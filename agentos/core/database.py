@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -65,12 +65,22 @@ CREATE TABLE IF NOT EXISTS sessions (
     cost_llm_output_usd REAL NOT NULL DEFAULT 0.0,
     cost_tool_usd       REAL NOT NULL DEFAULT 0.0,
     cost_total_usd      REAL NOT NULL DEFAULT 0.0,
+    -- Benchmark cost (eval infrastructure — grader LLM calls, etc.)
+    benchmark_cost_llm_input_usd  REAL NOT NULL DEFAULT 0.0,
+    benchmark_cost_llm_output_usd REAL NOT NULL DEFAULT 0.0,
+    benchmark_cost_tool_usd       REAL NOT NULL DEFAULT 0.0,
+    benchmark_cost_total_usd      REAL NOT NULL DEFAULT 0.0,
     -- Composition snapshot (JSON blob for tools, memory, governance)
     composition_json    TEXT NOT NULL DEFAULT '{}',
+    -- Session semantics (EEE agentic extensions)
+    finish_accepted     INTEGER,  -- NULL=unknown, 0=rejected, 1=accepted
+    stop_initiated_by   TEXT NOT NULL DEFAULT '',  -- agent/benchmark/infrastructure
     -- Eval fields
     eval_score          REAL,
     eval_passed         INTEGER,
     eval_task_name      TEXT NOT NULL DEFAULT '',
+    -- Eval conditions (queryable columns, not buried in JSON)
+    eval_conditions_json TEXT NOT NULL DEFAULT '{}',
     -- Timestamps
     created_at          REAL NOT NULL DEFAULT (unixepoch('now'))
 );
@@ -230,6 +240,89 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_cost_agent ON cost_ledger(agent_id);
 CREATE INDEX IF NOT EXISTS idx_cost_created ON cost_ledger(created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- EVAL RUNS — aggregate eval reports (one row per `agentos eval` invocation)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name      TEXT NOT NULL DEFAULT '',
+    agent_version   TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    benchmark_name  TEXT NOT NULL DEFAULT '',
+    benchmark_version TEXT NOT NULL DEFAULT '',
+    grader_type     TEXT NOT NULL DEFAULT '',
+    protocol        TEXT NOT NULL DEFAULT 'agentos',
+    -- Aggregate metrics
+    total_tasks     INTEGER NOT NULL DEFAULT 0,
+    total_trials    INTEGER NOT NULL DEFAULT 0,
+    pass_count      INTEGER NOT NULL DEFAULT 0,
+    fail_count      INTEGER NOT NULL DEFAULT 0,
+    error_count     INTEGER NOT NULL DEFAULT 0,
+    pass_rate       REAL NOT NULL DEFAULT 0.0,
+    avg_score       REAL NOT NULL DEFAULT 0.0,
+    avg_latency_ms  REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    benchmark_cost_usd REAL NOT NULL DEFAULT 0.0,
+    avg_tool_calls  REAL NOT NULL DEFAULT 0.0,
+    tool_efficiency REAL NOT NULL DEFAULT 1.0,
+    pass_at_1       REAL,
+    pass_at_3       REAL,
+    -- Eval conditions
+    eval_conditions_json TEXT NOT NULL DEFAULT '{}',
+    -- Timestamps
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(agent_name);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at);
+"""
+
+# ── Migration from v1 → v2 ─────────────────────────────────────────────────
+
+MIGRATION_V1_TO_V2 = """\
+-- Add benchmark cost columns to sessions
+ALTER TABLE sessions ADD COLUMN benchmark_cost_llm_input_usd REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE sessions ADD COLUMN benchmark_cost_llm_output_usd REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE sessions ADD COLUMN benchmark_cost_tool_usd REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE sessions ADD COLUMN benchmark_cost_total_usd REAL NOT NULL DEFAULT 0.0;
+
+-- Add session semantics columns
+ALTER TABLE sessions ADD COLUMN finish_accepted INTEGER;
+ALTER TABLE sessions ADD COLUMN stop_initiated_by TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN eval_conditions_json TEXT NOT NULL DEFAULT '{}';
+
+-- Create eval_runs table
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name      TEXT NOT NULL DEFAULT '',
+    agent_version   TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    benchmark_name  TEXT NOT NULL DEFAULT '',
+    benchmark_version TEXT NOT NULL DEFAULT '',
+    grader_type     TEXT NOT NULL DEFAULT '',
+    protocol        TEXT NOT NULL DEFAULT 'agentos',
+    total_tasks     INTEGER NOT NULL DEFAULT 0,
+    total_trials    INTEGER NOT NULL DEFAULT 0,
+    pass_count      INTEGER NOT NULL DEFAULT 0,
+    fail_count      INTEGER NOT NULL DEFAULT 0,
+    error_count     INTEGER NOT NULL DEFAULT 0,
+    pass_rate       REAL NOT NULL DEFAULT 0.0,
+    avg_score       REAL NOT NULL DEFAULT 0.0,
+    avg_latency_ms  REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    benchmark_cost_usd REAL NOT NULL DEFAULT 0.0,
+    avg_tool_calls  REAL NOT NULL DEFAULT 0.0,
+    tool_efficiency REAL NOT NULL DEFAULT 1.0,
+    pass_at_1       REAL,
+    pass_at_3       REAL,
+    eval_conditions_json TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(agent_name);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at);
 """
 
 
@@ -271,14 +364,47 @@ class AgentDB:
         return conn
 
     def initialize(self) -> None:
-        """Create all tables and set schema version. Idempotent."""
-        self.conn.executescript(SCHEMA_SQL)
+        """Create all tables and set schema version. Runs migrations for existing DBs."""
+        current = self.schema_version()
+
+        if current == 0:
+            # Fresh database — create everything from scratch
+            self.conn.executescript(SCHEMA_SQL)
+        else:
+            # Existing database — apply migrations
+            self._migrate(current)
+
         self.conn.execute(
             "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
             ("schema_version", str(SCHEMA_VERSION)),
         )
         self.conn.commit()
         logger.info("Database initialized at %s (schema v%d)", self.path, SCHEMA_VERSION)
+
+    def _migrate(self, from_version: int) -> None:
+        """Apply schema migrations incrementally."""
+        if from_version < 2:
+            logger.info("Migrating database from v%d to v2", from_version)
+            # ALTER TABLE doesn't support IF NOT EXISTS, so check first
+            existing_cols = {
+                row[1]
+                for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            for stmt in MIGRATION_V1_TO_V2.split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                # Skip ALTER TABLE for columns that already exist
+                if "ALTER TABLE" in stmt and "ADD COLUMN" in stmt:
+                    col_name = stmt.split("ADD COLUMN")[1].strip().split()[0]
+                    if col_name in existing_cols:
+                        continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                        raise
+            self.conn.commit()
 
     @contextmanager
     def tx(self) -> Generator[sqlite3.Cursor, None, None]:
@@ -318,6 +444,9 @@ class AgentDB:
     def insert_session(self, record: dict[str, Any]) -> None:
         """Insert a complete session record (from SessionRecord.to_dict())."""
         comp = record.get("composition", {})
+        cost = record.get("cost", {})
+        bench_cost = record.get("benchmark_cost", {})
+        finish_accepted = record.get("finish_accepted")
         with self.tx() as cur:
             cur.execute(
                 """INSERT INTO sessions (
@@ -327,8 +456,12 @@ class AgentDB:
                     wall_clock_seconds, input_text, output_text,
                     cost_llm_input_usd, cost_llm_output_usd,
                     cost_tool_usd, cost_total_usd,
+                    benchmark_cost_llm_input_usd, benchmark_cost_llm_output_usd,
+                    benchmark_cost_tool_usd, benchmark_cost_total_usd,
                     composition_json,
+                    finish_accepted, stop_initiated_by,
                     eval_score, eval_passed, eval_task_name,
+                    eval_conditions_json,
                     created_at
                 ) VALUES (
                     ?, ?, ?, ?, ?,
@@ -337,8 +470,12 @@ class AgentDB:
                     ?, ?, ?,
                     ?, ?,
                     ?, ?,
+                    ?, ?,
+                    ?, ?,
                     ?,
+                    ?, ?,
                     ?, ?, ?,
+                    ?,
                     ?
                 )""",
                 (
@@ -357,17 +494,99 @@ class AgentDB:
                     record.get("wall_clock_seconds", 0.0),
                     record.get("input_text", ""),
                     record.get("output_text", ""),
-                    record.get("cost", {}).get("llm_input_cost_usd", 0.0),
-                    record.get("cost", {}).get("llm_output_cost_usd", 0.0),
-                    record.get("cost", {}).get("tool_cost_usd", 0.0),
-                    record.get("cost", {}).get("total_usd", 0.0),
+                    cost.get("llm_input_cost_usd", 0.0),
+                    cost.get("llm_output_cost_usd", 0.0),
+                    cost.get("tool_cost_usd", 0.0),
+                    cost.get("total_usd", 0.0),
+                    bench_cost.get("llm_input_cost_usd", 0.0),
+                    bench_cost.get("llm_output_cost_usd", 0.0),
+                    bench_cost.get("tool_cost_usd", 0.0),
+                    bench_cost.get("total_usd", 0.0),
                     json.dumps(comp),
+                    1 if finish_accepted else (0 if finish_accepted is not None else None),
+                    record.get("stop_initiated_by", ""),
                     record.get("eval_score"),
                     1 if record.get("eval_passed") else (0 if record.get("eval_passed") is not None else None),
                     record.get("eval_task_name", ""),
+                    json.dumps(record.get("eval_conditions", {})) if record.get("eval_conditions") else "{}",
                     record.get("timestamp", time.time()),
                 ),
             )
+
+    def insert_turns(self, session_id: str, turns: list[dict[str, Any]]) -> None:
+        """Insert turn-level records for a session."""
+        with self.tx() as cur:
+            for turn in turns:
+                cost = turn.get("cost", {})
+                cur.execute(
+                    """INSERT INTO turns (
+                        session_id, turn_number, model_used,
+                        input_tokens, output_tokens, latency_ms, llm_content,
+                        cost_llm_input_usd, cost_llm_output_usd,
+                        cost_tool_usd, cost_total_usd,
+                        tool_calls_json, tool_results_json, errors_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        session_id,
+                        turn.get("turn_number", 0),
+                        turn.get("model_used", ""),
+                        turn.get("input_tokens", 0),
+                        turn.get("output_tokens", 0),
+                        turn.get("latency_ms", 0.0),
+                        turn.get("llm_content", ""),
+                        cost.get("llm_input_cost_usd", 0.0),
+                        cost.get("llm_output_cost_usd", 0.0),
+                        cost.get("tool_cost_usd", 0.0),
+                        cost.get("total_usd", 0.0),
+                        json.dumps(turn.get("tool_calls", [])),
+                        json.dumps(turn.get("tool_results", [])),
+                        json.dumps([
+                            {"source": e.get("source", "unknown"), "message": e.get("message", "")}
+                            for e in turn.get("errors", [])
+                        ]),
+                    ),
+                )
+
+    def insert_eval_run(self, report: dict[str, Any]) -> int:
+        """Insert an aggregate eval run report. Returns the row id."""
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO eval_runs (
+                    agent_name, agent_version, model,
+                    benchmark_name, benchmark_version, grader_type, protocol,
+                    total_tasks, total_trials, pass_count, fail_count, error_count,
+                    pass_rate, avg_score, avg_latency_ms,
+                    total_cost_usd, benchmark_cost_usd,
+                    avg_tool_calls, tool_efficiency,
+                    pass_at_1, pass_at_3,
+                    eval_conditions_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    report.get("agent_name", ""),
+                    report.get("agent_version", ""),
+                    report.get("model", ""),
+                    report.get("benchmark_name", ""),
+                    report.get("benchmark_version", ""),
+                    report.get("grader_type", ""),
+                    report.get("protocol", "agentos"),
+                    report.get("total_tasks", 0),
+                    report.get("total_trials", 0),
+                    report.get("pass_count", 0),
+                    report.get("fail_count", 0),
+                    report.get("error_count", 0),
+                    report.get("pass_rate", 0.0),
+                    report.get("avg_score", 0.0),
+                    report.get("avg_latency_ms", 0.0),
+                    report.get("total_cost_usd", 0.0),
+                    report.get("benchmark_cost_usd", 0.0),
+                    report.get("avg_tool_calls", 0.0),
+                    report.get("tool_efficiency", 1.0),
+                    report.get("pass_at_1"),
+                    report.get("pass_at_3"),
+                    json.dumps(report.get("eval_conditions", {})),
+                ),
+            )
+            return cur.lastrowid
 
     def insert_session_errors(self, session_id: str, errors: list[dict[str, Any]]) -> None:
         """Insert error records for a session."""
