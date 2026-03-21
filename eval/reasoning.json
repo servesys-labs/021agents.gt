@@ -1,0 +1,32 @@
+[
+  {
+    "name": "logic_deduction",
+    "input": "All roses are flowers. All flowers need water. Do roses need water? Answer yes or no.",
+    "expected": "yes",
+    "grader": "contains"
+  },
+  {
+    "name": "math_word_problem",
+    "input": "A store has 15 apples. 7 are sold. How many remain? Give just the number.",
+    "expected": "8",
+    "grader": "contains"
+  },
+  {
+    "name": "comparison",
+    "input": "Which is larger: 0.9 or 0.11? Give just the number.",
+    "expected": "0.9",
+    "grader": "contains"
+  },
+  {
+    "name": "negation",
+    "input": "Is the sky normally green? Answer yes or no.",
+    "expected": "no",
+    "grader": "contains"
+  },
+  {
+    "name": "multi_step",
+    "input": "If x = 3 and y = x + 2, what is y * 2? Give just the number.",
+    "expected": "10",
+    "grader": "contains"
+  }
+]

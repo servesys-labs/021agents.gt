@@ -1367,12 +1367,31 @@ def _load_eval_tasks(tasks_path: Path):
 
 
 def _make_agent_fn(agent):
-    """Create an async agent function for eval/evolve runs."""
-    async def agent_fn(task_input: str) -> str:
+    """Create an async agent function for eval/evolve runs.
+
+    Returns an ``AgentResult`` so the gym picks up cost, tool-call counts,
+    and model metadata from the agent's harness results.
+    """
+    from agentos.eval.gym import AgentResult
+
+    async def agent_fn(task_input: str) -> AgentResult:
         results = await agent.run(task_input)
-        if results and results[-1].llm_response:
-            return results[-1].llm_response.content
-        return ""
+        output = ""
+        total_cost = 0.0
+        total_tool_calls = 0
+        model = ""
+        for r in results:
+            if r.llm_response:
+                output = r.llm_response.content
+                model = getattr(r, "model_used", "") or r.llm_response.model
+            total_cost += getattr(r, "cost_usd", 0.0)
+            total_tool_calls += len(r.tool_results) if r.tool_results else 0
+        return AgentResult(
+            output=output,
+            cost_usd=total_cost,
+            tool_calls_count=total_tool_calls,
+            model=model,
+        )
     return agent_fn
 
 
