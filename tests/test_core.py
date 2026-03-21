@@ -70,3 +70,24 @@ class TestAgentHarness:
     async def test_from_config_file(self):
         harness = AgentHarness.from_config_file()
         assert harness.config.max_turns == 50
+
+    @pytest.mark.asyncio
+    async def test_init_sequence_emits_task_received(self):
+        """Verify the initialization sequence emits TASK_RECEIVED with complexity."""
+        bus = EventBus()
+        received: list[Event] = []
+
+        async def listener(event: Event):
+            received.append(event)
+
+        bus.on(EventType.TASK_RECEIVED, listener)
+        harness = AgentHarness(config=HarnessConfig(max_turns=1), event_bus=bus)
+        await harness.run("Implement a new feature")
+        assert len(received) == 1
+        assert "complexity" in received[0].data
+
+    @pytest.mark.asyncio
+    async def test_stores_episodic_memory(self):
+        harness = AgentHarness(config=HarnessConfig(max_turns=1))
+        await harness.run("Hello there")
+        assert harness.memory_manager.episodic.count() == 1

@@ -47,6 +47,49 @@ class TestEvalGym:
         assert report.total_trials == 2
         assert report.pass_rate == 1.0
 
+    @pytest.mark.asyncio
+    async def test_pass_at_k(self):
+        gym = EvalGym(trials_per_task=4)
+        gym.add_task(EvalTask(
+            name="coin_flip",
+            input="flip",
+            expected="heads",
+            grader=ContainsGrader(),
+        ))
+
+        call_count = 0
+
+        async def flaky_agent(input: str) -> str:
+            nonlocal call_count
+            call_count += 1
+            # Pass on 2 out of 4 trials
+            return "heads" if call_count % 2 == 0 else "tails"
+
+        report = await gym.run(flaky_agent)
+        assert report.pass_rate == 0.5
+        # pass@1 should be < 1.0, pass@4 should be 1.0
+        assert report.pass_at_k(1) < 1.0
+        assert report.pass_at_k(4) == 1.0
+        # pass@k with k=None uses all trials
+        assert report.pass_at_k() == 1.0
+
+    @pytest.mark.asyncio
+    async def test_tool_efficiency(self):
+        gym = EvalGym(trials_per_task=1)
+        gym.add_task(EvalTask(
+            name="simple",
+            input="test",
+            expected="ok",
+            grader=ContainsGrader(),
+        ))
+
+        async def agent(input: str) -> str:
+            return "ok"
+
+        report = await gym.run(agent)
+        # No tool calls → tool_efficiency should be 1.0
+        assert report.tool_efficiency == 1.0
+
 
 class TestAutoResearchLoop:
     @pytest.mark.asyncio
