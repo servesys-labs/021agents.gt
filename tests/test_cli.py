@@ -1,5 +1,6 @@
 """Tests for the CLI commands."""
 
+import asyncio
 import json
 import subprocess
 import sys
@@ -149,6 +150,160 @@ class TestCmdInit:
 
         yaml_content = (tmp_path / "agentos.yaml").read_text()
         assert DEFAULT_MODEL in yaml_content
+
+
+def _make_create_args(**overrides):
+    """Build a complete Args namespace for cmd_create with sane defaults."""
+    defaults = dict(
+        one_shot=None,
+        name=None,
+        output=None,
+        model=None,
+        provider="stub",
+        tools_dir=None,
+        force=False,
+        max_turns=20,
+    )
+    defaults.update(overrides)
+
+    class Args:
+        pass
+
+    for k, v in defaults.items():
+        setattr(Args, k, v)
+    return Args()
+
+
+class TestCmdCreate:
+    @pytest.mark.asyncio
+    async def test_one_shot_creates_agent_file(self, tmp_path):
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        args = _make_create_args(
+            one_shot="a research assistant that finds papers",
+            output=str(agents_dir / "researcher.json"),
+        )
+
+        with patch("agentos.cli.Path") as mock_path_cls:
+            # Let Path.cwd() return tmp_path so the project check passes
+            mock_path_cls.cwd.return_value = tmp_path
+            # But let Path(x) still work normally for everything else
+            mock_path_cls.side_effect = Path
+            mock_path_cls.cwd = lambda: tmp_path
+
+            # Simpler: just call cmd_create and let it use stub provider
+            # We need to patch the project detection check
+            await cmd_create(args)
+
+        assert (agents_dir / "researcher.json").exists()
+        data = json.loads((agents_dir / "researcher.json").read_text())
+        assert data["name"] is not None
+        assert "research" in data["description"].lower()
+
+    @pytest.mark.asyncio
+    async def test_one_shot_with_name_override(self, tmp_path):
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        args = _make_create_args(
+            one_shot="a customer support bot",
+            name="my-bot",
+            output=str(agents_dir / "my-bot.json"),
+        )
+
+        await cmd_create(args)
+
+        data = json.loads((agents_dir / "my-bot.json").read_text())
+        assert data["name"] == "my-bot"
+
+    @pytest.mark.asyncio
+    async def test_create_collision_without_force_exits(self, tmp_path):
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        # Create an existing file
+        existing = agents_dir / "existing.json"
+        existing.write_text('{"name": "existing"}')
+
+        args = _make_create_args(
+            one_shot="some agent",
+            name="existing",
+            output=str(existing),
+        )
+
+        with pytest.raises(SystemExit):
+            await cmd_create(args)
+
+    @pytest.mark.asyncio
+    async def test_create_collision_with_force_overwrites(self, tmp_path):
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        existing = agents_dir / "overwrite-me.json"
+        existing.write_text('{"name": "old"}')
+
+        args = _make_create_args(
+            one_shot="a new agent",
+            name="overwrite-me",
+            output=str(existing),
+            force=True,
+        )
+
+        await cmd_create(args)
+
+        data = json.loads(existing.read_text())
+        assert data["name"] == "overwrite-me"
+
+    @pytest.mark.asyncio
+    async def test_create_warns_without_project(self, tmp_path, capsys, monkeypatch):
+        from agentos.cli import cmd_create
+
+        # Use a directory with no agents/ or agentos.yaml
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        monkeypatch.chdir(empty_dir)
+
+        out_path = empty_dir / "my-agent.json"
+        args = _make_create_args(
+            one_shot="a test bot",
+            output=str(out_path),
+        )
+
+        await cmd_create(args)
+
+        captured = capsys.readouterr()
+        assert "No AgentOS project detected" in captured.out
+
+    @pytest.mark.asyncio
+    async def test_create_custom_tools_dir(self, tmp_path):
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        tools_dir = tmp_path / "my-tools"
+        tools_dir.mkdir()
+
+        # Create a custom tool in the custom tools dir
+        tool = {"name": "custom-tool", "description": "My custom tool", "input_schema": {"type": "object", "properties": {}}}
+        (tools_dir / "custom-tool.json").write_text(json.dumps(tool))
+
+        args = _make_create_args(
+            one_shot="an agent using custom tools",
+            output=str(agents_dir / "custom.json"),
+            tools_dir=str(tools_dir),
+        )
+
+        await cmd_create(args)
+        assert (agents_dir / "custom.json").exists()
 
 
 class TestCmdList:

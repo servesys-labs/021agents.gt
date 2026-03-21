@@ -8,6 +8,9 @@ Usage:
     agentos init --force            — Overwrite existing files on re-init
     agentos create                  — Conversationally build an agent with an LLM
     agentos create --one-shot DESC  — Build an agent from a one-line description
+    agentos create --name N         — Override the generated agent name
+    agentos create --output PATH    — Save agent definition to a custom path
+    agentos create --force          — Overwrite an existing agent file
     agentos run <name> "task"       — Run a named agent on a task
     agentos list                    — List all available agents
     agentos tools                   — List available tool plugins
@@ -66,6 +69,14 @@ def main() -> None:
         help="Create from a one-line description (skip conversation)",
     )
     create_p.add_argument(
+        "--name", "-n", type=str, default=None,
+        help="Override the generated agent name",
+    )
+    create_p.add_argument(
+        "--output", "-O", type=str, default=None,
+        help="Save agent definition to a custom path (default: agents/<name>.json)",
+    )
+    create_p.add_argument(
         "--model", "-m", type=str, default=None,
         help="LLM model for the builder agent",
     )
@@ -73,6 +84,18 @@ def main() -> None:
         "--provider", type=str, default=None,
         choices=["anthropic", "openai", "stub"],
         help="LLM provider for the builder agent",
+    )
+    create_p.add_argument(
+        "--tools-dir", type=str, default=None,
+        help="Directory of tool plugins to show the builder (default: tools/)",
+    )
+    create_p.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing agent with the same name",
+    )
+    create_p.add_argument(
+        "--max-turns", type=int, default=20,
+        help="Max conversation turns in interactive mode (default: 20)",
     )
 
     # --- run ---
@@ -745,65 +768,96 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 async def cmd_create(args: argparse.Namespace) -> None:
     """Create an agent — either conversationally or from a one-shot description."""
+    from agentos.agent import AGENTS_DIR
     from agentos.builder import AgentBuilder
 
+    # ── Warn if project hasn't been initialized ──────────────────────────
+    agents_dir = Path.cwd() / "agents"
+    project_config = Path.cwd() / "agentos.yaml"
+    if not agents_dir.is_dir() and not project_config.exists():
+        print("Warning: No AgentOS project detected in the current directory.")
+        print("  Run 'agentos init' first to set up the project structure.")
+        print("  Continuing anyway — the agent file will be created in agents/.\n")
+
     provider = _get_builder_provider(args)
-    builder = AgentBuilder(provider=provider)
+    tools_dir = args.tools_dir
+    builder = AgentBuilder(provider=provider, tools_dir=tools_dir)
+
+    max_turns = args.max_turns
 
     if args.one_shot:
         # One-shot mode: generate from description
         print(f"Building agent from: {args.one_shot}")
         config = await builder.build_from_description(args.one_shot)
-        path = builder.save()
-        print(f"\nAgent created: {config.name}")
-        print(f"  Saved to: {path}")
-        print(f"  Description: {config.description}")
-        print(f"\nRun it: agentos run {config.name} \"your task\"")
-        return
+    else:
+        # Conversational mode
+        print("=" * 60)
+        print("  AgentOS Agent Builder")
+        print("  Describe what you want your agent to do.")
+        print("  Type 'quit' to cancel.")
+        print("=" * 60)
+        print()
 
-    # Conversational mode
-    print("=" * 60)
-    print("  AgentOS Agent Builder")
-    print("  Describe what you want your agent to do.")
-    print("  Type 'quit' to cancel.")
-    print("=" * 60)
-    print()
-
-    # Get initial description
-    try:
-        user_input = input("What kind of agent do you want to build?\n> ").strip()
-    except EOFError:
-        print("\nAborted.")
-        return
-
-    if not user_input or user_input.lower() in ("quit", "exit", "q"):
-        return
-
-    response = await builder.start(user_input)
-    print(f"\n{response}\n")
-
-    # Continue conversation until complete
-    while not builder.is_complete:
+        # Get initial description
         try:
-            user_input = input("> ").strip()
+            user_input = input("What kind of agent do you want to build?\n> ").strip()
         except EOFError:
-            break
-        if not user_input:
-            continue
-        if user_input.lower() in ("quit", "exit", "q"):
-            print("Cancelled.")
+            print("\nAborted.")
             return
 
-        response = await builder.step(user_input)
+        if not user_input or user_input.lower() in ("quit", "exit", "q"):
+            return
+
+        response = await builder.start(user_input)
         print(f"\n{response}\n")
 
-    if builder.result:
-        path = builder.save()
-        print(f"\nAgent created: {builder.result.name}")
-        print(f"  Saved to: {path}")
-        print(f"\nRun it: agentos run {builder.result.name} \"your task\"")
-    else:
-        print("No agent was created.")
+        # Continue conversation until complete or turn limit reached
+        turn = 1
+        while not builder.is_complete:
+            if turn >= max_turns:
+                print(f"\nReached max conversation turns ({max_turns}).")
+                print("Tip: try 'agentos create --one-shot \"description\"' for quicker creation,")
+                print("     or increase with --max-turns.\n")
+                break
+            try:
+                user_input = input("> ").strip()
+            except EOFError:
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in ("quit", "exit", "q"):
+                print("Cancelled.")
+                return
+
+            response = await builder.step(user_input)
+            print(f"\n{response}\n")
+            turn += 1
+
+        if not builder.result:
+            print("No agent was created.")
+            return
+
+        config = builder.result
+
+    # ── Apply --name override ────────────────────────────────────────────
+    if args.name:
+        config = _rename_agent_config(config, args.name)
+        builder._result = config  # Keep builder in sync for save()
+
+    # ── Collision check ──────────────────────────────────────────────────
+    save_path = Path(args.output) if args.output else (AGENTS_DIR / f"{config.name}.json")
+    if save_path.exists() and not args.force:
+        print(f"Error: Agent file already exists: {save_path}")
+        print("  Use --force to overwrite, or --name to pick a different name.")
+        sys.exit(1)
+
+    # ── Save ─────────────────────────────────────────────────────────────
+    path = builder.save(str(save_path))
+    print(f"\nAgent created: {config.name}")
+    print(f"  Saved to: {path}")
+    if config.description:
+        print(f"  Description: {config.description}")
+    print(f"\nRun it: agentos run {config.name} \"your task\"")
 
 
 async def cmd_run(args: argparse.Namespace) -> None:
@@ -1230,6 +1284,14 @@ def _slugify(name: str) -> str:
     return slug or "my-agent"
 
 
+def _rename_agent_config(config, new_name: str):
+    """Return a copy of the AgentConfig with an updated name."""
+    from agentos.agent import AgentConfig
+    data = config.to_dict()
+    data["name"] = new_name
+    return AgentConfig.from_dict(data)
+
+
 def cmd_login(args: argparse.Namespace) -> None:
     """Authenticate via OAuth device flow (like `gh auth login`)."""
     from agentos.auth.credentials import CredentialsStore, StoredCredential
@@ -1536,7 +1598,7 @@ def _get_builder_provider(args: argparse.Namespace):
             print("Error: ANTHROPIC_API_KEY not set")
             sys.exit(1)
         return HttpProvider(
-            model_id=model or "claude-sonnet-4-20250514",
+            model_id=model or DEFAULT_MODEL,
             api_base="https://api.anthropic.com",
             api_key=anthropic_key,
             headers={"anthropic-version": "2023-06-01"},
