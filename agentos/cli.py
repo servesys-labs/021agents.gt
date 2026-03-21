@@ -64,6 +64,17 @@ def main() -> None:
     chat_p = sub.add_parser("chat", help="Interactive chat with an agent")
     chat_p.add_argument("name", help="Agent name or path")
 
+    # --- ingest ---
+    ingest_p = sub.add_parser("ingest", help="Ingest documents into RAG knowledge base")
+    ingest_p.add_argument("files", nargs="+", help="Files or directories to ingest")
+    ingest_p.add_argument("--chunk-size", type=int, default=512, help="Chunk size (default: 512)")
+
+    # --- eval ---
+    eval_p = sub.add_parser("eval", help="Evaluate an agent with test cases")
+    eval_p.add_argument("name", help="Agent name or path")
+    eval_p.add_argument("tasks_file", help="JSON file with eval tasks")
+    eval_p.add_argument("--trials", type=int, default=3, help="Trials per task (default: 3)")
+
     # --- deploy ---
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
     deploy_p.add_argument("name", help="Agent name or path")
@@ -94,6 +105,10 @@ def main() -> None:
             cmd_tools(args)
         elif args.command == "chat":
             asyncio.run(cmd_chat(args))
+        elif args.command == "ingest":
+            cmd_ingest(args)
+        elif args.command == "eval":
+            asyncio.run(cmd_eval(args))
         elif args.command == "deploy":
             cmd_deploy(args)
     except FileNotFoundError as exc:
@@ -350,6 +365,133 @@ async def cmd_chat(args: argparse.Namespace) -> None:
             print(f"\n[error] {results[-1].error}")
 
     print("Goodbye.")
+
+
+def cmd_ingest(args: argparse.Namespace) -> None:
+    """Ingest documents into the RAG knowledge base."""
+    from pathlib import Path
+    from agentos.rag.pipeline import RAGPipeline
+
+    pipeline = RAGPipeline(chunk_size=args.chunk_size)
+
+    documents: list[str] = []
+    metadatas: list[dict] = []
+
+    for file_arg in args.files:
+        p = Path(file_arg)
+        if p.is_dir():
+            files = sorted(
+                f for f in p.rglob("*")
+                if f.is_file() and f.suffix in (".txt", ".md", ".py", ".js", ".ts", ".json", ".csv", ".html")
+            )
+        elif p.is_file():
+            files = [p]
+        else:
+            print(f"Warning: {file_arg} not found, skipping")
+            continue
+
+        for f in files:
+            try:
+                text = f.read_text(errors="replace")
+                if text.strip():
+                    documents.append(text)
+                    metadatas.append({"source": str(f), "filename": f.name})
+            except Exception as exc:
+                print(f"Warning: Could not read {f}: {exc}")
+
+    if not documents:
+        print("No documents found to ingest.")
+        return
+
+    pipeline.ingest(documents, metadatas)
+
+    # Save the indexed data for later retrieval
+    import json
+    data_dir = Path.cwd() / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    index_path = data_dir / "rag_index.json"
+    index_data = {
+        "chunk_size": args.chunk_size,
+        "documents": [
+            {"text": doc[:500], "metadata": meta}
+            for doc, meta in zip(documents, metadatas)
+        ],
+        "total_chunks": len(pipeline.retriever._chunks) if hasattr(pipeline.retriever, '_chunks') else 0,
+    }
+    index_path.write_text(json.dumps(index_data, indent=2) + "\n")
+
+    total_chunks = sum(len(pipeline.chunker.chunk(d)) for d in documents)
+    print(f"Ingested {len(documents)} documents ({total_chunks} chunks)")
+    print(f"  Sources: {', '.join(m['filename'] for m in metadatas[:5])}")
+    if len(metadatas) > 5:
+        print(f"  ... and {len(metadatas) - 5} more")
+    print(f"  Index saved to: {index_path}")
+
+
+async def cmd_eval(args: argparse.Namespace) -> None:
+    """Evaluate an agent with test cases."""
+    import json as _json
+    from pathlib import Path
+    from agentos.eval.gym import EvalGym, EvalTask
+    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
+
+    agent = _load_agent(args.name)
+
+    # Load tasks from JSON file
+    tasks_path = Path(args.tasks_file)
+    if not tasks_path.exists():
+        print(f"Error: Tasks file not found: {tasks_path}")
+        return
+
+    tasks_data = _json.loads(tasks_path.read_text())
+    if not isinstance(tasks_data, list):
+        tasks_data = [tasks_data]
+
+    gym = EvalGym(trials_per_task=args.trials)
+    for t in tasks_data:
+        grader_type = t.get("grader", "contains")
+        if grader_type == "exact":
+            grader = ExactMatchGrader()
+        else:
+            grader = ContainsGrader()
+        gym.add_task(EvalTask(
+            name=t.get("name", t.get("input", "")[:30]),
+            input=t["input"],
+            expected=t["expected"],
+            grader=grader,
+        ))
+
+    print(f"Evaluating agent '{agent.config.name}' with {len(tasks_data)} tasks ({args.trials} trials each)")
+    print("-" * 50)
+
+    async def agent_fn(task_input: str) -> str:
+        results = await agent.run(task_input)
+        if results and results[-1].llm_response:
+            return results[-1].llm_response.content
+        return ""
+
+    report = await gym.run(agent_fn)
+
+    print(f"\nResults:")
+    print(f"  Pass rate:    {report.pass_rate:.1%} ({report.pass_count}/{report.total_trials})")
+    print(f"  Avg score:    {report.avg_score:.3f}")
+    print(f"  Avg latency:  {report.avg_latency_ms:.0f}ms")
+    print(f"  Total cost:   ${report.total_cost_usd:.4f}")
+    if report.total_trials > 1:
+        print(f"  Pass@1:       {report.pass_at_k(1):.1%}")
+        if args.trials >= 3:
+            print(f"  Pass@3:       {report.pass_at_k(3):.1%}")
+
+    # Show per-task results
+    print(f"\nPer-task breakdown:")
+    task_results: dict[str, list] = {}
+    for tr in report.trial_results:
+        task_results.setdefault(tr.task_name, []).append(tr)
+
+    for task_name, trials in task_results.items():
+        passed = sum(1 for t in trials if t.grade.passed)
+        print(f"  {task_name}: {passed}/{len(trials)} passed")
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:

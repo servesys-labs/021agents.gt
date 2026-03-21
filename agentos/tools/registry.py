@@ -71,6 +71,12 @@ class ToolRegistry:
         if not self._plugins_dir.exists():
             return
 
+        # Load built-in handlers for bundled tools
+        try:
+            from agentos.tools.builtins import BUILTIN_HANDLERS
+        except ImportError:
+            BUILTIN_HANDLERS = {}
+
         # Load JSON tool definitions
         for p in sorted(self._plugins_dir.glob("*.json")):
             try:
@@ -81,6 +87,7 @@ class ToolRegistry:
                         name=t["name"],
                         description=t.get("description", ""),
                         input_schema=t.get("input_schema", {}),
+                        handler=BUILTIN_HANDLERS.get(t["name"]),
                         source_path=p,
                     )
                     self._tools[plugin.name] = plugin

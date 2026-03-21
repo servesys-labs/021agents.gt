@@ -86,6 +86,23 @@ class AgentHarness:
         4. Discover tools — verify availability via MCP
         5. Plan & Execute — formulate plan and begin execution
         """
+        import asyncio
+
+        try:
+            return await asyncio.wait_for(
+                self._run_inner(user_input),
+                timeout=self.config.timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Agent run timed out after %.0fs", self.config.timeout_seconds)
+            return [TurnResult(
+                turn_number=self._turn or 1,
+                error=f"Timed out after {self.config.timeout_seconds:.0f}s",
+                done=True,
+            )]
+
+    async def _run_inner(self, user_input: str) -> list[TurnResult]:
+        """Inner run loop — separated so timeout can wrap it."""
         results: list[TurnResult] = []
         await self.event_bus.emit(Event(type=EventType.SESSION_START, data={"input": user_input}))
 

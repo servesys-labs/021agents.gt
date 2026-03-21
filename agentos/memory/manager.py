@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from agentos.memory.episodic import Episode, EpisodicMemory
 from agentos.memory.procedural import ProceduralMemory
 from agentos.memory.semantic import SemanticMemory
 from agentos.memory.working import WorkingMemory
 
+if TYPE_CHECKING:
+    from agentos.rag.pipeline import RAGPipeline
+
 
 class MemoryManager:
-    """Coordinates working, episodic, semantic, and procedural memory."""
+    """Coordinates working, episodic, semantic, procedural memory, and RAG."""
 
     def __init__(
         self,
@@ -17,15 +22,23 @@ class MemoryManager:
         episodic: EpisodicMemory | None = None,
         semantic: SemanticMemory | None = None,
         procedural: ProceduralMemory | None = None,
+        rag: RAGPipeline | None = None,
     ) -> None:
         self.working = working or WorkingMemory()
         self.episodic = episodic or EpisodicMemory()
         self.semantic = semantic or SemanticMemory()
         self.procedural = procedural or ProceduralMemory()
+        self.rag = rag
 
     async def build_context(self, query: str) -> str:
-        """Build a unified context string from all memory tiers."""
+        """Build a unified context string from all memory tiers + RAG."""
         sections: list[str] = []
+
+        # RAG retrieval (highest priority — user's ingested documents)
+        if self.rag:
+            rag_text = self.rag.query_text(query)
+            if rag_text:
+                sections.append(f"[Retrieved Documents]\n{rag_text}")
 
         # Working memory snapshot
         snapshot = self.working.snapshot()
