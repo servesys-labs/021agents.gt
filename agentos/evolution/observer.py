@@ -106,6 +106,7 @@ class Observer:
             agent_name=self._agent_name,
             input_text=event.data.get("input", ""),
             composition=SystemComposition(
+                agent_id=config.get("agent_id", ""),
                 agent_name=self._agent_name,
                 agent_version=config.get("version", "0.0.0"),
                 model=config.get("model", "unknown"),

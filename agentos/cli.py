@@ -35,6 +35,7 @@ def main() -> None:
     init_p.add_argument("--name", "-n", type=str, default=None, help="Agent name (default: directory name)")
     init_p.add_argument("--remote", "-r", type=str, default=None, help="Git remote URL to connect")
     init_p.add_argument("--no-git", action="store_true", help="Skip git repository initialization")
+    init_p.add_argument("--no-signing", action="store_true", help="Skip signing keypair generation")
 
     # --- create ---
     create_p = sub.add_parser("create", help="Create a new agent (conversational)")
@@ -141,8 +142,11 @@ def main() -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """Scaffold a new agent project with git repo and CI/CD scaffolding."""
+    """Scaffold a new agent project — identity, security, sessions, CI/CD."""
     import subprocess
+    from datetime import datetime, timezone
+
+    from agentos.core.identity import AgentIdentity, write_keypair
 
     directory = Path(args.directory).resolve()
     agent_name = args.name or _slugify(directory.name)
@@ -153,7 +157,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     print()
 
     # ── Directory structure ──────────────────────────────────────────────
-    for d in ("agents", "tools", "data", "eval"):
+    for d in ("agents", "tools", "data", "eval", "sessions"):
         dir_path = directory / d
         if dir_path.exists():
             skipped.append(f"{d}/")
@@ -161,25 +165,104 @@ def cmd_init(args: argparse.Namespace) -> None:
             dir_path.mkdir(parents=True, exist_ok=True)
             created.append(f"{d}/")
 
+    # ── Agent identity (generated once, immutable) ───────────────────────
+    identity_path = directory / "agents" / ".identity.json"
+    if not identity_path.exists():
+        identity, secret_key = AgentIdentity.generate(
+            with_signing=not args.no_signing,
+        )
+        identity_path.write_text(json.dumps(identity.to_dict(), indent=2) + "\n")
+        created.append("agents/.identity.json")
+        agent_id = identity.agent_id
+    else:
+        # Preserve existing identity on re-init
+        existing = json.loads(identity_path.read_text())
+        agent_id = existing.get("agent_id", "")
+        secret_key = ""  # Already written to .keys/
+        skipped.append("agents/.identity.json")
+
+    # ── Signing keypair ──────────────────────────────────────────────────
+    keys_dir = directory / ".keys"
+    if not args.no_signing and secret_key:
+        from agentos.core.identity import AgentIdentity as _id
+        identity_data = json.loads(identity_path.read_text())
+        fingerprint = identity_data.get("fingerprint", "")
+        if fingerprint and not (keys_dir / "agent.key").exists():
+            write_keypair(keys_dir, secret_key, fingerprint)
+            created.append(".keys/agent.pub (public — safe to commit)")
+            created.append(".keys/agent.key (SECRET — gitignored)")
+        elif (keys_dir / "agent.key").exists():
+            skipped.append(".keys/ (keypair exists)")
+    elif (keys_dir / "agent.key").exists():
+        skipped.append(".keys/ (keypair exists)")
+
     # ── Project config (agentos.yaml) ────────────────────────────────────
     project_config_path = directory / "agentos.yaml"
     if not project_config_path.exists():
+        init_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         project_config_path.write_text(
             f"# AgentOS project configuration\n"
+            f"# Generated: {init_date}\n"
+            f"\n"
             f"project: {agent_name}\n"
+            f"agent_id: {agent_id}\n"
             f"version: 0.1.0\n"
             f"\n"
+            f"# ── LLM defaults ─────────────────────────────────────────\n"
             f"defaults:\n"
             f"  model: claude-sonnet-4-20250514\n"
             f"  provider: anthropic\n"
             f"  max_turns: 50\n"
             f"  budget_limit_usd: 10.0\n"
             f"\n"
+            f"# ── Security & access control ──────────────────────────────\n"
+            f"security:\n"
+            f"  # Who can invoke this agent (RBAC)\n"
+            f"  allowed_callers: ['*']          # '*' = anyone, or list of caller IDs\n"
+            f"  rate_limit_rpm: 60               # Max requests per minute\n"
+            f"  # Network boundaries\n"
+            f"  allowed_domains: []              # Empty = unrestricted\n"
+            f"  blocked_domains: []              # Explicit blocklist\n"
+            f"  # File system scope\n"
+            f"  allowed_paths:\n"
+            f"    - agents/\n"
+            f"    - tools/\n"
+            f"    - data/\n"
+            f"  # Signing\n"
+            f"  sign_outputs: false              # Enable output signing for audit\n"
+            f"  signing_key: .keys/agent.key\n"
+            f"\n"
+            f"# ── Session tracking ─────────────────────────────────────\n"
+            f"sessions:\n"
+            f"  storage: sessions/               # Where session logs are stored\n"
+            f"  format: jsonl                     # jsonl | json\n"
+            f"  retention_days: 90                # Auto-cleanup after N days (0 = forever)\n"
+            f"  include_llm_content: true         # Store full LLM responses\n"
+            f"  include_tool_results: true        # Store full tool outputs\n"
+            f"\n"
+            f"# ── Observability ──────────────────────────────────────────\n"
+            f"observability:\n"
+            f"  log_level: INFO                   # DEBUG | INFO | WARNING | ERROR\n"
+            f"  log_format: structured            # structured (JSON) | text\n"
+            f"  # Event sinks — where events are sent\n"
+            f"  event_sinks:\n"
+            f"    - type: file\n"
+            f"      path: sessions/events.jsonl\n"
+            f"    # - type: webhook\n"
+            f"    #   url: https://your-observability.example.com/events\n"
+            f"    #   headers:\n"
+            f"    #     Authorization: Bearer ${{OBSERVABILITY_TOKEN}}\n"
+            f"  # Cost tracking\n"
+            f"  cost_ledger: sessions/costs.jsonl  # Persistent cost log\n"
+            f"  cost_alert_usd: 50.0               # Alert when cumulative cost exceeds\n"
+            f"\n"
+            f"# ── Paths ────────────────────────────────────────────────\n"
             f"paths:\n"
             f"  agents: agents/\n"
             f"  tools: tools/\n"
             f"  data: data/\n"
             f"  eval: eval/\n"
+            f"  sessions: sessions/\n"
         )
         created.append("agentos.yaml")
     else:
@@ -190,13 +273,22 @@ def cmd_init(args: argparse.Namespace) -> None:
     if not agent_path.exists():
         starter = {
             "name": agent_name,
+            "agent_id": agent_id,
             "description": f"{agent_name} — customize me!",
+            "version": "0.1.0",
             "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
             "model": "claude-sonnet-4-20250514",
             "tools": [],
             "governance": {
                 "budget_limit_usd": 10.0,
                 "require_confirmation_for_destructive": True,
+                "blocked_tools": [],
+                "allowed_domains": [],
+            },
+            "memory": {
+                "working": {"max_items": 100},
+                "episodic": {"max_episodes": 10000, "ttl_days": 90},
+                "procedural": {"max_procedures": 500},
             },
             "tags": ["starter"],
         }
@@ -240,6 +332,29 @@ def cmd_init(args: argparse.Namespace) -> None:
     else:
         skipped.append("eval/smoke-test.json")
 
+    # ── .env.example (declares required secrets without values) ──────────
+    env_example_path = directory / ".env.example"
+    if not env_example_path.exists():
+        env_example_path.write_text(
+            "# AgentOS environment variables\n"
+            "# Copy to .env and fill in your values:\n"
+            "#   cp .env.example .env\n"
+            "\n"
+            "# LLM provider API keys (at least one required)\n"
+            "ANTHROPIC_API_KEY=\n"
+            "OPENAI_API_KEY=\n"
+            "\n"
+            "# Observability (optional)\n"
+            "OBSERVABILITY_TOKEN=\n"
+            "\n"
+            "# Deployment (optional)\n"
+            "CLOUDFLARE_API_TOKEN=\n"
+            "CLOUDFLARE_ACCOUNT_ID=\n"
+        )
+        created.append(".env.example")
+    else:
+        skipped.append(".env.example")
+
     # ── .gitignore ───────────────────────────────────────────────────────
     gitignore_path = directory / ".gitignore"
     if not gitignore_path.exists():
@@ -250,10 +365,15 @@ def cmd_init(args: argparse.Namespace) -> None:
             "data/cache/\n"
             "evolution_state*.json\n"
             "\n"
-            "# Secrets\n"
+            "# Sessions (can be large)\n"
+            "sessions/*.jsonl\n"
+            "sessions/*.json\n"
+            "\n"
+            "# Secrets — NEVER commit these\n"
             ".env\n"
             ".env.*\n"
-            "*.key\n"
+            "!.env.example\n"
+            ".keys/agent.key\n"
             "\n"
             "# Python\n"
             "__pycache__/\n"
@@ -309,6 +429,11 @@ def cmd_init(args: argparse.Namespace) -> None:
     else:
         skipped.append(".github/workflows/eval.yml")
 
+    # ── Sessions keepfile (so git tracks the empty dir) ──────────────────
+    sessions_keep = directory / "sessions" / ".gitkeep"
+    if not sessions_keep.exists():
+        sessions_keep.write_text("")
+
     # ── Git initialization ───────────────────────────────────────────────
     git_initialized = False
     git_remote_added = False
@@ -322,13 +447,12 @@ def cmd_init(args: argparse.Namespace) -> None:
             )
             if result.returncode == 0:
                 git_initialized = True
-                # Make initial commit with scaffolding
                 subprocess.run(
                     ["git", "add", "."], cwd=directory,
                     capture_output=True, text=True,
                 )
                 subprocess.run(
-                    ["git", "commit", "-m", f"Initialize {agent_name} agent project"],
+                    ["git", "commit", "-m", f"Initialize {agent_name} agent project\n\nagent_id: {agent_id}"],
                     cwd=directory, capture_output=True, text=True,
                 )
             else:
@@ -365,20 +489,21 @@ def cmd_init(args: argparse.Namespace) -> None:
         for s in skipped:
             print(f"  - {s}")
 
+    print(f"\nAgent ID: {agent_id}")
     if git_initialized:
-        print(f"\nGit repo initialized with initial commit.")
+        print(f"Git repo initialized with initial commit.")
     if git_remote_added:
         print(f"Remote 'origin' set to: {args.remote}")
         print(f"  Push with: git push -u origin main")
 
     print()
     print("Next steps:")
-    print(f"  1. Edit agents/{agent_name}.json to customize your agent")
-    print(f"  2. Run: agentos run {agent_name} \"your task here\"")
-    print(f"  3. Run: agentos eval {agent_name} eval/smoke-test.json")
+    print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
+    print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
+    print(f"  3. agentos run {agent_name} \"your task\"")
+    print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
     if not args.no_git and not git_remote_added and not args.remote:
-        print(f"  4. Connect a remote: agentos init --remote <git-url>")
-        print(f"     or: git remote add origin <git-url> && git push -u origin main")
+        print(f"  5. git remote add origin <url> && git push -u origin main")
 
 
 async def cmd_create(args: argparse.Namespace) -> None:

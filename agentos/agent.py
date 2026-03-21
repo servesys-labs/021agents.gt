@@ -38,7 +38,8 @@ class AgentConfig:
     description: str = ""
     version: str = "0.1.0"
 
-    # Identity
+    # Identity — agent_id is immutable, generated once at init
+    agent_id: str = ""
     system_prompt: str = "You are a helpful AI assistant."
     personality: str = ""
 
@@ -78,6 +79,7 @@ class AgentConfig:
             "name": self.name,
             "description": self.description,
             "version": self.version,
+            "agent_id": self.agent_id,
             "system_prompt": self.system_prompt,
             "personality": self.personality,
             "model": self.model,
