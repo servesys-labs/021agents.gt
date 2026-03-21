@@ -1,0 +1,55 @@
+// wrangler.jsonc — AgentOS Cloudflare Workers deployment
+{
+  "name": "agentos",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-03-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // Static frontend assets
+  "assets": {
+    "directory": "./public/",
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  },
+
+  // Durable Objects — the AgentOS agent
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AGENTOS",
+        "class_name": "AgentOSWorker"
+      }
+    ]
+  },
+
+  // Mandatory: SQLite migration for Agent state persistence
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AgentOSWorker"]
+    }
+  ],
+
+  // Workers AI binding for LLM inference and embeddings
+  "ai": {
+    "binding": "AI"
+  },
+
+  // Vectorize for semantic memory / RAG
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "agentos-knowledge"
+    }
+  ],
+
+  // Environment variables (secrets set via `wrangler secret put`)
+  "vars": {
+    "DEFAULT_PROVIDER": "workers-ai",
+    "DEFAULT_MODEL": "@cf/meta/llama-3.1-70b-instruct"
+  }
+}

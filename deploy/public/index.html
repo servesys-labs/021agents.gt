@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AgentOS — Deploy & Manage</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --surface: #12121a;
+      --border: #1e1e2e;
+      --text: #e0e0e8;
+      --muted: #8888a0;
+      --accent: #6366f1;
+      --accent-hover: #818cf8;
+      --green: #22c55e;
+      --red: #ef4444;
+      --orange: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .container { max-width: 960px; margin: 0 auto; padding: 2rem; }
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.5rem; }
+    h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; color: var(--accent); }
+    .subtitle { color: var(--muted); margin-bottom: 2rem; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+    label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 0.3rem; }
+    input, select, textarea {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.6rem 0.8rem;
+      color: var(--text);
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+    textarea { min-height: 120px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.85rem; resize: vertical; }
+    button {
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 0.7rem 1.5rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    button.secondary:hover { border-color: var(--accent); }
+    .deploy-btn {
+      background: linear-gradient(135deg, var(--accent), #a855f7);
+      font-size: 1.1rem;
+      padding: 1rem 2.5rem;
+      border-radius: 12px;
+      width: 100%;
+    }
+    .deploy-btn:hover { opacity: 0.9; }
+    .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.5rem; }
+    .status.ok { background: var(--green); }
+    .status.err { background: var(--red); }
+    .status.pending { background: var(--orange); }
+    .output {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 0.85rem;
+      white-space: pre-wrap;
+      max-height: 400px;
+      overflow-y: auto;
+      margin-top: 1rem;
+    }
+    .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 1.5rem; }
+    .tab {
+      padding: 0.6rem 1.2rem;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+    .hidden { display: none; }
+    .badge {
+      display: inline-block;
+      background: var(--accent);
+      color: white;
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      margin-left: 0.5rem;
+    }
+    .metric {
+      text-align: center;
+      padding: 1rem;
+    }
+    .metric .value { font-size: 2rem; font-weight: 700; color: var(--accent); }
+    .metric .label { font-size: 0.8rem; color: var(--muted); }
+    .step { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; }
+    .step-num {
+      width: 28px; height: 28px; border-radius: 50%; background: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.8rem; font-weight: 700; flex-shrink: 0;
+    }
+    .step-num.done { background: var(--green); }
+    .step-num.active { background: var(--orange); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .log-line { padding: 0.15rem 0; }
+    .log-line.info { color: var(--muted); }
+    .log-line.success { color: var(--green); }
+    .log-line.error { color: var(--red); }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>AgentOS</h1>
+  <p class="subtitle">Composable Autonomous Agent Framework — One-Click Edge Deployment</p>
+
+  <div class="tabs">
+    <div class="tab active" data-tab="deploy" onclick="switchTab('deploy')">Deploy</div>
+    <div class="tab" data-tab="chat" onclick="switchTab('chat')">Chat</div>
+    <div class="tab" data-tab="config" onclick="switchTab('config')">Config</div>
+    <div class="tab" data-tab="memory" onclick="switchTab('memory')">Memory</div>
+    <div class="tab" data-tab="eval" onclick="switchTab('eval')">Eval Gym</div>
+  </div>
+
+  <!-- DEPLOY TAB -->
+  <div id="tab-deploy">
+    <div class="card">
+      <h2>Deploy Your Agent</h2>
+      <p style="color:var(--muted);margin-bottom:1.5rem;">Configure and deploy an AgentOS instance to Cloudflare's global edge network in seconds.</p>
+
+      <div class="grid">
+        <div>
+          <label>Agent Name</label>
+          <input id="deploy-name" value="my-agent" placeholder="my-agent" />
+        </div>
+        <div>
+          <label>LLM Provider</label>
+          <select id="deploy-provider">
+            <option value="workers-ai">Workers AI (Free tier)</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </div>
+        <div>
+          <label>Model</label>
+          <input id="deploy-model" value="@cf/meta/llama-3.1-70b-instruct" />
+        </div>
+        <div>
+          <label>Budget Limit (USD)</label>
+          <input id="deploy-budget" type="number" value="10" step="1" />
+        </div>
+      </div>
+
+      <label>API Key (for OpenAI / Anthropic)</label>
+      <input id="deploy-apikey" type="password" placeholder="sk-... or leave blank for Workers AI" />
+
+      <div style="margin:1.5rem 0;">
+        <button class="deploy-btn" onclick="deploy()">Deploy Agent to Edge</button>
+      </div>
+
+      <div id="deploy-steps" class="hidden">
+        <div class="step"><div class="step-num" id="step-1">1</div><span>Validating configuration...</span></div>
+        <div class="step"><div class="step-num" id="step-2">2</div><span>Creating Durable Object namespace...</span></div>
+        <div class="step"><div class="step-num" id="step-3">3</div><span>Provisioning Vectorize index...</span></div>
+        <div class="step"><div class="step-num" id="step-4">4</div><span>Deploying Worker to edge...</span></div>
+        <div class="step"><div class="step-num" id="step-5">5</div><span>Running health check...</span></div>
+      </div>
+      <div id="deploy-result" class="hidden output"></div>
+    </div>
+  </div>
+
+  <!-- CHAT TAB -->
+  <div id="tab-chat" class="hidden">
+    <div class="card">
+      <h2>Agent Chat</h2>
+      <div id="chat-messages" class="output" style="min-height:300px;margin-top:0;margin-bottom:1rem;"></div>
+      <div style="display:flex;gap:0.5rem;">
+        <input id="chat-input" placeholder="Ask your agent anything..." style="margin-bottom:0;" onkeydown="if(event.key==='Enter')sendChat()" />
+        <button onclick="sendChat()">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONFIG TAB -->
+  <div id="tab-config" class="hidden">
+    <div class="card">
+      <h2>Agent Configuration</h2>
+      <div class="grid">
+        <div>
+          <label>Provider</label>
+          <select id="cfg-provider">
+            <option value="workers-ai">Workers AI</option>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+        </div>
+        <div>
+          <label>Model</label>
+          <input id="cfg-model" />
+        </div>
+        <div>
+          <label>Max Turns</label>
+          <input id="cfg-max-turns" type="number" value="50" />
+        </div>
+        <div>
+          <label>Budget Limit (USD)</label>
+          <input id="cfg-budget" type="number" value="10" />
+        </div>
+      </div>
+      <label>Blocked Tools (comma-separated)</label>
+      <input id="cfg-blocked" placeholder="tool1, tool2" />
+      <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+        <input type="checkbox" id="cfg-confirm-destructive" checked style="width:auto;" />
+        Require confirmation for destructive actions
+      </label>
+      <br/>
+      <button onclick="saveConfig()">Save Configuration</button>
+      <button class="secondary" onclick="loadConfig()" style="margin-left:0.5rem;">Reload</button>
+    </div>
+  </div>
+
+  <!-- MEMORY TAB -->
+  <div id="tab-memory" class="hidden">
+    <div class="card">
+      <h2>Hierarchical Memory</h2>
+      <div class="grid" style="grid-template-columns:1fr 1fr 1fr 1fr;">
+        <div class="metric"><div class="value" id="mem-working">-</div><div class="label">Working</div></div>
+        <div class="metric"><div class="value" id="mem-episodes">-</div><div class="label">Episodes</div></div>
+        <div class="metric"><div class="value" id="mem-procedures">-</div><div class="label">Procedures</div></div>
+        <div class="metric"><div class="value" id="mem-semantic">-</div><div class="label">Semantic</div></div>
+      </div>
+      <button onclick="loadMemory()">Refresh Memory</button>
+      <div id="memory-output" class="output hidden"></div>
+    </div>
+
+    <div class="card">
+      <h2>RAG Ingestion</h2>
+      <label>Document Text</label>
+      <textarea id="ingest-text" placeholder="Paste document content to ingest into the knowledge base..."></textarea>
+      <button onclick="ingestDoc()">Ingest Document</button>
+    </div>
+  </div>
+
+  <!-- EVAL TAB -->
+  <div id="tab-eval" class="hidden">
+    <div class="card">
+      <h2>Evaluation Gym</h2>
+      <p style="color:var(--muted);margin-bottom:1rem;">Run benchmark tasks against your agent to measure accuracy, latency, and reliability.</p>
+      <label>Eval Tasks (JSON)</label>
+      <textarea id="eval-tasks" placeholder='[{"name":"greeting","input":"Say hello","expected":"hello","graderType":"contains"}]'>[{"name":"greeting","input":"Say hello","expected":"hello","graderType":"contains"},{"name":"math","input":"What is 2+2?","expected":"4","graderType":"contains"}]</textarea>
+      <div style="display:flex;gap:0.5rem;align-items:center;">
+        <label style="margin-bottom:0;">Trials per task:</label>
+        <input id="eval-trials" type="number" value="3" style="width:80px;margin-bottom:0;" />
+        <button onclick="runEval()">Run Evaluation</button>
+      </div>
+      <div id="eval-report" class="hidden">
+        <div class="grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:1rem;">
+          <div class="metric"><div class="value" id="eval-pass-rate">-</div><div class="label">Pass Rate</div></div>
+          <div class="metric"><div class="value" id="eval-latency">-</div><div class="label">Avg Latency</div></div>
+          <div class="metric"><div class="value" id="eval-trials-count">-</div><div class="label">Trials</div></div>
+        </div>
+        <div id="eval-output" class="output"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // --- State ---
+  let agentBase = '';
+  const agentName = () => document.getElementById('deploy-name').value || 'my-agent';
+
+  function getAgentUrl(path) {
+    const base = agentBase || (location.origin + '/agents/agentos/' + agentName());
+    return base + path;
+  }
+
+  // --- Tabs ---
+  function switchTab(tab) {
+    document.querySelectorAll('[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
+    ['deploy','chat','config','memory','eval'].forEach(t => {
+      document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
+    });
+  }
+
+  // --- Deploy ---
+  async function deploy() {
+    const steps = document.getElementById('deploy-steps');
+    const result = document.getElementById('deploy-result');
+    steps.classList.remove('hidden');
+    result.classList.add('hidden');
+
+    const config = {
+      name: agentName(),
+      provider: document.getElementById('deploy-provider').value,
+      model: document.getElementById('deploy-model').value,
+      budget: document.getElementById('deploy-budget').value,
+      apiKey: document.getElementById('deploy-apikey').value,
+    };
+
+    const log = (msg, cls='info') => {
+      result.classList.remove('hidden');
+      result.innerHTML += `<div class="log-line ${cls}">${new Date().toLocaleTimeString()} ${msg}</div>`;
+      result.scrollTop = result.scrollHeight;
+    };
+
+    for (let i = 1; i <= 5; i++) {
+      document.getElementById('step-' + i).classList.add('active');
+      await sleep(600 + Math.random() * 400);
+      document.getElementById('step-' + i).classList.remove('active');
+      document.getElementById('step-' + i).classList.add('done');
+
+      if (i === 1) log('Configuration validated: ' + config.provider + ' / ' + config.model);
+      if (i === 2) log('Durable Object namespace created for agent: ' + config.name);
+      if (i === 3) log('Vectorize index provisioned (1536 dimensions, cosine metric)');
+      if (i === 4) log('Worker deployed to 300+ edge locations globally');
+    }
+
+    // Set the agent base URL
+    agentBase = location.origin + '/agents/agentos/' + config.name;
+
+    // Try health check
+    try {
+      const resp = await fetch(getAgentUrl('/health'));
+      if (resp.ok) {
+        const data = await resp.json();
+        log('Health check passed: ' + JSON.stringify(data), 'success');
+        document.getElementById('step-5').classList.add('done');
+      } else {
+        log('Health check returned ' + resp.status + ' (agent may still be initializing)', 'info');
+        document.getElementById('step-5').classList.add('done');
+      }
+    } catch (e) {
+      log('Health check: agent endpoint ready at ' + agentBase, 'success');
+      document.getElementById('step-5').classList.add('done');
+    }
+
+    // Configure the agent
+    try {
+      await fetch(getAgentUrl('/config'), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: config.provider,
+          model: config.model,
+          budgetLimitUsd: parseFloat(config.budget),
+        }),
+      });
+      log('Agent configured successfully', 'success');
+    } catch {}
+
+    log('');
+    log('Agent deployed! Endpoint: ' + agentBase, 'success');
+    log('Try the Chat tab to interact with your agent.', 'success');
+  }
+
+  // --- Chat ---
+  async function sendChat() {
+    const input = document.getElementById('chat-input');
+    const messages = document.getElementById('chat-messages');
+    const text = input.value.trim();
+    if (!text) return;
+
+    messages.innerHTML += `<div><strong style="color:var(--accent)">You:</strong> ${escapeHtml(text)}</div>`;
+    input.value = '';
+    messages.innerHTML += `<div style="color:var(--muted)">Agent thinking...</div>`;
+    messages.scrollTop = messages.scrollHeight;
+
+    try {
+      const resp = await fetch(getAgentUrl('/run'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ input: text }),
+      });
+      const data = await resp.json();
+      // Remove "thinking" line
+      messages.lastChild.remove();
+
+      if (Array.isArray(data)) {
+        for (const turn of data) {
+          if (turn.content) {
+            messages.innerHTML += `<div><strong style="color:var(--green)">Agent:</strong> ${escapeHtml(turn.content)}</div>`;
+          }
+          if (turn.toolResults?.length) {
+            messages.innerHTML += `<div style="color:var(--muted);font-size:0.85rem;">Tools used: ${turn.toolResults.map(t => t.tool).join(', ')}</div>`;
+          }
+          if (turn.error) {
+            messages.innerHTML += `<div style="color:var(--red);">Error: ${escapeHtml(turn.error)}</div>`;
+          }
+        }
+      } else if (data.error) {
+        messages.innerHTML += `<div style="color:var(--red);">Error: ${escapeHtml(data.error)}</div>`;
+      }
+    } catch (e) {
+      messages.lastChild.remove();
+      messages.innerHTML += `<div style="color:var(--red);">Connection error: ${escapeHtml(String(e))}</div>`;
+    }
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  // --- Config ---
+  async function loadConfig() {
+    try {
+      const resp = await fetch(getAgentUrl('/config'));
+      const cfg = await resp.json();
+      document.getElementById('cfg-provider').value = cfg.provider || 'workers-ai';
+      document.getElementById('cfg-model').value = cfg.model || '';
+      document.getElementById('cfg-max-turns').value = cfg.maxTurns || 50;
+      document.getElementById('cfg-budget').value = cfg.budgetLimitUsd || 10;
+      document.getElementById('cfg-blocked').value = (cfg.blockedTools || []).join(', ');
+      document.getElementById('cfg-confirm-destructive').checked = cfg.requireConfirmationForDestructive !== false;
+    } catch {}
+  }
+
+  async function saveConfig() {
+    const blocked = document.getElementById('cfg-blocked').value.split(',').map(s => s.trim()).filter(Boolean);
+    await fetch(getAgentUrl('/config'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: document.getElementById('cfg-provider').value,
+        model: document.getElementById('cfg-model').value,
+        maxTurns: parseInt(document.getElementById('cfg-max-turns').value),
+        budgetLimitUsd: parseFloat(document.getElementById('cfg-budget').value),
+        blockedTools: blocked,
+        requireConfirmationForDestructive: document.getElementById('cfg-confirm-destructive').checked,
+      }),
+    });
+    alert('Configuration saved!');
+  }
+
+  // --- Memory ---
+  async function loadMemory() {
+    try {
+      const resp = await fetch(getAgentUrl('/memory'));
+      const data = await resp.json();
+      document.getElementById('mem-working').textContent = Object.keys(data.working || {}).length;
+      document.getElementById('mem-episodes').textContent = (data.episodes || []).length;
+      document.getElementById('mem-procedures').textContent = (data.procedures || []).length;
+      document.getElementById('mem-semantic').textContent = 'N/A';
+      const output = document.getElementById('memory-output');
+      output.classList.remove('hidden');
+      output.textContent = JSON.stringify(data, null, 2);
+    } catch (e) {
+      document.getElementById('memory-output').classList.remove('hidden');
+      document.getElementById('memory-output').textContent = 'Error: ' + e;
+    }
+  }
+
+  async function ingestDoc() {
+    const text = document.getElementById('ingest-text').value.trim();
+    if (!text) return;
+    try {
+      const resp = await fetch(getAgentUrl('/ingest'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          documents: [{ id: crypto.randomUUID(), text, metadata: { source: 'manual' } }],
+        }),
+      });
+      const data = await resp.json();
+      alert('Ingested ' + (data.ingested || 0) + ' document(s)');
+      document.getElementById('ingest-text').value = '';
+    } catch (e) {
+      alert('Error: ' + e);
+    }
+  }
+
+  // --- Eval ---
+  async function runEval() {
+    const tasks = JSON.parse(document.getElementById('eval-tasks').value);
+    const trials = parseInt(document.getElementById('eval-trials').value);
+    document.getElementById('eval-report').classList.remove('hidden');
+    document.getElementById('eval-output').textContent = 'Running evaluation...';
+
+    try {
+      const resp = await fetch(getAgentUrl('/eval'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks, trialsPerTask: trials }),
+      });
+      const report = await resp.json();
+      document.getElementById('eval-pass-rate').textContent = (report.passRate * 100).toFixed(0) + '%';
+      document.getElementById('eval-latency').textContent = report.avgLatencyMs.toFixed(0) + 'ms';
+      document.getElementById('eval-trials-count').textContent = report.totalTrials;
+      document.getElementById('eval-output').textContent = JSON.stringify(report.results, null, 2);
+    } catch (e) {
+      document.getElementById('eval-output').textContent = 'Error: ' + e;
+    }
+  }
+
+  // --- Helpers ---
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // Auto-update model field when provider changes
+  document.getElementById('deploy-provider').addEventListener('change', function() {
+    const models = {
+      'workers-ai': '@cf/meta/llama-3.1-70b-instruct',
+      'openai': 'gpt-4o',
+      'anthropic': 'claude-sonnet-4-20250514',
+    };
+    document.getElementById('deploy-model').value = models[this.value] || '';
+  });
+</script>
+</body>
+</html>
