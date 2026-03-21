@@ -165,6 +165,16 @@ def cmd_init(args: argparse.Namespace) -> None:
             dir_path.mkdir(parents=True, exist_ok=True)
             created.append(f"{d}/")
 
+    # ── SQLite database (the agent's persistent brain) ────────────────────
+    db_path = directory / "data" / "agent.db"
+    if not db_path.exists():
+        from agentos.core.database import create_database
+        db = create_database(db_path)
+        db.close()
+        created.append("data/agent.db (SQLite — WAL mode)")
+    else:
+        skipped.append("data/agent.db")
+
     # ── Agent identity (generated once, immutable) ───────────────────────
     identity_path = directory / "agents" / ".identity.json"
     if not identity_path.exists():
@@ -232,10 +242,15 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"  sign_outputs: false              # Enable output signing for audit\n"
             f"  signing_key: .keys/agent.key\n"
             f"\n"
+            f"# ── Database ───────────────────────────────────────────────\n"
+            f"database:\n"
+            f"  path: data/agent.db               # SQLite — single file, zero dependencies\n"
+            f"  wal_mode: true                    # WAL = concurrent readers + atomic writes\n"
+            f"  # Cloudflare D1 compatible — same schema works at the edge\n"
+            f"\n"
             f"# ── Session tracking ─────────────────────────────────────\n"
             f"sessions:\n"
-            f"  storage: sessions/               # Where session logs are stored\n"
-            f"  format: jsonl                     # jsonl | json\n"
+            f"  storage: database                 # 'database' (SQLite) or 'jsonl' (flat file)\n"
             f"  retention_days: 90                # Auto-cleanup after N days (0 = forever)\n"
             f"  include_llm_content: true         # Store full LLM responses\n"
             f"  include_tool_results: true        # Store full tool outputs\n"
@@ -262,7 +277,7 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"  tools: tools/\n"
             f"  data: data/\n"
             f"  eval: eval/\n"
-            f"  sessions: sessions/\n"
+            f"  database: data/agent.db\n"
         )
         created.append("agentos.yaml")
     else:
@@ -360,6 +375,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     if not gitignore_path.exists():
         gitignore_path.write_text(
             "# AgentOS\n"
+            "data/agent.db\n"
+            "data/agent.db-wal\n"
+            "data/agent.db-shm\n"
             "data/rag_index.json\n"
             "data/embeddings/\n"
             "data/cache/\n"

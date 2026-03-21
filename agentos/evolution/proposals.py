@@ -76,10 +76,12 @@ class ReviewQueue:
         surface_ratio: float = 0.1,  # Show top 10% to humans
         min_priority: float = 0.2,   # Floor priority to surface
         storage_path: Path | None = None,
+        db: Any | None = None,
     ) -> None:
         self.surface_ratio = surface_ratio
         self.min_priority = min_priority
         self.storage_path = storage_path
+        self._db = db  # AgentDB instance (optional, preferred over JSON file)
         self._all_proposals: list[Proposal] = []
         self._surfaced: list[Proposal] = []
 
@@ -131,7 +133,10 @@ class ReviewQueue:
 
         self._surfaced.extend(surfaced)
 
-        if self.storage_path:
+        if self._db is not None:
+            for p in proposals:
+                self._persist_proposal_to_db(p, surfaced=p in surfaced)
+        elif self.storage_path:
             self._persist()
 
         return surfaced
@@ -151,7 +156,11 @@ class ReviewQueue:
         proposal.reviewed_at = time.time()
         proposal.reviewer_note = note
 
-        if self.storage_path:
+        if self._db is not None:
+            self._db.update_proposal_status(
+                proposal.id, proposal.status.value, note, proposal.reviewed_at,
+            )
+        elif self.storage_path:
             self._persist()
 
         return proposal
@@ -181,6 +190,12 @@ class ReviewQueue:
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         data = [p.to_dict() for p in self._all_proposals]
         self.storage_path.write_text(json.dumps(data, indent=2) + "\n")
+
+    def _persist_proposal_to_db(self, proposal: Proposal, surfaced: bool = False) -> None:
+        """Persist a proposal to SQLite."""
+        data = proposal.to_dict()
+        data["surfaced"] = surfaced
+        self._db.insert_proposal(data)
 
     def summary(self) -> dict[str, Any]:
         """Summary stats for the review queue."""
