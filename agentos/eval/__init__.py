@@ -1,6 +1,6 @@
 """Evaluation gym and auto-research loop."""
 
-from agentos.eval.gym import AgentResult, EvalGym, EvalReport
+from agentos.eval.gym import AgentResult, EvalGym, EvalReport, PromptPerturbation
 from agentos.eval.grader import Grader, ExactMatchGrader, ContainsGrader, LLMGrader
 from agentos.eval.research_loop import AutoResearchLoop
 
@@ -13,4 +13,5 @@ __all__ = [
     "ContainsGrader",
     "LLMGrader",
     "AutoResearchLoop",
+    "PromptPerturbation",
 ]

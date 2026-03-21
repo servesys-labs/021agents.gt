@@ -445,6 +445,296 @@ class TestTrialMetadata:
         assert report.trial_results[0].metadata == {"custom_key": "custom_value"}
 
 
+# ── Agentic Eval Extensions (Every Eval Ever gaps) ───────────────────────────
+
+
+class TestFinishAccepted:
+    """Gap 1: finish_accepted — did the grader accept the output?"""
+
+    @pytest.mark.asyncio
+    async def test_passing_trial_has_finish_accepted_true(self):
+        gym = EvalGym(trials_per_task=1)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        assert report.trial_results[0].finish_accepted is True
+
+    @pytest.mark.asyncio
+    async def test_failing_trial_has_finish_accepted_false(self):
+        gym = EvalGym(trials_per_task=1)
+        gym.add_task(EvalTask(name="t", input="hi", expected="xyz", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        assert report.trial_results[0].finish_accepted is False
+
+    @pytest.mark.asyncio
+    async def test_error_trial_has_finish_accepted_false(self):
+        gym = EvalGym(trials_per_task=1)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            raise RuntimeError("boom")
+
+        report = await gym.run(agent)
+        assert report.trial_results[0].finish_accepted is False
+
+
+class TestStopReasonAttribution:
+    """Gap 2: stop_reason distinguishes agent vs benchmark stops."""
+
+    @pytest.mark.asyncio
+    async def test_completed_trial_stop_reason(self):
+        gym = EvalGym(trials_per_task=1)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        assert report.trial_results[0].stop_reason == "completed"
+
+    @pytest.mark.asyncio
+    async def test_timeout_trial_stop_reason(self):
+        import asyncio as _asyncio
+        gym = EvalGym(trials_per_task=1, trial_timeout_seconds=0.05)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            await _asyncio.sleep(5)
+            return "hi"
+
+        report = await gym.run(agent)
+        assert report.trial_results[0].stop_reason == "benchmark_timeout"
+
+    @pytest.mark.asyncio
+    async def test_error_trial_stop_reason(self):
+        gym = EvalGym(trials_per_task=1)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            raise ValueError("oops")
+
+        report = await gym.run(agent)
+        assert report.trial_results[0].stop_reason == "error"
+
+    def test_stop_reason_initiated_by(self):
+        from agentos.evolution.session_record import StopReason
+        assert StopReason.COMPLETED.initiated_by == "agent"
+        assert StopReason.USER_CANCELLED.initiated_by == "agent"
+        assert StopReason.BENCHMARK_TIMEOUT.initiated_by == "benchmark"
+        assert StopReason.BENCHMARK_ERROR.initiated_by == "benchmark"
+        assert StopReason.TIMEOUT.initiated_by == "infrastructure"
+        assert StopReason.BUDGET_EXHAUSTED.initiated_by == "infrastructure"
+        assert StopReason.MAX_TURNS.initiated_by == "infrastructure"
+
+
+class TestBenchmarkCost:
+    """Gap 3: benchmark_cost separates eval infra cost from agent cost."""
+
+    @pytest.mark.asyncio
+    async def test_benchmark_cost_aggregated(self):
+        gym = EvalGym(trials_per_task=2)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> AgentResult:
+            return AgentResult(output="hi", cost_usd=0.10)
+
+        report = await gym.run(agent)
+        # Agent cost should be $0.20 (2 trials * $0.10)
+        assert report.total_cost_usd == pytest.approx(0.20)
+        # ContainsGrader has no LLM cost, so benchmark cost = $0
+        assert report.benchmark_cost_usd == pytest.approx(0.0)
+
+    @pytest.mark.asyncio
+    async def test_trial_result_has_benchmark_cost(self):
+        gym = EvalGym(trials_per_task=1)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        assert hasattr(report.trial_results[0], "benchmark_cost_usd")
+        assert report.trial_results[0].benchmark_cost_usd == 0.0
+
+
+class TestSeedAndPerturbation:
+    """Gap 4: seed control and prompt perturbation in the gym."""
+
+    @pytest.mark.asyncio
+    async def test_seed_in_eval_conditions(self):
+        gym = EvalGym(trials_per_task=1, seed=42)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        assert report.eval_conditions["seed"] == 42
+
+    @pytest.mark.asyncio
+    async def test_perturbation_trial_1_unmodified(self):
+        """Trial 1 should always use the original input (baseline)."""
+        received_inputs = []
+
+        gym = EvalGym(trials_per_task=3, perturbation=True, seed=42)
+        gym.add_task(EvalTask(name="t", input="Hello world", expected="hello", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            received_inputs.append(inp)
+            return "hello"
+
+        await gym.run(agent)
+        # Trial 1 should be unmodified
+        assert received_inputs[0] == "Hello world"
+        # At least one subsequent trial should be different
+        assert any(inp != "Hello world" for inp in received_inputs[1:])
+
+    @pytest.mark.asyncio
+    async def test_perturbation_deterministic_with_seed(self):
+        """Same seed should produce same perturbations."""
+        inputs_run1 = []
+        inputs_run2 = []
+
+        async def agent1(inp: str) -> str:
+            inputs_run1.append(inp)
+            return "hello"
+
+        async def agent2(inp: str) -> str:
+            inputs_run2.append(inp)
+            return "hello"
+
+        for agent, inputs in [(agent1, inputs_run1), (agent2, inputs_run2)]:
+            gym = EvalGym(trials_per_task=5, perturbation=True, seed=123)
+            gym.add_task(EvalTask(name="t", input="Test input", expected="hello", grader=ContainsGrader()))
+            await gym.run(agent)
+
+        assert inputs_run1 == inputs_run2
+
+    @pytest.mark.asyncio
+    async def test_no_perturbation_by_default(self):
+        """Without perturbation flag, all trials get identical input."""
+        received_inputs = []
+
+        gym = EvalGym(trials_per_task=3)
+        gym.add_task(EvalTask(name="t", input="Exact input", expected="exact", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            received_inputs.append(inp)
+            return "exact"
+
+        await gym.run(agent)
+        assert all(inp == "Exact input" for inp in received_inputs)
+
+    def test_perturbation_class_strategies(self):
+        from agentos.eval.gym import PromptPerturbation
+        p = PromptPerturbation(seed=0)
+        original = "Hello world"
+        # Trial 1 always unperturbed
+        assert p.perturb(original, 1) == original
+        # Later trials should vary
+        results = {p.perturb(original, t) for t in range(2, 20)}
+        assert len(results) > 1  # At least 2 different perturbations
+
+
+class TestBenchmarkMetadata:
+    """Gap 5: benchmark env/grader/protocol in EvalReport."""
+
+    @pytest.mark.asyncio
+    async def test_report_includes_benchmark_metadata(self):
+        gym = EvalGym(
+            trials_per_task=1,
+            benchmark_name="smoke-test",
+            benchmark_version="1.0",
+            protocol="agentos",
+        )
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        assert report.benchmark_name == "smoke-test"
+        assert report.benchmark_version == "1.0"
+        assert report.protocol == "agentos"
+        assert report.grader_type == "contains"
+
+    @pytest.mark.asyncio
+    async def test_report_to_dict_has_benchmark_fields(self):
+        gym = EvalGym(trials_per_task=1, seed=99)
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ExactMatchGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        d = report.to_dict()
+        assert "benchmark_name" in d
+        assert "benchmark_cost_usd" in d
+        assert "eval_conditions" in d
+        assert d["grader_type"] == "exactmatch"
+        assert d["eval_conditions"]["seed"] == 99
+
+    @pytest.mark.asyncio
+    async def test_eval_conditions_in_report(self):
+        gym = EvalGym(
+            trials_per_task=3,
+            trial_timeout_seconds=30.0,
+            max_concurrency=2,
+            seed=7,
+            perturbation=True,
+        )
+        gym.add_task(EvalTask(name="t", input="hi", expected="hi", grader=ContainsGrader()))
+
+        async def agent(inp: str) -> str:
+            return "hi"
+
+        report = await gym.run(agent)
+        conds = report.eval_conditions
+        assert conds["seed"] == 7
+        assert conds["perturbation"] is True
+        assert conds["trials_per_task"] == 3
+        assert conds["trial_timeout_seconds"] == 30.0
+        assert conds["max_concurrency"] == 2
+
+
+class TestSessionRecordGaps:
+    """Tests for SessionRecord fields: finish_accepted, benchmark_cost, stop_reason."""
+
+    def test_finish_accepted_field(self):
+        from agentos.evolution.session_record import SessionRecord
+        rec = SessionRecord()
+        assert rec.finish_accepted is None  # Unknown by default
+        rec.finish_accepted = True
+        assert rec.finish_accepted is True
+
+    def test_benchmark_cost_field(self):
+        from agentos.evolution.session_record import CostBreakdown, SessionRecord
+        rec = SessionRecord()
+        assert rec.benchmark_cost.total_usd == 0.0
+        rec.benchmark_cost.add_llm(0.01, 0.02)
+        assert rec.benchmark_cost.total_usd == pytest.approx(0.03)
+
+    def test_to_dict_includes_new_fields(self):
+        from agentos.evolution.session_record import SessionRecord, StopReason
+        rec = SessionRecord(
+            finish_accepted=True,
+            stop_reason=StopReason.BENCHMARK_TIMEOUT,
+        )
+        d = rec.to_dict()
+        assert d["finish_accepted"] is True
+        assert d["stop_reason"] == "benchmark_timeout"
+        assert d["stop_initiated_by"] == "benchmark"
+        assert "benchmark_cost" in d
+        assert d["benchmark_cost"]["total_usd"] == 0.0
+
+
 # ── AutoResearchLoop ─────────────────────────────────────────────────────────
 
 
