@@ -66,7 +66,11 @@ class StubProvider:
 
 
 class HttpProvider:
-    """Generic HTTP-based LLM provider using httpx."""
+    """Generic HTTP-based LLM provider using httpx.
+
+    Supports both Anthropic (/v1/messages) and OpenAI (/v1/chat/completions)
+    API formats, auto-detected from api_base.
+    """
 
     def __init__(
         self,
@@ -79,6 +83,7 @@ class HttpProvider:
         self._api_base = api_base.rstrip("/")
         self._api_key = api_key
         self._headers = headers or {}
+        self._is_anthropic = "anthropic" in self._api_base
 
     @property
     def model_id(self) -> str:
@@ -93,18 +98,43 @@ class HttpProvider:
     ) -> LLMResponse:
         import httpx
 
+        if self._is_anthropic:
+            return await self._complete_anthropic(messages, max_tokens, temperature, tools)
+        else:
+            return await self._complete_openai(messages, max_tokens, temperature, tools)
+
+    async def _complete_anthropic(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        tools: list[dict[str, Any]] | None,
+    ) -> LLMResponse:
+        import httpx
+
+        # Separate system message from conversation messages
+        system_text = ""
+        chat_messages = []
+        for m in messages:
+            if m.get("role") == "system":
+                system_text += m.get("content", "") + "\n"
+            else:
+                chat_messages.append(m)
+
         payload: dict[str, Any] = {
             "model": self._model_id,
-            "messages": messages,
+            "messages": chat_messages or [{"role": "user", "content": "Hello"}],
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        if system_text.strip():
+            payload["system"] = system_text.strip()
         if tools:
             payload["tools"] = tools
 
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
+            "x-api-key": self._api_key,
             **self._headers,
         }
 
@@ -137,5 +167,78 @@ class HttpProvider:
             model=body.get("model", self._model_id),
             tool_calls=tool_calls,
             usage=usage,
+            latency_ms=elapsed_ms,
+        )
+
+    async def _complete_openai(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        tools: list[dict[str, Any]] | None,
+    ) -> LLMResponse:
+        import httpx
+
+        payload: dict[str, Any] = {
+            "model": self._model_id,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            # Convert MCP-style tools to OpenAI function-calling format
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name", ""),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("input_schema", {}),
+                    },
+                }
+                for t in tools
+            ]
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+            **self._headers,
+        }
+
+        start = time.monotonic()
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{self._api_base}/v1/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=120.0,
+            )
+            resp.raise_for_status()
+        elapsed_ms = (time.monotonic() - start) * 1000
+        body = resp.json()
+
+        choice = body.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        content = message.get("content", "") or ""
+
+        tool_calls: list[dict[str, Any]] = []
+        for tc in message.get("tool_calls", []):
+            fn = tc.get("function", {})
+            import json as _json
+            try:
+                args = _json.loads(fn.get("arguments", "{}"))
+            except _json.JSONDecodeError:
+                args = {}
+            tool_calls.append({"name": fn.get("name", ""), "arguments": args})
+
+        usage = body.get("usage", {})
+        return LLMResponse(
+            content=content,
+            model=body.get("model", self._model_id),
+            tool_calls=tool_calls,
+            usage={
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            },
             latency_ms=elapsed_ms,
         )

@@ -1,6 +1,8 @@
 """Tests for the CLI commands."""
 
 import json
+import subprocess
+import sys
 import pytest
 from pathlib import Path
 from unittest.mock import patch
@@ -72,3 +74,31 @@ class TestCmdList:
 
         captured = capsys.readouterr()
         assert "No agents found" in captured.out
+
+
+class TestCLIEntrypoint:
+    def test_version_flag(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "agentos.cli", "--version"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "agentos" in result.stdout
+
+    def test_missing_agent_error(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "agentos.cli", "run", "nonexistent-agent-xyz", "hello"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 1
+        assert "Error" in result.stdout or "Error" in result.stderr or "not found" in result.stdout.lower()
+
+    def test_help(self):
+        result = subprocess.run(
+            [sys.executable, "-m", "agentos.cli", "--help"],
+            capture_output=True, text=True,
+        )
+        assert result.returncode == 0
+        assert "init" in result.stdout
+        assert "create" in result.stdout
+        assert "run" in result.stdout

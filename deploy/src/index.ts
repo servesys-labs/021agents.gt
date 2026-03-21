@@ -55,6 +55,9 @@ interface AgentConfig {
   spentUsd: number;
   blockedTools: string[];
   requireConfirmationForDestructive: boolean;
+  systemPrompt: string;
+  agentName: string;
+  agentDescription: string;
 }
 
 interface ChatMessage {
@@ -468,6 +471,9 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
           spentUsd: 0,
           blockedTools: [],
           requireConfirmationForDestructive: true,
+          systemPrompt: "",
+          agentName: "",
+          agentDescription: "",
         },
         turnCount: 0,
         sessionActive: false,
@@ -683,7 +689,7 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
     }
     messages.push({
       role: "system",
-      content: SYSTEM_PROMPT,
+      content: this.state.config.systemPrompt || SYSTEM_PROMPT,
     });
     messages.push({ role: "user", content: userInput });
 

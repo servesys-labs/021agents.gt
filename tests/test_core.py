@@ -91,3 +91,12 @@ class TestAgentHarness:
         harness = AgentHarness(config=HarnessConfig(max_turns=1))
         await harness.run("Hello there")
         assert harness.memory_manager.episodic.count() == 1
+
+    @pytest.mark.asyncio
+    async def test_system_prompt_attribute(self):
+        """Verify the harness accepts and uses system_prompt."""
+        harness = AgentHarness(config=HarnessConfig(max_turns=1))
+        harness.system_prompt = "You are a test assistant."
+        results = await harness.run("Hello")
+        assert len(results) >= 1
+        assert results[-1].done is True

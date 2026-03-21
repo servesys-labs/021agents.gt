@@ -61,6 +61,7 @@ class AgentHarness:
         self.llm_router = llm_router or LLMRouter()
         self.tool_executor = tool_executor or ToolExecutor()
         self.memory_manager = memory_manager or MemoryManager()
+        self.system_prompt: str = ""
         self._turn = 0
 
     @classmethod
@@ -109,8 +110,15 @@ class AgentHarness:
 
         # Step 5: Build messages and begin execution
         messages: list[dict[str, str]] = [{"role": "user", "content": user_input}]
+
+        # Build system message from agent identity + memory context
+        system_parts: list[str] = []
+        if self.system_prompt:
+            system_parts.append(self.system_prompt)
         if memory_context:
-            messages.insert(0, {"role": "system", "content": memory_context})
+            system_parts.append(memory_context)
+        if system_parts:
+            messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
         # Track successful tool sequences for procedural memory
         tool_sequence: list[dict[str, Any]] = []

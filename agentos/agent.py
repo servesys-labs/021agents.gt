@@ -15,7 +15,19 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-AGENTS_DIR = Path("agents")
+def _resolve_agents_dir() -> Path:
+    """Resolve the agents directory — cwd/agents/ first, then package root."""
+    cwd_agents = Path.cwd() / "agents"
+    if cwd_agents.is_dir():
+        return cwd_agents
+    # Fall back to package-level agents dir (for development)
+    pkg_agents = Path(__file__).resolve().parent.parent / "agents"
+    if pkg_agents.is_dir():
+        return pkg_agents
+    return cwd_agents  # Default: will be created on save
+
+
+AGENTS_DIR = _resolve_agents_dir()
 
 
 @dataclass
@@ -238,18 +250,19 @@ class Agent:
                     MCPServer(name=tool_ref["name"], tools=[tool])
                 )
 
-        # Inject system prompt into working memory
-        if self.config.system_prompt:
-            memory_manager.working.set("system_prompt", self.config.system_prompt)
-        if self.config.personality:
-            memory_manager.working.set("personality", self.config.personality)
-
-        return AgentHarness(
+        harness = AgentHarness(
             config=harness_cfg,
             tool_executor=ToolExecutor(mcp_client=mcp_client),
             memory_manager=memory_manager,
             governance=GovernanceLayer(gov_policy),
         )
+
+        # Set the agent's system prompt (used as the LLM system message)
+        harness.system_prompt = self.config.system_prompt or ""
+        if self.config.personality:
+            harness.system_prompt += f"\n\nPersonality: {self.config.personality}"
+
+        return harness
 
     async def run(self, user_input: str) -> list:
         """Execute the agent on a user task."""

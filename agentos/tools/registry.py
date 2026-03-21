@@ -13,8 +13,18 @@ from agentos.tools.mcp import MCPServer, MCPTool
 
 logger = logging.getLogger(__name__)
 
-# Default plugins directory at project root
-PLUGINS_DIR = Path(__file__).resolve().parent.parent.parent / "tools"
+def _resolve_plugins_dir() -> Path:
+    """Resolve the tools directory — cwd/tools/ first, then package root."""
+    cwd_tools = Path.cwd() / "tools"
+    if cwd_tools.is_dir():
+        return cwd_tools
+    pkg_tools = Path(__file__).resolve().parent.parent.parent / "tools"
+    if pkg_tools.is_dir():
+        return pkg_tools
+    return cwd_tools
+
+
+PLUGINS_DIR = _resolve_plugins_dir()
 
 
 @dataclass

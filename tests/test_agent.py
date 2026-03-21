@@ -116,9 +116,8 @@ class TestAgent:
             max_turns=1,
         )
         agent = Agent(config)
-        wm = agent._harness.memory_manager.working
-        assert wm.get("system_prompt") == "You are a pirate."
-        assert wm.get("personality") == "Gruff and salty"
+        assert "You are a pirate." in agent._harness.system_prompt
+        assert "Gruff and salty" in agent._harness.system_prompt
 
     @pytest.mark.asyncio
     async def test_agent_with_inline_tool(self):

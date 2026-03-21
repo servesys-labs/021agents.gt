@@ -68,7 +68,14 @@ def main() -> None:
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
     deploy_p.add_argument("name", help="Agent name or path")
 
+    parser.add_argument("--version", "-V", action="store_true", help="Show version")
+
     args = parser.parse_args()
+
+    if getattr(args, "version", False):
+        from agentos import __version__
+        print(f"agentos {__version__}")
+        sys.exit(0)
 
     if args.command is None:
         parser.print_help()
@@ -89,8 +96,14 @@ def main() -> None:
             asyncio.run(cmd_chat(args))
         elif args.command == "deploy":
             cmd_deploy(args)
+    except FileNotFoundError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
     except KeyboardInterrupt:
         print("\nAborted.")
+        sys.exit(1)
+    except Exception as exc:
+        print(f"Error: {exc}")
         sys.exit(1)
 
 
@@ -224,14 +237,18 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     task = args.task
     if not task:
-        # Read from stdin if no task provided
-        try:
-            task = input("Task: ").strip()
-        except EOFError:
-            print("No task provided.")
-            return
+        # Read from stdin/pipe if no task provided
+        if not sys.stdin.isatty():
+            task = sys.stdin.read().strip()
+        else:
+            try:
+                task = input("Task: ").strip()
+            except EOFError:
+                pass
         if not task:
-            print("No task provided.")
+            print("Error: No task provided.")
+            print("Usage: agentos run <name> \"your task here\"")
+            print("   or: echo \"your task\" | agentos run <name>")
             return
 
     print(f"Running agent '{agent.config.name}' on: {task}")
@@ -325,8 +342,6 @@ async def cmd_chat(args: argparse.Namespace) -> None:
 
 def cmd_deploy(args: argparse.Namespace) -> None:
     """Deploy an agent to Cloudflare Workers."""
-    from agentos.agent import AgentConfig, load_agent_config
-
     config = _load_agent_config(args.name)
 
     deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
@@ -334,19 +349,42 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         print("Error: deploy/ directory not found. Run from the AgentOS root.")
         sys.exit(1)
 
+    # Convert Python agent config → CF worker config format
+    gov = config.governance
+    cf_config = {
+        "agentName": config.name,
+        "agentDescription": config.description,
+        "systemPrompt": config.system_prompt,
+        "maxTurns": config.max_turns,
+        "budgetLimitUsd": gov.get("budget_limit_usd", 10.0),
+        "blockedTools": gov.get("blocked_tools", []),
+        "requireConfirmationForDestructive": gov.get(
+            "require_confirmation_for_destructive", True
+        ),
+        # These are set during `npm run setup`
+        "provider": "",
+        "model": config.model,
+        "spentUsd": 0,
+    }
+
+    deploy_config_path = deploy_dir / "agent-config.json"
+    deploy_config_path.write_text(json.dumps(cf_config, indent=2) + "\n")
+
     print(f"Deploying agent '{config.name}' to Cloudflare Workers...")
     print(f"  Model: {config.model}")
     print(f"  Tools: {', '.join(str(t) for t in config.tools) or 'none'}")
-    print(f"  Budget: ${config.governance.get('budget_limit_usd', 10.0)}")
+    print(f"  Budget: ${gov.get('budget_limit_usd', 10.0)}")
+    print(f"  System prompt: {config.system_prompt[:60]}...")
     print()
-    print(f"Run the following from the deploy/ directory:")
+    print(f"Agent config written to: deploy/agent-config.json")
+    print()
+    print("Next steps:")
     print(f"  cd deploy && npm run setup")
     print()
-    print(f"The agent config has been written to deploy/agent-config.json")
-
-    # Write the agent config for the CF worker to pick up
-    deploy_config_path = deploy_dir / "agent-config.json"
-    deploy_config_path.write_text(json.dumps(config.to_dict(), indent=2) + "\n")
+    print("After deployment, configure via:")
+    print(f"  curl -X PUT https://YOUR_WORKER.workers.dev/agents/agentos/{config.name}/config \\")
+    print(f"    -H 'Content-Type: application/json' \\")
+    print(f"    -d @deploy/agent-config.json")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 import pytest
 
-from agentos.llm.provider import StubProvider
+from agentos.llm.provider import HttpProvider, StubProvider
 from agentos.llm.router import Complexity, LLMRouter
 from agentos.llm.tokens import count_tokens, count_message_tokens, estimate_cost
 
@@ -63,3 +63,29 @@ class TestTokenCounting:
         haiku_cost = estimate_cost(1000, 1000, model="claude-haiku-4-5-20251001")
         opus_cost = estimate_cost(1000, 1000, model="claude-opus-4-20250514")
         assert opus_cost > haiku_cost
+
+
+class TestHttpProvider:
+    def test_anthropic_detection(self):
+        provider = HttpProvider(
+            model_id="claude-sonnet-4-20250514",
+            api_base="https://api.anthropic.com",
+            api_key="test-key",
+        )
+        assert provider._is_anthropic is True
+
+    def test_openai_detection(self):
+        provider = HttpProvider(
+            model_id="gpt-4o",
+            api_base="https://api.openai.com",
+            api_key="test-key",
+        )
+        assert provider._is_anthropic is False
+
+    def test_model_id_property(self):
+        provider = HttpProvider(
+            model_id="my-model",
+            api_base="https://example.com",
+            api_key="key",
+        )
+        assert provider.model_id == "my-model"
