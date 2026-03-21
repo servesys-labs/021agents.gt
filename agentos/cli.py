@@ -251,6 +251,17 @@ async def cmd_run(args: argparse.Namespace) -> None:
             print("   or: echo \"your task\" | agentos run <name>")
             return
 
+    # Warn if using stub provider
+    from agentos.llm.provider import StubProvider
+    _any_stub = any(
+        isinstance(route.provider, StubProvider)
+        for route in agent._harness.llm_router._routes.values()
+    )
+    if _any_stub:
+        print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
+        print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
+        print()
+
     print(f"Running agent '{agent.config.name}' on: {task}")
     print("-" * 40)
 
@@ -285,11 +296,12 @@ def cmd_list(args: argparse.Namespace) -> None:
         print("  Or initialize a project with: agentos init")
         return
 
-    print(f"{'Name':<25} {'Description':<40} {'Model':<25}")
-    print("-" * 90)
+    print(f"{'Name':<30} {'Description':<40} {'Model':<25}")
+    print("-" * 95)
     for a in agents:
+        name = (a.name[:27] + "...") if len(a.name) > 30 else a.name
         desc = (a.description[:37] + "...") if len(a.description) > 40 else a.description
-        print(f"{a.name:<25} {desc:<40} {a.model:<25}")
+        print(f"{name:<30} {desc:<40} {a.model:<25}")
 
 
 def cmd_tools(args: argparse.Namespace) -> None:
@@ -344,9 +356,14 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     """Deploy an agent to Cloudflare Workers."""
     config = _load_agent_config(args.name)
 
-    deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
+    # Look for deploy/ in cwd first, then fall back to package
+    deploy_dir = Path.cwd() / "deploy"
     if not deploy_dir.exists():
-        print("Error: deploy/ directory not found. Run from the AgentOS root.")
+        deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
+    if not deploy_dir.exists():
+        print("Error: No deploy/ directory found.")
+        print("  Option 1: Run from the AgentOS source root")
+        print("  Option 2: Copy the deploy/ directory to your project")
         sys.exit(1)
 
     # Convert Python agent config → CF worker config format
@@ -376,15 +393,15 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     print(f"  Budget: ${gov.get('budget_limit_usd', 10.0)}")
     print(f"  System prompt: {config.system_prompt[:60]}...")
     print()
-    print(f"Agent config written to: deploy/agent-config.json")
+    print(f"Agent config written to: {deploy_config_path}")
     print()
     print("Next steps:")
-    print(f"  cd deploy && npm run setup")
+    print(f"  cd {deploy_dir} && npm run setup")
     print()
     print("After deployment, configure via:")
     print(f"  curl -X PUT https://YOUR_WORKER.workers.dev/agents/agentos/{config.name}/config \\")
     print(f"    -H 'Content-Type: application/json' \\")
-    print(f"    -d @deploy/agent-config.json")
+    print(f"    -d @{deploy_config_path}")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

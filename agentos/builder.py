@@ -217,10 +217,24 @@ class AgentBuilder:
         return str(path)
 
 
+_STOP_WORDS = frozenset({
+    "a", "an", "the", "that", "this", "my", "your", "our", "their",
+    "which", "who", "whom", "is", "are", "was", "were", "be", "been",
+    "and", "or", "but", "for", "with", "from", "into", "of", "to",
+    "in", "on", "at", "by", "it", "its", "i", "me", "we", "you",
+    "can", "will", "does", "do", "has", "have", "had",
+})
+
+
 def _slugify(text: str) -> str:
-    """Convert text to a lowercase, hyphenated slug."""
+    """Convert text to a concise, lowercase, hyphenated slug."""
     import re
-    slug = re.sub(r"[^a-z0-9\s-]", "", text.lower().strip())
-    slug = re.sub(r"[\s_]+", "-", slug)
+    text = re.sub(r"[^a-z0-9\s-]", "", text.lower().strip())
+    words = text.split()
+    # Remove stop words but keep at least 2 words
+    meaningful = [w for w in words if w not in _STOP_WORDS]
+    if len(meaningful) < 2:
+        meaningful = words[:3]
+    slug = "-".join(meaningful[:5])  # Max 5 meaningful words
     slug = re.sub(r"-+", "-", slug).strip("-")
-    return slug[:40] or "my-agent"
+    return slug[:40].rstrip("-") or "my-agent"

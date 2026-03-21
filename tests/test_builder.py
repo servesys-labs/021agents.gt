@@ -45,7 +45,7 @@ class TestExtractJson:
 
 class TestSlugify:
     def test_basic(self):
-        assert _slugify("My Cool Agent") == "my-cool-agent"
+        assert _slugify("My Cool Agent") == "cool-agent"
 
     def test_special_chars(self):
         assert _slugify("Agent #1 (test)!") == "agent-1-test"
@@ -55,7 +55,20 @@ class TestSlugify:
 
     def test_truncation(self):
         long = "a" * 100
-        assert len(_slugify(long)) <= 40
+        result = _slugify(long)
+        assert len(result) <= 40
+        assert not result.endswith("-")
+
+    def test_strips_stop_words(self):
+        result = _slugify("an email summarizer that reads my inbox and gives me a morning brief")
+        assert result == "email-summarizer-reads-inbox-gives"
+        assert "an" not in result.split("-")
+        assert "that" not in result.split("-")
+        assert "my" not in result.split("-")
+
+    def test_no_trailing_dash(self):
+        result = _slugify("a long description with many stop words that should be removed")
+        assert not result.endswith("-")
 
 
 class TestAgentBuilder:
