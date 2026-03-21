@@ -31,9 +31,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from agentos.defaults import DEFAULT_MODEL, DEFAULT_PROVIDER, AGENT_TEMPLATES, slugify as _slugify
 
@@ -1154,6 +1157,16 @@ async def cmd_eval(args: argparse.Namespace) -> None:
         passed = sum(1 for t in trials if t.grade.passed)
         print(f"  {task_name}: {passed}/{len(trials)} passed")
 
+    # Persist eval run to database (if available)
+    if agent.db:
+        try:
+            report.agent_name = agent.config.name
+            report.agent_version = agent.config.version
+            report.model = agent.config.model
+            agent.db.insert_eval_run(report.to_dict())
+        except Exception as exc:
+            logger.warning("Could not persist eval run: %s", exc)
+
 
 async def cmd_evolve(args: argparse.Namespace) -> None:
     """Run the continuous evolution loop — observe, analyze, propose, review, apply."""
@@ -1195,7 +1208,7 @@ async def cmd_evolve(args: argparse.Namespace) -> None:
 
     # Step 2: Analyze patterns
     print("\n[2/4] Analyzing session patterns...")
-    report = loop.analyze()
+    report = loop.analyze(db=agent.db)
 
     if report.recommendations:
         print(f"  Found {len(report.recommendations)} recommendations:")
