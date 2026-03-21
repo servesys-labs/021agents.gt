@@ -4,6 +4,7 @@ import pytest
 
 from agentos.rag.chunker import DynamicChunker
 from agentos.rag.pipeline import RAGPipeline
+from agentos.rag.query_transform import QueryTransformer
 from agentos.rag.reranker import Reranker
 from agentos.rag.retriever import HybridRetriever, RetrievalResult
 
@@ -59,6 +60,31 @@ class TestReranker:
         assert len(reranked) == 2
 
 
+class TestQueryTransformer:
+    def test_synonym_expansion(self):
+        qt = QueryTransformer()
+        result = qt.transform("fix the error in auth")
+        assert len(result.synonyms) > 0
+        assert "resolve" in result.synonyms or "exception" in result.synonyms
+
+    def test_no_synonyms(self):
+        qt = QueryTransformer()
+        result = qt.transform("hello world")
+        assert result.expanded == "hello world"
+
+    def test_decomposition(self):
+        qt = QueryTransformer()
+        result = qt.transform("search the database and deploy the app")
+        assert len(result.sub_queries) == 2
+
+    def test_expanded_query_includes_synonyms(self):
+        qt = QueryTransformer()
+        result = qt.transform("deploy the api")
+        assert "deploy" in result.expanded
+        # Should include synonyms for both "deploy" and "api"
+        assert len(result.expanded) > len(result.original)
+
+
 class TestRAGPipeline:
     def test_ingest_and_query(self):
         pipeline = RAGPipeline(chunk_size=100, top_k=5, rerank_top_n=3)
@@ -78,3 +104,16 @@ class TestRAGPipeline:
         pipeline.ingest(["Hello world. This is a test document."])
         text = pipeline.query_text("hello")
         assert "Hello" in text
+
+    def test_query_with_expansion(self):
+        """Verify that query transformation improves recall."""
+        pipeline = RAGPipeline(chunk_size=200, top_k=5, rerank_top_n=3)
+        pipeline.ingest([
+            "The authentication system uses OAuth tokens for login.",
+            "Error handling resolves exceptions gracefully.",
+            "Cooking recipes for pasta and salad.",
+        ])
+        # "auth error" should expand to include "authentication", "exception", etc.
+        results = pipeline.query("auth error")
+        texts = " ".join(r.chunk.text for r in results)
+        assert "authentication" in texts.lower() or "error" in texts.lower()

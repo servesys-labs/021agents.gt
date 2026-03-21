@@ -76,16 +76,44 @@ class AgentHarness:
         return cls(config=harness_cfg, governance=GovernanceLayer(gov_policy))
 
     async def run(self, user_input: str) -> list[TurnResult]:
-        """Execute a multi-turn agent loop for the given user input."""
+        """Execute a multi-turn agent loop for the given user input.
+
+        Follows the initialization sequence:
+        1. Analyze request — determine intent and complexity
+        2. Select LLM — choose appropriate model via router
+        3. Load context — retrieve from all memory tiers + RAG
+        4. Discover tools — verify availability via MCP
+        5. Plan & Execute — formulate plan and begin execution
+        """
         results: list[TurnResult] = []
         await self.event_bus.emit(Event(type=EventType.SESSION_START, data={"input": user_input}))
 
-        messages: list[dict[str, str]] = [{"role": "user", "content": user_input}]
+        # --- Initialization Sequence ---
 
-        # Load relevant memory context
+        # Step 1: Analyze request (complexity classification)
+        from agentos.llm.router import Complexity
+        complexity = self.llm_router.classify([{"role": "user", "content": user_input}])
+        await self.event_bus.emit(Event(
+            type=EventType.TASK_RECEIVED,
+            data={"input": user_input, "complexity": complexity.value},
+        ))
+
+        # Step 2: LLM selection is handled dynamically by the router
+
+        # Step 3: Load context from all memory tiers
         memory_context = await self.memory_manager.build_context(user_input)
+
+        # Step 4: Discover available tools
+        available_tools = self.tool_executor.available_tools()
+        self.llm_router.set_tools(available_tools)
+
+        # Step 5: Build messages and begin execution
+        messages: list[dict[str, str]] = [{"role": "user", "content": user_input}]
         if memory_context:
             messages.insert(0, {"role": "system", "content": memory_context})
+
+        # Track successful tool sequences for procedural memory
+        tool_sequence: list[dict[str, Any]] = []
 
         for turn in range(1, self.config.max_turns + 1):
             self._turn = turn
@@ -101,17 +129,43 @@ class AgentHarness:
             # 2. Check for tool calls
             if llm_response.tool_calls:
                 tool_results = await self._execute_tools(llm_response.tool_calls)
-                result = TurnResult(
-                    turn_number=turn,
-                    llm_response=llm_response,
-                    tool_results=tool_results,
-                )
-                results.append(result)
 
-                # Feed tool results back as messages
-                messages.append({"role": "assistant", "content": llm_response.content})
+                # Track tool results for procedural memory
                 for tr in tool_results:
-                    messages.append({"role": "tool", "content": json.dumps(tr)})
+                    tool_sequence.append(tr)
+
+                # Check for failures and attempt alternative approaches
+                failed = [tr for tr in tool_results if "error" in tr]
+                if failed and self.config.retry_on_tool_failure:
+                    # Inject failure context so LLM can try alternative approach
+                    error_summary = "; ".join(
+                        f"{tr.get('tool', '?')}: {tr['error']}" for tr in failed
+                    )
+                    messages.append({"role": "assistant", "content": llm_response.content})
+                    for tr in tool_results:
+                        messages.append({"role": "tool", "content": json.dumps(tr)})
+                    messages.append({
+                        "role": "system",
+                        "content": f"Tool failures occurred: {error_summary}. "
+                        "Analyze the error and try an alternative approach. "
+                        "Do not repeat the exact same failed action.",
+                    })
+                    result = TurnResult(
+                        turn_number=turn,
+                        llm_response=llm_response,
+                        tool_results=tool_results,
+                    )
+                    results.append(result)
+                else:
+                    result = TurnResult(
+                        turn_number=turn,
+                        llm_response=llm_response,
+                        tool_results=tool_results,
+                    )
+                    results.append(result)
+                    messages.append({"role": "assistant", "content": llm_response.content})
+                    for tr in tool_results:
+                        messages.append({"role": "tool", "content": json.dumps(tr)})
             else:
                 # No tool calls — agent is done
                 result = TurnResult(turn_number=turn, llm_response=llm_response, done=True)
@@ -119,6 +173,11 @@ class AgentHarness:
 
                 # Store interaction in episodic memory
                 await self.memory_manager.store_episode(user_input, llm_response.content)
+
+                # Store successful tool sequence in procedural memory
+                if tool_sequence:
+                    await self._store_procedure(user_input, tool_sequence)
+
                 break
 
             await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
@@ -159,3 +218,34 @@ class AgentHarness:
             await self.event_bus.emit(Event(type=EventType.TOOL_RESULT, data=result))
             results.append(result)
         return results
+
+    async def _store_procedure(
+        self, task_description: str, tool_sequence: list[dict[str, Any]]
+    ) -> None:
+        """Store a successful tool sequence as a learned procedure."""
+        from agentos.memory.procedural import Procedure
+
+        # Build a name from the first few words of the task
+        words = task_description.split()[:5]
+        name = "_".join(w.lower().strip("?.!,") for w in words if w.strip())
+        if not name:
+            return
+
+        steps = [
+            {"tool": tr.get("tool", "unknown"), "result_keys": list(tr.keys())}
+            for tr in tool_sequence
+        ]
+        success = all("error" not in tr for tr in tool_sequence)
+
+        existing = self.memory_manager.procedural.get(name)
+        if existing:
+            self.memory_manager.procedural.record_outcome(name, success)
+        else:
+            proc = Procedure(
+                name=name,
+                steps=steps,
+                description=task_description[:120],
+                success_count=1 if success else 0,
+                failure_count=0 if success else 1,
+            )
+            self.memory_manager.procedural.store(proc)

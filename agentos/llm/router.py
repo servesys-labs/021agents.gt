@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any
 
 from agentos.llm.provider import LLMProvider, LLMResponse, StubProvider
+from agentos.llm.tokens import count_message_tokens, estimate_cost
 
 
 class Complexity(str, Enum):
@@ -66,12 +67,27 @@ class LLMRouter:
         return Complexity.SIMPLE
 
     async def route(self, messages: list[dict[str, str]]) -> LLMResponse:
-        """Classify complexity and route to the appropriate provider."""
+        """Classify complexity, count tokens, and route to the appropriate provider."""
         complexity = self.classify(messages)
         config = self._routes[complexity]
-        return await config.provider.complete(
+
+        # Token counting for cost/latency optimization
+        input_tokens = count_message_tokens(messages, model=config.provider.model_id)
+        effective_max_tokens = min(config.max_tokens, max(256, config.max_tokens - input_tokens // 4))
+
+        response = await config.provider.complete(
             messages,
-            max_tokens=config.max_tokens,
+            max_tokens=effective_max_tokens,
             temperature=config.temperature,
             tools=self._tools or None,
         )
+
+        # Estimate cost if not already set by the provider
+        if response.cost_usd == 0 and response.usage:
+            response.cost_usd = estimate_cost(
+                response.usage.get("input_tokens", input_tokens),
+                response.usage.get("output_tokens", 0),
+                model=response.model,
+            )
+
+        return response
