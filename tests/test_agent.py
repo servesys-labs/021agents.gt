@@ -139,6 +139,38 @@ class TestAgent:
         assert tools[0]["name"] == "calc"
 
     @pytest.mark.asyncio
+    async def test_agent_wires_tool_handler(self, tmp_path):
+        """Verify that Python tool handlers are wired through to the MCPClient."""
+        # Create a Python tool with a handler in a temp tools dir
+        tool_code = '''
+async def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+TOOLS = [{
+    "name": "greeter",
+    "description": "Greet someone",
+    "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    "handler": greet,
+}]
+'''
+        (tmp_path / "greeter.py").write_text(tool_code)
+
+        from unittest.mock import patch
+        from agentos.tools import registry as registry_mod
+
+        with patch.object(registry_mod, "PLUGINS_DIR", tmp_path):
+            config = AgentConfig(name="handler-test", tools=["greeter"], max_turns=1)
+            agent = Agent(config)
+
+            # Verify handler is registered
+            handler = agent._harness.tool_executor.mcp_client._handlers.get("greeter")
+            assert handler is not None
+
+            # Verify it actually works
+            result = await agent._harness.tool_executor.mcp_client.invoke("greeter", {"name": "World"})
+            assert result["result"] == "Hello, World!"
+
+    @pytest.mark.asyncio
     async def test_agent_governance_from_config(self):
         config = AgentConfig(
             name="governed",

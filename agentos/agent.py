@@ -189,8 +189,12 @@ class Agent:
 
     def _build_harness(self):
         """Wire up all subsystems from the agent config."""
+        import os
+
         from agentos.core.governance import GovernanceLayer, GovernancePolicy
         from agentos.core.harness import AgentHarness, HarnessConfig
+        from agentos.llm.router import Complexity, LLMRouter
+        from agentos.llm.provider import HttpProvider, StubProvider
         from agentos.memory.manager import MemoryManager
         from agentos.memory.working import WorkingMemory
         from agentos.memory.episodic import EpisodicMemory
@@ -204,6 +208,30 @@ class Agent:
             max_turns=self.config.max_turns,
             timeout_seconds=self.config.timeout_seconds,
         )
+
+        # LLM Router — configure from agent model + env API keys
+        llm_router = LLMRouter()
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        openai_key = os.environ.get("OPENAI_API_KEY", "")
+        model = self.config.model
+
+        if anthropic_key and ("claude" in model or not openai_key):
+            provider = HttpProvider(
+                model_id=model,
+                api_base="https://api.anthropic.com",
+                api_key=anthropic_key,
+                headers={"anthropic-version": "2023-06-01"},
+            )
+            for tier in Complexity:
+                llm_router.register(tier, provider, max_tokens=self.config.max_tokens)
+        elif openai_key:
+            provider = HttpProvider(
+                model_id=model if "gpt" in model else "gpt-4o",
+                api_base="https://api.openai.com",
+                api_key=openai_key,
+            )
+            for tier in Complexity:
+                llm_router.register(tier, provider, max_tokens=self.config.max_tokens)
 
         # Governance
         gov_data = self.config.governance
@@ -238,6 +266,10 @@ class Agent:
                 plugin = registry.get(tool_ref)
                 if plugin:
                     mcp_client.register_server(plugin.to_mcp_server())
+                    if plugin.handler:
+                        mcp_client.register_handler(plugin.name, plugin.handler)
+                else:
+                    logger.warning("Tool '%s' not found in registry — skipping", tool_ref)
             elif isinstance(tool_ref, dict):
                 # Inline tool definition
                 from agentos.tools.mcp import MCPServer, MCPTool
@@ -252,6 +284,7 @@ class Agent:
 
         harness = AgentHarness(
             config=harness_cfg,
+            llm_router=llm_router,
             tool_executor=ToolExecutor(mcp_client=mcp_client),
             memory_manager=memory_manager,
             governance=GovernanceLayer(gov_policy),
