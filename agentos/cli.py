@@ -1,7 +1,8 @@
 """AgentOS CLI — the user-facing command line interface.
 
 Usage:
-    agentos init                    — Scaffold a new agent project
+    agentos init [dir] [--name N]   — Scaffold a new agent project (with git + CI)
+    agentos init --remote <url>     — ...and connect to a git remote
     agentos create                  — Conversationally build an agent with an LLM
     agentos create --one-shot DESC  — Build an agent from a one-line description
     agentos run <name> "task"       — Run a named agent on a task
@@ -31,6 +32,9 @@ def main() -> None:
     # --- init ---
     init_p = sub.add_parser("init", help="Scaffold a new agent project")
     init_p.add_argument("directory", nargs="?", default=".", help="Project directory")
+    init_p.add_argument("--name", "-n", type=str, default=None, help="Agent name (default: directory name)")
+    init_p.add_argument("--remote", "-r", type=str, default=None, help="Git remote URL to connect")
+    init_p.add_argument("--no-git", action="store_true", help="Skip git repository initialization")
 
     # --- create ---
     create_p = sub.add_parser("create", help="Create a new agent (conversational)")
@@ -137,57 +141,244 @@ def main() -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """Scaffold a new agent project."""
+    """Scaffold a new agent project with git repo and CI/CD scaffolding."""
+    import subprocess
+
     directory = Path(args.directory).resolve()
+    agent_name = args.name or _slugify(directory.name)
+    created: list[str] = []
+    skipped: list[str] = []
+
     print(f"Initializing AgentOS project in {directory}")
+    print()
 
-    # Create directory structure
-    (directory / "agents").mkdir(parents=True, exist_ok=True)
-    (directory / "tools").mkdir(parents=True, exist_ok=True)
-    (directory / "data").mkdir(parents=True, exist_ok=True)
+    # ── Directory structure ──────────────────────────────────────────────
+    for d in ("agents", "tools", "data", "eval"):
+        dir_path = directory / d
+        if dir_path.exists():
+            skipped.append(f"{d}/")
+        else:
+            dir_path.mkdir(parents=True, exist_ok=True)
+            created.append(f"{d}/")
 
-    # Create a starter agent definition
-    starter = {
-        "name": "my-agent",
-        "description": "A starter agent — customize me!",
-        "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
-        "model": "claude-sonnet-4-20250514",
-        "tools": [],
-        "governance": {
-            "budget_limit_usd": 10.0,
-            "require_confirmation_for_destructive": True,
-        },
-        "tags": ["starter"],
-    }
-    agent_path = directory / "agents" / "my-agent.json"
+    # ── Project config (agentos.yaml) ────────────────────────────────────
+    project_config_path = directory / "agentos.yaml"
+    if not project_config_path.exists():
+        project_config_path.write_text(
+            f"# AgentOS project configuration\n"
+            f"project: {agent_name}\n"
+            f"version: 0.1.0\n"
+            f"\n"
+            f"defaults:\n"
+            f"  model: claude-sonnet-4-20250514\n"
+            f"  provider: anthropic\n"
+            f"  max_turns: 50\n"
+            f"  budget_limit_usd: 10.0\n"
+            f"\n"
+            f"paths:\n"
+            f"  agents: agents/\n"
+            f"  tools: tools/\n"
+            f"  data: data/\n"
+            f"  eval: eval/\n"
+        )
+        created.append("agentos.yaml")
+    else:
+        skipped.append("agentos.yaml")
+
+    # ── Starter agent definition ─────────────────────────────────────────
+    agent_path = directory / "agents" / f"{agent_name}.json"
     if not agent_path.exists():
-        agent_path.write_text(json.dumps(starter, indent=2) + "\n")
-
-    # Create a starter tool plugin
-    tool_example = {
-        "name": "example-search",
-        "description": "Example search tool — replace with your own implementation",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
+        starter = {
+            "name": agent_name,
+            "description": f"{agent_name} — customize me!",
+            "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
+            "model": "claude-sonnet-4-20250514",
+            "tools": [],
+            "governance": {
+                "budget_limit_usd": 10.0,
+                "require_confirmation_for_destructive": True,
             },
-            "required": ["query"],
-        },
-    }
+            "tags": ["starter"],
+        }
+        agent_path.write_text(json.dumps(starter, indent=2) + "\n")
+        created.append(f"agents/{agent_name}.json")
+    else:
+        skipped.append(f"agents/{agent_name}.json")
+
+    # ── Starter tool plugin ──────────────────────────────────────────────
     tool_path = directory / "tools" / "example-search.json"
     if not tool_path.exists():
+        tool_example = {
+            "name": "example-search",
+            "description": "Example search tool — replace with your own implementation",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        }
         tool_path.write_text(json.dumps(tool_example, indent=2) + "\n")
+        created.append("tools/example-search.json")
+    else:
+        skipped.append("tools/example-search.json")
 
-    print(f"  Created agents/my-agent.json")
-    print(f"  Created tools/example-search.json")
-    print(f"  Created data/ directory")
+    # ── Starter eval task ────────────────────────────────────────────────
+    eval_path = directory / "eval" / "smoke-test.json"
+    if not eval_path.exists():
+        eval_task = [
+            {
+                "name": "greeting",
+                "input": "Say hello",
+                "expected": "hello",
+                "grader": "contains",
+            }
+        ]
+        eval_path.write_text(json.dumps(eval_task, indent=2) + "\n")
+        created.append("eval/smoke-test.json")
+    else:
+        skipped.append("eval/smoke-test.json")
+
+    # ── .gitignore ───────────────────────────────────────────────────────
+    gitignore_path = directory / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text(
+            "# AgentOS\n"
+            "data/rag_index.json\n"
+            "data/embeddings/\n"
+            "data/cache/\n"
+            "evolution_state*.json\n"
+            "\n"
+            "# Secrets\n"
+            ".env\n"
+            ".env.*\n"
+            "*.key\n"
+            "\n"
+            "# Python\n"
+            "__pycache__/\n"
+            "*.pyc\n"
+            ".venv/\n"
+            "venv/\n"
+            "dist/\n"
+            "*.egg-info/\n"
+            "\n"
+            "# Node (deploy)\n"
+            "node_modules/\n"
+            "\n"
+            "# OS\n"
+            ".DS_Store\n"
+            "Thumbs.db\n"
+        )
+        created.append(".gitignore")
+    else:
+        skipped.append(".gitignore")
+
+    # ── GitHub Actions CI ────────────────────────────────────────────────
+    ci_dir = directory / ".github" / "workflows"
+    ci_path = ci_dir / "eval.yml"
+    if not ci_path.exists():
+        ci_dir.mkdir(parents=True, exist_ok=True)
+        ci_path.write_text(
+            "name: Agent Eval\n"
+            "on:\n"
+            "  push:\n"
+            "    branches: [main]\n"
+            "    paths:\n"
+            "      - 'agents/**'\n"
+            "      - 'tools/**'\n"
+            "      - 'eval/**'\n"
+            "  pull_request:\n"
+            "    branches: [main]\n"
+            "\n"
+            "jobs:\n"
+            "  eval:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - uses: actions/setup-python@v5\n"
+            "        with:\n"
+            "          python-version: '3.11'\n"
+            "      - run: pip install agentos\n"
+            "      - name: Run smoke test\n"
+            "        env:\n"
+            "          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n"
+            f"        run: agentos eval {agent_name} eval/smoke-test.json --trials 1\n"
+        )
+        created.append(".github/workflows/eval.yml")
+    else:
+        skipped.append(".github/workflows/eval.yml")
+
+    # ── Git initialization ───────────────────────────────────────────────
+    git_initialized = False
+    git_remote_added = False
+
+    if not args.no_git:
+        git_dir = directory / ".git"
+        if not git_dir.exists():
+            result = subprocess.run(
+                ["git", "init"], cwd=directory,
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                git_initialized = True
+                # Make initial commit with scaffolding
+                subprocess.run(
+                    ["git", "add", "."], cwd=directory,
+                    capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", f"Initialize {agent_name} agent project"],
+                    cwd=directory, capture_output=True, text=True,
+                )
+            else:
+                print(f"  Warning: git init failed: {result.stderr.strip()}")
+        else:
+            skipped.append(".git/ (already a repo)")
+
+        # Connect remote if provided
+        if args.remote:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"], cwd=directory,
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                result = subprocess.run(
+                    ["git", "remote", "add", "origin", args.remote],
+                    cwd=directory, capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    git_remote_added = True
+                else:
+                    print(f"  Warning: Could not add remote: {result.stderr.strip()}")
+            else:
+                existing = result.stdout.strip()
+                print(f"  Remote 'origin' already set to: {existing}")
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    if created:
+        print("Created:")
+        for c in created:
+            print(f"  + {c}")
+    if skipped:
+        print("Already exists (skipped):")
+        for s in skipped:
+            print(f"  - {s}")
+
+    if git_initialized:
+        print(f"\nGit repo initialized with initial commit.")
+    if git_remote_added:
+        print(f"Remote 'origin' set to: {args.remote}")
+        print(f"  Push with: git push -u origin main")
+
     print()
     print("Next steps:")
-    print("  1. Edit agents/my-agent.json to define your agent")
-    print("  2. Add tools to the tools/ directory")
-    print("  3. Run: agentos create   (to build an agent via conversation)")
-    print("  4. Run: agentos run my-agent \"your task here\"")
+    print(f"  1. Edit agents/{agent_name}.json to customize your agent")
+    print(f"  2. Run: agentos run {agent_name} \"your task here\"")
+    print(f"  3. Run: agentos eval {agent_name} eval/smoke-test.json")
+    if not args.no_git and not git_remote_added and not args.remote:
+        print(f"  4. Connect a remote: agentos init --remote <git-url>")
+        print(f"     or: git remote add origin <git-url> && git push -u origin main")
 
 
 async def cmd_create(args: argparse.Namespace) -> None:
@@ -668,6 +859,13 @@ async def cmd_evolve(args: argparse.Namespace) -> None:
 def _indent(text: str, spaces: int) -> str:
     prefix = " " * spaces
     return "\n".join(prefix + line for line in text.split("\n"))
+
+
+def _slugify(name: str) -> str:
+    """Turn a directory/project name into a valid agent slug."""
+    import re
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.lower()).strip("-")
+    return slug or "my-agent"
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:
