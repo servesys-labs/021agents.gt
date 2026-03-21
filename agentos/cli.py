@@ -35,9 +35,7 @@ import os
 import sys
 from pathlib import Path
 
-# Single source of truth for the default model used across init scaffolding.
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
-DEFAULT_PROVIDER = "anthropic"
+from agentos.defaults import DEFAULT_MODEL, DEFAULT_PROVIDER, AGENT_TEMPLATES, slugify as _slugify
 
 
 def main() -> None:
@@ -231,116 +229,6 @@ def main() -> None:
 def _should_write(path: Path, *, force: bool) -> bool:
     """Return True if the path doesn't exist yet, or --force is set."""
     return force or not path.exists()
-
-
-# ── Agent templates ──────────────────────────────────────────────────────────
-
-AGENT_TEMPLATES: dict[str, dict] = {
-    "blank": {
-        "description": "{name} — customize me!",
-        "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
-        "tools": [],
-        "max_turns": 50,
-        "governance": {
-            "budget_limit_usd": 10.0,
-            "require_confirmation_for_destructive": True,
-            "blocked_tools": [],
-            "allowed_domains": [],
-        },
-        "memory": {
-            "working": {"max_items": 100},
-            "episodic": {"max_episodes": 10000, "ttl_days": 90},
-            "procedural": {"max_procedures": 500},
-        },
-        "tags": ["starter"],
-    },
-    "research": {
-        "description": "A research agent that finds, synthesizes, and summarizes information",
-        "system_prompt": (
-            "You are a research assistant. When given a topic:\n"
-            "1. Search for relevant information using available tools\n"
-            "2. Cross-reference multiple sources for accuracy\n"
-            "3. Synthesize findings into a clear, structured summary\n"
-            "4. Cite your sources\n"
-            "5. Flag any conflicting information or uncertainty\n\n"
-            "Be thorough but concise. Prefer facts over opinions."
-        ),
-        "tools": ["web-search", "store-knowledge"],
-        "max_turns": 30,
-        "governance": {
-            "budget_limit_usd": 5.0,
-            "require_confirmation_for_destructive": True,
-            "blocked_tools": [],
-            "allowed_domains": [],
-        },
-        "memory": {
-            "working": {"max_items": 200},
-            "episodic": {"max_episodes": 5000, "ttl_days": 180},
-            "procedural": {"max_procedures": 100},
-        },
-        "tags": ["research", "knowledge", "synthesis"],
-    },
-    "support": {
-        "description": "A customer support agent that handles inquiries and troubleshoots issues",
-        "system_prompt": (
-            "You are a customer support agent. Your responsibilities:\n"
-            "1. Greet the customer warmly and acknowledge their issue\n"
-            "2. Ask clarifying questions to understand the problem\n"
-            "3. Search the knowledge base for relevant solutions\n"
-            "4. Provide step-by-step troubleshooting guidance\n"
-            "5. Escalate to a human if you cannot resolve the issue after 3 attempts\n\n"
-            "Rules:\n"
-            "- Never make up information about products or policies\n"
-            "- Always verify information against the knowledge base\n"
-            "- Be empathetic and patient\n"
-            "- Keep responses concise but complete"
-        ),
-        "tools": ["knowledge-search"],
-        "max_turns": 20,
-        "governance": {
-            "budget_limit_usd": 2.0,
-            "require_confirmation_for_destructive": True,
-            "blocked_tools": ["web-search"],
-            "allowed_domains": [],
-        },
-        "memory": {
-            "working": {"max_items": 50},
-            "episodic": {"max_episodes": 50000, "ttl_days": 365},
-            "procedural": {"max_procedures": 200},
-        },
-        "tags": ["support", "customer-facing", "troubleshooting"],
-    },
-    "code-review": {
-        "description": "A code reviewer that checks for bugs, security issues, and style",
-        "system_prompt": (
-            "You are a senior code reviewer. When given code to review:\n"
-            "1. Check for bugs and logical errors\n"
-            "2. Identify security vulnerabilities (OWASP Top 10)\n"
-            "3. Flag performance issues and suggest optimizations\n"
-            "4. Check for code style and readability\n"
-            "5. Suggest concrete improvements with code examples\n\n"
-            "Structure your review as:\n"
-            "- **Critical**: Must fix before merge (bugs, security)\n"
-            "- **Important**: Should fix (performance, maintainability)\n"
-            "- **Suggestion**: Nice to have (style, minor improvements)\n\n"
-            "Be specific. Reference line numbers. Show corrected code."
-        ),
-        "tools": [],
-        "max_turns": 10,
-        "governance": {
-            "budget_limit_usd": 5.0,
-            "require_confirmation_for_destructive": True,
-            "blocked_tools": [],
-            "allowed_domains": [],
-        },
-        "memory": {
-            "working": {"max_items": 100},
-            "episodic": {"max_episodes": 2000, "ttl_days": 90},
-            "procedural": {"max_procedures": 50},
-        },
-        "tags": ["code-review", "security", "development"],
-    },
-}
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -760,6 +648,7 @@ def cmd_init(args: argparse.Namespace) -> None:
         print("Next steps:")
         print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
         print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
+        print(f"     Or: agentos create --one-shot \"description\"  (LLM-powered)")
         print(f"  3. agentos run {agent_name} \"your task\"")
         print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
         if not args.no_git and not git_remote_added and not args.remote:
@@ -768,16 +657,19 @@ def cmd_init(args: argparse.Namespace) -> None:
 
 async def cmd_create(args: argparse.Namespace) -> None:
     """Create an agent — either conversationally or from a one-shot description."""
-    from agentos.agent import AGENTS_DIR
+    from agentos.agent import AGENTS_DIR, AgentConfig, save_agent_config
     from agentos.builder import AgentBuilder
 
     # ── Warn if project hasn't been initialized ──────────────────────────
     agents_dir = Path.cwd() / "agents"
-    project_config = Path.cwd() / "agentos.yaml"
-    if not agents_dir.is_dir() and not project_config.exists():
+    project_config_path = Path.cwd() / "agentos.yaml"
+    if not agents_dir.is_dir() and not project_config_path.exists():
         print("Warning: No AgentOS project detected in the current directory.")
         print("  Run 'agentos init' first to set up the project structure.")
         print("  Continuing anyway — the agent file will be created in agents/.\n")
+
+    # ── Read project defaults from agentos.yaml (if present) ─────────────
+    project_defaults = _load_project_defaults(project_config_path)
 
     provider = _get_builder_provider(args)
     tools_dir = args.tools_dir
@@ -842,7 +734,12 @@ async def cmd_create(args: argparse.Namespace) -> None:
     # ── Apply --name override ────────────────────────────────────────────
     if args.name:
         config = _rename_agent_config(config, args.name)
-        builder._result = config  # Keep builder in sync for save()
+
+    # ── Apply project defaults ───────────────────────────────────────────
+    config = _apply_project_defaults(config, project_defaults)
+
+    # ── Stamp agent_id from project identity ─────────────────────────────
+    config = _stamp_project_identity(config, agents_dir)
 
     # ── Collision check ──────────────────────────────────────────────────
     save_path = Path(args.output) if args.output else (AGENTS_DIR / f"{config.name}.json")
@@ -851,13 +748,16 @@ async def cmd_create(args: argparse.Namespace) -> None:
         print("  Use --force to overwrite, or --name to pick a different name.")
         sys.exit(1)
 
-    # ── Save ─────────────────────────────────────────────────────────────
-    path = builder.save(str(save_path))
+    # ── Save (directly via save_agent_config, not builder.save()) ────────
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    path = save_agent_config(config, save_path)
     print(f"\nAgent created: {config.name}")
     print(f"  Saved to: {path}")
     if config.description:
         print(f"  Description: {config.description}")
-    print(f"\nRun it: agentos run {config.name} \"your task\"")
+    print(f"\nNext steps:")
+    print(f"  1. agentos run {config.name} \"your task\"")
+    print(f"  2. agentos eval {config.name} eval/smoke-test.json")
 
 
 async def cmd_run(args: argparse.Namespace) -> None:
@@ -1277,19 +1177,68 @@ def _indent(text: str, spaces: int) -> str:
     return "\n".join(prefix + line for line in text.split("\n"))
 
 
-def _slugify(name: str) -> str:
-    """Turn a directory/project name into a valid agent slug."""
-    import re
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.lower()).strip("-")
-    return slug or "my-agent"
-
-
 def _rename_agent_config(config, new_name: str):
     """Return a copy of the AgentConfig with an updated name."""
     from agentos.agent import AgentConfig
     data = config.to_dict()
     data["name"] = new_name
     return AgentConfig.from_dict(data)
+
+
+def _load_project_defaults(config_path: Path) -> dict:
+    """Load project-level defaults from agentos.yaml (if it exists).
+
+    Returns the ``defaults:`` section or an empty dict.
+    """
+    if not config_path.exists():
+        return {}
+    try:
+        # agentos.yaml is simple enough for a lightweight parse;
+        # full YAML is an optional dep so we do a best-effort read.
+        text = config_path.read_text()
+        try:
+            import yaml
+            data = yaml.safe_load(text) or {}
+        except ImportError:
+            # Minimal key-value extraction for the defaults section
+            data = {}
+        return data.get("defaults", {}) if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_project_defaults(config, defaults: dict):
+    """Merge project defaults (model, budget) into an AgentConfig if not already set."""
+    from agentos.agent import AgentConfig
+    if not defaults:
+        return config
+    data = config.to_dict()
+    # Only override model if the builder produced the generic default
+    if defaults.get("model") and data.get("model") == DEFAULT_MODEL:
+        data["model"] = defaults["model"]
+    # Inherit budget from project if governance uses the generic default
+    budget = defaults.get("budget_limit_usd")
+    if budget and data.get("governance", {}).get("budget_limit_usd") == 10.0:
+        data.setdefault("governance", {})["budget_limit_usd"] = budget
+    return AgentConfig.from_dict(data)
+
+
+def _stamp_project_identity(config, agents_dir: Path):
+    """If agents/.identity.json exists, stamp its agent_id onto the config."""
+    from agentos.agent import AgentConfig
+    identity_path = agents_dir / ".identity.json"
+    if not identity_path.exists():
+        return config
+    try:
+        identity_data = json.loads(identity_path.read_text())
+        agent_id = identity_data.get("agent_id", "")
+        if agent_id and not config.agent_id:
+            data = config.to_dict()
+            data["agent_id"] = agent_id
+            return AgentConfig.from_dict(data)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return config
 
 
 def cmd_login(args: argparse.Namespace) -> None:

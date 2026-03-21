@@ -2,7 +2,8 @@
 
 import pytest
 
-from agentos.builder import AgentBuilder, _extract_json, _slugify
+from agentos.builder import AgentBuilder, _extract_json
+from agentos.defaults import slugify as _slugify
 from agentos.llm.provider import LLMResponse, StubProvider
 
 

@@ -11,6 +11,15 @@ from unittest.mock import patch
 from agentos.cli import cmd_init, cmd_list, cmd_tools
 
 
+def _make_args(**overrides):
+    """Build a mock Args namespace from keyword arguments."""
+    class Args:
+        pass
+    for k, v in overrides.items():
+        setattr(Args, k, v)
+    return Args()
+
+
 def _make_init_args(directory, **overrides):
     """Build a complete Args namespace for cmd_init with sane defaults."""
     defaults = dict(
@@ -24,13 +33,7 @@ def _make_init_args(directory, **overrides):
         force=False,
     )
     defaults.update(overrides)
-
-    class Args:
-        pass
-
-    for k, v in defaults.items():
-        setattr(Args, k, v)
-    return Args()
+    return _make_args(**defaults)
 
 
 class TestCmdInit:
@@ -141,7 +144,7 @@ class TestCmdInit:
         assert "E2B_API_KEY" in content
 
     def test_init_uses_default_model_constant(self, tmp_path):
-        from agentos.cli import DEFAULT_MODEL
+        from agentos.defaults import DEFAULT_MODEL
         args = _make_init_args(tmp_path, name="my-agent")
         cmd_init(args)
 
@@ -150,6 +153,13 @@ class TestCmdInit:
 
         yaml_content = (tmp_path / "agentos.yaml").read_text()
         assert DEFAULT_MODEL in yaml_content
+
+    def test_init_next_steps_mention_create(self, tmp_path, capsys):
+        args = _make_init_args(tmp_path, name="my-agent")
+        cmd_init(args)
+
+        captured = capsys.readouterr()
+        assert "agentos create" in captured.out
 
 
 def _make_create_args(**overrides):
@@ -165,13 +175,7 @@ def _make_create_args(**overrides):
         max_turns=20,
     )
     defaults.update(overrides)
-
-    class Args:
-        pass
-
-    for k, v in defaults.items():
-        setattr(Args, k, v)
-    return Args()
+    return _make_args(**defaults)
 
 
 class TestCmdCreate:
@@ -304,6 +308,46 @@ class TestCmdCreate:
 
         await cmd_create(args)
         assert (agents_dir / "custom.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_create_stamps_agent_id_from_identity(self, tmp_path, monkeypatch):
+        """create should read agents/.identity.json and stamp agent_id."""
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        # Write a project identity
+        identity = {"agent_id": "agent-test123", "fingerprint": "abc"}
+        (agents_dir / ".identity.json").write_text(json.dumps(identity))
+        # agentos.yaml so no "project not detected" warning
+        (tmp_path / "agentos.yaml").write_text("project: test\n")
+        monkeypatch.chdir(tmp_path)
+
+        args = _make_create_args(
+            one_shot="a test bot",
+            name="stamped",
+            output=str(agents_dir / "stamped.json"),
+        )
+        await cmd_create(args)
+
+        data = json.loads((agents_dir / "stamped.json").read_text())
+        assert data["agent_id"] == "agent-test123"
+
+    @pytest.mark.asyncio
+    async def test_create_next_steps_mention_eval(self, tmp_path, capsys):
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+
+        args = _make_create_args(
+            one_shot="a simple bot",
+            output=str(agents_dir / "simple.json"),
+        )
+        await cmd_create(args)
+
+        captured = capsys.readouterr()
+        assert "agentos eval" in captured.out
 
 
 class TestCmdList:

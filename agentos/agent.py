@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agentos.defaults import DEFAULT_MODEL
+
 logger = logging.getLogger(__name__)
 
 def _resolve_agents_dir() -> Path:
@@ -44,7 +46,7 @@ class AgentConfig:
     personality: str = ""
 
     # LLM settings
-    model: str = "claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODEL
     max_tokens: int = 4096
     temperature: float = 0.0
 
