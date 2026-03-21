@@ -54,8 +54,8 @@ def main() -> None:
     init_p.add_argument("--no-signing", action="store_true", help="Skip signing keypair generation")
     init_p.add_argument(
         "--template", "-t", type=str, default=None,
-        choices=["blank", "research", "support", "code-review"],
-        help="Start from a preset agent template (default: blank)",
+        choices=["orchestrator", "blank", "research", "support", "code-review"],
+        help="Start from a preset agent template (default: orchestrator)",
     )
     init_p.add_argument("--dry-run", action="store_true", help="Preview what would be created without writing anything")
     init_p.add_argument("--force", action="store_true", help="Overwrite existing files during re-initialization")
@@ -241,7 +241,7 @@ def cmd_init(args: argparse.Namespace) -> None:
     directory = Path(args.directory).resolve()
     force = args.force
     dry_run = args.dry_run
-    template_name = args.template or "blank"
+    template_name = args.template or "orchestrator"
 
     # ── Input validation ─────────────────────────────────────────────────
     if directory.exists() and directory.is_file():
@@ -635,7 +635,9 @@ def cmd_init(args: argparse.Namespace) -> None:
             print(f"  - {s}")
 
     print(f"\nAgent ID: {agent_id}")
-    if template_name != "blank":
+    if template_name == "orchestrator":
+        print("Orchestrator agent created — it can build, test, and evolve other agents.")
+    elif template_name != "blank":
         print(f"Template: {template_name}")
     if git_initialized:
         print("Git repo initialized with initial commit.")
@@ -647,12 +649,18 @@ def cmd_init(args: argparse.Namespace) -> None:
         print()
         print("Next steps:")
         print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
-        print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
-        print(f"     Or: agentos create --one-shot \"description\"  (LLM-powered)")
-        print(f"  3. agentos run {agent_name} \"your task\"")
-        print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
+        if template_name == "orchestrator":
+            print(f"  2. agentos chat {agent_name}             (talk to the orchestrator)")
+            print(f"     Ask it to: create agents, run evals, analyze failures, evolve agents")
+            print(f"  3. agentos create --one-shot \"description\" (or let the orchestrator do it)")
+            print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
+        else:
+            print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
+            print(f"     Or: agentos create --one-shot \"description\"  (LLM-powered)")
+            print(f"  3. agentos run {agent_name} \"your task\"")
+            print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
         if not args.no_git and not git_remote_added and not args.remote:
-            print("  5. git remote add origin <url> && git push -u origin main")
+            print(f"  5. git remote add origin <url> && git push -u origin main")
 
 
 async def cmd_create(args: argparse.Namespace) -> None:
