@@ -791,6 +791,11 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     from agentos.agent import Agent
 
+    # ── Validate numeric arguments ─────────────────────────────────────
+    _validate_positive(args.turns, "turns")
+    _validate_positive(args.timeout, "timeout")
+    _validate_positive(args.budget, "budget", allow_zero=True)
+
     agent = _load_agent(args.name)
     quiet = args.quiet or args.json_output
 
@@ -1012,6 +1017,25 @@ async def cmd_chat(args: argparse.Namespace) -> None:
     from agentos.agent import Agent
 
     agent = _load_agent(args.name)
+
+    # Warn if agent_id doesn't match project identity (consistent with run)
+    identity_path = Path.cwd() / "agents" / ".identity.json"
+    if identity_path.exists() and agent.config.agent_id:
+        try:
+            project_id = json.loads(identity_path.read_text()).get("agent_id", "")
+            if project_id and agent.config.agent_id != project_id:
+                print(f"Warning: Agent '{agent.config.name}' has agent_id "
+                      f"'{agent.config.agent_id}' but project identity is "
+                      f"'{project_id}'.", file=sys.stderr)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Warn about stub provider
+    if agent.uses_stub_provider:
+        print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
+        print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
+        print()
+
     print(f"Chatting with '{agent.config.name}' — type 'quit' to exit")
     print(f"  {agent.config.description}")
     print("-" * 40)
@@ -1082,7 +1106,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     index_data = {
         "chunk_size": args.chunk_size,
         "documents": [
-            {"text": doc[:500], "metadata": meta}
+            {"length": len(doc), "metadata": meta}
             for doc, meta in zip(documents, metadatas)
         ],
         "total_chunks": len(pipeline.retriever._chunks) if hasattr(pipeline.retriever, '_chunks') else 0,
@@ -1099,47 +1123,16 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 async def cmd_eval(args: argparse.Namespace) -> None:
     """Evaluate an agent with test cases."""
-    import json as _json
-    from pathlib import Path
-    from agentos.eval.gym import EvalGym, EvalTask
-    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
-
+    _validate_positive(args.trials, "trials")
     agent = _load_agent(args.name)
 
-    # Load tasks from JSON file
-    tasks_path = Path(args.tasks_file)
-    if not tasks_path.exists():
-        print(f"Error: Tasks file not found: {tasks_path}")
-        return
-
-    tasks_data = _json.loads(tasks_path.read_text())
-    if not isinstance(tasks_data, list):
-        tasks_data = [tasks_data]
-
-    gym = EvalGym(trials_per_task=args.trials)
-    for t in tasks_data:
-        grader_type = t.get("grader", "contains")
-        if grader_type == "exact":
-            grader = ExactMatchGrader()
-        else:
-            grader = ContainsGrader()
-        gym.add_task(EvalTask(
-            name=t.get("name", t.get("input", "")[:30]),
-            input=t["input"],
-            expected=t["expected"],
-            grader=grader,
-        ))
+    gym, tasks_data = _load_eval_tasks(Path(args.tasks_file))
+    gym.trials_per_task = args.trials
 
     print(f"Evaluating agent '{agent.config.name}' with {len(tasks_data)} tasks ({args.trials} trials each)")
     print("-" * 50)
 
-    async def agent_fn(task_input: str) -> str:
-        results = await agent.run(task_input)
-        if results and results[-1].llm_response:
-            return results[-1].llm_response.content
-        return ""
-
-    report = await gym.run(agent_fn)
+    report = await gym.run(_make_agent_fn(agent))
 
     print(f"\nResults:")
     print(f"  Pass rate:    {report.pass_rate:.1%} ({report.pass_count}/{report.total_trials})")
@@ -1164,24 +1157,18 @@ async def cmd_eval(args: argparse.Namespace) -> None:
 
 async def cmd_evolve(args: argparse.Namespace) -> None:
     """Run the continuous evolution loop — observe, analyze, propose, review, apply."""
-    import json as _json
-    from pathlib import Path
-    from agentos.agent import Agent
-    from agentos.eval.gym import EvalGym, EvalTask
-    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
+    _validate_positive(args.trials, "trials")
+    _validate_positive(args.min_sessions, "min-sessions")
+    if args.surface_ratio is not None and not (0.0 < args.surface_ratio <= 1.0):
+        print(f"Error: --surface-ratio must be between 0 and 1 (got {args.surface_ratio})", file=sys.stderr)
+        sys.exit(1)
+
     from agentos.evolution.loop import EvolutionLoop
 
     agent = _load_agent(args.name)
 
-    # Load eval tasks
-    tasks_path = Path(args.tasks_file)
-    if not tasks_path.exists():
-        print(f"Error: Tasks file not found: {tasks_path}")
-        return
-
-    tasks_data = _json.loads(tasks_path.read_text())
-    if not isinstance(tasks_data, list):
-        tasks_data = [tasks_data]
+    gym, tasks_data = _load_eval_tasks(Path(args.tasks_file))
+    gym.trials_per_task = args.trials
 
     # Set up the evolution loop
     loop = EvolutionLoop.for_agent(
@@ -1197,24 +1184,7 @@ async def cmd_evolve(args: argparse.Namespace) -> None:
     # Step 1: Run baseline eval (this populates the observer with session records)
     print("\n[1/4] Running baseline evaluation...")
 
-    gym = EvalGym(trials_per_task=args.trials)
-    for t in tasks_data:
-        grader_type = t.get("grader", "contains")
-        grader = ExactMatchGrader() if grader_type == "exact" else ContainsGrader()
-        gym.add_task(EvalTask(
-            name=t.get("name", t.get("input", "")[:30]),
-            input=t["input"],
-            expected=t["expected"],
-            grader=grader,
-        ))
-
-    async def agent_fn(task_input: str) -> str:
-        results = await agent.run(task_input)
-        if results and results[-1].llm_response:
-            return results[-1].llm_response.content
-        return ""
-
-    baseline_report = await gym.run(agent_fn)
+    baseline_report = await gym.run(_make_agent_fn(agent))
     baseline_report.agent_name = agent.config.name
     baseline_report.agent_version = agent.config.version
     baseline_report.model = agent.config.model
@@ -1333,6 +1303,77 @@ def _rename_agent_config(config, new_name: str):
     data = config.to_dict()
     data["name"] = new_name
     return AgentConfig.from_dict(data)
+
+
+def _validate_positive(value, name: str, allow_zero: bool = False) -> None:
+    """Validate that a numeric CLI argument is positive. Exits on failure."""
+    if value is None:
+        return
+    if allow_zero and value < 0:
+        print(f"Error: --{name} must be non-negative (got {value})", file=sys.stderr)
+        sys.exit(1)
+    if not allow_zero and value <= 0:
+        print(f"Error: --{name} must be positive (got {value})", file=sys.stderr)
+        sys.exit(1)
+
+
+def _load_eval_tasks(tasks_path: Path):
+    """Load eval tasks from a JSON file and return (EvalGym, tasks_data).
+
+    Shared by cmd_eval and cmd_evolve to avoid duplicated task-loading logic.
+    Exits with code 1 if the file is missing or malformed.
+    """
+    from agentos.eval.gym import EvalGym, EvalTask
+    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
+
+    if not tasks_path.exists():
+        print(f"Error: Tasks file not found: {tasks_path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        tasks_data = json.loads(tasks_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Error: Could not parse tasks file: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(tasks_data, list):
+        tasks_data = [tasks_data]
+
+    if not tasks_data:
+        print("Error: Tasks file is empty.", file=sys.stderr)
+        sys.exit(1)
+
+    gym = EvalGym()
+    for t in tasks_data:
+        if "input" not in t or "expected" not in t:
+            print(f"Error: Task missing 'input' or 'expected' field: {t}", file=sys.stderr)
+            sys.exit(1)
+        grader_type = t.get("grader", "contains")
+        if grader_type == "exact":
+            grader = ExactMatchGrader()
+        elif grader_type == "contains":
+            grader = ContainsGrader()
+        else:
+            print(f"Warning: Unknown grader type '{grader_type}', using 'contains'", file=sys.stderr)
+            grader = ContainsGrader()
+        gym.add_task(EvalTask(
+            name=t.get("name", t.get("input", "")[:30]),
+            input=t["input"],
+            expected=t["expected"],
+            grader=grader,
+        ))
+
+    return gym, tasks_data
+
+
+def _make_agent_fn(agent):
+    """Create an async agent function for eval/evolve runs."""
+    async def agent_fn(task_input: str) -> str:
+        results = await agent.run(task_input)
+        if results and results[-1].llm_response:
+            return results[-1].llm_response.content
+        return ""
+    return agent_fn
 
 
 def _load_project_defaults(config_path: Path) -> dict:
@@ -1549,8 +1590,16 @@ async def cmd_sandbox(args: argparse.Namespace) -> None:
     """E2B sandbox operations — create, exec, list, kill."""
     from agentos.sandbox import SandboxManager
 
-    mgr = SandboxManager()
     subcmd = args.sandbox_command
+    if not subcmd:
+        print("Usage: agentos sandbox {create|exec|list|kill}", file=sys.stderr)
+        print("  create          Create a new E2B sandbox", file=sys.stderr)
+        print("  exec <command>  Execute command in sandbox", file=sys.stderr)
+        print("  list            List active sandboxes", file=sys.stderr)
+        print("  kill <id>       Kill a sandbox", file=sys.stderr)
+        sys.exit(1)
+
+    mgr = SandboxManager()
 
     if subcmd == "create":
         session = await mgr.create()
@@ -1587,12 +1636,6 @@ async def cmd_sandbox(args: argparse.Namespace) -> None:
         else:
             print(f"Failed to kill sandbox {args.sandbox_id}")
 
-    else:
-        print("Usage: agentos sandbox {create|exec|list|kill}")
-        print("  create          Create a new E2B sandbox")
-        print("  exec <command>  Execute command in sandbox")
-        print("  list            List active sandboxes")
-        print("  kill <id>       Kill a sandbox")
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:
@@ -1604,13 +1647,18 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     if not deploy_dir.exists():
         deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
     if not deploy_dir.exists():
-        print("Error: No deploy/ directory found.")
-        print("  Option 1: Run from the AgentOS source root")
-        print("  Option 2: Copy the deploy/ directory to your project")
+        print("Error: No deploy/ directory found.", file=sys.stderr)
+        print("  Option 1: Run from the AgentOS source root", file=sys.stderr)
+        print("  Option 2: Copy the deploy/ directory to your project", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate governance structure before converting
+    gov = config.governance
+    if not isinstance(gov, dict):
+        print(f"Error: Agent governance config is malformed (expected dict, got {type(gov).__name__})", file=sys.stderr)
         sys.exit(1)
 
     # Convert Python agent config → CF worker config format
-    gov = config.governance
     cf_config = {
         "agentName": config.name,
         "agentDescription": config.description,
@@ -1628,7 +1676,11 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     }
 
     deploy_config_path = deploy_dir / "agent-config.json"
-    deploy_config_path.write_text(json.dumps(cf_config, indent=2) + "\n")
+    try:
+        deploy_config_path.write_text(json.dumps(cf_config, indent=2) + "\n")
+    except OSError as exc:
+        print(f"Error: Could not write deploy config: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Deploying agent '{config.name}' to Cloudflare Workers...")
     print(f"  Model: {config.model}")
