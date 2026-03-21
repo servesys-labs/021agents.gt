@@ -301,6 +301,15 @@ class Agent:
 
         return harness
 
+    @property
+    def uses_stub_provider(self) -> bool:
+        """True if any LLM route uses the stub provider (no API key)."""
+        from agentos.llm.provider import StubProvider
+        return any(
+            isinstance(route.provider, StubProvider)
+            for route in self._harness.llm_router._routes.values()
+        )
+
     async def run(self, user_input: str) -> list:
         """Execute the agent on a user task."""
         return await self._harness.run(user_input)
