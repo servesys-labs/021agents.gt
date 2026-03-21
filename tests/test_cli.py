@@ -41,7 +41,6 @@ class TestCmdInit:
         args = _make_init_args(tmp_path)
         cmd_init(args)
 
-        slug = tmp_path.name.replace(" ", "-").lower()
         # Core directories
         assert (tmp_path / "agents").is_dir()
         assert (tmp_path / "tools").is_dir()
@@ -55,6 +54,20 @@ class TestCmdInit:
         assert (tmp_path / ".env.example").exists()
         assert (tmp_path / ".gitignore").exists()
         assert (tmp_path / ".github" / "workflows" / "eval.yml").exists()
+
+    def test_init_default_creates_orchestrator(self, tmp_path):
+        """Default init should create an orchestrator agent."""
+        args = _make_init_args(tmp_path, name="my-project")
+        cmd_init(args)
+
+        agent_path = tmp_path / "agents" / "my-project.json"
+        assert agent_path.exists()
+        data = json.loads(agent_path.read_text())
+        assert "orchestrator" in data["tags"]
+        assert "create-agent" in data["tools"]
+        assert "eval-agent" in data["tools"]
+        assert "evolve-agent" in data["tools"]
+        assert "meta-agent" in data["description"].lower() or "orchestrator" in data["description"].lower()
 
     def test_init_does_not_overwrite(self, tmp_path):
         agent_name = tmp_path.name.replace(" ", "-").lower()
@@ -154,8 +167,18 @@ class TestCmdInit:
         yaml_content = (tmp_path / "agentos.yaml").read_text()
         assert DEFAULT_MODEL in yaml_content
 
-    def test_init_next_steps_mention_create(self, tmp_path, capsys):
+    def test_init_next_steps_mention_orchestrator_chat(self, tmp_path, capsys):
+        """Default orchestrator template should suggest chatting with it."""
         args = _make_init_args(tmp_path, name="my-agent")
+        cmd_init(args)
+
+        captured = capsys.readouterr()
+        assert "agentos chat" in captured.out
+        assert "orchestrator" in captured.out.lower()
+
+    def test_init_blank_next_steps_mention_create(self, tmp_path, capsys):
+        """Blank template should suggest agentos create."""
+        args = _make_init_args(tmp_path, name="my-agent", template="blank")
         cmd_init(args)
 
         captured = capsys.readouterr()

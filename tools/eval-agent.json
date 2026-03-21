@@ -1,0 +1,22 @@
+{
+  "name": "eval-agent",
+  "description": "Run evaluation tasks against an agent and return the results (pass rate, latency, cost, tool efficiency).",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "agent_name": {
+        "type": "string",
+        "description": "Name of the agent to evaluate"
+      },
+      "eval_file": {
+        "type": "string",
+        "description": "Path to eval tasks JSON file (default: eval/smoke-test.json)"
+      },
+      "trials": {
+        "type": "integer",
+        "description": "Number of trials per task (default: 3)"
+      }
+    },
+    "required": ["agent_name"]
+  }
+}

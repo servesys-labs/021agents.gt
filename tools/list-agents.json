@@ -1,0 +1,9 @@
+{
+  "name": "list-agents",
+  "description": "List all agent definitions in the project with their names, descriptions, tools, and tags.",
+  "input_schema": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  }
+}
