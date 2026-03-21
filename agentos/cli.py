@@ -97,10 +97,17 @@ def main() -> None:
     )
 
     # --- run ---
-    run_p = sub.add_parser("run", help="Run an agent")
+    run_p = sub.add_parser("run", help="Run an agent on a task")
     run_p.add_argument("name", help="Agent name or path to definition file")
     run_p.add_argument("task", nargs="?", help="Task to execute")
     run_p.add_argument("--turns", type=int, default=None, help="Max turns override")
+    run_p.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
+    run_p.add_argument("--budget", type=float, default=None, help="Budget limit in USD")
+    run_p.add_argument("--input-file", "-i", type=str, default=None, help="Read task from file")
+    run_p.add_argument("--output", "-o", type=str, default=None, help="Write final output to file")
+    run_p.add_argument("--json", dest="json_output", action="store_true", help="Output results as JSON")
+    run_p.add_argument("--quiet", "-q", action="store_true", help="Only print final output")
+    run_p.add_argument("--verbose", "-v", action="store_true", help="Show all turns with tool details")
 
     # --- list ---
     sub.add_parser("list", help="List available agents")
@@ -770,61 +777,163 @@ async def cmd_create(args: argparse.Namespace) -> None:
 
 async def cmd_run(args: argparse.Namespace) -> None:
     """Run an agent on a task."""
+    import time as _time
+
     from agentos.agent import Agent
 
     agent = _load_agent(args.name)
-    if args.turns:
+
+    # Apply runtime overrides
+    if args.turns is not None:
         agent.config.max_turns = args.turns
+    if args.timeout is not None:
+        agent.config.timeout_seconds = args.timeout
+    if args.budget is not None:
+        agent.config.governance["budget_limit_usd"] = args.budget
+        agent._harness.governance._policy.budget_limit_usd = args.budget
 
-    task = args.task
+    # Resolve task: --input-file > positional arg > stdin > interactive prompt
+    task = None
+    if args.input_file:
+        p = Path(args.input_file)
+        if not p.exists():
+            print(f"Error: Input file not found: {args.input_file}", file=sys.stderr)
+            sys.exit(1)
+        task = p.read_text().strip()
+    elif args.task:
+        task = args.task
+    elif not sys.stdin.isatty():
+        task = sys.stdin.read().strip()
+    else:
+        try:
+            task = input("Task: ").strip()
+        except EOFError:
+            pass
+
     if not task:
-        # Read from stdin/pipe if no task provided
-        if not sys.stdin.isatty():
-            task = sys.stdin.read().strip()
-        else:
-            try:
-                task = input("Task: ").strip()
-            except EOFError:
-                pass
-        if not task:
-            print("Error: No task provided.")
-            print("Usage: agentos run <name> \"your task here\"")
-            print("   or: echo \"your task\" | agentos run <name>")
-            return
+        print("Error: No task provided.", file=sys.stderr)
+        print("Usage: agentos run <name> \"your task here\"", file=sys.stderr)
+        print("   or: echo \"your task\" | agentos run <name>", file=sys.stderr)
+        print("   or: agentos run <name> --input-file task.txt", file=sys.stderr)
+        sys.exit(1)
 
-    # Warn if using stub provider
-    from agentos.llm.provider import StubProvider
-    _any_stub = any(
-        isinstance(route.provider, StubProvider)
-        for route in agent._harness.llm_router._routes.values()
-    )
-    if _any_stub:
+    # Warn if using stub provider (unless --quiet or --json)
+    if not args.quiet and not args.json_output and agent.uses_stub_provider:
         print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
         print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
         print()
 
-    print(f"Running agent '{agent.config.name}' on: {task}")
-    print("-" * 40)
+    if not args.quiet and not args.json_output:
+        print(f"Running agent '{agent.config.name}' on: {task}")
+        print("-" * 40)
 
+    start = _time.monotonic()
     results = await agent.run(task)
+    elapsed_ms = (_time.monotonic() - start) * 1000
 
-    for result in results:
-        if result.llm_response:
-            print(f"\n[Turn {result.turn_number}] {result.llm_response.content}")
-        if result.tool_results:
-            for tr in result.tool_results:
-                if "error" in tr:
-                    print(f"  Tool error: {tr.get('tool', '?')}: {tr['error']}")
-                else:
-                    print(f"  Tool result: {tr.get('tool', '?')}: {tr.get('result', '')}")
-        if result.error:
-            print(f"  Error: {result.error}")
-
-    # Print final output
+    # Compute summary metrics
+    total_cost = sum(
+        r.llm_response.cost_usd for r in results if r.llm_response
+    )
+    total_turns = len(results)
+    total_tool_calls = sum(len(r.tool_results) for r in results)
+    tool_errors = sum(
+        1 for r in results for tr in r.tool_results if "error" in tr
+    )
+    final_output = ""
     if results and results[-1].llm_response:
-        print("\n" + "=" * 40)
-        print("Final output:")
-        print(results[-1].llm_response.content)
+        final_output = results[-1].llm_response.content
+
+    # Determine if the run failed
+    failed = False
+    failure_reason = ""
+    if results and results[-1].error:
+        failed = True
+        failure_reason = results[-1].error
+    elif results and results[-1].stop_reason not in ("completed", ""):
+        failed = True
+        failure_reason = f"Stopped: {results[-1].stop_reason}"
+
+    # --- JSON output mode ---
+    if args.json_output:
+        import json as _json
+        output = {
+            "agent": agent.config.name,
+            "task": task,
+            "success": not failed,
+            "output": final_output,
+            "turns": total_turns,
+            "tool_calls": total_tool_calls,
+            "tool_errors": tool_errors,
+            "cost_usd": round(total_cost, 6),
+            "latency_ms": round(elapsed_ms, 1),
+        }
+        if failed:
+            output["error"] = failure_reason
+        if args.verbose:
+            output["results"] = [
+                {
+                    "turn": r.turn_number,
+                    "content": r.llm_response.content if r.llm_response else None,
+                    "tool_results": r.tool_results,
+                    "error": r.error,
+                    "stop_reason": r.stop_reason,
+                }
+                for r in results
+            ]
+        text = _json.dumps(output, indent=2)
+        if args.output:
+            Path(args.output).write_text(text + "\n")
+        else:
+            print(text)
+        if failed:
+            sys.exit(1)
+        return
+
+    # --- Verbose mode: show every turn ---
+    if args.verbose:
+        for result in results:
+            if result.llm_response:
+                print(f"\n[Turn {result.turn_number}] {result.llm_response.content}")
+            if result.tool_results:
+                for tr in result.tool_results:
+                    if "error" in tr:
+                        print(f"  Tool error: {tr.get('tool', '?')}: {tr['error']}")
+                    else:
+                        preview = str(tr.get("result", ""))
+                        if len(preview) > 200:
+                            preview = preview[:200] + "..."
+                        print(f"  Tool result: {tr.get('tool', '?')}: {preview}")
+            if result.error:
+                print(f"  Error: {result.error}")
+        print()
+
+    # --- Final output ---
+    if final_output:
+        if not args.quiet:
+            print("\n" + "=" * 40)
+            print("Output:")
+        print(final_output)
+    elif failed:
+        print(f"\nAgent failed: {failure_reason}", file=sys.stderr)
+
+    # Write to file if requested
+    if args.output:
+        Path(args.output).write_text(final_output + "\n" if final_output else "")
+        if not args.quiet:
+            print(f"\nOutput written to: {args.output}")
+
+    # --- Summary (unless --quiet) ---
+    if not args.quiet:
+        print(f"\n--- {total_turns} turn{'s' if total_turns != 1 else ''}"
+              f" | {total_tool_calls} tool call{'s' if total_tool_calls != 1 else ''}"
+              f" | {elapsed_ms:.0f}ms"
+              f" | ${total_cost:.4f} ---")
+        if tool_errors:
+            print(f"    ({tool_errors} tool error{'s' if tool_errors != 1 else ''})")
+
+    if failed:
+        sys.exit(1)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
