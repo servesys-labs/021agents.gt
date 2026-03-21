@@ -287,11 +287,18 @@
 <script>
   // --- State ---
   let agentBase = '';
+  let apiToken = '';
   const agentName = () => document.getElementById('deploy-name').value || 'my-agent';
 
   function getAgentUrl(path) {
     const base = agentBase || (location.origin + '/agents/agentos/' + agentName());
     return base + path;
+  }
+
+  function authHeaders(extra = {}) {
+    const h = { ...extra };
+    if (apiToken) h['Authorization'] = 'Bearer ' + apiToken;
+    return h;
   }
 
   // --- Tabs ---
@@ -335,8 +342,9 @@
       if (i === 4) log('Worker deployed to 300+ edge locations globally');
     }
 
-    // Set the agent base URL
+    // Set the agent base URL and API token
     agentBase = location.origin + '/agents/agentos/' + config.name;
+    apiToken = config.apiKey || '';
 
     // Try health check
     try {
@@ -358,7 +366,7 @@
     try {
       await fetch(getAgentUrl('/config'), {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           provider: config.provider,
           model: config.model,
@@ -388,7 +396,7 @@
     try {
       const resp = await fetch(getAgentUrl('/run'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ input: text }),
       });
       const data = await resp.json();
@@ -420,7 +428,7 @@
   // --- Config ---
   async function loadConfig() {
     try {
-      const resp = await fetch(getAgentUrl('/config'));
+      const resp = await fetch(getAgentUrl('/config'), { headers: authHeaders() });
       const cfg = await resp.json();
       document.getElementById('cfg-provider').value = cfg.provider || 'workers-ai';
       document.getElementById('cfg-model').value = cfg.model || '';
@@ -435,7 +443,7 @@
     const blocked = document.getElementById('cfg-blocked').value.split(',').map(s => s.trim()).filter(Boolean);
     await fetch(getAgentUrl('/config'), {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
         provider: document.getElementById('cfg-provider').value,
         model: document.getElementById('cfg-model').value,
@@ -451,7 +459,7 @@
   // --- Memory ---
   async function loadMemory() {
     try {
-      const resp = await fetch(getAgentUrl('/memory'));
+      const resp = await fetch(getAgentUrl('/memory'), { headers: authHeaders() });
       const data = await resp.json();
       document.getElementById('mem-working').textContent = Object.keys(data.working || {}).length;
       document.getElementById('mem-episodes').textContent = (data.episodes || []).length;
@@ -472,7 +480,7 @@
     try {
       const resp = await fetch(getAgentUrl('/ingest'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           documents: [{ id: crypto.randomUUID(), text, metadata: { source: 'manual' } }],
         }),
@@ -495,7 +503,7 @@
     try {
       const resp = await fetch(getAgentUrl('/eval'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ tasks, trialsPerTask: trials }),
       });
       const report = await resp.json();
