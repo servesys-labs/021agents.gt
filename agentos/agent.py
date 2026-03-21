@@ -203,11 +203,40 @@ class Agent:
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
+        self._apply_project_defaults()
         self._db = None
         self._observer = None
         self._tracer = None
         self._harness = self._build_harness()
         self._attach_observability()
+
+    def _apply_project_defaults(self) -> None:
+        """Apply project-level defaults from agentos.yaml (if present).
+
+        This runs automatically on construction so every code path
+        (run, chat, eval, evolve) inherits project settings without
+        each CLI command needing to call it separately.
+        """
+        config_path = Path.cwd() / "agentos.yaml"
+        if not config_path.exists():
+            return
+        try:
+            try:
+                import yaml
+                data = yaml.safe_load(config_path.read_text()) or {}
+            except ImportError:
+                data = {}
+            defaults = data.get("defaults", {}) if isinstance(data, dict) else {}
+            if not defaults:
+                return
+            from agentos.defaults import DEFAULT_MODEL
+            if defaults.get("model") and self.config.model == DEFAULT_MODEL:
+                self.config.model = defaults["model"]
+            budget = defaults.get("budget_limit_usd")
+            if budget and self.config.governance.get("budget_limit_usd") == 10.0:
+                self.config.governance["budget_limit_usd"] = budget
+        except Exception:
+            pass
 
     def _build_harness(self):
         """Wire up all subsystems from the agent config."""
