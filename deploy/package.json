@@ -11,7 +11,9 @@
   "dependencies": {
     "agents": "^0.0.50",
     "openai": "^4.80",
-    "@anthropic-ai/sdk": "^0.39"
+    "@anthropic-ai/sdk": "^0.39",
+    "@e2b/code-interpreter": "^1.0",
+    "e2b": "^1.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250312.0",

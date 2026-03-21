@@ -83,6 +83,7 @@ class TurnRecord:
 @dataclass
 class SystemComposition:
     """[1] What agent ran — full identity snapshot."""
+    agent_id: str = ""  # Immutable ID — survives renames
     agent_name: str = ""
     agent_version: str = ""
     model: str = ""
@@ -157,6 +158,7 @@ class SessionRecord:
             "agent_name": self.agent_name,
             "timestamp": self.timestamp,
             "composition": {
+                "agent_id": self.composition.agent_id,
                 "agent_name": self.composition.agent_name,
                 "agent_version": self.composition.agent_version,
                 "model": self.composition.model,

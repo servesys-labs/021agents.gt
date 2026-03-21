@@ -1,12 +1,21 @@
 """AgentOS CLI — the user-facing command line interface.
 
 Usage:
-    agentos init                    — Scaffold a new agent project
+    agentos init [dir] [--name N]   — Scaffold a new agent project (with git + CI)
+    agentos init --remote <url>     — ...and connect to a git remote
     agentos create                  — Conversationally build an agent with an LLM
     agentos create --one-shot DESC  — Build an agent from a one-line description
     agentos run <name> "task"       — Run a named agent on a task
     agentos list                    — List all available agents
     agentos tools                   — List available tool plugins
+    agentos login                   — Authenticate via OAuth (GitHub/Google)
+    agentos logout                  — Remove stored credentials
+    agentos whoami                  — Show current authenticated user
+    agentos sandbox create          — Create an E2B sandbox
+    agentos sandbox exec <cmd>      — Execute command in sandbox
+    agentos sandbox list            — List active sandboxes
+    agentos sandbox kill <id>       — Kill a sandbox
+    agentos serve                   — Start local API server with dashboard
     agentos deploy <name>           — Deploy an agent (Cloudflare Workers)
     agentos chat <name>             — Interactive chat session with an agent
 """
@@ -31,6 +40,10 @@ def main() -> None:
     # --- init ---
     init_p = sub.add_parser("init", help="Scaffold a new agent project")
     init_p.add_argument("directory", nargs="?", default=".", help="Project directory")
+    init_p.add_argument("--name", "-n", type=str, default=None, help="Agent name (default: directory name)")
+    init_p.add_argument("--remote", "-r", type=str, default=None, help="Git remote URL to connect")
+    init_p.add_argument("--no-git", action="store_true", help="Skip git repository initialization")
+    init_p.add_argument("--no-signing", action="store_true", help="Skip signing keypair generation")
 
     # --- create ---
     create_p = sub.add_parser("create", help="Create a new agent (conversational)")
@@ -84,6 +97,38 @@ def main() -> None:
     evolve_p.add_argument("--surface-ratio", type=float, default=0.1, help="Fraction of proposals to surface (default: 0.1)")
     evolve_p.add_argument("--export", type=str, default=None, help="Export evolution state to JSON")
 
+    # --- login ---
+    login_p = sub.add_parser("login", help="Authenticate with AgentOS (OAuth device flow)")
+    login_p.add_argument(
+        "--provider", type=str, default="github",
+        choices=["github", "google"],
+        help="OAuth provider (default: github)",
+    )
+    login_p.add_argument("--server", type=str, default="", help="AgentOS server URL")
+
+    # --- logout ---
+    logout_p = sub.add_parser("logout", help="Remove stored credentials")
+    logout_p.add_argument("--server", type=str, default="", help="Server to logout from")
+
+    # --- whoami ---
+    sub.add_parser("whoami", help="Show current authenticated user")
+
+    # --- serve ---
+    serve_p = sub.add_parser("serve", help="Start local API server with dashboard")
+    serve_p.add_argument("--port", type=int, default=8340, help="Port (default: 8340)")
+    serve_p.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
+
+    # --- sandbox ---
+    sandbox_p = sub.add_parser("sandbox", help="E2B sandbox operations")
+    sandbox_sub = sandbox_p.add_subparsers(dest="sandbox_command")
+    sandbox_sub.add_parser("create", help="Create a new sandbox")
+    sb_exec = sandbox_sub.add_parser("exec", help="Execute a command in a sandbox")
+    sb_exec.add_argument("shell_command", nargs="+", help="Command to execute")
+    sb_exec.add_argument("--id", type=str, default=None, help="Sandbox ID")
+    sb_ls = sandbox_sub.add_parser("list", help="List active sandboxes")
+    sb_kill = sandbox_sub.add_parser("kill", help="Kill a sandbox")
+    sb_kill.add_argument("sandbox_id", help="Sandbox ID to kill")
+
     # --- deploy ---
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
     deploy_p.add_argument("name", help="Agent name or path")
@@ -120,6 +165,16 @@ def main() -> None:
             asyncio.run(cmd_eval(args))
         elif args.command == "evolve":
             asyncio.run(cmd_evolve(args))
+        elif args.command == "login":
+            cmd_login(args)
+        elif args.command == "logout":
+            cmd_logout(args)
+        elif args.command == "whoami":
+            cmd_whoami(args)
+        elif args.command == "serve":
+            cmd_serve(args)
+        elif args.command == "sandbox":
+            asyncio.run(cmd_sandbox(args))
         elif args.command == "deploy":
             cmd_deploy(args)
     except FileNotFoundError as exc:
@@ -137,57 +192,395 @@ def main() -> None:
 
 
 def cmd_init(args: argparse.Namespace) -> None:
-    """Scaffold a new agent project."""
+    """Scaffold a new agent project — identity, security, sessions, CI/CD."""
+    import subprocess
+    from datetime import datetime, timezone
+
+    from agentos.core.identity import AgentIdentity, write_keypair
+
     directory = Path(args.directory).resolve()
+    agent_name = args.name or _slugify(directory.name)
+    created: list[str] = []
+    skipped: list[str] = []
+
     print(f"Initializing AgentOS project in {directory}")
+    print()
 
-    # Create directory structure
-    (directory / "agents").mkdir(parents=True, exist_ok=True)
-    (directory / "tools").mkdir(parents=True, exist_ok=True)
-    (directory / "data").mkdir(parents=True, exist_ok=True)
+    # ── Directory structure ──────────────────────────────────────────────
+    for d in ("agents", "tools", "data", "eval", "sessions"):
+        dir_path = directory / d
+        if dir_path.exists():
+            skipped.append(f"{d}/")
+        else:
+            dir_path.mkdir(parents=True, exist_ok=True)
+            created.append(f"{d}/")
 
-    # Create a starter agent definition
-    starter = {
-        "name": "my-agent",
-        "description": "A starter agent — customize me!",
-        "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
-        "model": "claude-sonnet-4-20250514",
-        "tools": [],
-        "governance": {
-            "budget_limit_usd": 10.0,
-            "require_confirmation_for_destructive": True,
-        },
-        "tags": ["starter"],
-    }
-    agent_path = directory / "agents" / "my-agent.json"
+    # ── SQLite database (the agent's persistent brain) ────────────────────
+    db_path = directory / "data" / "agent.db"
+    if not db_path.exists():
+        from agentos.core.database import create_database
+        db = create_database(db_path)
+        db.close()
+        created.append("data/agent.db (SQLite — WAL mode)")
+    else:
+        skipped.append("data/agent.db")
+
+    # ── Agent identity (generated once, immutable) ───────────────────────
+    identity_path = directory / "agents" / ".identity.json"
+    if not identity_path.exists():
+        identity, secret_key = AgentIdentity.generate(
+            with_signing=not args.no_signing,
+        )
+        identity_path.write_text(json.dumps(identity.to_dict(), indent=2) + "\n")
+        created.append("agents/.identity.json")
+        agent_id = identity.agent_id
+    else:
+        # Preserve existing identity on re-init
+        existing = json.loads(identity_path.read_text())
+        agent_id = existing.get("agent_id", "")
+        secret_key = ""  # Already written to .keys/
+        skipped.append("agents/.identity.json")
+
+    # ── Signing keypair ──────────────────────────────────────────────────
+    keys_dir = directory / ".keys"
+    if not args.no_signing and secret_key:
+        from agentos.core.identity import AgentIdentity as _id
+        identity_data = json.loads(identity_path.read_text())
+        fingerprint = identity_data.get("fingerprint", "")
+        if fingerprint and not (keys_dir / "agent.key").exists():
+            write_keypair(keys_dir, secret_key, fingerprint)
+            created.append(".keys/agent.pub (public — safe to commit)")
+            created.append(".keys/agent.key (SECRET — gitignored)")
+        elif (keys_dir / "agent.key").exists():
+            skipped.append(".keys/ (keypair exists)")
+    elif (keys_dir / "agent.key").exists():
+        skipped.append(".keys/ (keypair exists)")
+
+    # ── Project config (agentos.yaml) ────────────────────────────────────
+    project_config_path = directory / "agentos.yaml"
+    if not project_config_path.exists():
+        init_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        project_config_path.write_text(
+            f"# AgentOS project configuration\n"
+            f"# Generated: {init_date}\n"
+            f"\n"
+            f"project: {agent_name}\n"
+            f"agent_id: {agent_id}\n"
+            f"version: 0.1.0\n"
+            f"\n"
+            f"# ── LLM defaults ─────────────────────────────────────────\n"
+            f"defaults:\n"
+            f"  model: claude-sonnet-4-20250514\n"
+            f"  provider: anthropic\n"
+            f"  max_turns: 50\n"
+            f"  budget_limit_usd: 10.0\n"
+            f"\n"
+            f"# ── Security & access control ──────────────────────────────\n"
+            f"security:\n"
+            f"  # Who can invoke this agent (RBAC)\n"
+            f"  allowed_callers: ['*']          # '*' = anyone, or list of caller IDs\n"
+            f"  rate_limit_rpm: 60               # Max requests per minute\n"
+            f"  # Network boundaries\n"
+            f"  allowed_domains: []              # Empty = unrestricted\n"
+            f"  blocked_domains: []              # Explicit blocklist\n"
+            f"  # File system scope\n"
+            f"  allowed_paths:\n"
+            f"    - agents/\n"
+            f"    - tools/\n"
+            f"    - data/\n"
+            f"  # Signing\n"
+            f"  sign_outputs: false              # Enable output signing for audit\n"
+            f"  signing_key: .keys/agent.key\n"
+            f"\n"
+            f"# ── Database ───────────────────────────────────────────────\n"
+            f"database:\n"
+            f"  path: data/agent.db               # SQLite — single file, zero dependencies\n"
+            f"  wal_mode: true                    # WAL = concurrent readers + atomic writes\n"
+            f"  # Cloudflare D1 compatible — same schema works at the edge\n"
+            f"\n"
+            f"# ── Session tracking ─────────────────────────────────────\n"
+            f"sessions:\n"
+            f"  storage: database                 # 'database' (SQLite) or 'jsonl' (flat file)\n"
+            f"  retention_days: 90                # Auto-cleanup after N days (0 = forever)\n"
+            f"  include_llm_content: true         # Store full LLM responses\n"
+            f"  include_tool_results: true        # Store full tool outputs\n"
+            f"\n"
+            f"# ── Vector store (semantic memory + RAG) ────────────────────\n"
+            f"vector:\n"
+            f"  backend: local                    # local | vectorize\n"
+            f"  # local: brute-force cosine, backed by SQLite facts table\n"
+            f"  # vectorize: Cloudflare Vectorize (set by 'agentos deploy')\n"
+            f"  index_name: agentos-knowledge     # Vectorize index name\n"
+            f"  embedding_model: '@cf/baai/bge-base-en-v1.5'  # 768 dimensions\n"
+            f"  dimensions: 768\n"
+            f"\n"
+            f"# ── Observability ──────────────────────────────────────────\n"
+            f"observability:\n"
+            f"  log_level: INFO                   # DEBUG | INFO | WARNING | ERROR\n"
+            f"  log_format: structured            # structured (JSON) | text\n"
+            f"  # Event sinks — where events are sent\n"
+            f"  event_sinks:\n"
+            f"    - type: file\n"
+            f"      path: sessions/events.jsonl\n"
+            f"    # - type: webhook\n"
+            f"    #   url: https://your-observability.example.com/events\n"
+            f"    #   headers:\n"
+            f"    #     Authorization: Bearer ${{OBSERVABILITY_TOKEN}}\n"
+            f"  # Cost tracking\n"
+            f"  cost_ledger: sessions/costs.jsonl  # Persistent cost log\n"
+            f"  cost_alert_usd: 50.0               # Alert when cumulative cost exceeds\n"
+            f"\n"
+            f"# ── Paths ────────────────────────────────────────────────\n"
+            f"paths:\n"
+            f"  agents: agents/\n"
+            f"  tools: tools/\n"
+            f"  data: data/\n"
+            f"  eval: eval/\n"
+            f"  database: data/agent.db\n"
+        )
+        created.append("agentos.yaml")
+    else:
+        skipped.append("agentos.yaml")
+
+    # ── Starter agent definition ─────────────────────────────────────────
+    agent_path = directory / "agents" / f"{agent_name}.json"
     if not agent_path.exists():
-        agent_path.write_text(json.dumps(starter, indent=2) + "\n")
-
-    # Create a starter tool plugin
-    tool_example = {
-        "name": "example-search",
-        "description": "Example search tool — replace with your own implementation",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query"},
+        starter = {
+            "name": agent_name,
+            "agent_id": agent_id,
+            "description": f"{agent_name} — customize me!",
+            "version": "0.1.0",
+            "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
+            "model": "claude-sonnet-4-20250514",
+            "tools": [],
+            "governance": {
+                "budget_limit_usd": 10.0,
+                "require_confirmation_for_destructive": True,
+                "blocked_tools": [],
+                "allowed_domains": [],
             },
-            "required": ["query"],
-        },
-    }
+            "memory": {
+                "working": {"max_items": 100},
+                "episodic": {"max_episodes": 10000, "ttl_days": 90},
+                "procedural": {"max_procedures": 500},
+            },
+            "tags": ["starter"],
+        }
+        agent_path.write_text(json.dumps(starter, indent=2) + "\n")
+        created.append(f"agents/{agent_name}.json")
+    else:
+        skipped.append(f"agents/{agent_name}.json")
+
+    # ── Starter tool plugin ──────────────────────────────────────────────
     tool_path = directory / "tools" / "example-search.json"
     if not tool_path.exists():
+        tool_example = {
+            "name": "example-search",
+            "description": "Example search tool — replace with your own implementation",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                },
+                "required": ["query"],
+            },
+        }
         tool_path.write_text(json.dumps(tool_example, indent=2) + "\n")
+        created.append("tools/example-search.json")
+    else:
+        skipped.append("tools/example-search.json")
 
-    print(f"  Created agents/my-agent.json")
-    print(f"  Created tools/example-search.json")
-    print(f"  Created data/ directory")
+    # ── Starter eval task ────────────────────────────────────────────────
+    eval_path = directory / "eval" / "smoke-test.json"
+    if not eval_path.exists():
+        eval_task = [
+            {
+                "name": "greeting",
+                "input": "Say hello",
+                "expected": "hello",
+                "grader": "contains",
+            }
+        ]
+        eval_path.write_text(json.dumps(eval_task, indent=2) + "\n")
+        created.append("eval/smoke-test.json")
+    else:
+        skipped.append("eval/smoke-test.json")
+
+    # ── .env.example (declares required secrets without values) ──────────
+    env_example_path = directory / ".env.example"
+    if not env_example_path.exists():
+        env_example_path.write_text(
+            "# AgentOS environment variables\n"
+            "# Copy to .env and fill in your values:\n"
+            "#   cp .env.example .env\n"
+            "\n"
+            "# LLM provider API keys (at least one required)\n"
+            "ANTHROPIC_API_KEY=\n"
+            "OPENAI_API_KEY=\n"
+            "\n"
+            "# Observability (optional)\n"
+            "OBSERVABILITY_TOKEN=\n"
+            "\n"
+            "# Deployment (optional)\n"
+            "CLOUDFLARE_API_TOKEN=\n"
+            "CLOUDFLARE_ACCOUNT_ID=\n"
+        )
+        created.append(".env.example")
+    else:
+        skipped.append(".env.example")
+
+    # ── .gitignore ───────────────────────────────────────────────────────
+    gitignore_path = directory / ".gitignore"
+    if not gitignore_path.exists():
+        gitignore_path.write_text(
+            "# AgentOS\n"
+            "data/agent.db\n"
+            "data/agent.db-wal\n"
+            "data/agent.db-shm\n"
+            "data/rag_index.json\n"
+            "data/embeddings/\n"
+            "data/cache/\n"
+            "evolution_state*.json\n"
+            "\n"
+            "# Sessions (can be large)\n"
+            "sessions/*.jsonl\n"
+            "sessions/*.json\n"
+            "\n"
+            "# Secrets — NEVER commit these\n"
+            ".env\n"
+            ".env.*\n"
+            "!.env.example\n"
+            ".keys/agent.key\n"
+            "\n"
+            "# Python\n"
+            "__pycache__/\n"
+            "*.pyc\n"
+            ".venv/\n"
+            "venv/\n"
+            "dist/\n"
+            "*.egg-info/\n"
+            "\n"
+            "# Node (deploy)\n"
+            "node_modules/\n"
+            "\n"
+            "# OS\n"
+            ".DS_Store\n"
+            "Thumbs.db\n"
+        )
+        created.append(".gitignore")
+    else:
+        skipped.append(".gitignore")
+
+    # ── GitHub Actions CI ────────────────────────────────────────────────
+    ci_dir = directory / ".github" / "workflows"
+    ci_path = ci_dir / "eval.yml"
+    if not ci_path.exists():
+        ci_dir.mkdir(parents=True, exist_ok=True)
+        ci_path.write_text(
+            "name: Agent Eval\n"
+            "on:\n"
+            "  push:\n"
+            "    branches: [main]\n"
+            "    paths:\n"
+            "      - 'agents/**'\n"
+            "      - 'tools/**'\n"
+            "      - 'eval/**'\n"
+            "  pull_request:\n"
+            "    branches: [main]\n"
+            "\n"
+            "jobs:\n"
+            "  eval:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/checkout@v4\n"
+            "      - uses: actions/setup-python@v5\n"
+            "        with:\n"
+            "          python-version: '3.11'\n"
+            "      - run: pip install agentos\n"
+            "      - name: Run smoke test\n"
+            "        env:\n"
+            "          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n"
+            f"        run: agentos eval {agent_name} eval/smoke-test.json --trials 1\n"
+        )
+        created.append(".github/workflows/eval.yml")
+    else:
+        skipped.append(".github/workflows/eval.yml")
+
+    # ── Sessions keepfile (so git tracks the empty dir) ──────────────────
+    sessions_keep = directory / "sessions" / ".gitkeep"
+    if not sessions_keep.exists():
+        sessions_keep.write_text("")
+
+    # ── Git initialization ───────────────────────────────────────────────
+    git_initialized = False
+    git_remote_added = False
+
+    if not args.no_git:
+        git_dir = directory / ".git"
+        if not git_dir.exists():
+            result = subprocess.run(
+                ["git", "init"], cwd=directory,
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                git_initialized = True
+                subprocess.run(
+                    ["git", "add", "."], cwd=directory,
+                    capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ["git", "commit", "-m", f"Initialize {agent_name} agent project\n\nagent_id: {agent_id}"],
+                    cwd=directory, capture_output=True, text=True,
+                )
+            else:
+                print(f"  Warning: git init failed: {result.stderr.strip()}")
+        else:
+            skipped.append(".git/ (already a repo)")
+
+        # Connect remote if provided
+        if args.remote:
+            result = subprocess.run(
+                ["git", "remote", "get-url", "origin"], cwd=directory,
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                result = subprocess.run(
+                    ["git", "remote", "add", "origin", args.remote],
+                    cwd=directory, capture_output=True, text=True,
+                )
+                if result.returncode == 0:
+                    git_remote_added = True
+                else:
+                    print(f"  Warning: Could not add remote: {result.stderr.strip()}")
+            else:
+                existing = result.stdout.strip()
+                print(f"  Remote 'origin' already set to: {existing}")
+
+    # ── Summary ──────────────────────────────────────────────────────────
+    if created:
+        print("Created:")
+        for c in created:
+            print(f"  + {c}")
+    if skipped:
+        print("Already exists (skipped):")
+        for s in skipped:
+            print(f"  - {s}")
+
+    print(f"\nAgent ID: {agent_id}")
+    if git_initialized:
+        print(f"Git repo initialized with initial commit.")
+    if git_remote_added:
+        print(f"Remote 'origin' set to: {args.remote}")
+        print(f"  Push with: git push -u origin main")
+
     print()
     print("Next steps:")
-    print("  1. Edit agents/my-agent.json to define your agent")
-    print("  2. Add tools to the tools/ directory")
-    print("  3. Run: agentos create   (to build an agent via conversation)")
-    print("  4. Run: agentos run my-agent \"your task here\"")
+    print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
+    print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
+    print(f"  3. agentos run {agent_name} \"your task\"")
+    print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
+    if not args.no_git and not git_remote_added and not args.remote:
+        print(f"  5. git remote add origin <url> && git push -u origin main")
 
 
 async def cmd_create(args: argparse.Namespace) -> None:
@@ -668,6 +1061,217 @@ async def cmd_evolve(args: argparse.Namespace) -> None:
 def _indent(text: str, spaces: int) -> str:
     prefix = " " * spaces
     return "\n".join(prefix + line for line in text.split("\n"))
+
+
+def _slugify(name: str) -> str:
+    """Turn a directory/project name into a valid agent slug."""
+    import re
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.lower()).strip("-")
+    return slug or "my-agent"
+
+
+def cmd_login(args: argparse.Namespace) -> None:
+    """Authenticate via OAuth device flow (like `gh auth login`)."""
+    from agentos.auth.credentials import CredentialsStore, StoredCredential
+    from agentos.auth.jwt import create_token
+
+    provider = args.provider
+    server = args.server or "local"
+
+    print(f"Authenticating with {provider.title()}...")
+    print()
+
+    try:
+        if provider == "github":
+            from agentos.auth.oauth import (
+                github_get_user,
+                github_poll_for_token,
+                github_request_device_code,
+            )
+
+            dc = github_request_device_code()
+            print(f"  Open this URL in your browser:  {dc.verification_uri}")
+            print(f"  Enter this code:                {dc.user_code}")
+            print()
+            print("Waiting for authorization...", end="", flush=True)
+
+            access_token = github_poll_for_token(
+                dc.device_code, interval=dc.interval, timeout=dc.expires_in
+            )
+            if not access_token:
+                print("\nAuthorization failed or timed out.")
+                sys.exit(1)
+
+            user = github_get_user(access_token)
+
+        elif provider == "google":
+            from agentos.auth.oauth import (
+                google_get_user,
+                google_poll_for_token,
+                google_request_device_code,
+            )
+
+            dc = google_request_device_code()
+            print(f"  Open this URL in your browser:  {dc.verification_uri}")
+            print(f"  Enter this code:                {dc.user_code}")
+            print()
+            print("Waiting for authorization...", end="", flush=True)
+
+            access_token = google_poll_for_token(
+                dc.device_code, interval=dc.interval, timeout=dc.expires_in
+            )
+            if not access_token:
+                print("\nAuthorization failed or timed out.")
+                sys.exit(1)
+
+            user = google_get_user(access_token)
+        else:
+            print(f"Unknown provider: {provider}")
+            sys.exit(1)
+
+        print(f" done!")
+        print()
+
+        # Issue AgentOS JWT
+        token = create_token(
+            user_id=user.id,
+            email=user.email,
+            name=user.name,
+            provider=user.provider,
+        )
+
+        # Store credential
+        store = CredentialsStore.load()
+        store.store(StoredCredential(
+            token=token,
+            user_id=user.id,
+            email=user.email,
+            name=user.name,
+            provider=user.provider,
+            server=server,
+        ))
+
+        print(f"Logged in as {user.name} ({user.email})")
+        print(f"  Provider: {user.provider}")
+        print(f"  User ID:  {user.id}")
+        print(f"  Server:   {server}")
+        print()
+        print(f"Credentials saved to ~/.agentos/credentials.json")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        print()
+        print("To set up OAuth:")
+        if provider == "github":
+            print("  1. Create a GitHub OAuth App: https://github.com/settings/developers")
+            print("  2. Enable 'Device Flow' in app settings")
+            print("  3. Set GITHUB_CLIENT_ID environment variable")
+        elif provider == "google":
+            print("  1. Create OAuth credentials: https://console.cloud.google.com/apis/credentials")
+            print("  2. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables")
+        sys.exit(1)
+
+
+def cmd_logout(args: argparse.Namespace) -> None:
+    """Remove stored credentials."""
+    from agentos.auth.credentials import CredentialsStore
+
+    store = CredentialsStore.load()
+    server = args.server or ""
+
+    if store.remove(server):
+        print(f"Logged out from {server or store.default_server or 'default server'}")
+    else:
+        print("No credentials found to remove.")
+
+
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Show current authenticated user."""
+    from agentos.auth.credentials import CredentialsStore
+
+    store = CredentialsStore.load()
+
+    if not store.credentials:
+        print("Not logged in. Run 'agentos login' to authenticate.")
+        return
+
+    for server, cred in store.credentials.items():
+        default = " (default)" if server == store.default_server else ""
+        print(f"{server}{default}:")
+        print(f"  User:     {cred.name} ({cred.email})")
+        print(f"  Provider: {cred.provider}")
+        print(f"  User ID:  {cred.user_id}")
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    """Start local API server with dashboard."""
+    try:
+        import uvicorn
+    except ImportError:
+        print("Error: uvicorn not installed. Run: pip install uvicorn")
+        sys.exit(1)
+
+    print(f"Starting AgentOS server on http://{args.host}:{args.port}")
+    print(f"  Dashboard: http://{args.host}:{args.port}/dashboard")
+    print(f"  API:       http://{args.host}:{args.port}/health")
+    print()
+
+    uvicorn.run(
+        "agentos.api.app:create_app",
+        host=args.host,
+        port=args.port,
+        factory=True,
+    )
+
+
+async def cmd_sandbox(args: argparse.Namespace) -> None:
+    """E2B sandbox operations — create, exec, list, kill."""
+    from agentos.sandbox import SandboxManager
+
+    mgr = SandboxManager()
+    subcmd = args.sandbox_command
+
+    if subcmd == "create":
+        session = await mgr.create()
+        print(f"Sandbox created: {session.sandbox_id}")
+        print(f"  Template: {session.template}")
+        print(f"  Status:   {session.status}")
+        if not mgr.has_api_key:
+            print("  (local fallback — set E2B_API_KEY for cloud sandboxes)")
+
+    elif subcmd == "exec":
+        command = " ".join(args.shell_command)
+        sandbox_id = getattr(args, "id", None)
+        result = await mgr.exec(command, sandbox_id=sandbox_id)
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.exit_code != 0:
+            print(f"\n[exit code: {result.exit_code}]")
+        print(f"[sandbox: {result.sandbox_id}, {result.duration_ms:.0f}ms]")
+
+    elif subcmd == "list":
+        sandboxes = await mgr.list_sandboxes()
+        if not sandboxes:
+            print("No active sandboxes.")
+        else:
+            for s in sandboxes:
+                print(f"  {s['sandbox_id']}  template={s.get('template', '-')}  {s.get('status', s.get('started_at', ''))}")
+
+    elif subcmd == "kill":
+        killed = await mgr.kill(args.sandbox_id)
+        if killed:
+            print(f"Sandbox {args.sandbox_id} killed.")
+        else:
+            print(f"Failed to kill sandbox {args.sandbox_id}")
+
+    else:
+        print("Usage: agentos sandbox {create|exec|list|kill}")
+        print("  create          Create a new E2B sandbox")
+        print("  exec <command>  Execute command in sandbox")
+        print("  list            List active sandboxes")
+        print("  kill <id>       Kill a sandbox")
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:

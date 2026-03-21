@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -68,8 +69,20 @@ def _build_run_response(results: list) -> RunResponse:
 
 def create_app(harness: AgentHarness | None = None) -> FastAPI:
     """Create the AgentOS FastAPI application."""
+    from fastapi.staticfiles import StaticFiles
+
     app = FastAPI(title="AgentOS", version="0.1.0", description="Composable Autonomous Agent Framework")
     _harness = harness or AgentHarness.from_config_file()
+
+    # Mount auth routes (signup, login, /auth/me, token verify)
+    from agentos.auth.middleware import mount_auth_routes
+    mount_auth_routes(app)
+
+    # Serve local dashboard (same SPA as CF deploy)
+    import importlib.resources
+    dashboard_dir = Path(__file__).parent.parent / "dashboard"
+    if dashboard_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(dashboard_dir)), name="static")
 
     # Cache of loaded Agent instances
     _agent_cache: dict[str, Any] = {}
@@ -151,5 +164,91 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
         return _agent_cache[agent_name]._harness.tool_executor.available_tools()
+
+    # ── Sandbox endpoints ────────────────────────────────────────────────
+
+    from agentos.sandbox import SandboxManager
+    _sandbox_mgr = SandboxManager()
+
+    @app.post("/sandbox/create")
+    async def sandbox_create(request: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Create a new E2B sandbox."""
+        template = (request or {}).get("template", "base")
+        timeout_sec = (request or {}).get("timeout_sec", 300)
+        session = await _sandbox_mgr.create(template=template, timeout_sec=timeout_sec)
+        return {"sandbox_id": session.sandbox_id, "template": session.template, "status": session.status}
+
+    @app.post("/sandbox/exec")
+    async def sandbox_exec(request: dict[str, Any]) -> dict[str, Any]:
+        """Execute a command in a sandbox."""
+        command = request.get("command", "")
+        if not command:
+            raise HTTPException(status_code=400, detail="command required")
+        result = await _sandbox_mgr.exec(
+            command=command,
+            sandbox_id=request.get("sandbox_id"),
+            timeout_ms=int(request.get("timeout_ms", 30000)),
+        )
+        return {
+            "sandbox_id": result.sandbox_id,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "exit_code": result.exit_code,
+            "duration_ms": result.duration_ms,
+        }
+
+    @app.post("/sandbox/file/write")
+    async def sandbox_file_write(request: dict[str, Any]) -> dict[str, Any]:
+        """Write a file in a sandbox."""
+        path = request.get("path", "")
+        content = request.get("content")
+        if not path or content is None:
+            raise HTTPException(status_code=400, detail="path and content required")
+        result = await _sandbox_mgr.file_write(path=path, content=content, sandbox_id=request.get("sandbox_id"))
+        return {"sandbox_id": result.sandbox_id, "path": result.path, "success": result.success, "error": result.error}
+
+    @app.post("/sandbox/file/read")
+    async def sandbox_file_read(request: dict[str, Any]) -> dict[str, Any]:
+        """Read a file from a sandbox."""
+        path = request.get("path", "")
+        if not path:
+            raise HTTPException(status_code=400, detail="path required")
+        result = await _sandbox_mgr.file_read(path=path, sandbox_id=request.get("sandbox_id"))
+        return {"sandbox_id": result.sandbox_id, "path": result.path, "content": result.content, "success": result.success, "error": result.error}
+
+    @app.get("/sandbox/list")
+    async def sandbox_list() -> dict[str, Any]:
+        """List all active sandboxes."""
+        sandboxes = await _sandbox_mgr.list_sandboxes()
+        return {"sandboxes": sandboxes}
+
+    @app.post("/sandbox/kill")
+    async def sandbox_kill_endpoint(request: dict[str, Any]) -> dict[str, Any]:
+        """Kill a sandbox."""
+        sandbox_id = request.get("sandbox_id", "")
+        if not sandbox_id:
+            raise HTTPException(status_code=400, detail="sandbox_id required")
+        killed = await _sandbox_mgr.kill(sandbox_id=sandbox_id)
+        return {"killed": killed, "sandbox_id": sandbox_id}
+
+    @app.post("/sandbox/keepalive")
+    async def sandbox_keepalive(request: dict[str, Any]) -> dict[str, Any]:
+        """Extend sandbox timeout."""
+        sandbox_id = request.get("sandbox_id", "")
+        if not sandbox_id:
+            raise HTTPException(status_code=400, detail="sandbox_id required")
+        ok = await _sandbox_mgr.keepalive(sandbox_id=sandbox_id, timeout_sec=int(request.get("timeout_sec", 300)))
+        return {"kept_alive": ok, "sandbox_id": sandbox_id}
+
+    # ── Dashboard ─────────────────────────────────────────────────────────
+
+    @app.get("/dashboard")
+    async def dashboard():
+        """Serve the local dashboard SPA."""
+        from fastapi.responses import FileResponse
+        index = dashboard_dir / "index.html" if dashboard_dir.is_dir() else None
+        if index and index.exists():
+            return FileResponse(str(index))
+        return {"error": "Dashboard not found. Run 'agentos init' first."}
 
     return app
