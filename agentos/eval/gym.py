@@ -2,11 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
 from agentos.eval.grader import GradeResult, Grader
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AgentResult:
+    """Structured result from an agent run.
+
+    Agent functions can return either a plain ``str`` (backward-compatible)
+    or an ``AgentResult`` to supply cost and tool-call metadata that the
+    gym will propagate into ``TrialResult``.
+    """
+
+    output: str
+    cost_usd: float = 0.0
+    tool_calls_count: int = 0
+    model: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -27,6 +47,8 @@ class TrialResult:
     cost_usd: float = 0.0
     output: str = ""
     tool_calls_count: int = 0
+    error: str | None = None  # Non-None when the trial failed with an exception
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -49,6 +71,9 @@ class EvalReport:
     model: str = ""
     tools_available: list[str] = field(default_factory=list)
 
+    # Error tracking
+    error_count: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize for JSON export."""
         return {
@@ -60,6 +85,7 @@ class EvalReport:
             "pass_rate": self.pass_rate,
             "pass_count": self.pass_count,
             "fail_count": self.fail_count,
+            "error_count": self.error_count,
             "avg_score": self.avg_score,
             "avg_latency_ms": self.avg_latency_ms,
             "total_cost_usd": self.total_cost_usd,
@@ -125,7 +151,15 @@ class EvalReport:
         return self.pass_count / total_calls
 
 
-AgentFn = Callable[[str], Coroutine[Any, Any, str]]
+# Agent functions can return str (backward-compatible) or AgentResult.
+AgentFn = Callable[[str], Coroutine[Any, Any, str | AgentResult]]
+
+
+def _unpack_agent_output(raw: str | AgentResult) -> AgentResult:
+    """Normalize an agent function's return value to AgentResult."""
+    if isinstance(raw, AgentResult):
+        return raw
+    return AgentResult(output=str(raw))
 
 
 class EvalGym:
@@ -133,10 +167,23 @@ class EvalGym:
 
     Runs multiple trials per task to account for LLM non-determinism.
     Produces aggregate reports with pass rate, latency, and cost metrics.
+
+    Features:
+    - Per-trial timeout (``trial_timeout_seconds``)
+    - Graceful error handling (exceptions → error trials, not crashes)
+    - Parallel execution (``max_concurrency`` > 1)
+    - Cost and tool-call tracking via ``AgentResult``
     """
 
-    def __init__(self, trials_per_task: int = 5) -> None:
+    def __init__(
+        self,
+        trials_per_task: int = 5,
+        trial_timeout_seconds: float | None = None,
+        max_concurrency: int = 1,
+    ) -> None:
         self.trials_per_task = trials_per_task
+        self.trial_timeout_seconds = trial_timeout_seconds
+        self.max_concurrency = max(1, max_concurrency)
         self._tasks: list[EvalTask] = []
 
     def add_task(self, task: EvalTask) -> None:
@@ -145,26 +192,94 @@ class EvalGym:
     def add_tasks(self, tasks: list[EvalTask]) -> None:
         self._tasks.extend(tasks)
 
+    async def _run_single_trial(
+        self,
+        task: EvalTask,
+        trial: int,
+        agent_fn: AgentFn,
+    ) -> TrialResult:
+        """Execute a single trial with timeout and error handling."""
+        start = time.monotonic()
+        try:
+            coro = agent_fn(task.input)
+            if self.trial_timeout_seconds:
+                raw = await asyncio.wait_for(coro, timeout=self.trial_timeout_seconds)
+            else:
+                raw = await coro
+            elapsed = (time.monotonic() - start) * 1000
+
+            result = _unpack_agent_output(raw)
+            grade = task.grader.grade(task.expected, result.output)
+            return TrialResult(
+                task_name=task.name,
+                trial=trial,
+                grade=grade,
+                latency_ms=elapsed,
+                cost_usd=result.cost_usd,
+                output=result.output,
+                tool_calls_count=result.tool_calls_count,
+                metadata=result.metadata,
+            )
+        except asyncio.TimeoutError:
+            elapsed = (time.monotonic() - start) * 1000
+            logger.warning(
+                "Trial %d of task '%s' timed out after %.1fs",
+                trial, task.name, self.trial_timeout_seconds,
+            )
+            return TrialResult(
+                task_name=task.name,
+                trial=trial,
+                grade=GradeResult(score=0.0, passed=False, details={"error": "timeout"}),
+                latency_ms=elapsed,
+                error=f"Timed out after {self.trial_timeout_seconds:.0f}s",
+            )
+        except Exception as exc:
+            elapsed = (time.monotonic() - start) * 1000
+            logger.warning(
+                "Trial %d of task '%s' failed: %s", trial, task.name, exc,
+            )
+            return TrialResult(
+                task_name=task.name,
+                trial=trial,
+                grade=GradeResult(score=0.0, passed=False, details={"error": str(exc)}),
+                latency_ms=elapsed,
+                error=str(exc),
+            )
+
     async def run(self, agent_fn: AgentFn) -> EvalReport:
-        """Run all tasks through the agent and produce a report."""
-        results: list[TrialResult] = []
+        """Run all tasks through the agent and produce a report.
 
-        for task in self._tasks:
-            for trial in range(1, self.trials_per_task + 1):
-                start = time.monotonic()
-                output = await agent_fn(task.input)
-                elapsed = (time.monotonic() - start) * 1000
+        Supports parallel execution when ``max_concurrency > 1``.
+        Handles exceptions and timeouts gracefully per trial.
+        """
+        # Build list of (task, trial_number) pairs
+        work: list[tuple[EvalTask, int]] = [
+            (task, trial)
+            for task in self._tasks
+            for trial in range(1, self.trials_per_task + 1)
+        ]
 
-                grade = task.grader.grade(task.expected, output)
-                results.append(TrialResult(
-                    task_name=task.name,
-                    trial=trial,
-                    grade=grade,
-                    latency_ms=elapsed,
-                    output=output,
-                ))
+        if self.max_concurrency <= 1:
+            # Sequential — simple and deterministic
+            results = [
+                await self._run_single_trial(task, trial, agent_fn)
+                for task, trial in work
+            ]
+        else:
+            # Parallel with bounded concurrency
+            semaphore = asyncio.Semaphore(self.max_concurrency)
+
+            async def bounded(task: EvalTask, trial: int) -> TrialResult:
+                async with semaphore:
+                    return await self._run_single_trial(task, trial, agent_fn)
+
+            results = await asyncio.gather(
+                *(bounded(task, trial) for task, trial in work)
+            )
+            results = list(results)
 
         pass_count = sum(1 for r in results if r.grade.passed)
+        error_count = sum(1 for r in results if r.error is not None)
         scores = [r.grade.score for r in results]
         latencies = [r.latency_ms for r in results]
         tool_counts = [r.tool_calls_count for r in results]
@@ -180,4 +295,5 @@ class EvalGym:
             total_cost_usd=sum(costs),
             avg_tool_calls=sum(tool_counts) / len(tool_counts) if tool_counts else 0.0,
             trial_results=results,
+            error_count=error_count,
         )
