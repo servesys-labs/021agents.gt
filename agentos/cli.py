@@ -8,6 +8,10 @@ Usage:
     agentos run <name> "task"       — Run a named agent on a task
     agentos list                    — List all available agents
     agentos tools                   — List available tool plugins
+    agentos login                   — Authenticate via OAuth (GitHub/Google)
+    agentos logout                  — Remove stored credentials
+    agentos whoami                  — Show current authenticated user
+    agentos serve                   — Start local API server with dashboard
     agentos deploy <name>           — Deploy an agent (Cloudflare Workers)
     agentos chat <name>             — Interactive chat session with an agent
 """
@@ -89,6 +93,27 @@ def main() -> None:
     evolve_p.add_argument("--surface-ratio", type=float, default=0.1, help="Fraction of proposals to surface (default: 0.1)")
     evolve_p.add_argument("--export", type=str, default=None, help="Export evolution state to JSON")
 
+    # --- login ---
+    login_p = sub.add_parser("login", help="Authenticate with AgentOS (OAuth device flow)")
+    login_p.add_argument(
+        "--provider", type=str, default="github",
+        choices=["github", "google"],
+        help="OAuth provider (default: github)",
+    )
+    login_p.add_argument("--server", type=str, default="", help="AgentOS server URL")
+
+    # --- logout ---
+    logout_p = sub.add_parser("logout", help="Remove stored credentials")
+    logout_p.add_argument("--server", type=str, default="", help="Server to logout from")
+
+    # --- whoami ---
+    sub.add_parser("whoami", help="Show current authenticated user")
+
+    # --- serve ---
+    serve_p = sub.add_parser("serve", help="Start local API server with dashboard")
+    serve_p.add_argument("--port", type=int, default=8340, help="Port (default: 8340)")
+    serve_p.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
+
     # --- deploy ---
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
     deploy_p.add_argument("name", help="Agent name or path")
@@ -125,6 +150,14 @@ def main() -> None:
             asyncio.run(cmd_eval(args))
         elif args.command == "evolve":
             asyncio.run(cmd_evolve(args))
+        elif args.command == "login":
+            cmd_login(args)
+        elif args.command == "logout":
+            cmd_logout(args)
+        elif args.command == "whoami":
+            cmd_whoami(args)
+        elif args.command == "serve":
+            cmd_serve(args)
         elif args.command == "deploy":
             cmd_deploy(args)
     except FileNotFoundError as exc:
@@ -1018,6 +1051,160 @@ def _slugify(name: str) -> str:
     import re
     slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.lower()).strip("-")
     return slug or "my-agent"
+
+
+def cmd_login(args: argparse.Namespace) -> None:
+    """Authenticate via OAuth device flow (like `gh auth login`)."""
+    from agentos.auth.credentials import CredentialsStore, StoredCredential
+    from agentos.auth.jwt import create_token
+
+    provider = args.provider
+    server = args.server or "local"
+
+    print(f"Authenticating with {provider.title()}...")
+    print()
+
+    try:
+        if provider == "github":
+            from agentos.auth.oauth import (
+                github_get_user,
+                github_poll_for_token,
+                github_request_device_code,
+            )
+
+            dc = github_request_device_code()
+            print(f"  Open this URL in your browser:  {dc.verification_uri}")
+            print(f"  Enter this code:                {dc.user_code}")
+            print()
+            print("Waiting for authorization...", end="", flush=True)
+
+            access_token = github_poll_for_token(
+                dc.device_code, interval=dc.interval, timeout=dc.expires_in
+            )
+            if not access_token:
+                print("\nAuthorization failed or timed out.")
+                sys.exit(1)
+
+            user = github_get_user(access_token)
+
+        elif provider == "google":
+            from agentos.auth.oauth import (
+                google_get_user,
+                google_poll_for_token,
+                google_request_device_code,
+            )
+
+            dc = google_request_device_code()
+            print(f"  Open this URL in your browser:  {dc.verification_uri}")
+            print(f"  Enter this code:                {dc.user_code}")
+            print()
+            print("Waiting for authorization...", end="", flush=True)
+
+            access_token = google_poll_for_token(
+                dc.device_code, interval=dc.interval, timeout=dc.expires_in
+            )
+            if not access_token:
+                print("\nAuthorization failed or timed out.")
+                sys.exit(1)
+
+            user = google_get_user(access_token)
+        else:
+            print(f"Unknown provider: {provider}")
+            sys.exit(1)
+
+        print(f" done!")
+        print()
+
+        # Issue AgentOS JWT
+        token = create_token(
+            user_id=user.id,
+            email=user.email,
+            name=user.name,
+            provider=user.provider,
+        )
+
+        # Store credential
+        store = CredentialsStore.load()
+        store.store(StoredCredential(
+            token=token,
+            user_id=user.id,
+            email=user.email,
+            name=user.name,
+            provider=user.provider,
+            server=server,
+        ))
+
+        print(f"Logged in as {user.name} ({user.email})")
+        print(f"  Provider: {user.provider}")
+        print(f"  User ID:  {user.id}")
+        print(f"  Server:   {server}")
+        print()
+        print(f"Credentials saved to ~/.agentos/credentials.json")
+
+    except ValueError as e:
+        print(f"Error: {e}")
+        print()
+        print("To set up OAuth:")
+        if provider == "github":
+            print("  1. Create a GitHub OAuth App: https://github.com/settings/developers")
+            print("  2. Enable 'Device Flow' in app settings")
+            print("  3. Set GITHUB_CLIENT_ID environment variable")
+        elif provider == "google":
+            print("  1. Create OAuth credentials: https://console.cloud.google.com/apis/credentials")
+            print("  2. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables")
+        sys.exit(1)
+
+
+def cmd_logout(args: argparse.Namespace) -> None:
+    """Remove stored credentials."""
+    from agentos.auth.credentials import CredentialsStore
+
+    store = CredentialsStore.load()
+    server = args.server or ""
+
+    if store.remove(server):
+        print(f"Logged out from {server or store.default_server or 'default server'}")
+    else:
+        print("No credentials found to remove.")
+
+
+def cmd_whoami(args: argparse.Namespace) -> None:
+    """Show current authenticated user."""
+    from agentos.auth.credentials import CredentialsStore
+
+    store = CredentialsStore.load()
+
+    if not store.credentials:
+        print("Not logged in. Run 'agentos login' to authenticate.")
+        return
+
+    for server, cred in store.credentials.items():
+        default = " (default)" if server == store.default_server else ""
+        print(f"{server}{default}:")
+        print(f"  User:     {cred.name} ({cred.email})")
+        print(f"  Provider: {cred.provider}")
+        print(f"  User ID:  {cred.user_id}")
+
+
+def cmd_serve(args: argparse.Namespace) -> None:
+    """Start local API server with dashboard."""
+    try:
+        import uvicorn
+    except ImportError:
+        print("Error: uvicorn not installed. Run: pip install uvicorn")
+        sys.exit(1)
+
+    print(f"Starting AgentOS server on http://{args.host}:{args.port}")
+    print(f"  Dashboard: http://{args.host}:{args.port}/dashboard")
+    print(f"  API:       http://{args.host}:{args.port}/health")
+    print()
+
+    uvicorn.run(
+        "agentos.api.app:create_app",
+        host=args.host,
+        port=args.port,
+        factory=True,
+    )
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:

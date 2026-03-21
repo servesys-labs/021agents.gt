@@ -30,7 +30,12 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
-  AGENTOS_API_KEY?: string; // Optional API key for auth
+  AGENTOS_API_KEY?: string; // Legacy API key auth (simple Bearer token)
+  AUTH_JWT_SECRET?: string; // JWT signing secret for user auth
+  GITHUB_CLIENT_ID?: string; // OAuth: GitHub device flow
+  GITHUB_CLIENT_SECRET?: string;
+  GOOGLE_CLIENT_ID?: string; // OAuth: Google device flow
+  GOOGLE_CLIENT_SECRET?: string;
   DEFAULT_PROVIDER: string; // "workers-ai" | "openai" | "anthropic"
   DEFAULT_MODEL: string;
 }
@@ -455,6 +460,29 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
         output TEXT DEFAULT '',
         created_at INTEGER NOT NULL
       )`;
+
+      // User accounts table
+      this.sql`CREATE TABLE IF NOT EXISTS users (
+        user_id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        name TEXT DEFAULT '',
+        password_hash TEXT DEFAULT '',
+        provider TEXT DEFAULT 'email',
+        created_at INTEGER NOT NULL
+      )`;
+
+      // Evolution proposals table
+      this.sql`CREATE TABLE IF NOT EXISTS evolution_proposals (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        rationale TEXT DEFAULT '',
+        category TEXT DEFAULT '',
+        priority REAL DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        modification TEXT DEFAULT '{}',
+        evidence TEXT DEFAULT '{}',
+        created_at INTEGER NOT NULL
+      )`;
     } catch (err) {
       console.error("Failed to initialize SQL tables:", err);
     }
@@ -495,13 +523,29 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
       return new Response(null, { headers: corsHeaders() });
     }
 
-    // API key auth — if AGENTOS_API_KEY is set, require Bearer token
-    if (this.env.AGENTOS_API_KEY) {
+    // Auth: public routes skip auth checks
+    const isPublicRoute = lastSegment === "health"
+      || lastTwoSegments === "auth/signup"
+      || lastTwoSegments === "auth/login"
+      || lastTwoSegments === "auth/device";
+
+    if (!isPublicRoute) {
       const authHeader = request.headers.get("Authorization") || "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-      // Allow health check without auth
-      if (lastSegment !== "health" && token !== this.env.AGENTOS_API_KEY) {
-        return jsonResponse({ error: "Unauthorized" }, 401);
+      const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+
+      if (bearerToken) {
+        // Try JWT first, then legacy API key
+        const jwtSecret = this.env.AUTH_JWT_SECRET;
+        if (jwtSecret) {
+          const claims = await verifyJWT(bearerToken, jwtSecret);
+          if (!claims && bearerToken !== this.env.AGENTOS_API_KEY) {
+            return jsonResponse({ error: "Invalid or expired token" }, 401);
+          }
+        } else if (this.env.AGENTOS_API_KEY && bearerToken !== this.env.AGENTOS_API_KEY) {
+          return jsonResponse({ error: "Unauthorized" }, 401);
+        }
+      } else if (this.env.AGENTOS_API_KEY || this.env.AUTH_JWT_SECRET) {
+        return jsonResponse({ error: "Authentication required" }, 401);
       }
     }
 
@@ -618,6 +662,173 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
           config: { ...this.state.config, ...updates },
         });
         return jsonResponse(this.state.config);
+      }
+
+      // ── Auth endpoints ────────────────────────────────────────
+
+      // POST /auth/signup — create account
+      if (request.method === "POST" && lastTwoSegments === "auth/signup") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ email: string; password: string; name?: string }>(request);
+        if (!body?.email || !body?.password) return jsonResponse({ error: "email and password required" }, 400);
+        if (body.password.length < 8) return jsonResponse({ error: "Password must be at least 8 characters" }, 400);
+
+        const existing = this.querySql<{ user_id: string }>`SELECT user_id FROM users WHERE email = ${body.email}`;
+        if (existing.length > 0) return jsonResponse({ error: "Email already registered" }, 409);
+
+        const userId = `email:${body.email.split("@")[0]}_${Date.now().toString(36)}`;
+        const passwordHash = await hashPassword(body.password);
+        const name = body.name || body.email.split("@")[0];
+
+        this.execSql`INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
+                     VALUES (${userId}, ${body.email}, ${name}, ${passwordHash}, 'email', ${Date.now()})`;
+
+        const secret = this.env.AUTH_JWT_SECRET || "dev-secret";
+        const token = await createJWT(
+          { sub: userId, email: body.email, name, provider: "email", iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 7 * 86400 },
+          secret
+        );
+
+        return jsonResponse({ token, user_id: userId, email: body.email, name, provider: "email" });
+      }
+
+      // POST /auth/login — email/password login
+      if (request.method === "POST" && lastTwoSegments === "auth/login") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ email: string; password: string }>(request);
+        if (!body?.email || !body?.password) return jsonResponse({ error: "email and password required" }, 400);
+
+        const users = this.querySql<{ user_id: string; email: string; name: string; password_hash: string; provider: string }>`
+          SELECT user_id, email, name, password_hash, provider FROM users WHERE email = ${body.email}`;
+        if (users.length === 0) return jsonResponse({ error: "Invalid email or password" }, 401);
+
+        const user = users[0];
+        if (!(await verifyPassword(body.password, user.password_hash))) {
+          return jsonResponse({ error: "Invalid email or password" }, 401);
+        }
+
+        const secret = this.env.AUTH_JWT_SECRET || "dev-secret";
+        const token = await createJWT(
+          { sub: user.user_id, email: user.email, name: user.name, provider: user.provider, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 7 * 86400 },
+          secret
+        );
+
+        return jsonResponse({ token, user_id: user.user_id, email: user.email, name: user.name, provider: user.provider });
+      }
+
+      // POST /auth/device — OAuth device code exchange (GitHub/Google)
+      if (request.method === "POST" && lastTwoSegments === "auth/device") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ provider: string; access_token: string }>(request);
+        if (!body?.provider || !body?.access_token) return jsonResponse({ error: "provider and access_token required" }, 400);
+
+        let userId = "", email = "", name = "";
+
+        if (body.provider === "github") {
+          const resp = await fetch("https://api.github.com/user", {
+            headers: { Authorization: `Bearer ${body.access_token}`, Accept: "application/json", "User-Agent": "AgentOS" },
+          });
+          const ghUser = await resp.json() as { id: number; login: string; name?: string; email?: string };
+          userId = `github:${ghUser.id}`;
+          name = ghUser.name || ghUser.login;
+          email = ghUser.email || "";
+
+          if (!email) {
+            try {
+              const emailResp = await fetch("https://api.github.com/user/emails", {
+                headers: { Authorization: `Bearer ${body.access_token}`, Accept: "application/json", "User-Agent": "AgentOS" },
+              });
+              const emails = await emailResp.json() as { email: string; primary: boolean }[];
+              const primary = emails.find((e) => e.primary);
+              if (primary) email = primary.email;
+            } catch {}
+          }
+        } else if (body.provider === "google") {
+          const resp = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+            headers: { Authorization: `Bearer ${body.access_token}` },
+          });
+          const gUser = await resp.json() as { id: string; email: string; name: string };
+          userId = `google:${gUser.id}`;
+          email = gUser.email;
+          name = gUser.name;
+        } else {
+          return jsonResponse({ error: "Unsupported provider" }, 400);
+        }
+
+        // Upsert user
+        const existing = this.querySql<{ user_id: string }>`SELECT user_id FROM users WHERE user_id = ${userId}`;
+        if (existing.length === 0) {
+          this.execSql`INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
+                       VALUES (${userId}, ${email}, ${name}, '', ${body.provider}, ${Date.now()})`;
+        }
+
+        const secret = this.env.AUTH_JWT_SECRET || "dev-secret";
+        const token = await createJWT(
+          { sub: userId, email, name, provider: body.provider, iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 7 * 86400 },
+          secret
+        );
+
+        return jsonResponse({ token, user_id: userId, email, name, provider: body.provider });
+      }
+
+      // GET /auth/me — current user
+      if (lastTwoSegments === "auth/me") {
+        const authHeader = request.headers.get("Authorization") || "";
+        const bearerToken = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        const secret = this.env.AUTH_JWT_SECRET || "dev-secret";
+        const claims = await verifyJWT(bearerToken, secret);
+        if (!claims) return jsonResponse({ error: "Invalid token" }, 401);
+        return jsonResponse({ user_id: claims.sub, email: claims.email, name: claims.name, provider: claims.provider });
+      }
+
+      // ── Evolution endpoints ─────────────────────────────────────
+
+      // GET /evolution/status — current evolution state
+      if (lastTwoSegments === "evolution/status" || lastSegment === "evolution") {
+        const episodes = this.querySql<{ id: string }>`SELECT id FROM episodes`;
+        const proposals = this.querySql<EvolutionProposal>`SELECT * FROM evolution_proposals ORDER BY priority DESC`;
+        return jsonResponse({
+          totalSessions: episodes.length,
+          proposals: proposals,
+          lastAnalyzedAt: 0,
+        });
+      }
+
+      // POST /evolution/analyze — run analysis on accumulated sessions
+      if (request.method === "POST" && lastTwoSegments === "evolution/analyze") {
+        const report = await this.runEvolutionAnalysis();
+        return jsonResponse(report);
+      }
+
+      // POST /evolution/proposals/:id/approve
+      if (request.method === "POST" && segments.includes("proposals")) {
+        const proposalId = segments[segments.length - 2] === "proposals" ? lastSegment : "";
+        if (proposalId && lastSegment === "approve") {
+          const pid = segments[segments.length - 2];
+          this.execSql`UPDATE evolution_proposals SET status = 'approved' WHERE id = ${pid}`;
+          return jsonResponse({ status: "approved", id: pid });
+        }
+        if (proposalId && lastSegment === "reject") {
+          const pid = segments[segments.length - 2];
+          this.execSql`UPDATE evolution_proposals SET status = 'rejected' WHERE id = ${pid}`;
+          return jsonResponse({ status: "rejected", id: pid });
+        }
+      }
+
+      // POST /evolution/apply — apply all approved proposals
+      if (request.method === "POST" && lastTwoSegments === "evolution/apply") {
+        const approved = this.querySql<EvolutionProposal>`SELECT * FROM evolution_proposals WHERE status = 'approved'`;
+        if (approved.length === 0) return jsonResponse({ message: "No approved proposals to apply" });
+
+        let config = { ...this.state.config };
+        for (const proposal of approved) {
+          const mod = JSON.parse(typeof proposal.modification === 'string' ? proposal.modification : JSON.stringify(proposal.modification));
+          config = { ...config, ...mod };
+          this.execSql`UPDATE evolution_proposals SET status = 'applied' WHERE id = ${proposal.id}`;
+        }
+
+        this.setState({ ...this.state, config });
+        return jsonResponse({ applied: approved.length, config });
       }
 
       return jsonResponse({ error: "Not found" }, 404);
@@ -934,6 +1145,104 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
     }
   }
 
+  // ---- Evolution Analysis (ported from Python FailureAnalyzer) ----
+
+  private async runEvolutionAnalysis(): Promise<AnalysisReport> {
+    const episodes = this.querySql<Episode>`SELECT * FROM episodes ORDER BY timestamp DESC LIMIT 100`;
+    const report: AnalysisReport = {
+      totalSessions: episodes.length,
+      successRate: 0,
+      failureClusters: [],
+      toolFailureRates: {},
+      unusedTools: [],
+      costAnomalies: [],
+      recommendations: [],
+    };
+
+    if (episodes.length < 3) {
+      report.recommendations.push(`Need at least 3 sessions for analysis. Currently have ${episodes.length}.`);
+      return report;
+    }
+
+    // Success rate
+    const successes = episodes.filter((e) => e.outcome === "success").length;
+    report.successRate = successes / episodes.length;
+
+    // Analyze procedures for tool failure patterns
+    const procedures = this.querySql<Procedure>`SELECT * FROM procedures`;
+    const totalCalls: Record<string, number> = {};
+    const failedCalls: Record<string, number> = {};
+
+    for (const proc of procedures) {
+      totalCalls[proc.name] = (totalCalls[proc.name] || 0) + proc.successCount + proc.failureCount;
+      failedCalls[proc.name] = (failedCalls[proc.name] || 0) + proc.failureCount;
+    }
+
+    for (const [tool, total] of Object.entries(totalCalls)) {
+      if (total > 0) {
+        const rate = (failedCalls[tool] || 0) / total;
+        report.toolFailureRates[tool] = rate;
+      }
+    }
+
+    // Generate recommendations
+    if (report.successRate < 0.7) {
+      report.recommendations.push(
+        `Success rate is ${(report.successRate * 100).toFixed(0)}% — below 70% threshold.`
+      );
+    }
+
+    for (const [tool, rate] of Object.entries(report.toolFailureRates)) {
+      if (rate > 0.3) {
+        report.recommendations.push(
+          `Tool '${tool}' fails ${(rate * 100).toFixed(0)}% of the time. Consider fixing or adding fallback.`
+        );
+      }
+    }
+
+    // Generate proposals from findings
+    const proposals: EvolutionProposal[] = [];
+
+    if (report.successRate < 0.5) {
+      const proposal: EvolutionProposal = {
+        id: crypto.randomUUID(),
+        title: "Review system prompt (success rate below 50%)",
+        rationale: `Success rate is ${(report.successRate * 100).toFixed(0)}%. The system prompt may need improvement.`,
+        category: "prompt",
+        priority: 0.9,
+        status: "pending",
+        modification: {},
+        evidence: { successRate: report.successRate },
+        createdAt: Date.now(),
+      };
+      proposals.push(proposal);
+    }
+
+    for (const [tool, rate] of Object.entries(report.toolFailureRates)) {
+      if (rate > 0.3) {
+        proposals.push({
+          id: crypto.randomUUID(),
+          title: `Add failure guidance for tool '${tool}'`,
+          rationale: `Tool '${tool}' fails ${(rate * 100).toFixed(0)}% of calls.`,
+          category: "prompt",
+          priority: Math.min(0.9, rate + 0.3),
+          status: "pending",
+          modification: {},
+          evidence: { tool, failureRate: rate },
+          createdAt: Date.now(),
+        });
+      }
+    }
+
+    // Store proposals in SQLite
+    for (const p of proposals) {
+      this.execSql`INSERT OR IGNORE INTO evolution_proposals (id, title, rationale, category, priority, status, modification, evidence, created_at)
+                   VALUES (${p.id}, ${p.title}, ${p.rationale}, ${p.category}, ${p.priority}, ${p.status}, ${JSON.stringify(p.modification)}, ${JSON.stringify(p.evidence)}, ${p.createdAt})`;
+    }
+
+    return report;
+  }
+
   // ---- Eval Gym ----
 
   private async runEval(
@@ -1011,6 +1320,133 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
     const score = expWords.size > 0 ? overlap / expWords.size : 0;
     return { passed: score >= 0.5, score };
   }
+}
+
+// ---------------------------------------------------------------------------
+// JWT Auth (matches Python agentos/auth/jwt.py)
+// ---------------------------------------------------------------------------
+
+interface JWTClaims {
+  sub: string;
+  email: string;
+  name: string;
+  provider: string; // "github" | "google" | "email"
+  iat: number;
+  exp: number;
+}
+
+function b64urlEncode(data: Uint8Array): string {
+  let b64 = btoa(String.fromCharCode(...data));
+  return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function b64urlDecode(s: string): Uint8Array {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  const bin = atob(s);
+  return new Uint8Array([...bin].map((c) => c.charCodeAt(0)));
+}
+
+async function hmacSign(secret: string, data: string): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+  return new Uint8Array(sig);
+}
+
+async function createJWT(claims: JWTClaims, secret: string): Promise<string> {
+  const header = b64urlEncode(new TextEncoder().encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
+  const payload = b64urlEncode(new TextEncoder().encode(JSON.stringify(claims)));
+  const sig = await hmacSign(secret, `${header}.${payload}`);
+  return `${header}.${payload}.${b64urlEncode(sig)}`;
+}
+
+async function verifyJWT(token: string, secret: string): Promise<JWTClaims | null> {
+  try {
+    const [headerB64, payloadB64, sigB64] = token.split(".");
+    if (!headerB64 || !payloadB64 || !sigB64) return null;
+
+    const expected = await hmacSign(secret, `${headerB64}.${payloadB64}`);
+    const actual = b64urlDecode(sigB64);
+
+    if (expected.length !== actual.length) return null;
+    let match = true;
+    for (let i = 0; i < expected.length; i++) {
+      if (expected[i] !== actual[i]) match = false;
+    }
+    if (!match) return null;
+
+    const claims = JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64))) as JWTClaims;
+    if (claims.exp && Date.now() / 1000 > claims.exp) return null;
+
+    return claims;
+  } catch {
+    return null;
+  }
+}
+
+async function hashPassword(password: string, salt?: string): Promise<string> {
+  salt = salt || crypto.randomUUID().replace(/-/g, "").slice(0, 32);
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: new TextEncoder().encode(salt), iterations: 100000, hash: "SHA-256" },
+    key,
+    256
+  );
+  const hash = [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${salt}:${hash}`;
+}
+
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [salt] = stored.split(":");
+  const rehash = await hashPassword(password, salt);
+  return rehash === stored;
+}
+
+// ---------------------------------------------------------------------------
+// Evolution types (ported from Python agentos/evolution/)
+// ---------------------------------------------------------------------------
+
+interface EvolutionState {
+  enabled: boolean;
+  analyzeIntervalMs: number; // Default: 1 hour
+  minSessionsForAnalysis: number;
+  lastAnalyzedAt: number;
+  surfaceRatio: number;
+  proposals: EvolutionProposal[];
+}
+
+interface EvolutionProposal {
+  id: string;
+  title: string;
+  rationale: string;
+  category: string; // "prompt" | "tools" | "governance" | "model" | "memory"
+  priority: number;
+  status: string; // "pending" | "approved" | "rejected" | "applied" | "rolled_back"
+  modification: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  createdAt: number;
+}
+
+interface AnalysisReport {
+  totalSessions: number;
+  successRate: number;
+  failureClusters: { pattern: string; count: number; severity: number }[];
+  toolFailureRates: Record<string, number>;
+  unusedTools: string[];
+  costAnomalies: { sessionId: string; cost: number; factor: number }[];
+  recommendations: string[];
 }
 
 // ---------------------------------------------------------------------------

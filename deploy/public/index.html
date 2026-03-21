@@ -133,6 +133,44 @@
   <h1>AgentOS</h1>
   <p class="subtitle">Composable Autonomous Agent Framework — One-Click Edge Deployment</p>
 
+  <!-- Auth bar -->
+  <div id="auth-bar" style="display:flex;justify-content:flex-end;align-items:center;gap:0.75rem;margin-bottom:0.5rem;">
+    <span id="auth-status" style="color:var(--muted);font-size:0.85rem;"></span>
+    <button id="auth-btn" class="secondary" style="padding:0.3rem 0.8rem;font-size:0.8rem;" onclick="toggleAuthModal()">Sign In</button>
+  </div>
+
+  <!-- Auth Modal -->
+  <div id="auth-modal" class="hidden">
+    <div class="card" style="max-width:400px;margin:0 auto 1.5rem;">
+      <h2 id="auth-modal-title">Sign In</h2>
+      <div id="auth-login-fields">
+        <label>Email</label>
+        <input id="modal-email" type="email" placeholder="you@example.com" />
+        <label>Password</label>
+        <input id="modal-password" type="password" placeholder="Min 8 characters" />
+        <button onclick="doLogin()" style="width:100%;">Sign In</button>
+        <p style="text-align:center;margin-top:0.75rem;font-size:0.85rem;">
+          <span style="color:var(--muted);">No account? </span>
+          <a style="color:var(--accent);cursor:pointer;" onclick="toggleSignup()">Sign up</a>
+        </p>
+      </div>
+      <div id="auth-signup-fields" class="hidden">
+        <label>Name</label>
+        <input id="modal-name" type="text" placeholder="Your name" />
+        <label>Email</label>
+        <input id="modal-signup-email" type="email" placeholder="you@example.com" />
+        <label>Password</label>
+        <input id="modal-signup-password" type="password" placeholder="Min 8 characters" />
+        <button onclick="doSignup()" style="width:100%;">Create Account</button>
+        <p style="text-align:center;margin-top:0.75rem;font-size:0.85rem;">
+          <span style="color:var(--muted);">Have an account? </span>
+          <a style="color:var(--accent);cursor:pointer;" onclick="toggleSignup()">Sign in</a>
+        </p>
+      </div>
+      <div id="auth-modal-error" style="color:var(--red);margin-top:0.5rem;font-size:0.85rem;"></div>
+    </div>
+  </div>
+
   <div class="tabs">
     <div class="tab active" data-tab="deploy" onclick="switchTab('deploy')">Deploy</div>
     <div class="tab" data-tab="chat" onclick="switchTab('chat')">Chat</div>
@@ -519,6 +557,88 @@
   // --- Helpers ---
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
   function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  // --- Auth ---
+  let authToken = localStorage.getItem('agentos_token') || '';
+
+  function updateAuthUI() {
+    const bar = document.getElementById('auth-status');
+    const btn = document.getElementById('auth-btn');
+    if (authToken) {
+      bar.textContent = 'Authenticated';
+      btn.textContent = 'Logout';
+      btn.onclick = doLogout;
+    } else {
+      bar.textContent = '';
+      btn.textContent = 'Sign In';
+      btn.onclick = toggleAuthModal;
+    }
+    // Include token in auth headers
+    if (authToken) apiToken = authToken;
+  }
+
+  function toggleAuthModal() {
+    document.getElementById('auth-modal').classList.toggle('hidden');
+  }
+
+  function toggleSignup() {
+    document.getElementById('auth-login-fields').classList.toggle('hidden');
+    document.getElementById('auth-signup-fields').classList.toggle('hidden');
+    const title = document.getElementById('auth-modal-title');
+    title.textContent = title.textContent === 'Sign In' ? 'Create Account' : 'Sign In';
+  }
+
+  async function doLogin() {
+    const email = document.getElementById('modal-email').value;
+    const password = document.getElementById('modal-password').value;
+    const errEl = document.getElementById('auth-modal-error');
+    errEl.textContent = '';
+    try {
+      const resp = await fetch(getAgentUrl('/auth/login'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) { errEl.textContent = data.error || 'Login failed'; return; }
+      authToken = data.token;
+      apiToken = data.token;
+      localStorage.setItem('agentos_token', authToken);
+      toggleAuthModal();
+      updateAuthUI();
+    } catch (e) { errEl.textContent = 'Connection error'; }
+  }
+
+  async function doSignup() {
+    const name = document.getElementById('modal-name').value;
+    const email = document.getElementById('modal-signup-email').value;
+    const password = document.getElementById('modal-signup-password').value;
+    const errEl = document.getElementById('auth-modal-error');
+    errEl.textContent = '';
+    try {
+      const resp = await fetch(getAgentUrl('/auth/signup'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, name }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) { errEl.textContent = data.error || 'Signup failed'; return; }
+      authToken = data.token;
+      apiToken = data.token;
+      localStorage.setItem('agentos_token', authToken);
+      toggleAuthModal();
+      updateAuthUI();
+    } catch (e) { errEl.textContent = 'Connection error'; }
+  }
+
+  function doLogout() {
+    authToken = '';
+    apiToken = '';
+    localStorage.removeItem('agentos_token');
+    updateAuthUI();
+  }
+
+  updateAuthUI();
 
   // Auto-update model field when provider changes
   document.getElementById('deploy-provider').addEventListener('change', function() {

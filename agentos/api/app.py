@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -68,8 +69,20 @@ def _build_run_response(results: list) -> RunResponse:
 
 def create_app(harness: AgentHarness | None = None) -> FastAPI:
     """Create the AgentOS FastAPI application."""
+    from fastapi.staticfiles import StaticFiles
+
     app = FastAPI(title="AgentOS", version="0.1.0", description="Composable Autonomous Agent Framework")
     _harness = harness or AgentHarness.from_config_file()
+
+    # Mount auth routes (signup, login, /auth/me, token verify)
+    from agentos.auth.middleware import mount_auth_routes
+    mount_auth_routes(app)
+
+    # Serve local dashboard (same SPA as CF deploy)
+    import importlib.resources
+    dashboard_dir = Path(__file__).parent.parent / "dashboard"
+    if dashboard_dir.is_dir():
+        app.mount("/static", StaticFiles(directory=str(dashboard_dir)), name="static")
 
     # Cache of loaded Agent instances
     _agent_cache: dict[str, Any] = {}
@@ -151,5 +164,16 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
             except FileNotFoundError:
                 raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
         return _agent_cache[agent_name]._harness.tool_executor.available_tools()
+
+    # ── Dashboard ─────────────────────────────────────────────────────────
+
+    @app.get("/dashboard")
+    async def dashboard():
+        """Serve the local dashboard SPA."""
+        from fastapi.responses import FileResponse
+        index = dashboard_dir / "index.html" if dashboard_dir.is_dir() else None
+        if index and index.exists():
+            return FileResponse(str(index))
+        return {"error": "Dashboard not found. Run 'agentos init' first."}
 
     return app
