@@ -29,6 +29,13 @@ class EventType(str, Enum):
     SESSION_END = "session_end"
     GOVERNANCE_CHECK = "governance_check"
 
+    # Evolution events (outer-loop agent)
+    EVOLUTION_ANALYSIS = "evolution_analysis"
+    EVOLUTION_PROPOSAL = "evolution_proposal"
+    EVOLUTION_APPROVED = "evolution_approved"
+    EVOLUTION_APPLIED = "evolution_applied"
+    EVOLUTION_ROLLBACK = "evolution_rollback"
+
 
 @dataclass
 class Event:

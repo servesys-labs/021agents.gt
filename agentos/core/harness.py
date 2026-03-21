@@ -37,6 +37,9 @@ class TurnResult:
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     done: bool = False
+    stop_reason: str = ""  # completed / max_turns / budget / timeout / llm_error
+    cost_usd: float = 0.0
+    model_used: str = ""
 
 
 class AgentHarness:
@@ -99,6 +102,7 @@ class AgentHarness:
                 turn_number=self._turn or 1,
                 error=f"Timed out after {self.config.timeout_seconds:.0f}s",
                 done=True,
+                stop_reason="timeout",
             )]
 
     async def _run_inner(self, user_input: str) -> list[TurnResult]:
@@ -147,7 +151,10 @@ class AgentHarness:
             # 1. LLM call
             llm_response = await self._call_llm(messages)
             if llm_response is None:
-                result = TurnResult(turn_number=turn, error="LLM call failed", done=True)
+                stop = "budget" if not self.governance.check_budget(0.01) else "llm_error"
+                result = TurnResult(
+                    turn_number=turn, error="LLM call failed", done=True, stop_reason=stop,
+                )
                 results.append(result)
                 break
 
@@ -193,7 +200,12 @@ class AgentHarness:
                         messages.append({"role": "tool", "content": json.dumps(tr)})
             else:
                 # No tool calls — agent is done
-                result = TurnResult(turn_number=turn, llm_response=llm_response, done=True)
+                result = TurnResult(
+                    turn_number=turn, llm_response=llm_response, done=True,
+                    stop_reason="completed",
+                    cost_usd=llm_response.cost_usd,
+                    model_used=llm_response.model,
+                )
                 results.append(result)
 
                 # Store interaction in episodic memory
@@ -219,7 +231,13 @@ class AgentHarness:
         await self.event_bus.emit(Event(type=EventType.LLM_REQUEST))
         response = await self.llm_router.route(messages)
         await self.event_bus.emit(
-            Event(type=EventType.LLM_RESPONSE, data={"model": response.model})
+            Event(type=EventType.LLM_RESPONSE, data={
+                "model": response.model,
+                "content": response.content[:200] if response.content else "",
+                "cost_usd": response.cost_usd,
+                "input_tokens": getattr(response, "input_tokens", 0),
+                "output_tokens": getattr(response, "output_tokens", 0),
+            })
         )
         self.governance.record_cost(response.cost_usd)
         return response
