@@ -2,7 +2,10 @@
 
 Usage:
     agentos init [dir] [--name N]   — Scaffold a new agent project (with git + CI)
+    agentos init --template research — ...from a preset template
     agentos init --remote <url>     — ...and connect to a git remote
+    agentos init --dry-run          — Preview what would be created
+    agentos init --force            — Overwrite existing files on re-init
     agentos create                  — Conversationally build an agent with an LLM
     agentos create --one-shot DESC  — Build an agent from a one-line description
     agentos run <name> "task"       — Run a named agent on a task
@@ -29,6 +32,10 @@ import os
 import sys
 from pathlib import Path
 
+# Single source of truth for the default model used across init scaffolding.
+DEFAULT_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_PROVIDER = "anthropic"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -44,6 +51,13 @@ def main() -> None:
     init_p.add_argument("--remote", "-r", type=str, default=None, help="Git remote URL to connect")
     init_p.add_argument("--no-git", action="store_true", help="Skip git repository initialization")
     init_p.add_argument("--no-signing", action="store_true", help="Skip signing keypair generation")
+    init_p.add_argument(
+        "--template", "-t", type=str, default=None,
+        choices=["blank", "research", "support", "code-review"],
+        help="Start from a preset agent template (default: blank)",
+    )
+    init_p.add_argument("--dry-run", action="store_true", help="Preview what would be created without writing anything")
+    init_p.add_argument("--force", action="store_true", help="Overwrite existing files during re-initialization")
 
     # --- create ---
     create_p = sub.add_parser("create", help="Create a new agent (conversational)")
@@ -191,6 +205,121 @@ def main() -> None:
 # ── Commands ──────────────────────────────────────────────────────────────────
 
 
+def _should_write(path: Path, *, force: bool) -> bool:
+    """Return True if the path doesn't exist yet, or --force is set."""
+    return force or not path.exists()
+
+
+# ── Agent templates ──────────────────────────────────────────────────────────
+
+AGENT_TEMPLATES: dict[str, dict] = {
+    "blank": {
+        "description": "{name} — customize me!",
+        "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
+        "tools": [],
+        "max_turns": 50,
+        "governance": {
+            "budget_limit_usd": 10.0,
+            "require_confirmation_for_destructive": True,
+            "blocked_tools": [],
+            "allowed_domains": [],
+        },
+        "memory": {
+            "working": {"max_items": 100},
+            "episodic": {"max_episodes": 10000, "ttl_days": 90},
+            "procedural": {"max_procedures": 500},
+        },
+        "tags": ["starter"],
+    },
+    "research": {
+        "description": "A research agent that finds, synthesizes, and summarizes information",
+        "system_prompt": (
+            "You are a research assistant. When given a topic:\n"
+            "1. Search for relevant information using available tools\n"
+            "2. Cross-reference multiple sources for accuracy\n"
+            "3. Synthesize findings into a clear, structured summary\n"
+            "4. Cite your sources\n"
+            "5. Flag any conflicting information or uncertainty\n\n"
+            "Be thorough but concise. Prefer facts over opinions."
+        ),
+        "tools": ["web-search", "store-knowledge"],
+        "max_turns": 30,
+        "governance": {
+            "budget_limit_usd": 5.0,
+            "require_confirmation_for_destructive": True,
+            "blocked_tools": [],
+            "allowed_domains": [],
+        },
+        "memory": {
+            "working": {"max_items": 200},
+            "episodic": {"max_episodes": 5000, "ttl_days": 180},
+            "procedural": {"max_procedures": 100},
+        },
+        "tags": ["research", "knowledge", "synthesis"],
+    },
+    "support": {
+        "description": "A customer support agent that handles inquiries and troubleshoots issues",
+        "system_prompt": (
+            "You are a customer support agent. Your responsibilities:\n"
+            "1. Greet the customer warmly and acknowledge their issue\n"
+            "2. Ask clarifying questions to understand the problem\n"
+            "3. Search the knowledge base for relevant solutions\n"
+            "4. Provide step-by-step troubleshooting guidance\n"
+            "5. Escalate to a human if you cannot resolve the issue after 3 attempts\n\n"
+            "Rules:\n"
+            "- Never make up information about products or policies\n"
+            "- Always verify information against the knowledge base\n"
+            "- Be empathetic and patient\n"
+            "- Keep responses concise but complete"
+        ),
+        "tools": ["knowledge-search"],
+        "max_turns": 20,
+        "governance": {
+            "budget_limit_usd": 2.0,
+            "require_confirmation_for_destructive": True,
+            "blocked_tools": ["web-search"],
+            "allowed_domains": [],
+        },
+        "memory": {
+            "working": {"max_items": 50},
+            "episodic": {"max_episodes": 50000, "ttl_days": 365},
+            "procedural": {"max_procedures": 200},
+        },
+        "tags": ["support", "customer-facing", "troubleshooting"],
+    },
+    "code-review": {
+        "description": "A code reviewer that checks for bugs, security issues, and style",
+        "system_prompt": (
+            "You are a senior code reviewer. When given code to review:\n"
+            "1. Check for bugs and logical errors\n"
+            "2. Identify security vulnerabilities (OWASP Top 10)\n"
+            "3. Flag performance issues and suggest optimizations\n"
+            "4. Check for code style and readability\n"
+            "5. Suggest concrete improvements with code examples\n\n"
+            "Structure your review as:\n"
+            "- **Critical**: Must fix before merge (bugs, security)\n"
+            "- **Important**: Should fix (performance, maintainability)\n"
+            "- **Suggestion**: Nice to have (style, minor improvements)\n\n"
+            "Be specific. Reference line numbers. Show corrected code."
+        ),
+        "tools": [],
+        "max_turns": 10,
+        "governance": {
+            "budget_limit_usd": 5.0,
+            "require_confirmation_for_destructive": True,
+            "blocked_tools": [],
+            "allowed_domains": [],
+        },
+        "memory": {
+            "working": {"max_items": 100},
+            "episodic": {"max_episodes": 2000, "ttl_days": 90},
+            "procedural": {"max_procedures": 50},
+        },
+        "tags": ["code-review", "security", "development"],
+    },
+}
+
+
 def cmd_init(args: argparse.Namespace) -> None:
     """Scaffold a new agent project — identity, security, sessions, CI/CD."""
     import subprocess
@@ -199,12 +328,51 @@ def cmd_init(args: argparse.Namespace) -> None:
     from agentos.core.identity import AgentIdentity, write_keypair
 
     directory = Path(args.directory).resolve()
+    force = args.force
+    dry_run = args.dry_run
+    template_name = args.template or "blank"
+
+    # ── Input validation ─────────────────────────────────────────────────
+    if directory.exists() and directory.is_file():
+        print(f"Error: '{directory}' is a file, not a directory.")
+        sys.exit(1)
+
     agent_name = args.name or _slugify(directory.name)
+    template = AGENT_TEMPLATES[template_name]
     created: list[str] = []
     skipped: list[str] = []
+    overwritten: list[str] = []
 
-    print(f"Initializing AgentOS project in {directory}")
-    print()
+    if dry_run:
+        print(f"[dry-run] Would initialize AgentOS project in {directory}")
+        print(f"[dry-run] Agent name: {agent_name}")
+        print(f"[dry-run] Template: {template_name}")
+        print()
+    else:
+        print(f"Initializing AgentOS project in {directory}")
+        if template_name != "blank":
+            print(f"  Template: {template_name}")
+        print()
+
+    def _track(label: str, path: Path) -> bool:
+        """Track file creation. Returns True if we should write."""
+        existed = path.exists()
+        if dry_run:
+            if existed and not force:
+                skipped.append(label)
+            elif existed and force:
+                overwritten.append(label)
+            else:
+                created.append(label)
+            return False  # never write in dry-run
+        if existed and not force:
+            skipped.append(label)
+            return False
+        if existed and force:
+            overwritten.append(label)
+            return True
+        created.append(label)
+        return True
 
     # ── Directory structure ──────────────────────────────────────────────
     for d in ("agents", "tools", "data", "eval", "sessions"):
@@ -212,43 +380,42 @@ def cmd_init(args: argparse.Namespace) -> None:
         if dir_path.exists():
             skipped.append(f"{d}/")
         else:
-            dir_path.mkdir(parents=True, exist_ok=True)
+            if not dry_run:
+                dir_path.mkdir(parents=True, exist_ok=True)
             created.append(f"{d}/")
 
     # ── SQLite database (the agent's persistent brain) ────────────────────
     db_path = directory / "data" / "agent.db"
-    if not db_path.exists():
+    if _track("data/agent.db (SQLite — WAL mode)", db_path):
         from agentos.core.database import create_database
         db = create_database(db_path)
         db.close()
-        created.append("data/agent.db (SQLite — WAL mode)")
-    else:
-        skipped.append("data/agent.db")
 
     # ── Agent identity (generated once, immutable) ───────────────────────
+    # Identity is special: --force does NOT regenerate it (it's immutable).
     identity_path = directory / "agents" / ".identity.json"
     if not identity_path.exists():
         identity, secret_key = AgentIdentity.generate(
             with_signing=not args.no_signing,
         )
-        identity_path.write_text(json.dumps(identity.to_dict(), indent=2) + "\n")
+        if not dry_run:
+            identity_path.write_text(json.dumps(identity.to_dict(), indent=2) + "\n")
         created.append("agents/.identity.json")
         agent_id = identity.agent_id
     else:
-        # Preserve existing identity on re-init
         existing = json.loads(identity_path.read_text())
         agent_id = existing.get("agent_id", "")
         secret_key = ""  # Already written to .keys/
-        skipped.append("agents/.identity.json")
+        skipped.append("agents/.identity.json (immutable)")
 
     # ── Signing keypair ──────────────────────────────────────────────────
     keys_dir = directory / ".keys"
     if not args.no_signing and secret_key:
-        from agentos.core.identity import AgentIdentity as _id
-        identity_data = json.loads(identity_path.read_text())
+        identity_data = json.loads(identity_path.read_text()) if identity_path.exists() else {}
         fingerprint = identity_data.get("fingerprint", "")
         if fingerprint and not (keys_dir / "agent.key").exists():
-            write_keypair(keys_dir, secret_key, fingerprint)
+            if not dry_run:
+                write_keypair(keys_dir, secret_key, fingerprint)
             created.append(".keys/agent.pub (public — safe to commit)")
             created.append(".keys/agent.key (SECRET — gitignored)")
         elif (keys_dir / "agent.key").exists():
@@ -258,7 +425,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     # ── Project config (agentos.yaml) ────────────────────────────────────
     project_config_path = directory / "agentos.yaml"
-    if not project_config_path.exists():
+    if _track("agentos.yaml", project_config_path):
         init_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         project_config_path.write_text(
             f"# AgentOS project configuration\n"
@@ -270,8 +437,8 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"\n"
             f"# ── LLM defaults ─────────────────────────────────────────\n"
             f"defaults:\n"
-            f"  model: claude-sonnet-4-20250514\n"
-            f"  provider: anthropic\n"
+            f"  model: {DEFAULT_MODEL}\n"
+            f"  provider: {DEFAULT_PROVIDER}\n"
             f"  max_turns: 50\n"
             f"  budget_limit_usd: 10.0\n"
             f"\n"
@@ -338,42 +505,29 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"  eval: eval/\n"
             f"  database: data/agent.db\n"
         )
-        created.append("agentos.yaml")
-    else:
-        skipped.append("agentos.yaml")
 
-    # ── Starter agent definition ─────────────────────────────────────────
+    # ── Agent definition (from template) ──────────────────────────────────
     agent_path = directory / "agents" / f"{agent_name}.json"
-    if not agent_path.exists():
+    if _track(f"agents/{agent_name}.json", agent_path):
+        description = template["description"].format(name=agent_name)
         starter = {
             "name": agent_name,
             "agent_id": agent_id,
-            "description": f"{agent_name} — customize me!",
+            "description": description,
             "version": "0.1.0",
-            "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
-            "model": "claude-sonnet-4-20250514",
-            "tools": [],
-            "governance": {
-                "budget_limit_usd": 10.0,
-                "require_confirmation_for_destructive": True,
-                "blocked_tools": [],
-                "allowed_domains": [],
-            },
-            "memory": {
-                "working": {"max_items": 100},
-                "episodic": {"max_episodes": 10000, "ttl_days": 90},
-                "procedural": {"max_procedures": 500},
-            },
-            "tags": ["starter"],
+            "system_prompt": template["system_prompt"],
+            "model": DEFAULT_MODEL,
+            "tools": template["tools"],
+            "governance": template["governance"],
+            "memory": template["memory"],
+            "max_turns": template.get("max_turns", 50),
+            "tags": template["tags"],
         }
         agent_path.write_text(json.dumps(starter, indent=2) + "\n")
-        created.append(f"agents/{agent_name}.json")
-    else:
-        skipped.append(f"agents/{agent_name}.json")
 
     # ── Starter tool plugin ──────────────────────────────────────────────
     tool_path = directory / "tools" / "example-search.json"
-    if not tool_path.exists():
+    if _track("tools/example-search.json", tool_path):
         tool_example = {
             "name": "example-search",
             "description": "Example search tool — replace with your own implementation",
@@ -386,13 +540,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             },
         }
         tool_path.write_text(json.dumps(tool_example, indent=2) + "\n")
-        created.append("tools/example-search.json")
-    else:
-        skipped.append("tools/example-search.json")
 
     # ── Starter eval task ────────────────────────────────────────────────
     eval_path = directory / "eval" / "smoke-test.json"
-    if not eval_path.exists():
+    if _track("eval/smoke-test.json", eval_path):
         eval_task = [
             {
                 "name": "greeting",
@@ -402,13 +553,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             }
         ]
         eval_path.write_text(json.dumps(eval_task, indent=2) + "\n")
-        created.append("eval/smoke-test.json")
-    else:
-        skipped.append("eval/smoke-test.json")
 
     # ── .env.example (declares required secrets without values) ──────────
     env_example_path = directory / ".env.example"
-    if not env_example_path.exists():
+    if _track(".env.example", env_example_path):
         env_example_path.write_text(
             "# AgentOS environment variables\n"
             "# Copy to .env and fill in your values:\n"
@@ -418,6 +566,9 @@ def cmd_init(args: argparse.Namespace) -> None:
             "ANTHROPIC_API_KEY=\n"
             "OPENAI_API_KEY=\n"
             "\n"
+            "# Sandbox (optional — enables agentos sandbox)\n"
+            "E2B_API_KEY=\n"
+            "\n"
             "# Observability (optional)\n"
             "OBSERVABILITY_TOKEN=\n"
             "\n"
@@ -425,13 +576,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             "CLOUDFLARE_API_TOKEN=\n"
             "CLOUDFLARE_ACCOUNT_ID=\n"
         )
-        created.append(".env.example")
-    else:
-        skipped.append(".env.example")
 
     # ── .gitignore ───────────────────────────────────────────────────────
     gitignore_path = directory / ".gitignore"
-    if not gitignore_path.exists():
+    if _track(".gitignore", gitignore_path):
         gitignore_path.write_text(
             "# AgentOS\n"
             "data/agent.db\n"
@@ -467,15 +615,13 @@ def cmd_init(args: argparse.Namespace) -> None:
             ".DS_Store\n"
             "Thumbs.db\n"
         )
-        created.append(".gitignore")
-    else:
-        skipped.append(".gitignore")
 
     # ── GitHub Actions CI ────────────────────────────────────────────────
     ci_dir = directory / ".github" / "workflows"
     ci_path = ci_dir / "eval.yml"
-    if not ci_path.exists():
-        ci_dir.mkdir(parents=True, exist_ok=True)
+    if _track(".github/workflows/eval.yml", ci_path):
+        if not dry_run:
+            ci_dir.mkdir(parents=True, exist_ok=True)
         ci_path.write_text(
             "name: Agent Eval\n"
             "on:\n"
@@ -502,20 +648,24 @@ def cmd_init(args: argparse.Namespace) -> None:
             "          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n"
             f"        run: agentos eval {agent_name} eval/smoke-test.json --trials 1\n"
         )
-        created.append(".github/workflows/eval.yml")
-    else:
-        skipped.append(".github/workflows/eval.yml")
 
     # ── Sessions keepfile (so git tracks the empty dir) ──────────────────
     sessions_keep = directory / "sessions" / ".gitkeep"
-    if not sessions_keep.exists():
+    if not dry_run and not sessions_keep.exists():
         sessions_keep.write_text("")
 
     # ── Git initialization ───────────────────────────────────────────────
     git_initialized = False
     git_remote_added = False
 
-    if not args.no_git:
+    # Files that init creates — only stage these, not the whole directory.
+    _init_files = [
+        "agents/", "tools/", "data/", "eval/", "sessions/",
+        "agentos.yaml", ".env.example", ".gitignore",
+        ".github/", ".keys/agent.pub",
+    ]
+
+    if not args.no_git and not dry_run:
         git_dir = directory / ".git"
         if not git_dir.exists():
             result = subprocess.run(
@@ -524,8 +674,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             )
             if result.returncode == 0:
                 git_initialized = True
+                # Only stage AgentOS files, not unrelated files in the directory.
+                existing = [f for f in _init_files if (directory / f.rstrip("/")).exists()]
                 subprocess.run(
-                    ["git", "add", "."], cwd=directory,
+                    ["git", "add", "--"] + existing, cwd=directory,
                     capture_output=True, text=True,
                 )
                 subprocess.run(
@@ -553,34 +705,42 @@ def cmd_init(args: argparse.Namespace) -> None:
                 else:
                     print(f"  Warning: Could not add remote: {result.stderr.strip()}")
             else:
-                existing = result.stdout.strip()
-                print(f"  Remote 'origin' already set to: {existing}")
+                existing_remote = result.stdout.strip()
+                print(f"  Remote 'origin' already set to: {existing_remote}")
 
     # ── Summary ──────────────────────────────────────────────────────────
+    prefix = "[dry-run] " if dry_run else ""
     if created:
-        print("Created:")
+        print(f"{prefix}Created:")
         for c in created:
             print(f"  + {c}")
+    if overwritten:
+        print(f"{prefix}Overwritten (--force):")
+        for o in overwritten:
+            print(f"  ~ {o}")
     if skipped:
-        print("Already exists (skipped):")
+        print(f"{prefix}Already exists (skipped):")
         for s in skipped:
             print(f"  - {s}")
 
     print(f"\nAgent ID: {agent_id}")
+    if template_name != "blank":
+        print(f"Template: {template_name}")
     if git_initialized:
-        print(f"Git repo initialized with initial commit.")
+        print("Git repo initialized with initial commit.")
     if git_remote_added:
         print(f"Remote 'origin' set to: {args.remote}")
-        print(f"  Push with: git push -u origin main")
+        print("  Push with: git push -u origin main")
 
-    print()
-    print("Next steps:")
-    print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
-    print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
-    print(f"  3. agentos run {agent_name} \"your task\"")
-    print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
-    if not args.no_git and not git_remote_added and not args.remote:
-        print(f"  5. git remote add origin <url> && git push -u origin main")
+    if not dry_run:
+        print()
+        print("Next steps:")
+        print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
+        print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
+        print(f"  3. agentos run {agent_name} \"your task\"")
+        print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
+        if not args.no_git and not git_remote_added and not args.remote:
+            print("  5. git remote add origin <url> && git push -u origin main")
 
 
 async def cmd_create(args: argparse.Namespace) -> None:
