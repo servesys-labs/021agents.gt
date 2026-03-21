@@ -42,6 +42,26 @@ class TestExtractJson:
         result = _extract_json(text)
         assert result is None
 
+    def test_extract_deeply_nested_json(self):
+        """Handles 3+ levels of nesting (governance > blocked_tools > etc)."""
+        text = 'Here: {"name": "deep", "governance": {"budget": 5, "rules": {"max": 10, "nested": {"level": 3}}}}'
+        result = _extract_json(text)
+        assert result is not None
+        assert result["name"] == "deep"
+        assert result["governance"]["rules"]["nested"]["level"] == 3
+
+    def test_extract_json_with_arrays(self):
+        text = '{"name": "arr", "tools": ["web-search", "store"], "governance": {"blocked": []}}'
+        result = _extract_json(text)
+        assert result is not None
+        assert result["tools"] == ["web-search", "store"]
+
+    def test_extract_json_with_strings_containing_braces(self):
+        text = '{"name": "tricky", "prompt": "Use {name} in your response"}'
+        result = _extract_json(text)
+        assert result is not None
+        assert result["name"] == "tricky"
+
 
 class TestSlugify:
     def test_basic(self):
