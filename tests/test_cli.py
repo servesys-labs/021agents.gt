@@ -838,6 +838,204 @@ class TestCmdList:
         assert "No agents found" in captured.out
 
 
+class TestLoadEvalTasks:
+    """Tests for the _load_eval_tasks helper (shared by eval + evolve)."""
+
+    def test_missing_file_exits(self, tmp_path):
+        from agentos.cli import _load_eval_tasks
+        with pytest.raises(SystemExit):
+            _load_eval_tasks(tmp_path / "nonexistent.json")
+
+    def test_malformed_json_exits(self, tmp_path):
+        from agentos.cli import _load_eval_tasks
+        bad = tmp_path / "bad.json"
+        bad.write_text("not json {{{")
+        with pytest.raises(SystemExit):
+            _load_eval_tasks(bad)
+
+    def test_empty_tasks_exits(self, tmp_path):
+        from agentos.cli import _load_eval_tasks
+        empty = tmp_path / "empty.json"
+        empty.write_text("[]")
+        with pytest.raises(SystemExit):
+            _load_eval_tasks(empty)
+
+    def test_missing_fields_exits(self, tmp_path):
+        from agentos.cli import _load_eval_tasks
+        bad = tmp_path / "missing.json"
+        bad.write_text('[{"input": "hello"}]')  # missing expected
+        with pytest.raises(SystemExit):
+            _load_eval_tasks(bad)
+
+    def test_unknown_grader_warns(self, tmp_path, capsys):
+        from agentos.cli import _load_eval_tasks
+        tasks = tmp_path / "tasks.json"
+        tasks.write_text(json.dumps([{"input": "hi", "expected": "hello", "grader": "fuzzy"}]))
+        gym, data = _load_eval_tasks(tasks)
+        captured = capsys.readouterr()
+        assert "Unknown grader type" in captured.err
+        assert len(data) == 1
+
+    def test_valid_tasks_load(self, tmp_path):
+        from agentos.cli import _load_eval_tasks
+        tasks = tmp_path / "tasks.json"
+        tasks.write_text(json.dumps([
+            {"input": "hi", "expected": "hello", "grader": "exact"},
+            {"input": "bye", "expected": "goodbye"},
+        ]))
+        gym, data = _load_eval_tasks(tasks)
+        assert len(data) == 2
+
+
+class TestNumericValidation:
+    """Tests for _validate_positive."""
+
+    def test_rejects_negative_timeout(self):
+        from agentos.cli import _validate_positive
+        with pytest.raises(SystemExit):
+            _validate_positive(-5, "timeout")
+
+    def test_rejects_zero_turns(self):
+        from agentos.cli import _validate_positive
+        with pytest.raises(SystemExit):
+            _validate_positive(0, "turns")
+
+    def test_allows_zero_budget(self):
+        from agentos.cli import _validate_positive
+        _validate_positive(0, "budget", allow_zero=True)  # should not raise
+
+    def test_allows_none(self):
+        from agentos.cli import _validate_positive
+        _validate_positive(None, "timeout")  # should not raise
+
+    def test_allows_positive(self):
+        from agentos.cli import _validate_positive
+        _validate_positive(42, "turns")  # should not raise
+
+
+class TestCmdChat:
+    """Tests for chat command."""
+
+    @pytest.mark.asyncio
+    async def test_chat_warns_mismatched_agent_id(self, tmp_path, capsys, monkeypatch):
+        """chat should warn if agent_id doesn't match project identity."""
+        from agentos.cli import cmd_chat
+        from agentos.agent import AgentConfig, save_agent_config
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        config = AgentConfig(name="test-agent", agent_id="agent-AAA")
+        save_agent_config(config, agents_dir / "test-agent.json")
+
+        identity = {"agent_id": "agent-BBB", "fingerprint": "xyz"}
+        (agents_dir / ".identity.json").write_text(json.dumps(identity))
+
+        # Simulate EOFError immediately to exit the chat loop
+        monkeypatch.setattr("builtins.input", lambda _: (_ for _ in ()).throw(EOFError))
+
+        class Args:
+            name = str(agents_dir / "test-agent.json")
+
+        await cmd_chat(Args())
+
+        captured = capsys.readouterr()
+        assert "Warning" in captured.err
+        assert "agent-AAA" in captured.err
+        assert "agent-BBB" in captured.err
+
+
+class TestCmdDeploy:
+    """Tests for deploy command."""
+
+    def test_deploy_no_deploy_dir(self, tmp_path, monkeypatch):
+        """deploy should exit 1 when no deploy/ dir exists."""
+        from agentos.cli import cmd_deploy
+        from agentos.agent import AgentConfig, save_agent_config
+
+        # Use a completely isolated directory with no deploy/ anywhere
+        isolated = tmp_path / "isolated"
+        isolated.mkdir()
+        agents_dir = isolated / "agents"
+        agents_dir.mkdir()
+        monkeypatch.chdir(isolated)
+
+        config = AgentConfig(name="test-agent")
+        save_agent_config(config, agents_dir / "test-agent.json")
+
+        # Patch __file__ resolution to prevent fallback to package deploy/
+        fake_parent = isolated / "fake_pkg"
+        fake_parent.mkdir()
+        monkeypatch.setattr("agentos.cli.Path.__file__", str(fake_parent / "cli.py"), raising=False)
+
+        class Args:
+            name = str(agents_dir / "test-agent.json")
+
+        # Patch Path(__file__) to avoid the package fallback
+        original_resolve = Path.resolve
+        def fake_resolve(self):
+            if "cli.py" in str(self):
+                return isolated / "fake_pkg" / "agentos" / "cli.py"
+            return original_resolve(self)
+
+        with patch.object(Path, "resolve", fake_resolve):
+            with pytest.raises(SystemExit):
+                cmd_deploy(Args())
+
+    def test_deploy_writes_config(self, tmp_path, monkeypatch, capsys):
+        """deploy should write agent-config.json into deploy/."""
+        from agentos.cli import cmd_deploy
+        from agentos.agent import AgentConfig, save_agent_config
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        deploy_dir = tmp_path / "deploy"
+        deploy_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        config = AgentConfig(name="my-bot", description="A bot")
+        save_agent_config(config, agents_dir / "my-bot.json")
+
+        class Args:
+            name = str(agents_dir / "my-bot.json")
+
+        cmd_deploy(Args())
+
+        deploy_config = deploy_dir / "agent-config.json"
+        assert deploy_config.exists()
+        data = json.loads(deploy_config.read_text())
+        assert data["agentName"] == "my-bot"
+        assert data["agentDescription"] == "A bot"
+
+
+class TestCmdIngest:
+    """Tests for ingest command."""
+
+    def test_ingest_index_has_length_not_text(self, tmp_path, capsys, monkeypatch):
+        """Ingest index should store document length, not truncated text."""
+        from agentos.cli import cmd_ingest
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+
+        doc_dir = tmp_path / "docs"
+        doc_dir.mkdir()
+        (doc_dir / "test.txt").write_text("Hello world " * 100)
+
+        class Args:
+            files = [str(doc_dir)]
+            chunk_size = 500
+
+        cmd_ingest(Args())
+
+        index = json.loads((tmp_path / "data" / "rag_index.json").read_text())
+        for doc in index["documents"]:
+            assert "text" not in doc
+            assert "length" in doc
+            assert isinstance(doc["length"], int)
+
+
 class TestCLIEntrypoint:
     def test_version_flag(self):
         result = subprocess.run(
