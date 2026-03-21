@@ -7,7 +7,7 @@ Usage:
     agentos init --dry-run          — Preview what would be created
     agentos init --force            — Overwrite existing files on re-init
     agentos create                  — Conversationally build an agent with an LLM
-    agentos create --one-shot DESC  — Build an agent from a one-line description
+    agentos create -1 DESC          — Build an agent from a one-line description
     agentos create --name N         — Override the generated agent name
     agentos create --output PATH    — Save agent definition to a custom path
     agentos create --force          — Overwrite an existing agent file
@@ -63,7 +63,7 @@ def main() -> None:
     # --- create ---
     create_p = sub.add_parser("create", help="Create a new agent (conversational)")
     create_p.add_argument(
-        "--one-shot", "-o", type=str, default=None,
+        "--one-shot", "-1", type=str, default=None,
         help="Create from a one-line description (skip conversation)",
     )
     create_p.add_argument(
@@ -103,6 +103,7 @@ def main() -> None:
     run_p.add_argument("--turns", type=int, default=None, help="Max turns override")
     run_p.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
     run_p.add_argument("--budget", type=float, default=None, help="Budget limit in USD")
+    run_p.add_argument("--model", "-m", type=str, default=None, help="Override the LLM model")
     run_p.add_argument("--input-file", "-i", type=str, default=None, help="Read task from file")
     run_p.add_argument("--output", "-o", type=str, default=None, help="Write final output to file")
     run_p.add_argument("--json", dest="json_output", action="store_true", help="Output results as JSON")
@@ -220,13 +221,13 @@ def main() -> None:
         elif args.command == "deploy":
             cmd_deploy(args)
     except FileNotFoundError as exc:
-        print(f"Error: {exc}")
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\nAborted.")
+        print("\nAborted.", file=sys.stderr)
         sys.exit(1)
     except Exception as exc:
-        print(f"Error: {exc}")
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -252,7 +253,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     # ── Input validation ─────────────────────────────────────────────────
     if directory.exists() and directory.is_file():
-        print(f"Error: '{directory}' is a file, not a directory.")
+        print(f"Error: '{directory}' is a file, not a directory.", file=sys.stderr)
         sys.exit(1)
 
     agent_name = args.name or _slugify(directory.name)
@@ -657,9 +658,10 @@ def cmd_init(args: argparse.Namespace) -> None:
         print("Next steps:")
         print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
         if template_name == "orchestrator":
-            print(f"  2. agentos chat {agent_name}             (talk to the orchestrator)")
+            print(f"  2. agentos chat {agent_name}             (interactive — talk to the orchestrator)")
             print(f"     Ask it to: create agents, run evals, analyze failures, evolve agents")
-            print(f"  3. agentos create --one-shot \"description\" (or let the orchestrator do it)")
+            print(f"  3. agentos run {agent_name} \"create a support agent\"  (one-shot task)")
+            print(f"     Or: agentos run {agent_name} --json -o result.json  (scripted)")
             print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
         else:
             print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
@@ -741,8 +743,8 @@ async def cmd_create(args: argparse.Namespace) -> None:
             turn += 1
 
         if not builder.result:
-            print("No agent was created.")
-            return
+            print("No agent was created.", file=sys.stderr)
+            sys.exit(1)
 
         config = builder.result
 
@@ -756,11 +758,19 @@ async def cmd_create(args: argparse.Namespace) -> None:
     # ── Stamp agent_id from project identity ─────────────────────────────
     config = _stamp_project_identity(config, agents_dir)
 
+    # ── Stamp built_with so run can warn about stub-created agents ───────
+    from agentos.llm.provider import StubProvider
+    if isinstance(provider, StubProvider):
+        config.built_with = "stub"
+    else:
+        config.built_with = getattr(args, "provider", "") or "anthropic"
+
     # ── Collision check ──────────────────────────────────────────────────
-    save_path = Path(args.output) if args.output else (AGENTS_DIR / f"{config.name}.json")
+    from agentos.agent import _resolve_agents_dir
+    save_path = Path(args.output) if args.output else (_resolve_agents_dir() / f"{config.name}.json")
     if save_path.exists() and not args.force:
-        print(f"Error: Agent file already exists: {save_path}")
-        print("  Use --force to overwrite, or --name to pick a different name.")
+        print(f"Error: Agent file already exists: {save_path}", file=sys.stderr)
+        print("  Use --force to overwrite, or --name to pick a different name.", file=sys.stderr)
         sys.exit(1)
 
     # ── Save (directly via save_agent_config, not builder.save()) ────────
@@ -782,17 +792,36 @@ async def cmd_run(args: argparse.Namespace) -> None:
     from agentos.agent import Agent
 
     agent = _load_agent(args.name)
+    quiet = args.quiet or args.json_output
 
-    # Apply runtime overrides
-    if args.turns is not None:
-        agent.config.max_turns = args.turns
-    if args.timeout is not None:
-        agent.config.timeout_seconds = args.timeout
-    if args.budget is not None:
-        agent.config.governance["budget_limit_usd"] = args.budget
-        agent._harness.governance._policy.budget_limit_usd = args.budget
+    # ── Merge project defaults from agentos.yaml ─────────────────────────
+    project_config_path = Path.cwd() / "agentos.yaml"
+    project_defaults = _load_project_defaults(project_config_path)
+    if project_defaults:
+        agent.config = _apply_project_defaults(agent.config, project_defaults)
 
-    # Resolve task: --input-file > positional arg > stdin > interactive prompt
+    # ── Apply CLI runtime overrides (rebuild harness once) ────────────────
+    agent.apply_overrides(
+        turns=args.turns,
+        timeout=args.timeout,
+        budget=args.budget,
+        model=args.model,
+    )
+
+    # ── Validate agent_id against project identity ───────────────────────
+    if not quiet:
+        identity_path = Path.cwd() / "agents" / ".identity.json"
+        if identity_path.exists() and agent.config.agent_id:
+            try:
+                project_id = json.loads(identity_path.read_text()).get("agent_id", "")
+                if project_id and agent.config.agent_id != project_id:
+                    print(f"Warning: Agent '{agent.config.name}' has agent_id "
+                          f"'{agent.config.agent_id}' but project identity is "
+                          f"'{project_id}'.", file=sys.stderr)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # ── Resolve task: --input-file > positional arg > stdin > prompt ──────
     task = None
     if args.input_file:
         p = Path(args.input_file)
@@ -817,13 +846,17 @@ async def cmd_run(args: argparse.Namespace) -> None:
         print("   or: agentos run <name> --input-file task.txt", file=sys.stderr)
         sys.exit(1)
 
-    # Warn if using stub provider (unless --quiet or --json)
-    if not args.quiet and not args.json_output and agent.uses_stub_provider:
+    # ── Warn about stub provider (unless --quiet or --json) ──────────────
+    if not quiet and agent.uses_stub_provider:
         print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
         print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
+        if agent.config.built_with == "stub":
+            print("  This agent was also created with the stub provider —")
+            print("  re-create it with a real LLM for better results:")
+            print(f"    agentos create --one-shot \"{agent.config.description}\"")
         print()
 
-    if not args.quiet and not args.json_output:
+    if not quiet:
         print(f"Running agent '{agent.config.name}' on: {task}")
         print("-" * 40)
 
@@ -1629,16 +1662,16 @@ def _load_agent(name: str):
 
 def _load_agent_config(name: str):
     """Load an agent config from a name or file path."""
-    from agentos.agent import load_agent_config, AgentConfig
+    from agentos.agent import load_agent_config, _resolve_agents_dir
 
     path = Path(name)
     if path.exists() and path.is_file():
         return load_agent_config(path)
 
-    # Search in agents/ directory
-    from agentos.agent import AGENTS_DIR
+    # Search in agents/ directory (dynamic resolution)
+    agents_dir = _resolve_agents_dir()
     for ext in (".yaml", ".yml", ".json"):
-        p = AGENTS_DIR / f"{name}{ext}"
+        p = agents_dir / f"{name}{ext}"
         if p.exists():
             return load_agent_config(p)
 

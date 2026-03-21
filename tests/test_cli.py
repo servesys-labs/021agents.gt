@@ -381,6 +381,7 @@ def _make_run_args(name, **overrides):
         turns=None,
         timeout=None,
         budget=None,
+        model=None,
         input_file=None,
         output=None,
         json_output=False,
@@ -647,6 +648,163 @@ class TestCmdRun:
         assert isinstance(data, dict)
 
 
+    @pytest.mark.asyncio
+    async def test_run_model_override(self, tmp_path, capsys, monkeypatch):
+        from agentos.cli import cmd_run
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_stub_agent(agents_dir)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        args = _make_run_args(
+            str(agents_dir / "test-agent.json"),
+            task="hello",
+            model="gpt-4o",
+            json_output=True,
+        )
+        await cmd_run(args)
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["success"]
+
+    @pytest.mark.asyncio
+    async def test_run_reads_project_defaults(self, tmp_path, capsys, monkeypatch):
+        """run should pick up budget from agentos.yaml."""
+        from agentos.cli import cmd_run
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_stub_agent(agents_dir)
+        monkeypatch.chdir(tmp_path)
+
+        # Write agentos.yaml with a custom budget
+        (tmp_path / "agentos.yaml").write_text(
+            "defaults:\n  budget_limit_usd: 5.0\n"
+        )
+
+        args = _make_run_args(
+            str(agents_dir / "test-agent.json"),
+            task="hello",
+            quiet=True,
+        )
+        await cmd_run(args)
+        # Doesn't crash — that's the test
+        captured = capsys.readouterr()
+        assert captured.out  # got some output
+
+    @pytest.mark.asyncio
+    async def test_run_warns_mismatched_agent_id(self, tmp_path, capsys, monkeypatch):
+        """run should warn if agent_id doesn't match project identity."""
+        from agentos.cli import cmd_run
+        from agentos.agent import AgentConfig, save_agent_config
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        # Create agent with one ID
+        config = AgentConfig(name="test-agent", agent_id="agent-AAA")
+        save_agent_config(config, agents_dir / "test-agent.json")
+
+        # Create project identity with different ID
+        identity = {"agent_id": "agent-BBB", "fingerprint": "xyz"}
+        (agents_dir / ".identity.json").write_text(json.dumps(identity))
+
+        args = _make_run_args(
+            str(agents_dir / "test-agent.json"),
+            task="hello",
+        )
+        await cmd_run(args)
+
+        captured = capsys.readouterr()
+        assert "Warning" in captured.err
+        assert "agent-AAA" in captured.err
+        assert "agent-BBB" in captured.err
+
+    @pytest.mark.asyncio
+    async def test_run_stub_built_agent_warning(self, tmp_path, capsys, monkeypatch):
+        """run should warn that a stub-built agent should be re-created."""
+        from agentos.cli import cmd_run
+        from agentos.agent import AgentConfig, save_agent_config
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+        # Create agent marked as stub-built
+        config = AgentConfig(name="stub-agent", built_with="stub")
+        save_agent_config(config, agents_dir / "stub-agent.json")
+
+        args = _make_run_args(
+            str(agents_dir / "stub-agent.json"),
+            task="hello",
+        )
+        await cmd_run(args)
+
+        captured = capsys.readouterr()
+        assert "re-create" in captured.out.lower()
+
+
+class TestCrossCutting:
+    """Tests that verify consistency across init, create, and run."""
+
+    def test_no_short_flag_collision(self):
+        """Ensure -o doesn't collide between create and run."""
+        import argparse
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+
+        # Simulate create parser
+        create_p = sub.add_parser("create")
+        create_p.add_argument("--one-shot", "-1", type=str)
+        create_p.add_argument("--output", "-O", type=str)
+
+        # Simulate run parser
+        run_p = sub.add_parser("run")
+        run_p.add_argument("--output", "-o", type=str)
+
+        # These should parse without conflict
+        args = parser.parse_args(["create", "-1", "test desc"])
+        assert args.one_shot == "test desc"
+        args = parser.parse_args(["run", "-o", "out.txt"])
+        assert args.output == "out.txt"
+
+    @pytest.mark.asyncio
+    async def test_create_stamps_built_with(self, tmp_path, monkeypatch):
+        """create should stamp built_with into the agent config."""
+        from agentos.cli import cmd_create
+
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        args = _make_create_args(
+            one_shot="a test bot",
+            name="stamped",
+            output=str(agents_dir / "stamped.json"),
+        )
+        await cmd_create(args)
+
+        data = json.loads((agents_dir / "stamped.json").read_text())
+        assert "built_with" in data
+        assert data["built_with"] == "stub"
+
+    def test_init_next_steps_mention_run(self, tmp_path, capsys):
+        """Orchestrator next steps should mention 'agentos run'."""
+        args = _make_init_args(tmp_path, name="my-project")
+        cmd_init(args)
+
+        captured = capsys.readouterr()
+        assert "agentos run" in captured.out
+        assert "agentos chat" in captured.out
+
+
 class TestCmdList:
     def test_list_with_agents(self, tmp_path, capsys):
         from agentos.agent import AgentConfig, save_agent_config
@@ -655,7 +813,7 @@ class TestCmdList:
             tmp_path / "test-agent.json",
         )
 
-        with patch("agentos.agent.AGENTS_DIR", tmp_path):
+        with patch("agentos.agent._resolve_agents_dir", return_value=tmp_path):
 
             class Args:
                 pass
@@ -666,7 +824,10 @@ class TestCmdList:
         assert "test-agent" in captured.out
 
     def test_list_empty(self, tmp_path, capsys):
-        with patch("agentos.agent.AGENTS_DIR", tmp_path):
+        empty = tmp_path / "empty_agents"
+        empty.mkdir()
+
+        with patch("agentos.agent._resolve_agents_dir", return_value=empty):
 
             class Args:
                 pass

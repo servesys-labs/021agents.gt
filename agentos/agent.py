@@ -18,7 +18,11 @@ from agentos.defaults import DEFAULT_MODEL
 logger = logging.getLogger(__name__)
 
 def _resolve_agents_dir() -> Path:
-    """Resolve the agents directory — cwd/agents/ first, then package root."""
+    """Resolve the agents directory — cwd/agents/ first, then package root.
+
+    Called dynamically (not cached at import time) so that tests and
+    commands that change cwd after import still find the right directory.
+    """
     cwd_agents = Path.cwd() / "agents"
     if cwd_agents.is_dir():
         return cwd_agents
@@ -29,6 +33,8 @@ def _resolve_agents_dir() -> Path:
     return cwd_agents  # Default: will be created on save
 
 
+# Kept as a module-level alias for backward compatibility.
+# New code should call _resolve_agents_dir() for a fresh lookup.
 AGENTS_DIR = _resolve_agents_dir()
 
 
@@ -74,10 +80,11 @@ class AgentConfig:
     # Metadata
     tags: list[str] = field(default_factory=list)
     author: str = ""
+    built_with: str = ""  # "stub" | "anthropic" | "openai" | "" — how create built this agent
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict (for YAML/JSON output)."""
-        return {
+        d: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
             "version": self.version,
@@ -95,6 +102,9 @@ class AgentConfig:
             "tags": self.tags,
             "author": self.author,
         }
+        if self.built_with:
+            d["built_with"] = self.built_with
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
@@ -145,8 +155,9 @@ def load_agent_config(path: str | Path) -> AgentConfig:
 def save_agent_config(config: AgentConfig, path: str | Path | None = None) -> Path:
     """Save an agent definition to a YAML or JSON file."""
     if path is None:
-        AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-        path = AGENTS_DIR / f"{config.name}.json"
+        agents_dir = _resolve_agents_dir()
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        path = agents_dir / f"{config.name}.json"
     else:
         path = Path(path)
 
@@ -166,7 +177,7 @@ def save_agent_config(config: AgentConfig, path: str | Path | None = None) -> Pa
 
 def list_agents(directory: str | Path | None = None) -> list[AgentConfig]:
     """Discover all agent definitions in a directory."""
-    directory = Path(directory) if directory else AGENTS_DIR
+    directory = Path(directory) if directory else _resolve_agents_dir()
     if not directory.exists():
         return []
 
@@ -310,6 +321,36 @@ class Agent:
             for route in self._harness.llm_router._routes.values()
         )
 
+    def apply_overrides(
+        self,
+        *,
+        turns: int | None = None,
+        timeout: float | None = None,
+        budget: float | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Apply runtime overrides and rebuild the harness.
+
+        This is the safe way to change agent settings at runtime —
+        modifies the config and rebuilds the harness so all subsystems
+        pick up the changes (governance budget, LLM router, etc.).
+        """
+        changed = False
+        if turns is not None:
+            self.config.max_turns = turns
+            changed = True
+        if timeout is not None:
+            self.config.timeout_seconds = timeout
+            changed = True
+        if budget is not None:
+            self.config.governance["budget_limit_usd"] = budget
+            changed = True
+        if model is not None:
+            self.config.model = model
+            changed = True
+        if changed:
+            self._harness = self._build_harness()
+
     async def run(self, user_input: str) -> list:
         """Execute the agent on a user task."""
         return await self._harness.run(user_input)
@@ -322,7 +363,7 @@ class Agent:
     @classmethod
     def from_name(cls, name: str, directory: str | Path | None = None) -> Agent:
         """Load a named agent from the agents directory."""
-        directory = Path(directory) if directory else AGENTS_DIR
+        directory = Path(directory) if directory else _resolve_agents_dir()
         for ext in (".yaml", ".yml", ".json"):
             p = directory / f"{name}{ext}"
             if p.exists():
