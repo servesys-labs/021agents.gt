@@ -75,6 +75,15 @@ def main() -> None:
     eval_p.add_argument("tasks_file", help="JSON file with eval tasks")
     eval_p.add_argument("--trials", type=int, default=3, help="Trials per task (default: 3)")
 
+    # --- evolve ---
+    evolve_p = sub.add_parser("evolve", help="Continuous improvement loop for an agent")
+    evolve_p.add_argument("name", help="Agent name or path")
+    evolve_p.add_argument("tasks_file", help="JSON file with eval tasks (for baseline)")
+    evolve_p.add_argument("--trials", type=int, default=3, help="Trials per task (default: 3)")
+    evolve_p.add_argument("--min-sessions", type=int, default=5, help="Min sessions before analysis")
+    evolve_p.add_argument("--surface-ratio", type=float, default=0.1, help="Fraction of proposals to surface (default: 0.1)")
+    evolve_p.add_argument("--export", type=str, default=None, help="Export evolution state to JSON")
+
     # --- deploy ---
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
     deploy_p.add_argument("name", help="Agent name or path")
@@ -109,6 +118,8 @@ def main() -> None:
             cmd_ingest(args)
         elif args.command == "eval":
             asyncio.run(cmd_eval(args))
+        elif args.command == "evolve":
+            asyncio.run(cmd_evolve(args))
         elif args.command == "deploy":
             cmd_deploy(args)
     except FileNotFoundError as exc:
@@ -492,6 +503,171 @@ async def cmd_eval(args: argparse.Namespace) -> None:
     for task_name, trials in task_results.items():
         passed = sum(1 for t in trials if t.grade.passed)
         print(f"  {task_name}: {passed}/{len(trials)} passed")
+
+
+async def cmd_evolve(args: argparse.Namespace) -> None:
+    """Run the continuous evolution loop — observe, analyze, propose, review, apply."""
+    import json as _json
+    from pathlib import Path
+    from agentos.agent import Agent
+    from agentos.eval.gym import EvalGym, EvalTask
+    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
+    from agentos.evolution.loop import EvolutionLoop
+
+    agent = _load_agent(args.name)
+
+    # Load eval tasks
+    tasks_path = Path(args.tasks_file)
+    if not tasks_path.exists():
+        print(f"Error: Tasks file not found: {tasks_path}")
+        return
+
+    tasks_data = _json.loads(tasks_path.read_text())
+    if not isinstance(tasks_data, list):
+        tasks_data = [tasks_data]
+
+    # Set up the evolution loop
+    loop = EvolutionLoop.for_agent(
+        agent,
+        min_sessions_for_analysis=args.min_sessions,
+        surface_ratio=args.surface_ratio,
+    )
+
+    print(f"Evolution loop for '{agent.config.name}' v{agent.config.version}")
+    print(f"  Tasks: {len(tasks_data)} | Trials: {args.trials} | Surface ratio: {args.surface_ratio:.0%}")
+    print("=" * 60)
+
+    # Step 1: Run baseline eval (this populates the observer with session records)
+    print("\n[1/4] Running baseline evaluation...")
+
+    gym = EvalGym(trials_per_task=args.trials)
+    for t in tasks_data:
+        grader_type = t.get("grader", "contains")
+        grader = ExactMatchGrader() if grader_type == "exact" else ContainsGrader()
+        gym.add_task(EvalTask(
+            name=t.get("name", t.get("input", "")[:30]),
+            input=t["input"],
+            expected=t["expected"],
+            grader=grader,
+        ))
+
+    async def agent_fn(task_input: str) -> str:
+        results = await agent.run(task_input)
+        if results and results[-1].llm_response:
+            return results[-1].llm_response.content
+        return ""
+
+    baseline_report = await gym.run(agent_fn)
+    baseline_report.agent_name = agent.config.name
+    baseline_report.agent_version = agent.config.version
+    baseline_report.model = agent.config.model
+
+    print(f"  Baseline: pass_rate={baseline_report.pass_rate:.1%}, "
+          f"avg_latency={baseline_report.avg_latency_ms:.0f}ms, "
+          f"cost=${baseline_report.total_cost_usd:.4f}")
+
+    # Step 2: Analyze patterns
+    print("\n[2/4] Analyzing session patterns...")
+    report = loop.analyze()
+
+    if report.recommendations:
+        print(f"  Found {len(report.recommendations)} recommendations:")
+        for rec in report.recommendations[:5]:
+            print(f"    - {rec}")
+    else:
+        print("  No significant patterns found (may need more sessions).")
+
+    # Step 3: Generate proposals
+    print("\n[3/4] Generating improvement proposals...")
+    proposals = loop.propose(report)
+
+    if not proposals:
+        print("  No proposals generated. Agent may be performing well enough,")
+        print("  or more sessions are needed for meaningful analysis.")
+        if args.export:
+            path = loop.export(args.export)
+            print(f"\n  Evolution state exported to: {path}")
+        return
+
+    # Step 4: Human review
+    print(f"\n[4/4] Review proposals ({len(proposals)} surfaced for review):")
+    print(loop.show_proposals())
+    print()
+
+    # Interactive review loop
+    pending = loop.review_queue.pending
+    for proposal in pending:
+        print(f"\n--- Proposal: {proposal.title} ---")
+        print(f"    Priority: {proposal.priority:.0%}")
+        print(f"    {proposal.rationale}")
+        if proposal.modification:
+            mod_str = _json.dumps(proposal.modification, indent=2)
+            if len(mod_str) > 300:
+                mod_str = mod_str[:300] + "\n..."
+            print(f"    Change:\n{_indent(mod_str, 6)}")
+
+        try:
+            choice = input("\n    [a]pprove / [r]eject / [s]kip? ").strip().lower()
+        except EOFError:
+            break
+
+        if choice in ("a", "approve", "y", "yes"):
+            note = ""
+            try:
+                note = input("    Note (optional): ").strip()
+            except EOFError:
+                pass
+            loop.approve(proposal.id, note=note)
+            print(f"    Approved.")
+        elif choice in ("r", "reject", "n", "no"):
+            note = ""
+            try:
+                note = input("    Reason (optional): ").strip()
+            except EOFError:
+                pass
+            loop.reject(proposal.id, note=note)
+            print(f"    Rejected.")
+        else:
+            print(f"    Skipped.")
+
+    # Apply approved proposals
+    approved = loop.review_queue.approved
+    if approved:
+        metrics_before = {
+            "pass_rate": baseline_report.pass_rate,
+            "avg_score": baseline_report.avg_score,
+            "avg_latency_ms": baseline_report.avg_latency_ms,
+            "total_cost_usd": baseline_report.total_cost_usd,
+        }
+
+        new_config = loop.apply_approved(metrics_before=metrics_before)
+        if new_config:
+            print(f"\nApplied {len(approved)} change(s) → v{new_config.version}")
+            print(f"  Saved to: agents/{new_config.name}.json")
+            print(f"\n  Run 'agentos eval {new_config.name} {args.tasks_file}' to measure impact.")
+            print(f"  Run 'agentos evolve {new_config.name} {args.tasks_file}' again to continue evolving.")
+    else:
+        print("\nNo proposals approved. Agent config unchanged.")
+
+    # Export
+    if args.export:
+        path = loop.export(args.export)
+        print(f"\nEvolution state exported to: {path}")
+    else:
+        path = loop.export()
+        print(f"\nEvolution state saved to: {path}")
+
+    # Show timeline
+    timeline = loop.ledger.timeline()
+    if timeline:
+        print(f"\nEvolution timeline:")
+        for entry in timeline:
+            print(f"  v{entry['version']} ({entry['date']}): {entry['change']}")
+
+
+def _indent(text: str, spaces: int) -> str:
+    prefix = " " * spaces
+    return "\n".join(prefix + line for line in text.split("\n"))
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:

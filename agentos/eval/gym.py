@@ -43,6 +43,33 @@ class EvalReport:
     avg_tool_calls: float = 0.0
     trial_results: list[TrialResult] = field(default_factory=list)
 
+    # Agent identity (populated by caller for structured reporting)
+    agent_name: str = ""
+    agent_version: str = ""
+    model: str = ""
+    tools_available: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for JSON export."""
+        return {
+            "agent_name": self.agent_name,
+            "agent_version": self.agent_version,
+            "model": self.model,
+            "total_tasks": self.total_tasks,
+            "total_trials": self.total_trials,
+            "pass_rate": self.pass_rate,
+            "pass_count": self.pass_count,
+            "fail_count": self.fail_count,
+            "avg_score": self.avg_score,
+            "avg_latency_ms": self.avg_latency_ms,
+            "total_cost_usd": self.total_cost_usd,
+            "avg_tool_calls": self.avg_tool_calls,
+            "tool_efficiency": self.tool_efficiency,
+            "pass_at_1": self.pass_at_k(1),
+            "pass_at_3": self.pass_at_k(3) if self.total_trials >= 3 else None,
+            "tools_available": self.tools_available,
+        }
+
     @property
     def pass_rate(self) -> float:
         return self.pass_count / self.total_trials if self.total_trials else 0.0
