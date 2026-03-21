@@ -175,6 +175,7 @@ class Observer:
         # Auto-persist: prefer SQLite, fall back to JSONL
         if self._db is not None:
             self._persist_to_db(rec)
+            self._persist_turns_to_db(rec)
         elif self.storage_path:
             self._append_to_storage(rec)
 
@@ -250,6 +251,38 @@ class Observer:
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.storage_path, "a") as f:
             f.write(json.dumps(record.to_dict()) + "\n")
+
+    def _persist_turns_to_db(self, record: SessionRecord) -> None:
+        """Persist turn-level detail to the turns table."""
+        if not record.turns:
+            return
+        try:
+            turns_data = []
+            for turn in record.turns:
+                turn_dict = {
+                    "turn_number": turn.turn_number,
+                    "model_used": turn.model_used,
+                    "input_tokens": turn.input_tokens,
+                    "output_tokens": turn.output_tokens,
+                    "latency_ms": turn.latency_ms,
+                    "llm_content": turn.llm_content,
+                    "cost": {
+                        "llm_input_cost_usd": turn.cost.llm_input_cost_usd,
+                        "llm_output_cost_usd": turn.cost.llm_output_cost_usd,
+                        "tool_cost_usd": turn.cost.tool_cost_usd,
+                        "total_usd": turn.cost.total_usd,
+                    },
+                    "tool_calls": turn.tool_calls,
+                    "tool_results": turn.tool_results,
+                    "errors": [
+                        {"source": e.source.value, "message": e.message}
+                        for e in turn.errors
+                    ],
+                }
+                turns_data.append(turn_dict)
+            self._db.insert_turns(record.session_id, turns_data)
+        except Exception as exc:
+            logger.error("Failed to persist turns to SQLite: %s", exc)
 
     def _persist_to_db(self, record: SessionRecord) -> None:
         """Persist a session record to SQLite (atomic, indexed)."""
