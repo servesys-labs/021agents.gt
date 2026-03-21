@@ -195,12 +195,19 @@ class Agent:
     """A runnable agent instance built from an AgentConfig.
 
     This is the primary user-facing class. It wires up the harness,
-    tools, memory, and governance from a single config object.
+    tools, memory, governance, and observability from a single config.
+
+    Observability is automatic: every ``run()`` call is traced and
+    recorded to SQLite (if data/ exists). No manual setup needed.
     """
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
+        self._db = None
+        self._observer = None
+        self._tracer = None
         self._harness = self._build_harness()
+        self._attach_observability()
 
     def _build_harness(self):
         """Wire up all subsystems from the agent config."""
@@ -312,6 +319,54 @@ class Agent:
 
         return harness
 
+    def _attach_observability(self) -> None:
+        """Auto-attach observer, tracer, and DB if data/ dir exists.
+
+        This makes every ``run()`` call automatically observed and
+        persisted — no manual setup in CLI commands needed.
+        """
+        from agentos.core.tracing import Tracer
+        from agentos.evolution.observer import Observer
+
+        self._tracer = Tracer()
+
+        # Auto-open DB if data/ directory exists (created by `agentos init`)
+        data_dir = Path.cwd() / "data"
+        db_path = data_dir / "agent.db"
+        if data_dir.is_dir():
+            try:
+                from agentos.core.database import AgentDB
+                self._db = AgentDB(db_path)
+                self._db.initialize()
+            except Exception as exc:
+                logger.warning("Could not open database at %s: %s", db_path, exc)
+                self._db = None
+
+        # Attach observer to the harness event bus
+        self._observer = Observer(
+            event_bus=self._harness.event_bus,
+            db=self._db,
+        )
+        self._observer.attach(
+            agent_name=self.config.name,
+            agent_config=self.config.to_dict(),
+        )
+
+    @property
+    def db(self):
+        """The agent's SQLite database (None if no data/ dir)."""
+        return self._db
+
+    @property
+    def tracer(self):
+        """The agent's span tracer."""
+        return self._tracer
+
+    @property
+    def observer(self):
+        """The agent's session observer."""
+        return self._observer
+
     @property
     def uses_stub_provider(self) -> bool:
         """True if any LLM route uses the stub provider (no API key)."""
@@ -350,10 +405,32 @@ class Agent:
             changed = True
         if changed:
             self._harness = self._build_harness()
+            self._attach_observability()
 
     async def run(self, user_input: str) -> list:
-        """Execute the agent on a user task."""
-        return await self._harness.run(user_input)
+        """Execute the agent on a user task.
+
+        Every run is automatically:
+        - Traced (span-based tracing with parent-child hierarchy)
+        - Observed (SessionRecord built from EventBus events)
+        - Persisted (to SQLite if data/ dir exists)
+        """
+        from agentos.core.tracing import Tracer
+
+        results = await self._harness.run(user_input)
+
+        # Persist spans to DB if available
+        if self._db and self._tracer and self._tracer.span_count > 0:
+            try:
+                session_id = ""
+                if self._observer and self._observer.records:
+                    session_id = self._observer.records[-1].session_id
+                self._db.insert_spans(self._tracer.export(), session_id=session_id)
+                self._tracer.clear()
+            except Exception as exc:
+                logger.warning("Failed to persist spans: %s", exc)
+
+        return results
 
     @classmethod
     def from_file(cls, path: str | Path) -> Agent:
