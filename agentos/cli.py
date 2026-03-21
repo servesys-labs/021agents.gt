@@ -11,6 +11,10 @@ Usage:
     agentos login                   — Authenticate via OAuth (GitHub/Google)
     agentos logout                  — Remove stored credentials
     agentos whoami                  — Show current authenticated user
+    agentos sandbox create          — Create an E2B sandbox
+    agentos sandbox exec <cmd>      — Execute command in sandbox
+    agentos sandbox list            — List active sandboxes
+    agentos sandbox kill <id>       — Kill a sandbox
     agentos serve                   — Start local API server with dashboard
     agentos deploy <name>           — Deploy an agent (Cloudflare Workers)
     agentos chat <name>             — Interactive chat session with an agent
@@ -114,6 +118,17 @@ def main() -> None:
     serve_p.add_argument("--port", type=int, default=8340, help="Port (default: 8340)")
     serve_p.add_argument("--host", type=str, default="127.0.0.1", help="Host (default: 127.0.0.1)")
 
+    # --- sandbox ---
+    sandbox_p = sub.add_parser("sandbox", help="E2B sandbox operations")
+    sandbox_sub = sandbox_p.add_subparsers(dest="sandbox_command")
+    sandbox_sub.add_parser("create", help="Create a new sandbox")
+    sb_exec = sandbox_sub.add_parser("exec", help="Execute a command in a sandbox")
+    sb_exec.add_argument("shell_command", nargs="+", help="Command to execute")
+    sb_exec.add_argument("--id", type=str, default=None, help="Sandbox ID")
+    sb_ls = sandbox_sub.add_parser("list", help="List active sandboxes")
+    sb_kill = sandbox_sub.add_parser("kill", help="Kill a sandbox")
+    sb_kill.add_argument("sandbox_id", help="Sandbox ID to kill")
+
     # --- deploy ---
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
     deploy_p.add_argument("name", help="Agent name or path")
@@ -158,6 +173,8 @@ def main() -> None:
             cmd_whoami(args)
         elif args.command == "serve":
             cmd_serve(args)
+        elif args.command == "sandbox":
+            asyncio.run(cmd_sandbox(args))
         elif args.command == "deploy":
             cmd_deploy(args)
     except FileNotFoundError as exc:
@@ -1205,6 +1222,56 @@ def cmd_serve(args: argparse.Namespace) -> None:
         port=args.port,
         factory=True,
     )
+
+
+async def cmd_sandbox(args: argparse.Namespace) -> None:
+    """E2B sandbox operations — create, exec, list, kill."""
+    from agentos.sandbox import SandboxManager
+
+    mgr = SandboxManager()
+    subcmd = args.sandbox_command
+
+    if subcmd == "create":
+        session = await mgr.create()
+        print(f"Sandbox created: {session.sandbox_id}")
+        print(f"  Template: {session.template}")
+        print(f"  Status:   {session.status}")
+        if not mgr.has_api_key:
+            print("  (local fallback — set E2B_API_KEY for cloud sandboxes)")
+
+    elif subcmd == "exec":
+        command = " ".join(args.shell_command)
+        sandbox_id = getattr(args, "id", None)
+        result = await mgr.exec(command, sandbox_id=sandbox_id)
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.exit_code != 0:
+            print(f"\n[exit code: {result.exit_code}]")
+        print(f"[sandbox: {result.sandbox_id}, {result.duration_ms:.0f}ms]")
+
+    elif subcmd == "list":
+        sandboxes = await mgr.list_sandboxes()
+        if not sandboxes:
+            print("No active sandboxes.")
+        else:
+            for s in sandboxes:
+                print(f"  {s['sandbox_id']}  template={s.get('template', '-')}  {s.get('status', s.get('started_at', ''))}")
+
+    elif subcmd == "kill":
+        killed = await mgr.kill(args.sandbox_id)
+        if killed:
+            print(f"Sandbox {args.sandbox_id} killed.")
+        else:
+            print(f"Failed to kill sandbox {args.sandbox_id}")
+
+    else:
+        print("Usage: agentos sandbox {create|exec|list|kill}")
+        print("  create          Create a new E2B sandbox")
+        print("  exec <command>  Execute command in sandbox")
+        print("  list            List active sandboxes")
+        print("  kill <id>       Kill a sandbox")
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:

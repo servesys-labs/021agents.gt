@@ -36,6 +36,7 @@ export interface Env {
   GITHUB_CLIENT_SECRET?: string;
   GOOGLE_CLIENT_ID?: string; // OAuth: Google device flow
   GOOGLE_CLIENT_SECRET?: string;
+  E2B_API_KEY?: string; // E2B sandbox API key
   DEFAULT_PROVIDER: string; // "workers-ai" | "openai" | "anthropic"
   DEFAULT_MODEL: string;
 }
@@ -199,6 +200,76 @@ function getBuiltinTools(env: Env): MCPTool[] {
         return { stored: true, id: args.id };
       },
     },
+    // ── E2B Sandbox tools ──────────────────────────────────────────────
+    {
+      name: "sandbox_exec",
+      description: "Execute a shell command in a secure E2B sandbox. Returns stdout, stderr, and exit code.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "Shell command to execute" },
+          sandbox_id: { type: "string", description: "Existing sandbox ID (optional — creates new if omitted)" },
+          timeout_ms: { type: "number", description: "Timeout in ms (default: 30000)" },
+        },
+        required: ["command"],
+      },
+      handler: async (args, env) => {
+        return sandboxExec(env, String(args.command), args.sandbox_id as string | undefined, Number(args.timeout_ms) || 30000);
+      },
+    },
+    {
+      name: "sandbox_file_write",
+      description: "Write a file inside the E2B sandbox filesystem",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path inside sandbox" },
+          content: { type: "string", description: "File content" },
+          sandbox_id: { type: "string", description: "Existing sandbox ID" },
+        },
+        required: ["path", "content"],
+      },
+      handler: async (args, env) => {
+        return sandboxFileWrite(env, String(args.path), String(args.content), args.sandbox_id as string | undefined);
+      },
+    },
+    {
+      name: "sandbox_file_read",
+      description: "Read a file from the E2B sandbox filesystem",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path inside sandbox" },
+          sandbox_id: { type: "string", description: "Existing sandbox ID" },
+        },
+        required: ["path"],
+      },
+      handler: async (args, env) => {
+        return sandboxFileRead(env, String(args.path), args.sandbox_id as string | undefined);
+      },
+    },
+    {
+      name: "sandbox_list",
+      description: "List all active E2B sandboxes",
+      inputSchema: { type: "object", properties: {} },
+      handler: async (_args, env) => {
+        return sandboxList(env);
+      },
+    },
+    {
+      name: "sandbox_kill",
+      description: "Kill an E2B sandbox to free resources",
+      inputSchema: {
+        type: "object",
+        properties: {
+          sandbox_id: { type: "string", description: "Sandbox ID to kill" },
+        },
+        required: ["sandbox_id"],
+      },
+      handler: async (args, env) => {
+        return sandboxKill(env, String(args.sandbox_id));
+      },
+    },
   ];
 }
 
@@ -211,6 +282,213 @@ async function generateEmbedding(env: Env, text: string): Promise<number[]> {
     text: [text],
   });
   return (result as { data: number[][] }).data[0];
+}
+
+// ---------------------------------------------------------------------------
+// E2B Sandbox Functions
+// ---------------------------------------------------------------------------
+
+/** Cache of active sandbox instances (sandbox_id -> Sandbox) */
+const activeSandboxes = new Map<string, unknown>();
+
+/**
+ * Get or create an E2B sandbox.
+ * Uses the E2B REST API directly (no Node.js SDK import needed in Workers).
+ */
+async function getOrCreateSandbox(
+  env: Env,
+  sandboxId?: string,
+  template = "base"
+): Promise<{ sandboxId: string; isNew: boolean }> {
+  const apiKey = env.E2B_API_KEY;
+  if (!apiKey) {
+    throw new Error("E2B_API_KEY secret is not configured. Set it with: wrangler secret put E2B_API_KEY");
+  }
+
+  // Reuse existing sandbox if provided
+  if (sandboxId) {
+    // Verify it's still alive
+    const resp = await fetch(`https://api.e2b.dev/sandboxes/${sandboxId}`, {
+      headers: { "X-API-Key": apiKey },
+    });
+    if (resp.ok) {
+      return { sandboxId, isNew: false };
+    }
+    // Sandbox died — fall through to create new one
+  }
+
+  // Create new sandbox
+  const resp = await fetch("https://api.e2b.dev/sandboxes", {
+    method: "POST",
+    headers: {
+      "X-API-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      templateID: template,
+      timeout: 300, // 5 min default timeout
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`E2B sandbox creation failed: ${resp.status} ${err}`);
+  }
+
+  const data = (await resp.json()) as { sandboxID: string };
+  return { sandboxId: data.sandboxID, isNew: true };
+}
+
+/** Execute a shell command in an E2B sandbox */
+async function sandboxExec(
+  env: Env,
+  command: string,
+  sandboxId?: string,
+  timeoutMs = 30000
+): Promise<SandboxExecResult> {
+  const apiKey = env.E2B_API_KEY;
+  if (!apiKey) throw new Error("E2B_API_KEY not configured");
+
+  const { sandboxId: sid } = await getOrCreateSandbox(env, sandboxId);
+  const start = Date.now();
+
+  const resp = await fetch(`https://api.e2b.dev/sandboxes/${sid}/commands`, {
+    method: "POST",
+    headers: {
+      "X-API-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      cmd: command,
+      timeout: Math.ceil(timeoutMs / 1000),
+    }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    return { sandboxId: sid, stdout: "", stderr: `E2B error: ${err}`, exitCode: -1, durationMs: Date.now() - start };
+  }
+
+  const result = (await resp.json()) as {
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+  };
+
+  return {
+    sandboxId: sid,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+    exitCode: result.exitCode ?? 0,
+    durationMs: Date.now() - start,
+  };
+}
+
+/** Write a file in an E2B sandbox */
+async function sandboxFileWrite(
+  env: Env,
+  path: string,
+  content: string,
+  sandboxId?: string
+): Promise<SandboxFileResult> {
+  const apiKey = env.E2B_API_KEY;
+  if (!apiKey) throw new Error("E2B_API_KEY not configured");
+
+  const { sandboxId: sid } = await getOrCreateSandbox(env, sandboxId);
+
+  const resp = await fetch(`https://api.e2b.dev/sandboxes/${sid}/files`, {
+    method: "POST",
+    headers: {
+      "X-API-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ path, content }),
+  });
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    return { sandboxId: sid, path, success: false, error: `Write failed: ${err}` };
+  }
+
+  return { sandboxId: sid, path, success: true };
+}
+
+/** Read a file from an E2B sandbox */
+async function sandboxFileRead(
+  env: Env,
+  path: string,
+  sandboxId?: string
+): Promise<SandboxFileResult> {
+  const apiKey = env.E2B_API_KEY;
+  if (!apiKey) throw new Error("E2B_API_KEY not configured");
+
+  const { sandboxId: sid } = await getOrCreateSandbox(env, sandboxId);
+
+  const resp = await fetch(
+    `https://api.e2b.dev/sandboxes/${sid}/files?path=${encodeURIComponent(path)}`,
+    { headers: { "X-API-Key": apiKey } }
+  );
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    return { sandboxId: sid, path, success: false, error: `Read failed: ${err}` };
+  }
+
+  const data = (await resp.json()) as { content: string };
+  return { sandboxId: sid, path, content: data.content, success: true };
+}
+
+/** List active sandboxes */
+async function sandboxList(env: Env): Promise<{ sandboxes: { sandboxId: string; template: string; startedAt: string }[] }> {
+  const apiKey = env.E2B_API_KEY;
+  if (!apiKey) throw new Error("E2B_API_KEY not configured");
+
+  const resp = await fetch("https://api.e2b.dev/sandboxes", {
+    headers: { "X-API-Key": apiKey },
+  });
+
+  if (!resp.ok) {
+    return { sandboxes: [] };
+  }
+
+  const data = (await resp.json()) as { sandboxID: string; templateID: string; startedAt: string }[];
+  return {
+    sandboxes: data.map((s) => ({
+      sandboxId: s.sandboxID,
+      template: s.templateID,
+      startedAt: s.startedAt,
+    })),
+  };
+}
+
+/** Kill a sandbox */
+async function sandboxKill(env: Env, sandboxId: string): Promise<{ killed: boolean; sandboxId: string }> {
+  const apiKey = env.E2B_API_KEY;
+  if (!apiKey) throw new Error("E2B_API_KEY not configured");
+
+  const resp = await fetch(`https://api.e2b.dev/sandboxes/${sandboxId}`, {
+    method: "DELETE",
+    headers: { "X-API-Key": apiKey },
+  });
+
+  return { killed: resp.ok, sandboxId };
+}
+
+/** Keep a sandbox alive for a given duration */
+async function sandboxKeepAlive(env: Env, sandboxId: string, timeoutSec: number): Promise<boolean> {
+  const apiKey = env.E2B_API_KEY;
+  if (!apiKey) throw new Error("E2B_API_KEY not configured");
+
+  const resp = await fetch(`https://api.e2b.dev/sandboxes/${sandboxId}/timeout`, {
+    method: "POST",
+    headers: {
+      "X-API-Key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ timeout: timeoutSec }),
+  });
+
+  return resp.ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +747,17 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
         password_hash TEXT DEFAULT '',
         provider TEXT DEFAULT 'email',
         created_at INTEGER NOT NULL
+      )`;
+
+      // E2B sandbox sessions table
+      this.sql`CREATE TABLE IF NOT EXISTS sandbox_sessions (
+        sandbox_id TEXT PRIMARY KEY,
+        agent_name TEXT DEFAULT '',
+        template TEXT DEFAULT 'base',
+        status TEXT DEFAULT 'running',
+        created_at INTEGER NOT NULL,
+        last_activity_at INTEGER NOT NULL,
+        keep_alive_ms INTEGER DEFAULT 300000
       )`;
 
       // Evolution proposals table
@@ -829,6 +1118,124 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
 
         this.setState({ ...this.state, config });
         return jsonResponse({ applied: approved.length, config });
+      }
+
+      // ── Sandbox endpoints ──────────────────────────────────────────
+
+      // POST /sandbox/create — create a new E2B sandbox
+      if (request.method === "POST" && lastTwoSegments === "sandbox/create") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ template?: string; timeout_sec?: number }>(request);
+        const template = body?.template || "base";
+        const { sandboxId } = await getOrCreateSandbox(this.env, undefined, template);
+
+        // Track in SQLite
+        this.execSql`INSERT INTO sandbox_sessions (sandbox_id, template, status, created_at, last_activity_at)
+                     VALUES (${sandboxId}, ${template}, 'running', ${Date.now()}, ${Date.now()})`;
+
+        // Keep alive if requested
+        if (body?.timeout_sec) {
+          await sandboxKeepAlive(this.env, sandboxId, body.timeout_sec);
+          this.execSql`UPDATE sandbox_sessions SET keep_alive_ms = ${body.timeout_sec * 1000} WHERE sandbox_id = ${sandboxId}`;
+        }
+
+        return jsonResponse({ sandbox_id: sandboxId, template, status: "running" });
+      }
+
+      // POST /sandbox/exec — execute command in sandbox
+      if (request.method === "POST" && lastTwoSegments === "sandbox/exec") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ command: string; sandbox_id?: string; timeout_ms?: number }>(request);
+        if (!body?.command) return jsonResponse({ error: "command required" }, 400);
+
+        const result = await sandboxExec(this.env, body.command, body.sandbox_id, body.timeout_ms || 30000);
+
+        // Track sandbox in DB if new
+        if (result.sandboxId) {
+          const existing = this.querySql<{ sandbox_id: string }>`SELECT sandbox_id FROM sandbox_sessions WHERE sandbox_id = ${result.sandboxId}`;
+          if (existing.length === 0) {
+            this.execSql`INSERT INTO sandbox_sessions (sandbox_id, template, status, created_at, last_activity_at)
+                         VALUES (${result.sandboxId}, 'base', 'running', ${Date.now()}, ${Date.now()})`;
+          } else {
+            this.execSql`UPDATE sandbox_sessions SET last_activity_at = ${Date.now()} WHERE sandbox_id = ${result.sandboxId}`;
+          }
+        }
+
+        return jsonResponse(result);
+      }
+
+      // POST /sandbox/file/write — write file in sandbox
+      if (request.method === "POST" && segments.includes("sandbox") && segments.includes("file") && lastSegment === "write") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ path: string; content: string; sandbox_id?: string }>(request);
+        if (!body?.path || body.content === undefined) return jsonResponse({ error: "path and content required" }, 400);
+        const result = await sandboxFileWrite(this.env, body.path, body.content, body.sandbox_id);
+        return jsonResponse(result);
+      }
+
+      // POST /sandbox/file/read — read file from sandbox
+      if (request.method === "POST" && segments.includes("sandbox") && segments.includes("file") && lastSegment === "read") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ path: string; sandbox_id?: string }>(request);
+        if (!body?.path) return jsonResponse({ error: "path required" }, 400);
+        const result = await sandboxFileRead(this.env, body.path, body.sandbox_id);
+        return jsonResponse(result);
+      }
+
+      // GET /sandbox/list — list all tracked sandboxes
+      if (lastTwoSegments === "sandbox/list" || (lastSegment === "sandboxes" && request.method === "GET")) {
+        // Merge E2B API list with local tracking
+        let liveSandboxes: { sandboxId: string; template: string; startedAt: string }[] = [];
+        try {
+          const e2bList = await sandboxList(this.env);
+          liveSandboxes = e2bList.sandboxes;
+        } catch {}
+
+        const tracked = this.querySql<SandboxSession>`SELECT * FROM sandbox_sessions ORDER BY last_activity_at DESC LIMIT 50`;
+
+        // Mark dead sandboxes
+        const liveIds = new Set(liveSandboxes.map((s) => s.sandboxId));
+        for (const t of tracked) {
+          if (t.status === "running" && !liveIds.has(t.sandboxId)) {
+            this.execSql`UPDATE sandbox_sessions SET status = 'timeout' WHERE sandbox_id = ${t.sandboxId}`;
+          }
+        }
+
+        return jsonResponse({
+          live: liveSandboxes,
+          tracked: tracked.map((t) => ({
+            sandbox_id: t.sandboxId,
+            agent_name: t.agentName,
+            template: t.template,
+            status: liveIds.has(t.sandboxId) ? "running" : t.status,
+            created_at: t.createdAt,
+            last_activity_at: t.lastActivityAt,
+          })),
+        });
+      }
+
+      // POST /sandbox/kill — kill a sandbox
+      if (request.method === "POST" && lastTwoSegments === "sandbox/kill") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ sandbox_id: string }>(request);
+        if (!body?.sandbox_id) return jsonResponse({ error: "sandbox_id required" }, 400);
+
+        const result = await sandboxKill(this.env, body.sandbox_id);
+        this.execSql`UPDATE sandbox_sessions SET status = 'killed' WHERE sandbox_id = ${body.sandbox_id}`;
+        return jsonResponse(result);
+      }
+
+      // POST /sandbox/keepalive — extend sandbox timeout
+      if (request.method === "POST" && lastTwoSegments === "sandbox/keepalive") {
+        if (!isJsonRequest(request)) return jsonResponse({ error: "Content-Type must be application/json" }, 415);
+        const body = await parseJsonBody<{ sandbox_id: string; timeout_sec?: number }>(request);
+        if (!body?.sandbox_id) return jsonResponse({ error: "sandbox_id required" }, 400);
+
+        const ok = await sandboxKeepAlive(this.env, body.sandbox_id, body.timeout_sec || 300);
+        if (ok) {
+          this.execSql`UPDATE sandbox_sessions SET last_activity_at = ${Date.now()} WHERE sandbox_id = ${body.sandbox_id}`;
+        }
+        return jsonResponse({ kept_alive: ok, sandbox_id: body.sandbox_id });
       }
 
       return jsonResponse({ error: "Not found" }, 404);
@@ -1447,6 +1854,46 @@ interface AnalysisReport {
   unusedTools: string[];
   costAnomalies: { sessionId: string; cost: number; factor: number }[];
   recommendations: string[];
+}
+
+// ---------------------------------------------------------------------------
+// E2B Sandbox types
+// ---------------------------------------------------------------------------
+
+interface SandboxSession {
+  sandboxId: string;
+  agentName: string;
+  template: string;
+  status: "running" | "idle" | "killed" | "timeout";
+  createdAt: number;
+  lastActivityAt: number;
+  keepAliveMs: number;
+}
+
+interface SandboxExecResult {
+  sandboxId: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+}
+
+interface SandboxFileResult {
+  sandboxId: string;
+  path: string;
+  content?: string;
+  success: boolean;
+  error?: string;
+}
+
+interface SandboxBrowserResult {
+  sandboxId: string;
+  url: string;
+  title?: string;
+  screenshot?: string; // base64
+  content?: string;
+  success: boolean;
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
