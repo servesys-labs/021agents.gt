@@ -97,12 +97,16 @@ class EvolutionLedger:
         self,
         agent_name: str = "",
         storage_path: Path | None = None,
+        db: Any | None = None,
     ) -> None:
         self.agent_name = agent_name
         self.storage_path = storage_path
+        self._db = db  # AgentDB instance (optional, preferred over JSON file)
         self._entries: list[EvolutionEntry] = []
 
-        if storage_path and storage_path.exists():
+        if db is not None:
+            self._load_from_db()
+        elif storage_path and storage_path.exists():
             self._load()
 
     @property
@@ -156,7 +160,9 @@ class EvolutionLedger:
         )
         self._entries.append(entry)
 
-        if self.storage_path:
+        if self._db is not None:
+            self._persist_entry_to_db(entry)
+        elif self.storage_path:
             self._persist()
 
         logger.info(
@@ -182,7 +188,9 @@ class EvolutionLedger:
             for key in set(entry.metrics_before) | set(metrics_after)
         }
 
-        if self.storage_path:
+        if self._db is not None:
+            self._db.update_evolution_impact(version, metrics_after, entry.impact)
+        elif self.storage_path:
             self._persist()
 
         return entry.impact
@@ -245,3 +253,43 @@ class EvolutionLedger:
                 ))
         except Exception as exc:
             logger.warning("Could not load ledger: %s", exc)
+
+    def _load_from_db(self) -> None:
+        """Load evolution entries from SQLite."""
+        try:
+            rows = self._db.query_evolution(limit=10000)
+            for d in reversed(rows):  # query returns newest-first, we want oldest-first
+                self._entries.append(EvolutionEntry(
+                    version=d.get("version", ""),
+                    previous_version=d.get("previous_version", ""),
+                    timestamp=d.get("created_at", 0),
+                    proposal_id=d.get("proposal_id", ""),
+                    proposal_title=d.get("proposal_title", ""),
+                    category=d.get("category", ""),
+                    modification=d.get("modification", {}),
+                    reviewer_note=d.get("reviewer_note", ""),
+                    metrics_before=d.get("metrics_before", {}),
+                    metrics_after=d.get("metrics_after", {}),
+                    impact=d.get("impact", {}),
+                ))
+        except Exception as exc:
+            logger.warning("Could not load ledger from database: %s", exc)
+
+    def _persist_entry_to_db(self, entry: EvolutionEntry) -> None:
+        """Persist a single evolution entry to SQLite."""
+        self._db.insert_evolution_entry({
+            "version": entry.version,
+            "previous_version": entry.previous_version,
+            "timestamp": entry.timestamp,
+            "proposal_id": entry.proposal_id,
+            "proposal_title": entry.proposal_title,
+            "category": entry.category,
+            "modification": entry.modification,
+            "previous_config": entry.previous_config,
+            "new_config": entry.new_config,
+            "reviewer": entry.reviewer,
+            "reviewer_note": entry.reviewer_note,
+            "metrics_before": entry.metrics_before,
+            "metrics_after": entry.metrics_after,
+            "impact": entry.impact,
+        })

@@ -44,15 +44,23 @@ class Observer:
 
         records = observer.records  # All captured sessions
         observer.export("sessions.jsonl")  # Export for dashboards
+
+    With SQLite (preferred):
+        from agentos.core.database import AgentDB
+        db = AgentDB("data/agent.db")
+        observer = Observer(event_bus=bus, db=db)
+        # Sessions auto-persist to SQLite with indexes, atomicity, etc.
     """
 
     def __init__(
         self,
         event_bus: EventBus | None = None,
         storage_path: Path | None = None,
+        db: Any | None = None,
     ) -> None:
         self.event_bus = event_bus or EventBus()
         self.storage_path = storage_path
+        self._db = db  # AgentDB instance (optional, preferred over JSONL)
         self._records: list[SessionRecord] = []
         self._current: SessionRecord | None = None
         self._session_start_time: float = 0.0
@@ -164,8 +172,10 @@ class Observer:
 
         self._records.append(rec)
 
-        # Auto-persist if storage path is set
-        if self.storage_path:
+        # Auto-persist: prefer SQLite, fall back to JSONL
+        if self._db is not None:
+            self._persist_to_db(rec)
+        elif self.storage_path:
             self._append_to_storage(rec)
 
         logger.info(
@@ -240,6 +250,31 @@ class Observer:
         self.storage_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.storage_path, "a") as f:
             f.write(json.dumps(record.to_dict()) + "\n")
+
+    def _persist_to_db(self, record: SessionRecord) -> None:
+        """Persist a session record to SQLite (atomic, indexed)."""
+        try:
+            data = record.to_dict()
+            self._db.insert_session(data)
+            if data.get("errors"):
+                self._db.insert_session_errors(data["session_id"], data["errors"])
+            # Record cost in the cost ledger for aggregate tracking
+            if record.cost.total_usd > 0:
+                comp = data.get("composition", {})
+                self._db.record_cost(
+                    session_id=data["session_id"],
+                    agent_id=comp.get("agent_id", ""),
+                    agent_name=comp.get("agent_name", ""),
+                    model=comp.get("model", ""),
+                    input_tokens=sum(t.input_tokens for t in record.turns),
+                    output_tokens=sum(t.output_tokens for t in record.turns),
+                    cost_usd=record.cost.total_usd,
+                )
+        except Exception as exc:
+            logger.error("Failed to persist session to SQLite: %s", exc)
+            # Fall back to JSONL if configured
+            if self.storage_path:
+                self._append_to_storage(record)
 
     def export(self, path: str | Path) -> Path:
         """Export all records to a JSONL file."""
