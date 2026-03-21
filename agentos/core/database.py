@@ -277,6 +277,49 @@ CREATE TABLE IF NOT EXISTS eval_runs (
 
 CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(agent_name);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SPANS — structured trace spans with parent-child hierarchy
+-- "Traces are the source of truth for agents" — Mikyo King, Arize AI
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS spans (
+    span_id         TEXT PRIMARY KEY,
+    trace_id        TEXT NOT NULL,
+    parent_span_id  TEXT,
+    session_id      TEXT,
+    name            TEXT NOT NULL DEFAULT '',
+    kind            TEXT NOT NULL DEFAULT '',  -- session/turn/llm/tool/sub_agent/memory/governance
+    status          TEXT NOT NULL DEFAULT 'ok',
+    start_time      REAL NOT NULL DEFAULT 0.0,
+    end_time        REAL NOT NULL DEFAULT 0.0,
+    duration_ms     REAL NOT NULL DEFAULT 0.0,
+    attributes_json TEXT NOT NULL DEFAULT '{}',
+    events_json     TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
+CREATE INDEX IF NOT EXISTS idx_spans_session ON spans(session_id);
+CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- FEEDBACK — human feedback on agent outputs (thumbs up/down, corrections)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    turn_number     INTEGER,
+    rating          INTEGER NOT NULL DEFAULT 0,  -- -1=bad, 0=neutral, 1=good
+    correction      TEXT NOT NULL DEFAULT '',     -- Human-provided corrected output
+    comment         TEXT NOT NULL DEFAULT '',     -- Free-text feedback
+    tags            TEXT NOT NULL DEFAULT '[]',   -- JSON array of tags
+    source          TEXT NOT NULL DEFAULT 'human', -- human/auto/llm
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id);
+CREATE INDEX IF NOT EXISTS idx_feedback_rating ON feedback(rating);
 """
 
 # ── Migration from v1 → v2 ─────────────────────────────────────────────────
@@ -936,6 +979,220 @@ class AgentDB:
         row = self.conn.execute(sql, params).fetchone()
         return float(row["total"]) if row else 0.0
 
+    # ── Spans (tracing) ─────────────────────────────────────────────────
+
+    def insert_spans(self, spans: list[dict[str, Any]], session_id: str = "") -> None:
+        """Insert trace spans (from Tracer.export())."""
+        with self.tx() as cur:
+            for s in spans:
+                cur.execute(
+                    """INSERT OR REPLACE INTO spans (
+                        span_id, trace_id, parent_span_id, session_id,
+                        name, kind, status,
+                        start_time, end_time, duration_ms,
+                        attributes_json, events_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        s["span_id"],
+                        s["trace_id"],
+                        s.get("parent_span_id"),
+                        session_id,
+                        s.get("name", ""),
+                        s.get("kind", ""),
+                        s.get("status", "ok"),
+                        s.get("start_time", 0.0),
+                        s.get("end_time", 0.0),
+                        s.get("duration_ms", 0.0),
+                        json.dumps(s.get("attributes", {})),
+                        json.dumps(s.get("events", [])),
+                    ),
+                )
+
+    def query_trace(self, trace_id: str) -> list[dict[str, Any]]:
+        """Get all spans for a trace, ordered by start time."""
+        rows = self.conn.execute(
+            "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time",
+            (trace_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["attributes"] = json.loads(d.pop("attributes_json", "{}"))
+            d["events"] = json.loads(d.pop("events_json", "[]"))
+            result.append(d)
+        return result
+
+    def query_spans(
+        self,
+        session_id: str | None = None,
+        kind: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Query spans with optional filters — programmatic trace API."""
+        sql = "SELECT * FROM spans WHERE 1=1"
+        params: list[Any] = []
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if kind:
+            sql += " AND kind = ?"
+            params.append(kind)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY start_time DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["attributes"] = json.loads(d.pop("attributes_json", "{}"))
+            d["events"] = json.loads(d.pop("events_json", "[]"))
+            result.append(d)
+        return result
+
+    # ── Feedback ──────────────────────────────────────────────────────────
+
+    def insert_feedback(
+        self,
+        session_id: str,
+        rating: int,
+        turn_number: int | None = None,
+        correction: str = "",
+        comment: str = "",
+        tags: list[str] | None = None,
+        source: str = "human",
+    ) -> int:
+        """Record human (or automated) feedback on an agent output."""
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO feedback (
+                    session_id, turn_number, rating, correction, comment, tags, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    turn_number,
+                    rating,
+                    correction,
+                    comment,
+                    json.dumps(tags or []),
+                    source,
+                ),
+            )
+            return cur.lastrowid
+
+    def query_feedback(
+        self,
+        session_id: str | None = None,
+        rating: int | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Query feedback records."""
+        sql = "SELECT * FROM feedback WHERE 1=1"
+        params: list[Any] = []
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if rating is not None:
+            sql += " AND rating = ?"
+            params.append(rating)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["tags"] = json.loads(d.get("tags", "[]"))
+            result.append(d)
+        return result
+
+    def feedback_summary(self, agent_name: str | None = None) -> dict[str, Any]:
+        """Aggregate feedback stats — programmatic API for the agent."""
+        if agent_name:
+            rows = self.conn.execute(
+                """SELECT f.rating, COUNT(*) as cnt
+                FROM feedback f
+                JOIN sessions s ON f.session_id = s.session_id
+                WHERE s.agent_name = ?
+                GROUP BY f.rating""",
+                (agent_name,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT rating, COUNT(*) as cnt FROM feedback GROUP BY rating"
+            ).fetchall()
+        total = sum(r["cnt"] for r in rows)
+        by_rating = {r["rating"]: r["cnt"] for r in rows}
+        return {
+            "total": total,
+            "positive": by_rating.get(1, 0),
+            "neutral": by_rating.get(0, 0),
+            "negative": by_rating.get(-1, 0),
+            "approval_rate": by_rating.get(1, 0) / total if total else 0.0,
+        }
+
+    # ── Programmatic Trace Query API (Phase 3 — agent consumes its own telemetry) ──
+
+    def trace_summary(self, session_id: str) -> dict[str, Any]:
+        """Build a summary an agent can consume to understand its own performance.
+
+        This is the Phase 3 interface: the agent reads its own traces
+        to self-improve without human intervention.
+        """
+        session_rows = self.conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        if not session_rows:
+            return {}
+
+        session = dict(session_rows[0])
+        turns = self.conn.execute(
+            "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_number",
+            (session_id,),
+        ).fetchall()
+        errors = self.conn.execute(
+            "SELECT * FROM errors WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        feedback_rows = self.conn.execute(
+            "SELECT * FROM feedback WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        spans = self.query_trace(session.get("session_id", ""))
+
+        return {
+            "session": {
+                "status": session["status"],
+                "stop_reason": session["stop_reason"],
+                "stop_initiated_by": session.get("stop_initiated_by", ""),
+                "finish_accepted": session.get("finish_accepted"),
+                "wall_clock_seconds": session["wall_clock_seconds"],
+                "step_count": session["step_count"],
+                "action_count": session["action_count"],
+                "cost_total_usd": session["cost_total_usd"],
+                "benchmark_cost_total_usd": session.get("benchmark_cost_total_usd", 0.0),
+            },
+            "turns": [
+                {
+                    "turn": dict(t)["turn_number"],
+                    "model": dict(t)["model_used"],
+                    "latency_ms": dict(t)["latency_ms"],
+                    "tokens": dict(t)["input_tokens"] + dict(t)["output_tokens"],
+                    "tool_calls": len(json.loads(dict(t).get("tool_calls_json", "[]"))),
+                    "errors": len(json.loads(dict(t).get("errors_json", "[]"))),
+                }
+                for t in turns
+            ],
+            "errors": [
+                {"source": dict(e)["source"], "message": dict(e)["message"], "turn": dict(e)["turn"]}
+                for e in errors
+            ],
+            "feedback": [
+                {"rating": dict(f)["rating"], "comment": dict(f)["comment"]}
+                for f in feedback_rows
+            ],
+            "span_count": len(spans),
+        }
+
     # ── Utilities ────────────────────────────────────────────────────────
 
     def vacuum(self) -> None:
@@ -949,7 +1206,8 @@ class AgentDB:
     def stats(self) -> dict[str, Any]:
         """Quick overview of database contents."""
         tables = ["sessions", "turns", "errors", "evolution_entries",
-                   "proposals", "episodes", "facts", "procedures", "cost_ledger"]
+                   "proposals", "episodes", "facts", "procedures", "cost_ledger",
+                   "eval_runs", "spans", "feedback"]
         counts: dict[str, int] = {}
         for table in tables:
             try:
