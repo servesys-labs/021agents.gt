@@ -802,11 +802,8 @@ async def cmd_run(args: argparse.Namespace) -> None:
     agent = _load_agent(args.name)
     quiet = args.quiet or args.json_output
 
-    # ── Merge project defaults from agentos.yaml ─────────────────────────
-    project_config_path = Path.cwd() / "agentos.yaml"
-    project_defaults = _load_project_defaults(project_config_path)
-    if project_defaults:
-        agent.config = _apply_project_defaults(agent.config, project_defaults)
+    # Project defaults from agentos.yaml are applied automatically in
+    # Agent.__init__ — no need to call _load/_apply_project_defaults here.
 
     # ── Apply CLI runtime overrides (rebuild harness once) ────────────────
     agent.apply_overrides(
@@ -818,16 +815,7 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     # ── Validate agent_id against project identity ───────────────────────
     if not quiet:
-        identity_path = Path.cwd() / "agents" / ".identity.json"
-        if identity_path.exists() and agent.config.agent_id:
-            try:
-                project_id = json.loads(identity_path.read_text()).get("agent_id", "")
-                if project_id and agent.config.agent_id != project_id:
-                    print(f"Warning: Agent '{agent.config.name}' has agent_id "
-                          f"'{agent.config.agent_id}' but project identity is "
-                          f"'{project_id}'.", file=sys.stderr)
-            except (json.JSONDecodeError, OSError):
-                pass
+        _warn_identity_mismatch(agent)
 
     # ── Resolve task: --input-file > positional arg > stdin > prompt ──────
     task = None
@@ -855,14 +843,8 @@ async def cmd_run(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     # ── Warn about stub provider (unless --quiet or --json) ──────────────
-    if not quiet and agent.uses_stub_provider:
-        print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
-        print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
-        if agent.config.built_with == "stub":
-            print("  This agent was also created with the stub provider —")
-            print("  re-create it with a real LLM for better results:")
-            print(f"    agentos create --one-shot \"{agent.config.description}\"")
-        print()
+    if not quiet:
+        _warn_stub_provider(agent, show_recreate_hint=True)
 
     if not quiet:
         print(f"Running agent '{agent.config.name}' on: {task}")
@@ -1020,24 +1002,8 @@ async def cmd_chat(args: argparse.Namespace) -> None:
     from agentos.agent import Agent
 
     agent = _load_agent(args.name)
-
-    # Warn if agent_id doesn't match project identity (consistent with run)
-    identity_path = Path.cwd() / "agents" / ".identity.json"
-    if identity_path.exists() and agent.config.agent_id:
-        try:
-            project_id = json.loads(identity_path.read_text()).get("agent_id", "")
-            if project_id and agent.config.agent_id != project_id:
-                print(f"Warning: Agent '{agent.config.name}' has agent_id "
-                      f"'{agent.config.agent_id}' but project identity is "
-                      f"'{project_id}'.", file=sys.stderr)
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    # Warn about stub provider
-    if agent.uses_stub_provider:
-        print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
-        print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
-        print()
+    _warn_identity_mismatch(agent)
+    _warn_stub_provider(agent)
 
     print(f"Chatting with '{agent.config.name}' — type 'quit' to exit")
     print(f"  {agent.config.description}")
@@ -1476,53 +1442,11 @@ def cmd_login(args: argparse.Namespace) -> None:
     print()
 
     try:
-        if provider == "github":
-            from agentos.auth.oauth import (
-                github_get_user,
-                github_poll_for_token,
-                github_request_device_code,
-            )
-
-            dc = github_request_device_code()
-            print(f"  Open this URL in your browser:  {dc.verification_uri}")
-            print(f"  Enter this code:                {dc.user_code}")
-            print()
-            print("Waiting for authorization...", end="", flush=True)
-
-            access_token = github_poll_for_token(
-                dc.device_code, interval=dc.interval, timeout=dc.expires_in
-            )
-            if not access_token:
-                print("\nAuthorization failed or timed out.")
-                sys.exit(1)
-
-            user = github_get_user(access_token)
-
-        elif provider == "google":
-            from agentos.auth.oauth import (
-                google_get_user,
-                google_poll_for_token,
-                google_request_device_code,
-            )
-
-            dc = google_request_device_code()
-            print(f"  Open this URL in your browser:  {dc.verification_uri}")
-            print(f"  Enter this code:                {dc.user_code}")
-            print()
-            print("Waiting for authorization...", end="", flush=True)
-
-            access_token = google_poll_for_token(
-                dc.device_code, interval=dc.interval, timeout=dc.expires_in
-            )
-            if not access_token:
-                print("\nAuthorization failed or timed out.")
-                sys.exit(1)
-
-            user = google_get_user(access_token)
-        else:
-            print(f"Unknown provider: {provider}")
+        if provider not in ("github", "google"):
+            print(f"Unknown provider: {provider}", file=sys.stderr)
             sys.exit(1)
 
+        access_token, user = _oauth_device_flow(provider)
         print(f" done!")
         print()
 
@@ -1745,14 +1669,19 @@ def _load_agent(name: str):
 
 
 def _load_agent_config(name: str):
-    """Load an agent config from a name or file path."""
+    """Load an agent config from a name or file path.
+
+    For most commands, prefer ``_load_agent()`` which returns a full
+    ``Agent`` instance with observability attached. This function is
+    only for commands that need the config without running the agent
+    (e.g. ``deploy``).
+    """
     from agentos.agent import load_agent_config, _resolve_agents_dir
 
     path = Path(name)
     if path.exists() and path.is_file():
         return load_agent_config(path)
 
-    # Search in agents/ directory (dynamic resolution)
     agents_dir = _resolve_agents_dir()
     for ext in (".yaml", ".yml", ".json"):
         p = agents_dir / f"{name}{ext}"
@@ -1760,6 +1689,71 @@ def _load_agent_config(name: str):
             return load_agent_config(p)
 
     raise FileNotFoundError(f"Agent '{name}' not found")
+
+
+def _warn_identity_mismatch(agent) -> None:
+    """Warn if agent_id doesn't match project identity (.identity.json).
+
+    Shared by cmd_run and cmd_chat to avoid duplication.
+    """
+    identity_path = Path.cwd() / "agents" / ".identity.json"
+    if not identity_path.exists() or not agent.config.agent_id:
+        return
+    try:
+        project_id = json.loads(identity_path.read_text()).get("agent_id", "")
+        if project_id and agent.config.agent_id != project_id:
+            print(f"Warning: Agent '{agent.config.name}' has agent_id "
+                  f"'{agent.config.agent_id}' but project identity is "
+                  f"'{project_id}'.", file=sys.stderr)
+    except (json.JSONDecodeError, OSError):
+        pass
+
+
+def _warn_stub_provider(agent, *, show_recreate_hint: bool = False) -> None:
+    """Warn about stub provider usage.
+
+    Shared by cmd_run and cmd_chat. ``show_recreate_hint`` adds the
+    extra message about re-creating stub-built agents (cmd_run only).
+    """
+    if not agent.uses_stub_provider:
+        return
+    print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
+    print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
+    if show_recreate_hint and agent.config.built_with == "stub":
+        print("  This agent was also created with the stub provider —")
+        print("  re-create it with a real LLM for better results:")
+        print(f"    agentos create --one-shot \"{agent.config.description}\"")
+    print()
+
+
+def _oauth_device_flow(provider: str):
+    """Run OAuth device code flow for a given provider.
+
+    Shared by GitHub and Google login paths to avoid 21 lines of
+    near-identical code. Returns (access_token, user) or exits.
+    """
+    from agentos.auth import oauth
+
+    # Dispatch to provider-specific functions
+    request_fn = getattr(oauth, f"{provider}_request_device_code")
+    poll_fn = getattr(oauth, f"{provider}_poll_for_token")
+    user_fn = getattr(oauth, f"{provider}_get_user")
+
+    dc = request_fn()
+    print(f"  Open this URL in your browser:  {dc.verification_uri}")
+    print(f"  Enter this code:                {dc.user_code}")
+    print()
+    print("Waiting for authorization...", end="", flush=True)
+
+    access_token = poll_fn(
+        dc.device_code, interval=dc.interval, timeout=dc.expires_in
+    )
+    if not access_token:
+        print("\nAuthorization failed or timed out.")
+        sys.exit(1)
+
+    user = user_fn(access_token)
+    return access_token, user
 
 
 def _get_builder_provider(args: argparse.Namespace):
