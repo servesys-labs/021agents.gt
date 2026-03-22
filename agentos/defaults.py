@@ -144,8 +144,9 @@ Rubric evals are more robust — they check meaning, not exact strings. Example:
 {{"name": "task", "input": "...", "expected": "...", "grader": "llm", \
 "criteria": "Does the response do X? Score 0.0-1.0.", "pass_threshold": 0.5}}
 ```
-6. **Use the shared workspace** — When agents need to pass data between each other, \
-use `workspace-write` and `workspace-read`. This persists to data/workspace.json.
+6. **Use A2A for external agents** — Use `a2a-send` to communicate with agents built \
+in other frameworks (LangChain, CrewAI, AWS Bedrock, etc.) via the A2A protocol. \
+Use `run-agent` for agents within this project.
 7. **Evolve iteratively** — Run evolve to get improvement proposals. Verify with evals. \
 The system auto-rollbacks if quality regresses.
 
@@ -180,8 +181,7 @@ ORCHESTRATOR_TOOLS = [
     "glob",
     "http-request",
     "todo",
-    "workspace-write",
-    "workspace-read",
+    "a2a-send",
 ]
 
 AGENT_TEMPLATES: dict[str, dict] = {

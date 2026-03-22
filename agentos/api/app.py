@@ -154,6 +154,10 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
     from agentos.auth.middleware import mount_auth_routes
     mount_auth_routes(app)
 
+    # Mount A2A protocol routes (agent discovery + JSON-RPC)
+    from agentos.a2a.server import mount_a2a_routes
+    mount_a2a_routes(app)
+
     # Serve local dashboard (same SPA as CF deploy)
     import importlib.resources
     dashboard_dir = Path(__file__).parent.parent / "dashboard"

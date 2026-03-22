@@ -802,68 +802,38 @@ def _strip_tags(html: str) -> str:
     return re.sub(r"<[^>]+>", "", html)
 
 
-# ---------------------------------------------------------------------------
-# Shared workspace — agent-to-agent communication
-# ---------------------------------------------------------------------------
+async def a2a_send(url: str, message: str, agent_name: str = "") -> str:
+    """Send a message to an external A2A-compatible agent.
 
-def _workspace_path() -> Path:
-    return Path.cwd() / "data" / "workspace.json"
+    This enables communication with agents built in any framework
+    (LangChain, CrewAI, AutoGen, AWS Bedrock, etc.) via the A2A protocol.
 
+    Args:
+        url: Base URL of the A2A agent (e.g., https://agent.example.com)
+        message: Message text to send
+        agent_name: Optional name of specific agent on multi-agent servers
+    """
+    try:
+        from agentos.a2a.client import A2AClient
 
-def _load_workspace() -> dict[str, Any]:
-    p = _workspace_path()
-    if p.exists():
+        client = A2AClient(base_url=url)
+
+        # Try to discover the agent first
         try:
-            return json.loads(p.read_text())
+            card = await client.discover()
+            agent_desc = card.get("description", card.get("name", "unknown"))
         except Exception:
-            return {}
-    return {}
+            agent_desc = "unknown"
 
+        # Send message
+        response_text = await client.send_and_get_text(message, agent_name=agent_name)
 
-def _save_workspace(ws: dict[str, Any]) -> None:
-    p = _workspace_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(ws, indent=2) + "\n")
-
-
-async def workspace_write(key: str, value: str, agent_name: str = "") -> str:
-    """Write a value to the shared workspace.
-
-    The workspace is shared between all agents in the project. Use it to
-    pass data, results, or instructions between agents.
-
-    Args:
-        key: Key to store the value under
-        value: Value to store
-        agent_name: Name of the writing agent (auto-set)
-    """
-    ws = _load_workspace()
-    ws[key] = {"value": value, "written_by": agent_name, "timestamp": time.time()}
-    _save_workspace(ws)
-    return f"Written '{key}' to shared workspace ({len(value)} chars)"
-
-
-async def workspace_read(key: str = "", list_all: bool = False) -> str:
-    """Read from the shared workspace.
-
-    Args:
-        key: Key to read. If empty, lists all keys.
-        list_all: If true, returns all keys and values.
-    """
-    ws = _load_workspace()
-    if not ws:
-        return "Workspace is empty. Use workspace-write to add data."
-    if list_all or not key:
-        lines = [f"Workspace ({len(ws)} entries):"]
-        for k, entry in ws.items():
-            val = entry.get("value", str(entry))[:100] if isinstance(entry, dict) else str(entry)[:100]
-            by = entry.get("written_by", "?") if isinstance(entry, dict) else "?"
-            lines.append(f"  {k}: {val} (by {by})")
-        return "\n".join(lines)
-    entry = ws.get(key)
-    if entry is None:
-        return f"Key '{key}' not found. Available: {', '.join(ws.keys())}"
-    return entry.get("value", str(entry)) if isinstance(entry, dict) else str(entry)
+        return (
+            f"[A2A Response from {agent_desc}]\n\n"
+            f"{response_text}"
+        )
+    except Exception as exc:
+        return f"A2A communication failed: {exc}"
 
 
 # In-memory todo list for agent planning
@@ -950,8 +920,7 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "http-request": http_request,
     "run-agent": run_agent,
     "browse": browse_page,
-    "workspace-write": workspace_write,
-    "workspace-read": workspace_read,
+    "a2a-send": a2a_send,
 }
 
 # Schemas for built-in tools so the registry can expose them without JSON files
@@ -1168,25 +1137,16 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
             "required": ["url"],
         },
     },
-    "workspace-write": {
-        "description": "Write data to the shared workspace for other agents to read",
+    "a2a-send": {
+        "description": "Send a message to an external A2A-compatible agent (LangChain, CrewAI, AWS Bedrock, etc.)",
         "input_schema": {
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "Key to store the value under"},
-                "value": {"type": "string", "description": "Value to store"},
+                "url": {"type": "string", "description": "Base URL of the A2A agent"},
+                "message": {"type": "string", "description": "Message to send"},
+                "agent_name": {"type": "string", "description": "Optional agent name on multi-agent servers"},
             },
-            "required": ["key", "value"],
-        },
-    },
-    "workspace-read": {
-        "description": "Read data from the shared workspace written by other agents",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "key": {"type": "string", "description": "Key to read (empty to list all)"},
-                "list_all": {"type": "boolean", "description": "List all workspace entries", "default": False},
-            },
+            "required": ["url", "message"],
         },
     },
 }
