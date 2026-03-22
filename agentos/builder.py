@@ -54,6 +54,11 @@ a complete agent definition as a JSON object.
 - **browse**: Fetch web pages and extract text, HTML, or links
 - **store-knowledge**: Store facts in semantic memory
 
+### External Integrations (3,000+ apps via Pipedream)
+- **connector**: Call external apps — Slack, GitHub, Jira, Notion, Google Sheets, \
+Linear, HubSpot, Gmail, Stripe, and 3,000+ more. OAuth is managed automatically.
+  Example: connector(tool_name="slack-send-message", arguments={{"channel": "#alerts", "text": "Done"}})
+
 ### Planning & Management
 - **todo**: Task list for planning and tracking work
 - **run-agent**: Delegate a task to another agent within this project
@@ -152,6 +157,12 @@ TOOL_RECOMMENDATIONS: dict[str, list[str]] = {
     ],
     "manage|coordinate|delegate|orchestrate|project": [
         "run-agent", "create-agent", "list-agents", "eval-agent", "todo",
+    ],
+    "notify|alert|slack|jira|github|notion|email|integration": [
+        "connector", "todo",
+    ],
+    "report|dashboard|spreadsheet|google|sheets": [
+        "connector", "python-exec", "write-file", "todo",
     ],
 }
 

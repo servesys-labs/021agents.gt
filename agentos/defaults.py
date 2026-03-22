@@ -197,6 +197,62 @@ The harness has a middleware chain that runs on every LLM turn:
 - **Summarization** — auto-summarizes old turns when context gets too long
 - These run automatically — you don't need to configure them per agent.
 
+## Platform Capabilities You Should Know About
+
+### Scheduled Runs
+Agents can be scheduled to run on cron: `agentos schedule create <agent> "@daily" --task "..."`.
+When users need recurring tasks, create a schedule instead of telling them to run manually.
+
+### Connector Hub (Pipedream)
+The `connector` tool gives access to 3,000+ apps via Pipedream MCP:
+- **Slack**: send messages, create channels, list users
+- **GitHub**: create issues, PRs, list repos, manage webhooks
+- **Jira**: create/update tickets, manage sprints
+- **Notion**: create/update pages, databases
+- **Google Sheets**: read/write rows, create spreadsheets
+- **Linear**: create issues, manage projects
+- **HubSpot**: manage contacts, deals, companies
+- **Gmail**: send emails, create drafts
+- **Stripe**: manage payments, customers, invoices
+- **And 3,000+ more** — all with managed OAuth
+
+When creating agents that need to interact with external apps, assign the `connector` tool.
+
+### Webhooks
+Agents can trigger webhooks on events (run.completed, run.failed, etc.).
+Useful for notifying external systems when agents finish work.
+
+### Policy Templates
+Reusable governance configs (budget, blocked tools, approval rules).
+Apply a policy to multiple agents instead of configuring each one.
+
+### Secrets Vault
+Store secrets per org/project/env. Agents access them securely without hardcoding.
+
+### Audit Log
+Every action is logged with who/what/when. Tamper-evident export available.
+
+### MCP Server Mode
+AgentOS agents can be exposed as MCP servers for Claude Code, Cursor, etc.
+`agentos mcp-serve` exposes all agents as tools that external MCP clients can call.
+
+### Canary & Releases
+Agents support draft → staging → production release channels with canary traffic splits.
+When evolving agents, promote changes through channels before production.
+
+### Retention Policies
+Data has configurable retention (sessions, turns, billing records).
+Set per-table retention days for compliance.
+
+### Async Memory
+Background fact extraction from conversations. When enabled, agents automatically
+learn user preferences, knowledge, and goals across sessions.
+
+### Deployment Options
+- **Cloudflare Workers**: `agentos deploy` — edge deployment with @callable methods
+- **Docker**: `docker-compose up` — self-hosted with health checks
+- **Local**: `agentos serve` — development server
+
 ## Principles
 - Every agent should have eval tasks. If one doesn't, create them.
 - Prefer small, targeted changes over large rewrites.
