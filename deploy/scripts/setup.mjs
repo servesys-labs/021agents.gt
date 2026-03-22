@@ -82,10 +82,9 @@ async function main() {
   console.log("  Endpoints:");
   console.log("    GET  /agents/agentos/:name/health");
   console.log("    POST /agents/agentos/:name/run");
-  console.log("    GET  /agents/agentos/:name/tools");
+  console.log("    GET  /agents/agentos/:name/stats");
+  console.log("    GET  /agents/agentos/:name/sessions");
   console.log("    GET  /agents/agentos/:name/memory");
-  console.log("    POST /agents/agentos/:name/ingest");
-  console.log("    POST /agents/agentos/:name/eval");
   console.log("    PUT  /agents/agentos/:name/config\n");
 
   rl.close();

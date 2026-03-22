@@ -1,12 +1,11 @@
 /**
  * AgentOS — Cloudflare Agents Deployment (Modernized)
  *
- * Uses latest Cloudflare Agents SDK patterns:
+ * Uses Cloudflare Agents SDK patterns:
  *   - @callable() methods for type-safe RPC
- *   - McpAgent for MCP protocol support
+ *   - Dedicated MCP server agent for MCP protocol support
  *   - this.schedule() / this.queue() for job orchestration
  *   - this.sql`` for persistent state
- *   - AI Gateway for multi-provider routing
  *   - routeAgentRequest for URL-based agent dispatch
  */
 
@@ -18,6 +17,7 @@ import {
   routeAgentRequest,
   type StreamingResponse,
 } from "agents";
+import { McpAgent } from "agents/mcp";
 
 // ---------------------------------------------------------------------------
 // Environment bindings
@@ -27,7 +27,6 @@ export interface Env {
   AGENTOS_AGENT: AgentNamespace<AgentOSAgent>;
   AGENTOS_MCP: AgentNamespace<AgentOSMcpServer>;
   AI: Ai;
-  AI_GATEWAY: any;
   ASSETS: Fetcher;
   VECTORIZE: VectorizeIndex;
   ANTHROPIC_API_KEY?: string;
@@ -121,6 +120,21 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       arguments TEXT DEFAULT '{}',
       result TEXT DEFAULT '',
       error TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS schedules (
+      id TEXT PRIMARY KEY,
+      task_input TEXT NOT NULL,
+      cron_or_delay TEXT NOT NULL,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS jobs (
+      id TEXT PRIMARY KEY,
+      task_input TEXT NOT NULL,
+      priority INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'queued',
       created_at TEXT DEFAULT (datetime('now'))
     )`;
   }
@@ -232,21 +246,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   @callable()
   scheduleTask(taskInput: string, cronOrDelay: string | number): string {
     const id = crypto.randomUUID().slice(0, 12);
+    this.sql`INSERT INTO schedules (id, task_input, cron_or_delay) VALUES (${id}, ${taskInput}, ${String(cronOrDelay)})`;
     if (typeof cronOrDelay === "string") {
-      this.schedule(id, { cron: cronOrDelay, callback: "runScheduledTask", args: [taskInput] });
+      this.schedule(cronOrDelay, "runScheduledTask", { id, taskInput });
     } else {
-      this.schedule(id, { delay: cronOrDelay, callback: "runScheduledTask", args: [taskInput] });
+      this.schedule(cronOrDelay, "runScheduledTask", { id, taskInput });
     }
     return id;
   }
 
-  async runScheduledTask(taskInput: string) {
-    await this.run(taskInput);
+  async runScheduledTask(payload: { id: string; taskInput: string }) {
+    await this.run(payload.taskInput);
   }
 
   @callable()
   getSchedules(): any[] {
-    return this.getSchedule ? [this.getSchedule()] : [];
+    return this.sql`SELECT * FROM schedules ORDER BY created_at DESC LIMIT 100`;
   }
 
   // ── Queueing (async jobs) ──────────────────────────────────────
@@ -254,12 +269,21 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   @callable()
   enqueueJob(taskInput: string, priority: number = 0): string {
     const jobId = crypto.randomUUID().slice(0, 16);
-    this.queue(jobId, { callback: "processJob", args: [taskInput], priority });
+    this.sql`INSERT INTO jobs (id, task_input, priority, status) VALUES (${jobId}, ${taskInput}, ${priority}, 'queued')`;
+    this.queue("processJob", { jobId, taskInput, priority });
     return jobId;
   }
 
-  async processJob(taskInput: string) {
-    return await this.run(taskInput);
+  async processJob(payload: { jobId: string; taskInput: string; priority?: number }) {
+    this.sql`UPDATE jobs SET status = 'running' WHERE id = ${payload.jobId}`;
+    try {
+      const results = await this.run(payload.taskInput);
+      this.sql`UPDATE jobs SET status = 'completed' WHERE id = ${payload.jobId}`;
+      return results;
+    } catch (err) {
+      this.sql`UPDATE jobs SET status = 'failed' WHERE id = ${payload.jobId}`;
+      throw err;
+    }
   }
 
   // ── HTTP Handler ────────────────────────────────────────────────
@@ -456,7 +480,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 // MCP Server Agent — exposes tools via Model Context Protocol
 // ---------------------------------------------------------------------------
 
-export class AgentOSMcpServer extends Agent<Env> {
+export class AgentOSMcpServer extends McpAgent<Env> {
   async onStart() {
     // MCP tools are registered here
   }
@@ -528,6 +552,37 @@ export class AgentOSMcpServer extends Agent<Env> {
             jsonrpc: "2.0", id: body.id,
             result: { content: [{ type: "text", text: JSON.stringify(result) }] },
           });
+        }
+
+        if (toolName === "search-knowledge") {
+          const query = String(args.query || "");
+          if (!query.trim()) {
+            return Response.json({
+              jsonrpc: "2.0", id: body.id,
+              result: { content: [{ type: "text", text: "query is required" }], isError: true },
+            });
+          }
+          try {
+            const agentId = this.env.AGENTOS_AGENT.idFromName("default");
+            const agent = this.env.AGENTOS_AGENT.get(agentId);
+            const resp = await agent.fetch(new Request("http://internal/run", {
+              method: "POST",
+              body: JSON.stringify({ input: `Use knowledge search for: ${query}` }),
+            }));
+            const result = await resp.json();
+            return Response.json({
+              jsonrpc: "2.0", id: body.id,
+              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
+            });
+          } catch (err: any) {
+            return Response.json({
+              jsonrpc: "2.0", id: body.id,
+              result: {
+                content: [{ type: "text", text: `search-knowledge failed: ${err?.message || err}` }],
+                isError: true,
+              },
+            });
+          }
         }
 
         return Response.json({
