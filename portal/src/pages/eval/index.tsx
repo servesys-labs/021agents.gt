@@ -1,4 +1,3 @@
-import { Button, Card, Select, SelectItem, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -66,27 +65,27 @@ export const EvalPage = () => {
       <PageHeader title="Eval Runner" subtitle="Run evaluation suites and inspect benchmark outcomes" />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Run Evaluation</Text>
-          <Text className="text-xs text-gray-500 mb-2">Agent</Text>
-          <Select value={agentName || agents[0]?.name || ""} onValueChange={setAgentName}>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Run Evaluation</p>
+          <span className="text-xs text-gray-500 mb-2">Agent</span>
+          <select className="input-field" value={agentName || agents[0]?.name || ""} onChange={(e) => setAgentName(e.target.value)}>
             {agents.map((agent) => (
-              <SelectItem key={agent.name} value={agent.name}>
+              <option key={agent.name} value={agent.name}>
                 {agent.name}
-              </SelectItem>
+              </option>
             ))}
-          </Select>
-          <Text className="text-xs text-gray-500 mt-3 mb-2">Eval Task File</Text>
-          <Select value={evalFile || tasks[0]?.file || ""} onValueChange={setEvalFile}>
+          </select>
+          <span className="text-xs text-gray-500 mt-3 mb-2">Eval Task File</span>
+          <select className="input-field" value={evalFile || tasks[0]?.file || ""} onChange={(e) => setEvalFile(e.target.value)}>
             {tasks.map((task) => (
-              <SelectItem key={task.file} value={task.file}>
+              <option key={task.file} value={task.file}>
                 {task.name} ({task.task_count} tasks)
-              </SelectItem>
+              </option>
             ))}
-          </Select>
-          <Text className="text-xs text-gray-500 mt-3 mb-2">Trials</Text>
+          </select>
+          <span className="text-xs text-gray-500 mt-3 mb-2">Trials</span>
           <input
-            className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
+            className="w-24 rounded-md border border-[#2a2a2a] px-2 py-1 text-sm"
             type="number"
             min={1}
             max={20}
@@ -94,17 +93,17 @@ export const EvalPage = () => {
             onChange={(event) => setTrials(Number(event.target.value) || 1)}
           />
           <div className="mt-4">
-            <Button loading={running} onClick={() => void runEval()}>
+            <button className="btn-primary" disabled={running} onClick={() => void runEval()}>
               Run Eval
-            </Button>
+            </button>
           </div>
-          {error ? <Text className="mt-3 text-red-600">{error}</Text> : null}
+          {error ? <span className="mt-3 text-red-600">{error}</span> : null}
           {lastRun ? (
-            <pre className="mt-3 max-h-64 overflow-auto rounded bg-gray-50 p-3 text-xs">
+            <pre className="mt-3 max-h-64 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">
               {JSON.stringify(lastRun, null, 2)}
             </pre>
           ) : null}
-        </Card>
+        </div>
 
         <QueryState
           loading={tasksQuery.loading}
@@ -113,32 +112,32 @@ export const EvalPage = () => {
           emptyMessage="No eval task files found in /eval."
           onRetry={() => void tasksQuery.refetch()}
         >
-          <Card>
-            <Text className="font-semibold mb-3">Available Task Suites</Text>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Name</TableHeaderCell>
-                  <TableHeaderCell>File</TableHeaderCell>
-                  <TableHeaderCell>Tasks</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+          <div className="card">
+            <p className="font-semibold text-white mb-3">Available Task Suites</p>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>File</th>
+                  <th>Tasks</th>
+                </tr>
+              </thead>
+              <tbody>
                 {tasks.map((task) => (
-                  <TableRow key={task.file}>
-                    <TableCell><Text>{task.name}</Text></TableCell>
-                    <TableCell><Text className="font-mono text-xs">{task.file}</Text></TableCell>
-                    <TableCell><Text>{task.task_count}</Text></TableCell>
-                  </TableRow>
+                  <tr key={task.file}>
+                    <td><span className="text-gray-400">{task.name}</span></td>
+                    <td><span className="font-mono text-xs text-gray-300">{task.file}</span></td>
+                    <td><span className="text-gray-400">{task.task_count}</span></td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
-          </Card>
+              </tbody>
+            </table>
+          </div>
         </QueryState>
       </div>
 
-      <Card className="mt-6">
-        <Text className="font-semibold mb-3">Recent Eval Runs</Text>
+      <div className="card mt-6">
+        <p className="font-semibold text-white mb-3">Recent Eval Runs</p>
         <QueryState
           loading={runsQuery.loading}
           error={runsQuery.error}
@@ -146,48 +145,48 @@ export const EvalPage = () => {
           emptyMessage="No eval runs yet."
           onRetry={() => void runsQuery.refetch()}
         >
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Run</TableHeaderCell>
-                <TableHeaderCell>Agent</TableHeaderCell>
-                <TableHeaderCell>Pass Rate</TableHeaderCell>
-                <TableHeaderCell>Score</TableHeaderCell>
-                <TableHeaderCell>Cost</TableHeaderCell>
-                <TableHeaderCell></TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>Agent</th>
+                <th>Pass Rate</th>
+                <th>Score</th>
+                <th>Cost</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
               {runs.map((run) => (
-                <TableRow key={run.run_id}>
-                  <TableCell><Text>{run.run_id}</Text></TableCell>
-                  <TableCell><Text>{run.agent_name}</Text></TableCell>
-                  <TableCell><Text>{(run.pass_rate * 100).toFixed(1)}%</Text></TableCell>
-                  <TableCell><Text>{run.avg_score.toFixed(3)}</Text></TableCell>
-                  <TableCell><Text>${run.total_cost_usd.toFixed(4)}</Text></TableCell>
-                  <TableCell>
-                    <Button size="xs" onClick={() => setSelectedRunId(run.run_id)}>
+                <tr key={run.run_id}>
+                  <td><span className="text-gray-400">{run.run_id}</span></td>
+                  <td><span className="text-gray-400">{run.agent_name}</span></td>
+                  <td><span className="text-gray-400">{(run.pass_rate * 100).toFixed(1)}%</span></td>
+                  <td><span className="text-gray-400">{run.avg_score.toFixed(3)}</span></td>
+                  <td><span className="text-gray-400">${run.total_cost_usd.toFixed(4)}</span></td>
+                  <td>
+                    <button className="btn-primary text-xs" onClick={() => setSelectedRunId(run.run_id)}>
                       Detail
-                    </Button>
-                  </TableCell>
-                </TableRow>
+                    </button>
+                  </td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
+            </tbody>
+          </table>
         </QueryState>
-      </Card>
+      </div>
 
       {selectedRunId !== null ? (
-        <Card className="mt-6">
-          <Text className="font-semibold mb-2">Run Detail: {selectedRunId}</Text>
-          {runDetailQuery.loading ? <Text>Loading detail...</Text> : null}
-          {runDetailQuery.error ? <Text className="text-red-600">{runDetailQuery.error}</Text> : null}
+        <div className="card mt-6">
+          <p className="font-semibold text-white mb-2">Run Detail: {selectedRunId}</p>
+          {runDetailQuery.loading ? <span className="text-gray-400">Loading detail...</span> : null}
+          {runDetailQuery.error ? <p className="text-red-500">{runDetailQuery.error}</p> : null}
           {runDetailQuery.data ? (
-            <pre className="max-h-80 overflow-auto rounded bg-gray-50 p-3 text-xs">
+            <pre className="max-h-80 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">
               {JSON.stringify(runDetailQuery.data, null, 2)}
             </pre>
           ) : null}
-        </Card>
+        </div>
       ) : null}
     </div>
   );

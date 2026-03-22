@@ -1,4 +1,3 @@
-import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useState } from "react";
 
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
@@ -136,109 +135,109 @@ export const GovernancePage = () => {
       <PageHeader title="Governance" subtitle="Policies, secret inventory, and recent audit activity" />
 
       <div className="grid gap-6 lg:grid-cols-3">
-        <Card>
-          <Text className="text-gray-500">Policies</Text>
-          <Text className="text-3xl font-bold">{policies.length}</Text>
-        </Card>
-        <Card>
-          <Text className="text-gray-500">Secrets</Text>
-          <Text className="text-3xl font-bold">{secrets.length}</Text>
-        </Card>
-        <Card>
-          <Text className="text-gray-500">Recent Audit Events</Text>
-          <Text className="text-3xl font-bold">{events.length}</Text>
-        </Card>
+        <div className="card">
+          <span className="text-gray-500">Policies</span>
+          <p className="text-3xl font-bold text-white">{policies.length}</p>
+        </div>
+        <div className="card">
+          <span className="text-gray-500">Secrets</span>
+          <p className="text-3xl font-bold text-white">{secrets.length}</p>
+        </div>
+        <div className="card">
+          <span className="text-gray-500">Recent Audit Events</span>
+          <p className="text-3xl font-bold text-white">{events.length}</p>
+        </div>
       </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Policy Templates</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Policy Templates</p>
           <QueryState
             loading={policiesQuery.loading}
             error={policiesQuery.error}
             isEmpty={policies.length === 0}
             emptyMessage="No policies defined."
           >
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Name</TableHeaderCell>
-                  <TableHeaderCell>Scope</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Scope</th>
+                </tr>
+              </thead>
+              <tbody>
                 {policies.map((policy) => (
-                  <TableRow key={policy.policy_id}>
-                    <TableCell><Text>{policy.name ?? "unnamed"}</Text></TableCell>
-                    <TableCell><Badge>{policy.org_id ? "org" : "global"}</Badge></TableCell>
-                  </TableRow>
+                  <tr key={policy.policy_id}>
+                    <td><span className="text-gray-400">{policy.name ?? "unnamed"}</span></td>
+                    <td><span className="badge">{policy.org_id ? "org" : "global"}</span></td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
+        </div>
 
-        <Card>
-          <Text className="font-semibold mb-3">Secrets</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Secrets</p>
           <div className="mb-3 grid gap-2 md:grid-cols-3">
-            <TextInput value={secretName} onChange={(event) => setSecretName(event.target.value)} placeholder="SECRET_NAME" />
-            <TextInput value={secretValue} onChange={(event) => setSecretValue(event.target.value)} placeholder="secret value" />
-            <Button size="xs" onClick={() => void createSecret()}>Create Secret</Button>
+            <input className="input-field" value={secretName} onChange={(event) => setSecretName(event.target.value)} placeholder="SECRET_NAME" />
+            <input className="input-field" value={secretValue} onChange={(event) => setSecretValue(event.target.value)} placeholder="secret value" />
+            <button className="btn-primary text-xs" onClick={() => void createSecret()}>Create Secret</button>
           </div>
-          {actionMessage ? <Text className="text-emerald-600 mb-2">{actionMessage}</Text> : null}
-          {actionError ? <Text className="text-red-600 mb-2">{actionError}</Text> : null}
+          {actionMessage ? <p className="text-emerald-400 mb-2">{actionMessage}</p> : null}
+          {actionError ? <span className="text-red-600 mb-2">{actionError}</span> : null}
           <QueryState
             loading={secretsQuery.loading}
             error={secretsQuery.error}
             isEmpty={secrets.length === 0}
             emptyMessage="No secrets configured."
           >
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Name</TableHeaderCell>
-                  <TableHeaderCell>Project</TableHeaderCell>
-                  <TableHeaderCell>Env</TableHeaderCell>
-                  <TableHeaderCell>Actions</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Project</th>
+                  <th>Env</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
                 {secrets.map((secret) => (
-                  <TableRow key={`${secret.name}-${secret.project_id}-${secret.env}`}>
-                    <TableCell><Text>{secret.name ?? "secret"}</Text></TableCell>
-                    <TableCell><Badge>{secret.project_id || "org"}</Badge></TableCell>
-                    <TableCell><Badge>{secret.env || "all"}</Badge></TableCell>
-                    <TableCell>
+                  <tr key={`${secret.name}-${secret.project_id}-${secret.env}`}>
+                    <td><span className="text-gray-400">{secret.name ?? "secret"}</span></td>
+                    <td><span className="badge">{secret.project_id || "org"}</span></td>
+                    <td><span className="badge">{secret.env || "all"}</span></td>
+                    <td>
                       <div className="flex gap-2">
                         {secret.name ? (
                           <>
-                            <Button size="xs" variant="secondary" onClick={() => void rotateSecret(secret.name ?? "")}>Rotate</Button>
-                            <Button size="xs" color="red" onClick={() => setPendingDeleteSecretName(secret.name ?? "")}>Delete</Button>
+                            <button className="btn-secondary text-xs" onClick={() => void rotateSecret(secret.name ?? "")}>Rotate</button>
+                            <button className="btn-danger text-xs" onClick={() => setPendingDeleteSecretName(secret.name ?? "")}>Delete</button>
                           </>
                         ) : null}
                       </div>
-                    </TableCell>
-                  </TableRow>
+                    </td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
+        </div>
       </div>
 
-      <Card className="mt-6">
+      <div className="card mt-6">
         <div className="flex flex-wrap items-center gap-2 mb-3">
-          <Text className="font-semibold">Audit Trail</Text>
-          <TextInput value={auditFilter} onChange={(event) => setAuditFilter(event.target.value)} placeholder="filter by action" />
+          <p className="font-semibold text-white">Audit Trail</p>
+          <input className="input-field" value={auditFilter} onChange={(event) => setAuditFilter(event.target.value)} placeholder="filter by action" />
           <input
-            className="w-24 rounded-md border border-gray-300 px-2 py-1 text-sm"
+            className="w-24 rounded-md border border-[#2a2a2a] px-2 py-1 text-sm"
             type="number"
             min={1}
             value={auditSinceDays}
             onChange={(event) => setAuditSinceDays(Number(event.target.value) || 1)}
           />
-          <Button size="xs" variant="secondary" onClick={() => void auditQuery.refetch()}>Filter</Button>
-          <Button size="xs" onClick={() => void exportAudit()}>Export JSON</Button>
+          <button className="btn-secondary text-xs" onClick={() => void auditQuery.refetch()}>Filter</button>
+          <button className="btn-primary text-xs" onClick={() => void exportAudit()}>Export JSON</button>
         </div>
         <QueryState
           loading={auditQuery.loading}
@@ -246,26 +245,26 @@ export const GovernancePage = () => {
           isEmpty={events.length === 0}
           emptyMessage="No audit events yet."
         >
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Event</TableHeaderCell>
-                <TableHeaderCell>Resource</TableHeaderCell>
-                <TableHeaderCell>User</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Event</th>
+                <th>Resource</th>
+                <th>User</th>
+              </tr>
+            </thead>
+            <tbody>
               {events.map((event, index) => (
-                <TableRow key={`${event.action}-${event.created_at}-${index}`}>
-                  <TableCell><Text>{event.action ?? "unknown"}</Text></TableCell>
-                  <TableCell><Text>{event.resource_type ?? "n/a"}</Text></TableCell>
-                  <TableCell><Text className="font-mono text-xs">{event.user_id ?? "system"}</Text></TableCell>
-                </TableRow>
+                <tr key={`${event.action}-${event.created_at}-${index}`}>
+                  <td><span className="text-gray-400">{event.action ?? "unknown"}</span></td>
+                  <td><span className="text-gray-400">{event.resource_type ?? "n/a"}</span></td>
+                  <td><span className="font-mono text-xs text-gray-300">{event.user_id ?? "system"}</span></td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
+            </tbody>
+          </table>
         </QueryState>
-      </Card>
+      </div>
       <ConfirmDialog
         open={pendingDeleteSecretName !== null}
         title="Delete secret?"

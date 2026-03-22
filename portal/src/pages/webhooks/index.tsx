@@ -1,4 +1,3 @@
-import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -146,23 +145,23 @@ export const WebhooksPage = () => {
       <PageHeader title="Webhooks" subtitle="Create, test, update, and manage webhook endpoints" />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Create Webhook</Text>
-          <Text className="text-xs text-gray-500 mb-1">URL</Text>
-          <TextInput value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/webhook" />
-          <Text className="text-xs text-gray-500 mt-3 mb-1">Events (comma-separated)</Text>
-          <TextInput value={events} onChange={(event) => setEvents(event.target.value)} placeholder="run.completed,run.failed" />
-          <Button className="mt-4" onClick={() => void createWebhook()}>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Create Webhook</p>
+          <span className="text-xs text-gray-500 mb-1">URL</span>
+          <input className="input-field" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com/webhook" />
+          <span className="text-xs text-gray-500 mt-3 mb-1">Events (comma-separated)</span>
+          <input className="input-field" value={events} onChange={(event) => setEvents(event.target.value)} placeholder="run.completed,run.failed" />
+          <button className="btn-primary mt-4" onClick={() => void createWebhook()}>
             Create
-          </Button>
-          {actionMessage ? <Text className="mt-3 text-emerald-600 break-all">{actionMessage}</Text> : null}
-          {actionError ? <Text className="mt-3 text-red-600">{actionError}</Text> : null}
-        </Card>
+          </button>
+          {actionMessage ? <span className="mt-3 text-emerald-600 break-all">{actionMessage}</span> : null}
+          {actionError ? <span className="mt-3 text-red-600">{actionError}</span> : null}
+        </div>
 
-        <Card>
-          <Text className="font-semibold mb-3">Delivery Attempts</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Delivery Attempts</p>
           {!selectedWebhook ? (
-            <Text className="text-gray-500">Select a webhook below to load deliveries.</Text>
+            <span className="text-gray-500">Select a webhook below to load deliveries.</span>
           ) : (
             <QueryState
               loading={deliveriesQuery.loading}
@@ -171,31 +170,31 @@ export const WebhooksPage = () => {
               emptyMessage="No deliveries found."
               onRetry={() => void deliveriesQuery.refetch()}
             >
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableHeaderCell>Event</TableHeaderCell>
-                    <TableHeaderCell>Status</TableHeaderCell>
-                    <TableHeaderCell>Duration</TableHeaderCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
+              <table className="os-table">
+                <thead>
+                  <tr>
+                    <th>Event</th>
+                    <th>Status</th>
+                    <th>Duration</th>
+                  </tr>
+                </thead>
+                <tbody>
                   {(deliveriesQuery.data?.deliveries ?? []).map((delivery, index) => (
-                    <TableRow key={`${delivery.id ?? index}`}>
-                      <TableCell><Text>{delivery.event_type ?? "unknown"}</Text></TableCell>
-                      <TableCell><Text>{delivery.response_status ?? 0}</Text></TableCell>
-                      <TableCell><Text>{delivery.duration_ms?.toFixed(1) ?? "0.0"}ms</Text></TableCell>
-                    </TableRow>
+                    <tr key={`${delivery.id ?? index}`}>
+                      <td><span className="text-gray-400">{delivery.event_type ?? "unknown"}</span></td>
+                      <td><span className="text-gray-400">{delivery.response_status ?? 0}</span></td>
+                      <td><span className="text-gray-400">{delivery.duration_ms?.toFixed(1) ?? "0.0"}ms</span></td>
+                    </tr>
                   ))}
-                </TableBody>
-              </Table>
+                </tbody>
+              </table>
             </QueryState>
           )}
-        </Card>
+        </div>
       </div>
 
-      <Card className="mt-6">
-        <Text className="font-semibold mb-3">Configured Webhooks</Text>
+      <div className="card mt-6">
+        <p className="font-semibold text-white mb-3">Configured Webhooks</p>
         <QueryState
           loading={webhooksQuery.loading}
           error={webhooksQuery.error}
@@ -203,51 +202,51 @@ export const WebhooksPage = () => {
           emptyMessage="No webhooks configured."
           onRetry={() => void webhooksQuery.refetch()}
         >
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>ID</TableHeaderCell>
-                <TableHeaderCell>URL</TableHeaderCell>
-                <TableHeaderCell>Events</TableHeaderCell>
-                <TableHeaderCell>Status</TableHeaderCell>
-                <TableHeaderCell>Actions</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>URL</th>
+                <th>Events</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
               {webhooks.map((webhook) => (
-                <TableRow key={webhook.webhook_id}>
-                  <TableCell><Text className="font-mono text-xs">{webhook.webhook_id}</Text></TableCell>
-                  <TableCell><Text>{webhook.url}</Text></TableCell>
-                  <TableCell>
-                    <Text className="text-xs">{webhook.events.join(", ")}</Text>
-                  </TableCell>
-                  <TableCell>
-                    <Badge color={webhook.is_active ? "green" : "gray"}>
+                <tr key={webhook.webhook_id}>
+                  <td><span className="font-mono text-xs text-gray-300">{webhook.webhook_id}</span></td>
+                  <td><span className="text-gray-400">{webhook.url}</span></td>
+                  <td>
+                    <span className="text-xs">{webhook.events.join(", ")}</span>
+                  </td>
+                  <td>
+                    <span className="badge">
                       {webhook.is_active ? "active" : "disabled"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
+                    </span>
+                  </td>
+                  <td>
                     <div className="flex flex-wrap gap-2">
-                      <Button size="xs" onClick={() => void testWebhook(webhook)}>Test</Button>
-                      <Button size="xs" variant="secondary" onClick={() => void updateWebhook(webhook)}>Edit</Button>
-                      <Button size="xs" variant="secondary" onClick={() => void toggleWebhook(webhook)}>
+                      <button className="btn-primary text-xs" onClick={() => void testWebhook(webhook)}>Test</button>
+                      <button className="btn-secondary text-xs" onClick={() => void updateWebhook(webhook)}>Edit</button>
+                      <button className="btn-secondary text-xs" onClick={() => void toggleWebhook(webhook)}>
                         {webhook.is_active ? "Disable" : "Enable"}
-                      </Button>
-                      <Button size="xs" variant="secondary" onClick={() => setSelectedWebhook(webhook.webhook_id)}>
+                      </button>
+                      <button className="btn-secondary text-xs" onClick={() => setSelectedWebhook(webhook.webhook_id)}>
                         Deliveries
-                      </Button>
-                      <Button size="xs" variant="secondary" onClick={() => void rotateSecret(webhook)}>
+                      </button>
+                      <button className="btn-secondary text-xs" onClick={() => void rotateSecret(webhook)}>
                         Rotate Secret
-                      </Button>
-                      <Button size="xs" color="red" onClick={() => void deleteWebhook(webhook)}>Delete</Button>
+                      </button>
+                      <button className="btn-danger text-xs" onClick={() => void deleteWebhook(webhook)}>Delete</button>
                     </div>
-                  </TableCell>
-                </TableRow>
+                  </td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
+            </tbody>
+          </table>
         </QueryState>
-      </Card>
+      </div>
     </div>
   );
 };

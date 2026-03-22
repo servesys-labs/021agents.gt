@@ -1,4 +1,3 @@
-import { Card, Table, TableHead, TableHeaderCell, TableBody, TableRow, TableCell, Text, Badge, Button } from "@tremor/react";
 import { useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -21,21 +20,10 @@ export const AgentsPage = () => {
   return (
     <div>
       <PageHeader title="Agents" subtitle={`${agents.length} configured agents`} />
-      <div className="mb-3 flex items-center gap-2">
-        <Button size="xs" variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>
-          Previous
-        </Button>
-        <Button size="xs" variant="secondary" onClick={() => setOffset(offset + limit)}>
-          Next
-        </Button>
-        <select
-          className="rounded border border-gray-300 px-2 py-1 text-xs"
-          value={limit}
-          onChange={(event) => {
-            setLimit(Number(event.target.value));
-            setOffset(0);
-          }}
-        >
+      <div className="mb-4 flex items-center gap-2">
+        <button className="btn-secondary text-xs" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Previous</button>
+        <button className="btn-secondary text-xs" onClick={() => setOffset(offset + limit)}>Next</button>
+        <select className="input-field w-auto text-xs" value={limit} onChange={(e) => { setLimit(Number(e.target.value)); setOffset(0); }}>
           <option value={10}>10</option>
           <option value={25}>25</option>
           <option value={50}>50</option>
@@ -43,68 +31,42 @@ export const AgentsPage = () => {
         </select>
       </div>
 
-      <QueryState
-        loading={agentsQuery.loading}
-        error={agentsQuery.error}
-        isEmpty={agents.length === 0}
-        emptyMessage="No agents found."
-        onRetry={() => void agentsQuery.refetch()}
-      >
-        <Card>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Name</TableHeaderCell>
-                <TableHeaderCell>Model</TableHeaderCell>
-                <TableHeaderCell>Tools</TableHeaderCell>
-                <TableHeaderCell>Tags</TableHeaderCell>
-                <TableHeaderCell>Actions</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {agents.map((agent) => (
-                <TableRow key={agent.name}>
-                  <TableCell>
-                    <Text className="font-medium">{agent.name}</Text>
-                    <Text className="text-xs text-gray-400">{agent.description?.slice(0, 60) ?? "No description"}</Text>
-                  </TableCell>
-                  <TableCell>
-                    <Badge>{agent.model?.split("/").pop() || "n/a"}</Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Text>{safeArray(agent.tools).length} tools</Text>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex gap-1">
-                      {safeArray<string>(agent.tags).map((tag) => (
-                        <Badge key={tag} size="xs" color="gray">{tag}</Badge>
-                      ))}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <Button size="xs" onClick={() => setSelectedAgent(agent.name)}>
-                      View Config
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </Card>
+      <QueryState loading={agentsQuery.loading} error={agentsQuery.error} isEmpty={agents.length === 0} emptyMessage="No agents found." onRetry={() => void agentsQuery.refetch()}>
+        <div className="card">
+          <div className="overflow-x-auto">
+            <table className="os-table">
+              <thead><tr><th>Name</th><th>Model</th><th>Tools</th><th>Tags</th><th>Actions</th></tr></thead>
+              <tbody>
+                {agents.map((agent) => (
+                  <tr key={agent.name}>
+                    <td>
+                      <span className="font-medium text-white">{agent.name}</span>
+                      <span className="block text-xs text-gray-500">{agent.description?.slice(0, 60) ?? "No description"}</span>
+                    </td>
+                    <td><span className="badge">{agent.model?.split("/").pop() || "n/a"}</span></td>
+                    <td>{safeArray(agent.tools).length} tools</td>
+                    <td>
+                      <div className="flex gap-1 flex-wrap">
+                        {safeArray<string>(agent.tags).map((tag) => (<span key={tag} className="badge badge-muted">{tag}</span>))}
+                      </div>
+                    </td>
+                    <td><button className="btn-primary text-xs" onClick={() => setSelectedAgent(agent.name)}>View Config</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </QueryState>
 
       {selectedAgent ? (
-        <Card className="mt-6">
-          <Text className="font-bold mb-2">Agent Config: {selectedAgent}</Text>
-          {detailQuery.loading ? <Text>Loading config...</Text> : null}
-          {detailQuery.error ? <Text className="text-red-600">{detailQuery.error}</Text> : null}
-          {detailQuery.data ? (
-            <pre className="max-h-96 overflow-auto rounded bg-gray-50 p-4 text-xs">
-              {JSON.stringify(detailQuery.data, null, 2)}
-            </pre>
-          ) : null}
-          <Button size="xs" className="mt-2" onClick={() => setSelectedAgent(null)}>Close</Button>
-        </Card>
+        <div className="card mt-6">
+          <p className="font-bold text-white mb-2">Agent Config: {selectedAgent}</p>
+          {detailQuery.loading ? <p className="text-gray-400">Loading config...</p> : null}
+          {detailQuery.error ? <p className="text-red-500">{detailQuery.error}</p> : null}
+          {detailQuery.data ? <pre className="code-block">{JSON.stringify(detailQuery.data, null, 2)}</pre> : null}
+          <button className="btn-secondary text-xs mt-2" onClick={() => setSelectedAgent(null)}>Close</button>
+        </div>
       ) : null}
     </div>
   );

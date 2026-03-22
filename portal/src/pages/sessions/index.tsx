@@ -1,4 +1,3 @@
-import { Card, Table, TableHead, TableHeaderCell, TableBody, TableRow, TableCell, Text, Badge, Button } from "@tremor/react";
 import { useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -38,14 +37,14 @@ export const SessionsPage = () => {
     <div>
       <PageHeader title="Sessions" subtitle="Recent session runs and turn-level traces" />
       <div className="mb-3 flex items-center gap-2">
-        <Button size="xs" variant="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>
+        <button className="btn-secondary text-xs" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>
           Previous
-        </Button>
-        <Button size="xs" variant="secondary" onClick={() => setOffset(offset + limit)}>
+        </button>
+        <button className="btn-secondary text-xs" onClick={() => setOffset(offset + limit)}>
           Next
-        </Button>
+        </button>
         <select
-          className="rounded border border-gray-300 px-2 py-1 text-xs"
+          className="rounded border border-[#2a2a2a] px-2 py-1 text-xs"
           value={limit}
           onChange={(event) => {
             setLimit(Number(event.target.value));
@@ -66,71 +65,71 @@ export const SessionsPage = () => {
         emptyMessage="No sessions found."
         onRetry={() => void sessionsQuery.refetch()}
       >
-        <Card>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Session</TableHeaderCell>
-                <TableHeaderCell>Agent</TableHeaderCell>
-                <TableHeaderCell>Status</TableHeaderCell>
-                <TableHeaderCell>Turns</TableHeaderCell>
-                <TableHeaderCell>Cost</TableHeaderCell>
-                <TableHeaderCell>Duration</TableHeaderCell>
-                <TableHeaderCell>Actions</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+        <div className="card">
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Session</th>
+                <th>Agent</th>
+                <th>Status</th>
+                <th>Turns</th>
+                <th>Cost</th>
+                <th>Duration</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
               {sessions.map((s) => (
-                <TableRow key={s.session_id}>
-                  <TableCell>
-                    <Text className="font-mono text-xs">{s.session_id.slice(0, 12)}</Text>
-                  </TableCell>
-                  <TableCell><Text>{s.agent_name ?? "unknown"}</Text></TableCell>
-                  <TableCell>
-                    <Badge color={statusColor(s.status ?? "")}>{s.status ?? "unknown"}</Badge>
-                  </TableCell>
-                  <TableCell><Text>{toNumber(s.step_count)}</Text></TableCell>
-                  <TableCell><Text>${toNumber(s.cost_total_usd).toFixed(4)}</Text></TableCell>
-                  <TableCell><Text>{toNumber(s.wall_clock_seconds).toFixed(1)}s</Text></TableCell>
-                  <TableCell>
-                    <Button size="xs" onClick={() => setSelectedSession(s.session_id)}>
+                <tr key={s.session_id}>
+                  <td>
+                    <span className="font-mono text-xs text-gray-300">{s.session_id.slice(0, 12)}</span>
+                  </td>
+                  <td><span className="text-gray-400">{s.agent_name ?? "unknown"}</span></td>
+                  <td>
+                    <span className="badge">{s.status ?? "unknown"}</span>
+                  </td>
+                  <td><span className="text-gray-400">{toNumber(s.step_count)}</span></td>
+                  <td><span className="text-gray-400">${toNumber(s.cost_total_usd).toFixed(4)}</span></td>
+                  <td><span className="text-gray-400">{toNumber(s.wall_clock_seconds).toFixed(1)}s</span></td>
+                  <td>
+                    <button className="btn-primary text-xs" onClick={() => setSelectedSession(s.session_id)}>
                       Turns
-                    </Button>
-                  </TableCell>
-                </TableRow>
+                    </button>
+                  </td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
-        </Card>
+            </tbody>
+          </table>
+        </div>
       </QueryState>
 
       {selectedSession ? (
-        <Card className="mt-6">
-          <Text className="font-bold mb-4">Turns for {selectedSession.slice(0, 12)}</Text>
-          {turnsQuery.loading ? <Text>Loading turns...</Text> : null}
-          {turnsQuery.error ? <Text className="text-red-600">{turnsQuery.error}</Text> : null}
+        <div className="card mt-6">
+          <p className="font-bold text-white mb-4">Turns for {selectedSession.slice(0, 12)}</p>
+          {turnsQuery.loading ? <span className="text-gray-400">Loading turns...</span> : null}
+          {turnsQuery.error ? <p className="text-red-500">{turnsQuery.error}</p> : null}
           {safeArray<SessionTurn>(turnsQuery.data).map((turn) => (
-            <div key={turn.turn_number} className="border-b pb-3 mb-3">
+            <div key={turn.turn_number} className="border-b border-[#2a2a2a] pb-3 mb-3">
               <div className="flex justify-between mb-1">
-                <Badge>Turn {turn.turn_number}</Badge>
-                <Text className="text-xs text-gray-400">
+                <span className="badge">Turn {turn.turn_number}</span>
+                <span className="text-xs text-gray-500">
                   {turn.model_used?.split("/").pop()} · {toNumber(turn.latency_ms).toFixed(0)}ms · ${toNumber(turn.cost_total_usd).toFixed(6)}
-                </Text>
+                </span>
               </div>
-              <Text className="text-sm whitespace-pre-wrap">{turn.content?.slice(0, 500) ?? ""}</Text>
+              <p className="text-sm text-gray-300 whitespace-pre-wrap">{turn.content?.slice(0, 500) ?? ""}</p>
               {safeArray<ToolCall>(turn.tool_calls).length > 0 && (
                 <div className="mt-1">
                   {safeArray<ToolCall>(turn.tool_calls).map((tc, index) => (
-                    <Badge key={`${tc.name ?? tc.function?.name ?? "tool"}-${index}`} size="xs" color="blue" className="mr-1">
+                    <span key={`${tc.name ?? tc.function?.name ?? "tool"}-${index}`} className="badge badge-muted mr-1">
                       {tc.name || tc.function?.name || "tool"}
-                    </Badge>
+                    </span>
                   ))}
                 </div>
               )}
             </div>
           ))}
-          <Button size="xs" onClick={() => setSelectedSession(null)}>Close</Button>
-        </Card>
+          <button className="btn-primary text-xs" onClick={() => setSelectedSession(null)}>Close</button>
+        </div>
       ) : null}
     </div>
   );

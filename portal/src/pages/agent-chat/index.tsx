@@ -1,4 +1,3 @@
-import { Badge, Button, Card, Select, SelectItem, Text, Textarea } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -91,66 +90,66 @@ export const AgentChatPage = () => {
         onRetry={() => void agentsQuery.refetch()}
       >
         <div className="grid gap-6 lg:grid-cols-2">
-          <Card>
-            <Text className="font-semibold mb-3">Run Agent Task</Text>
-            <Text className="text-xs text-gray-500 mb-2">Agent</Text>
-            <Select value={selectedAgent} onValueChange={setAgentName}>
+          <div className="card">
+            <p className="font-semibold text-white mb-3">Run Agent Task</p>
+            <span className="text-xs text-gray-500 mb-2">Agent</span>
+            <select className="input-field" value={selectedAgent} onChange={(e) => setAgentName(e.target.value)}>
               {agents.map((agent) => (
-                <SelectItem key={agent.name} value={agent.name}>
+                <option key={agent.name} value={agent.name}>
                   {agent.name}
-                </SelectItem>
+                </option>
               ))}
-            </Select>
-            <Text className="text-xs text-gray-500 mt-3 mb-2">Task</Text>
-            <Textarea value={task} onChange={(event) => setTask(event.target.value)} rows={5} />
-            <Button className="mt-4" loading={loadingRun} onClick={() => void runAgent()}>
+            </select>
+            <span className="text-xs text-gray-500 mt-3 mb-2">Task</span>
+            <textarea className="input-field" value={task} onChange={(event) => setTask(event.target.value)} rows={5} />
+            <button className="btn-primary mt-4" disabled={loadingRun} onClick={() => void runAgent()}>
               Run Task
-            </Button>
+            </button>
             {runResult ? (
               <div className="mt-4 space-y-2">
                 <div className="flex gap-2">
-                  <Badge color={runResult.success ? "green" : "red"}>
+                  <span className="badge">
                     {runResult.success ? "success" : "failed"}
-                  </Badge>
-                  <Badge>{runResult.turns} turns</Badge>
-                  <Badge>{runResult.tool_calls} tools</Badge>
-                  <Badge>${runResult.cost_usd.toFixed(6)}</Badge>
+                  </span>
+                  <span className="badge">{runResult.turns} turns</span>
+                  <span className="badge">{runResult.tool_calls} tools</span>
+                  <span className="badge">${runResult.cost_usd.toFixed(6)}</span>
                 </div>
-                <pre className="max-h-80 overflow-auto rounded bg-gray-50 p-3 text-xs">{runResult.output || "(no output)"}</pre>
+                <pre className="max-h-80 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{runResult.output || "(no output)"}</pre>
               </div>
             ) : null}
-          </Card>
+          </div>
 
-          <Card>
-            <Text className="font-semibold mb-3">Chat Turn</Text>
-            <Text className="text-xs text-gray-500 mb-2">Session ID (optional)</Text>
+          <div className="card">
+            <p className="font-semibold text-white mb-3">Chat Turn</p>
+            <span className="text-xs text-gray-500 mb-2">Session ID (optional)</span>
             <input
-              className="w-full rounded-md border border-gray-300 px-2 py-1 text-sm"
+              className="w-full rounded-md border border-[#2a2a2a] px-2 py-1 text-sm"
               value={sessionId}
               onChange={(event) => setSessionId(event.target.value)}
               placeholder="reuse session id to maintain continuity"
             />
-            <Text className="text-xs text-gray-500 mt-3 mb-2">Message</Text>
-            <Textarea value={message} onChange={(event) => setMessage(event.target.value)} rows={5} />
-            <Button className="mt-4" loading={loadingChat} onClick={() => void sendChatTurn()}>
+            <span className="text-xs text-gray-500 mt-3 mb-2">Message</span>
+            <textarea className="input-field" value={message} onChange={(event) => setMessage(event.target.value)} rows={5} />
+            <button className="btn-primary mt-4" disabled={loadingChat} onClick={() => void sendChatTurn()}>
               Send Turn
-            </Button>
+            </button>
             {chatResult ? (
               <div className="mt-4 space-y-2">
                 <div className="flex gap-2">
-                  <Badge>{chatResult.turns} turns</Badge>
-                  <Badge>${chatResult.cost_usd.toFixed(6)}</Badge>
+                  <span className="badge">{chatResult.turns} turns</span>
+                  <span className="badge">${chatResult.cost_usd.toFixed(6)}</span>
                 </div>
-                <pre className="max-h-80 overflow-auto rounded bg-gray-50 p-3 text-xs">{chatResult.response || "(no response)"}</pre>
+                <pre className="max-h-80 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{chatResult.response || "(no response)"}</pre>
               </div>
             ) : null}
-          </Card>
+          </div>
         </div>
 
         {error ? (
-          <Card className="mt-6">
-            <Text className="text-red-600">{error}</Text>
-          </Card>
+          <div className="card mt-6">
+            <p className="text-red-500">{error}</p>
+          </div>
         ) : null}
       </QueryState>
     </div>

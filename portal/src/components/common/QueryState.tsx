@@ -1,5 +1,5 @@
-import { Button, Card, Text } from "@tremor/react";
 import type { ReactNode } from "react";
+import { AlertCircle, Inbox, RefreshCw, Loader2 } from "lucide-react";
 
 type QueryStateProps = {
   loading: boolean;
@@ -20,35 +20,40 @@ export function QueryState({
 }: QueryStateProps) {
   if (loading) {
     return (
-      <Card>
-        <div className="space-y-2 animate-pulse">
-          <div className="h-4 w-1/3 rounded bg-gray-200" />
-          <div className="h-3 w-full rounded bg-gray-100" />
-          <div className="h-3 w-5/6 rounded bg-gray-100" />
-          <div className="h-3 w-4/6 rounded bg-gray-100" />
+      <div className="card">
+        <div className="flex items-center gap-3 py-8 justify-center">
+          <Loader2 size={18} className="text-accent animate-spin" />
+          <span className="text-sm text-text-muted">Loading...</span>
         </div>
-      </Card>
+      </div>
     );
   }
 
   if (error) {
     return (
-      <Card>
-        <Text className="text-red-600">{error}</Text>
-        {onRetry ? (
-          <Button size="xs" className="mt-3" onClick={onRetry}>
-            Retry
-          </Button>
-        ) : null}
-      </Card>
+      <div className="card border-status-error/30">
+        <div className="flex flex-col items-center gap-3 py-8">
+          <AlertCircle size={20} className="text-status-error" />
+          <p className="text-sm text-status-error">{error}</p>
+          {onRetry ? (
+            <button onClick={onRetry} className="btn btn-secondary text-xs mt-2">
+              <RefreshCw size={12} />
+              Retry
+            </button>
+          ) : null}
+        </div>
+      </div>
     );
   }
 
   if (isEmpty) {
     return (
-      <Card>
-        <Text>{emptyMessage}</Text>
-      </Card>
+      <div className="card">
+        <div className="flex flex-col items-center gap-3 py-8">
+          <Inbox size={20} className="text-text-muted" />
+          <p className="text-sm text-text-muted">{emptyMessage}</p>
+        </div>
+      </div>
     );
   }
 

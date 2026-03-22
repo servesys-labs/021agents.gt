@@ -1,4 +1,3 @@
-import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -122,162 +121,162 @@ export const IntegrationsPage = () => {
       <PageHeader title="Integrations" subtitle="Connectors, MCP servers, and webhook delivery surface" />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Connector Providers</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Connector Providers</p>
           <QueryState
             loading={providersQuery.loading}
             error={providersQuery.error}
             isEmpty={providers.length === 0}
             emptyMessage="No providers available."
           >
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Name</TableHeaderCell>
-                  <TableHeaderCell>Apps</TableHeaderCell>
-                  <TableHeaderCell>Status</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Apps</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
                 {providers.map((provider) => (
-                  <TableRow key={provider.name}>
-                    <TableCell><Text>{provider.name}</Text></TableCell>
-                    <TableCell><Text>{provider.apps}</Text></TableCell>
-                    <TableCell>
-                      <Badge color={provider.name === providersQuery.data?.active ? "green" : "gray"}>
+                  <tr key={provider.name}>
+                    <td><span className="text-gray-400">{provider.name}</span></td>
+                    <td><span className="text-gray-400">{provider.apps}</span></td>
+                    <td>
+                      <span className="badge">
                         {provider.status}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
+                      </span>
+                    </td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
+        </div>
 
-        <Card>
-          <Text className="font-semibold mb-3">Connect an App</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Connect an App</p>
           <div className="space-y-3">
-            <TextInput value={appName} onChange={(event) => setAppName(event.target.value)} placeholder="slack, notion, github..." />
-            <Button onClick={() => void loadAuthUrl()}>Get Auth URL</Button>
-            {actionMessage ? <Text>{actionMessage}</Text> : null}
+            <input className="input-field" value={appName} onChange={(event) => setAppName(event.target.value)} placeholder="slack, notion, github..." />
+            <button className="btn-primary" onClick={() => void loadAuthUrl()}>Get Auth URL</button>
+            {actionMessage ? <span className="text-gray-400">{actionMessage}</span> : null}
             {authUrl ? (
-              <a href={authUrl} target="_blank" rel="noreferrer" className="text-sm text-blue-600 hover:underline break-all">
+              <a href={authUrl} target="_blank" rel="noreferrer" className="text-sm text-[#ff8c00] hover:text-[#ffa940] hover:underline break-all">
                 {authUrl}
               </a>
             ) : null}
           </div>
-        </Card>
+        </div>
       </div>
 
       <div className="grid gap-6 mt-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Connector Tools ({toolsQuery.data?.total ?? tools.length})</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Connector Tools ({toolsQuery.data?.total ?? tools.length})</p>
           <QueryState
             loading={toolsQuery.loading}
             error={toolsQuery.error}
             isEmpty={tools.length === 0}
             emptyMessage="No tools for selected app."
           >
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Tool</TableHeaderCell>
-                  <TableHeaderCell>App</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Tool</th>
+                  <th>App</th>
+                </tr>
+              </thead>
+              <tbody>
                 {tools.map((tool) => (
-                  <TableRow key={`${tool.name}-${tool.app}`}>
-                    <TableCell>
-                      <Text>{tool.name}</Text>
-                      <Text className="text-xs text-gray-500">{tool.description ?? ""}</Text>
-                    </TableCell>
-                    <TableCell><Text>{tool.app ?? "n/a"}</Text></TableCell>
-                  </TableRow>
+                  <tr key={`${tool.name}-${tool.app}`}>
+                    <td>
+                      <span className="text-gray-400">{tool.name}</span>
+                      <span className="text-xs text-gray-500">{tool.description ?? ""}</span>
+                    </td>
+                    <td><span className="text-gray-400">{tool.app ?? "n/a"}</span></td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
+        </div>
 
-        <Card>
-          <Text className="font-semibold mb-3">MCP Servers</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">MCP Servers</p>
           <div className="mb-3 grid gap-2 md:grid-cols-3">
-            <TextInput value={mcpName} onChange={(event) => setMcpName(event.target.value)} placeholder="Server name" />
-            <TextInput value={mcpUrl} onChange={(event) => setMcpUrl(event.target.value)} placeholder="https://mcp.example.com" />
-            <TextInput value={mcpTransport} onChange={(event) => setMcpTransport(event.target.value)} placeholder="http|sse|stdio" />
+            <input className="input-field" value={mcpName} onChange={(event) => setMcpName(event.target.value)} placeholder="Server name" />
+            <input className="input-field" value={mcpUrl} onChange={(event) => setMcpUrl(event.target.value)} placeholder="https://mcp.example.com" />
+            <input className="input-field" value={mcpTransport} onChange={(event) => setMcpTransport(event.target.value)} placeholder="http|sse|stdio" />
           </div>
-          <Button size="xs" className="mb-3" onClick={() => void registerMcp()}>Register MCP Server</Button>
+          <button className="btn-primary text-xs mb-3" onClick={() => void registerMcp()}>Register MCP Server</button>
           <QueryState
             loading={mcpQuery.loading}
             error={mcpQuery.error}
             isEmpty={mcpServers.length === 0}
             emptyMessage="No MCP servers registered."
           >
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Name</TableHeaderCell>
-                  <TableHeaderCell>Transport</TableHeaderCell>
-                  <TableHeaderCell>Status</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Transport</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
                 {mcpServers.map((server) => (
-                  <TableRow key={server.server_id}>
-                    <TableCell><Text>{server.name}</Text></TableCell>
-                    <TableCell><Text>{server.transport ?? "unknown"}</Text></TableCell>
-                    <TableCell><Badge>{server.status ?? "unknown"}</Badge></TableCell>
-                  </TableRow>
+                  <tr key={server.server_id}>
+                    <td><span className="text-gray-400">{server.name}</span></td>
+                    <td><span className="text-gray-400">{server.transport ?? "unknown"}</span></td>
+                    <td><span className="badge">{server.status ?? "unknown"}</span></td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
+        </div>
       </div>
 
-      <Card className="mt-6">
-        <Text className="font-semibold mb-3">Connector Tool Call</Text>
+      <div className="card mt-6">
+        <p className="font-semibold text-white mb-3">Connector Tool Call</p>
         <div className="grid gap-2 md:grid-cols-3">
-          <TextInput value={toolName} onChange={(event) => setToolName(event.target.value)} placeholder="tool name" />
-          <TextInput value={appName} onChange={(event) => setAppName(event.target.value)} placeholder="app filter" />
-          <TextInput value={toolArgs} onChange={(event) => setToolArgs(event.target.value)} placeholder='{"query":"hello"}' />
+          <input className="input-field" value={toolName} onChange={(event) => setToolName(event.target.value)} placeholder="tool name" />
+          <input className="input-field" value={appName} onChange={(event) => setAppName(event.target.value)} placeholder="app filter" />
+          <input className="input-field" value={toolArgs} onChange={(event) => setToolArgs(event.target.value)} placeholder='{"query":"hello"}' />
         </div>
-        <Button size="xs" className="mt-3" onClick={() => void callConnectorTool()}>Call Tool</Button>
+        <button className="btn-primary text-xs mt-3" onClick={() => void callConnectorTool()}>Call Tool</button>
         {toolResult ? (
-          <pre className="mt-3 max-h-72 overflow-auto rounded bg-gray-50 p-3 text-xs">{toolResult}</pre>
+          <pre className="mt-3 max-h-72 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{toolResult}</pre>
         ) : null}
-      </Card>
+      </div>
 
-      <Card className="mt-6">
-        <Text className="font-semibold mb-3">Webhooks</Text>
+      <div className="card mt-6">
+        <p className="font-semibold text-white mb-3">Webhooks</p>
         <QueryState
           loading={webhooksQuery.loading}
           error={webhooksQuery.error}
           isEmpty={webhooks.length === 0}
           emptyMessage="No webhooks configured."
         >
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Webhook ID</TableHeaderCell>
-                <TableHeaderCell>URL</TableHeaderCell>
-                <TableHeaderCell>Status</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Webhook ID</th>
+                <th>URL</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
               {webhooks.map((webhook) => (
-                <TableRow key={webhook.webhook_id}>
-                  <TableCell><Text className="font-mono text-xs">{webhook.webhook_id}</Text></TableCell>
-                  <TableCell><Text>{webhook.url}</Text></TableCell>
-                  <TableCell><Badge color={webhook.is_active ? "green" : "gray"}>{webhook.is_active ? "active" : "disabled"}</Badge></TableCell>
-                </TableRow>
+                <tr key={webhook.webhook_id}>
+                  <td><span className="font-mono text-xs text-gray-300">{webhook.webhook_id}</span></td>
+                  <td><span className="text-gray-400">{webhook.url}</span></td>
+                  <td><span className="badge">{webhook.is_active ? "active" : "disabled"}</span></td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
+            </tbody>
+          </table>
         </QueryState>
-      </Card>
+      </div>
     </div>
   );
 };

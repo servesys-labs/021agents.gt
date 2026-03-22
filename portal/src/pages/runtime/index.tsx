@@ -1,4 +1,3 @@
-import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -50,9 +49,9 @@ export const RuntimePage = () => {
       <PageHeader title="Workflows & Jobs" subtitle="Monitor async pipelines, retries, and queue state" />
 
       {actionMessage ? (
-        <Card className="mb-4">
-          <Text>{actionMessage}</Text>
-        </Card>
+        <div className="card mb-4">
+          <span className="text-gray-400">{actionMessage}</span>
+        </div>
       ) : null}
 
       <QueryState
@@ -66,63 +65,63 @@ export const RuntimePage = () => {
         }}
       >
         <div className="grid gap-6 lg:grid-cols-2">
-          <Card>
-            <Text className="mb-3 font-semibold">Workflows</Text>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Name</TableHeaderCell>
-                  <TableHeaderCell>Description</TableHeaderCell>
-                  <TableHeaderCell>ID</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+          <div className="card">
+            <span className="mb-3 font-semibold">Workflows</span>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Description</th>
+                  <th>ID</th>
+                </tr>
+              </thead>
+              <tbody>
                 {workflows.map((workflow) => (
-                  <TableRow key={workflow.workflow_id}>
-                    <TableCell><Text>{workflow.name ?? "Unnamed"}</Text></TableCell>
-                    <TableCell><Text>{workflow.description ?? "No description"}</Text></TableCell>
-                    <TableCell><Text className="font-mono text-xs">{workflow.workflow_id}</Text></TableCell>
-                  </TableRow>
+                  <tr key={workflow.workflow_id}>
+                    <td><span className="text-gray-400">{workflow.name ?? "Unnamed"}</span></td>
+                    <td><span className="text-gray-400">{workflow.description ?? "No description"}</span></td>
+                    <td><span className="font-mono text-xs text-gray-300">{workflow.workflow_id}</span></td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
-          </Card>
+              </tbody>
+            </table>
+          </div>
 
-          <Card>
-            <Text className="mb-3 font-semibold">Jobs</Text>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Job</TableHeaderCell>
-                  <TableHeaderCell>Agent</TableHeaderCell>
-                  <TableHeaderCell>Status</TableHeaderCell>
-                  <TableHeaderCell>Action</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+          <div className="card">
+            <span className="mb-3 font-semibold">Jobs</span>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Job</th>
+                  <th>Agent</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
                 {jobs.map((job) => (
-                  <TableRow key={job.job_id}>
-                    <TableCell>
-                      <Text className="font-mono text-xs">{job.job_id}</Text>
-                    </TableCell>
-                    <TableCell><Text>{job.agent_name ?? "n/a"}</Text></TableCell>
-                    <TableCell>
-                      <Badge color={job.status === "failed" || job.status === "dead" ? "red" : "blue"}>
+                  <tr key={job.job_id}>
+                    <td>
+                      <span className="font-mono text-xs text-gray-300">{job.job_id}</span>
+                    </td>
+                    <td><span className="text-gray-400">{job.agent_name ?? "n/a"}</span></td>
+                    <td>
+                      <span className="badge">
                         {job.status ?? "unknown"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
+                      </span>
+                    </td>
+                    <td>
                       {job.job_id ? (
-                        <Button size="xs" onClick={() => void retryJob(job.job_id as string)}>
+                        <button className="btn-primary text-xs" onClick={() => void retryJob(job.job_id as string)}>
                           Retry
-                        </Button>
+                        </button>
                       ) : null}
-                    </TableCell>
-                  </TableRow>
+                    </td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
-          </Card>
+              </tbody>
+            </table>
+          </div>
         </div>
       </QueryState>
     </div>

@@ -11,8 +11,8 @@ export default defineConfig({
           if (id.includes("@refinedev/")) {
             return "vendor-refine";
           }
-          if (id.includes("@tremor/")) {
-            return "vendor-tremor";
+          if (id.includes("chart.js")) {
+            return "vendor-chartjs";
           }
           if (id.includes("@clerk/")) {
             return "vendor-clerk";
@@ -24,6 +24,7 @@ export default defineConfig({
   },
   server: {
     port: 3000,
+    allowedHosts: true,
     proxy: {
       "/api": "http://localhost:8340",
       "/health": "http://localhost:8340",

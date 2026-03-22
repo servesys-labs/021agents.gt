@@ -72,7 +72,7 @@ function App() {
           ]}
           options={{ syncWithLocation: true }}
         >
-          <Suspense fallback={<div className="p-6 text-sm text-gray-500">Loading page...</div>}>
+          <Suspense fallback={<div className="flex items-center justify-center min-h-screen bg-[#0d0d0d] text-gray-500 text-sm">Loading...</div>}>
             <Routes>
               <Route
                 element={
