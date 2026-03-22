@@ -1,0 +1,20 @@
+[
+  {
+    "name": "capital_france",
+    "input": "What is the capital of France? Reply with just the city name.",
+    "expected": "Paris",
+    "grader": "exact"
+  },
+  {
+    "name": "color_sky",
+    "input": "What color is a clear daytime sky? Reply with one word.",
+    "expected": "blue",
+    "grader": "exact"
+  },
+  {
+    "name": "boiling_point",
+    "input": "At what temperature (Celsius) does water boil at sea level? Reply with just the number.",
+    "expected": "100",
+    "grader": "exact"
+  }
+]

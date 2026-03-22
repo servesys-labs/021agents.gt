@@ -17,14 +17,32 @@ from typing import Any
 
 
 class StopReason(str, Enum):
-    """Why did the agent session end?"""
+    """Why did the agent session end?
+
+    Distinguishes agent-initiated vs benchmark/infrastructure stops
+    (slide: "stop_reason: agent vs benchmark").
+    """
+    # Agent-initiated stops
     COMPLETED = "completed"           # Agent decided it was done (no more tool calls)
+    USER_CANCELLED = "user_cancelled" # User interrupted
+
+    # Infrastructure / benchmark stops
     MAX_TURNS = "max_turns"           # Hit the turn limit
     BUDGET_EXHAUSTED = "budget"       # Ran out of budget
     TIMEOUT = "timeout"               # Wall-clock timeout
     LLM_ERROR = "llm_error"          # LLM call failed
     GOVERNANCE_BLOCK = "governance"   # Blocked by governance policy
-    USER_CANCELLED = "user_cancelled" # User interrupted
+    BENCHMARK_TIMEOUT = "benchmark_timeout"  # Eval gym trial timeout (not agent's own)
+    BENCHMARK_ERROR = "benchmark_error"      # Eval infrastructure failure
+
+    @property
+    def initiated_by(self) -> str:
+        """Who caused the stop — 'agent', 'benchmark', or 'infrastructure'."""
+        if self in (StopReason.COMPLETED, StopReason.USER_CANCELLED):
+            return "agent"
+        if self in (StopReason.BENCHMARK_TIMEOUT, StopReason.BENCHMARK_ERROR):
+            return "benchmark"
+        return "infrastructure"
 
 
 class ErrorSource(str, Enum):
@@ -126,6 +144,7 @@ class SessionRecord:
     status: str = "unknown"  # success / error / timeout
     stop_reason: StopReason = StopReason.COMPLETED
     is_finished: bool = False
+    finish_accepted: bool | None = None  # Did the grader/human accept the finish?
     error_attribution: ErrorSource | None = None
     errors: list[ErrorRecord] = field(default_factory=list)
 
@@ -135,6 +154,7 @@ class SessionRecord:
     time_to_first_action_ms: float = 0.0
     wall_clock_seconds: float = 0.0
     cost: CostBreakdown = field(default_factory=CostBreakdown)
+    benchmark_cost: CostBreakdown = field(default_factory=CostBreakdown)  # Eval infra cost (grader LLM, etc.)
 
     # [4] Eval Conditions (populated when run through eval)
     eval_conditions: EvalConditions | None = None
@@ -168,7 +188,9 @@ class SessionRecord:
             },
             "status": self.status,
             "stop_reason": self.stop_reason.value,
+            "stop_initiated_by": self.stop_reason.initiated_by,
             "is_finished": self.is_finished,
+            "finish_accepted": self.finish_accepted,
             "error_attribution": self.error_attribution.value if self.error_attribution else None,
             "errors": [
                 {"source": e.source.value, "message": e.message, "tool_name": e.tool_name, "turn": e.turn}
@@ -183,6 +205,12 @@ class SessionRecord:
                 "llm_output_cost_usd": self.cost.llm_output_cost_usd,
                 "tool_cost_usd": self.cost.tool_cost_usd,
                 "total_usd": self.cost.total_usd,
+            },
+            "benchmark_cost": {
+                "llm_input_cost_usd": self.benchmark_cost.llm_input_cost_usd,
+                "llm_output_cost_usd": self.benchmark_cost.llm_output_cost_usd,
+                "tool_cost_usd": self.benchmark_cost.tool_cost_usd,
+                "total_usd": self.benchmark_cost.total_usd,
             },
             "input_text": self.input_text[:500],  # Truncate for storage
             "output_text": self.output_text[:500],

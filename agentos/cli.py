@@ -2,9 +2,15 @@
 
 Usage:
     agentos init [dir] [--name N]   — Scaffold a new agent project (with git + CI)
+    agentos init --template research — ...from a preset template
     agentos init --remote <url>     — ...and connect to a git remote
+    agentos init --dry-run          — Preview what would be created
+    agentos init --force            — Overwrite existing files on re-init
     agentos create                  — Conversationally build an agent with an LLM
-    agentos create --one-shot DESC  — Build an agent from a one-line description
+    agentos create -1 DESC          — Build an agent from a one-line description
+    agentos create --name N         — Override the generated agent name
+    agentos create --output PATH    — Save agent definition to a custom path
+    agentos create --force          — Overwrite an existing agent file
     agentos run <name> "task"       — Run a named agent on a task
     agentos list                    — List all available agents
     agentos tools                   — List available tool plugins
@@ -25,9 +31,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+from agentos.defaults import DEFAULT_MODEL, DEFAULT_PROVIDER, AGENT_TEMPLATES, slugify as _slugify
 
 
 def main() -> None:
@@ -44,12 +55,27 @@ def main() -> None:
     init_p.add_argument("--remote", "-r", type=str, default=None, help="Git remote URL to connect")
     init_p.add_argument("--no-git", action="store_true", help="Skip git repository initialization")
     init_p.add_argument("--no-signing", action="store_true", help="Skip signing keypair generation")
+    init_p.add_argument(
+        "--template", "-t", type=str, default=None,
+        choices=["orchestrator", "blank", "research", "support", "code-review"],
+        help="Start from a preset agent template (default: orchestrator)",
+    )
+    init_p.add_argument("--dry-run", action="store_true", help="Preview what would be created without writing anything")
+    init_p.add_argument("--force", action="store_true", help="Overwrite existing files during re-initialization")
 
     # --- create ---
     create_p = sub.add_parser("create", help="Create a new agent (conversational)")
     create_p.add_argument(
-        "--one-shot", "-o", type=str, default=None,
+        "--one-shot", "-1", type=str, default=None,
         help="Create from a one-line description (skip conversation)",
+    )
+    create_p.add_argument(
+        "--name", "-n", type=str, default=None,
+        help="Override the generated agent name",
+    )
+    create_p.add_argument(
+        "--output", "-O", type=str, default=None,
+        help="Save agent definition to a custom path (default: agents/<name>.json)",
     )
     create_p.add_argument(
         "--model", "-m", type=str, default=None,
@@ -60,12 +86,32 @@ def main() -> None:
         choices=["anthropic", "openai", "stub"],
         help="LLM provider for the builder agent",
     )
+    create_p.add_argument(
+        "--tools-dir", type=str, default=None,
+        help="Directory of tool plugins to show the builder (default: tools/)",
+    )
+    create_p.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing agent with the same name",
+    )
+    create_p.add_argument(
+        "--max-turns", type=int, default=20,
+        help="Max conversation turns in interactive mode (default: 20)",
+    )
 
     # --- run ---
-    run_p = sub.add_parser("run", help="Run an agent")
+    run_p = sub.add_parser("run", help="Run an agent on a task")
     run_p.add_argument("name", help="Agent name or path to definition file")
     run_p.add_argument("task", nargs="?", help="Task to execute")
     run_p.add_argument("--turns", type=int, default=None, help="Max turns override")
+    run_p.add_argument("--timeout", type=float, default=None, help="Timeout in seconds")
+    run_p.add_argument("--budget", type=float, default=None, help="Budget limit in USD")
+    run_p.add_argument("--model", "-m", type=str, default=None, help="Override the LLM model")
+    run_p.add_argument("--input-file", "-i", type=str, default=None, help="Read task from file")
+    run_p.add_argument("--output", "-o", type=str, default=None, help="Write final output to file")
+    run_p.add_argument("--json", dest="json_output", action="store_true", help="Output results as JSON")
+    run_p.add_argument("--quiet", "-q", action="store_true", help="Only print final output")
+    run_p.add_argument("--verbose", "-v", action="store_true", help="Show all turns with tool details")
 
     # --- list ---
     sub.add_parser("list", help="List available agents")
@@ -178,17 +224,22 @@ def main() -> None:
         elif args.command == "deploy":
             cmd_deploy(args)
     except FileNotFoundError as exc:
-        print(f"Error: {exc}")
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\nAborted.")
+        print("\nAborted.", file=sys.stderr)
         sys.exit(1)
     except Exception as exc:
-        print(f"Error: {exc}")
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
+
+
+def _should_write(path: Path, *, force: bool) -> bool:
+    """Return True if the path doesn't exist yet, or --force is set."""
+    return force or not path.exists()
 
 
 def cmd_init(args: argparse.Namespace) -> None:
@@ -199,12 +250,51 @@ def cmd_init(args: argparse.Namespace) -> None:
     from agentos.core.identity import AgentIdentity, write_keypair
 
     directory = Path(args.directory).resolve()
+    force = args.force
+    dry_run = args.dry_run
+    template_name = args.template or "orchestrator"
+
+    # ── Input validation ─────────────────────────────────────────────────
+    if directory.exists() and directory.is_file():
+        print(f"Error: '{directory}' is a file, not a directory.", file=sys.stderr)
+        sys.exit(1)
+
     agent_name = args.name or _slugify(directory.name)
+    template = AGENT_TEMPLATES[template_name]
     created: list[str] = []
     skipped: list[str] = []
+    overwritten: list[str] = []
 
-    print(f"Initializing AgentOS project in {directory}")
-    print()
+    if dry_run:
+        print(f"[dry-run] Would initialize AgentOS project in {directory}")
+        print(f"[dry-run] Agent name: {agent_name}")
+        print(f"[dry-run] Template: {template_name}")
+        print()
+    else:
+        print(f"Initializing AgentOS project in {directory}")
+        if template_name != "blank":
+            print(f"  Template: {template_name}")
+        print()
+
+    def _track(label: str, path: Path) -> bool:
+        """Track file creation. Returns True if we should write."""
+        existed = path.exists()
+        if dry_run:
+            if existed and not force:
+                skipped.append(label)
+            elif existed and force:
+                overwritten.append(label)
+            else:
+                created.append(label)
+            return False  # never write in dry-run
+        if existed and not force:
+            skipped.append(label)
+            return False
+        if existed and force:
+            overwritten.append(label)
+            return True
+        created.append(label)
+        return True
 
     # ── Directory structure ──────────────────────────────────────────────
     for d in ("agents", "tools", "data", "eval", "sessions"):
@@ -212,43 +302,42 @@ def cmd_init(args: argparse.Namespace) -> None:
         if dir_path.exists():
             skipped.append(f"{d}/")
         else:
-            dir_path.mkdir(parents=True, exist_ok=True)
+            if not dry_run:
+                dir_path.mkdir(parents=True, exist_ok=True)
             created.append(f"{d}/")
 
     # ── SQLite database (the agent's persistent brain) ────────────────────
     db_path = directory / "data" / "agent.db"
-    if not db_path.exists():
+    if _track("data/agent.db (SQLite — WAL mode)", db_path):
         from agentos.core.database import create_database
         db = create_database(db_path)
         db.close()
-        created.append("data/agent.db (SQLite — WAL mode)")
-    else:
-        skipped.append("data/agent.db")
 
     # ── Agent identity (generated once, immutable) ───────────────────────
+    # Identity is special: --force does NOT regenerate it (it's immutable).
     identity_path = directory / "agents" / ".identity.json"
     if not identity_path.exists():
         identity, secret_key = AgentIdentity.generate(
             with_signing=not args.no_signing,
         )
-        identity_path.write_text(json.dumps(identity.to_dict(), indent=2) + "\n")
+        if not dry_run:
+            identity_path.write_text(json.dumps(identity.to_dict(), indent=2) + "\n")
         created.append("agents/.identity.json")
         agent_id = identity.agent_id
     else:
-        # Preserve existing identity on re-init
         existing = json.loads(identity_path.read_text())
         agent_id = existing.get("agent_id", "")
         secret_key = ""  # Already written to .keys/
-        skipped.append("agents/.identity.json")
+        skipped.append("agents/.identity.json (immutable)")
 
     # ── Signing keypair ──────────────────────────────────────────────────
     keys_dir = directory / ".keys"
     if not args.no_signing and secret_key:
-        from agentos.core.identity import AgentIdentity as _id
-        identity_data = json.loads(identity_path.read_text())
+        identity_data = json.loads(identity_path.read_text()) if identity_path.exists() else {}
         fingerprint = identity_data.get("fingerprint", "")
         if fingerprint and not (keys_dir / "agent.key").exists():
-            write_keypair(keys_dir, secret_key, fingerprint)
+            if not dry_run:
+                write_keypair(keys_dir, secret_key, fingerprint)
             created.append(".keys/agent.pub (public — safe to commit)")
             created.append(".keys/agent.key (SECRET — gitignored)")
         elif (keys_dir / "agent.key").exists():
@@ -258,7 +347,7 @@ def cmd_init(args: argparse.Namespace) -> None:
 
     # ── Project config (agentos.yaml) ────────────────────────────────────
     project_config_path = directory / "agentos.yaml"
-    if not project_config_path.exists():
+    if _track("agentos.yaml", project_config_path):
         init_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         project_config_path.write_text(
             f"# AgentOS project configuration\n"
@@ -270,8 +359,8 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"\n"
             f"# ── LLM defaults ─────────────────────────────────────────\n"
             f"defaults:\n"
-            f"  model: claude-sonnet-4-20250514\n"
-            f"  provider: anthropic\n"
+            f"  model: {DEFAULT_MODEL}\n"
+            f"  provider: {DEFAULT_PROVIDER}\n"
             f"  max_turns: 50\n"
             f"  budget_limit_usd: 10.0\n"
             f"\n"
@@ -338,42 +427,29 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"  eval: eval/\n"
             f"  database: data/agent.db\n"
         )
-        created.append("agentos.yaml")
-    else:
-        skipped.append("agentos.yaml")
 
-    # ── Starter agent definition ─────────────────────────────────────────
+    # ── Agent definition (from template) ──────────────────────────────────
     agent_path = directory / "agents" / f"{agent_name}.json"
-    if not agent_path.exists():
+    if _track(f"agents/{agent_name}.json", agent_path):
+        description = template["description"].format(name=agent_name)
         starter = {
             "name": agent_name,
             "agent_id": agent_id,
-            "description": f"{agent_name} — customize me!",
+            "description": description,
             "version": "0.1.0",
-            "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
-            "model": "claude-sonnet-4-20250514",
-            "tools": [],
-            "governance": {
-                "budget_limit_usd": 10.0,
-                "require_confirmation_for_destructive": True,
-                "blocked_tools": [],
-                "allowed_domains": [],
-            },
-            "memory": {
-                "working": {"max_items": 100},
-                "episodic": {"max_episodes": 10000, "ttl_days": 90},
-                "procedural": {"max_procedures": 500},
-            },
-            "tags": ["starter"],
+            "system_prompt": template["system_prompt"],
+            "model": DEFAULT_MODEL,
+            "tools": template["tools"],
+            "governance": template["governance"],
+            "memory": template["memory"],
+            "max_turns": template.get("max_turns", 50),
+            "tags": template["tags"],
         }
         agent_path.write_text(json.dumps(starter, indent=2) + "\n")
-        created.append(f"agents/{agent_name}.json")
-    else:
-        skipped.append(f"agents/{agent_name}.json")
 
     # ── Starter tool plugin ──────────────────────────────────────────────
     tool_path = directory / "tools" / "example-search.json"
-    if not tool_path.exists():
+    if _track("tools/example-search.json", tool_path):
         tool_example = {
             "name": "example-search",
             "description": "Example search tool — replace with your own implementation",
@@ -386,13 +462,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             },
         }
         tool_path.write_text(json.dumps(tool_example, indent=2) + "\n")
-        created.append("tools/example-search.json")
-    else:
-        skipped.append("tools/example-search.json")
 
     # ── Starter eval task ────────────────────────────────────────────────
     eval_path = directory / "eval" / "smoke-test.json"
-    if not eval_path.exists():
+    if _track("eval/smoke-test.json", eval_path):
         eval_task = [
             {
                 "name": "greeting",
@@ -402,13 +475,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             }
         ]
         eval_path.write_text(json.dumps(eval_task, indent=2) + "\n")
-        created.append("eval/smoke-test.json")
-    else:
-        skipped.append("eval/smoke-test.json")
 
     # ── .env.example (declares required secrets without values) ──────────
     env_example_path = directory / ".env.example"
-    if not env_example_path.exists():
+    if _track(".env.example", env_example_path):
         env_example_path.write_text(
             "# AgentOS environment variables\n"
             "# Copy to .env and fill in your values:\n"
@@ -418,6 +488,9 @@ def cmd_init(args: argparse.Namespace) -> None:
             "ANTHROPIC_API_KEY=\n"
             "OPENAI_API_KEY=\n"
             "\n"
+            "# Sandbox (optional — enables agentos sandbox)\n"
+            "E2B_API_KEY=\n"
+            "\n"
             "# Observability (optional)\n"
             "OBSERVABILITY_TOKEN=\n"
             "\n"
@@ -425,13 +498,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             "CLOUDFLARE_API_TOKEN=\n"
             "CLOUDFLARE_ACCOUNT_ID=\n"
         )
-        created.append(".env.example")
-    else:
-        skipped.append(".env.example")
 
     # ── .gitignore ───────────────────────────────────────────────────────
     gitignore_path = directory / ".gitignore"
-    if not gitignore_path.exists():
+    if _track(".gitignore", gitignore_path):
         gitignore_path.write_text(
             "# AgentOS\n"
             "data/agent.db\n"
@@ -467,15 +537,13 @@ def cmd_init(args: argparse.Namespace) -> None:
             ".DS_Store\n"
             "Thumbs.db\n"
         )
-        created.append(".gitignore")
-    else:
-        skipped.append(".gitignore")
 
     # ── GitHub Actions CI ────────────────────────────────────────────────
     ci_dir = directory / ".github" / "workflows"
     ci_path = ci_dir / "eval.yml"
-    if not ci_path.exists():
-        ci_dir.mkdir(parents=True, exist_ok=True)
+    if _track(".github/workflows/eval.yml", ci_path):
+        if not dry_run:
+            ci_dir.mkdir(parents=True, exist_ok=True)
         ci_path.write_text(
             "name: Agent Eval\n"
             "on:\n"
@@ -502,20 +570,24 @@ def cmd_init(args: argparse.Namespace) -> None:
             "          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}\n"
             f"        run: agentos eval {agent_name} eval/smoke-test.json --trials 1\n"
         )
-        created.append(".github/workflows/eval.yml")
-    else:
-        skipped.append(".github/workflows/eval.yml")
 
     # ── Sessions keepfile (so git tracks the empty dir) ──────────────────
     sessions_keep = directory / "sessions" / ".gitkeep"
-    if not sessions_keep.exists():
+    if not dry_run and not sessions_keep.exists():
         sessions_keep.write_text("")
 
     # ── Git initialization ───────────────────────────────────────────────
     git_initialized = False
     git_remote_added = False
 
-    if not args.no_git:
+    # Files that init creates — only stage these, not the whole directory.
+    _init_files = [
+        "agents/", "tools/", "data/", "eval/", "sessions/",
+        "agentos.yaml", ".env.example", ".gitignore",
+        ".github/", ".keys/agent.pub",
+    ]
+
+    if not args.no_git and not dry_run:
         git_dir = directory / ".git"
         if not git_dir.exists():
             result = subprocess.run(
@@ -524,8 +596,10 @@ def cmd_init(args: argparse.Namespace) -> None:
             )
             if result.returncode == 0:
                 git_initialized = True
+                # Only stage AgentOS files, not unrelated files in the directory.
+                existing = [f for f in _init_files if (directory / f.rstrip("/")).exists()]
                 subprocess.run(
-                    ["git", "add", "."], cwd=directory,
+                    ["git", "add", "--"] + existing, cwd=directory,
                     capture_output=True, text=True,
                 )
                 subprocess.run(
@@ -553,156 +627,336 @@ def cmd_init(args: argparse.Namespace) -> None:
                 else:
                     print(f"  Warning: Could not add remote: {result.stderr.strip()}")
             else:
-                existing = result.stdout.strip()
-                print(f"  Remote 'origin' already set to: {existing}")
+                existing_remote = result.stdout.strip()
+                print(f"  Remote 'origin' already set to: {existing_remote}")
 
     # ── Summary ──────────────────────────────────────────────────────────
+    prefix = "[dry-run] " if dry_run else ""
     if created:
-        print("Created:")
+        print(f"{prefix}Created:")
         for c in created:
             print(f"  + {c}")
+    if overwritten:
+        print(f"{prefix}Overwritten (--force):")
+        for o in overwritten:
+            print(f"  ~ {o}")
     if skipped:
-        print("Already exists (skipped):")
+        print(f"{prefix}Already exists (skipped):")
         for s in skipped:
             print(f"  - {s}")
 
     print(f"\nAgent ID: {agent_id}")
+    if template_name == "orchestrator":
+        print("Orchestrator agent created — it can build, test, and evolve other agents.")
+    elif template_name != "blank":
+        print(f"Template: {template_name}")
     if git_initialized:
-        print(f"Git repo initialized with initial commit.")
+        print("Git repo initialized with initial commit.")
     if git_remote_added:
         print(f"Remote 'origin' set to: {args.remote}")
-        print(f"  Push with: git push -u origin main")
+        print("  Push with: git push -u origin main")
 
-    print()
-    print("Next steps:")
-    print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
-    print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
-    print(f"  3. agentos run {agent_name} \"your task\"")
-    print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
-    if not args.no_git and not git_remote_added and not args.remote:
-        print(f"  5. git remote add origin <url> && git push -u origin main")
+    if not dry_run:
+        print()
+        print("Next steps:")
+        print(f"  1. cp .env.example .env && edit .env   (add your API keys)")
+        if template_name == "orchestrator":
+            print(f"  2. agentos chat {agent_name}             (interactive — talk to the orchestrator)")
+            print(f"     Ask it to: create agents, run evals, analyze failures, evolve agents")
+            print(f"  3. agentos run {agent_name} \"create a support agent\"  (one-shot task)")
+            print(f"     Or: agentos run {agent_name} --json -o result.json  (scripted)")
+            print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
+        else:
+            print(f"  2. Edit agents/{agent_name}.json       (customize your agent)")
+            print(f"     Or: agentos create --one-shot \"description\"  (LLM-powered)")
+            print(f"  3. agentos run {agent_name} \"your task\"")
+            print(f"  4. agentos eval {agent_name} eval/smoke-test.json")
+        if not args.no_git and not git_remote_added and not args.remote:
+            print(f"  5. git remote add origin <url> && git push -u origin main")
 
 
 async def cmd_create(args: argparse.Namespace) -> None:
     """Create an agent — either conversationally or from a one-shot description."""
+    from agentos.agent import AGENTS_DIR, AgentConfig, save_agent_config
     from agentos.builder import AgentBuilder
 
+    # ── Warn if project hasn't been initialized ──────────────────────────
+    agents_dir = Path.cwd() / "agents"
+    project_config_path = Path.cwd() / "agentos.yaml"
+    if not agents_dir.is_dir() and not project_config_path.exists():
+        print("Warning: No AgentOS project detected in the current directory.")
+        print("  Run 'agentos init' first to set up the project structure.")
+        print("  Continuing anyway — the agent file will be created in agents/.\n")
+
+    # ── Read project defaults from agentos.yaml (if present) ─────────────
+    project_defaults = _load_project_defaults(project_config_path)
+
     provider = _get_builder_provider(args)
-    builder = AgentBuilder(provider=provider)
+    tools_dir = args.tools_dir
+    builder = AgentBuilder(provider=provider, tools_dir=tools_dir)
+
+    max_turns = args.max_turns
 
     if args.one_shot:
         # One-shot mode: generate from description
         print(f"Building agent from: {args.one_shot}")
         config = await builder.build_from_description(args.one_shot)
-        path = builder.save()
-        print(f"\nAgent created: {config.name}")
-        print(f"  Saved to: {path}")
-        print(f"  Description: {config.description}")
-        print(f"\nRun it: agentos run {config.name} \"your task\"")
-        return
+    else:
+        # Conversational mode
+        print("=" * 60)
+        print("  AgentOS Agent Builder")
+        print("  Describe what you want your agent to do.")
+        print("  Type 'quit' to cancel.")
+        print("=" * 60)
+        print()
 
-    # Conversational mode
-    print("=" * 60)
-    print("  AgentOS Agent Builder")
-    print("  Describe what you want your agent to do.")
-    print("  Type 'quit' to cancel.")
-    print("=" * 60)
-    print()
-
-    # Get initial description
-    try:
-        user_input = input("What kind of agent do you want to build?\n> ").strip()
-    except EOFError:
-        print("\nAborted.")
-        return
-
-    if not user_input or user_input.lower() in ("quit", "exit", "q"):
-        return
-
-    response = await builder.start(user_input)
-    print(f"\n{response}\n")
-
-    # Continue conversation until complete
-    while not builder.is_complete:
+        # Get initial description
         try:
-            user_input = input("> ").strip()
+            user_input = input("What kind of agent do you want to build?\n> ").strip()
         except EOFError:
-            break
-        if not user_input:
-            continue
-        if user_input.lower() in ("quit", "exit", "q"):
-            print("Cancelled.")
+            print("\nAborted.")
             return
 
-        response = await builder.step(user_input)
+        if not user_input or user_input.lower() in ("quit", "exit", "q"):
+            return
+
+        response = await builder.start(user_input)
         print(f"\n{response}\n")
 
-    if builder.result:
-        path = builder.save()
-        print(f"\nAgent created: {builder.result.name}")
-        print(f"  Saved to: {path}")
-        print(f"\nRun it: agentos run {builder.result.name} \"your task\"")
+        # Continue conversation until complete or turn limit reached
+        turn = 1
+        while not builder.is_complete:
+            if turn >= max_turns:
+                print(f"\nReached max conversation turns ({max_turns}).")
+                print("Tip: try 'agentos create --one-shot \"description\"' for quicker creation,")
+                print("     or increase with --max-turns.\n")
+                break
+            try:
+                user_input = input("> ").strip()
+            except EOFError:
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in ("quit", "exit", "q"):
+                print("Cancelled.")
+                return
+
+            response = await builder.step(user_input)
+            print(f"\n{response}\n")
+            turn += 1
+
+        if not builder.result:
+            print("No agent was created.", file=sys.stderr)
+            sys.exit(1)
+
+        config = builder.result
+
+    # ── Apply --name override ────────────────────────────────────────────
+    if args.name:
+        config = _rename_agent_config(config, args.name)
+
+    # ── Apply project defaults ───────────────────────────────────────────
+    config = _apply_project_defaults(config, project_defaults)
+
+    # ── Stamp agent_id from project identity ─────────────────────────────
+    config = _stamp_project_identity(config, agents_dir)
+
+    # ── Stamp built_with so run can warn about stub-created agents ───────
+    from agentos.llm.provider import StubProvider
+    if isinstance(provider, StubProvider):
+        config.built_with = "stub"
     else:
-        print("No agent was created.")
+        config.built_with = getattr(args, "provider", "") or "anthropic"
+
+    # ── Collision check ──────────────────────────────────────────────────
+    from agentos.agent import _resolve_agents_dir
+    save_path = Path(args.output) if args.output else (_resolve_agents_dir() / f"{config.name}.json")
+    if save_path.exists() and not args.force:
+        print(f"Error: Agent file already exists: {save_path}", file=sys.stderr)
+        print("  Use --force to overwrite, or --name to pick a different name.", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Save (directly via save_agent_config, not builder.save()) ────────
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    path = save_agent_config(config, save_path)
+    print(f"\nAgent created: {config.name}")
+    print(f"  Saved to: {path}")
+    if config.description:
+        print(f"  Description: {config.description}")
+    print(f"\nNext steps:")
+    print(f"  1. agentos run {config.name} \"your task\"")
+    print(f"  2. agentos eval {config.name} eval/smoke-test.json")
 
 
 async def cmd_run(args: argparse.Namespace) -> None:
     """Run an agent on a task."""
+    import time as _time
+
     from agentos.agent import Agent
 
+    # ── Validate numeric arguments ─────────────────────────────────────
+    _validate_positive(args.turns, "turns")
+    _validate_positive(args.timeout, "timeout")
+    _validate_positive(args.budget, "budget", allow_zero=True)
+
     agent = _load_agent(args.name)
-    if args.turns:
-        agent.config.max_turns = args.turns
+    quiet = args.quiet or args.json_output
 
-    task = args.task
-    if not task:
-        # Read from stdin/pipe if no task provided
-        if not sys.stdin.isatty():
-            task = sys.stdin.read().strip()
-        else:
-            try:
-                task = input("Task: ").strip()
-            except EOFError:
-                pass
-        if not task:
-            print("Error: No task provided.")
-            print("Usage: agentos run <name> \"your task here\"")
-            print("   or: echo \"your task\" | agentos run <name>")
-            return
+    # Project defaults from agentos.yaml are applied automatically in
+    # Agent.__init__ — no need to call _load/_apply_project_defaults here.
 
-    # Warn if using stub provider
-    from agentos.llm.provider import StubProvider
-    _any_stub = any(
-        isinstance(route.provider, StubProvider)
-        for route in agent._harness.llm_router._routes.values()
+    # ── Apply CLI runtime overrides (rebuild harness once) ────────────────
+    agent.apply_overrides(
+        turns=args.turns,
+        timeout=args.timeout,
+        budget=args.budget,
+        model=args.model,
     )
-    if _any_stub:
-        print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
-        print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
+
+    # ── Validate agent_id against project identity ───────────────────────
+    if not quiet:
+        _warn_identity_mismatch(agent)
+
+    # ── Resolve task: --input-file > positional arg > stdin > prompt ──────
+    task = None
+    if args.input_file:
+        p = Path(args.input_file)
+        if not p.exists():
+            print(f"Error: Input file not found: {args.input_file}", file=sys.stderr)
+            sys.exit(1)
+        task = p.read_text().strip()
+    elif args.task:
+        task = args.task
+    elif not sys.stdin.isatty():
+        task = sys.stdin.read().strip()
+    else:
+        try:
+            task = input("Task: ").strip()
+        except EOFError:
+            pass
+
+    if not task:
+        print("Error: No task provided.", file=sys.stderr)
+        print("Usage: agentos run <name> \"your task here\"", file=sys.stderr)
+        print("   or: echo \"your task\" | agentos run <name>", file=sys.stderr)
+        print("   or: agentos run <name> --input-file task.txt", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Warn about stub provider (unless --quiet or --json) ──────────────
+    if not quiet:
+        _warn_stub_provider(agent, show_recreate_hint=True)
+
+    if not quiet:
+        print(f"Running agent '{agent.config.name}' on: {task}")
+        print("-" * 40)
+
+    start = _time.monotonic()
+    results = await agent.run(task)
+    elapsed_ms = (_time.monotonic() - start) * 1000
+
+    # Compute summary metrics
+    total_cost = sum(
+        r.llm_response.cost_usd for r in results if r.llm_response
+    )
+    total_turns = len(results)
+    total_tool_calls = sum(len(r.tool_results) for r in results)
+    tool_errors = sum(
+        1 for r in results for tr in r.tool_results if "error" in tr
+    )
+    final_output = ""
+    if results and results[-1].llm_response:
+        final_output = results[-1].llm_response.content
+
+    # Determine if the run failed
+    failed = False
+    failure_reason = ""
+    if results and results[-1].error:
+        failed = True
+        failure_reason = results[-1].error
+    elif results and results[-1].stop_reason not in ("completed", ""):
+        failed = True
+        failure_reason = f"Stopped: {results[-1].stop_reason}"
+
+    # --- JSON output mode ---
+    if args.json_output:
+        import json as _json
+        output = {
+            "agent": agent.config.name,
+            "task": task,
+            "success": not failed,
+            "output": final_output,
+            "turns": total_turns,
+            "tool_calls": total_tool_calls,
+            "tool_errors": tool_errors,
+            "cost_usd": round(total_cost, 6),
+            "latency_ms": round(elapsed_ms, 1),
+        }
+        if failed:
+            output["error"] = failure_reason
+        if args.verbose:
+            output["results"] = [
+                {
+                    "turn": r.turn_number,
+                    "content": r.llm_response.content if r.llm_response else None,
+                    "tool_results": r.tool_results,
+                    "error": r.error,
+                    "stop_reason": r.stop_reason,
+                }
+                for r in results
+            ]
+        text = _json.dumps(output, indent=2)
+        if args.output:
+            Path(args.output).write_text(text + "\n")
+        else:
+            print(text)
+        if failed:
+            sys.exit(1)
+        return
+
+    # --- Verbose mode: show every turn ---
+    if args.verbose:
+        for result in results:
+            if result.llm_response:
+                print(f"\n[Turn {result.turn_number}] {result.llm_response.content}")
+            if result.tool_results:
+                for tr in result.tool_results:
+                    if "error" in tr:
+                        print(f"  Tool error: {tr.get('tool', '?')}: {tr['error']}")
+                    else:
+                        preview = str(tr.get("result", ""))
+                        if len(preview) > 200:
+                            preview = preview[:200] + "..."
+                        print(f"  Tool result: {tr.get('tool', '?')}: {preview}")
+            if result.error:
+                print(f"  Error: {result.error}")
         print()
 
-    print(f"Running agent '{agent.config.name}' on: {task}")
-    print("-" * 40)
+    # --- Final output ---
+    if final_output:
+        if not args.quiet:
+            print("\n" + "=" * 40)
+            print("Output:")
+        print(final_output)
+    elif failed:
+        print(f"\nAgent failed: {failure_reason}", file=sys.stderr)
 
-    results = await agent.run(task)
+    # Write to file if requested
+    if args.output:
+        Path(args.output).write_text(final_output + "\n" if final_output else "")
+        if not args.quiet:
+            print(f"\nOutput written to: {args.output}")
 
-    for result in results:
-        if result.llm_response:
-            print(f"\n[Turn {result.turn_number}] {result.llm_response.content}")
-        if result.tool_results:
-            for tr in result.tool_results:
-                if "error" in tr:
-                    print(f"  Tool error: {tr.get('tool', '?')}: {tr['error']}")
-                else:
-                    print(f"  Tool result: {tr.get('tool', '?')}: {tr.get('result', '')}")
-        if result.error:
-            print(f"  Error: {result.error}")
+    # --- Summary (unless --quiet) ---
+    if not args.quiet:
+        print(f"\n--- {total_turns} turn{'s' if total_turns != 1 else ''}"
+              f" | {total_tool_calls} tool call{'s' if total_tool_calls != 1 else ''}"
+              f" | {elapsed_ms:.0f}ms"
+              f" | ${total_cost:.4f} ---")
+        if tool_errors:
+            print(f"    ({tool_errors} tool error{'s' if tool_errors != 1 else ''})")
 
-    # Print final output
-    if results and results[-1].llm_response:
-        print("\n" + "=" * 40)
-        print("Final output:")
-        print(results[-1].llm_response.content)
+    if failed:
+        sys.exit(1)
 
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -748,6 +1002,9 @@ async def cmd_chat(args: argparse.Namespace) -> None:
     from agentos.agent import Agent
 
     agent = _load_agent(args.name)
+    _warn_identity_mismatch(agent)
+    _warn_stub_provider(agent)
+
     print(f"Chatting with '{agent.config.name}' — type 'quit' to exit")
     print(f"  {agent.config.description}")
     print("-" * 40)
@@ -818,7 +1075,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     index_data = {
         "chunk_size": args.chunk_size,
         "documents": [
-            {"text": doc[:500], "metadata": meta}
+            {"length": len(doc), "metadata": meta}
             for doc, meta in zip(documents, metadatas)
         ],
         "total_chunks": len(pipeline.retriever._chunks) if hasattr(pipeline.retriever, '_chunks') else 0,
@@ -835,47 +1092,16 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 async def cmd_eval(args: argparse.Namespace) -> None:
     """Evaluate an agent with test cases."""
-    import json as _json
-    from pathlib import Path
-    from agentos.eval.gym import EvalGym, EvalTask
-    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
-
+    _validate_positive(args.trials, "trials")
     agent = _load_agent(args.name)
 
-    # Load tasks from JSON file
-    tasks_path = Path(args.tasks_file)
-    if not tasks_path.exists():
-        print(f"Error: Tasks file not found: {tasks_path}")
-        return
-
-    tasks_data = _json.loads(tasks_path.read_text())
-    if not isinstance(tasks_data, list):
-        tasks_data = [tasks_data]
-
-    gym = EvalGym(trials_per_task=args.trials)
-    for t in tasks_data:
-        grader_type = t.get("grader", "contains")
-        if grader_type == "exact":
-            grader = ExactMatchGrader()
-        else:
-            grader = ContainsGrader()
-        gym.add_task(EvalTask(
-            name=t.get("name", t.get("input", "")[:30]),
-            input=t["input"],
-            expected=t["expected"],
-            grader=grader,
-        ))
+    gym, tasks_data = _load_eval_tasks(Path(args.tasks_file))
+    gym.trials_per_task = args.trials
 
     print(f"Evaluating agent '{agent.config.name}' with {len(tasks_data)} tasks ({args.trials} trials each)")
     print("-" * 50)
 
-    async def agent_fn(task_input: str) -> str:
-        results = await agent.run(task_input)
-        if results and results[-1].llm_response:
-            return results[-1].llm_response.content
-        return ""
-
-    report = await gym.run(agent_fn)
+    report = await gym.run(_make_agent_fn(agent))
 
     print(f"\nResults:")
     print(f"  Pass rate:    {report.pass_rate:.1%} ({report.pass_count}/{report.total_trials})")
@@ -897,27 +1123,31 @@ async def cmd_eval(args: argparse.Namespace) -> None:
         passed = sum(1 for t in trials if t.grade.passed)
         print(f"  {task_name}: {passed}/{len(trials)} passed")
 
+    # Persist eval run to database (if available)
+    if agent.db:
+        try:
+            report.agent_name = agent.config.name
+            report.agent_version = agent.config.version
+            report.model = agent.config.model
+            agent.db.insert_eval_run(report.to_dict())
+        except Exception as exc:
+            logger.warning("Could not persist eval run: %s", exc)
+
 
 async def cmd_evolve(args: argparse.Namespace) -> None:
     """Run the continuous evolution loop — observe, analyze, propose, review, apply."""
-    import json as _json
-    from pathlib import Path
-    from agentos.agent import Agent
-    from agentos.eval.gym import EvalGym, EvalTask
-    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
+    _validate_positive(args.trials, "trials")
+    _validate_positive(args.min_sessions, "min-sessions")
+    if args.surface_ratio is not None and not (0.0 < args.surface_ratio <= 1.0):
+        print(f"Error: --surface-ratio must be between 0 and 1 (got {args.surface_ratio})", file=sys.stderr)
+        sys.exit(1)
+
     from agentos.evolution.loop import EvolutionLoop
 
     agent = _load_agent(args.name)
 
-    # Load eval tasks
-    tasks_path = Path(args.tasks_file)
-    if not tasks_path.exists():
-        print(f"Error: Tasks file not found: {tasks_path}")
-        return
-
-    tasks_data = _json.loads(tasks_path.read_text())
-    if not isinstance(tasks_data, list):
-        tasks_data = [tasks_data]
+    gym, tasks_data = _load_eval_tasks(Path(args.tasks_file))
+    gym.trials_per_task = args.trials
 
     # Set up the evolution loop
     loop = EvolutionLoop.for_agent(
@@ -933,24 +1163,7 @@ async def cmd_evolve(args: argparse.Namespace) -> None:
     # Step 1: Run baseline eval (this populates the observer with session records)
     print("\n[1/4] Running baseline evaluation...")
 
-    gym = EvalGym(trials_per_task=args.trials)
-    for t in tasks_data:
-        grader_type = t.get("grader", "contains")
-        grader = ExactMatchGrader() if grader_type == "exact" else ContainsGrader()
-        gym.add_task(EvalTask(
-            name=t.get("name", t.get("input", "")[:30]),
-            input=t["input"],
-            expected=t["expected"],
-            grader=grader,
-        ))
-
-    async def agent_fn(task_input: str) -> str:
-        results = await agent.run(task_input)
-        if results and results[-1].llm_response:
-            return results[-1].llm_response.content
-        return ""
-
-    baseline_report = await gym.run(agent_fn)
+    baseline_report = await gym.run(_make_agent_fn(agent))
     baseline_report.agent_name = agent.config.name
     baseline_report.agent_version = agent.config.version
     baseline_report.model = agent.config.model
@@ -961,7 +1174,7 @@ async def cmd_evolve(args: argparse.Namespace) -> None:
 
     # Step 2: Analyze patterns
     print("\n[2/4] Analyzing session patterns...")
-    report = loop.analyze()
+    report = loop.analyze(db=agent.db)
 
     if report.recommendations:
         print(f"  Found {len(report.recommendations)} recommendations:")
@@ -1063,11 +1276,158 @@ def _indent(text: str, spaces: int) -> str:
     return "\n".join(prefix + line for line in text.split("\n"))
 
 
-def _slugify(name: str) -> str:
-    """Turn a directory/project name into a valid agent slug."""
-    import re
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", name.lower()).strip("-")
-    return slug or "my-agent"
+def _rename_agent_config(config, new_name: str):
+    """Return a copy of the AgentConfig with an updated name."""
+    from agentos.agent import AgentConfig
+    data = config.to_dict()
+    data["name"] = new_name
+    return AgentConfig.from_dict(data)
+
+
+def _validate_positive(value, name: str, allow_zero: bool = False) -> None:
+    """Validate that a numeric CLI argument is positive. Exits on failure."""
+    if value is None:
+        return
+    if allow_zero and value < 0:
+        print(f"Error: --{name} must be non-negative (got {value})", file=sys.stderr)
+        sys.exit(1)
+    if not allow_zero and value <= 0:
+        print(f"Error: --{name} must be positive (got {value})", file=sys.stderr)
+        sys.exit(1)
+
+
+def _load_eval_tasks(tasks_path: Path):
+    """Load eval tasks from a JSON file and return (EvalGym, tasks_data).
+
+    Shared by cmd_eval and cmd_evolve to avoid duplicated task-loading logic.
+    Exits with code 1 if the file is missing or malformed.
+    """
+    from agentos.eval.gym import EvalGym, EvalTask
+    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
+
+    if not tasks_path.exists():
+        print(f"Error: Tasks file not found: {tasks_path}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        tasks_data = json.loads(tasks_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"Error: Could not parse tasks file: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if not isinstance(tasks_data, list):
+        tasks_data = [tasks_data]
+
+    if not tasks_data:
+        print("Error: Tasks file is empty.", file=sys.stderr)
+        sys.exit(1)
+
+    gym = EvalGym()
+    for t in tasks_data:
+        if "input" not in t or "expected" not in t:
+            print(f"Error: Task missing 'input' or 'expected' field: {t}", file=sys.stderr)
+            sys.exit(1)
+        grader_type = t.get("grader", "contains")
+        if grader_type == "exact":
+            grader = ExactMatchGrader()
+        elif grader_type == "contains":
+            grader = ContainsGrader()
+        else:
+            print(f"Warning: Unknown grader type '{grader_type}', using 'contains'", file=sys.stderr)
+            grader = ContainsGrader()
+        gym.add_task(EvalTask(
+            name=t.get("name", t.get("input", "")[:30]),
+            input=t["input"],
+            expected=t["expected"],
+            grader=grader,
+        ))
+
+    return gym, tasks_data
+
+
+def _make_agent_fn(agent):
+    """Create an async agent function for eval/evolve runs.
+
+    Returns an ``AgentResult`` so the gym picks up cost, tool-call counts,
+    and model metadata from the agent's harness results.
+    """
+    from agentos.eval.gym import AgentResult
+
+    async def agent_fn(task_input: str) -> AgentResult:
+        results = await agent.run(task_input)
+        output = ""
+        total_cost = 0.0
+        total_tool_calls = 0
+        model = ""
+        for r in results:
+            if r.llm_response:
+                output = r.llm_response.content
+                model = getattr(r, "model_used", "") or r.llm_response.model
+            total_cost += getattr(r, "cost_usd", 0.0)
+            total_tool_calls += len(r.tool_results) if r.tool_results else 0
+        return AgentResult(
+            output=output,
+            cost_usd=total_cost,
+            tool_calls_count=total_tool_calls,
+            model=model,
+        )
+    return agent_fn
+
+
+def _load_project_defaults(config_path: Path) -> dict:
+    """Load project-level defaults from agentos.yaml (if it exists).
+
+    Returns the ``defaults:`` section or an empty dict.
+    """
+    if not config_path.exists():
+        return {}
+    try:
+        # agentos.yaml is simple enough for a lightweight parse;
+        # full YAML is an optional dep so we do a best-effort read.
+        text = config_path.read_text()
+        try:
+            import yaml
+            data = yaml.safe_load(text) or {}
+        except ImportError:
+            # Minimal key-value extraction for the defaults section
+            data = {}
+        return data.get("defaults", {}) if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_project_defaults(config, defaults: dict):
+    """Merge project defaults (model, budget) into an AgentConfig if not already set."""
+    from agentos.agent import AgentConfig
+    if not defaults:
+        return config
+    data = config.to_dict()
+    # Only override model if the builder produced the generic default
+    if defaults.get("model") and data.get("model") == DEFAULT_MODEL:
+        data["model"] = defaults["model"]
+    # Inherit budget from project if governance uses the generic default
+    budget = defaults.get("budget_limit_usd")
+    if budget and data.get("governance", {}).get("budget_limit_usd") == 10.0:
+        data.setdefault("governance", {})["budget_limit_usd"] = budget
+    return AgentConfig.from_dict(data)
+
+
+def _stamp_project_identity(config, agents_dir: Path):
+    """If agents/.identity.json exists, stamp its agent_id onto the config."""
+    from agentos.agent import AgentConfig
+    identity_path = agents_dir / ".identity.json"
+    if not identity_path.exists():
+        return config
+    try:
+        identity_data = json.loads(identity_path.read_text())
+        agent_id = identity_data.get("agent_id", "")
+        if agent_id and not config.agent_id:
+            data = config.to_dict()
+            data["agent_id"] = agent_id
+            return AgentConfig.from_dict(data)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return config
 
 
 def cmd_login(args: argparse.Namespace) -> None:
@@ -1082,53 +1442,11 @@ def cmd_login(args: argparse.Namespace) -> None:
     print()
 
     try:
-        if provider == "github":
-            from agentos.auth.oauth import (
-                github_get_user,
-                github_poll_for_token,
-                github_request_device_code,
-            )
-
-            dc = github_request_device_code()
-            print(f"  Open this URL in your browser:  {dc.verification_uri}")
-            print(f"  Enter this code:                {dc.user_code}")
-            print()
-            print("Waiting for authorization...", end="", flush=True)
-
-            access_token = github_poll_for_token(
-                dc.device_code, interval=dc.interval, timeout=dc.expires_in
-            )
-            if not access_token:
-                print("\nAuthorization failed or timed out.")
-                sys.exit(1)
-
-            user = github_get_user(access_token)
-
-        elif provider == "google":
-            from agentos.auth.oauth import (
-                google_get_user,
-                google_poll_for_token,
-                google_request_device_code,
-            )
-
-            dc = google_request_device_code()
-            print(f"  Open this URL in your browser:  {dc.verification_uri}")
-            print(f"  Enter this code:                {dc.user_code}")
-            print()
-            print("Waiting for authorization...", end="", flush=True)
-
-            access_token = google_poll_for_token(
-                dc.device_code, interval=dc.interval, timeout=dc.expires_in
-            )
-            if not access_token:
-                print("\nAuthorization failed or timed out.")
-                sys.exit(1)
-
-            user = google_get_user(access_token)
-        else:
-            print(f"Unknown provider: {provider}")
+        if provider not in ("github", "google"):
+            print(f"Unknown provider: {provider}", file=sys.stderr)
             sys.exit(1)
 
+        access_token, user = _oauth_device_flow(provider)
         print(f" done!")
         print()
 
@@ -1228,8 +1546,16 @@ async def cmd_sandbox(args: argparse.Namespace) -> None:
     """E2B sandbox operations — create, exec, list, kill."""
     from agentos.sandbox import SandboxManager
 
-    mgr = SandboxManager()
     subcmd = args.sandbox_command
+    if not subcmd:
+        print("Usage: agentos sandbox {create|exec|list|kill}", file=sys.stderr)
+        print("  create          Create a new E2B sandbox", file=sys.stderr)
+        print("  exec <command>  Execute command in sandbox", file=sys.stderr)
+        print("  list            List active sandboxes", file=sys.stderr)
+        print("  kill <id>       Kill a sandbox", file=sys.stderr)
+        sys.exit(1)
+
+    mgr = SandboxManager()
 
     if subcmd == "create":
         session = await mgr.create()
@@ -1266,12 +1592,6 @@ async def cmd_sandbox(args: argparse.Namespace) -> None:
         else:
             print(f"Failed to kill sandbox {args.sandbox_id}")
 
-    else:
-        print("Usage: agentos sandbox {create|exec|list|kill}")
-        print("  create          Create a new E2B sandbox")
-        print("  exec <command>  Execute command in sandbox")
-        print("  list            List active sandboxes")
-        print("  kill <id>       Kill a sandbox")
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:
@@ -1283,13 +1603,18 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     if not deploy_dir.exists():
         deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
     if not deploy_dir.exists():
-        print("Error: No deploy/ directory found.")
-        print("  Option 1: Run from the AgentOS source root")
-        print("  Option 2: Copy the deploy/ directory to your project")
+        print("Error: No deploy/ directory found.", file=sys.stderr)
+        print("  Option 1: Run from the AgentOS source root", file=sys.stderr)
+        print("  Option 2: Copy the deploy/ directory to your project", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate governance structure before converting
+    gov = config.governance
+    if not isinstance(gov, dict):
+        print(f"Error: Agent governance config is malformed (expected dict, got {type(gov).__name__})", file=sys.stderr)
         sys.exit(1)
 
     # Convert Python agent config → CF worker config format
-    gov = config.governance
     cf_config = {
         "agentName": config.name,
         "agentDescription": config.description,
@@ -1307,7 +1632,11 @@ def cmd_deploy(args: argparse.Namespace) -> None:
     }
 
     deploy_config_path = deploy_dir / "agent-config.json"
-    deploy_config_path.write_text(json.dumps(cf_config, indent=2) + "\n")
+    try:
+        deploy_config_path.write_text(json.dumps(cf_config, indent=2) + "\n")
+    except OSError as exc:
+        print(f"Error: Could not write deploy config: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Deploying agent '{config.name}' to Cloudflare Workers...")
     print(f"  Model: {config.model}")
@@ -1340,21 +1669,91 @@ def _load_agent(name: str):
 
 
 def _load_agent_config(name: str):
-    """Load an agent config from a name or file path."""
-    from agentos.agent import load_agent_config, AgentConfig
+    """Load an agent config from a name or file path.
+
+    For most commands, prefer ``_load_agent()`` which returns a full
+    ``Agent`` instance with observability attached. This function is
+    only for commands that need the config without running the agent
+    (e.g. ``deploy``).
+    """
+    from agentos.agent import load_agent_config, _resolve_agents_dir
 
     path = Path(name)
     if path.exists() and path.is_file():
         return load_agent_config(path)
 
-    # Search in agents/ directory
-    from agentos.agent import AGENTS_DIR
+    agents_dir = _resolve_agents_dir()
     for ext in (".yaml", ".yml", ".json"):
-        p = AGENTS_DIR / f"{name}{ext}"
+        p = agents_dir / f"{name}{ext}"
         if p.exists():
             return load_agent_config(p)
 
     raise FileNotFoundError(f"Agent '{name}' not found")
+
+
+def _warn_identity_mismatch(agent) -> None:
+    """Warn if agent_id doesn't match project identity (.identity.json).
+
+    Shared by cmd_run and cmd_chat to avoid duplication.
+    """
+    identity_path = Path.cwd() / "agents" / ".identity.json"
+    if not identity_path.exists() or not agent.config.agent_id:
+        return
+    try:
+        project_id = json.loads(identity_path.read_text()).get("agent_id", "")
+        if project_id and agent.config.agent_id != project_id:
+            print(f"Warning: Agent '{agent.config.name}' has agent_id "
+                  f"'{agent.config.agent_id}' but project identity is "
+                  f"'{project_id}'.", file=sys.stderr)
+    except (json.JSONDecodeError, OSError):
+        pass
+
+
+def _warn_stub_provider(agent, *, show_recreate_hint: bool = False) -> None:
+    """Warn about stub provider usage.
+
+    Shared by cmd_run and cmd_chat. ``show_recreate_hint`` adds the
+    extra message about re-creating stub-built agents (cmd_run only).
+    """
+    if not agent.uses_stub_provider:
+        return
+    print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
+    print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
+    if show_recreate_hint and agent.config.built_with == "stub":
+        print("  This agent was also created with the stub provider —")
+        print("  re-create it with a real LLM for better results:")
+        print(f"    agentos create --one-shot \"{agent.config.description}\"")
+    print()
+
+
+def _oauth_device_flow(provider: str):
+    """Run OAuth device code flow for a given provider.
+
+    Shared by GitHub and Google login paths to avoid 21 lines of
+    near-identical code. Returns (access_token, user) or exits.
+    """
+    from agentos.auth import oauth
+
+    # Dispatch to provider-specific functions
+    request_fn = getattr(oauth, f"{provider}_request_device_code")
+    poll_fn = getattr(oauth, f"{provider}_poll_for_token")
+    user_fn = getattr(oauth, f"{provider}_get_user")
+
+    dc = request_fn()
+    print(f"  Open this URL in your browser:  {dc.verification_uri}")
+    print(f"  Enter this code:                {dc.user_code}")
+    print()
+    print("Waiting for authorization...", end="", flush=True)
+
+    access_token = poll_fn(
+        dc.device_code, interval=dc.interval, timeout=dc.expires_in
+    )
+    if not access_token:
+        print("\nAuthorization failed or timed out.")
+        sys.exit(1)
+
+    user = user_fn(access_token)
+    return access_token, user
 
 
 def _get_builder_provider(args: argparse.Namespace):
@@ -1376,7 +1775,7 @@ def _get_builder_provider(args: argparse.Namespace):
             print("Error: ANTHROPIC_API_KEY not set")
             sys.exit(1)
         return HttpProvider(
-            model_id=model or "claude-sonnet-4-20250514",
+            model_id=model or DEFAULT_MODEL,
             api_base="https://api.anthropic.com",
             api_key=anthropic_key,
             headers={"anthropic-version": "2023-06-01"},
