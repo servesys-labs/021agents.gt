@@ -1,4 +1,3 @@
-import { Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -73,18 +72,18 @@ export const ProjectsPage = () => {
   return (
     <div>
       <PageHeader title="Projects & Environments" subtitle="Manage project hierarchy and environment plans" />
-      <Card className="mb-6">
+      <div className="card mb-6">
         <div className="grid gap-2 md:grid-cols-4">
-          <TextInput value={name} onChange={(event) => setName(event.target.value)} placeholder="Project name" />
-          <TextInput value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" />
-          <TextInput value={plan} onChange={(event) => setPlan(event.target.value)} placeholder="starter|standard|pro|enterprise" />
-          <Button onClick={() => void createProject()}>Create Project</Button>
+          <input className="input-field" value={name} onChange={(event) => setName(event.target.value)} placeholder="Project name" />
+          <input className="input-field" value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Description" />
+          <input className="input-field" value={plan} onChange={(event) => setPlan(event.target.value)} placeholder="starter|standard|pro|enterprise" />
+          <button className="btn-primary" onClick={() => void createProject()}>Create Project</button>
         </div>
-        {actionError ? <Text className="mt-2 text-red-600">{actionError}</Text> : null}
-      </Card>
+        {actionError ? <span className="mt-2 text-red-600">{actionError}</span> : null}
+      </div>
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Projects</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Projects</p>
           <QueryState
             loading={projectsQuery.loading}
             error={projectsQuery.error}
@@ -92,32 +91,32 @@ export const ProjectsPage = () => {
             emptyMessage="No projects created."
             onRetry={() => void projectsQuery.refetch()}
           >
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Name</TableHeaderCell>
-                  <TableHeaderCell>Plan</TableHeaderCell>
-                  <TableHeaderCell></TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Plan</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
                 {projects.map((project) => (
-                  <TableRow key={project.project_id}>
-                    <TableCell><Text>{project.name}</Text></TableCell>
-                    <TableCell><Text>{project.default_plan ?? "standard"}</Text></TableCell>
-                    <TableCell>
-                      <Button size="xs" onClick={() => setSelectedProject(project.project_id)}>Environments</Button>
-                    </TableCell>
-                  </TableRow>
+                  <tr key={project.project_id}>
+                    <td><span className="text-gray-400">{project.name}</span></td>
+                    <td><span className="text-gray-400">{project.default_plan ?? "standard"}</span></td>
+                    <td>
+                      <button className="btn-primary text-xs" onClick={() => setSelectedProject(project.project_id)}>Environments</button>
+                    </td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
-        <Card>
-          <Text className="font-semibold mb-3">Environments</Text>
+        </div>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Environments</p>
           {!selectedProject ? (
-            <Text className="text-gray-500">Select a project to view environments.</Text>
+            <span className="text-gray-500">Select a project to view environments.</span>
           ) : (
             <QueryState
               loading={envsQuery.loading}
@@ -126,29 +125,29 @@ export const ProjectsPage = () => {
               emptyMessage="No environments found."
               onRetry={() => void envsQuery.refetch()}
             >
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableHeaderCell>Name</TableHeaderCell>
-                    <TableHeaderCell>Plan</TableHeaderCell>
-                    <TableHeaderCell></TableHeaderCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
+              <table className="os-table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Plan</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
                   {(envsQuery.data?.environments ?? []).map((env) => (
-                    <TableRow key={env.env_id}>
-                      <TableCell><Text>{env.name}</Text></TableCell>
-                      <TableCell><Text>{env.plan || "default"}</Text></TableCell>
-                      <TableCell>
-                        <Button size="xs" variant="secondary" onClick={() => void updateEnvPlan(env.name)}>Edit Plan</Button>
-                      </TableCell>
-                    </TableRow>
+                    <tr key={env.env_id}>
+                      <td><span className="text-gray-400">{env.name}</span></td>
+                      <td><span className="text-gray-400">{env.plan || "default"}</span></td>
+                      <td>
+                        <button className="btn-secondary text-xs" onClick={() => void updateEnvPlan(env.name)}>Edit Plan</button>
+                      </td>
+                    </tr>
                   ))}
-                </TableBody>
-              </Table>
+                </tbody>
+              </table>
             </QueryState>
           )}
-        </Card>
+        </div>
       </div>
     </div>
   );

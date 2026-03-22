@@ -1,4 +1,3 @@
-import { Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -68,59 +67,59 @@ export const ReliabilityPage = () => {
   return (
     <div>
       <PageHeader title="Reliability (SLO + Compare)" subtitle="Define reliability targets and run A/B comparisons" />
-      <Card className="mb-6">
+      <div className="card mb-6">
         <div className="grid gap-2 md:grid-cols-6">
-          <TextInput value={metric} onChange={(event) => setMetric(event.target.value)} placeholder="success_rate" />
-          <TextInput value={threshold} onChange={(event) => setThreshold(event.target.value)} placeholder="0.95" />
-          <TextInput value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="gte" />
-          <TextInput value={windowHours} onChange={(event) => setWindowHours(event.target.value)} placeholder="24" />
-          <TextInput value={agentName} onChange={(event) => setAgentName(event.target.value)} placeholder="optional agent name" />
-          <Button onClick={() => void createSlo()}>Create SLO</Button>
+          <input className="input-field" value={metric} onChange={(event) => setMetric(event.target.value)} placeholder="success_rate" />
+          <input className="input-field" value={threshold} onChange={(event) => setThreshold(event.target.value)} placeholder="0.95" />
+          <input className="input-field" value={operator} onChange={(event) => setOperator(event.target.value)} placeholder="gte" />
+          <input className="input-field" value={windowHours} onChange={(event) => setWindowHours(event.target.value)} placeholder="24" />
+          <input className="input-field" value={agentName} onChange={(event) => setAgentName(event.target.value)} placeholder="optional agent name" />
+          <button className="btn-primary" onClick={() => void createSlo()}>Create SLO</button>
         </div>
-        {message ? <Text className="mt-2">{message}</Text> : null}
-      </Card>
+        {message ? <span className="mt-2">{message}</span> : null}
+      </div>
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">SLO Definitions</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">SLO Definitions</p>
           <QueryState loading={slosQuery.loading} error={slosQuery.error} isEmpty={(slosQuery.data?.slos ?? []).length === 0}>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Metric</TableHeaderCell>
-                  <TableHeaderCell>Target</TableHeaderCell>
-                  <TableHeaderCell>Status</TableHeaderCell>
-                  <TableHeaderCell></TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Target</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
                 {(statusQuery.data?.slos ?? []).map((slo) => (
-                  <TableRow key={slo.slo_id}>
-                    <TableCell><Text>{slo.metric}</Text></TableCell>
-                    <TableCell><Text>{slo.operator} {slo.threshold}</Text></TableCell>
-                    <TableCell><Text>{slo.breached ? "Breached" : "Healthy"}</Text></TableCell>
-                    <TableCell>
+                  <tr key={slo.slo_id}>
+                    <td><span className="text-gray-400">{slo.metric}</span></td>
+                    <td><span className="text-gray-400">{slo.operator} {slo.threshold}</span></td>
+                    <td><span className="text-gray-400">{slo.breached ? "Breached" : "Healthy"}</span></td>
+                    <td>
                       {slo.slo_id ? (
-                        <Button size="xs" color="red" onClick={() => void deleteSlo(slo.slo_id ?? "")}>Delete</Button>
+                        <button className="btn-danger text-xs" onClick={() => void deleteSlo(slo.slo_id ?? "")}>Delete</button>
                       ) : null}
-                    </TableCell>
-                  </TableRow>
+                    </td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
-        <Card>
-          <Text className="font-semibold mb-3">A/B Compare</Text>
+        </div>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">A/B Compare</p>
           <div className="grid gap-2 md:grid-cols-4">
-            <TextInput value={compareAgent} onChange={(event) => setCompareAgent(event.target.value)} placeholder="agent name" />
-            <TextInput value={versionA} onChange={(event) => setVersionA(event.target.value)} placeholder="version A" />
-            <TextInput value={versionB} onChange={(event) => setVersionB(event.target.value)} placeholder="version B" />
-            <Button onClick={() => void runCompare()}>Run Compare</Button>
+            <input className="input-field" value={compareAgent} onChange={(event) => setCompareAgent(event.target.value)} placeholder="agent name" />
+            <input className="input-field" value={versionA} onChange={(event) => setVersionA(event.target.value)} placeholder="version A" />
+            <input className="input-field" value={versionB} onChange={(event) => setVersionB(event.target.value)} placeholder="version B" />
+            <button className="btn-primary" onClick={() => void runCompare()}>Run Compare</button>
           </div>
           {compareResult ? (
-            <pre className="mt-3 max-h-72 overflow-auto rounded bg-gray-50 p-3 text-xs">{compareResult}</pre>
+            <pre className="mt-3 max-h-72 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{compareResult}</pre>
           ) : null}
-        </Card>
+        </div>
       </div>
     </div>
   );

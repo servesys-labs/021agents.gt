@@ -1,4 +1,3 @@
-import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -102,56 +101,56 @@ export const SandboxPage = () => {
       <PageHeader title="Sandbox Studio" subtitle="Create, execute, inspect, and manage sandboxes" />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Actions</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Actions</p>
           <div className="space-y-3">
             <div>
-              <Text>Template</Text>
-              <TextInput value={template} onChange={(event) => setTemplate(event.target.value)} />
+              <span className="text-gray-400">Template</span>
+              <input className="input-field" value={template} onChange={(event) => setTemplate(event.target.value)} />
             </div>
-            <Button onClick={() => void createSandbox()}>Create Sandbox</Button>
+            <button className="btn-primary" onClick={() => void createSandbox()}>Create Sandbox</button>
 
             <div>
-              <Text>Sandbox ID</Text>
-              <TextInput value={sandboxId} onChange={(event) => setSandboxId(event.target.value)} placeholder="sbx_..." />
+              <span className="text-gray-400">Sandbox ID</span>
+              <input className="input-field" value={sandboxId} onChange={(event) => setSandboxId(event.target.value)} placeholder="sbx_..." />
             </div>
             <div>
-              <Text>Command</Text>
-              <TextInput value={command} onChange={(event) => setCommand(event.target.value)} />
+              <span className="text-gray-400">Command</span>
+              <input className="input-field" value={command} onChange={(event) => setCommand(event.target.value)} />
             </div>
-            <Button onClick={() => void executeCommand()}>Run Command</Button>
+            <button className="btn-primary" onClick={() => void executeCommand()}>Run Command</button>
 
             <div>
-              <Text>File path</Text>
-              <TextInput value={filePath} onChange={(event) => setFilePath(event.target.value)} />
+              <span className="text-gray-400">File path</span>
+              <input className="input-field" value={filePath} onChange={(event) => setFilePath(event.target.value)} />
             </div>
-            <Button onClick={() => void listFiles()}>List Files</Button>
+            <button className="btn-primary" onClick={() => void listFiles()}>List Files</button>
           </div>
-          {error ? <Text className="mt-3 text-red-600">{error}</Text> : null}
-        </Card>
+          {error ? <span className="mt-3 text-red-600">{error}</span> : null}
+        </div>
 
-        <Card>
-          <Text className="font-semibold mb-3">Operation Timeline</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Operation Timeline</p>
           {timeline.length === 0 ? (
-            <Text className="text-gray-500">No operations yet.</Text>
+            <span className="text-gray-500">No operations yet.</span>
           ) : (
             <div className="space-y-2">
               {timeline.map((entry, index) => (
-                <div key={`${entry.at}-${entry.action}-${index}`} className="rounded border p-2">
-                  <Text className="font-medium">{entry.action}</Text>
-                  <Text className="text-xs text-gray-500">{entry.at}</Text>
-                  <Text>{entry.result}</Text>
+                <div key={`${entry.at}-${entry.action}-${index}`} className="rounded border border-[#2a2a2a] p-2">
+                  <span className="font-medium text-white">{entry.action}</span>
+                  <span className="text-xs text-gray-500">{entry.at}</span>
+                  <span className="text-gray-400">{entry.result}</span>
                 </div>
               ))}
             </div>
           )}
-        </Card>
+        </div>
       </div>
 
-      <Card className="mt-6">
-        <Text className="font-semibold mb-2">Output</Text>
-        <pre className="max-h-72 overflow-auto rounded bg-gray-50 p-3 text-xs">{output || "(no output yet)"}</pre>
-      </Card>
+      <div className="card mt-6">
+        <p className="font-semibold text-white mb-2">Output</p>
+        <pre className="max-h-72 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{output || "(no output yet)"}</pre>
+      </div>
 
       <div className="mt-6">
         <QueryState
@@ -161,27 +160,27 @@ export const SandboxPage = () => {
           emptyMessage="No active sandboxes."
           onRetry={() => void sandboxesQuery.refetch()}
         >
-          <Card>
-            <Text className="font-semibold mb-3">Active Sandboxes</Text>
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>ID</TableHeaderCell>
-                  <TableHeaderCell>Template</TableHeaderCell>
-                  <TableHeaderCell>Status</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+          <div className="card">
+            <p className="font-semibold text-white mb-3">Active Sandboxes</p>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Template</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
                 {sandboxes.map((entry) => (
-                  <TableRow key={entry.sandbox_id}>
-                    <TableCell><Text className="font-mono text-xs">{entry.sandbox_id}</Text></TableCell>
-                    <TableCell><Text>{entry.template ?? "base"}</Text></TableCell>
-                    <TableCell><Badge>{entry.status ?? "unknown"}</Badge></TableCell>
-                  </TableRow>
+                  <tr key={entry.sandbox_id}>
+                    <td><span className="font-mono text-xs text-gray-300">{entry.sandbox_id}</span></td>
+                    <td><span className="text-gray-400">{entry.template ?? "base"}</span></td>
+                    <td><span className="badge">{entry.status ?? "unknown"}</span></td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
-          </Card>
+              </tbody>
+            </table>
+          </div>
         </QueryState>
       </div>
     </div>

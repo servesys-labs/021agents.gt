@@ -1,4 +1,3 @@
-import { Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useState } from "react";
 
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
@@ -114,78 +113,78 @@ export const InfrastructurePage = () => {
   return (
     <div>
       <PageHeader title="Infrastructure & Retention" subtitle="GPU provisioning and data retention lifecycle controls" />
-      <Card className="mb-6">
-        <Text>{message}</Text>
-      </Card>
+      <div className="card mb-6">
+        <span className="text-gray-400">{message}</span>
+      </div>
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">GPU Endpoint Provisioning</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">GPU Endpoint Provisioning</p>
           <div className="grid gap-2 md:grid-cols-4">
-            <TextInput value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="model id" />
-            <TextInput value={gpuType} onChange={(event) => setGpuType(event.target.value)} placeholder="h200" />
-            <TextInput value={gpuCount} onChange={(event) => setGpuCount(event.target.value)} placeholder="1" />
-            <Button onClick={() => void provisionGpu()}>Provision</Button>
+            <input className="input-field" value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="model id" />
+            <input className="input-field" value={gpuType} onChange={(event) => setGpuType(event.target.value)} placeholder="h200" />
+            <input className="input-field" value={gpuCount} onChange={(event) => setGpuCount(event.target.value)} placeholder="1" />
+            <button className="btn-primary" onClick={() => void provisionGpu()}>Provision</button>
           </div>
           <QueryState loading={gpuQuery.loading} error={gpuQuery.error} isEmpty={(gpuQuery.data?.endpoints ?? []).length === 0}>
-            <Table className="mt-3">
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Endpoint</TableHeaderCell>
-                  <TableHeaderCell>Model</TableHeaderCell>
-                  <TableHeaderCell>Status</TableHeaderCell>
-                  <TableHeaderCell></TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table mt-3">
+              <thead>
+                <tr>
+                  <th>Endpoint</th>
+                  <th>Model</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
                 {(gpuQuery.data?.endpoints ?? []).map((endpoint, index) => (
-                  <TableRow key={`${endpoint.endpoint_id}-${index}`}>
-                    <TableCell><Text>{endpoint.endpoint_id}</Text></TableCell>
-                    <TableCell><Text>{endpoint.model_id}</Text></TableCell>
-                    <TableCell><Text>{endpoint.status}</Text></TableCell>
-                    <TableCell>
+                  <tr key={`${endpoint.endpoint_id}-${index}`}>
+                    <td><span className="text-gray-400">{endpoint.endpoint_id}</span></td>
+                    <td><span className="text-gray-400">{endpoint.model_id}</span></td>
+                    <td><span className="text-gray-400">{endpoint.status}</span></td>
+                    <td>
                       {endpoint.endpoint_id ? (
-                        <Button size="xs" color="red" onClick={() => setPendingEndpointId(endpoint.endpoint_id ?? null)}>Terminate</Button>
+                        <button className="btn-danger text-xs" onClick={() => setPendingEndpointId(endpoint.endpoint_id ?? null)}>Terminate</button>
                       ) : null}
-                    </TableCell>
-                  </TableRow>
+                    </td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
-        <Card>
-          <Text className="font-semibold mb-3">Retention Policies</Text>
+        </div>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Retention Policies</p>
           <div className="grid gap-2 md:grid-cols-3">
-            <TextInput value={resourceType} onChange={(event) => setResourceType(event.target.value)} placeholder="sessions" />
-            <TextInput value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} placeholder="90" />
-            <Button onClick={() => void createRetention()}>Create Policy</Button>
+            <input className="input-field" value={resourceType} onChange={(event) => setResourceType(event.target.value)} placeholder="sessions" />
+            <input className="input-field" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} placeholder="90" />
+            <button className="btn-primary" onClick={() => void createRetention()}>Create Policy</button>
           </div>
-          <Button size="xs" className="mt-3" variant="secondary" onClick={() => void applyRetention()}>Apply Retention</Button>
+          <button className="btn-secondary text-xs mt-3" onClick={() => void applyRetention()}>Apply Retention</button>
           <QueryState loading={retentionQuery.loading} error={retentionQuery.error} isEmpty={(retentionQuery.data?.policies ?? []).length === 0}>
-            <Table className="mt-3">
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Resource</TableHeaderCell>
-                  <TableHeaderCell>Days</TableHeaderCell>
-                  <TableHeaderCell></TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table mt-3">
+              <thead>
+                <tr>
+                  <th>Resource</th>
+                  <th>Days</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
                 {(retentionQuery.data?.policies ?? []).map((policy, index) => (
-                  <TableRow key={`${policy.policy_id}-${index}`}>
-                    <TableCell><Text>{policy.resource_type}</Text></TableCell>
-                    <TableCell><Text>{policy.retention_days}</Text></TableCell>
-                    <TableCell>
+                  <tr key={`${policy.policy_id}-${index}`}>
+                    <td><span className="text-gray-400">{policy.resource_type}</span></td>
+                    <td><span className="text-gray-400">{policy.retention_days}</span></td>
+                    <td>
                       {policy.policy_id ? (
-                        <Button size="xs" color="red" onClick={() => setPendingPolicyId(policy.policy_id ?? null)}>Delete</Button>
+                        <button className="btn-danger text-xs" onClick={() => setPendingPolicyId(policy.policy_id ?? null)}>Delete</button>
                       ) : null}
-                    </TableCell>
-                  </TableRow>
+                    </td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
+        </div>
       </div>
       <ConfirmDialog
         open={pendingEndpointId !== null}

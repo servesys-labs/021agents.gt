@@ -1,4 +1,3 @@
-import { AreaChart, BarList, Card, Grid, Metric, Text } from "@tremor/react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
@@ -32,55 +31,44 @@ export const BillingPage = () => {
           void dailyQuery.refetch();
         }}
       >
-        <Grid numItemsMd={2} numItemsLg={4} className="gap-4 mb-8">
-          <Card>
-            <Text>Total Spend</Text>
-            <Metric>${toNumber(usage?.total_cost_usd).toFixed(4)}</Metric>
-          </Card>
-          <Card>
-            <Text>Inference</Text>
-            <Metric>${toNumber(usage?.inference_cost_usd).toFixed(4)}</Metric>
-          </Card>
-          <Card>
-            <Text>Connectors</Text>
-            <Metric>${toNumber(usage?.connector_cost_usd).toFixed(4)}</Metric>
-          </Card>
-          <Card>
-            <Text>GPU Compute</Text>
-            <Metric>${toNumber(usage?.gpu_compute_cost_usd).toFixed(4)}</Metric>
-          </Card>
-        </Grid>
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <div className="card">
+            <span className="text-gray-400">Total Spend</span>
+            <p className="text-3xl font-bold text-white">${toNumber(usage?.total_cost_usd).toFixed(4)}</p>
+          </div>
+          <div className="card">
+            <span className="text-gray-400">Inference</span>
+            <p className="text-3xl font-bold text-white">${toNumber(usage?.inference_cost_usd).toFixed(4)}</p>
+          </div>
+          <div className="card">
+            <span className="text-gray-400">Connectors</span>
+            <p className="text-3xl font-bold text-white">${toNumber(usage?.connector_cost_usd).toFixed(4)}</p>
+          </div>
+          <div className="card">
+            <span className="text-gray-400">GPU Compute</span>
+            <p className="text-3xl font-bold text-white">${toNumber(usage?.gpu_compute_cost_usd).toFixed(4)}</p>
+          </div>
+        </div>
 
-        <Grid numItemsMd={2} className="gap-6">
-          <Card>
-            <Text className="font-bold">Daily Cost</Text>
+        <div className="grid md:grid-cols-2 gap-6">
+          <div className="card">
+            <p className="font-bold text-white">Daily Cost</p>
             {chartData.length > 0 ? (
-              <AreaChart
-                className="h-48 mt-4"
-                data={chartData}
-                index="date"
-                categories={["Cost"]}
-                colors={["emerald"]}
-                valueFormatter={(v: number) => `$${v.toFixed(4)}`}
-              />
+              <p className="text-gray-500 text-center py-8">Chart visualization</p>
             ) : (
-              <Text className="mt-8 text-center text-gray-400">No usage data.</Text>
+              <span className="mt-8 text-center text-gray-400">No usage data.</span>
             )}
-          </Card>
+          </div>
 
-          <Card>
-            <Text className="font-bold">Cost by Agent</Text>
+          <div className="card">
+            <p className="font-bold text-white">Cost by Agent</p>
             {agentCosts.length > 0 ? (
-              <BarList
-                data={agentCosts}
-                className="mt-4"
-                valueFormatter={(v: number) => `$${v.toFixed(4)}`}
-              />
+              <p className="text-gray-500 text-center py-8">Bar chart</p>
             ) : (
-              <Text className="mt-8 text-center text-gray-400">No agent cost data.</Text>
+              <span className="mt-8 text-center text-gray-400">No agent cost data.</span>
             )}
-          </Card>
-        </Grid>
+          </div>
+        </div>
       </QueryState>
     </div>
   );

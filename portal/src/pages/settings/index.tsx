@@ -1,5 +1,4 @@
 import { useGetIdentity } from "@refinedev/core";
-import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useState } from "react";
 
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
@@ -99,11 +98,11 @@ export const SettingsPage = () => {
     <div>
       <PageHeader title="Settings" subtitle="Identity, organizations, and API credentials" />
 
-      <Card className="mb-6">
-        <Text className="font-bold mb-2">Profile</Text>
-        <Text>Email: {identity?.email}</Text>
-        <Text>Name: {identity?.name || "(not set)"}</Text>
-      </Card>
+      <div className="card mb-6">
+        <p className="font-bold text-white mb-2">Profile</p>
+        <span className="text-gray-400">Email: {identity?.email}</span>
+        <span className="text-gray-400">Name: {identity?.name || "(not set)"}</span>
+      </div>
 
       <QueryState
         loading={orgsQuery.loading}
@@ -112,27 +111,27 @@ export const SettingsPage = () => {
         emptyMessage="No organizations available."
         onRetry={() => void orgsQuery.refetch()}
       >
-        <Card className="mb-6">
-          <Text className="font-bold mb-2">Organizations</Text>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Name</TableHeaderCell>
-                <TableHeaderCell>Plan</TableHeaderCell>
-                <TableHeaderCell>Members</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+        <div className="card mb-6">
+          <p className="font-bold text-white mb-2">Organizations</p>
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Plan</th>
+                <th>Members</th>
+              </tr>
+            </thead>
+            <tbody>
               {orgs.map((org) => (
-                <TableRow key={org.org_id}>
-                  <TableCell><Text className="font-medium">{org.name}</Text></TableCell>
-                  <TableCell><Badge>{org.plan ?? "free"}</Badge></TableCell>
-                  <TableCell><Text>{org.member_count ?? 0}</Text></TableCell>
-                </TableRow>
+                <tr key={org.org_id}>
+                  <td><span className="font-medium text-white">{org.name}</span></td>
+                  <td><span className="badge">{org.plan ?? "free"}</span></td>
+                  <td><span className="text-gray-400">{org.member_count ?? 0}</span></td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
-        </Card>
+            </tbody>
+          </table>
+        </div>
       </QueryState>
 
       <QueryState
@@ -142,68 +141,68 @@ export const SettingsPage = () => {
         emptyMessage="No API keys created yet."
         onRetry={() => void keysQuery.refetch()}
       >
-        <Card>
+        <div className="card">
           <div className="flex justify-between mb-2">
-            <Text className="font-bold">API Keys</Text>
-            <Text className="text-xs text-gray-400">{keys.length} key(s)</Text>
+            <p className="font-bold text-white">API Keys</p>
+            <span className="text-xs text-gray-500">{keys.length} key(s)</span>
           </div>
           <div className="mb-4 grid gap-2 md:grid-cols-3">
-            <TextInput value={newKeyName} onChange={(event) => setNewKeyName(event.target.value)} placeholder="Key name" />
-            <TextInput value={keyScope} onChange={(event) => setKeyScope(event.target.value)} placeholder="Scopes e.g. * or agents:read" />
-            <Button onClick={() => void createApiKey()}>Create Key</Button>
+            <input className="input-field" value={newKeyName} onChange={(event) => setNewKeyName(event.target.value)} placeholder="Key name" />
+            <input className="input-field" value={keyScope} onChange={(event) => setKeyScope(event.target.value)} placeholder="Scopes e.g. * or agents:read" />
+            <button className="btn-primary" onClick={() => void createApiKey()}>Create Key</button>
           </div>
           {createdKey ? (
-            <Text className="text-emerald-600 mb-3 break-all">Created/rotated key: {createdKey}</Text>
+            <p className="text-emerald-400 mb-3 break-all">Created/rotated key: {createdKey}</p>
           ) : null}
           {actionError ? (
-            <Text className="text-red-600 mb-3">{actionError}</Text>
+            <span className="text-red-600 mb-3">{actionError}</span>
           ) : null}
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Name</TableHeaderCell>
-                <TableHeaderCell>Prefix</TableHeaderCell>
-                <TableHeaderCell>Scopes</TableHeaderCell>
-                <TableHeaderCell>Status</TableHeaderCell>
-                <TableHeaderCell>Actions</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Prefix</th>
+                <th>Scopes</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
               {keys.map((key) => (
-                <TableRow key={key.key_id}>
-                  <TableCell><Text>{key.name}</Text></TableCell>
-                  <TableCell><Text className="font-mono text-xs">{key.key_prefix}...</Text></TableCell>
-                  <TableCell>
+                <tr key={key.key_id}>
+                  <td><span className="text-gray-400">{key.name}</span></td>
+                  <td><span className="font-mono text-xs text-gray-300">{key.key_prefix}...</span></td>
+                  <td>
                     <div className="flex gap-1">
                       {safeArray<string>(key.scopes).slice(0, 3).map((scope) => (
-                        <Badge key={scope} size="xs">{scope}</Badge>
+                        <span key={scope} className="badge badge-muted">{scope}</span>
                       ))}
                     </div>
-                  </TableCell>
-                  <TableCell>
-                    <Badge color={key.is_active ? "green" : "red"}>
+                  </td>
+                  <td>
+                    <span className="badge">
                       {key.is_active ? "Active" : "Revoked"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
+                    </span>
+                  </td>
+                  <td>
                     <div className="flex gap-2">
                       {key.is_active ? (
                         <>
-                          <Button size="xs" variant="secondary" onClick={() => void rotateApiKey(key.key_id)}>
+                          <button className="btn-secondary text-xs" onClick={() => void rotateApiKey(key.key_id)}>
                             Rotate
-                          </Button>
-                          <Button size="xs" color="red" onClick={() => setPendingRevokeKeyId(key.key_id)}>
+                          </button>
+                          <button className="btn-danger text-xs" onClick={() => setPendingRevokeKeyId(key.key_id)}>
                             Revoke
-                          </Button>
+                          </button>
                         </>
                       ) : null}
                     </div>
-                  </TableCell>
-                </TableRow>
+                  </td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
-        </Card>
+            </tbody>
+          </table>
+        </div>
       </QueryState>
       <ConfirmDialog
         open={pendingRevokeKeyId !== null}

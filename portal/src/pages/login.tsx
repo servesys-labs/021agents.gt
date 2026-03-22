@@ -1,6 +1,5 @@
 import { useLogin, useRegister } from "@refinedev/core";
 import { useEffect, useState } from "react";
-import { Card, TextInput, Button, Text } from "@tremor/react";
 import { SignedIn, SignedOut, SignIn, useAuth, useClerk, useUser } from "@clerk/clerk-react";
 import { useNavigate } from "react-router-dom";
 
@@ -39,43 +38,43 @@ const LocalLoginPage = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
-      <Card className="w-full max-w-md">
+    <div className="min-h-screen flex items-center justify-center bg-[#0d0d0d]">
+      <div className="card w-full max-w-md">
         <div className="text-center mb-6">
-          <h1 className="text-2xl font-bold">AgentOS</h1>
-          <Text className="text-gray-500">Agent Control Plane</Text>
+          <h1 className="text-2xl font-bold text-white">oneshots<span className="text-[#ff8c00]">.co</span></h1>
+          <span className="text-gray-500 text-sm">Agent Infrastructure Platform</span>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {expiryMessage ? <Text className="text-amber-600">{expiryMessage}</Text> : null}
+          {expiryMessage ? <span className="text-amber-600">{expiryMessage}</span> : null}
           {isRegister && (
             <div>
-              <Text className="mb-1">Name</Text>
-              <TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
+              <span className="mb-1">Name</span>
+              <input className="input-field" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
             </div>
           )}
           <div>
-            <Text className="mb-1">Email</Text>
-            <TextInput type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" required />
+            <span className="mb-1">Email</span>
+            <input className="input-field" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" required />
           </div>
           <div>
-            <Text className="mb-1">Password</Text>
-            <TextInput type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required />
+            <span className="mb-1">Password</span>
+            <input className="input-field" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••" required />
           </div>
-          <Button type="submit" className="w-full" loading={loginLoading || registerLoading}>
-            {isRegister ? "Create Account" : "Sign In"}
-          </Button>
+          <button type="submit" className="btn-primary w-full" disabled={loginLoading || registerLoading}>
+            {loginLoading || registerLoading ? "Loading..." : isRegister ? "Create Account" : "Sign In"}
+          </button>
         </form>
 
         <div className="text-center mt-4">
           <button
             onClick={() => setIsRegister(!isRegister)}
-            className="text-sm text-blue-600 hover:underline"
+            className="text-sm text-[#ff8c00] hover:text-[#ffa940] hover:underline"
           >
             {isRegister ? "Already have an account? Sign in" : "Don't have an account? Register"}
           </button>
         </div>
-      </Card>
+      </div>
     </div>
   );
 };
@@ -143,21 +142,21 @@ const ClerkLoginPage = () => {
   }, [getToken, navigate, user]);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 p-6">
-      <Card className="w-full max-w-md">
+    <div className="min-h-screen flex items-center justify-center bg-[#0d0d0d] p-6">
+      <div className="card w-full max-w-md">
         <div className="text-center mb-4">
-          <h1 className="text-2xl font-bold">AgentOS</h1>
-          <Text className="text-gray-500">Sign in with Clerk</Text>
+          <h1 className="text-2xl font-bold text-white">oneshots<span className="text-[#ff8c00]">.co</span></h1>
+          <span className="text-gray-500 text-sm">Sign in with Clerk</span>
         </div>
         <SignedOut>
           <SignIn routing="hash" />
         </SignedOut>
         <SignedIn>
-          <Text>{syncing ? "Completing sign in..." : "Signed in with Clerk."}</Text>
+          <span className="text-gray-400">{syncing ? "Completing sign in..." : "Signed in with Clerk."}</span>
         </SignedIn>
-        {expiryMessage ? <Text className="mt-2 text-amber-600">{expiryMessage}</Text> : null}
-        {error ? <Text className="mt-2 text-red-600">{error}</Text> : null}
-      </Card>
+        {expiryMessage ? <span className="mt-2 text-amber-600">{expiryMessage}</span> : null}
+        {error ? <span className="mt-2 text-red-600">{error}</span> : null}
+      </div>
     </div>
   );
 };

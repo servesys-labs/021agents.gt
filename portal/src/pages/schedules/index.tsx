@@ -1,4 +1,3 @@
-import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput, Textarea } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -109,34 +108,34 @@ export const SchedulesPage = () => {
       <PageHeader title="Schedules" subtitle="Create and manage cron-based agent runs" />
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Create Schedule</Text>
-          <Text className="text-xs text-gray-500 mb-1">Agent</Text>
-          <TextInput value={agentName} onChange={(event) => setAgentName(event.target.value)} placeholder={agents[0]?.name ?? "agent-name"} />
-          <Text className="text-xs text-gray-500 mt-3 mb-1">Cron</Text>
-          <TextInput value={cron} onChange={(event) => setCron(event.target.value)} placeholder="0 * * * *" />
-          <Text className="text-xs text-gray-500 mt-3 mb-1">Task</Text>
-          <Textarea value={task} onChange={(event) => setTask(event.target.value)} rows={4} />
-          <Button className="mt-4" onClick={() => void createSchedule()}>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Create Schedule</p>
+          <span className="text-xs text-gray-500 mb-1">Agent</span>
+          <input className="input-field" value={agentName} onChange={(event) => setAgentName(event.target.value)} placeholder={agents[0]?.name ?? "agent-name"} />
+          <span className="text-xs text-gray-500 mt-3 mb-1">Cron</span>
+          <input className="input-field" value={cron} onChange={(event) => setCron(event.target.value)} placeholder="0 * * * *" />
+          <span className="text-xs text-gray-500 mt-3 mb-1">Task</span>
+          <textarea className="input-field" value={task} onChange={(event) => setTask(event.target.value)} rows={4} />
+          <button className="btn-primary mt-4" onClick={() => void createSchedule()}>
             Create
-          </Button>
-          {actionError ? <Text className="mt-3 text-red-600">{actionError}</Text> : null}
-        </Card>
+          </button>
+          {actionError ? <span className="mt-3 text-red-600">{actionError}</span> : null}
+        </div>
 
         {history ? (
-          <Card>
-            <Text className="font-semibold mb-2">Schedule History</Text>
-            <pre className="max-h-80 overflow-auto rounded bg-gray-50 p-3 text-xs">{JSON.stringify(history, null, 2)}</pre>
-          </Card>
+          <div className="card">
+            <p className="font-semibold text-white mb-2">Schedule History</p>
+            <pre className="max-h-80 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{JSON.stringify(history, null, 2)}</pre>
+          </div>
         ) : (
-          <Card>
-            <Text className="text-gray-500">Select a schedule and click History to inspect run metadata.</Text>
-          </Card>
+          <div className="card">
+            <span className="text-gray-500">Select a schedule and click History to inspect run metadata.</span>
+          </div>
         )}
       </div>
 
-      <Card className="mt-6">
-        <Text className="font-semibold mb-3">Existing Schedules</Text>
+      <div className="card mt-6">
+        <p className="font-semibold text-white mb-3">Existing Schedules</p>
         <QueryState
           loading={schedulesQuery.loading}
           error={schedulesQuery.error}
@@ -144,51 +143,51 @@ export const SchedulesPage = () => {
           emptyMessage="No schedules configured."
           onRetry={() => void schedulesQuery.refetch()}
         >
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Agent</TableHeaderCell>
-                <TableHeaderCell>Cron</TableHeaderCell>
-                <TableHeaderCell>Task</TableHeaderCell>
-                <TableHeaderCell>Status</TableHeaderCell>
-                <TableHeaderCell>Runs</TableHeaderCell>
-                <TableHeaderCell>Actions</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Agent</th>
+                <th>Cron</th>
+                <th>Task</th>
+                <th>Status</th>
+                <th>Runs</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
               {schedules.map((schedule) => (
-                <TableRow key={schedule.schedule_id}>
-                  <TableCell><Text>{schedule.agent_name}</Text></TableCell>
-                  <TableCell><Text className="font-mono text-xs">{schedule.cron}</Text></TableCell>
-                  <TableCell><Text>{schedule.task}</Text></TableCell>
-                  <TableCell>
-                    <Badge color={schedule.is_enabled ? "green" : "gray"}>
+                <tr key={schedule.schedule_id}>
+                  <td><span className="text-gray-400">{schedule.agent_name}</span></td>
+                  <td><span className="font-mono text-xs text-gray-300">{schedule.cron}</span></td>
+                  <td><span className="text-gray-400">{schedule.task}</span></td>
+                  <td>
+                    <span className="badge">
                       {schedule.is_enabled ? "enabled" : "disabled"}
-                    </Badge>
-                  </TableCell>
-                  <TableCell><Text>{schedule.run_count}</Text></TableCell>
-                  <TableCell>
+                    </span>
+                  </td>
+                  <td><span className="text-gray-400">{schedule.run_count}</span></td>
+                  <td>
                     <div className="flex flex-wrap gap-2">
-                      <Button size="xs" onClick={() => void toggleSchedule(schedule)}>
+                      <button className="btn-primary text-xs" onClick={() => void toggleSchedule(schedule)}>
                         {schedule.is_enabled ? "Disable" : "Enable"}
-                      </Button>
-                      <Button size="xs" variant="secondary" onClick={() => void updateSchedule(schedule)}>
+                      </button>
+                      <button className="btn-secondary text-xs" onClick={() => void updateSchedule(schedule)}>
                         Edit
-                      </Button>
-                      <Button size="xs" variant="secondary" onClick={() => void loadHistory(schedule)}>
+                      </button>
+                      <button className="btn-secondary text-xs" onClick={() => void loadHistory(schedule)}>
                         History
-                      </Button>
-                      <Button size="xs" color="red" onClick={() => void deleteSchedule(schedule)}>
+                      </button>
+                      <button className="btn-danger text-xs" onClick={() => void deleteSchedule(schedule)}>
                         Delete
-                      </Button>
+                      </button>
                     </div>
-                  </TableCell>
-                </TableRow>
+                  </td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
+            </tbody>
+          </table>
         </QueryState>
-      </Card>
+      </div>
     </div>
   );
 };

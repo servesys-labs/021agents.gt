@@ -1,4 +1,3 @@
-import { Card, Select, SelectItem, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -63,14 +62,14 @@ export const RagPage = () => {
   return (
     <div>
       <PageHeader title="RAG & Ingest" subtitle="Upload documents and monitor retrieval index state" />
-      <Card className="mb-6">
+      <div className="card mb-6">
         <div className="grid gap-2 md:grid-cols-3">
-          <Select value={selectedAgent} onValueChange={setAgentName}>
+          <select className="input-field" value={selectedAgent} onChange={(e) => setAgentName(e.target.value)}>
             {agents.map((agent) => (
-              <SelectItem key={agent.name} value={agent.name}>{agent.name}</SelectItem>
+              <option key={agent.name} value={agent.name}>{agent.name}</option>
             ))}
-          </Select>
-          <TextInput value={chunkSize} onChange={(event) => setChunkSize(event.target.value)} placeholder="chunk size" />
+          </select>
+          <input className="input-field" value={chunkSize} onChange={(event) => setChunkSize(event.target.value)} placeholder="chunk size" />
           <input
             type="file"
             multiple
@@ -78,45 +77,45 @@ export const RagPage = () => {
             onChange={(event) => void upload(event.target.files)}
           />
         </div>
-        {message ? <Text className="mt-2 text-emerald-600">{message}</Text> : null}
-        {error ? <Text className="mt-2 text-red-600">{error}</Text> : null}
-      </Card>
+        {message ? <span className="mt-2 text-emerald-600">{message}</span> : null}
+        {error ? <span className="mt-2 text-red-600">{error}</span> : null}
+      </div>
 
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <Text className="font-semibold mb-3">Index Status</Text>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Index Status</p>
           <QueryState loading={statusQuery.loading} error={statusQuery.error} isEmpty={!statusQuery.data}>
-            <pre className="max-h-72 overflow-auto rounded bg-gray-50 p-3 text-xs">
+            <pre className="max-h-72 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">
               {JSON.stringify(statusQuery.data, null, 2)}
             </pre>
           </QueryState>
-        </Card>
-        <Card>
-          <Text className="font-semibold mb-3">Indexed Documents</Text>
+        </div>
+        <div className="card">
+          <p className="font-semibold text-white mb-3">Indexed Documents</p>
           <QueryState
             loading={docsQuery.loading}
             error={docsQuery.error}
             isEmpty={(docsQuery.data?.documents ?? []).length === 0}
             emptyMessage="No ingested documents."
           >
-            <Table>
-              <TableHead>
-                <TableRow>
-                  <TableHeaderCell>Source</TableHeaderCell>
-                  <TableHeaderCell>Length</TableHeaderCell>
-                </TableRow>
-              </TableHead>
-              <TableBody>
+            <table className="os-table">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Length</th>
+                </tr>
+              </thead>
+              <tbody>
                 {(docsQuery.data?.documents ?? []).map((doc, index) => (
-                  <TableRow key={`${doc.metadata?.source}-${index}`}>
-                    <TableCell><Text>{doc.metadata?.source ?? `document-${index + 1}`}</Text></TableCell>
-                    <TableCell><Text>{doc.length ?? 0}</Text></TableCell>
-                  </TableRow>
+                  <tr key={`${doc.metadata?.source}-${index}`}>
+                    <td><span className="text-gray-400">{doc.metadata?.source ?? `document-${index + 1}`}</span></td>
+                    <td><span className="text-gray-400">{doc.length ?? 0}</span></td>
+                  </tr>
                 ))}
-              </TableBody>
-            </Table>
+              </tbody>
+            </table>
           </QueryState>
-        </Card>
+        </div>
       </div>
     </div>
   );

@@ -1,5 +1,3 @@
-import { Button, Card, Text } from "@tremor/react";
-
 type ConfirmDialogProps = {
   open: boolean;
   title: string;
@@ -26,19 +24,26 @@ export function ConfirmDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <Card className="w-full max-w-md">
-        <Text className="text-base font-semibold">{title}</Text>
-        <Text className="mt-2 text-gray-600">{description}</Text>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+      <div className="card w-full max-w-md">
+        <h3 className="text-base font-semibold text-text-primary">{title}</h3>
+        <p className="mt-2 text-sm text-text-secondary">{description}</p>
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="secondary" onClick={onCancel}>
+          <button onClick={onCancel} className="btn btn-secondary">
             {cancelLabel}
-          </Button>
-          <Button color={tone === "danger" ? "red" : "blue"} onClick={onConfirm}>
+          </button>
+          <button
+            onClick={onConfirm}
+            className={`btn ${
+              tone === "danger"
+                ? "bg-status-error text-white hover:bg-status-error/80"
+                : "btn-primary"
+            }`}
+          >
             {confirmLabel}
-          </Button>
+          </button>
         </div>
-      </Card>
+      </div>
     </div>
   );
 }

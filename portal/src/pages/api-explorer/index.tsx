@@ -1,4 +1,3 @@
-import { Badge, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -65,31 +64,30 @@ export const ApiExplorerPage = () => {
       />
 
       <div className="grid gap-4 md:grid-cols-4 mb-6">
-        <Card>
-          <Text>Total Endpoints</Text>
-          <Text className="text-3xl font-bold">{coverage.total}</Text>
-        </Card>
-        <Card>
-          <Text>v1 Endpoints</Text>
-          <Text className="text-3xl font-bold">{coverage.v1}</Text>
-        </Card>
-        <Card>
-          <Text>Legacy Endpoints</Text>
-          <Text className="text-3xl font-bold">{coverage.legacy}</Text>
-        </Card>
-        <Card>
-          <Text>Document</Text>
-          <Text>{openApiQuery.data?.info?.title ?? "AgentOS"} {openApiQuery.data?.info?.version ?? ""}</Text>
-        </Card>
+        <div className="card">
+          <span className="text-gray-400">Total Endpoints</span>
+          <p className="text-3xl font-bold text-white">{coverage.total}</p>
+        </div>
+        <div className="card">
+          <span className="text-gray-400">v1 Endpoints</span>
+          <p className="text-3xl font-bold text-white">{coverage.v1}</p>
+        </div>
+        <div className="card">
+          <span className="text-gray-400">Legacy Endpoints</span>
+          <p className="text-3xl font-bold text-white">{coverage.legacy}</p>
+        </div>
+        <div className="card">
+          <span className="text-gray-400">Document</span>
+          <span className="text-gray-400">{openApiQuery.data?.info?.title ?? "AgentOS"} {openApiQuery.data?.info?.version ?? ""}</span>
+        </div>
       </div>
 
-      <Card className="mb-4">
-        <TextInput
-          value={query}
+      <div className="card mb-4">
+        <input className="input-field" value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Filter by path, method, tag, or summary"
         />
-      </Card>
+      </div>
 
       <QueryState
         loading={openApiQuery.loading}
@@ -98,32 +96,32 @@ export const ApiExplorerPage = () => {
         emptyMessage="No endpoints match this filter."
         onRetry={() => void openApiQuery.refetch()}
       >
-        <Card>
-          <Table>
-            <TableHead>
-              <TableRow>
-                <TableHeaderCell>Method</TableHeaderCell>
-                <TableHeaderCell>Path</TableHeaderCell>
-                <TableHeaderCell>Surface</TableHeaderCell>
-                <TableHeaderCell>Tags</TableHeaderCell>
-                <TableHeaderCell>Summary</TableHeaderCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
+        <div className="card">
+          <table className="os-table">
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Path</th>
+                <th>Surface</th>
+                <th>Tags</th>
+                <th>Summary</th>
+              </tr>
+            </thead>
+            <tbody>
               {filtered.map((endpoint) => (
-                <TableRow key={`${endpoint.method}-${endpoint.path}`}>
-                  <TableCell><Badge>{endpoint.method}</Badge></TableCell>
-                  <TableCell><Text className="font-mono text-xs">{endpoint.path}</Text></TableCell>
-                  <TableCell>
-                    <Badge color={endpoint.surface === "v1" ? "blue" : "amber"}>{endpoint.surface}</Badge>
-                  </TableCell>
-                  <TableCell><Text>{endpoint.tags || "untagged"}</Text></TableCell>
-                  <TableCell><Text>{endpoint.summary || "-"}</Text></TableCell>
-                </TableRow>
+                <tr key={`${endpoint.method}-${endpoint.path}`}>
+                  <td><span className="badge">{endpoint.method}</span></td>
+                  <td><span className="font-mono text-xs text-gray-300">{endpoint.path}</span></td>
+                  <td>
+                    <span className="badge">{endpoint.surface}</span>
+                  </td>
+                  <td><span className="text-gray-400">{endpoint.tags || "untagged"}</span></td>
+                  <td><span className="text-gray-400">{endpoint.summary || "-"}</span></td>
+                </tr>
               ))}
-            </TableBody>
-          </Table>
-        </Card>
+            </tbody>
+          </table>
+        </div>
       </QueryState>
     </div>
   );
