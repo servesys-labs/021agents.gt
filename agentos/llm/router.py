@@ -15,6 +15,7 @@ class Complexity(str, Enum):
     SIMPLE = "simple"
     MODERATE = "moderate"
     COMPLEX = "complex"
+    TOOL_CALL = "tool_call"  # Dedicated tier for tool-calling turns
 
 
 @dataclass
@@ -39,6 +40,7 @@ class LLMRouter:
             Complexity.SIMPLE: RouteConfig(provider=stub, max_tokens=1024),
             Complexity.MODERATE: RouteConfig(provider=stub, max_tokens=4096),
             Complexity.COMPLEX: RouteConfig(provider=stub, max_tokens=8192),
+            Complexity.TOOL_CALL: RouteConfig(provider=stub, max_tokens=4096),
         }
         self._tools: list[dict[str, Any]] = []
 
@@ -67,8 +69,19 @@ class LLMRouter:
         return Complexity.SIMPLE
 
     async def route(self, messages: list[dict[str, str]]) -> LLMResponse:
-        """Classify complexity, count tokens, and route to the appropriate provider."""
+        """Classify complexity, count tokens, and route to the appropriate provider.
+
+        When tools are available and a dedicated TOOL_CALL model is configured,
+        uses it instead of the complexity-based tier. This ensures tool calls
+        go to a model with strong structured output / function-calling ability.
+        """
         complexity = self.classify(messages)
+
+        # Use TOOL_CALL tier when tools are present and a dedicated model is registered
+        tool_call_route = self._routes.get(Complexity.TOOL_CALL)
+        if self._tools and tool_call_route and not isinstance(tool_call_route.provider, StubProvider):
+            complexity = Complexity.TOOL_CALL
+
         config = self._routes[complexity]
 
         # Token counting for cost/latency optimization
