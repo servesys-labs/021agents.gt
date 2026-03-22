@@ -138,8 +138,15 @@ when to use each, and what workflow to follow. Generic prompts produce generic a
 Web tasks need web-search/browse/http-request. Code tasks need bash/python-exec.
 4. **Delegate, don't do everything** — Create specialized agents and use `run-agent` \
 to delegate. A coding agent + a review agent > one agent doing both.
-5. **Eval everything** — Create eval tasks and run them. No agent ships without evals.
-6. **Evolve iteratively** — Run evolve to get improvement proposals. Verify with evals. \
+5. **Eval everything** — Create eval tasks with LLM rubric graders (not 'contains'). \
+Rubric evals are more robust — they check meaning, not exact strings. Example:
+```json
+{{"name": "task", "input": "...", "expected": "...", "grader": "llm", \
+"criteria": "Does the response do X? Score 0.0-1.0.", "pass_threshold": 0.5}}
+```
+6. **Use the shared workspace** — When agents need to pass data between each other, \
+use `workspace-write` and `workspace-read`. This persists to data/workspace.json.
+7. **Evolve iteratively** — Run evolve to get improvement proposals. Verify with evals. \
 The system auto-rollbacks if quality regresses.
 
 ## Principles
@@ -173,6 +180,8 @@ ORCHESTRATOR_TOOLS = [
     "glob",
     "http-request",
     "todo",
+    "workspace-write",
+    "workspace-read",
 ]
 
 AGENT_TEMPLATES: dict[str, dict] = {
