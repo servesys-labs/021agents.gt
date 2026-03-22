@@ -58,6 +58,54 @@ async def retry_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
     return {"retried": job_id}
 
 
+@router.post("/{job_id}/cancel")
+async def cancel_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Cancel a running or pending job."""
+    db = _get_db()
+    row = db.conn.execute("SELECT status FROM job_queue WHERE job_id = ?", (job_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if row["status"] not in ("pending", "running"):
+        raise HTTPException(status_code=409, detail=f"Cannot cancel job with status '{row['status']}'")
+    db.conn.execute(
+        "UPDATE job_queue SET status = 'cancelled' WHERE job_id = ?", (job_id,)
+    )
+    db.conn.commit()
+    return {"cancelled": job_id}
+
+
+@router.post("/{job_id}/pause")
+async def pause_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Pause a pending job."""
+    db = _get_db()
+    row = db.conn.execute("SELECT status FROM job_queue WHERE job_id = ?", (job_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if row["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"Cannot pause job with status '{row['status']}' — only pending jobs can be paused")
+    db.conn.execute(
+        "UPDATE job_queue SET status = 'paused' WHERE job_id = ?", (job_id,)
+    )
+    db.conn.commit()
+    return {"paused": job_id}
+
+
+@router.post("/{job_id}/resume")
+async def resume_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Resume a paused job."""
+    db = _get_db()
+    row = db.conn.execute("SELECT status FROM job_queue WHERE job_id = ?", (job_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if row["status"] != "paused":
+        raise HTTPException(status_code=409, detail=f"Cannot resume job with status '{row['status']}' — only paused jobs can be resumed")
+    db.conn.execute(
+        "UPDATE job_queue SET status = 'pending' WHERE job_id = ?", (job_id,)
+    )
+    db.conn.commit()
+    return {"resumed": job_id}
+
+
 @router.get("/dlq")
 async def dead_letter_queue(limit: int = 50):
     """List dead-letter (permanently failed) jobs."""

@@ -1,8 +1,11 @@
-"""Webhooks router — CRUD + test delivery."""
+"""Webhooks router — CRUD + test delivery + deliveries + secret rotation."""
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import secrets
 import time
 import uuid
 
@@ -128,3 +131,109 @@ async def test_webhook(webhook_id: str, user: CurrentUser = Depends(get_current_
         return {"status": resp.status_code, "duration_ms": round(duration, 1), "success": resp.status_code < 400}
     except Exception as exc:
         return {"status": 0, "error": str(exc), "success": False}
+
+
+@router.get("/{webhook_id}/deliveries")
+async def list_deliveries(
+    webhook_id: str,
+    limit: int = 50,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List delivery attempts for a webhook with status codes."""
+    db = _get_db()
+    # Verify webhook belongs to user's org
+    wh = db.conn.execute(
+        "SELECT webhook_id FROM webhooks WHERE webhook_id = ? AND org_id = ?",
+        (webhook_id, user.org_id),
+    ).fetchone()
+    if not wh:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    rows = db.conn.execute(
+        "SELECT * FROM webhook_deliveries WHERE webhook_id = ? ORDER BY rowid DESC LIMIT ?",
+        (webhook_id, limit),
+    ).fetchall()
+    return {"deliveries": [dict(r) for r in rows]}
+
+
+@router.post("/{webhook_id}/deliveries/{delivery_id}/replay")
+async def replay_delivery(
+    webhook_id: str,
+    delivery_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Replay a failed webhook delivery."""
+    import httpx
+
+    db = _get_db()
+    # Verify webhook ownership
+    wh = db.conn.execute(
+        "SELECT * FROM webhooks WHERE webhook_id = ? AND org_id = ?",
+        (webhook_id, user.org_id),
+    ).fetchone()
+    if not wh:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    webhook = dict(wh)
+
+    # Find original delivery
+    delivery = db.conn.execute(
+        "SELECT * FROM webhook_deliveries WHERE rowid = ? AND webhook_id = ?",
+        (delivery_id, webhook_id),
+    ).fetchone()
+    if not delivery:
+        raise HTTPException(status_code=404, detail="Delivery not found")
+    delivery = dict(delivery)
+
+    payload = json.loads(delivery.get("payload_json", "{}"))
+
+    try:
+        start = time.monotonic()
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                webhook["url"],
+                json=payload,
+                headers={"X-AgentOS-Secret": webhook["secret"]},
+            )
+        duration = (time.monotonic() - start) * 1000
+
+        # Log the replay delivery
+        db.conn.execute(
+            """INSERT INTO webhook_deliveries (webhook_id, event_type, payload_json,
+            response_status, response_body, duration_ms, success) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (webhook_id, delivery.get("event_type", "replay"), json.dumps(payload),
+             resp.status_code, resp.text[:500], duration, 1 if resp.status_code < 400 else 0),
+        )
+        db.conn.commit()
+
+        return {
+            "replayed": delivery_id,
+            "status": resp.status_code,
+            "duration_ms": round(duration, 1),
+            "success": resp.status_code < 400,
+        }
+    except Exception as exc:
+        return {"replayed": delivery_id, "status": 0, "error": str(exc), "success": False}
+
+
+@router.post("/{webhook_id}/rotate-secret")
+async def rotate_secret(
+    webhook_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Rotate the signing secret for a webhook."""
+    db = _get_db()
+    row = db.conn.execute(
+        "SELECT webhook_id FROM webhooks WHERE webhook_id = ? AND org_id = ?",
+        (webhook_id, user.org_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+
+    new_secret = secrets.token_hex(32)
+    db.conn.execute(
+        "UPDATE webhooks SET secret = ? WHERE webhook_id = ?",
+        (new_secret, webhook_id),
+    )
+    db.conn.commit()
+
+    return {"webhook_id": webhook_id, "secret": new_secret, "rotated": True}

@@ -142,6 +142,114 @@ async def list_workflow_runs(workflow_id: str, limit: int = 20):
     return {"runs": [dict(r) for r in rows]}
 
 
+@router.get("/{workflow_id}/runs/{run_id}")
+async def get_workflow_run(workflow_id: str, run_id: str):
+    """Get run detail with step-level status."""
+    db = _get_db()
+    row = db.conn.execute(
+        "SELECT * FROM workflow_runs WHERE run_id = ? AND workflow_id = ?",
+        (run_id, workflow_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    result = dict(row)
+    result["steps"] = json.loads(result.pop("steps_status_json", "{}"))
+    return result
+
+
+@router.post("/{workflow_id}/runs/{run_id}/cancel")
+async def cancel_workflow_run(
+    workflow_id: str,
+    run_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Cancel a running workflow."""
+    db = _get_db()
+    row = db.conn.execute(
+        "SELECT status FROM workflow_runs WHERE run_id = ? AND workflow_id = ?",
+        (run_id, workflow_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Workflow run not found")
+    if row["status"] not in ("running", "pending"):
+        raise HTTPException(status_code=409, detail=f"Cannot cancel run with status '{row['status']}'")
+    import time
+    db.conn.execute(
+        "UPDATE workflow_runs SET status = 'cancelled', completed_at = ? WHERE run_id = ?",
+        (time.time(), run_id),
+    )
+    db.conn.commit()
+    return {"cancelled": run_id}
+
+
+@router.post("/validate")
+async def validate_workflow(
+    request: CreateWorkflowRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Validate a workflow DAG — check agent references and circular dependencies."""
+    from agentos.agent import list_agents as _list_agents
+
+    errors: list[str] = []
+    steps = request.steps
+
+    # Build lookup of step IDs
+    step_ids = set()
+    for step in steps:
+        step_id = step.get("id", "")
+        if not step_id:
+            errors.append("Every step must have an 'id' field")
+            continue
+        if step_id in step_ids:
+            errors.append(f"Duplicate step id: '{step_id}'")
+        step_ids.add(step_id)
+
+    # Check agent references exist
+    available_agents = {a.name for a in _list_agents()}
+    for step in steps:
+        agent_name = step.get("agent", "")
+        if agent_name and agent_name not in available_agents:
+            errors.append(f"Step '{step.get('id', '?')}' references unknown agent '{agent_name}'")
+
+    # Check depends_on references and detect circular dependencies
+    graph: dict[str, list[str]] = {}
+    for step in steps:
+        step_id = step.get("id", "")
+        deps = step.get("depends_on", [])
+        graph[step_id] = deps
+        for dep in deps:
+            if dep not in step_ids:
+                errors.append(f"Step '{step_id}' depends on unknown step '{dep}'")
+
+    # Topological sort to detect cycles
+    visited: set[str] = set()
+    in_stack: set[str] = set()
+
+    def _has_cycle(node: str) -> bool:
+        if node in in_stack:
+            return True
+        if node in visited:
+            return False
+        visited.add(node)
+        in_stack.add(node)
+        for dep in graph.get(node, []):
+            if _has_cycle(dep):
+                return True
+        in_stack.discard(node)
+        return False
+
+    for step_id in step_ids:
+        if _has_cycle(step_id):
+            errors.append("Circular dependency detected in workflow DAG")
+            break
+
+    return {
+        "valid": len(errors) == 0,
+        "errors": errors,
+        "step_count": len(steps),
+    }
+
+
 @router.delete("/{workflow_id}")
 async def delete_workflow(workflow_id: str, user: CurrentUser = Depends(get_current_user)):
     db = _get_db()
