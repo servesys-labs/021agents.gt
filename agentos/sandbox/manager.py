@@ -15,6 +15,8 @@ from typing import Any
 
 import httpx
 
+from agentos.sandbox.virtual_paths import PathMapping
+
 logger = logging.getLogger(__name__)
 
 E2B_API_BASE = "https://api.e2b.dev"
@@ -67,6 +69,7 @@ class SandboxManager:
         root = os.environ.get("AGENTOS_LOCAL_SANDBOX_ROOT", ".agentos_sandbox")
         self.local_sandbox_root = (Path.cwd() / root).resolve()
         self._sessions: dict[str, SandboxSession] = {}
+        self._path_mappings: dict[str, PathMapping] = {}
         self._default_sandbox_id: str | None = None
 
     @property
@@ -88,7 +91,13 @@ class SandboxManager:
                 )
             # Local fallback — fake sandbox ID
             session = SandboxSession(sandbox_id=f"local-{int(time.time())}", template="local")
-            self._local_session_dir(session.sandbox_id)
+            mapping = PathMapping.for_session(
+                session_id=session.sandbox_id,
+                base_dir=self.local_sandbox_root,
+                skills_dir=(Path.cwd() / "skills").resolve(),
+            )
+            mapping.ensure_dirs()
+            self._path_mappings[session.sandbox_id] = mapping
             self._sessions[session.sandbox_id] = session
             self._default_sandbox_id = session.sandbox_id
             logger.info("Created local fallback sandbox: %s", session.sandbox_id)
@@ -165,10 +174,12 @@ class SandboxManager:
 
         start = time.time()
         try:
+            mapping = self._path_mappings.get(sid)
+            translated_command = mapping.translate_command(command) if mapping else command
             proc = await asyncio.create_subprocess_exec(
                 "/bin/sh",
                 "-lc",
-                command,
+                translated_command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(self._local_session_dir(sid)),
@@ -282,6 +293,7 @@ class SandboxManager:
 
         if sid.startswith("local-"):
             self._sessions.pop(sid, None)
+            self._path_mappings.pop(sid, None)
             if self._default_sandbox_id == sid:
                 self._default_sandbox_id = None
             return True
@@ -293,6 +305,7 @@ class SandboxManager:
             )
 
         self._sessions.pop(sid, None)
+        self._path_mappings.pop(sid, None)
         if self._default_sandbox_id == sid:
             self._default_sandbox_id = None
         return resp.is_success
@@ -319,8 +332,13 @@ class SandboxManager:
             self._sessions[sandbox_id].last_activity_at = time.time()
 
     def _local_session_dir(self, sandbox_id: str) -> Path:
-        """Return the local session directory for fallback mode."""
-        p = (self.local_sandbox_root / sandbox_id).resolve()
+        """Return the local workspace directory for fallback mode."""
+        mapping = self._path_mappings.get(sandbox_id)
+        if mapping:
+            mapping.ensure_dirs()
+            return mapping.workspace
+        # Backward compatibility for sessions created before mapping integration.
+        p = (self.local_sandbox_root / sandbox_id / "user-data" / "workspace").resolve()
         p.mkdir(parents=True, exist_ok=True)
         return p
 
@@ -329,13 +347,30 @@ class SandboxManager:
         if not raw_path.strip():
             raise ValueError("path cannot be empty")
 
+        mapping = self._path_mappings.get(sandbox_id)
+        normalized_path = raw_path
+        if mapping:
+            normalized_path = mapping.virtual_to_physical(raw_path)
+
         session_dir = self._local_session_dir(sandbox_id)
-        requested = Path(raw_path)
+        requested = Path(normalized_path)
         if requested.is_absolute():
-            requested = Path(*requested.parts[1:])
-        resolved = (session_dir / requested).resolve()
-        try:
-            resolved.relative_to(session_dir)
-        except ValueError as exc:
-            raise ValueError(f"path escapes local sandbox: {raw_path}") from exc
+            resolved = requested.resolve()
+        else:
+            resolved = (session_dir / requested).resolve()
+
+        allowed_roots = [session_dir]
+        if mapping:
+            allowed_roots = [mapping.workspace.resolve(), mapping.uploads.resolve(), mapping.outputs.resolve()]
+
+        in_bounds = False
+        for root in allowed_roots:
+            try:
+                resolved.relative_to(root)
+                in_bounds = True
+                break
+            except ValueError:
+                continue
+        if not in_bounds:
+            raise ValueError(f"path escapes local sandbox: {raw_path}")
         return resolved

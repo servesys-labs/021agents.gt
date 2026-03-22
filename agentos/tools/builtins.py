@@ -916,6 +916,59 @@ async def connector_call(tool_name: str, app: str = "", arguments: dict[str, Any
         return f"Connector call failed: {exc}"
 
 
+async def sandbox_exec(command: str, sandbox_id: str = "", timeout_ms: int = 30000) -> str:
+    """Execute a shell command in a secure sandbox."""
+    try:
+        from agentos.sandbox.tools import handle_sandbox_tool
+
+        result = await handle_sandbox_tool(
+            "sandbox_exec",
+            {"command": command, "sandbox_id": sandbox_id or None, "timeout_ms": timeout_ms},
+        )
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Sandbox exec failed: {exc}"
+
+
+async def sandbox_file_write(path: str, content: str, sandbox_id: str = "") -> str:
+    """Write a file inside a secure sandbox."""
+    try:
+        from agentos.sandbox.tools import handle_sandbox_tool
+
+        result = await handle_sandbox_tool(
+            "sandbox_file_write",
+            {"path": path, "content": content, "sandbox_id": sandbox_id or None},
+        )
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Sandbox file write failed: {exc}"
+
+
+async def sandbox_file_read(path: str, sandbox_id: str = "") -> str:
+    """Read a file from a secure sandbox."""
+    try:
+        from agentos.sandbox.tools import handle_sandbox_tool
+
+        result = await handle_sandbox_tool(
+            "sandbox_file_read",
+            {"path": path, "sandbox_id": sandbox_id or None},
+        )
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Sandbox file read failed: {exc}"
+
+
+async def sandbox_kill(sandbox_id: str) -> str:
+    """Terminate a secure sandbox session."""
+    try:
+        from agentos.sandbox.tools import handle_sandbox_tool
+
+        result = await handle_sandbox_tool("sandbox_kill", {"sandbox_id": sandbox_id})
+        return json.dumps(result, indent=2)
+    except Exception as exc:
+        return f"Sandbox kill failed: {exc}"
+
+
 # In-memory todo list for agent planning
 _todo_items: dict[str, list[dict[str, Any]]] = {}
 
@@ -1002,6 +1055,10 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "browse": browse_page,
     "a2a-send": a2a_send,
     "connector": connector_call,
+    "sandbox_exec": sandbox_exec,
+    "sandbox_file_write": sandbox_file_write,
+    "sandbox_file_read": sandbox_file_read,
+    "sandbox_kill": sandbox_kill,
 }
 
 # Schemas for built-in tools so the registry can expose them without JSON files
@@ -1240,6 +1297,51 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 "arguments": {"type": "object", "description": "Arguments for the tool"},
             },
             "required": ["tool_name"],
+        },
+    },
+    "sandbox_exec": {
+        "description": "Execute a shell command in a secure E2B sandbox",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "sandbox_id": {"type": "string", "description": "Existing sandbox ID (optional)"},
+                "timeout_ms": {"type": "integer", "description": "Timeout in milliseconds", "default": 30000},
+            },
+            "required": ["command"],
+        },
+    },
+    "sandbox_file_write": {
+        "description": "Write a file inside the sandbox filesystem",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path inside sandbox"},
+                "content": {"type": "string", "description": "File contents"},
+                "sandbox_id": {"type": "string", "description": "Existing sandbox ID (optional)"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    "sandbox_file_read": {
+        "description": "Read a file from the sandbox filesystem",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path inside sandbox"},
+                "sandbox_id": {"type": "string", "description": "Existing sandbox ID (optional)"},
+            },
+            "required": ["path"],
+        },
+    },
+    "sandbox_kill": {
+        "description": "Terminate a sandbox session to free resources",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sandbox_id": {"type": "string", "description": "Sandbox ID to terminate"},
+            },
+            "required": ["sandbox_id"],
         },
     },
 }
