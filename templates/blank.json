@@ -9,7 +9,11 @@
   "max_tokens": 4096,
   "temperature": 0.0,
   "tools": [
-    "example-search"
+    "web-search",
+    "read-file",
+    "write-file",
+    "bash",
+    "todo"
   ],
   "memory": {
     "working": {

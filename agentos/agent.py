@@ -78,6 +78,20 @@ class AgentConfig:
     max_turns: int = 50
     timeout_seconds: float = 300.0
 
+    # Plan — selects LLM routing tier (basic/standard/premium/code/dedicated/private)
+    plan: str = "standard"
+
+    # Harness config — controls middleware, skills, memory, retries
+    harness: dict[str, Any] = field(default_factory=lambda: {
+        "enable_loop_detection": True,
+        "enable_summarization": True,
+        "enable_skills": True,
+        "enable_async_memory": False,
+        "max_context_tokens": 100_000,
+        "retry_on_tool_failure": True,
+        "max_retries": 3,
+    })
+
     # Metadata
     tags: list[str] = field(default_factory=list)
     author: str = ""
@@ -100,6 +114,8 @@ class AgentConfig:
             "governance": self.governance,
             "max_turns": self.max_turns,
             "timeout_seconds": self.timeout_seconds,
+            "plan": self.plan,
+            "harness": self.harness,
             "tags": self.tags,
             "author": self.author,
         }
@@ -257,10 +273,18 @@ class Agent:
         from agentos.tools.mcp import MCPClient
         from agentos.tools.registry import ToolRegistry
 
-        # Harness config
+        # Harness config — propagate ALL fields from agent config
+        h = self.config.harness if isinstance(self.config.harness, dict) else {}
         harness_cfg = HarnessConfig(
             max_turns=self.config.max_turns,
             timeout_seconds=self.config.timeout_seconds,
+            enable_loop_detection=h.get("enable_loop_detection", True),
+            enable_summarization=h.get("enable_summarization", True),
+            enable_skills=h.get("enable_skills", True),
+            enable_async_memory=h.get("enable_async_memory", False),
+            max_context_tokens=h.get("max_context_tokens", 100_000),
+            retry_on_tool_failure=h.get("retry_on_tool_failure", True),
+            max_retries=h.get("max_retries", 3),
         )
 
         # LLM Router — configure per-tier models with mixed provider support
@@ -272,13 +296,24 @@ class Agent:
         model = self.config.model
 
         # Load per-tier routing config from config/default.json
+        # If agent specifies a plan, use plan-specific routing; else use default routing
         routing_config: dict[str, dict[str, Any]] = {}
         default_config_path = Path(__file__).resolve().parent.parent / "config" / "default.json"
         if default_config_path.exists():
             try:
                 import json as _json
                 raw = _json.loads(default_config_path.read_text())
-                routing_config = raw.get("llm", {}).get("routing", {})
+                llm_config = raw.get("llm", {})
+                # Check if agent has a plan and it exists in plans config
+                agent_plan = getattr(self.config, "plan", "")
+                plans = llm_config.get("plans", {})
+                if agent_plan and agent_plan in plans:
+                    plan_cfg = plans[agent_plan]
+                    # Filter out metadata keys (start with _)
+                    routing_config = {k: v for k, v in plan_cfg.items() if not k.startswith("_")}
+                    logger.info("Using plan '%s' for LLM routing", agent_plan)
+                else:
+                    routing_config = llm_config.get("routing", {})
             except Exception:
                 pass
 

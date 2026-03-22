@@ -107,15 +107,10 @@ class AgentHarness:
 
         # Async memory updater
         self._async_memory_updater = None
+        self._async_memory_started = False
         if self.config.enable_async_memory:
             from agentos.memory.async_updater import AsyncMemoryUpdater
             self._async_memory_updater = AsyncMemoryUpdater()
-            import asyncio
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._async_memory_updater.start())
-            except RuntimeError:
-                pass  # Will be started on first run
 
     def _build_default_middleware(self) -> MiddlewareChain:
         """Build the default middleware chain based on config."""
@@ -188,6 +183,11 @@ class AgentHarness:
             event_bus=self.event_bus,
         )
 
+        # Start async memory updater if enabled (deferred to first run)
+        if self._async_memory_updater and not self._async_memory_started:
+            self._async_memory_updater.start()
+            self._async_memory_started = True
+
         # Notify middleware chain of session start
         await self.middleware_chain.run_on_session_start(mw_ctx)
 
@@ -224,6 +224,16 @@ class AgentHarness:
         available_tools = self.tool_executor.available_tools()
         self.llm_router.set_tools(available_tools)
 
+        # Step 3c: Load learned procedures relevant to this task
+        procedures_section = ""
+        best_procs = self.memory_manager.procedural.find_best(user_input, limit=3)
+        if best_procs:
+            proc_lines = []
+            for p in best_procs:
+                steps_str = " → ".join(s.get("tool", "?") for s in p.steps[:5])
+                proc_lines.append(f"- {p.name} ({p.success_rate:.0%} success): {steps_str}")
+            procedures_section = "Learned procedures (from past successes):\n" + "\n".join(proc_lines)
+
         # Step 4b: Load enabled skills
         skills_section = ""
         if self.config.enable_skills:
@@ -242,6 +252,8 @@ class AgentHarness:
             system_parts.append(memory_context)
         if async_memory_section:
             system_parts.append(async_memory_section)
+        if procedures_section:
+            system_parts.append(procedures_section)
         if system_parts:
             messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
