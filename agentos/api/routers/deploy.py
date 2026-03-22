@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -57,7 +55,7 @@ async def deploy_agent(agent_name: str, user: CurrentUser = Depends(get_current_
 
 
 @router.get("/{agent_name}/status")
-async def deploy_status(agent_name: str):
+async def deploy_status(agent_name: str, user: CurrentUser = Depends(get_current_user)):
     """Get deployment status for an agent."""
     deploy_dir = Path.cwd() / "deploy"
     config_path = deploy_dir / "agent-config.json"

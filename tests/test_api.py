@@ -13,9 +13,18 @@ from agentos.tools.mcp import MCPClient, MCPServer, MCPTool
 
 class TestAPI:
     def setup_method(self):
+        from agentos.auth.jwt import create_token, set_secret
+        set_secret("test-api-secret")
+
         harness = AgentHarness()
         self.app = create_app(harness)
         self.client = TestClient(self.app)
+        self.token = create_token(user_id="test-user", email="test@test.com")
+        self.auth = {"Authorization": f"Bearer {self.token}"}
+
+    def teardown_method(self):
+        from agentos.auth import jwt
+        jwt._jwt_secret = None
 
     def test_health(self):
         resp = self.client.get("/health")
@@ -25,30 +34,29 @@ class TestAPI:
         assert "version" in data
 
     def test_list_tools(self):
-        resp = self.client.get("/tools")
+        resp = self.client.get("/tools", headers=self.auth)
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
     def test_memory_snapshot(self):
-        resp = self.client.get("/memory/snapshot")
+        resp = self.client.get("/memory/snapshot", headers=self.auth)
         assert resp.status_code == 200
 
     def test_list_agents(self):
-        resp = self.client.get("/agents")
+        resp = self.client.get("/agents", headers=self.auth)
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
     def test_run_named_agent(self):
-        # This tests the /agents/{name}/run endpoint
-        # It should return 404 for a nonexistent agent
         resp = self.client.post(
             "/agents/nonexistent-xyz/run",
             json={"input": "hello"},
+            headers=self.auth,
         )
         assert resp.status_code == 404
 
     def test_get_agent_not_found(self):
-        resp = self.client.get("/agents/nonexistent-xyz")
+        resp = self.client.get("/agents/nonexistent-xyz", headers=self.auth)
         assert resp.status_code == 404
 
     def test_run_config_overrides_max_turns(self):
@@ -93,7 +101,7 @@ class TestAPI:
         client = TestClient(app)
 
         # Baseline uses configured max_turns=3 (provider never completes).
-        baseline = client.post("/run", json={"input": "keep going"})
+        baseline = client.post("/run", json={"input": "keep going"}, headers=self.auth)
         assert baseline.status_code == 200
         assert len(baseline.json()["turns"]) == 3
 
@@ -101,6 +109,7 @@ class TestAPI:
         overridden = client.post(
             "/run",
             json={"input": "keep going", "config": {"max_turns": 1}},
+            headers=self.auth,
         )
         assert overridden.status_code == 200
         assert len(overridden.json()["turns"]) == 1

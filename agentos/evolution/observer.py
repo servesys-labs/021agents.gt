@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,7 @@ class Observer:
         prompt_hash = hashlib.sha256(system_prompt.encode()).hexdigest()[:12]
 
         self._current = SessionRecord(
+            session_id=event.data.get("session_id") or uuid.uuid4().hex[:16],
             agent_name=self._agent_name,
             input_text=event.data.get("input", ""),
             trace_id=event.data.get("trace_id", ""),

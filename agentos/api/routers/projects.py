@@ -14,6 +14,17 @@ from agentos.api.deps import CurrentUser, get_current_user, _get_db
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 
+def _require_project_org(project_id: str, user: CurrentUser) -> dict[str, Any]:
+    db = _get_db()
+    row = db.conn.execute(
+        "SELECT * FROM projects WHERE project_id = ? AND org_id = ?",
+        (project_id, user.org_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return dict(row)
+
+
 @router.get("")
 async def list_projects(user: CurrentUser = Depends(get_current_user)):
     db = _get_db()
@@ -26,6 +37,9 @@ async def list_projects(user: CurrentUser = Depends(get_current_user)):
 @router.post("")
 async def create_project(name: str, description: str = "", plan: str = "standard",
                          user: CurrentUser = Depends(get_current_user)):
+    allowed_plans = {"starter", "standard", "pro", "enterprise"}
+    if plan not in allowed_plans:
+        raise HTTPException(status_code=400, detail="Invalid plan")
     db = _get_db()
     project_id = uuid.uuid4().hex[:16]
     slug = name.lower().replace(" ", "-")
@@ -47,18 +61,17 @@ async def create_project(name: str, description: str = "", plan: str = "standard
 
 
 @router.get("/{project_id}")
-async def get_project(project_id: str):
+async def get_project(project_id: str, user: CurrentUser = Depends(get_current_user)):
     db = _get_db()
-    row = db.conn.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,)).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Project not found")
+    row = _require_project_org(project_id, user)
     envs = db.conn.execute("SELECT * FROM environments WHERE project_id = ?", (project_id,)).fetchall()
-    return {"project": dict(row), "environments": [dict(e) for e in envs]}
+    return {"project": row, "environments": [dict(e) for e in envs]}
 
 
 @router.get("/{project_id}/envs")
-async def list_environments(project_id: str):
+async def list_environments(project_id: str, user: CurrentUser = Depends(get_current_user)):
     db = _get_db()
+    _require_project_org(project_id, user)
     rows = db.conn.execute("SELECT * FROM environments WHERE project_id = ?", (project_id,)).fetchall()
     return {"environments": [dict(r) for r in rows]}
 
@@ -67,6 +80,7 @@ async def list_environments(project_id: str):
 async def update_environment(project_id: str, env_name: str, plan: str = "",
                              provider_config: dict[str, Any] | None = None,
                              user: CurrentUser = Depends(get_current_user)):
+    _require_project_org(project_id, user)
     db = _get_db()
     updates, params = [], []
     if plan:

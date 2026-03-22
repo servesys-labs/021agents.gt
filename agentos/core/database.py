@@ -985,12 +985,18 @@ class AgentDB:
         )
         self.conn.commit()
 
-    def list_jobs(self, status: str = "", limit: int = 50) -> list[dict[str, Any]]:
+    def list_jobs(self, status: str = "", limit: int = 50, org_id: str = "") -> list[dict[str, Any]]:
         sql = "SELECT * FROM job_queue"
         params: list[Any] = []
+        clauses: list[str] = []
+        if org_id:
+            clauses.append("org_id = ?")
+            params.append(org_id)
         if status:
-            sql += " WHERE status = ?"
+            clauses.append("status = ?")
             params.append(status)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         return [dict(r) for r in self.conn.execute(sql, params).fetchall()]

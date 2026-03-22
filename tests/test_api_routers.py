@@ -195,14 +195,20 @@ class TestToolsRouter:
 
 
 class TestObservabilityRouter:
+    def _auth_header(self, api_client):
+        signup = api_client.post("/api/v1/auth/signup", json={"email": "obs@test.com", "password": "p"}).json()
+        return {"Authorization": f"Bearer {signup['token']}"}
+
     def test_stats(self, api_client):
-        resp = api_client.get("/api/v1/observability/stats")
+        headers = self._auth_header(api_client)
+        resp = api_client.get("/api/v1/observability/stats", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
         assert "tables" in data
 
     def test_cost_ledger(self, api_client):
-        resp = api_client.get("/api/v1/observability/cost-ledger")
+        headers = self._auth_header(api_client)
+        resp = api_client.get("/api/v1/observability/cost-ledger", headers=headers)
         assert resp.status_code == 200
         assert "entries" in resp.json()
 

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import time
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -20,6 +22,21 @@ class RegisterMCPServerRequest(BaseModel):
     transport: str = Field("stdio", description="Transport type: stdio, sse, http")
     auth_token: str = Field("", description="Optional auth token for the server")
     metadata: dict = Field(default_factory=dict, description="Extra metadata")
+
+
+def _validate_remote_url(url: str) -> None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise HTTPException(status_code=400, detail="Invalid server URL")
+    if host in {"localhost"} or host.endswith(".local") or host.endswith(".internal"):
+        raise HTTPException(status_code=400, detail="Server URL host is not allowed")
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise HTTPException(status_code=400, detail="Server URL host is not allowed")
+    except ValueError:
+        pass
 
 
 @router.get("/servers")
@@ -39,6 +56,7 @@ async def register_mcp_server(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Register a new MCP server."""
+    _validate_remote_url(request.url)
     db = _get_db()
     server_id = uuid.uuid4().hex[:16]
     now = time.time()

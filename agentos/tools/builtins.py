@@ -655,6 +655,10 @@ async def http_request(url: str, method: str = "GET", headers: dict[str, str] | 
     method = method.upper()
     if method not in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
         return f"Invalid HTTP method: {method}"
+    try:
+        _ensure_public_http_url(url)
+    except ValueError as exc:
+        return f"Blocked URL: {exc}"
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
@@ -696,23 +700,35 @@ async def run_agent(agent_name: str, task: str, max_turns: int = 10,
         from agentos.agent import Agent
 
         agent = Agent.from_name(agent_name)
+        harness = agent._harness
+        original_config = harness.config
+        original_trace_id = harness.trace_id
+        original_parent_session_id = harness.parent_session_id
+        original_depth = harness.depth
 
         # Cap sub-agent turns to prevent infinite chains
-        if agent._harness.config.max_turns > max_turns:
-            agent._harness.config = type(agent._harness.config)(
+        if harness.config.max_turns > max_turns:
+            harness.config = type(harness.config)(
                 max_turns=max_turns,
-                timeout_seconds=agent._harness.config.timeout_seconds,
-                retry_on_tool_failure=agent._harness.config.retry_on_tool_failure,
-                max_retries=agent._harness.config.max_retries,
+                timeout_seconds=harness.config.timeout_seconds,
+                retry_on_tool_failure=harness.config.retry_on_tool_failure,
+                max_retries=harness.config.max_retries,
             )
 
         # Propagate trace context for audit trail
         if _parent_trace_id:
-            agent._harness.trace_id = _parent_trace_id
-            agent._harness.parent_session_id = _parent_session_id
-            agent._harness.depth = _parent_depth + 1
+            harness.trace_id = _parent_trace_id
+            harness.parent_session_id = _parent_session_id
+            harness.depth = _parent_depth + 1
 
-        results = await agent.run(task)
+        try:
+            results = await agent.run(task)
+        finally:
+            # Restore original harness state so subsequent runs are isolated.
+            harness.config = original_config
+            harness.trace_id = original_trace_id
+            harness.parent_session_id = original_parent_session_id
+            harness.depth = original_depth
 
         # Extract the final output
         output = ""
@@ -751,6 +767,7 @@ async def browse_page(url: str, extract: str = "text", selector: str = "") -> st
     import re
 
     try:
+        _ensure_public_http_url(url)
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(url, headers={
                 "User-Agent": "Mozilla/5.0 (compatible; AgentOS/0.2.0)",
@@ -802,6 +819,26 @@ def _strip_tags(html: str) -> str:
     return re.sub(r"<[^>]+>", "", html)
 
 
+def _ensure_public_http_url(url: str) -> None:
+    """Reject non-http(s) and obvious local/private network URLs."""
+    import ipaddress
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise ValueError("URL must be valid http(s)")
+    if host in {"localhost"} or host.endswith(".local") or host.endswith(".internal"):
+        raise ValueError("local/internal hosts are not allowed")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Non-IP hostnames are allowed.
+        return
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+        raise ValueError("private/loopback IPs are not allowed")
+
+
 async def a2a_send(url: str, message: str, agent_name: str = "") -> str:
     """Send a message to an external A2A-compatible agent.
 
@@ -814,6 +851,7 @@ async def a2a_send(url: str, message: str, agent_name: str = "") -> str:
         agent_name: Optional name of specific agent on multi-agent servers
     """
     try:
+        _ensure_public_http_url(url)
         from agentos.a2a.client import A2AClient
 
         client = A2AClient(base_url=url)

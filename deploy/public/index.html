@@ -416,7 +416,7 @@
 
       if (i === 1) log('Configuration validated: ' + config.provider + ' / ' + config.model);
       if (i === 2) log('Durable Object namespace created for agent: ' + config.name);
-      if (i === 3) log('Vectorize index provisioned (1536 dimensions, cosine metric)');
+      if (i === 3) log('Vectorize index provisioned (768 dimensions, cosine metric)');
       if (i === 4) log('Worker deployed to 300+ edge locations globally');
     }
 
@@ -481,8 +481,9 @@
       // Remove "thinking" line
       messages.lastChild.remove();
 
-      if (Array.isArray(data)) {
-        for (const turn of data) {
+      const turns = Array.isArray(data) ? data : (Array.isArray(data.turnResults) ? data.turnResults : []);
+      if (turns.length) {
+        for (const turn of turns) {
           if (turn.content) {
             messages.innerHTML += `<div><strong style="color:var(--green)">Agent:</strong> ${escapeHtml(turn.content)}</div>`;
           }
@@ -493,6 +494,8 @@
             messages.innerHTML += `<div style="color:var(--red);">Error: ${escapeHtml(turn.error)}</div>`;
           }
         }
+      } else if (typeof data.output === 'string') {
+        messages.innerHTML += `<div><strong style="color:var(--green)">Agent:</strong> ${escapeHtml(data.output)}</div>`;
       } else if (data.error) {
         messages.innerHTML += `<div style="color:var(--red);">Error: ${escapeHtml(data.error)}</div>`;
       }

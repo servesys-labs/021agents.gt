@@ -92,13 +92,13 @@ def _save_users(users: dict[str, Any]) -> None:
 def _hash_password(password: str, salt: str = "") -> str:
     if not salt:
         salt = os.urandom(16).hex()
-    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000).hex()
+    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 600_000).hex()
     return f"{salt}:{hashed}"
 
 
 def _verify_password(password: str, stored: str) -> bool:
     salt, expected_hash = stored.split(":", 1)
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100_000).hex()
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 600_000).hex()
     return actual == expected_hash
 
 

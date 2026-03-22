@@ -128,6 +128,7 @@ class AgentHarness:
         """Inner run loop — separated so timeout can wrap it."""
         results: list[TurnResult] = []
         cumulative_cost = 0.0
+        self.governance.reset_for_session()
         # Generate trace_id and session_id for this run
         import uuid as _uuid
         if not self.trace_id:
@@ -135,6 +136,7 @@ class AgentHarness:
         self._current_session_id = _uuid.uuid4().hex[:16]
         await self.event_bus.emit(Event(type=EventType.SESSION_START, data={
             "input": user_input,
+            "session_id": self._current_session_id,
             "trace_id": self.trace_id,
             "parent_session_id": self.parent_session_id,
             "depth": self.depth,
@@ -191,6 +193,7 @@ class AgentHarness:
                 )
                 results.append(result)
                 self._notify_turn(result)
+                await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
                 break
 
             cumulative_cost += llm_response.cost_usd
@@ -223,6 +226,7 @@ class AgentHarness:
                         )
                         results.append(result)
                         self._notify_turn(result)
+                        await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
                         break
                     failure_retries += 1
                     # Inject failure context so LLM can try alternative approach
@@ -301,6 +305,7 @@ class AgentHarness:
                     await self._store_procedure(user_input, tool_sequence)
                 failure_retries = 0
 
+                await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
                 break
 
             await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))

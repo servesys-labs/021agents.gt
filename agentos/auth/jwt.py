@@ -74,6 +74,7 @@ class TokenClaims:
     email: str = ""
     name: str = ""
     provider: str = ""  # "github", "google", "email"
+    org_id: str = ""  # tenant context for API authorization
     iat: int = 0  # issued at (unix timestamp)
     exp: int = 0  # expiry (unix timestamp)
     extra: dict[str, Any] | None = None
@@ -148,8 +149,14 @@ def verify_token(token: str) -> TokenClaims | None:
             email=payload.get("email", ""),
             name=payload.get("name", ""),
             provider=payload.get("provider", ""),
+            org_id=payload.get("org_id", ""),
             iat=payload.get("iat", 0),
             exp=payload.get("exp", 0),
+            extra={
+                k: v
+                for k, v in payload.items()
+                if k not in {"sub", "email", "name", "provider", "org_id", "iat", "exp"}
+            } or None,
         )
 
         # Check expiry
