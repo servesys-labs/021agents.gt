@@ -146,7 +146,7 @@ class TestBudgetExhaustion:
         last = results[-1]
         assert last.done is True
         assert last.stop_reason == "budget"
-        assert last.error == "LLM call failed"
+        assert last.error == "Budget exhausted"
 
     @pytest.mark.asyncio
     async def test_zero_budget_stops_immediately(self):

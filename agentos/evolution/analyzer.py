@@ -311,6 +311,14 @@ class FailureAnalyzer:
                 "or tuning tool descriptions."
             )
 
+        # High-performing agent — suggest optimizations
+        if report.success_rate >= 0.9 and len(records) >= 3:
+            recs.append(
+                f"Agent performs well ({report.success_rate:.0%} success). "
+                "Consider: trying a cheaper/faster model, reducing max_turns, "
+                "or tightening the budget to optimize cost."
+            )
+
         return recs
 
     def generate_proposals(
@@ -425,6 +433,49 @@ class FailureAnalyzer:
                 "modification": {},  # Empty — requires human authoring
                 "priority": 0.9,
                 "evidence": {"success_rate": report.success_rate},
+            })
+
+        # Proposal: High-performing agent — try a cheaper/faster model
+        if report.success_rate >= 0.9 and report.total_sessions >= 3:
+            current_model = agent_config.get("model", "")
+            # Suggest downgrading to a cheaper model if using an expensive one
+            cheaper_models = {
+                "claude-sonnet-4-6-20250627": ("claude-haiku-4-5-20251001", "Haiku 4.5"),
+                "claude-opus-4-6-20250627": ("claude-sonnet-4-6-20250627", "Sonnet 4.6"),
+                "gpt-5.4": ("gpt-5.4-mini", "GPT-5.4 Mini"),
+                "gpt-5.4-mini": ("gpt-5.4-nano", "GPT-5.4 Nano"),
+                "gpt-4o": ("gpt-4o-mini", "GPT-4o Mini"),
+            }
+            if current_model in cheaper_models:
+                new_model, model_label = cheaper_models[current_model]
+                proposals.append({
+                    "title": f"Try cheaper model ({model_label}) — agent passes {report.success_rate:.0%}",
+                    "rationale": (
+                        f"Agent achieves {report.success_rate:.0%} success rate with {current_model}. "
+                        f"A cheaper model ({new_model}) may maintain quality at lower cost. "
+                        "Run eval after switching to verify."
+                    ),
+                    "category": "model",
+                    "modification": {"model": new_model},
+                    "priority": 0.4,
+                    "evidence": {"success_rate": report.success_rate, "current_model": current_model},
+                })
+
+        # Proposal: High-performing agent — reduce max_turns to save cost
+        current_max_turns = agent_config.get("max_turns", 50)
+        if report.success_rate >= 0.9 and report.total_sessions >= 3 and current_max_turns > 10:
+            # For simple agents (no tool failures, high success), max_turns is likely over-provisioned
+            proposals.append({
+                "title": f"Reduce max_turns from {current_max_turns} to {max(5, current_max_turns // 3)}",
+                "rationale": (
+                    f"Agent achieves {report.success_rate:.0%} success rate. "
+                    f"Current max_turns ({current_max_turns}) is likely over-provisioned. "
+                    f"Reducing to {max(5, current_max_turns // 3)} lowers worst-case cost while maintaining headroom."
+                ),
+                "category": "governance",
+                "modification": {"max_turns": max(5, current_max_turns // 3)},
+                "priority": 0.25,
+                "evidence": {"current_max_turns": current_max_turns},
             })
 
         # Sort by priority (highest first)
