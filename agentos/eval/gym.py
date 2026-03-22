@@ -286,7 +286,10 @@ class EvalGym:
 
             # Grade — track grading cost separately as benchmark_cost
             grade_start = time.monotonic()
-            grade = task.grader.grade(task.expected, result.output)
+            if hasattr(task.grader, 'agrade'):
+                grade = await task.grader.agrade(task.expected, result.output)
+            else:
+                grade = task.grader.grade(task.expected, result.output)
             grade_elapsed = (time.monotonic() - grade_start) * 1000
             benchmark_cost = grade.details.get("cost_usd", 0.0)
 

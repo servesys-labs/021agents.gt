@@ -167,13 +167,14 @@ class HttpProvider:
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self._api_key,
+            "anthropic-version": "2023-06-01",
             **self._headers,
         }
 
         start = time.monotonic()
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{self._api_base}/v1/messages",
+                f"{self._api_base.rstrip('/')}/v1/messages" if not self._api_base.rstrip("/").endswith("/v1") else f"{self._api_base.rstrip('/')}/messages",
                 json=payload,
                 headers=headers,
                 timeout=120.0,
@@ -266,8 +267,14 @@ class HttpProvider:
 
         start = time.monotonic()
         async with httpx.AsyncClient() as client:
+            # Avoid doubling /v1/ if api_base already ends with it
+            base = self._api_base.rstrip("/")
+            if base.endswith("/v1"):
+                url = f"{base}/chat/completions"
+            else:
+                url = f"{base}/v1/chat/completions"
             resp = await client.post(
-                f"{self._api_base}/v1/chat/completions",
+                url,
                 json=payload,
                 headers=headers,
                 timeout=120.0,
