@@ -178,6 +178,52 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         results = await runner.run(request.input)
         return _build_run_response(results)
 
+    @app.post("/run/stream")
+    async def run_stream(request: RunRequest):
+        """Stream agent run results as Server-Sent Events."""
+        import asyncio
+        from starlette.responses import StreamingResponse
+
+        turn_queue: asyncio.Queue = asyncio.Queue()
+
+        runner = (
+            _build_harness_with_overrides(_harness, request.config)
+            if request.config
+            else _harness
+        )
+
+        def on_turn(result):
+            content = result.llm_response.content if result.llm_response else ""
+            turn_queue.put_nowait({
+                "turn": result.turn_number,
+                "content": content,
+                "tool_results": result.tool_results,
+                "done": result.done,
+                "error": result.error,
+                "cost_usd": result.cost_usd,
+            })
+
+        runner.on_turn_complete = on_turn
+
+        async def event_stream():
+            import json as _json
+            task = asyncio.create_task(runner.run(request.input))
+            while not task.done():
+                try:
+                    data = await asyncio.wait_for(turn_queue.get(), timeout=0.5)
+                    yield f"data: {_json.dumps(data)}\n\n"
+                    if data.get("done"):
+                        break
+                except asyncio.TimeoutError:
+                    continue
+            # Drain remaining
+            while not turn_queue.empty():
+                data = turn_queue.get_nowait()
+                yield f"data: {_json.dumps(data)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
+
     @app.get("/tools")
     async def list_tools() -> list[dict[str, Any]]:
         return _harness.tool_executor.available_tools()

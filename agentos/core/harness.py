@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agentos.core.events import Event, EventBus, EventType
 from agentos.core.governance import GovernanceLayer, GovernancePolicy
@@ -79,6 +79,8 @@ class AgentHarness:
         self.trace_id: str = ""
         self.parent_session_id: str = ""
         self.depth: int = 0
+        # Streaming callback — called after each turn completes
+        self.on_turn_complete: Callable | None = None
 
     @classmethod
     def from_config_file(cls, path: str | Path | None = None) -> AgentHarness:
@@ -188,6 +190,7 @@ class AgentHarness:
                     cumulative_cost_usd=cumulative_cost,
                 )
                 results.append(result)
+                self._notify_turn(result)
                 break
 
             cumulative_cost += llm_response.cost_usd
@@ -219,6 +222,7 @@ class AgentHarness:
                             model_used=llm_response.model,
                         )
                         results.append(result)
+                        self._notify_turn(result)
                         break
                     failure_retries += 1
                     # Inject failure context so LLM can try alternative approach
@@ -252,6 +256,7 @@ class AgentHarness:
                         model_used=llm_response.model,
                     )
                     results.append(result)
+                    self._notify_turn(result)
                 else:
                     result = TurnResult(
                         turn_number=turn,
@@ -262,6 +267,7 @@ class AgentHarness:
                         model_used=llm_response.model,
                     )
                     results.append(result)
+                    self._notify_turn(result)
                     failure_retries = 0
                     messages.append({
                         "role": "assistant",
@@ -285,6 +291,7 @@ class AgentHarness:
                     model_used=llm_response.model,
                 )
                 results.append(result)
+                self._notify_turn(result)
 
                 # Store interaction in episodic memory
                 await self.memory_manager.store_episode(user_input, llm_response.content)
@@ -300,6 +307,14 @@ class AgentHarness:
 
         await self.event_bus.emit(Event(type=EventType.SESSION_END))
         return results
+
+    def _notify_turn(self, result: TurnResult) -> None:
+        """Fire the on_turn_complete callback if set."""
+        if self.on_turn_complete is not None:
+            try:
+                self.on_turn_complete(result)
+            except Exception:
+                pass  # Don't let callback errors break the run
 
     async def _call_llm(self, messages: list[dict[str, str]]) -> LLMResponse | None:
         """Route to the appropriate LLM and return the response."""

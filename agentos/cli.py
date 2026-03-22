@@ -127,6 +127,8 @@ def main() -> None:
     run_p.add_argument("--verbose", "-v", action="store_true", help="Show all turns with tool details")
     run_p.add_argument("--plan", type=str, default=None,
         help="LLM plan override: basic, standard, premium, code, private, or custom plan name")
+    run_p.add_argument("--stream", action="store_true",
+        help="Stream output in real-time as each turn completes")
 
     # --- list ---
     sub.add_parser("list", help="List available agents")
@@ -503,9 +505,19 @@ def cmd_init(args: argparse.Namespace) -> None:
             {
                 "name": "greeting",
                 "input": "Say hello",
-                "expected": "hello",
-                "grader": "contains",
-            }
+                "expected": "A friendly greeting response",
+                "grader": "llm",
+                "criteria": "Does the response contain a greeting (hello, hi, hey, etc.)? Score 1.0 if yes, 0.0 if no.",
+                "pass_threshold": 0.5,
+            },
+            {
+                "name": "helpfulness",
+                "input": "What can you help me with?",
+                "expected": "A helpful response explaining capabilities",
+                "grader": "llm",
+                "criteria": "Does the response explain what the agent can do? Is it helpful and specific? Score 0.0-1.0.",
+                "pass_threshold": 0.5,
+            },
         ]
         eval_path.write_text(json.dumps(eval_task, indent=2) + "\n")
 
@@ -911,6 +923,26 @@ async def cmd_run(args: argparse.Namespace) -> None:
     if not quiet:
         print(f"Running agent '{agent.config.name}' on: {task}")
         print("-" * 40)
+
+    # Set up streaming callback if requested
+    stream = getattr(args, "stream", False)
+    if stream and not quiet:
+        def _stream_turn(result):
+            if result.llm_response and result.llm_response.content:
+                content = result.llm_response.content
+                print(f"\n[Turn {result.turn_number}] {content}")
+            for tr in result.tool_results:
+                if "error" in tr:
+                    print(f"  Tool error: {tr.get('tool', '?')}: {tr['error']}")
+                else:
+                    preview = str(tr.get("result", ""))[:200]
+                    if len(str(tr.get("result", ""))) > 200:
+                        preview += "..."
+                    print(f"  Tool: {tr.get('tool', '?')}: {preview}")
+            if result.error:
+                print(f"  Error: {result.error}")
+            sys.stdout.flush()
+        agent._harness.on_turn_complete = _stream_turn
 
     start = _time.monotonic()
     results = await agent.run(task)
