@@ -96,6 +96,8 @@ class TurnRecord:
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     errors: list[ErrorRecord] = field(default_factory=list)
     llm_content: str = ""
+    started_at: float = field(default_factory=time.time)
+    ended_at: float = 0.0
 
 
 @dataclass
@@ -171,6 +173,11 @@ class SessionRecord:
     eval_passed: bool | None = None
     eval_task_name: str = ""
 
+    # Trace chain (for sub-agent audit trail)
+    trace_id: str = ""
+    parent_session_id: str = ""
+    depth: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a flat dict for JSON export."""
         return {
@@ -217,4 +224,7 @@ class SessionRecord:
             "eval_score": self.eval_score,
             "eval_passed": self.eval_passed,
             "eval_task_name": self.eval_task_name,
+            "trace_id": self.trace_id,
+            "parent_session_id": self.parent_session_id,
+            "depth": self.depth,
         }

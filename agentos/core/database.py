@@ -81,14 +81,21 @@ CREATE TABLE IF NOT EXISTS sessions (
     eval_task_name      TEXT NOT NULL DEFAULT '',
     -- Eval conditions (queryable columns, not buried in JSON)
     eval_conditions_json TEXT NOT NULL DEFAULT '{}',
+    -- Trace chain (for sub-agent observability and audit)
+    trace_id            TEXT NOT NULL DEFAULT '',  -- links all sessions in a chain
+    parent_session_id   TEXT NOT NULL DEFAULT '',  -- which session spawned this one
+    depth               INTEGER NOT NULL DEFAULT 0,  -- 0=root, 1=sub-agent, 2=sub-sub-agent
     -- Timestamps
-    created_at          REAL NOT NULL DEFAULT (unixepoch('now'))
+    created_at          REAL NOT NULL DEFAULT (unixepoch('now')),
+    ended_at            REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent_name ON sessions(agent_name);
+CREATE INDEX IF NOT EXISTS idx_sessions_trace_id ON sessions(trace_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- TURNS — per-turn detail within a session
@@ -111,7 +118,10 @@ CREATE TABLE IF NOT EXISTS turns (
     -- Tool calls/results as JSON arrays
     tool_calls_json     TEXT NOT NULL DEFAULT '[]',
     tool_results_json   TEXT NOT NULL DEFAULT '[]',
-    errors_json         TEXT NOT NULL DEFAULT '[]'
+    errors_json         TEXT NOT NULL DEFAULT '[]',
+    -- Timestamps
+    started_at          REAL NOT NULL DEFAULT (unixepoch('now')),
+    ended_at            REAL NOT NULL DEFAULT (unixepoch('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_turns_session ON turns(session_id);
@@ -240,6 +250,75 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_cost_agent ON cost_ledger(agent_id);
 CREATE INDEX IF NOT EXISTS idx_cost_created ON cost_ledger(created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BILLING — customer billing aggregation for charging
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS billing_records (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Who
+    org_id          TEXT NOT NULL DEFAULT '',
+    customer_id     TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    -- What
+    cost_type       TEXT NOT NULL DEFAULT 'inference',  -- inference / gpu_compute / tool / eval
+    description     TEXT NOT NULL DEFAULT '',
+    -- Inference costs
+    model           TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    -- GPU compute costs (dedicated endpoints)
+    gpu_type        TEXT NOT NULL DEFAULT '',  -- h100 / h200 / '' for serverless
+    gpu_hours       REAL NOT NULL DEFAULT 0.0,
+    gpu_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    -- Total
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    -- Trace
+    session_id      TEXT NOT NULL DEFAULT '',
+    trace_id        TEXT NOT NULL DEFAULT '',
+    -- Time
+    period_start    REAL,   -- billing period start
+    period_end      REAL,   -- billing period end
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_org ON billing_records(org_id);
+CREATE INDEX IF NOT EXISTS idx_billing_customer ON billing_records(customer_id);
+CREATE INDEX IF NOT EXISTS idx_billing_created ON billing_records(created_at);
+CREATE INDEX IF NOT EXISTS idx_billing_type ON billing_records(cost_type);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- GPU ENDPOINTS — dedicated GPU endpoint tracking
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS gpu_endpoints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint_id     TEXT NOT NULL UNIQUE,  -- GMI task/endpoint ID
+    org_id          TEXT NOT NULL DEFAULT '',
+    -- Config
+    provider        TEXT NOT NULL DEFAULT 'gmi',
+    gpu_type        TEXT NOT NULL DEFAULT 'h100',  -- h100 / h200
+    gpu_count       INTEGER NOT NULL DEFAULT 1,
+    model_id        TEXT NOT NULL DEFAULT '',
+    api_base        TEXT NOT NULL DEFAULT '',  -- dedicated endpoint URL
+    -- Status
+    status          TEXT NOT NULL DEFAULT 'provisioning',  -- provisioning / running / stopped / terminated
+    hourly_rate_usd REAL NOT NULL DEFAULT 2.98,
+    -- Time tracking
+    started_at      REAL,
+    stopped_at      REAL,
+    total_hours     REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    -- Metadata
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_gpu_endpoint_id ON gpu_endpoints(endpoint_id);
+CREATE INDEX IF NOT EXISTS idx_gpu_org ON gpu_endpoints(org_id);
+CREATE INDEX IF NOT EXISTS idx_gpu_status ON gpu_endpoints(status);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- EVAL RUNS — aggregate eval reports (one row per `agentos eval` invocation)
@@ -505,7 +584,8 @@ class AgentDB:
                     finish_accepted, stop_initiated_by,
                     eval_score, eval_passed, eval_task_name,
                     eval_conditions_json,
-                    created_at
+                    trace_id, parent_session_id, depth,
+                    created_at, ended_at
                 ) VALUES (
                     ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
@@ -519,7 +599,8 @@ class AgentDB:
                     ?, ?,
                     ?, ?, ?,
                     ?,
-                    ?
+                    ?, ?, ?,
+                    ?, ?
                 )""",
                 (
                     record["session_id"],
@@ -552,7 +633,11 @@ class AgentDB:
                     1 if record.get("eval_passed") else (0 if record.get("eval_passed") is not None else None),
                     record.get("eval_task_name", ""),
                     json.dumps(record.get("eval_conditions", {})) if record.get("eval_conditions") else "{}",
+                    record.get("trace_id", ""),
+                    record.get("parent_session_id", ""),
+                    record.get("depth", 0),
                     record.get("timestamp", time.time()),
+                    record.get("ended_at"),
                 ),
             )
 
@@ -567,8 +652,9 @@ class AgentDB:
                         input_tokens, output_tokens, latency_ms, llm_content,
                         cost_llm_input_usd, cost_llm_output_usd,
                         cost_tool_usd, cost_total_usd,
-                        tool_calls_json, tool_results_json, errors_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        tool_calls_json, tool_results_json, errors_json,
+                        started_at, ended_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         turn.get("turn_number", 0),
@@ -587,6 +673,8 @@ class AgentDB:
                             {"source": e.get("source", "unknown"), "message": e.get("message", "")}
                             for e in turn.get("errors", [])
                         ]),
+                        turn.get("started_at", time.time()),
+                        turn.get("ended_at", time.time()),
                     ),
                 )
 
@@ -674,6 +762,31 @@ class AgentDB:
 
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
+
+    def query_trace(self, trace_id: str) -> list[dict[str, Any]]:
+        """Get all sessions in a trace chain, ordered by depth then time."""
+        rows = self.conn.execute(
+            "SELECT * FROM sessions WHERE trace_id = ? ORDER BY depth, created_at",
+            (trace_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def trace_cost_rollup(self, trace_id: str) -> dict[str, Any]:
+        """Aggregate costs across all sessions in a trace."""
+        row = self.conn.execute(
+            """SELECT
+                COUNT(*) as total_sessions,
+                SUM(step_count) as total_turns,
+                SUM(action_count) as total_tool_calls,
+                SUM(cost_total_usd) as total_cost_usd,
+                SUM(cost_llm_input_usd) as total_input_cost_usd,
+                SUM(cost_llm_output_usd) as total_output_cost_usd,
+                SUM(wall_clock_seconds) as total_wall_clock_seconds,
+                MAX(depth) as max_depth
+            FROM sessions WHERE trace_id = ?""",
+            (trace_id,),
+        ).fetchone()
+        return dict(row) if row else {}
 
     def session_summary(self, agent_id: str | None = None) -> dict[str, Any]:
         """Aggregate stats across sessions."""
@@ -1203,11 +1316,161 @@ class AgentDB:
         """Get database file size."""
         return self.path.stat().st_size if self.path.exists() else 0
 
+    # ── Billing ─────────────────────────────────────────────────────────
+
+    def record_billing(
+        self,
+        cost_type: str,
+        total_cost_usd: float,
+        org_id: str = "",
+        customer_id: str = "",
+        agent_name: str = "",
+        description: str = "",
+        model: str = "",
+        provider: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        inference_cost_usd: float = 0.0,
+        gpu_type: str = "",
+        gpu_hours: float = 0.0,
+        gpu_cost_usd: float = 0.0,
+        session_id: str = "",
+        trace_id: str = "",
+    ) -> int:
+        """Record a billing entry for customer charging."""
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO billing_records (
+                    org_id, customer_id, agent_name, cost_type, description,
+                    model, provider, input_tokens, output_tokens, inference_cost_usd,
+                    gpu_type, gpu_hours, gpu_cost_usd, total_cost_usd,
+                    session_id, trace_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    org_id, customer_id, agent_name, cost_type, description,
+                    model, provider, input_tokens, output_tokens, inference_cost_usd,
+                    gpu_type, gpu_hours, gpu_cost_usd, total_cost_usd,
+                    session_id, trace_id,
+                ),
+            )
+            return cur.lastrowid
+
+    def billing_summary(
+        self,
+        org_id: str = "",
+        customer_id: str = "",
+        since: float | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate billing for an org/customer — for invoicing."""
+        sql = "SELECT * FROM billing_records WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if customer_id:
+            sql += " AND customer_id = ?"
+            params.append(customer_id)
+        if since:
+            sql += " AND created_at >= ?"
+            params.append(since)
+
+        rows = self.conn.execute(sql, params).fetchall()
+        records = [dict(r) for r in rows]
+
+        total_inference = sum(r.get("inference_cost_usd", 0) for r in records)
+        total_gpu = sum(r.get("gpu_cost_usd", 0) for r in records)
+        total_all = sum(r.get("total_cost_usd", 0) for r in records)
+        total_tokens_in = sum(r.get("input_tokens", 0) for r in records)
+        total_tokens_out = sum(r.get("output_tokens", 0) for r in records)
+        total_gpu_hours = sum(r.get("gpu_hours", 0) for r in records)
+
+        # Breakdown by cost type
+        by_type: dict[str, float] = {}
+        for r in records:
+            t = r.get("cost_type", "other")
+            by_type[t] = by_type.get(t, 0) + r.get("total_cost_usd", 0)
+
+        # Breakdown by model
+        by_model: dict[str, float] = {}
+        for r in records:
+            m = r.get("model", "unknown")
+            by_model[m] = by_model.get(m, 0) + r.get("total_cost_usd", 0)
+
+        return {
+            "total_records": len(records),
+            "total_cost_usd": total_all,
+            "inference_cost_usd": total_inference,
+            "gpu_compute_cost_usd": total_gpu,
+            "total_input_tokens": total_tokens_in,
+            "total_output_tokens": total_tokens_out,
+            "total_gpu_hours": total_gpu_hours,
+            "by_cost_type": by_type,
+            "by_model": by_model,
+        }
+
+    # ── GPU Endpoints ──────────────────────────────────────────────────
+
+    def register_gpu_endpoint(
+        self,
+        endpoint_id: str,
+        model_id: str,
+        api_base: str,
+        gpu_type: str = "h100",
+        gpu_count: int = 1,
+        hourly_rate_usd: float = 2.98,
+        org_id: str = "",
+    ) -> None:
+        """Register a dedicated GPU endpoint."""
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT OR REPLACE INTO gpu_endpoints (
+                    endpoint_id, org_id, gpu_type, gpu_count,
+                    model_id, api_base, status, hourly_rate_usd, started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)""",
+                (endpoint_id, org_id, gpu_type, gpu_count,
+                 model_id, api_base, hourly_rate_usd, time.time()),
+            )
+
+    def get_gpu_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT * FROM gpu_endpoints WHERE endpoint_id = ?", (endpoint_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def stop_gpu_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
+        """Stop a GPU endpoint and calculate total cost."""
+        endpoint = self.get_gpu_endpoint(endpoint_id)
+        if not endpoint:
+            return None
+        now = time.time()
+        started = endpoint.get("started_at", now)
+        hours = (now - started) / 3600
+        cost = hours * endpoint.get("hourly_rate_usd", 2.98)
+        with self.tx() as cur:
+            cur.execute(
+                """UPDATE gpu_endpoints SET status='stopped', stopped_at=?,
+                total_hours=?, total_cost_usd=? WHERE endpoint_id=?""",
+                (now, hours, cost, endpoint_id),
+            )
+        return {"endpoint_id": endpoint_id, "hours": hours, "cost_usd": cost}
+
+    def list_gpu_endpoints(self, status: str | None = None, org_id: str = "") -> list[dict[str, Any]]:
+        sql = "SELECT * FROM gpu_endpoints WHERE 1=1"
+        params: list[Any] = []
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        sql += " ORDER BY created_at DESC"
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
     def stats(self) -> dict[str, Any]:
         """Quick overview of database contents."""
         tables = ["sessions", "turns", "errors", "evolution_entries",
                    "proposals", "episodes", "facts", "procedures", "cost_ledger",
-                   "eval_runs", "spans", "feedback"]
+                   "eval_runs", "spans", "feedback", "billing_records", "gpu_endpoints"]
         counts: dict[str, int] = {}
         for table in tables:
             try:

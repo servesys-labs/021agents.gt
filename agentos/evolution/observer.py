@@ -113,6 +113,9 @@ class Observer:
         self._current = SessionRecord(
             agent_name=self._agent_name,
             input_text=event.data.get("input", ""),
+            trace_id=event.data.get("trace_id", ""),
+            parent_session_id=event.data.get("parent_session_id", ""),
+            depth=event.data.get("depth", 0),
             composition=SystemComposition(
                 agent_id=config.get("agent_id", ""),
                 agent_name=self._agent_name,
@@ -197,7 +200,8 @@ class Observer:
         ))
 
     async def _on_turn_end(self, event: Event) -> None:
-        pass  # Turn data already captured via other events
+        if self._current and self._current.turns:
+            self._current.turns[-1].ended_at = time.time()
 
     async def _on_llm_request(self, event: Event) -> None:
         if not self._current or not self._current.turns:
@@ -214,10 +218,22 @@ class Observer:
         turn.input_tokens = event.data.get("input_tokens", 0)
         turn.output_tokens = event.data.get("output_tokens", 0)
         turn.llm_content = event.data.get("content", "")
-        # Populate cost from the LLM response event
+        # Populate cost breakdown from the LLM response event
         cost_usd = event.data.get("cost_usd", 0.0)
         if cost_usd:
             turn.cost.total_usd = cost_usd
+            # Compute per-component breakdown from token counts
+            if turn.input_tokens or turn.output_tokens:
+                try:
+                    from agentos.llm.tokens import estimate_cost
+                    model = turn.model_used or self._agent_config.get("model", "")
+                    total_est = estimate_cost(turn.input_tokens, turn.output_tokens, model)
+                    if total_est > 0:
+                        input_ratio = (turn.input_tokens * 3.0) / (turn.input_tokens * 3.0 + turn.output_tokens * 15.0) if (turn.input_tokens + turn.output_tokens) > 0 else 0.5
+                        turn.cost.llm_input_cost_usd = cost_usd * input_ratio
+                        turn.cost.llm_output_cost_usd = cost_usd * (1 - input_ratio)
+                except Exception:
+                    pass
 
     async def _on_tool_call(self, event: Event) -> None:
         if not self._current or not self._current.turns:
@@ -276,6 +292,8 @@ class Observer:
                         "tool_cost_usd": turn.cost.tool_cost_usd,
                         "total_usd": turn.cost.total_usd,
                     },
+                    "started_at": turn.started_at,
+                    "ended_at": turn.ended_at or time.time(),
                     "tool_calls": turn.tool_calls,
                     "tool_results": turn.tool_results,
                     "errors": [
@@ -292,21 +310,40 @@ class Observer:
         """Persist a session record to SQLite (atomic, indexed)."""
         try:
             data = record.to_dict()
+            data["ended_at"] = time.time()  # Session end timestamp
             self._db.insert_session(data)
             if data.get("errors"):
                 self._db.insert_session_errors(data["session_id"], data["errors"])
             # Record cost in the cost ledger for aggregate tracking
+            total_input = sum(t.input_tokens for t in record.turns)
+            total_output = sum(t.output_tokens for t in record.turns)
+            comp = data.get("composition", {})
             if record.cost.total_usd > 0:
-                comp = data.get("composition", {})
                 self._db.record_cost(
                     session_id=data["session_id"],
                     agent_id=comp.get("agent_id", ""),
                     agent_name=comp.get("agent_name", ""),
                     model=comp.get("model", ""),
-                    input_tokens=sum(t.input_tokens for t in record.turns),
-                    output_tokens=sum(t.output_tokens for t in record.turns),
+                    input_tokens=total_input,
+                    output_tokens=total_output,
                     cost_usd=record.cost.total_usd,
                 )
+            # Record billing entry for customer charging
+            try:
+                self._db.record_billing(
+                    cost_type="inference",
+                    total_cost_usd=record.cost.total_usd,
+                    agent_name=comp.get("agent_name", ""),
+                    model=comp.get("model", ""),
+                    provider=self._agent_config.get("_provider", ""),
+                    input_tokens=total_input,
+                    output_tokens=total_output,
+                    inference_cost_usd=record.cost.total_usd,
+                    session_id=data["session_id"],
+                    trace_id=data.get("trace_id", ""),
+                )
+            except Exception:
+                pass  # billing table may not exist in older DBs
         except Exception as exc:
             logger.error("Failed to persist session to SQLite: %s", exc)
             # Fall back to JSONL if configured
