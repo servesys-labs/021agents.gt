@@ -6,10 +6,44 @@ import os
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
+
+
+SENSITIVE_KEYS = {
+    "authorization",
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "client_secret",
+}
+
+
+def _redact_arguments(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if k.lower() in SENSITIVE_KEYS:
+                out[k] = "***REDACTED***"
+            else:
+                out[k] = _redact_arguments(v)
+        return out
+    if isinstance(value, list):
+        return [_redact_arguments(v) for v in value]
+    return value
+
+
+class ConnectorToolCallRequest(BaseModel):
+    tool_name: str = Field(..., min_length=1)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    app: str = ""
 
 
 def _get_hub():
@@ -56,8 +90,7 @@ async def list_connector_tools(app: str = "", user: CurrentUser = Depends(get_cu
 
 @router.post("/tools/call")
 async def call_connector_tool(
-    tool_name: str,
-    arguments: dict[str, Any] | None = None,
+    request: ConnectorToolCallRequest,
     user: CurrentUser = Depends(get_current_user),
 ):
     """Call a tool via the connector hub.
@@ -69,7 +102,12 @@ async def call_connector_tool(
     start = _time.time()
 
     hub = _get_hub()
-    result = await hub.call_tool(tool_name, arguments or {}, user_id=user.user_id)
+    result = await hub.call_tool(
+        request.tool_name,
+        request.arguments or {},
+        app=request.app,
+        user_id=user.user_id,
+    )
     duration_ms = (_time.time() - start) * 1000
 
     if result.auth_required:
@@ -90,15 +128,20 @@ async def call_connector_tool(
         total_cost_usd=0.001,  # Per-call connector cost
         org_id=user.org_id,
         customer_id=user.user_id,
-        description=f"Connector: {tool_name}",
-        model=tool_name,
+        description=f"Connector: {request.tool_name}",
+        model=request.tool_name,
         provider=os.environ.get("CONNECTOR_PROVIDER", "pipedream"),
     )
     db.audit(
         "connector.tool_call",
         user_id=user.user_id, org_id=user.org_id,
-        resource_type="connector", resource_id=tool_name,
-        changes={"arguments": arguments, "provider": "pipedream", "duration_ms": duration_ms},
+        resource_type="connector", resource_id=request.tool_name,
+        changes={
+            "arguments": _redact_arguments(request.arguments),
+            "provider": "pipedream",
+            "app": request.app,
+            "duration_ms": duration_ms,
+        },
     )
 
     return {"success": True, "data": result.data, "duration_ms": round(duration_ms, 1)}

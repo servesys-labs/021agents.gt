@@ -856,10 +856,11 @@ async def connector_call(tool_name: str, app: str = "", arguments: dict[str, Any
             project_id=os.environ.get("PIPEDREAM_PROJECT_ID", ""),
             client_id=os.environ.get("PIPEDREAM_CLIENT_ID", ""),
             client_secret=os.environ.get("PIPEDREAM_CLIENT_SECRET", ""),
+            environment=os.environ.get("PIPEDREAM_ENVIRONMENT", "production"),
         )
 
         start_time = time.time()
-        result = await hub.call_tool(tool_name, arguments or {})
+        result = await hub.call_tool(tool_name, arguments or {}, app=app)
         duration_ms = (time.time() - start_time) * 1000
 
         if result.auth_required:
