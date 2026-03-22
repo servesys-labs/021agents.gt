@@ -180,6 +180,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         rag, compare, observability, memory, deploy, gpu, config,
         projects, audit, policies, slos, releases, jobs, workflows, retention,
         secrets, mcp_control, connectors, stripe_billing,
+        skills as skills_router, middleware as middleware_router,
     )
     for r in [
         auth.router, agents_router.router, sessions.router,
@@ -192,6 +193,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         releases.router, jobs.router, workflows.router, retention.router,
         secrets.router, mcp_control.router, connectors.router,
         stripe_billing.router,
+        skills_router.router, middleware_router.router,
     ]:
         app.include_router(r, prefix="/api/v1")
 

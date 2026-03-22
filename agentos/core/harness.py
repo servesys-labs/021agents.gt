@@ -1,4 +1,8 @@
-"""The Composable Agent Harness — central orchestrator of AgentOS."""
+"""The Composable Agent Harness — central orchestrator of AgentOS.
+
+Now with middleware chain support for composable cross-cutting concerns
+(loop detection, summarization, memory updates, etc.).
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,8 @@ from agentos.core.governance import GovernanceLayer, GovernancePolicy
 from agentos.llm.provider import LLMResponse
 from agentos.llm.router import LLMRouter
 from agentos.memory.manager import MemoryManager
+from agentos.middleware.base import Middleware, MiddlewareChain, MiddlewareContext
+from agentos.skills.loader import SkillLoader
 from agentos.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -34,6 +40,12 @@ class HarnessConfig:
     timeout_seconds: float = 300.0
     retry_on_tool_failure: bool = True
     max_retries: int = 3
+    enable_loop_detection: bool = True
+    enable_summarization: bool = True
+    enable_skills: bool = True
+    enable_async_memory: bool = False
+    max_context_tokens: int = 100_000
+    skills_dir: str = ""
 
 
 @dataclass
@@ -45,10 +57,11 @@ class TurnResult:
     tool_results: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
     done: bool = False
-    stop_reason: str = ""  # completed / max_turns / budget / timeout / llm_error
+    stop_reason: str = ""  # completed / max_turns / budget / timeout / llm_error / loop_detected / middleware_halt
     cost_usd: float = 0.0
     cumulative_cost_usd: float = 0.0
     model_used: str = ""
+    middleware_warnings: list[str] = field(default_factory=list)
 
 
 class AgentHarness:
@@ -56,6 +69,7 @@ class AgentHarness:
 
     Separates orchestration (execution flow) from governance (safety checks).
     Supports multi-turn execution with graceful error recovery.
+    Integrates composable middleware chain for cross-cutting concerns.
     """
 
     def __init__(
@@ -66,6 +80,8 @@ class AgentHarness:
         memory_manager: MemoryManager | None = None,
         governance: GovernanceLayer | None = None,
         event_bus: EventBus | None = None,
+        middleware_chain: MiddlewareChain | None = None,
+        skill_loader: SkillLoader | None = None,
     ) -> None:
         self.config = config or HarnessConfig()
         self.event_bus = event_bus or EventBus()
@@ -82,6 +98,32 @@ class AgentHarness:
         # Streaming callback — called after each turn completes
         self.on_turn_complete: Callable | None = None
 
+        # Middleware chain — composable hooks around each LLM call
+        self.middleware_chain = middleware_chain or self._build_default_middleware()
+
+        # Skill loader
+        skills_dir = Path(self.config.skills_dir) if self.config.skills_dir else None
+        self.skill_loader = skill_loader or SkillLoader(skills_dir=skills_dir)
+
+        # Async memory updater (lazy init)
+        self._async_memory_updater = None
+
+    def _build_default_middleware(self) -> MiddlewareChain:
+        """Build the default middleware chain based on config."""
+        middlewares: list[Middleware] = []
+
+        if self.config.enable_loop_detection:
+            from agentos.middleware.loop_detection import LoopDetectionMiddleware
+            middlewares.append(LoopDetectionMiddleware())
+
+        if self.config.enable_summarization:
+            from agentos.middleware.summarization import SummarizationMiddleware
+            middlewares.append(SummarizationMiddleware(
+                max_context_tokens=self.config.max_context_tokens,
+            ))
+
+        return MiddlewareChain(middlewares)
+
     @classmethod
     def from_config_file(cls, path: str | Path | None = None) -> AgentHarness:
         if path:
@@ -94,20 +136,15 @@ class AgentHarness:
         else:
             raw = {}
 
-        harness_cfg = HarnessConfig(**raw.get("harness", {}))
+        harness_cfg = HarnessConfig(**{
+            k: v for k, v in raw.get("harness", {}).items()
+            if k in HarnessConfig.__dataclass_fields__
+        })
         gov_policy = GovernancePolicy(**raw.get("governance", {}))
         return cls(config=harness_cfg, governance=GovernanceLayer(gov_policy))
 
     async def run(self, user_input: str) -> list[TurnResult]:
-        """Execute a multi-turn agent loop for the given user input.
-
-        Follows the initialization sequence:
-        1. Analyze request — determine intent and complexity
-        2. Select LLM — choose appropriate model via router
-        3. Load context — retrieve from all memory tiers + RAG
-        4. Discover tools — verify availability via MCP
-        5. Plan & Execute — formulate plan and begin execution
-        """
+        """Execute a multi-turn agent loop for the given user input."""
         import asyncio
 
         try:
@@ -134,12 +171,24 @@ class AgentHarness:
         if not self.trace_id:
             self.trace_id = _uuid.uuid4().hex[:16]
         self._current_session_id = _uuid.uuid4().hex[:16]
+
+        # Initialize middleware context for this session
+        mw_ctx = MiddlewareContext(
+            session_id=self._current_session_id,
+            trace_id=self.trace_id,
+            event_bus=self.event_bus,
+        )
+
+        # Notify middleware chain of session start
+        await self.middleware_chain.run_on_session_start(mw_ctx)
+
         await self.event_bus.emit(Event(type=EventType.SESSION_START, data={
             "input": user_input,
             "session_id": self._current_session_id,
             "trace_id": self.trace_id,
             "parent_session_id": self.parent_session_id,
             "depth": self.depth,
+            "middleware_chain": self.middleware_chain.middleware_names,
         }))
 
         # --- Initialization Sequence ---
@@ -157,19 +206,33 @@ class AgentHarness:
         # Step 3: Load context from all memory tiers
         memory_context = await self.memory_manager.build_context(user_input)
 
+        # Step 3b: Load async memory context if available
+        async_memory_section = ""
+        if self._async_memory_updater:
+            async_memory_section = self._async_memory_updater.memory.to_prompt_section()
+
         # Step 4: Discover available tools
         available_tools = self.tool_executor.available_tools()
         self.llm_router.set_tools(available_tools)
 
+        # Step 4b: Load enabled skills
+        skills_section = ""
+        if self.config.enable_skills:
+            skills_section = self.skill_loader.build_prompt_section()
+
         # Step 5: Build messages and begin execution
         messages: list[dict[str, str]] = [{"role": "user", "content": user_input}]
 
-        # Build system message from agent identity + memory context
+        # Build system message from agent identity + memory + skills
         system_parts: list[str] = []
         if self.system_prompt:
             system_parts.append(self.system_prompt)
+        if skills_section:
+            system_parts.append(skills_section)
         if memory_context:
             system_parts.append(memory_context)
+        if async_memory_section:
+            system_parts.append(async_memory_section)
         if system_parts:
             messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
@@ -179,9 +242,37 @@ class AgentHarness:
 
         for turn in range(1, self.config.max_turns + 1):
             self._turn = turn
+            mw_ctx.turn_number = turn
+            mw_ctx.messages = messages
+            mw_ctx.injected_messages = []
             await self.event_bus.emit(Event(type=EventType.TURN_START, data={"turn": turn}))
 
-            # 1. LLM call
+            # --- Middleware: before_model ---
+            await self.middleware_chain.run_before_model(mw_ctx)
+            messages = mw_ctx.messages  # Middleware may have modified messages
+
+            # Check if middleware halted execution
+            if mw_ctx.halt:
+                result = TurnResult(
+                    turn_number=turn,
+                    error=mw_ctx.halt_reason or "Halted by middleware",
+                    done=True,
+                    stop_reason="middleware_halt",
+                    cumulative_cost_usd=cumulative_cost,
+                )
+                results.append(result)
+                self._notify_turn(result)
+                await self.event_bus.emit(Event(type=EventType.MIDDLEWARE_HALT, data={
+                    "turn": turn, "reason": mw_ctx.halt_reason,
+                }))
+                await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
+                break
+
+            # 1. LLM call (skip if middleware says so)
+            if mw_ctx.skip_llm_call:
+                mw_ctx.skip_llm_call = False
+                continue
+
             llm_response = await self._call_llm(messages)
             if llm_response is None:
                 is_budget = not self.governance.check_budget(0.01)
@@ -198,6 +289,26 @@ class AgentHarness:
 
             cumulative_cost += llm_response.cost_usd
 
+            # --- Middleware: after_model ---
+            mw_ctx.llm_response = llm_response
+            await self.middleware_chain.run_after_model(mw_ctx)
+
+            # Apply force_text_response (e.g., from loop detection)
+            if mw_ctx.force_text_response and llm_response.tool_calls:
+                llm_response.tool_calls = []
+                mw_ctx.force_text_response = False
+
+            # Collect middleware warnings for the turn result
+            turn_warnings = [
+                m.get("content", "") for m in mw_ctx.injected_messages
+                if m.get("role") == "system"
+            ]
+
+            # Inject middleware messages into conversation
+            for msg in mw_ctx.injected_messages:
+                messages.append(msg)
+            mw_ctx.injected_messages = []
+
             # 2. Check for tool calls
             if llm_response.tool_calls:
                 tool_results = await self._execute_tools(llm_response.tool_calls)
@@ -205,6 +316,9 @@ class AgentHarness:
                 # Track tool results for procedural memory
                 for tr in tool_results:
                     tool_sequence.append(tr)
+
+                # Update middleware context with tool results
+                mw_ctx.tool_results = tool_results
 
                 # Check for failures and attempt alternative approaches
                 failed = [tr for tr in tool_results if "error" in tr]
@@ -223,6 +337,7 @@ class AgentHarness:
                             cost_usd=llm_response.cost_usd,
                             cumulative_cost_usd=cumulative_cost,
                             model_used=llm_response.model,
+                            middleware_warnings=turn_warnings,
                         )
                         results.append(result)
                         self._notify_turn(result)
@@ -258,6 +373,7 @@ class AgentHarness:
                         cost_usd=llm_response.cost_usd,
                         cumulative_cost_usd=cumulative_cost,
                         model_used=llm_response.model,
+                        middleware_warnings=turn_warnings,
                     )
                     results.append(result)
                     self._notify_turn(result)
@@ -269,6 +385,7 @@ class AgentHarness:
                         cost_usd=llm_response.cost_usd,
                         cumulative_cost_usd=cumulative_cost,
                         model_used=llm_response.model,
+                        middleware_warnings=turn_warnings,
                     )
                     results.append(result)
                     self._notify_turn(result)
@@ -293,12 +410,22 @@ class AgentHarness:
                     cost_usd=llm_response.cost_usd,
                     cumulative_cost_usd=cumulative_cost,
                     model_used=llm_response.model,
+                    middleware_warnings=turn_warnings,
                 )
                 results.append(result)
                 self._notify_turn(result)
 
                 # Store interaction in episodic memory
                 await self.memory_manager.store_episode(user_input, llm_response.content)
+
+                # Queue async memory update if enabled
+                if self._async_memory_updater:
+                    from agentos.memory.async_updater import MemoryUpdate
+                    self._async_memory_updater.queue_update(MemoryUpdate(
+                        user_message=user_input,
+                        assistant_message=llm_response.content,
+                        session_id=self._current_session_id,
+                    ))
 
                 # Store successful tool sequence in procedural memory
                 if tool_sequence:
@@ -308,8 +435,12 @@ class AgentHarness:
                 await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
                 break
 
+            # --- Middleware: on_turn_end ---
+            await self.middleware_chain.run_on_turn_end(mw_ctx)
             await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
 
+        # --- Middleware: on_session_end ---
+        await self.middleware_chain.run_on_session_end(mw_ctx)
         await self.event_bus.emit(Event(type=EventType.SESSION_END))
         return results
 
@@ -403,3 +534,7 @@ class AgentHarness:
                 failure_count=0 if success else 1,
             )
             self.memory_manager.procedural.store(proc)
+
+    def middleware_status(self) -> list[dict[str, Any]]:
+        """Return status of all middlewares (for API/observability)."""
+        return self.middleware_chain.status()

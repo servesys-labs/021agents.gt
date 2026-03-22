@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -380,6 +380,57 @@ CREATE TABLE IF NOT EXISTS spans (
 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_session ON spans(session_id);
 CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SKILLS — loaded skill definitions and their enabled state
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS skills (
+    name            TEXT PRIMARY KEY,
+    description     TEXT NOT NULL DEFAULT '',
+    version         TEXT NOT NULL DEFAULT '1.0.0',
+    license         TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT 'public',
+    allowed_tools   TEXT NOT NULL DEFAULT '[]',
+    tags            TEXT NOT NULL DEFAULT '[]',
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    source_path     TEXT NOT NULL DEFAULT '',
+    content_hash    TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- MEMORY_FACTS — async memory updater extracted facts
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS memory_facts (
+    id              TEXT PRIMARY KEY,
+    content         TEXT NOT NULL,
+    content_hash    TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT 'context',
+    confidence      REAL NOT NULL DEFAULT 0.8,
+    source          TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_category ON memory_facts(category);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(content_hash);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- MIDDLEWARE_EVENTS — loop detection and middleware actions log
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS middleware_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL DEFAULT '',
+    middleware_name  TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    details_json    TEXT NOT NULL DEFAULT '{}',
+    turn_number     INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_mw_events_session ON middleware_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_mw_events_middleware ON middleware_events(middleware_name);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- FEEDBACK — human feedback on agent outputs (thumbs up/down, corrections)
@@ -750,6 +801,61 @@ CREATE INDEX IF NOT EXISTS idx_mcp_org ON mcp_servers(org_id);
 """;
 
 
+# ── Migration from v4 → v5 (middleware, skills, async memory) ────────────────
+
+MIGRATION_V4_TO_V5 = """\
+-- SKILLS — loaded skill definitions and their enabled state
+CREATE TABLE IF NOT EXISTS skills (
+    name            TEXT PRIMARY KEY,
+    description     TEXT NOT NULL DEFAULT '',
+    version         TEXT NOT NULL DEFAULT '1.0.0',
+    license         TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT 'public',  -- public/custom
+    allowed_tools   TEXT NOT NULL DEFAULT '[]',       -- JSON array
+    tags            TEXT NOT NULL DEFAULT '[]',       -- JSON array
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    source_path     TEXT NOT NULL DEFAULT '',
+    content_hash    TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+-- MEMORY_FACTS — async memory updater extracted facts
+CREATE TABLE IF NOT EXISTS memory_facts (
+    id              TEXT PRIMARY KEY,
+    content         TEXT NOT NULL,
+    content_hash    TEXT NOT NULL DEFAULT '',  -- for deduplication
+    category        TEXT NOT NULL DEFAULT 'context',  -- preference/knowledge/context/behavior/goal
+    confidence      REAL NOT NULL DEFAULT 0.8,
+    source          TEXT NOT NULL DEFAULT '',  -- session_id or 'manual'
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_category ON memory_facts(category);
+CREATE INDEX IF NOT EXISTS idx_memory_facts_hash ON memory_facts(content_hash);
+
+-- MIDDLEWARE_EVENTS — loop detection and middleware actions log
+CREATE TABLE IF NOT EXISTS middleware_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL DEFAULT '',
+    middleware_name  TEXT NOT NULL,
+    action          TEXT NOT NULL,  -- warning/hard_stop/summarized/halt
+    details_json    TEXT NOT NULL DEFAULT '{}',
+    turn_number     INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_mw_events_session ON middleware_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_mw_events_middleware ON middleware_events(middleware_name);
+
+-- Add middleware_warnings column to turns table
+ALTER TABLE turns ADD COLUMN middleware_warnings_json TEXT NOT NULL DEFAULT '[]';
+
+-- Add skills_active column to sessions for tracking which skills were enabled
+ALTER TABLE sessions ADD COLUMN skills_active_json TEXT NOT NULL DEFAULT '[]';
+-- Add middleware_chain column to sessions for tracking which middlewares ran
+ALTER TABLE sessions ADD COLUMN middleware_chain_json TEXT NOT NULL DEFAULT '[]';
+""";
+
+
 # ── Database class ───────────────────────────────────────────────────────────
 
 
@@ -844,6 +950,52 @@ class AgentDB:
                 logger.debug("v4 migration partial: %s", exc)
             self._seed_event_types()
             self.conn.commit()
+        if from_version < 5:
+            logger.info("Migrating database from v%d to v5 (middleware, skills, async memory)", from_version)
+            existing_turn_cols = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(turns)").fetchall()
+            }
+            existing_session_cols = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            for stmt in MIGRATION_V4_TO_V5.split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                if "ALTER TABLE" in stmt and "ADD COLUMN" in stmt:
+                    col_name = stmt.split("ADD COLUMN")[1].strip().split()[0]
+                    if col_name in existing_turn_cols or col_name in existing_session_cols:
+                        continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                        logger.debug("v5 migration stmt skipped: %s", exc)
+            self._seed_middleware_event_types()
+            self.conn.commit()
+
+    def _seed_middleware_event_types(self) -> None:
+        """Seed middleware-related event types."""
+        try:
+            self.conn.execute("SELECT 1 FROM event_types LIMIT 1")
+        except sqlite3.OperationalError:
+            return
+        events = [
+            ("middleware.loop_warning", "middleware", "Loop detection issued a warning"),
+            ("middleware.loop_hard_stop", "middleware", "Loop detection forced a hard stop"),
+            ("middleware.summarized", "middleware", "Context was summarized to save tokens"),
+            ("middleware.halt", "middleware", "Middleware halted agent execution"),
+            ("skill.loaded", "skill", "Skill was loaded from filesystem"),
+            ("skill.enabled", "skill", "Skill was enabled"),
+            ("skill.disabled", "skill", "Skill was disabled"),
+            ("memory.fact_extracted", "memory", "Fact extracted from conversation"),
+            ("memory.update_queued", "memory", "Memory update queued for processing"),
+        ]
+        for event_type, category, description in events:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO event_types (event_type, category, description) VALUES (?, ?, ?)",
+                (event_type, category, description),
+            )
 
     def _seed_event_types(self) -> None:
         """Seed the default event taxonomy."""
@@ -1977,6 +2129,114 @@ class AgentDB:
             "schema_version": self.schema_version(),
             "tables": counts,
         }
+
+
+    # ── Skills CRUD ──────────────────────────────────────────────────────
+
+    def upsert_skill(self, skill: dict[str, Any]) -> None:
+        """Insert or update a skill record."""
+        try:
+            self.conn.execute(
+                """INSERT OR REPLACE INTO skills (
+                    name, description, version, license, category,
+                    allowed_tools, tags, enabled, source_path, content_hash, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    skill["name"],
+                    skill.get("description", ""),
+                    skill.get("version", "1.0.0"),
+                    skill.get("license", ""),
+                    skill.get("category", "public"),
+                    json.dumps(skill.get("allowed_tools", [])),
+                    json.dumps(skill.get("tags", [])),
+                    1 if skill.get("enabled", True) else 0,
+                    skill.get("source_path", ""),
+                    skill.get("content_hash", ""),
+                    time.time(),
+                ),
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # skills table may not exist
+
+    def list_skills(self) -> list[dict[str, Any]]:
+        try:
+            rows = self.conn.execute("SELECT * FROM skills ORDER BY name").fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
+
+    # ── Memory Facts CRUD ─────────────────────────────────────────────
+
+    def insert_memory_fact(self, fact: dict[str, Any]) -> None:
+        """Insert a memory fact (deduplicates by content_hash)."""
+        try:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO memory_facts (id, content, content_hash, category, confidence, source)
+                VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    fact["id"],
+                    fact["content"],
+                    fact.get("content_hash", ""),
+                    fact.get("category", "context"),
+                    fact.get("confidence", 0.8),
+                    fact.get("source", ""),
+                ),
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def list_memory_facts(self, category: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        try:
+            if category:
+                rows = self.conn.execute(
+                    "SELECT * FROM memory_facts WHERE category = ? ORDER BY confidence DESC LIMIT ?",
+                    (category, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM memory_facts ORDER BY confidence DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except sqlite3.OperationalError:
+            return []
+
+    # ── Middleware Events ──────────────────────────────────────────────
+
+    def insert_middleware_event(
+        self, session_id: str, middleware_name: str, action: str,
+        details: dict | None = None, turn_number: int = 0,
+    ) -> None:
+        """Log a middleware event (loop detection, summarization, etc.)."""
+        try:
+            self.conn.execute(
+                """INSERT INTO middleware_events (session_id, middleware_name, action, details_json, turn_number)
+                VALUES (?, ?, ?, ?, ?)""",
+                (session_id, middleware_name, action, json.dumps(details or {}), turn_number),
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    def query_middleware_events(
+        self, session_id: str = "", middleware_name: str = "", limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        try:
+            sql = "SELECT * FROM middleware_events WHERE 1=1"
+            params: list[Any] = []
+            if session_id:
+                sql += " AND session_id = ?"
+                params.append(session_id)
+            if middleware_name:
+                sql += " AND middleware_name = ?"
+                params.append(middleware_name)
+            sql += " ORDER BY created_at DESC LIMIT ?"
+            params.append(limit)
+            return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        except sqlite3.OperationalError:
+            return []
 
 
 def create_database(path: str | Path) -> AgentDB:

@@ -29,6 +29,24 @@ class EventType(str, Enum):
     SESSION_END = "session_end"
     GOVERNANCE_CHECK = "governance_check"
 
+    # Middleware events
+    MIDDLEWARE_WARNING = "middleware_warning"
+    MIDDLEWARE_HALT = "middleware_halt"
+    LOOP_DETECTED = "loop_detected"
+    CONTEXT_SUMMARIZED = "context_summarized"
+
+    # Skill events
+    SKILL_LOADED = "skill_loaded"
+    SKILL_INJECTED = "skill_injected"
+
+    # Memory async events
+    MEMORY_FACT_EXTRACTED = "memory_fact_extracted"
+    MEMORY_UPDATE_QUEUED = "memory_update_queued"
+    MEMORY_UPDATE_PROCESSED = "memory_update_processed"
+
+    # Sandbox virtual path events
+    SANDBOX_PATH_TRANSLATED = "sandbox_path_translated"
+
     # Evolution events (outer-loop agent)
     EVOLUTION_ANALYSIS = "evolution_analysis"
     EVOLUTION_PROPOSAL = "evolution_proposal"
