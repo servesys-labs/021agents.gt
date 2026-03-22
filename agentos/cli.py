@@ -24,6 +24,7 @@ Usage:
     agentos serve                   — Start local API server with dashboard
     agentos deploy <name>           — Deploy an agent (Cloudflare Workers)
     agentos chat <name>             — Interactive chat session with an agent
+    agentos codemap                 — Generate visual + JSON code graph maps
 """
 
 from __future__ import annotations
@@ -236,6 +237,14 @@ def main() -> None:
     mcp_p = sub.add_parser("mcp-serve", help="Expose agents as MCP tool servers")
     mcp_p.add_argument("--agent", type=str, default=None, help="Specific agent to expose (default: all)")
 
+    # --- codemap ---
+    codemap_p = sub.add_parser("codemap", help="Generate code dependency and feature maps")
+    codemap_p.add_argument("--root", type=str, default=".", help="Repository root (default: current directory)")
+    codemap_p.add_argument("--json-out", type=str, default="data/codemap.json", help="JSON output path")
+    codemap_p.add_argument("--dot-out", type=str, default="docs/codemap.dot", help="DOT output path")
+    codemap_p.add_argument("--svg-out", type=str, default="docs/codemap.svg", help="SVG output path")
+    codemap_p.add_argument("--no-portal", action="store_true", help="Skip portal TypeScript route/dependency analysis")
+
     parser.add_argument("--version", "-V", action="store_true", help="Show version")
 
     args = parser.parse_args()
@@ -288,6 +297,8 @@ def main() -> None:
             asyncio.run(cmd_compare(args))
         elif args.command == "mcp-serve":
             cmd_mcp_serve(args)
+        elif args.command == "codemap":
+            cmd_codemap(args)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1120,6 +1131,34 @@ def cmd_tools(args: argparse.Namespace) -> None:
         desc = (t.description[:47] + "...") if len(t.description) > 50 else t.description
         source = t.source_path.name if t.source_path else "programmatic"
         print(f"{t.name:<25} {desc:<50} {source:<20}")
+
+
+def cmd_codemap(args: argparse.Namespace) -> None:
+    """Generate repository code maps for humans and agents."""
+    from agentos.analysis.codemap import build_codemap, write_outputs
+
+    root = Path(args.root).resolve()
+    if not root.exists():
+        raise FileNotFoundError(f"Repository root does not exist: {root}")
+
+    payload = build_codemap(root=root, include_portal=not args.no_portal)
+    outputs = write_outputs(
+        payload=payload,
+        json_path=(root / args.json_out).resolve(),
+        dot_path=(root / args.dot_out).resolve(),
+        svg_path=(root / args.svg_out).resolve() if args.svg_out else None,
+    )
+
+    summary = payload.get("summary", {})
+    print("Code map generated.")
+    print(f"  Nodes: {summary.get('node_count', 0)}")
+    print(f"  Edges: {summary.get('edge_count', 0)}")
+    print(f"  JSON: {outputs.get('json', '')}")
+    print(f"  DOT:  {outputs.get('dot', '')}")
+    if outputs.get("svg"):
+        print(f"  SVG:  {outputs.get('svg', '')}")
+    else:
+        print("  SVG:  not generated (graphviz `dot` not installed or failed)")
 
 
 async def cmd_chat(args: argparse.Namespace) -> None:

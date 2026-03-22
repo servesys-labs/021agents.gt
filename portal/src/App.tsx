@@ -68,6 +68,7 @@ function App() {
             { name: "billing", list: "/billing" },
             { name: "api-explorer", list: "/api-explorer" },
             { name: "settings", list: "/settings" },
+            { name: "login", list: "/login" },
           ]}
           options={{ syncWithLocation: true }}
         >
