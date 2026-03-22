@@ -836,6 +836,46 @@ async def a2a_send(url: str, message: str, agent_name: str = "") -> str:
         return f"A2A communication failed: {exc}"
 
 
+async def connector_call(tool_name: str, app: str = "", arguments: dict[str, Any] | None = None) -> str:
+    """Call an external app/API via the connector hub (Pipedream).
+
+    Access 3,000+ apps (Slack, GitHub, Notion, Google, Linear, etc.)
+    without building individual integrations. OAuth is managed automatically.
+
+    Args:
+        tool_name: The tool to call (e.g., 'slack_send_message', 'github_create_issue')
+        app: App filter (e.g., 'slack', 'github') — helps find the right tool
+        arguments: Arguments for the tool call
+    """
+    import os
+    try:
+        from agentos.connectors.hub import ConnectorHub
+
+        hub = ConnectorHub(
+            provider=os.environ.get("CONNECTOR_PROVIDER", "pipedream"),
+            project_id=os.environ.get("PIPEDREAM_PROJECT_ID", ""),
+            client_id=os.environ.get("PIPEDREAM_CLIENT_ID", ""),
+            client_secret=os.environ.get("PIPEDREAM_CLIENT_SECRET", ""),
+        )
+
+        result = await hub.call_tool(tool_name, arguments or {})
+
+        if result.auth_required:
+            return (
+                f"Authentication required for this app.\n"
+                f"Connect your account: {result.auth_url}\n"
+                f"Then retry the tool call."
+            )
+
+        if not result.success:
+            return f"Connector error: {result.error}"
+
+        return f"[Connector Result]\n{result.data}"
+
+    except Exception as exc:
+        return f"Connector call failed: {exc}"
+
+
 # In-memory todo list for agent planning
 _todo_items: dict[str, list[dict[str, Any]]] = {}
 
@@ -921,6 +961,7 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "run-agent": run_agent,
     "browse": browse_page,
     "a2a-send": a2a_send,
+    "connector": connector_call,
 }
 
 # Schemas for built-in tools so the registry can expose them without JSON files
@@ -1147,6 +1188,18 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 "agent_name": {"type": "string", "description": "Optional agent name on multi-agent servers"},
             },
             "required": ["url", "message"],
+        },
+    },
+    "connector": {
+        "description": "Call external apps (Slack, GitHub, Notion, Google, etc.) via connector hub (3,000+ integrations)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string", "description": "Tool to call (e.g., 'slack_send_message', 'github_create_issue')"},
+                "app": {"type": "string", "description": "App filter (e.g., 'slack', 'github')"},
+                "arguments": {"type": "object", "description": "Arguments for the tool"},
+            },
+            "required": ["tool_name"],
         },
     },
 }
