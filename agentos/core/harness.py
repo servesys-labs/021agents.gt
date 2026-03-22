@@ -173,9 +173,18 @@ class AgentHarness:
                     error_summary = "; ".join(
                         f"{tr.get('tool', '?')}: {tr['error']}" for tr in failed
                     )
-                    messages.append({"role": "assistant", "content": llm_response.content})
-                    for tr in tool_results:
-                        messages.append({"role": "tool", "content": json.dumps(tr)})
+                    messages.append({
+                        "role": "assistant",
+                        "content": llm_response.content,
+                        "tool_calls": llm_response.tool_calls,
+                    })
+                    for tc, tr in zip(llm_response.tool_calls, tool_results):
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "name": tc.get("name", ""),
+                            "content": json.dumps(tr),
+                        })
                     messages.append({
                         "role": "system",
                         "content": f"Tool failures occurred: {error_summary}. "
@@ -186,6 +195,8 @@ class AgentHarness:
                         turn_number=turn,
                         llm_response=llm_response,
                         tool_results=tool_results,
+                        cost_usd=llm_response.cost_usd,
+                        model_used=llm_response.model,
                     )
                     results.append(result)
                 else:
@@ -193,11 +204,22 @@ class AgentHarness:
                         turn_number=turn,
                         llm_response=llm_response,
                         tool_results=tool_results,
+                        cost_usd=llm_response.cost_usd,
+                        model_used=llm_response.model,
                     )
                     results.append(result)
-                    messages.append({"role": "assistant", "content": llm_response.content})
-                    for tr in tool_results:
-                        messages.append({"role": "tool", "content": json.dumps(tr)})
+                    messages.append({
+                        "role": "assistant",
+                        "content": llm_response.content,
+                        "tool_calls": llm_response.tool_calls,
+                    })
+                    for tc, tr in zip(llm_response.tool_calls, tool_results):
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", ""),
+                            "name": tc.get("name", ""),
+                            "content": json.dumps(tr),
+                        })
             else:
                 # No tool calls — agent is done
                 result = TurnResult(
@@ -235,8 +257,8 @@ class AgentHarness:
                 "model": response.model,
                 "content": response.content[:200] if response.content else "",
                 "cost_usd": response.cost_usd,
-                "input_tokens": getattr(response, "input_tokens", 0),
-                "output_tokens": getattr(response, "output_tokens", 0),
+                "input_tokens": response.usage.get("input_tokens", 0),
+                "output_tokens": response.usage.get("output_tokens", 0),
             })
         )
         self.governance.record_cost(response.cost_usd)

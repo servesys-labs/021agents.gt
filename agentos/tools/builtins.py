@@ -227,14 +227,12 @@ async def eval_agent(agent_name: str, eval_file: str | None = None, trials: int 
     agent = Agent(config)
 
     async def agent_fn(user_input: str) -> str:
-        result = await agent.run(user_input)
-        # Extract text from harness result
-        for msg in reversed(result):
-            if isinstance(msg, dict) and msg.get("role") == "assistant":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    return content
-        return str(result[-1]) if result else ""
+        results = await agent.run(user_input)
+        # Agent.run() returns list[TurnResult] — extract the last LLM content
+        for r in reversed(results):
+            if r.llm_response and r.llm_response.content:
+                return r.llm_response.content
+        return ""
 
     # Run eval
     report = await gym.run(agent_fn)

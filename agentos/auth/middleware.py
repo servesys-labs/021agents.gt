@@ -230,6 +230,40 @@ def mount_auth_routes(app: FastAPI) -> None:
         """Logout (client should discard token)."""
         return {"status": "logged_out"}
 
+    @app.post("/auth/token/exchange")
+    async def exchange(req: dict[str, Any]) -> dict[str, Any]:
+        """Exchange an OAuth token for a server-signed JWT.
+
+        Called by ``agentos login --server <url>`` so the CLI gets a JWT
+        signed with this server's secret rather than a client-minted one.
+        """
+        user_id = req.get("user_id", "")
+        email = req.get("email", "")
+        name = req.get("name", "")
+        provider = req.get("provider", "")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="user_id required")
+
+        # Ensure user exists in the local store
+        users = _load_users()
+        if email not in users:
+            users[email] = {
+                "user_id": user_id,
+                "email": email,
+                "name": name or email.split("@")[0],
+                "password_hash": "",  # OAuth users have no password
+                "provider": provider,
+            }
+            _save_users(users)
+
+        token = create_token(
+            user_id=user_id,
+            email=email,
+            name=name,
+            provider=provider,
+        )
+        return {"token": token, "user_id": user_id}
+
     @app.post("/auth/token/verify")
     async def verify(user: TokenClaims | None = Depends(get_current_user)) -> dict[str, Any]:
         """Verify a JWT token and return claims."""

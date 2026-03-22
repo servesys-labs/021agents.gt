@@ -94,12 +94,21 @@ class EvolutionLoop:
 
     @classmethod
     def for_agent(cls, agent: Any, **kwargs) -> EvolutionLoop:
-        """Create an EvolutionLoop wired to a live Agent instance."""
-        return cls(
+        """Create an EvolutionLoop wired to a live Agent instance.
+
+        Reuses the agent's existing observer to avoid double-attaching
+        listeners to the same EventBus.
+        """
+        loop = cls(
             agent_config=agent.config,
             event_bus=agent._harness.event_bus,
             **kwargs,
         )
+        # Reuse the agent's observer if it exists, to avoid duplicate
+        # event listeners on the same bus
+        if getattr(agent, '_observer', None) is not None:
+            loop.observer = agent._observer
+        return loop
 
     # ── Step 1: Analyze ────────────────────────────────────────────
 
