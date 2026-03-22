@@ -211,6 +211,31 @@ def main() -> None:
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
     deploy_p.add_argument("name", help="Agent name or path")
 
+    # --- schedule ---
+    sched_p = sub.add_parser("schedule", help="Schedule agent runs on a cron")
+    sched_sub = sched_p.add_subparsers(dest="schedule_command")
+    sched_create = sched_sub.add_parser("create", help="Create a scheduled run")
+    sched_create.add_argument("name", help="Agent name")
+    sched_create.add_argument("cron", help="Cron expression (e.g., '0 9 * * *') or @hourly, @daily, @weekly")
+    sched_create.add_argument("--task", type=str, required=True, help="Task to run")
+    sched_sub.add_parser("list", help="List all schedules")
+    sched_del = sched_sub.add_parser("delete", help="Delete a schedule")
+    sched_del.add_argument("schedule_id", help="Schedule ID to delete")
+    sched_sub.add_parser("run", help="Start the scheduler daemon")
+
+    # --- compare ---
+    compare_p = sub.add_parser("compare", help="A/B test two agent versions")
+    compare_p.add_argument("name", help="Agent name")
+    compare_p.add_argument("version_a", help="First version (e.g., v0.1.1)")
+    compare_p.add_argument("version_b", help="Second version (e.g., v0.1.2)")
+    compare_p.add_argument("--eval", dest="eval_file", type=str, required=True, help="Eval tasks file")
+    compare_p.add_argument("--trials", type=int, default=3, help="Trials per task")
+
+    # --- mcp-serve ---
+    mcp_p = sub.add_parser("mcp-serve", help="Expose agents as MCP tool servers")
+    mcp_p.add_argument("--port", type=int, default=3000, help="Port (default: 3000)")
+    mcp_p.add_argument("--agent", type=str, default=None, help="Specific agent to expose (default: all)")
+
     parser.add_argument("--version", "-V", action="store_true", help="Show version")
 
     args = parser.parse_args()
@@ -257,6 +282,12 @@ def main() -> None:
             cmd_deploy(args)
         elif args.command == "plans":
             cmd_plans(args)
+        elif args.command == "schedule":
+            asyncio.run(cmd_schedule(args))
+        elif args.command == "compare":
+            asyncio.run(cmd_compare(args))
+        elif args.command == "mcp-serve":
+            cmd_mcp_serve(args)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1834,6 +1865,288 @@ def cmd_plans(args: argparse.Namespace) -> None:
         print("  agentos run <agent> --plan <name>")
         print("  agentos init --plan <name>")
         print("  agentos plans create <name> --simple <model> --moderate <model> --complex <model>")
+
+
+async def cmd_schedule(args: argparse.Namespace) -> None:
+    """Manage scheduled agent runs."""
+    from agentos.scheduler import Schedule, load_schedules, save_schedules, parse_cron, scheduler_loop
+
+    subcmd = getattr(args, "schedule_command", None)
+
+    if subcmd == "create":
+        # Validate cron
+        try:
+            parse_cron(args.cron)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Validate agent exists
+        _load_agent(args.name)
+
+        schedules = load_schedules()
+        sched = Schedule(agent_name=args.name, task=args.task, cron=args.cron)
+        schedules.append(sched)
+        save_schedules(schedules)
+
+        print(f"Schedule created: {sched.id}")
+        print(f"  Agent: {args.name}")
+        print(f"  Task: {args.task}")
+        print(f"  Cron: {args.cron}")
+        print(f"\nStart the scheduler: agentos schedule run")
+
+    elif subcmd == "list":
+        schedules = load_schedules()
+        if not schedules:
+            print("No schedules. Create one: agentos schedule create <agent> '<cron>' --task '<task>'")
+            return
+        print(f"Schedules ({len(schedules)}):")
+        for s in schedules:
+            status = "enabled" if s.enabled else "disabled"
+            last = f"last run: {s.last_status}" if s.last_run else "never run"
+            print(f"  {s.id}  {s.agent_name:15s}  {s.cron:15s}  [{status}]  runs={s.run_count}  {last}")
+            print(f"          task: {s.task[:60]}")
+
+    elif subcmd == "delete":
+        schedules = load_schedules()
+        before = len(schedules)
+        schedules = [s for s in schedules if s.id != args.schedule_id]
+        if len(schedules) == before:
+            print(f"Schedule '{args.schedule_id}' not found", file=sys.stderr)
+            sys.exit(1)
+        save_schedules(schedules)
+        print(f"Deleted schedule {args.schedule_id}")
+
+    elif subcmd == "run":
+        print("Starting AgentOS scheduler...")
+        print("  Checking for due tasks every 60 seconds")
+        print("  Press Ctrl+C to stop\n")
+        try:
+            await scheduler_loop(check_interval=60)
+        except KeyboardInterrupt:
+            print("\nScheduler stopped.")
+
+    else:
+        print("Usage: agentos schedule {create|list|delete|run}")
+
+
+async def cmd_compare(args: argparse.Namespace) -> None:
+    """A/B test two agent versions on the same eval tasks."""
+    from pathlib import Path
+
+    version_a = args.version_a.lstrip("v")
+    version_b = args.version_b.lstrip("v")
+
+    # Load the agent config
+    agent = _load_agent(args.name)
+    current_version = agent.config.version
+
+    # Load eval tasks
+    gym_a, tasks_data = _load_eval_tasks(Path(args.eval_file))
+    gym_b, _ = _load_eval_tasks(Path(args.eval_file))
+    gym_a.trials_per_task = args.trials
+    gym_b.trials_per_task = args.trials
+
+    # Check evolution ledger for version history
+    evolution_dir = Path.cwd() / "data" / "evolution" / args.name
+    ledger_path = evolution_dir / "ledger.json"
+
+    version_configs: dict[str, dict] = {}
+    if ledger_path.exists():
+        try:
+            ledger = json.loads(ledger_path.read_text())
+            for entry in ledger.get("entries", []):
+                v = entry.get("version", "")
+                if v == version_a and "config_before" in entry:
+                    version_configs[version_a] = entry["config_before"]
+                if v == version_b and "config_after" in entry:
+                    version_configs[version_b] = entry["config_after"]
+                elif v == version_b:
+                    version_configs[version_b] = entry.get("config_before", {})
+        except Exception:
+            pass
+
+    # If versions not in ledger, use current config for both
+    if version_a not in version_configs and version_b not in version_configs:
+        print(f"Note: Version history not found in ledger. Running current config (v{current_version}) for both.")
+        print(f"  The compare command works best after 'agentos evolve' has created version history.\n")
+
+    print(f"Comparing agent '{args.name}': v{version_a} vs v{version_b}")
+    print(f"  Eval: {args.eval_file} ({len(tasks_data)} tasks, {args.trials} trials)")
+    print("=" * 60)
+
+    # Run version A
+    print(f"\n[A] Running v{version_a}...")
+    report_a = await gym_a.run(_make_agent_fn(agent))
+
+    # If we have a different config for version B, apply it
+    if version_b in version_configs:
+        from agentos.agent import Agent, AgentConfig
+        config_b = AgentConfig.from_dict(version_configs[version_b])
+        agent_b = Agent(config_b)
+    else:
+        agent_b = agent
+
+    print(f"[B] Running v{version_b}...")
+    report_b = await gym_b.run(_make_agent_fn(agent_b))
+
+    # Compare results
+    print(f"\n{'=' * 60}")
+    print(f"{'Metric':<25s} {'v' + version_a:>15s} {'v' + version_b:>15s} {'Delta':>10s}")
+    print(f"{'-' * 60}")
+
+    metrics = [
+        ("Pass rate", f"{report_a.pass_rate:.1%}", f"{report_b.pass_rate:.1%}",
+         f"{(report_b.pass_rate - report_a.pass_rate):+.1%}"),
+        ("Avg score", f"{report_a.avg_score:.3f}", f"{report_b.avg_score:.3f}",
+         f"{(report_b.avg_score - report_a.avg_score):+.3f}"),
+        ("Avg latency", f"{report_a.avg_latency_ms:.0f}ms", f"{report_b.avg_latency_ms:.0f}ms",
+         f"{(report_b.avg_latency_ms - report_a.avg_latency_ms):+.0f}ms"),
+        ("Total cost", f"${report_a.total_cost_usd:.4f}", f"${report_b.total_cost_usd:.4f}",
+         f"${(report_b.total_cost_usd - report_a.total_cost_usd):+.4f}"),
+    ]
+
+    for name, val_a, val_b, delta in metrics:
+        print(f"{name:<25s} {val_a:>15s} {val_b:>15s} {delta:>10s}")
+
+    # Recommendation
+    print(f"\n{'=' * 60}")
+    if report_b.pass_rate > report_a.pass_rate:
+        print(f"Recommendation: v{version_b} is better (higher pass rate)")
+    elif report_b.pass_rate < report_a.pass_rate:
+        print(f"Recommendation: v{version_a} is better (higher pass rate)")
+    elif report_b.total_cost_usd < report_a.total_cost_usd:
+        print(f"Recommendation: v{version_b} is better (same quality, lower cost)")
+    else:
+        print(f"Recommendation: No significant difference between versions")
+
+
+def cmd_mcp_serve(args: argparse.Namespace) -> None:
+    """Expose agents as MCP tool servers for Claude Code, Cursor, etc."""
+    import sys
+
+    from agentos.agent import list_agents
+
+    agents = list_agents()
+    if not agents:
+        print("No agents found. Run 'agentos init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    agent_filter = getattr(args, "agent", None)
+    if agent_filter:
+        agents = [a for a in agents if a.name == agent_filter]
+        if not agents:
+            print(f"Agent '{agent_filter}' not found", file=sys.stderr)
+            sys.exit(1)
+
+    # Build MCP tool list from agents
+    tools = []
+    for agent_config in agents:
+        tools.append({
+            "name": f"run-{agent_config.name}",
+            "description": agent_config.description,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string", "description": "Task to give the agent"},
+                },
+                "required": ["task"],
+            },
+        })
+
+    print(f"AgentOS MCP Server")
+    print(f"  Exposing {len(tools)} agent(s) as MCP tools:")
+    for t in tools:
+        print(f"    - {t['name']}: {t['description'][:60]}")
+    print(f"\n  Connect from Claude Code:")
+    print(f"    claude mcp add agentos -- agentos mcp-serve")
+    print(f"\n  Or add to .claude/settings.json:")
+    print(f'    "mcpServers": {{"agentos": {{"command": "agentos", "args": ["mcp-serve"]}}}}')
+    print()
+
+    # Run MCP stdio server
+    _run_mcp_stdio(agents, tools)
+
+
+def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
+    """Run an MCP server over stdio (JSON-RPC)."""
+    import sys
+
+    def _write_response(id: Any, result: Any) -> None:
+        resp = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
+        sys.stdout.write(f"Content-Length: {len(resp)}\r\n\r\n{resp}")
+        sys.stdout.flush()
+
+    def _read_request() -> dict | None:
+        # Read Content-Length header
+        line = sys.stdin.readline()
+        if not line:
+            return None
+        if line.startswith("Content-Length:"):
+            length = int(line.split(":")[1].strip())
+            sys.stdin.readline()  # empty line
+            body = sys.stdin.read(length)
+            return json.loads(body)
+        # Fallback: try reading as plain JSON line
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            return None
+
+    while True:
+        try:
+            request = _read_request()
+            if request is None:
+                break
+
+            method = request.get("method", "")
+            req_id = request.get("id")
+
+            if method == "initialize":
+                _write_response(req_id, {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "agentos", "version": "0.2.0"},
+                })
+
+            elif method == "tools/list":
+                _write_response(req_id, {"tools": tools})
+
+            elif method == "tools/call":
+                params = request.get("params", {})
+                tool_name = params.get("name", "")
+                arguments = params.get("arguments", {})
+                task = arguments.get("task", "")
+
+                # Find agent from tool name (run-<agent-name>)
+                agent_name = tool_name.replace("run-", "", 1)
+
+                try:
+                    import asyncio
+                    from agentos.agent import Agent
+                    agent = Agent.from_name(agent_name)
+                    results = asyncio.run(agent.run(task))
+                    output = ""
+                    for r in results:
+                        if r.llm_response and r.llm_response.content:
+                            output = r.llm_response.content
+                    _write_response(req_id, {
+                        "content": [{"type": "text", "text": output}],
+                    })
+                except Exception as exc:
+                    _write_response(req_id, {
+                        "content": [{"type": "text", "text": f"Error: {exc}"}],
+                        "isError": True,
+                    })
+
+            elif method == "notifications/initialized":
+                pass  # Acknowledgement, no response needed
+
+            else:
+                _write_response(req_id, {"error": f"Unknown method: {method}"})
+
+        except (KeyboardInterrupt, EOFError):
+            break
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:
