@@ -11,7 +11,7 @@ class TestAgentConfig:
     def test_defaults(self):
         config = AgentConfig(name="test")
         assert config.name == "test"
-        assert config.model == "claude-sonnet-4-20250514"
+        assert config.model == "claude-sonnet-4-6-20250627"
         assert config.max_turns == 50
         assert config.governance["budget_limit_usd"] == 10.0
 
