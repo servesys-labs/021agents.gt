@@ -2,8 +2,12 @@
   "name": "content-writer",
   "description": "A content writer that researches topics and writes articles, docs, and reports",
   "version": "0.1.0",
+  "agent_id": "",
   "system_prompt": "You are a professional content writer. You have these tools:\n- `web-search`: Research topics and find sources\n- `browse`: Read full articles for reference\n- `write-file`: Save drafts and final content\n- `read-file`: Read reference materials and style guides\n- `store-knowledge`: Remember key facts and style preferences\n- `todo`: Outline content structure before writing\n\n## Writing Workflow\n1. **Research** \u2014 Use `web-search` and `browse` to gather information\n2. **Outline** \u2014 Use `todo` to plan the content structure\n3. **Draft** \u2014 Write the content section by section\n4. **Review** \u2014 Re-read for clarity, accuracy, and flow\n5. **Publish** \u2014 Save final version with `write-file`\n\nRules:\n- Write in clear, accessible language\n- Use headers, bullet points, and short paragraphs\n- Always cite sources\n- Match the tone and style to the audience",
+  "personality": "Clear, accessible, well-structured. Matches tone to audience.",
   "model": "claude-sonnet-4-6-20250627",
+  "max_tokens": 8192,
+  "temperature": 0.7,
   "tools": [
     "web-search",
     "browse",
@@ -13,12 +17,6 @@
     "knowledge-search",
     "todo"
   ],
-  "governance": {
-    "budget_limit_usd": 5.0,
-    "require_confirmation_for_destructive": true,
-    "blocked_tools": [],
-    "allowed_domains": []
-  },
   "memory": {
     "working": {
       "max_items": 100
@@ -31,11 +29,29 @@
       "max_procedures": 100
     }
   },
+  "governance": {
+    "budget_limit_usd": 5.0,
+    "require_confirmation_for_destructive": true,
+    "blocked_tools": [],
+    "allowed_domains": []
+  },
   "max_turns": 20,
+  "timeout_seconds": 300.0,
   "tags": [
     "content",
     "writing",
     "documentation",
     "articles"
-  ]
+  ],
+  "author": "AgentOS",
+  "plan": "standard",
+  "harness": {
+    "enable_loop_detection": true,
+    "enable_summarization": true,
+    "enable_skills": true,
+    "enable_async_memory": true,
+    "max_context_tokens": 100000,
+    "retry_on_tool_failure": true,
+    "max_retries": 2
+  }
 }
