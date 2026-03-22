@@ -1092,6 +1092,16 @@ class _StdoutCapture:
         return self._bytes.decode("utf-8", errors="replace")
 
 
+class _StdinBytesCapture:
+    """Provide a binary stdin-like object with .buffer for framed MCP tests."""
+
+    def __init__(self, data: bytes):
+        self.buffer = io.BytesIO(data)
+
+    def readline(self) -> str:
+        return self.buffer.readline().decode("utf-8", errors="replace")
+
+
 class TestMcpStdioServer:
     def test_mcp_serve_logs_to_stderr_not_stdout(self, tmp_path, monkeypatch, capsys):
         """Human-readable startup logs must not pollute stdout MCP stream."""
@@ -1154,3 +1164,48 @@ class TestMcpStdioServer:
         assert payload.get("id") == "1"
         assert "error" in payload
         assert payload["error"]["code"] == -32601
+
+    def test_run_mcp_stdio_framed_request_is_parsed_from_bytes(self, monkeypatch):
+        """Framed MCP requests should be parsed from stdin bytes safely."""
+        from agentos.cli import _run_mcp_stdio
+
+        body = json.dumps({"jsonrpc": "2.0", "id": "42", "method": "initialize"}).encode("utf-8")
+        framed = b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\n\r\n" + body
+        input_stream = _StdinBytesCapture(framed)
+        output_stream = _StdoutCapture()
+        monkeypatch.setattr("sys.stdin", input_stream)
+        monkeypatch.setattr("sys.stdout", output_stream)
+
+        _run_mcp_stdio([], [])
+        _, response_body = output_stream.text.split("\r\n\r\n", 1)
+        payload = json.loads(response_body)
+        assert payload["id"] == "42"
+        assert payload["result"]["protocolVersion"] == "2024-11-05"
+
+    def test_run_mcp_stdio_unknown_notification_has_no_response(self, monkeypatch):
+        """Unknown notifications (no id) must not receive any response."""
+        from agentos.cli import _run_mcp_stdio
+
+        req = json.dumps({"jsonrpc": "2.0", "method": "unknown/method"})
+        input_stream = io.StringIO(req + "\n")
+        output_stream = _StdoutCapture()
+        monkeypatch.setattr("sys.stdin", input_stream)
+        monkeypatch.setattr("sys.stdout", output_stream)
+
+        _run_mcp_stdio([], [])
+        assert output_stream.text == ""
+
+    def test_run_mcp_stdio_invalid_json_returns_parse_error(self, monkeypatch):
+        """Malformed JSON should return JSON-RPC parse error."""
+        from agentos.cli import _run_mcp_stdio
+
+        input_stream = io.StringIO("{not-json}\n")
+        output_stream = _StdoutCapture()
+        monkeypatch.setattr("sys.stdin", input_stream)
+        monkeypatch.setattr("sys.stdout", output_stream)
+
+        _run_mcp_stdio([], [])
+        _, body = output_stream.text.split("\r\n\r\n", 1)
+        payload = json.loads(body)
+        assert payload["error"]["code"] == -32700
+        assert payload["id"] is None

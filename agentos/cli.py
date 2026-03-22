@@ -233,7 +233,6 @@ def main() -> None:
 
     # --- mcp-serve ---
     mcp_p = sub.add_parser("mcp-serve", help="Expose agents as MCP tool servers")
-    mcp_p.add_argument("--port", type=int, default=3000, help="Port (default: 3000)")
     mcp_p.add_argument("--agent", type=str, default=None, help="Specific agent to expose (default: all)")
 
     parser.add_argument("--version", "-V", action="store_true", help="Show version")
@@ -2073,6 +2072,12 @@ def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
     import sys
     import traceback
 
+    class _ParseError(Exception):
+        """Raised when a request cannot be parsed."""
+
+    class _InvalidRequest(Exception):
+        """Raised when a parsed request violates JSON-RPC request shape."""
+
     def _write_jsonrpc(payload: dict[str, Any]) -> None:
         resp = json.dumps(payload, ensure_ascii=False)
         resp_bytes = resp.encode("utf-8")
@@ -2081,9 +2086,15 @@ def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
         sys.stdout.flush()
 
     def _write_response(id: Any, result: Any) -> None:
+        # JSON-RPC notifications do not have ids and must not receive responses.
+        if id is None:
+            return
         _write_jsonrpc({"jsonrpc": "2.0", "id": id, "result": result})
 
-    def _write_error(id: Any, code: int, message: str) -> None:
+    def _write_error(id: Any, code: int, message: str, *, allow_null_id: bool = False) -> None:
+        # For request errors (parse/invalid), JSON-RPC uses id=null.
+        if id is None and not allow_null_id:
+            return
         _write_jsonrpc({
             "jsonrpc": "2.0",
             "id": id,
@@ -2091,40 +2102,66 @@ def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
         })
 
     def _read_request() -> dict | None:
-        # Read headers until blank line (MCP/JSON-RPC over stdio framing).
-        first = sys.stdin.readline()
-        if not first:
-            return None
-        headers: list[str] = [first.rstrip("\r\n")]
-        while True:
+        stream = getattr(sys.stdin, "buffer", None)
+
+        # MCP framing path: read bytes only to avoid text/buffer desync.
+        if stream is not None:
+            headers_bytes = bytearray()
+            while True:
+                ch = stream.read(1)
+                if not ch:
+                    if not headers_bytes:
+                        return None
+                    raise _ParseError("Unexpected EOF while reading headers")
+                headers_bytes.extend(ch)
+                if headers_bytes.endswith(b"\r\n\r\n") or headers_bytes.endswith(b"\n\n"):
+                    break
+                if len(headers_bytes) > 65536:
+                    raise _InvalidRequest("MCP headers too large")
+
+            header_text = headers_bytes.decode("latin-1", errors="replace")
+            header_lines = [line.strip() for line in header_text.splitlines() if line.strip()]
+            content_length: int | None = None
+            for h in header_lines:
+                if h.lower().startswith("content-length:"):
+                    try:
+                        content_length = int(h.split(":", 1)[1].strip())
+                    except ValueError as exc:
+                        raise _InvalidRequest("Invalid Content-Length header") from exc
+                    break
+
+            if content_length is None:
+                # Compatibility fallback for JSON line inputs.
+                first = header_lines[0] if header_lines else ""
+                if not first:
+                    return None
+                try:
+                    payload = json.loads(first)
+                except json.JSONDecodeError as exc:
+                    raise _ParseError(f"Invalid JSON payload: {exc}") from exc
+            else:
+                if content_length < 0:
+                    raise _InvalidRequest("Content-Length cannot be negative")
+                body_bytes = stream.read(content_length)
+                if len(body_bytes) != content_length:
+                    raise _ParseError("Unexpected EOF while reading request body")
+                try:
+                    payload = json.loads(body_bytes.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise _ParseError(f"Invalid JSON payload: {exc}") from exc
+        else:
+            # Plain JSON-line fallback for tests or non-framed clients.
             line = sys.stdin.readline()
             if not line:
                 return None
-            stripped = line.rstrip("\r\n")
-            if stripped == "":
-                break
-            headers.append(stripped)
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise _ParseError(f"Invalid JSON payload: {exc}") from exc
 
-        content_length: int | None = None
-        for h in headers:
-            if h.lower().startswith("content-length:"):
-                try:
-                    content_length = int(h.split(":", 1)[1].strip())
-                except ValueError:
-                    return None
-                break
-
-        if content_length is not None:
-            body_bytes = sys.stdin.buffer.read(content_length)
-            if not body_bytes:
-                return None
-            return json.loads(body_bytes.decode("utf-8"))
-
-        # Fallback: try reading as plain JSON line
-        try:
-            return json.loads(first)
-        except json.JSONDecodeError:
-            return None
+        if not isinstance(payload, dict):
+            raise _InvalidRequest("Request must be a JSON object")
+        return payload
 
     while True:
         try:
@@ -2132,8 +2169,13 @@ def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
             if request is None:
                 break
 
+            if request.get("jsonrpc") != "2.0":
+                raise _InvalidRequest("Only JSON-RPC 2.0 requests are supported")
+
             method = request.get("method", "")
             req_id = request.get("id")
+            if not isinstance(method, str) or not method:
+                raise _InvalidRequest("Request method must be a non-empty string")
 
             if method == "initialize":
                 _write_response(req_id, {
@@ -2178,12 +2220,16 @@ def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
             else:
                 _write_error(req_id, -32601, f"Method not found: {method}")
 
+        except _ParseError as exc:
+            _write_error(None, -32700, f"Parse error: {exc}", allow_null_id=True)
+        except _InvalidRequest as exc:
+            _write_error(None, -32600, f"Invalid request: {exc}", allow_null_id=True)
         except (KeyboardInterrupt, EOFError):
             break
         except Exception as exc:
             # Keep server alive and return a protocol-level error.
             logger.debug("MCP stdio server error: %s\n%s", exc, traceback.format_exc())
-            _write_error(None, -32000, f"Internal error: {exc}")
+            _write_error(None, -32000, f"Internal error: {exc}", allow_null_id=True)
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:
