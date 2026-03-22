@@ -25,13 +25,28 @@ _jwt_secret: str | None = None
 
 
 def _get_secret() -> str:
-    """Get or generate the JWT signing secret."""
+    """Get or generate the JWT signing secret.
+
+    Resolution order:
+      1. Explicit override via set_secret()
+      2. AGENTOS_JWT_SECRET env var
+      3. Persisted secret in ~/.agentos/jwt_secret (created once, reused)
+    This ensures tokens survive process restarts.
+    """
     global _jwt_secret
     if _jwt_secret is None:
         _jwt_secret = os.environ.get("AGENTOS_JWT_SECRET", "")
         if not _jwt_secret:
-            # Auto-generate for local dev (not persisted across restarts)
-            _jwt_secret = os.urandom(32).hex()
+            # Persist to disk so local tokens survive restarts
+            from pathlib import Path
+            secret_path = Path.home() / ".agentos" / "jwt_secret"
+            if secret_path.exists():
+                _jwt_secret = secret_path.read_text().strip()
+            else:
+                _jwt_secret = os.urandom(32).hex()
+                secret_path.parent.mkdir(parents=True, exist_ok=True)
+                secret_path.write_text(_jwt_secret)
+                secret_path.chmod(0o600)
     return _jwt_secret
 
 

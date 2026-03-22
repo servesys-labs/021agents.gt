@@ -214,6 +214,10 @@ class Observer:
         turn.input_tokens = event.data.get("input_tokens", 0)
         turn.output_tokens = event.data.get("output_tokens", 0)
         turn.llm_content = event.data.get("content", "")
+        # Populate cost from the LLM response event
+        cost_usd = event.data.get("cost_usd", 0.0)
+        if cost_usd:
+            turn.cost.total_usd = cost_usd
 
     async def _on_tool_call(self, event: Event) -> None:
         if not self._current or not self._current.turns:
