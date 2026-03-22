@@ -6,10 +6,17 @@ import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
+
+
+class CreateWorkflowRequest(BaseModel):
+    name: str
+    description: str = ""
+    steps: list[dict] = Field(default_factory=list)
 
 
 @router.get("")
@@ -28,9 +35,7 @@ async def list_workflows(user: CurrentUser = Depends(get_current_user)):
 
 @router.post("")
 async def create_workflow(
-    name: str,
-    description: str = "",
-    steps: list[dict] | None = None,
+    request: CreateWorkflowRequest,
     user: CurrentUser = Depends(get_current_user),
 ):
     """Create a multi-agent workflow.
@@ -45,10 +50,10 @@ async def create_workflow(
     workflow_id = uuid.uuid4().hex[:16]
     db.conn.execute(
         "INSERT INTO workflows (workflow_id, org_id, name, description, steps_json) VALUES (?, ?, ?, ?, ?)",
-        (workflow_id, user.org_id, name, description, json.dumps(steps or [])),
+        (workflow_id, user.org_id, request.name, request.description, json.dumps(request.steps)),
     )
     db.conn.commit()
-    return {"workflow_id": workflow_id, "name": name, "steps": len(steps or [])}
+    return {"workflow_id": workflow_id, "name": request.name, "steps": len(request.steps)}
 
 
 @router.post("/{workflow_id}/run")

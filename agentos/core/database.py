@@ -805,28 +805,17 @@ class AgentDB:
             self.conn.commit()
         if from_version < 3:
             logger.info("Migrating database from v%d to v3 (portal tables)", from_version)
-            for stmt in MIGRATION_V2_TO_V3.split(";"):
-                stmt = stmt.strip()
-                if not stmt:
-                    continue
-                try:
-                    self.conn.execute(stmt)
-                except sqlite3.OperationalError as exc:
-                    if "already exists" not in str(exc).lower() and "duplicate" not in str(exc).lower():
-                        logger.debug("Migration stmt skipped: %s", exc)
+            try:
+                self.conn.executescript(MIGRATION_V2_TO_V3)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v3 migration partial: %s", exc)
             self.conn.commit()
         if from_version < 4:
             logger.info("Migrating database from v%d to v4 (control plane)", from_version)
-            for stmt in MIGRATION_V3_TO_V4.split(";"):
-                stmt = stmt.strip()
-                if not stmt or stmt.startswith("--"):
-                    continue
-                try:
-                    self.conn.execute(stmt)
-                except sqlite3.OperationalError as exc:
-                    if "already exists" not in str(exc).lower() and "duplicate" not in str(exc).lower():
-                        logger.debug("v4 migration stmt skipped: %s", exc)
-            # Seed default event types
+            try:
+                self.conn.executescript(MIGRATION_V3_TO_V4)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v4 migration partial: %s", exc)
             self._seed_event_types()
             self.conn.commit()
 
@@ -876,14 +865,17 @@ class AgentDB:
         self, action: str, user_id: str = "", org_id: str = "", project_id: str = "",
         resource_type: str = "", resource_id: str = "", changes: dict | None = None,
     ) -> None:
-        """Record an audit log entry."""
-        self.conn.execute(
-            """INSERT INTO audit_log (org_id, project_id, user_id, action,
-            resource_type, resource_id, changes_json) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (org_id, project_id, user_id, action, resource_type, resource_id,
-             json.dumps(changes or {})),
-        )
-        self.conn.commit()
+        """Record an audit log entry. Silently skips if table doesn't exist."""
+        try:
+            self.conn.execute(
+                """INSERT INTO audit_log (org_id, project_id, user_id, action,
+                resource_type, resource_id, changes_json) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (org_id, project_id, user_id, action, resource_type, resource_id,
+                 json.dumps(changes or {})),
+            )
+            self.conn.commit()
+        except sqlite3.OperationalError:
+            pass  # audit_log table may not exist in older DBs
 
     def query_audit_log(
         self, org_id: str = "", action: str = "", user_id: str = "",
