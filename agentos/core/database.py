@@ -1226,7 +1226,7 @@ class AgentDB:
                     ),
                 )
 
-    def query_trace(self, trace_id: str) -> list[dict[str, Any]]:
+    def query_trace_spans(self, trace_id: str) -> list[dict[str, Any]]:
         """Get all spans for a trace, ordered by start time."""
         rows = self.conn.execute(
             "SELECT * FROM spans WHERE trace_id = ? ORDER BY start_time",
