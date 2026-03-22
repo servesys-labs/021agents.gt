@@ -56,12 +56,12 @@ async function main() {
   if (provider === "openai") {
     const key = await ask("OpenAI API key: ");
     if (key.trim()) {
-      execSync(`echo "${key.trim()}" | wrangler secret put OPENAI_API_KEY`, { stdio: "inherit" });
+      execSync("wrangler secret put OPENAI_API_KEY", { stdio: ["pipe", "inherit", "inherit"], input: key.trim() });
     }
   } else if (provider === "anthropic") {
     const key = await ask("Anthropic API key: ");
     if (key.trim()) {
-      execSync(`echo "${key.trim()}" | wrangler secret put ANTHROPIC_API_KEY`, { stdio: "inherit" });
+      execSync("wrangler secret put ANTHROPIC_API_KEY", { stdio: ["pipe", "inherit", "inherit"], input: key.trim() });
     }
   } else {
     console.log("  Using Workers AI (no API key needed).");

@@ -75,6 +75,10 @@ class AgentHarness:
         self.memory_manager = memory_manager or MemoryManager()
         self.system_prompt: str = ""
         self._turn = 0
+        # Trace context — set by parent when running as sub-agent
+        self.trace_id: str = ""
+        self.parent_session_id: str = ""
+        self.depth: int = 0
 
     @classmethod
     def from_config_file(cls, path: str | Path | None = None) -> AgentHarness:
@@ -122,7 +126,17 @@ class AgentHarness:
         """Inner run loop — separated so timeout can wrap it."""
         results: list[TurnResult] = []
         cumulative_cost = 0.0
-        await self.event_bus.emit(Event(type=EventType.SESSION_START, data={"input": user_input}))
+        # Generate trace_id and session_id for this run
+        import uuid as _uuid
+        if not self.trace_id:
+            self.trace_id = _uuid.uuid4().hex[:16]
+        self._current_session_id = _uuid.uuid4().hex[:16]
+        await self.event_bus.emit(Event(type=EventType.SESSION_START, data={
+            "input": user_input,
+            "trace_id": self.trace_id,
+            "parent_session_id": self.parent_session_id,
+            "depth": self.depth,
+        }))
 
         # --- Initialization Sequence ---
 
@@ -166,9 +180,11 @@ class AgentHarness:
             # 1. LLM call
             llm_response = await self._call_llm(messages)
             if llm_response is None:
-                stop = "budget" if not self.governance.check_budget(0.01) else "llm_error"
+                is_budget = not self.governance.check_budget(0.01)
+                stop = "budget" if is_budget else "llm_error"
+                error_msg = "Budget exhausted" if is_budget else "LLM call failed"
                 result = TurnResult(
-                    turn_number=turn, error="LLM call failed", done=True, stop_reason=stop,
+                    turn_number=turn, error=error_msg, done=True, stop_reason=stop,
                     cumulative_cost_usd=cumulative_cost,
                 )
                 results.append(result)
@@ -292,7 +308,12 @@ class AgentHarness:
             return None
 
         await self.event_bus.emit(Event(type=EventType.LLM_REQUEST))
-        response = await self.llm_router.route(messages)
+        try:
+            response = await self.llm_router.route(messages)
+        except Exception as exc:
+            logger.error("LLM call failed: %s", exc)
+            await self.event_bus.emit(Event(type=EventType.ERROR, data={"source": "llm", "message": str(exc)}))
+            return None
         await self.event_bus.emit(
             Event(type=EventType.LLM_RESPONSE, data={
                 "model": response.model,
@@ -318,9 +339,16 @@ class AgentHarness:
                 continue
 
             await self.event_bus.emit(Event(type=EventType.TOOL_CALL, data=call))
-            result = await self.tool_executor.execute(
-                tool_name, call.get("arguments", {})
-            )
+            arguments = call.get("arguments", {})
+            # Inject trace context for sub-agent calls
+            if tool_name == "run-agent" and self.trace_id:
+                arguments = {
+                    **arguments,
+                    "_parent_trace_id": self.trace_id,
+                    "_parent_session_id": getattr(self, '_current_session_id', ''),
+                    "_parent_depth": self.depth,
+                }
+            result = await self.tool_executor.execute(tool_name, arguments)
             await self.event_bus.emit(Event(type=EventType.TOOL_RESULT, data=result))
             results.append(result)
         return results

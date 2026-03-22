@@ -136,6 +136,18 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
     load_dotenv_if_present()
 
     app = FastAPI(title="AgentOS", version="0.1.0", description="Composable Autonomous Agent Framework")
+
+    # Build a real harness from the first available agent so /run uses a real LLM.
+    if harness is None:
+        try:
+            from agentos.agent import Agent, list_agents
+            agents = list_agents()
+            if agents:
+                default_agent = Agent.from_name(agents[0].name)
+                harness = default_agent._harness
+                logger.info("Default harness loaded from agent '%s'", agents[0].name)
+        except Exception as exc:
+            logger.warning("Could not load default agent for harness: %s", exc)
     _harness = harness or AgentHarness.from_config_file()
 
     # Mount auth routes (signup, login, /auth/me, token verify)
