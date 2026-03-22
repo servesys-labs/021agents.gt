@@ -1,36 +1,40 @@
-// wrangler.jsonc — AgentOS Cloudflare Workers deployment
+// wrangler.jsonc — AgentOS Cloudflare Agents deployment (modernized)
 {
   "name": "agentos",
   "main": "src/index.ts",
-  "compatibility_date": "2025-03-07",
+  "compatibility_date": "2026-03-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1
   },
 
-  // Static frontend assets
+  // Static frontend assets (portal SPA)
   "assets": {
     "directory": "./public/",
     "not_found_handling": "single-page-application",
     "binding": "ASSETS"
   },
 
-  // Durable Objects — the AgentOS agent
+  // Durable Objects — AgentOS agents + MCP server
   "durable_objects": {
     "bindings": [
       {
-        "name": "AGENTOS",
-        "class_name": "AgentOSWorker"
+        "name": "AGENTOS_AGENT",
+        "class_name": "AgentOSAgent"
+      },
+      {
+        "name": "AGENTOS_MCP",
+        "class_name": "AgentOSMcpServer"
       }
     ]
   },
 
-  // Mandatory: SQLite migration for Agent state persistence
+  // SQLite migration for Agent + MCP state persistence
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["AgentOSWorker"]
+      "new_sqlite_classes": ["AgentOSAgent", "AgentOSMcpServer"]
     }
   ],
 
