@@ -143,7 +143,7 @@ class TestSpanPersistence:
         db.insert_spans(tracer.export(), session_id="sess-001")
 
         # Query by trace
-        spans = db.query_trace(trace.trace_id)
+        spans = db.query_trace_spans(trace.trace_id)
         assert len(spans) == 3  # root + turn + llm
 
         # Query by kind
