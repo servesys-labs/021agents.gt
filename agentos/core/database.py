@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -541,6 +541,189 @@ CREATE INDEX IF NOT EXISTS idx_agent_versions_name ON agent_versions(agent_name)
 """
 
 
+# ── Migration from v3 → v4 (control plane) ─────────────────────────────────
+
+MIGRATION_V3_TO_V4 = """\
+-- PROJECTS — org → project → agents hierarchy
+CREATE TABLE IF NOT EXISTS projects (
+    project_id      TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    slug            TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    default_env     TEXT NOT NULL DEFAULT 'development',
+    default_plan    TEXT NOT NULL DEFAULT 'standard',
+    settings_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(org_id);
+CREATE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug);
+
+-- ENVIRONMENTS — dev/staging/production per project
+CREATE TABLE IF NOT EXISTS environments (
+    env_id          TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL DEFAULT 'development',  -- development/staging/production
+    plan            TEXT NOT NULL DEFAULT '',              -- LLM plan for this env
+    provider_config_json TEXT NOT NULL DEFAULT '{}',       -- provider overrides per env
+    secrets_json    TEXT NOT NULL DEFAULT '{}',            -- encrypted secret refs
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_env_project ON environments(project_id);
+
+-- AUDIT LOG — who changed what, when
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    project_id      TEXT NOT NULL DEFAULT '',
+    user_id         TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL,          -- agent.create, agent.update, policy.change, etc.
+    resource_type   TEXT NOT NULL DEFAULT '', -- agent, policy, env, schedule, etc.
+    resource_id     TEXT NOT NULL DEFAULT '',
+    changes_json    TEXT NOT NULL DEFAULT '{}',  -- before/after diff
+    ip_address      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_log(org_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
+
+-- EVENT DEFINITIONS — structured webhook event taxonomy
+CREATE TABLE IF NOT EXISTS event_types (
+    event_type      TEXT PRIMARY KEY,      -- run.started, run.completed, run.failed, etc.
+    category        TEXT NOT NULL DEFAULT '', -- run, agent, policy, billing, system
+    description     TEXT NOT NULL DEFAULT '',
+    schema_json     TEXT NOT NULL DEFAULT '{}',  -- JSON schema for event payload
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+-- POLICY TEMPLATES — reusable governance configurations
+CREATE TABLE IF NOT EXISTS policy_templates (
+    policy_id       TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    policy_json     TEXT NOT NULL DEFAULT '{}',  -- budget, tools, domains, approval rules
+    is_default      INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_policy_org ON policy_templates(org_id);
+
+-- SLO DEFINITIONS — success rate, latency, cost thresholds
+CREATE TABLE IF NOT EXISTS slo_definitions (
+    slo_id          TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',  -- '' = org-wide default
+    env             TEXT NOT NULL DEFAULT '',  -- '' = all envs
+    metric          TEXT NOT NULL,             -- success_rate, p95_latency_ms, cost_per_run_usd
+    threshold       REAL NOT NULL,             -- e.g., 0.95, 2000, 0.05
+    operator        TEXT NOT NULL DEFAULT 'gte', -- gte, lte, eq
+    window_hours    INTEGER NOT NULL DEFAULT 24,
+    alert_on_breach INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_slo_org ON slo_definitions(org_id);
+CREATE INDEX IF NOT EXISTS idx_slo_agent ON slo_definitions(agent_name);
+
+-- RELEASE CHANNELS — draft/staging/production per agent
+CREATE TABLE IF NOT EXISTS release_channels (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL,
+    channel         TEXT NOT NULL DEFAULT 'draft',  -- draft/staging/production
+    version         TEXT NOT NULL,
+    config_json     TEXT NOT NULL,
+    promoted_by     TEXT NOT NULL DEFAULT '',
+    promoted_at     REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    UNIQUE(agent_name, channel)
+);
+CREATE INDEX IF NOT EXISTS idx_release_agent ON release_channels(agent_name);
+
+-- CANARY SPLITS — traffic routing between versions
+CREATE TABLE IF NOT EXISTS canary_splits (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name      TEXT NOT NULL,
+    env             TEXT NOT NULL DEFAULT 'production',
+    primary_version TEXT NOT NULL,
+    canary_version  TEXT NOT NULL,
+    canary_weight   REAL NOT NULL DEFAULT 0.1,  -- 0.0 to 1.0
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+-- JOB QUEUE — async agent runs with retries
+CREATE TABLE IF NOT EXISTS job_queue (
+    job_id          TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL,
+    task            TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending/running/completed/failed/dead
+    priority        INTEGER NOT NULL DEFAULT 0,
+    retries         INTEGER NOT NULL DEFAULT 0,
+    max_retries     INTEGER NOT NULL DEFAULT 3,
+    result_json     TEXT NOT NULL DEFAULT '{}',
+    error           TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    scheduled_at    REAL,
+    started_at      REAL,
+    completed_at    REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_job_status ON job_queue(status);
+CREATE INDEX IF NOT EXISTS idx_job_agent ON job_queue(agent_name);
+CREATE INDEX IF NOT EXISTS idx_job_idempotency ON job_queue(idempotency_key);
+
+-- WORKFLOW DEFINITIONS — multi-agent DAGs
+CREATE TABLE IF NOT EXISTS workflows (
+    workflow_id     TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    steps_json      TEXT NOT NULL DEFAULT '[]',  -- ordered list of {agent, task, depends_on, condition}
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_org ON workflows(org_id);
+
+-- WORKFLOW RUNS — execution instances of workflows
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    run_id          TEXT PRIMARY KEY,
+    workflow_id     TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'running',  -- running/completed/failed/canceled
+    steps_status_json TEXT NOT NULL DEFAULT '{}',     -- per-step status
+    trace_id        TEXT NOT NULL DEFAULT '',
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    started_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    completed_at    REAL
+);
+CREATE INDEX IF NOT EXISTS idx_wfrun_workflow ON workflow_runs(workflow_id);
+
+-- RETENTION POLICIES — data lifecycle management
+CREATE TABLE IF NOT EXISTS retention_policies (
+    policy_id       TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    resource_type   TEXT NOT NULL,         -- sessions, turns, episodes, billing_records
+    retention_days  INTEGER NOT NULL DEFAULT 90,
+    redact_pii      INTEGER NOT NULL DEFAULT 0,
+    redact_fields   TEXT NOT NULL DEFAULT '[]',  -- JSON array of field names to redact
+    archive_before_delete INTEGER NOT NULL DEFAULT 1,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_retention_org ON retention_policies(org_id);
+
+-- Add project_id and env to sessions (for project scoping)
+-- ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT '';
+-- ALTER TABLE sessions ADD COLUMN env TEXT NOT NULL DEFAULT 'development';
+""";
+
+
 # ── Database class ───────────────────────────────────────────────────────────
 
 
@@ -632,6 +815,187 @@ class AgentDB:
                     if "already exists" not in str(exc).lower() and "duplicate" not in str(exc).lower():
                         logger.debug("Migration stmt skipped: %s", exc)
             self.conn.commit()
+        if from_version < 4:
+            logger.info("Migrating database from v%d to v4 (control plane)", from_version)
+            for stmt in MIGRATION_V3_TO_V4.split(";"):
+                stmt = stmt.strip()
+                if not stmt or stmt.startswith("--"):
+                    continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "already exists" not in str(exc).lower() and "duplicate" not in str(exc).lower():
+                        logger.debug("v4 migration stmt skipped: %s", exc)
+            # Seed default event types
+            self._seed_event_types()
+            self.conn.commit()
+
+    def _seed_event_types(self) -> None:
+        """Seed the default event taxonomy."""
+        try:
+            self.conn.execute("SELECT 1 FROM event_types LIMIT 1")
+        except sqlite3.OperationalError:
+            return  # Table doesn't exist yet
+        events = [
+            ("run.started", "run", "Agent run started"),
+            ("run.completed", "run", "Agent run completed successfully"),
+            ("run.failed", "run", "Agent run failed with error"),
+            ("run.timeout", "run", "Agent run timed out"),
+            ("run.budget_exhausted", "run", "Agent run stopped due to budget"),
+            ("tool.called", "tool", "Tool was invoked"),
+            ("tool.failed", "tool", "Tool invocation failed"),
+            ("tool.blocked", "policy", "Tool blocked by governance policy"),
+            ("agent.created", "agent", "New agent was created"),
+            ("agent.updated", "agent", "Agent config was modified"),
+            ("agent.deleted", "agent", "Agent was deleted"),
+            ("agent.promoted", "agent", "Agent promoted to new channel"),
+            ("evolve.proposal", "evolve", "Evolution proposal generated"),
+            ("evolve.approved", "evolve", "Evolution proposal approved"),
+            ("evolve.rejected", "evolve", "Evolution proposal rejected"),
+            ("evolve.applied", "evolve", "Evolution change applied"),
+            ("evolve.rollback", "evolve", "Evolution change rolled back"),
+            ("policy.blocked", "policy", "Action blocked by policy"),
+            ("policy.warning", "policy", "Policy threshold warning"),
+            ("billing.threshold", "billing", "Billing threshold exceeded"),
+            ("slo.breach", "slo", "SLO threshold breached"),
+            ("schedule.triggered", "schedule", "Scheduled run triggered"),
+            ("schedule.failed", "schedule", "Scheduled run failed"),
+            ("workflow.started", "workflow", "Workflow execution started"),
+            ("workflow.completed", "workflow", "Workflow execution completed"),
+            ("workflow.failed", "workflow", "Workflow execution failed"),
+        ]
+        for event_type, category, description in events:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO event_types (event_type, category, description) VALUES (?, ?, ?)",
+                (event_type, category, description),
+            )
+
+    # ── Audit Log ──────────────────────────────────────────────────────
+
+    def audit(
+        self, action: str, user_id: str = "", org_id: str = "", project_id: str = "",
+        resource_type: str = "", resource_id: str = "", changes: dict | None = None,
+    ) -> None:
+        """Record an audit log entry."""
+        self.conn.execute(
+            """INSERT INTO audit_log (org_id, project_id, user_id, action,
+            resource_type, resource_id, changes_json) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (org_id, project_id, user_id, action, resource_type, resource_id,
+             json.dumps(changes or {})),
+        )
+        self.conn.commit()
+
+    def query_audit_log(
+        self, org_id: str = "", action: str = "", user_id: str = "",
+        since: float = 0, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM audit_log WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if action:
+            sql += " AND action LIKE ?"
+            params.append(f"%{action}%")
+        if user_id:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        if since:
+            sql += " AND created_at >= ?"
+            params.append(since)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    # ── Job Queue ──────────────────────────────────────────────────────
+
+    def enqueue_job(
+        self, job_id: str, agent_name: str, task: str,
+        org_id: str = "", idempotency_key: str = "", max_retries: int = 3,
+        priority: int = 0, scheduled_at: float | None = None,
+    ) -> None:
+        # Check idempotency
+        if idempotency_key:
+            existing = self.conn.execute(
+                "SELECT job_id FROM job_queue WHERE idempotency_key = ? AND status != 'dead'",
+                (idempotency_key,),
+            ).fetchone()
+            if existing:
+                return  # Deduplicate
+
+        self.conn.execute(
+            """INSERT INTO job_queue (job_id, org_id, agent_name, task,
+            idempotency_key, max_retries, priority, scheduled_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (job_id, org_id, agent_name, task, idempotency_key, max_retries, priority, scheduled_at),
+        )
+        self.conn.commit()
+
+    def dequeue_job(self) -> dict[str, Any] | None:
+        """Get the next pending job (highest priority, oldest first)."""
+        row = self.conn.execute(
+            """SELECT * FROM job_queue WHERE status = 'pending'
+            AND (scheduled_at IS NULL OR scheduled_at <= ?)
+            ORDER BY priority DESC, created_at ASC LIMIT 1""",
+            (time.time(),),
+        ).fetchone()
+        if not row:
+            return None
+        job = dict(row)
+        self.conn.execute(
+            "UPDATE job_queue SET status = 'running', started_at = ? WHERE job_id = ?",
+            (time.time(), job["job_id"]),
+        )
+        self.conn.commit()
+        return job
+
+    def complete_job(self, job_id: str, result: dict | None = None, session_id: str = "") -> None:
+        self.conn.execute(
+            "UPDATE job_queue SET status = 'completed', completed_at = ?, result_json = ?, session_id = ? WHERE job_id = ?",
+            (time.time(), json.dumps(result or {}), session_id, job_id),
+        )
+        self.conn.commit()
+
+    def fail_job(self, job_id: str, error: str) -> None:
+        job = dict(self.conn.execute("SELECT * FROM job_queue WHERE job_id = ?", (job_id,)).fetchone())
+        if job["retries"] >= job["max_retries"]:
+            new_status = "dead"  # Dead-letter
+        else:
+            new_status = "pending"  # Retry
+        self.conn.execute(
+            "UPDATE job_queue SET status = ?, retries = retries + 1, error = ? WHERE job_id = ?",
+            (new_status, error, job_id),
+        )
+        self.conn.commit()
+
+    def list_jobs(self, status: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM job_queue"
+        params: list[Any] = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    # ── Retention ──────────────────────────────────────────────────────
+
+    def apply_retention(self) -> dict[str, int]:
+        """Apply all active retention policies. Returns counts of deleted rows."""
+        policies = self.conn.execute(
+            "SELECT * FROM retention_policies WHERE is_active = 1"
+        ).fetchall()
+        deleted: dict[str, int] = {}
+        for p in policies:
+            p = dict(p)
+            cutoff = time.time() - (p["retention_days"] * 86400)
+            table = p["resource_type"]
+            try:
+                result = self.conn.execute(f"DELETE FROM {table} WHERE created_at < ?", (cutoff,))
+                deleted[table] = result.rowcount
+            except Exception:
+                deleted[table] = -1
+        self.conn.commit()
+        return deleted
 
     @contextmanager
     def tx(self) -> Generator[sqlite3.Cursor, None, None]:
