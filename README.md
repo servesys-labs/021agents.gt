@@ -6,7 +6,7 @@ Build, test, govern, deploy, and observe AI agents. The Vercel for agents.
 
 | Metric | Count |
 |--------|-------|
-| API endpoints | 190+ across 35 routers |
+| API endpoints | 195 across 35 routers |
 | Builtin tools | 21 + 3,000+ via Pipedream |
 | Portal pages | 22 (Refine + Tremor) |
 | LLM plans | 6 (basic/standard/premium/code/dedicated/private) |
@@ -37,8 +37,11 @@ agentos run research-assistant "What are the latest advances in RLHF?"
 # Interactive chat
 agentos chat research-assistant
 
-# Start the API server (190+ endpoints)
+# Start the API server (195 endpoints)
 agentos serve
+
+# Generate codebase dependency graph
+agentos codemap
 
 # Start the portal UI
 cd portal && npm install --legacy-peer-deps && npm run dev
@@ -53,10 +56,11 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 │  Memory · RAG · Billing · Integrations · API Explorer · ...     │
 ├─────────────────────────────────────────────────────────────────┤
 │                     API Layer (FastAPI)                          │
-│  35 routers · RBAC · Rate limiting · Stripe billing · A2A/MCP   │
+│  35 routers · 195 endpoints · RBAC · Rate limiting · A2A/MCP    │
 ├─────────────────────────────────────────────────────────────────┤
 │                      Core Engine                                │
 │  Harness · LLM Router · Middleware · Memory · Tools · Skills    │
+│  Identity · Tracing · Governance · Events · Evolution           │
 ├─────────────────────────────────────────────────────────────────┤
 │                    LLM Providers                                │
 │  GMI Cloud (primary) · Anthropic · OpenAI · Cloudflare · Local  │
@@ -73,21 +77,28 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 | **Agent** | `agentos.agent` | Agent definition, loading, execution, plan-based routing |
 | **Builder** | `agentos.builder` | Meta-agent that builds agents via LLM conversation |
 | **CLI** | `agentos.cli` | 16 commands + 9 subcommands |
-| **API** | `agentos.api` | 35 routers, 190+ endpoints, RBAC + scoped API keys |
-| **Harness** | `agentos.core` | Orchestration, governance, event bus, middleware chain |
+| **API** | `agentos.api` | 35 routers, 195 endpoints, RBAC + scoped API keys |
+| **Harness** | `agentos.core.harness` | Orchestration engine, middleware chain, turn lifecycle |
+| **Governance** | `agentos.core.governance` | Budget enforcement, policy checks, cost tracking |
+| **Identity** | `agentos.core.identity` | Cryptographic agent IDs + optional signing keypairs |
+| **Tracing** | `agentos.core.tracing` | Span-based observability (session → turn → tool → sub-agent) |
+| **Database** | `agentos.core.database` | SQLite WAL (39 tables, migrations v1-v5) + Postgres backend |
+| **Events** | `agentos.core.events` | Event bus for lifecycle hooks and observability |
 | **LLM Routing** | `agentos.llm` | Multi-provider routing by complexity (simple/moderate/complex/tool_call) |
 | **Tools** | `agentos.tools` | 21 builtins + MCP client + plugin registry |
 | **Connectors** | `agentos.connectors` | 3,000+ app integrations via Pipedream MCP |
-| **Memory** | `agentos.memory` | Working, episodic, semantic, procedural + async updater |
+| **Memory** | `agentos.memory` | Working, episodic, semantic, procedural, vector store + async updater |
 | **Middleware** | `agentos.middleware` | Loop detection, context summarization, composable chain |
 | **Skills** | `agentos.skills` | SKILL.md files with YAML frontmatter, injected into prompts |
 | **A2A** | `agentos.a2a` | Google Agent-to-Agent protocol (discovery + JSON-RPC) |
-| **Scheduler** | `agentos.scheduler` | Cron-based scheduled agent runs |
-| **RAG** | `agentos.rag` | Hybrid retrieval (dense + BM25), chunking, reranking |
-| **Eval** | `agentos.eval` | Benchmarking, LLM grading, evolution loop |
-| **Sandbox** | `agentos.sandbox` | E2B cloud sandboxes with local fallback |
+| **Scheduler** | `agentos.scheduler` | Cron-based scheduled agent runs (auto-started in API) |
+| **RAG** | `agentos.rag` | Hybrid retrieval (dense + BM25), chunking, query transform, reranking |
+| **Eval** | `agentos.eval` | Benchmarking, LLM grading, auto-research loop |
+| **Evolution** | `agentos.evolution` | Continuous improvement: analyzer, proposals, ledger, session recording |
+| **Sandbox** | `agentos.sandbox` | E2B cloud sandboxes with local fallback + virtual path isolation |
 | **Voice** | `agentos.voice` | Real-time STT/TTS with barge-in support |
-| **Auth** | `agentos.auth` | JWT + Clerk hybrid, RBAC (owner/admin/member/viewer) |
+| **Auth** | `agentos.auth` | JWT + Clerk + OAuth, RBAC (owner/admin/member/viewer) |
+| **Analysis** | `agentos.analysis` | Codebase graph maps (JSON + DOT + SVG) via `agentos codemap` |
 | **Deploy** | `deploy/` | Cloudflare Workers with Agents SDK |
 
 ## Agent Definition
@@ -181,7 +192,7 @@ agentos serve --port 8340
 uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8340
 ```
 
-### Key Endpoint Groups (35 routers)
+### Key Endpoint Groups (35 routers, 195 endpoints)
 
 | Group | Prefix | Endpoints |
 |-------|--------|-----------|
@@ -210,6 +221,13 @@ uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8340
 | MCP | `/api/v1/mcp` | MCP server registry |
 | Deploy | `/api/v1/deploy` | Deployment status |
 | Plans | `/api/v1/plans` | List, create custom |
+| Skills | `/api/v1/skills` | Skill CRUD |
+| Middleware | `/api/v1/middleware` | Middleware status and stats |
+| Config | `/api/v1/config` | System configuration |
+| Tools | `/api/v1/tools` | Tool listing |
+| Compare | `/api/v1/compare` | A/B version comparison |
+| GPU | `/api/v1/gpu` | Dedicated GPU endpoint provisioning |
+| Retention | `/api/v1/retention` | Data lifecycle policies |
 | A2A | `/.well-known/agent.json`, `/a2a` | Agent discovery + JSON-RPC |
 
 ### RBAC & API Keys
@@ -309,6 +327,62 @@ Both can be toggled per-agent via the `harness` config.
 
 Procedural memory automatically learns from successful tool sequences and injects relevant procedures as hints in future prompts.
 
+## Evolution
+
+Continuous improvement loop that proposes and tracks agent changes:
+
+1. **Analyze** — session recording captures tool sequences, costs, and outcomes
+2. **Propose** — analyzer generates improvement proposals (cheaper models, fewer turns, better prompts)
+3. **Review** — proposals enter a review queue (approve/reject/auto-apply)
+4. **Track** — ledger records version history with impact measurement
+
+```bash
+agentos evolve my-agent eval-tasks.json --max-cycles 5
+```
+
+## Observability
+
+Span-based tracing provides full visibility into agent execution:
+
+```
+session (trace_id)
+├── turn_1
+│   ├── llm_call (model, tokens, cost, latency)
+│   ├── tool_call: web-search
+│   └── tool_call: write-file
+├── turn_2
+│   └── llm_call (final response)
+└── cost_rollup ($0.0042)
+```
+
+Traces are persisted to the `spans` table and queryable via `/api/v1/observability/traces`.
+
+## Database
+
+SQLite with WAL mode by default. 39 tables across 5 migration versions. Postgres available for production.
+
+```bash
+# SQLite (default)
+export AGENTOS_DB_BACKEND=sqlite
+
+# Postgres
+export AGENTOS_DB_BACKEND=postgres
+export DATABASE_URL="postgresql://user:pass@host:5432/agentos"
+```
+
+## Codemap
+
+Generate a dependency graph of the entire codebase:
+
+```bash
+agentos codemap
+```
+
+Outputs:
+- `data/codemap.json` — structured graph (458 nodes, 847 edges) for agent/tool consumption
+- `docs/codemap.dot` — DOT format for Graphviz
+- SVG visualization (if `dot` is installed)
+
 ## Project Structure
 
 ```
@@ -317,56 +391,102 @@ templates/          # 9 pre-built agent templates
 tools/              # Custom tool plugins (JSON/Python)
 skills/             # SKILL.md files injected into prompts
 config/             # default.json — plans, routing, providers
-data/               # SQLite DB + RAG documents
+data/               # SQLite DB (agent.db) + RAG documents + codemap.json
 agentos/
   agent.py          # Agent class, AgentConfig, plan-based routing
   builder.py        # Meta-agent that builds agents
   cli.py            # 16 commands + 9 subcommands
   defaults.py       # Orchestrator prompt, templates, tool list
-  scheduler.py      # Cron scheduling
+  scheduler.py      # Cron scheduling (auto-started in API server)
+  env.py            # .env loader
   api/
-    app.py          # FastAPI app, 35 routers, background workers
-    deps.py         # Auth, RBAC, scoped API keys
-    ratelimit.py    # Sliding window rate limiter (120 RPM)
-    routers/        # 35 router files
-    schemas.py      # Pydantic models
+    app.py          # FastAPI app, 35 routers, background scheduler + job worker
+    deps.py         # Auth, RBAC, scoped API keys (25+ scopes)
+    ratelimit.py    # Sliding window rate limiter (120 RPM, 20 burst)
+    routers/        # 35 router files (195 endpoints total)
+    schemas.py      # Pydantic request/response models
   core/
-    harness.py      # Agent execution engine, middleware chain
+    harness.py      # Agent execution engine, middleware chain, turn lifecycle
     database.py     # SQLite WAL, 39 tables, migrations v1-v5
-    governance.py   # Budget enforcement, policy checks
-    events.py       # Event bus
+    db_config.py    # Database backend switching (SQLite / Postgres)
+    postgres_database.py  # Postgres backend adapter
+    governance.py   # Budget enforcement, policy checks, cost recording
+    events.py       # Event bus for lifecycle hooks
+    identity.py     # Cryptographic agent IDs + optional signing keypairs
+    tracing.py      # Span-based observability (session → turn → tool → sub-agent)
   llm/
     router.py       # Complexity-based multi-provider routing
     provider.py     # HTTP provider (OpenAI-compatible)
-    tokens.py       # Cost estimation for 50+ models
+    tokens.py       # Cost estimation for 50+ models across all providers
   tools/
     builtins.py     # 21 builtin tools with handlers + schemas
     executor.py     # Tool execution engine
-    registry.py     # Plugin discovery
+    registry.py     # Plugin discovery (JSON/Python)
     mcp.py          # MCP client
   connectors/
-    hub.py          # Pipedream MCP (3,000+ apps)
+    hub.py          # Pipedream MCP connector (3,000+ apps, managed OAuth)
   middleware/
     base.py         # MiddlewareChain, Middleware base class
-    loop_detection.py
-    summarization.py
+    loop_detection.py  # Warn at 3 repeats, hard stop at 5, persisted to DB
+    summarization.py   # Context compression at 75% token limit
   memory/
-    manager.py      # Unified memory manager
-    working.py      # Working memory
-    episodic.py     # Episodic memory
-    semantic.py     # Semantic facts
-    procedural.py   # Learned procedures
-    async_updater.py # Background fact extraction
+    manager.py      # Unified memory manager (all tiers)
+    working.py      # Working memory (in-session)
+    episodic.py     # Episodic memory (past interactions)
+    semantic.py     # Semantic facts (keyword search)
+    procedural.py   # Learned tool sequences with success rates
+    vector_store.py # Vector store for semantic similarity
+    async_updater.py # Background debounced fact extraction
   skills/
     loader.py       # SKILL.md discovery and prompt injection
-  a2a/              # A2A protocol (card, server, client)
-  auth/             # JWT, Clerk, RBAC
-  sandbox/          # E2B cloud + local fallback
-  rag/              # Hybrid retrieval pipeline
-  eval/             # Benchmarking and grading
-  voice/            # STT/TTS
+  a2a/
+    card.py         # AgentCard builder (/.well-known/agent.json)
+    server.py       # JSON-RPC handler (SendMessage, streaming)
+    client.py       # A2A client (discover, send_message, send_and_get_text)
+  auth/
+    jwt.py          # JWT token creation/verification
+    clerk.py        # Clerk JWKS verification + token exchange
+    oauth.py        # OAuth provider integration
+    credentials.py  # Credential storage
+    middleware.py   # Auth middleware for FastAPI
+    provisioning.py # User/org provisioning
+  sandbox/
+    manager.py      # E2B cloud + local subprocess fallback
+    tools.py        # Sandbox as agent tools
+    virtual_paths.py # Path isolation and escape prevention
+  rag/
+    pipeline.py     # End-to-end RAG pipeline
+    chunker.py      # Document chunking strategies
+    retriever.py    # Dense + BM25 hybrid retrieval
+    reranker.py     # Result reranking
+    query_transform.py # Query expansion/reformulation
+  eval/
+    gym.py          # EvalGym — run benchmarks with LLM grading
+    grader.py       # Rubric-based evaluation (heuristic + LLM)
+    research_loop.py # Auto-research improvement cycle
+  evolution/
+    loop.py         # Continuous improvement loop
+    analyzer.py     # Performance analysis + improvement proposals
+    proposals.py    # Review queue (approve/reject/auto-apply)
+    ledger.py       # Version history + impact tracking
+    observer.py     # Session recording for analysis
+    session_record.py # Structured session data
+  analysis/
+    codemap.py      # Codebase graph generator (JSON + DOT + SVG)
+  voice/
+    module.py       # Voice module orchestrator
+    stt.py          # Speech-to-text (streaming)
+    tts.py          # Text-to-speech (streaming)
 portal/             # React portal (Refine + Tremor)
-deploy/             # Cloudflare Workers (Agents SDK)
+  src/
+    App.tsx         # Routes (22 pages) + providers
+    providers/      # authProvider.ts, dataProvider.ts
+    pages/          # 22 page components
+    components/     # Sidebar, PageHeader, QueryState, ConfirmDialog, Toast, ErrorBoundary
+    auth/           # ClerkSessionManager, jwt, tokens, config
+    lib/            # api.ts, auth.ts, adapters.ts, validation.ts (with tests)
+deploy/             # Cloudflare Workers (Agents SDK v0.5+)
+  src/index.ts      # AgentOSAgent (@callable), AgentOSMcpServer, schedule/queue
 tests/              # 597 tests
 .github/workflows/  # CI (Python 3.12 + 3.13)
 Dockerfile          # Self-hosted deployment
