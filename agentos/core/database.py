@@ -718,9 +718,35 @@ CREATE TABLE IF NOT EXISTS retention_policies (
 );
 CREATE INDEX IF NOT EXISTS idx_retention_org ON retention_policies(org_id);
 
--- Add project_id and env to sessions (for project scoping)
--- ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT '';
--- ALTER TABLE sessions ADD COLUMN env TEXT NOT NULL DEFAULT 'development';
+-- SECRETS VAULT — org/project/env scoped secrets
+CREATE TABLE IF NOT EXISTS secrets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    project_id      TEXT NOT NULL DEFAULT '',
+    env             TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    value_encrypted TEXT NOT NULL DEFAULT '',
+    created_by      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    UNIQUE(org_id, project_id, env, name)
+);
+CREATE INDEX IF NOT EXISTS idx_secrets_org ON secrets(org_id);
+
+-- MCP SERVERS — registered MCP server connections
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    server_id       TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    url             TEXT NOT NULL DEFAULT '',
+    transport       TEXT NOT NULL DEFAULT 'stdio',
+    auth_token      TEXT NOT NULL DEFAULT '',
+    tools_json      TEXT NOT NULL DEFAULT '[]',
+    status          TEXT NOT NULL DEFAULT 'registered',
+    last_health_at  REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_org ON mcp_servers(org_id);
 """;
 
 

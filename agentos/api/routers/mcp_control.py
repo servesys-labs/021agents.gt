@@ -26,7 +26,7 @@ async def list_mcp_servers(user: CurrentUser = Depends(get_current_user)):
     """List all registered MCP servers for the org."""
     db = _get_db()
     rows = db.conn.execute(
-        "SELECT server_id, name, url, transport, status, last_sync_at, created_at FROM mcp_servers WHERE org_id = ? ORDER BY name",
+        "SELECT server_id, name, url, transport, status, last_health_at, created_at FROM mcp_servers WHERE org_id = ? ORDER BY name",
         (user.org_id,),
     ).fetchall()
     return {"servers": [dict(r) for r in rows]}
@@ -124,7 +124,7 @@ async def sync_mcp_server(
 
     now = time.time()
     db.conn.execute(
-        "UPDATE mcp_servers SET last_sync_at = ?, status = ? WHERE server_id = ?",
+        "UPDATE mcp_servers SET last_health_at = ?, status = ? WHERE server_id = ?",
         (now, "synced" if not error else "sync_failed", server_id),
     )
     db.conn.commit()

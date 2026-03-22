@@ -53,9 +53,9 @@ async def create_secret(
 
     now = time.time()
     db.conn.execute(
-        """INSERT INTO secrets (secret_id, org_id, project_id, env, name, encrypted_value, created_at, updated_at)
+        """INSERT INTO secrets (org_id, project_id, env, name, value_encrypted, created_by, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (uuid.uuid4().hex[:16], user.org_id, project_id, env, name, value, now, now),
+        (user.org_id, project_id, env, name, value, user.user_id, now, now),
     )
     db.conn.commit()
     return {"created": name, "project_id": project_id, "env": env}
@@ -92,7 +92,7 @@ async def rotate_secret(
     db = _get_db()
     now = time.time()
     result = db.conn.execute(
-        "UPDATE secrets SET encrypted_value = ?, updated_at = ? WHERE org_id = ? AND name = ? AND project_id = ? AND env = ?",
+        "UPDATE secrets SET value_encrypted = ?, updated_at = ? WHERE org_id = ? AND name = ? AND project_id = ? AND env = ?",
         (new_value, now, user.org_id, name, project_id, env),
     )
     db.conn.commit()
