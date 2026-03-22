@@ -47,9 +47,15 @@
     }
   ],
 
+  // AI Gateway for multi-provider routing and observability
+  "ai_gateway": {
+    "binding": "AI_GATEWAY",
+    "gateway_id": "agentos-gateway"
+  },
+
   // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
     "DEFAULT_PROVIDER": "workers-ai",
-    "DEFAULT_MODEL": "@cf/meta/llama-3.1-70b-instruct"
+    "DEFAULT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
   }
 }
