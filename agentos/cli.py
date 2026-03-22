@@ -1079,6 +1079,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             for doc, meta in zip(documents, metadatas)
         ],
         "total_chunks": len(pipeline.retriever._chunks) if hasattr(pipeline.retriever, '_chunks') else 0,
+        "source_files": [m.get("source", "") for m in metadatas],
     }
     index_path.write_text(json.dumps(index_data, indent=2) + "\n")
 
@@ -1529,8 +1530,10 @@ def cmd_serve(args: argparse.Namespace) -> None:
         print("Error: uvicorn not installed. Run: pip install uvicorn")
         sys.exit(1)
 
+    dashboard_dir = Path(__file__).resolve().parent / "dashboard"
     print(f"Starting AgentOS server on http://{args.host}:{args.port}")
-    print(f"  Dashboard: http://{args.host}:{args.port}/dashboard")
+    if dashboard_dir.is_dir():
+        print(f"  Dashboard: http://{args.host}:{args.port}/dashboard")
     print(f"  API:       http://{args.host}:{args.port}/health")
     print()
 

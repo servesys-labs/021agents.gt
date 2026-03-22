@@ -186,6 +186,8 @@ class AgentHarness:
                         turn_number=turn,
                         llm_response=llm_response,
                         tool_results=tool_results,
+                        cost_usd=llm_response.cost_usd,
+                        model_used=llm_response.model,
                     )
                     results.append(result)
                 else:
@@ -193,6 +195,8 @@ class AgentHarness:
                         turn_number=turn,
                         llm_response=llm_response,
                         tool_results=tool_results,
+                        cost_usd=llm_response.cost_usd,
+                        model_used=llm_response.model,
                     )
                     results.append(result)
                     messages.append({"role": "assistant", "content": llm_response.content})

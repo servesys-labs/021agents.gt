@@ -167,15 +167,20 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
 
     # ── Sandbox endpoints ────────────────────────────────────────────────
 
-    from agentos.sandbox import SandboxManager
-    _sandbox_mgr = SandboxManager()
+    _sandbox_mgr_instance: list = []  # lazy singleton
+
+    def _sandbox_mgr():
+        if not _sandbox_mgr_instance:
+            from agentos.sandbox import SandboxManager
+            _sandbox_mgr_instance.append(SandboxManager())
+        return _sandbox_mgr_instance[0]
 
     @app.post("/sandbox/create")
     async def sandbox_create(request: dict[str, Any] | None = None) -> dict[str, Any]:
         """Create a new E2B sandbox."""
         template = (request or {}).get("template", "base")
         timeout_sec = (request or {}).get("timeout_sec", 300)
-        session = await _sandbox_mgr.create(template=template, timeout_sec=timeout_sec)
+        session = await _sandbox_mgr().create(template=template, timeout_sec=timeout_sec)
         return {"sandbox_id": session.sandbox_id, "template": session.template, "status": session.status}
 
     @app.post("/sandbox/exec")
@@ -184,7 +189,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         command = request.get("command", "")
         if not command:
             raise HTTPException(status_code=400, detail="command required")
-        result = await _sandbox_mgr.exec(
+        result = await _sandbox_mgr().exec(
             command=command,
             sandbox_id=request.get("sandbox_id"),
             timeout_ms=int(request.get("timeout_ms", 30000)),
@@ -204,7 +209,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         content = request.get("content")
         if not path or content is None:
             raise HTTPException(status_code=400, detail="path and content required")
-        result = await _sandbox_mgr.file_write(path=path, content=content, sandbox_id=request.get("sandbox_id"))
+        result = await _sandbox_mgr().file_write(path=path, content=content, sandbox_id=request.get("sandbox_id"))
         return {"sandbox_id": result.sandbox_id, "path": result.path, "success": result.success, "error": result.error}
 
     @app.post("/sandbox/file/read")
@@ -213,13 +218,13 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         path = request.get("path", "")
         if not path:
             raise HTTPException(status_code=400, detail="path required")
-        result = await _sandbox_mgr.file_read(path=path, sandbox_id=request.get("sandbox_id"))
+        result = await _sandbox_mgr().file_read(path=path, sandbox_id=request.get("sandbox_id"))
         return {"sandbox_id": result.sandbox_id, "path": result.path, "content": result.content, "success": result.success, "error": result.error}
 
     @app.get("/sandbox/list")
     async def sandbox_list() -> dict[str, Any]:
         """List all active sandboxes."""
-        sandboxes = await _sandbox_mgr.list_sandboxes()
+        sandboxes = await _sandbox_mgr().list_sandboxes()
         return {"sandboxes": sandboxes}
 
     @app.post("/sandbox/kill")
@@ -228,7 +233,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         sandbox_id = request.get("sandbox_id", "")
         if not sandbox_id:
             raise HTTPException(status_code=400, detail="sandbox_id required")
-        killed = await _sandbox_mgr.kill(sandbox_id=sandbox_id)
+        killed = await _sandbox_mgr().kill(sandbox_id=sandbox_id)
         return {"killed": killed, "sandbox_id": sandbox_id}
 
     @app.post("/sandbox/keepalive")
@@ -237,7 +242,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         sandbox_id = request.get("sandbox_id", "")
         if not sandbox_id:
             raise HTTPException(status_code=400, detail="sandbox_id required")
-        ok = await _sandbox_mgr.keepalive(sandbox_id=sandbox_id, timeout_sec=int(request.get("timeout_sec", 300)))
+        ok = await _sandbox_mgr().keepalive(sandbox_id=sandbox_id, timeout_sec=int(request.get("timeout_sec", 300)))
         return {"kept_alive": ok, "sandbox_id": sandbox_id}
 
     # ── Dashboard ─────────────────────────────────────────────────────────
