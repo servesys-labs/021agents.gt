@@ -132,7 +132,7 @@ class TestCmdInit:
 
         data = json.loads((tmp_path / "agents" / "reviewer.json").read_text())
         assert "code-review" in data["tags"]
-        assert data["max_turns"] == 10
+        assert data["max_turns"] == 15
 
     def test_init_rejects_file_as_directory(self, tmp_path):
         target = tmp_path / "somefile.txt"

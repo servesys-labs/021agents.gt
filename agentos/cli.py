@@ -61,7 +61,8 @@ def main() -> None:
     init_p.add_argument("--no-signing", action="store_true", help="Skip signing keypair generation")
     init_p.add_argument(
         "--template", "-t", type=str, default=None,
-        choices=["orchestrator", "blank", "research", "support", "code-review"],
+        choices=["orchestrator", "blank", "research", "support", "code-review",
+                 "data-analyst", "devops", "content-writer", "project-manager"],
         help="Start from a preset agent template (default: orchestrator)",
     )
     init_p.add_argument(
