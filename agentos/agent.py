@@ -207,9 +207,9 @@ class Agent:
         # Allow programmatic usage without manual shell exports.
         load_dotenv_if_present()
         self._apply_project_defaults()
-        self._db = None
         self._observer = None
         self._tracer = None
+        self._init_db()
         self._harness = self._build_harness()
         self._attach_observability()
 
@@ -263,10 +263,12 @@ class Agent:
             timeout_seconds=self.config.timeout_seconds,
         )
 
-        # LLM Router — configure per-tier models from config, falling back to agent model
+        # LLM Router — configure per-tier models with mixed provider support
         llm_router = LLMRouter()
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         openai_key = os.environ.get("OPENAI_API_KEY", "")
+        cf_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+        cf_account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
         model = self.config.model
 
         # Load per-tier routing config from config/default.json
@@ -280,44 +282,111 @@ class Agent:
             except Exception:
                 pass
 
-        if anthropic_key and ("claude" in model or not openai_key):
-            for tier in Complexity:
-                tier_cfg = routing_config.get(tier.value, {})
-                tier_model = tier_cfg.get("model", model)
-                tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
-                # Use per-tier model if it's an Anthropic model, otherwise fall back
-                if "claude" in tier_model:
-                    provider = HttpProvider(
-                        model_id=tier_model,
-                        api_base="https://api.anthropic.com",
-                        api_key=anthropic_key,
-                        headers={"anthropic-version": "2023-06-01"},
+        # Validate GMI models at startup (cached per process)
+        _gmi_available_models: set[str] | None = None
+        def _validate_gmi_model(model_id: str) -> bool:
+            nonlocal _gmi_available_models
+            gmi_key = os.environ.get("GMI_API_KEY", "")
+            if not gmi_key:
+                return False
+            if _gmi_available_models is None:
+                try:
+                    import httpx
+                    resp = httpx.get(
+                        "https://api.gmi-serving.com/v1/models",
+                        headers={"Authorization": f"Bearer {gmi_key}"},
+                        timeout=10,
                     )
-                else:
-                    provider = HttpProvider(
-                        model_id=model,
-                        api_base="https://api.anthropic.com",
-                        api_key=anthropic_key,
-                        headers={"anthropic-version": "2023-06-01"},
-                    )
-                llm_router.register(tier, provider, max_tokens=tier_max_tokens)
-        elif openai_key:
-            for tier in Complexity:
-                tier_cfg = routing_config.get(tier.value, {})
-                tier_model = tier_cfg.get("model", model if "gpt" in model else "gpt-4o")
-                tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
-                if "gpt" in tier_model or "o1" in tier_model or "o3" in tier_model:
-                    provider = HttpProvider(
-                        model_id=tier_model,
-                        api_base="https://api.openai.com",
-                        api_key=openai_key,
-                    )
-                else:
-                    provider = HttpProvider(
-                        model_id=model if "gpt" in model else "gpt-4o",
-                        api_base="https://api.openai.com",
-                        api_key=openai_key,
-                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        _gmi_available_models = {m["id"] for m in data.get("data", [])}
+                        logger.info("GMI: %d models available", len(_gmi_available_models))
+                    else:
+                        _gmi_available_models = set()
+                        logger.warning("GMI model validation failed: %s", resp.status_code)
+                except Exception as exc:
+                    _gmi_available_models = set()
+                    logger.warning("GMI model validation failed: %s", exc)
+            if model_id in _gmi_available_models:
+                return True
+            logger.warning("GMI: model '%s' not found in available models", model_id)
+            return False
+
+        def _make_provider(tier_model: str, tier_provider: str) -> HttpProvider | None:
+            """Create an LLM provider for a specific model and provider combo."""
+            if tier_provider == "anthropic" or (not tier_provider and "claude" in tier_model):
+                if not anthropic_key:
+                    return None
+                return HttpProvider(
+                    model_id=tier_model,
+                    api_base="https://api.anthropic.com",
+                    api_key=anthropic_key,
+                    headers={"anthropic-version": "2023-06-01"},
+                )
+            elif tier_provider == "openai" or (not tier_provider and "gpt" in tier_model):
+                if not openai_key:
+                    return None
+                return HttpProvider(
+                    model_id=tier_model,
+                    api_base="https://api.openai.com",
+                    api_key=openai_key,
+                )
+            elif tier_provider == "cloudflare" or (not tier_provider and "@cf/" in tier_model):
+                if not cf_token or not cf_account:
+                    return None
+                return HttpProvider(
+                    model_id=tier_model,
+                    api_base=f"https://api.cloudflare.com/client/v4/accounts/{cf_account}/ai",
+                    api_key=cf_token,
+                )
+            elif tier_provider == "gmi":
+                gmi_key = os.environ.get("GMI_API_KEY", "")
+                gmi_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
+                if not gmi_key:
+                    return None
+                # Validate model exists on GMI
+                if not _validate_gmi_model(tier_model):
+                    logger.warning("Skipping GMI model '%s' — not available on your account", tier_model)
+                    return None
+                return HttpProvider(
+                    model_id=tier_model,
+                    api_base=gmi_base,
+                    api_key=gmi_key,
+                )
+            elif tier_provider == "local":
+                local_base = os.environ.get("LOCAL_LLM_BASE", "http://localhost:11434/v1")
+                return HttpProvider(
+                    model_id=tier_model,
+                    api_base=local_base,
+                    api_key=os.environ.get("LOCAL_LLM_KEY", "not-needed"),
+                )
+            return None
+
+        # Register providers per complexity tier — supports mixed providers
+        for tier in Complexity:
+            tier_cfg = routing_config.get(tier.value, {})
+            tier_model = tier_cfg.get("model", model)
+            tier_provider_name = tier_cfg.get("provider", "")
+            tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
+
+            provider = _make_provider(tier_model, tier_provider_name)
+
+            # Fallback: if configured provider unavailable, try in order:
+            # 1. GMI (if key exists — works with any model)
+            # 2. Anthropic (with Claude model)
+            # 3. OpenAI (with GPT model)
+            gmi_key = os.environ.get("GMI_API_KEY", "")
+            if provider is None and gmi_key:
+                # Use the agent's own model for GMI fallback (it's likely a valid GMI model ID)
+                gmi_model = model if tier_provider_name != "gmi" else tier_model
+                provider = _make_provider(gmi_model, "gmi")
+            if provider is None and anthropic_key:
+                fallback_model = model if "claude" in model else "claude-sonnet-4-6-20250627"
+                provider = _make_provider(fallback_model, "anthropic")
+            if provider is None and openai_key:
+                provider = _make_provider("gpt-5.4-mini", "openai")
+
+            if provider is not None:
                 llm_router.register(tier, provider, max_tokens=tier_max_tokens)
 
         # Governance
@@ -330,15 +399,17 @@ class Agent:
             ),
         )
 
-        # Memory
+        # Memory — pass DB for persistence when available
         mem_cfg = self.config.memory
         working = WorkingMemory(max_items=mem_cfg.get("working", {}).get("max_items", 100))
         episodic = EpisodicMemory(
             max_episodes=mem_cfg.get("episodic", {}).get("max_episodes", 10000),
             ttl_days=mem_cfg.get("episodic", {}).get("ttl_days", 90),
+            db=self._db,
         )
         procedural = ProceduralMemory(
             max_procedures=mem_cfg.get("procedural", {}).get("max_procedures", 500),
+            db=self._db,
         )
         # RAG — load pipeline from persisted chunks (fast) or re-index from source files (fallback)
         rag_pipeline = None
@@ -429,18 +500,12 @@ class Agent:
 
         return harness
 
-    def _attach_observability(self) -> None:
-        """Auto-attach observer, tracer, and DB if data/ dir exists.
+    def _init_db(self) -> None:
+        """Open the SQLite database if data/ dir exists.
 
-        This makes every ``run()`` call automatically observed and
-        persisted — no manual setup in CLI commands needed.
+        Called before _build_harness so memory classes can use the DB.
         """
-        from agentos.core.tracing import Tracer
-        from agentos.evolution.observer import Observer
-
-        self._tracer = Tracer()
-
-        # Auto-open DB if data/ directory exists (created by `agentos init`)
+        self._db = None
         data_dir = Path.cwd() / "data"
         db_path = data_dir / "agent.db"
         if data_dir.is_dir():
@@ -451,6 +516,17 @@ class Agent:
             except Exception as exc:
                 logger.warning("Could not open database at %s: %s", db_path, exc)
                 self._db = None
+
+    def _attach_observability(self) -> None:
+        """Auto-attach observer, tracer, and DB if data/ dir exists.
+
+        This makes every ``run()`` call automatically observed and
+        persisted — no manual setup in CLI commands needed.
+        """
+        from agentos.core.tracing import Tracer
+        from agentos.evolution.observer import Observer
+
+        self._tracer = Tracer()
 
         # Attach observer to the harness event bus
         self._observer = Observer(
