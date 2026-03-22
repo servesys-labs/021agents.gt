@@ -92,6 +92,52 @@ async def invite_member(org_id: str, request: InviteMemberRequest, user: Current
     return {"invited": request.email, "role": request.role}
 
 
+@router.put("/{org_id}")
+async def update_org(org_id: str, name: str = "", plan: str = "", user: CurrentUser = Depends(get_current_user)):
+    """Update org settings."""
+    db = _get_db()
+    updates = []
+    params: list = []
+    if name:
+        updates.append("name = ?")
+        params.append(name)
+    if plan:
+        updates.append("plan = ?")
+        params.append(plan)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    updates.append("updated_at = ?")
+    params.append(time.time())
+    params.append(org_id)
+    db.conn.execute(f"UPDATE orgs SET {', '.join(updates)} WHERE org_id = ?", params)
+    db.conn.commit()
+    return {"updated": org_id}
+
+
+@router.delete("/{org_id}")
+async def delete_org(org_id: str, user: CurrentUser = Depends(get_current_user)):
+    """Delete an organization."""
+    db = _get_db()
+    db.conn.execute("DELETE FROM org_members WHERE org_id = ?", (org_id,))
+    db.conn.execute("DELETE FROM orgs WHERE org_id = ?", (org_id,))
+    db.conn.commit()
+    return {"deleted": org_id}
+
+
+@router.put("/{org_id}/members/{member_user_id}")
+async def update_member_role(org_id: str, member_user_id: str, role: str, user: CurrentUser = Depends(get_current_user)):
+    """Change a member's role."""
+    if role not in ("owner", "admin", "member", "viewer"):
+        raise HTTPException(status_code=400, detail="Invalid role")
+    db = _get_db()
+    db.conn.execute(
+        "UPDATE org_members SET role = ? WHERE org_id = ? AND user_id = ?",
+        (role, org_id, member_user_id),
+    )
+    db.conn.commit()
+    return {"updated": member_user_id, "role": role}
+
+
 @router.delete("/{org_id}/members/{member_user_id}")
 async def remove_member(org_id: str, member_user_id: str, user: CurrentUser = Depends(get_current_user)):
     db = _get_db()

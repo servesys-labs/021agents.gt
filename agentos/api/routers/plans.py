@@ -38,6 +38,38 @@ async def list_plans():
     return {"plans": result}
 
 
+@router.post("")
+async def create_plan(
+    name: str,
+    simple_model: str,
+    moderate_model: str,
+    complex_model: str,
+    tool_call_model: str = "",
+    provider: str = "gmi",
+):
+    """Create a custom LLM plan."""
+    try:
+        import yaml
+        project_yaml = Path.cwd() / "agentos.yaml"
+        if project_yaml.exists():
+            data = yaml.safe_load(project_yaml.read_text()) or {}
+        else:
+            data = {}
+        if "plans" not in data:
+            data["plans"] = {}
+        data["plans"][name] = {
+            "_description": f"Custom plan: {name}",
+            "simple": {"provider": provider, "model": simple_model, "max_tokens": 1024},
+            "moderate": {"provider": provider, "model": moderate_model, "max_tokens": 4096},
+            "complex": {"provider": provider, "model": complex_model, "max_tokens": 8192},
+            "tool_call": {"provider": provider, "model": tool_call_model or moderate_model, "max_tokens": 4096},
+        }
+        project_yaml.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+        return {"created": name}
+    except ImportError:
+        return {"error": "PyYAML required for custom plans"}
+
+
 @router.get("/{name}")
 async def get_plan(name: str):
     """Get details of a specific plan."""

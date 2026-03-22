@@ -95,3 +95,35 @@ async def me(user: CurrentUser = Depends(get_current_user)):
         org_id=user.org_id,
         role=user.role,
     )
+
+
+@router.post("/logout")
+async def logout(user: CurrentUser = Depends(get_current_user)):
+    """Logout (client should discard token)."""
+    return {"logged_out": True}
+
+
+@router.post("/password")
+async def change_password(
+    current_password: str,
+    new_password: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Change password."""
+    db = _get_db()
+    current_hash = hashlib.sha256(current_password.encode()).hexdigest()
+
+    row = db.conn.execute(
+        "SELECT user_id FROM users WHERE user_id = ? AND password_hash = ?",
+        (user.user_id, current_hash),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+
+    new_hash = hashlib.sha256(new_password.encode()).hexdigest()
+    db.conn.execute(
+        "UPDATE users SET password_hash = ?, updated_at = ? WHERE user_id = ?",
+        (new_hash, time.time(), user.user_id),
+    )
+    db.conn.commit()
+    return {"updated": True}

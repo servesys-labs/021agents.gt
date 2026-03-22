@@ -220,3 +220,72 @@ async def list_versions(name: str):
         }
     except Exception:
         return {"versions": [], "current": "0.1.0"}
+
+
+@router.post("/create-from-description")
+async def create_from_description(
+    description: str,
+    name: str = "",
+    tools: str = "auto",
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Create an agent from a natural language description (LLM-powered).
+
+    tools: 'auto' = auto-detect, 'none' = no tools, or comma-separated list
+    """
+    from agentos.builder import AgentBuilder, recommend_tools
+    from agentos.agent import save_agent_config
+
+    builder = AgentBuilder()
+    config = await builder.build_from_description(description)
+
+    if name:
+        config.name = name
+
+    if tools == "auto":
+        config.tools = recommend_tools(description)
+    elif tools == "none":
+        config.tools = []
+    elif tools:
+        config.tools = [t.strip() for t in tools.split(",") if t.strip()]
+
+    path = save_agent_config(config)
+
+    return AgentResponse(
+        name=config.name, description=config.description, model=config.model,
+        tools=config.tools, tags=config.tags, version=config.version,
+    )
+
+
+@router.post("/{name}/chat")
+async def chat_turn(name: str, message: str, session_id: str = ""):
+    """Send a single turn in a multi-turn conversation."""
+    from agentos.agent import Agent
+
+    try:
+        agent = Agent.from_name(name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    results = await agent.run(message)
+    output = ""
+    for r in results:
+        if r.llm_response and r.llm_response.content:
+            output = r.llm_response.content
+
+    return {
+        "response": output,
+        "turns": len(results),
+        "cost_usd": sum(r.cost_usd for r in results),
+    }
+
+
+@router.get("/{name}/tools")
+async def get_agent_tools(name: str):
+    """List tools available to a specific agent."""
+    from agentos.agent import Agent
+    try:
+        agent = Agent.from_name(name)
+        return {"tools": agent._harness.tool_executor.available_tools()}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
