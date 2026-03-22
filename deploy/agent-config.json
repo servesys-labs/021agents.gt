@@ -1,6 +1,6 @@
 {
-  "agentName": "my-agent",
-  "agentDescription": "A starter agent \u2014 customize me!",
+  "agentName": "test-agent",
+  "agentDescription": "test-agent \u2014 customize me!",
   "systemPrompt": "You are a helpful AI assistant. Be concise and accurate.",
   "maxTurns": 50,
   "budgetLimitUsd": 10.0,
