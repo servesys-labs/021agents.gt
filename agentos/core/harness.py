@@ -105,8 +105,17 @@ class AgentHarness:
         skills_dir = Path(self.config.skills_dir) if self.config.skills_dir else None
         self.skill_loader = skill_loader or SkillLoader(skills_dir=skills_dir)
 
-        # Async memory updater (lazy init)
+        # Async memory updater
         self._async_memory_updater = None
+        if self.config.enable_async_memory:
+            from agentos.memory.async_updater import AsyncMemoryUpdater
+            self._async_memory_updater = AsyncMemoryUpdater()
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._async_memory_updater.start())
+            except RuntimeError:
+                pass  # Will be started on first run
 
     def _build_default_middleware(self) -> MiddlewareChain:
         """Build the default middleware chain based on config."""
