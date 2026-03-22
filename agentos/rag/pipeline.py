@@ -15,6 +15,65 @@ from agentos.rag.retriever import HybridRetriever, RetrievalResult
 logger = logging.getLogger(__name__)
 
 
+def _get_embedder():
+    """Get an embedding function. Tries GMI API, then numpy fallback.
+
+    Returns a callable that takes list[str] and returns list[list[float]],
+    or None if no embedding method is available.
+    """
+    import os
+
+    gmi_key = os.environ.get("GMI_API_KEY", "")
+    if gmi_key:
+        def _gmi_embed(texts: list[str]) -> list[list[float]]:
+            import httpx
+            resp = httpx.post(
+                "https://api.gmi-serving.com/v1/embeddings",
+                headers={"Authorization": f"Bearer {gmi_key}", "Content-Type": "application/json"},
+                json={"model": "BAAI/bge-base-en-v1.5", "input": texts},
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return [item["embedding"] for item in data.get("data", [])]
+            logger.warning("GMI embedding failed (%s), using fallback", resp.status_code)
+            return _numpy_embed(texts)
+        return _gmi_embed
+
+    # Fallback: simple numpy bag-of-words embeddings (works offline)
+    try:
+        import numpy as np
+
+        def _numpy_embed(texts: list[str]) -> list[list[float]]:
+            """Simple TF-based embeddings using numpy. Not great, but better than nothing."""
+            # Build vocabulary from all texts
+            vocab: dict[str, int] = {}
+            for text in texts:
+                for word in text.lower().split():
+                    if word not in vocab:
+                        vocab[word] = len(vocab)
+            dim = min(len(vocab), 256)  # Cap dimension
+
+            embeddings = []
+            for text in texts:
+                vec = np.zeros(dim)
+                words = text.lower().split()
+                for word in words:
+                    idx = vocab.get(word, -1)
+                    if 0 <= idx < dim:
+                        vec[idx] += 1.0
+                # Normalize
+                norm = np.linalg.norm(vec)
+                if norm > 0:
+                    vec = vec / norm
+                embeddings.append(vec.tolist())
+            return embeddings
+
+        return _numpy_embed
+    except ImportError:
+        return None
+
+
 class RAGPipeline:
     """End-to-end RAG pipeline for knowledge-grounded generation.
 
@@ -32,13 +91,16 @@ class RAGPipeline:
         top_k: int = 10,
         rerank_top_n: int = 5,
         hybrid_alpha: float = 0.7,
+        use_embeddings: bool = True,
     ) -> None:
         self.chunker = DynamicChunker(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         self.retriever = HybridRetriever(alpha=hybrid_alpha)
         self.reranker = Reranker(top_n=rerank_top_n)
         self.query_transformer = QueryTransformer()
         self.top_k = top_k
+        self.use_embeddings = use_embeddings
         self._documents: list[str] = []
+        self._embedder = _get_embedder() if use_embeddings else None
 
     def ingest(self, documents: list[str], metadatas: list[dict[str, str]] | None = None) -> int:
         """Chunk and index a batch of documents. Returns number of chunks."""
@@ -48,7 +110,18 @@ class RAGPipeline:
             chunks = self.chunker.chunk(doc, metadata=meta)
             all_chunks.extend(chunks)
         self._documents.extend(documents)
-        self.retriever.index(all_chunks)
+
+        # Generate embeddings if available
+        embeddings = None
+        if self._embedder:
+            try:
+                texts = [c.text for c in all_chunks]
+                embeddings = self._embedder(texts)
+                logger.info("Generated %d embeddings for RAG chunks", len(embeddings))
+            except Exception as exc:
+                logger.warning("Embedding generation failed, using BM25 only: %s", exc)
+
+        self.retriever.index(all_chunks, embeddings)
         return len(all_chunks)
 
     def save_chunks(self, db_path: str | Path) -> int:
@@ -138,6 +211,17 @@ class RAGPipeline:
         return self.reranker.rerank(query, results)
 
     def query_text(self, query: str) -> str:
-        """Return a concatenated context string from top results."""
-        results = self.query(query)
+        """Return a concatenated context string from top results.
+
+        Automatically embeds the query for semantic search if embeddings are available.
+        """
+        query_embedding = None
+        if self._embedder:
+            try:
+                embeddings = self._embedder([query])
+                if embeddings:
+                    query_embedding = embeddings[0]
+            except Exception:
+                pass
+        results = self.query(query, query_embedding=query_embedding)
         return "\n\n---\n\n".join(r.chunk.text for r in results)
