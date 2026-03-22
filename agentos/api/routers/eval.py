@@ -113,6 +113,29 @@ async def run_eval(
     }
 
 
+@router.post("/tasks")
+async def upload_eval_tasks(
+    name: str,
+    tasks: list[dict[str, Any]],
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Upload eval tasks as JSON."""
+    eval_dir = Path.cwd() / "eval"
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    path = eval_dir / f"{name}.json"
+    path.write_text(json.dumps(tasks, indent=2) + "\n")
+    return {"created": str(path), "task_count": len(tasks)}
+
+
+@router.delete("/runs/{run_id}")
+async def delete_eval_run(run_id: int, user: CurrentUser = Depends(get_current_user)):
+    """Delete an eval run."""
+    db = _get_db()
+    db.conn.execute("DELETE FROM eval_runs WHERE id = ?", (run_id,))
+    db.conn.commit()
+    return {"deleted": run_id}
+
+
 @router.get("/tasks")
 async def list_eval_tasks():
     """List available eval task files."""

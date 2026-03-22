@@ -98,6 +98,45 @@ async def get_trace(session_id: str):
     return {"trace_id": trace_id, "sessions": sessions, "cost_rollup": rollup}
 
 
+@router.get("/stats/summary")
+async def session_stats(agent_name: str = "", since_days: int = 30):
+    """Get aggregate session statistics."""
+    import time as _time
+    db = _get_db()
+    since = _time.time() - (since_days * 86400)
+    sql = "SELECT COUNT(*) as total, SUM(cost_total_usd) as cost, AVG(wall_clock_seconds) as avg_duration FROM sessions WHERE created_at >= ?"
+    params: list[Any] = [since]
+    if agent_name:
+        sql = sql.replace("WHERE", "WHERE agent_name = ? AND")
+        params.insert(0, agent_name)
+    row = db.conn.execute(sql, params).fetchone()
+    r = dict(row)
+
+    # Status breakdown
+    status_rows = db.conn.execute(
+        "SELECT status, COUNT(*) as cnt FROM sessions WHERE created_at >= ? GROUP BY status", (since,)
+    ).fetchall()
+
+    return {
+        "total_sessions": r["total"] or 0,
+        "total_cost_usd": r["cost"] or 0,
+        "avg_duration_seconds": r["avg_duration"] or 0,
+        "by_status": {s["status"]: s["cnt"] for s in status_rows},
+    }
+
+
+@router.delete("")
+async def cleanup_sessions(before_days: int = 90):
+    """Delete sessions older than N days."""
+    import time as _time
+    db = _get_db()
+    cutoff = _time.time() - (before_days * 86400)
+    result = db.conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+    db.conn.execute("DELETE FROM turns WHERE session_id NOT IN (SELECT session_id FROM sessions)")
+    db.conn.commit()
+    return {"deleted": result.rowcount, "before_days": before_days}
+
+
 @router.post("/{session_id}/feedback")
 async def submit_feedback(session_id: str, rating: int = 1, comment: str = ""):
     """Submit feedback for a session (-1=negative, 0=neutral, 1=positive)."""

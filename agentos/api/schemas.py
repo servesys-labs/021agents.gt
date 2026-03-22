@@ -96,6 +96,11 @@ class AgentRunRequest(BaseModel):
     task: str = Field(..., description="Task to execute")
     plan: str = Field("", description="LLM plan override")
     stream: bool = Field(False, description="Stream response via SSE")
+    model: str = Field("", description="Model override for this run")
+    budget_usd: float = Field(0, description="Budget limit override (0 = use default)")
+    max_turns: int = Field(0, description="Max turns override (0 = use default)")
+    timeout_seconds: float = Field(0, description="Timeout override (0 = use default)")
+    verbose: bool = Field(False, description="Include detailed turn data in response")
 
 
 class AgentCreateRequest(BaseModel):

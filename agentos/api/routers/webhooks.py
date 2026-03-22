@@ -47,6 +47,34 @@ async def create_webhook(request: CreateWebhookRequest, user: CurrentUser = Depe
     )
 
 
+@router.put("/{webhook_id}")
+async def update_webhook(
+    webhook_id: str,
+    url: str = "",
+    events: list[str] | None = None,
+    is_active: bool | None = None,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update a webhook."""
+    db = _get_db()
+    updates, params = [], []
+    if url:
+        updates.append("url = ?")
+        params.append(url)
+    if events is not None:
+        updates.append("events = ?")
+        params.append(json.dumps(events))
+    if is_active is not None:
+        updates.append("is_active = ?")
+        params.append(1 if is_active else 0)
+    if not updates:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    params.extend([webhook_id, user.org_id])
+    db.conn.execute(f"UPDATE webhooks SET {', '.join(updates)} WHERE webhook_id = ? AND org_id = ?", params)
+    db.conn.commit()
+    return {"updated": webhook_id}
+
+
 @router.delete("/{webhook_id}")
 async def delete_webhook(webhook_id: str, user: CurrentUser = Depends(get_current_user)):
     db = _get_db()

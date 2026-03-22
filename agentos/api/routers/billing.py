@@ -66,6 +66,21 @@ async def get_daily_usage(days: int = 30):
     return {"days": [dict(r) for r in rows]}
 
 
+@router.get("/trace/{trace_id}")
+async def billing_by_trace(trace_id: str):
+    """Get billing breakdown for a specific trace (workflow)."""
+    db = _get_db()
+    rollup = db.trace_cost_rollup(trace_id)
+    records = db.conn.execute(
+        "SELECT * FROM billing_records WHERE trace_id = ? ORDER BY created_at", (trace_id,)
+    ).fetchall()
+    return {
+        "trace_id": trace_id,
+        "rollup": rollup,
+        "records": [dict(r) for r in records],
+    }
+
+
 @router.get("/invoices")
 async def list_invoices(user: CurrentUser = Depends(get_current_user)):
     """List billing invoices (placeholder for Stripe integration)."""

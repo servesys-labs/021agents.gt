@@ -42,6 +42,47 @@ async def create_schedule(request: CreateScheduleRequest, user: CurrentUser = De
     )
 
 
+@router.put("/{schedule_id}")
+async def update_schedule(
+    schedule_id: str,
+    cron: str = "",
+    task: str = "",
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Update a schedule."""
+    schedules = load_schedules()
+    for s in schedules:
+        if s.id == schedule_id:
+            if cron:
+                parse_cron(cron)
+                s.cron = cron
+            if task:
+                s.task = task
+            save_schedules(schedules)
+            return ScheduleResponse(
+                schedule_id=s.id, agent_name=s.agent_name,
+                cron=s.cron, task=s.task, is_enabled=s.enabled,
+                run_count=s.run_count, last_run_at=s.last_run if s.last_run else None,
+            )
+    raise HTTPException(status_code=404, detail="Schedule not found")
+
+
+@router.get("/{schedule_id}/history")
+async def schedule_history(schedule_id: str):
+    """Get run history for a schedule."""
+    schedules = load_schedules()
+    for s in schedules:
+        if s.id == schedule_id:
+            return {
+                "schedule_id": s.id,
+                "run_count": s.run_count,
+                "last_run": s.last_run,
+                "last_status": s.last_status,
+                "last_output": s.last_output,
+            }
+    raise HTTPException(status_code=404, detail="Schedule not found")
+
+
 @router.delete("/{schedule_id}")
 async def delete_schedule(schedule_id: str, user: CurrentUser = Depends(get_current_user)):
     schedules = load_schedules()

@@ -289,3 +289,56 @@ async def get_agent_tools(name: str):
         return {"tools": agent._harness.tool_executor.available_tools()}
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+
+@router.get("/{name}/config")
+async def get_agent_config(name: str):
+    """Get raw agent configuration JSON."""
+    from agentos.agent import Agent
+    try:
+        agent = Agent.from_name(name)
+        return agent.config.to_dict()
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+
+@router.post("/{name}/clone")
+async def clone_agent(name: str, new_name: str, user: CurrentUser = Depends(get_current_user)):
+    """Clone an agent with a new name."""
+    from agentos.agent import Agent, save_agent_config
+    try:
+        agent = Agent.from_name(name)
+        config = agent.config
+        config.name = new_name
+        config.agent_id = ""  # Will get new ID
+        save_agent_config(config)
+        return AgentResponse(
+            name=config.name, description=config.description, model=config.model,
+            tools=config.tools, tags=config.tags, version=config.version,
+        )
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+
+@router.post("/import")
+async def import_agent(config: dict[str, Any], user: CurrentUser = Depends(get_current_user)):
+    """Import an agent from a JSON config."""
+    from agentos.agent import AgentConfig, save_agent_config
+    agent_config = AgentConfig.from_dict(config)
+    save_agent_config(agent_config)
+    return AgentResponse(
+        name=agent_config.name, description=agent_config.description,
+        model=agent_config.model, tools=agent_config.tools,
+        tags=agent_config.tags, version=agent_config.version,
+    )
+
+
+@router.get("/{name}/export")
+async def export_agent(name: str):
+    """Export agent config as JSON for backup or sharing."""
+    from agentos.agent import Agent
+    try:
+        agent = Agent.from_name(name)
+        return {"agent": agent.config.to_dict()}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
