@@ -260,29 +260,62 @@ class Agent:
             timeout_seconds=self.config.timeout_seconds,
         )
 
-        # LLM Router — configure from agent model + env API keys
+        # LLM Router — configure per-tier models from config, falling back to agent model
         llm_router = LLMRouter()
         anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
         openai_key = os.environ.get("OPENAI_API_KEY", "")
         model = self.config.model
 
+        # Load per-tier routing config from config/default.json
+        routing_config: dict[str, dict[str, Any]] = {}
+        default_config_path = Path(__file__).resolve().parent.parent / "config" / "default.json"
+        if default_config_path.exists():
+            try:
+                import json as _json
+                raw = _json.loads(default_config_path.read_text())
+                routing_config = raw.get("llm", {}).get("routing", {})
+            except Exception:
+                pass
+
         if anthropic_key and ("claude" in model or not openai_key):
-            provider = HttpProvider(
-                model_id=model,
-                api_base="https://api.anthropic.com",
-                api_key=anthropic_key,
-                headers={"anthropic-version": "2023-06-01"},
-            )
             for tier in Complexity:
-                llm_router.register(tier, provider, max_tokens=self.config.max_tokens)
+                tier_cfg = routing_config.get(tier.value, {})
+                tier_model = tier_cfg.get("model", model)
+                tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
+                # Use per-tier model if it's an Anthropic model, otherwise fall back
+                if "claude" in tier_model:
+                    provider = HttpProvider(
+                        model_id=tier_model,
+                        api_base="https://api.anthropic.com",
+                        api_key=anthropic_key,
+                        headers={"anthropic-version": "2023-06-01"},
+                    )
+                else:
+                    provider = HttpProvider(
+                        model_id=model,
+                        api_base="https://api.anthropic.com",
+                        api_key=anthropic_key,
+                        headers={"anthropic-version": "2023-06-01"},
+                    )
+                llm_router.register(tier, provider, max_tokens=tier_max_tokens)
         elif openai_key:
-            provider = HttpProvider(
-                model_id=model if "gpt" in model else "gpt-4o",
-                api_base="https://api.openai.com",
-                api_key=openai_key,
-            )
             for tier in Complexity:
-                llm_router.register(tier, provider, max_tokens=self.config.max_tokens)
+                tier_cfg = routing_config.get(tier.value, {})
+                tier_model = tier_cfg.get("model", model if "gpt" in model else "gpt-4o")
+                tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
+                if "gpt" in tier_model or "o1" in tier_model or "o3" in tier_model:
+                    provider = HttpProvider(
+                        model_id=tier_model,
+                        api_base="https://api.openai.com",
+                        api_key=openai_key,
+                    )
+                else:
+                    provider = HttpProvider(
+                        model_id=model if "gpt" in model else "gpt-4o",
+                        api_base="https://api.openai.com",
+                        api_key=openai_key,
+                    )
+                llm_router.register(tier, provider, max_tokens=tier_max_tokens)
 
         # Governance
         gov_data = self.config.governance
@@ -304,16 +337,28 @@ class Agent:
         procedural = ProceduralMemory(
             max_procedures=mem_cfg.get("procedural", {}).get("max_procedures", 500),
         )
-        # RAG — load pipeline if ingested documents exist
+        # RAG — load pipeline from persisted chunks (fast) or re-index from source files (fallback)
         rag_pipeline = None
+        rag_chunks_db = Path.cwd() / "data" / "rag_chunks.db"
         rag_index_path = Path.cwd() / "data" / "rag_index.json"
-        if rag_index_path.exists():
-            try:
+        try:
+            from agentos.rag.pipeline import RAGPipeline
+
+            # Try loading persisted chunks from SQLite first (fast path)
+            if rag_chunks_db.exists():
+                import json as _json
+                chunk_size = 512
+                if rag_index_path.exists():
+                    rag_data = _json.loads(rag_index_path.read_text())
+                    chunk_size = rag_data.get("chunk_size", 512)
+                rag_pipeline = RAGPipeline.load_from_db(rag_chunks_db, chunk_size=chunk_size)
+
+            # Fallback: re-index from source files listed in rag_index.json
+            if rag_pipeline is None and rag_index_path.exists():
                 import json as _json
                 rag_data = _json.loads(rag_index_path.read_text())
                 source_files = rag_data.get("source_files", [])
                 if source_files:
-                    from agentos.rag.pipeline import RAGPipeline
                     rag_pipeline = RAGPipeline(
                         chunk_size=rag_data.get("chunk_size", 512),
                     )
@@ -333,8 +378,8 @@ class Agent:
                         rag_pipeline.ingest(docs, metas)
                     else:
                         rag_pipeline = None
-            except Exception as exc:
-                logger.warning("Could not load RAG index: %s", exc)
+        except Exception as exc:
+            logger.warning("Could not load RAG index: %s", exc)
 
         memory_manager = MemoryManager(
             working=working, episodic=episodic, procedural=procedural,

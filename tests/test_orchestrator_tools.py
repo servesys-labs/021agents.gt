@@ -26,11 +26,11 @@ class TestBuiltinRegistry:
             assert name in BUILTIN_HANDLERS, f"{name} not in BUILTIN_HANDLERS"
 
     def test_handlers_are_coroutines(self):
-        import asyncio
+        import inspect
         for name in ["create-agent", "eval-agent", "evolve-agent",
                       "list-agents", "list-tools"]:
             handler = BUILTIN_HANDLERS[name]
-            assert asyncio.iscoroutinefunction(handler), f"{name} is not async"
+            assert inspect.iscoroutinefunction(handler), f"{name} is not async"
 
 
 class TestCreateAgent:

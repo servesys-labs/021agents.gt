@@ -707,19 +707,12 @@ class TestEvolutionLoopObserverReuse:
 class TestDashboardURLDisplay:
     """cmd_serve should only advertise dashboard URL if the directory exists."""
 
-    def test_no_dashboard_message_without_dir(self, capsys):
-        """When dashboard dir doesn't exist, the URL should not be printed."""
-        # The dashboard_dir check is in cmd_serve. We can verify indirectly
-        # by checking the dashboard directory existence.
+    def test_dashboard_directory_and_index_exist(self):
+        """Dashboard SPA directory and index.html should be present."""
         dashboard_dir = Path(__file__).parent.parent / "agentos" / "dashboard"
-        # If it doesn't exist, cmd_serve shouldn't print dashboard URL
-        # This is a structural test
-        if not dashboard_dir.is_dir():
-            # Good — no misleading dashboard URL will be shown
-            assert True
-        else:
-            # Dashboard exists — URL will be shown (also fine)
-            assert True
+        assert dashboard_dir.is_dir(), "Dashboard directory is missing"
+        index_html = dashboard_dir / "index.html"
+        assert index_html.is_file(), "Dashboard index.html is missing"
 
 
 # ── Ingest Persists Source Files (cli.py) ────────────────────────────────
@@ -744,3 +737,208 @@ class TestIngestPersistsSourceFiles:
         index = json.loads(index_path.read_text())
         assert "source_files" in index
         assert str(doc) in index["source_files"]
+
+
+# ── RAG Chunk Persistence to SQLite ──────────────────────────────────────
+
+
+class TestRAGChunkPersistence:
+    """RAG chunks should be saved to and loaded from SQLite."""
+
+    def test_save_and_load_chunks(self, tmp_path):
+        from agentos.rag.pipeline import RAGPipeline
+
+        pipeline = RAGPipeline(chunk_size=512)
+        pipeline.ingest(
+            ["Alpha bravo charlie delta echo foxtrot."],
+            [{"source": "test.txt", "filename": "test.txt"}],
+        )
+        assert len(pipeline.retriever._chunks) > 0
+
+        db_path = tmp_path / "rag_chunks.db"
+        saved = pipeline.save_chunks(db_path)
+        assert saved > 0
+        assert db_path.exists()
+
+        loaded = RAGPipeline.load_from_db(db_path, chunk_size=512)
+        assert loaded is not None
+        assert len(loaded.retriever._chunks) == saved
+
+    def test_load_from_nonexistent_db_returns_none(self, tmp_path):
+        from agentos.rag.pipeline import RAGPipeline
+
+        result = RAGPipeline.load_from_db(tmp_path / "missing.db")
+        assert result is None
+
+    def test_loaded_pipeline_supports_search(self, tmp_path):
+        from agentos.rag.pipeline import RAGPipeline
+
+        pipeline = RAGPipeline(chunk_size=512)
+        pipeline.ingest(
+            ["Machine learning is a subset of artificial intelligence.",
+             "Neural networks use layers of neurons for computation."],
+            [{"source": "a.txt"}, {"source": "b.txt"}],
+        )
+        db_path = tmp_path / "rag_chunks.db"
+        pipeline.save_chunks(db_path)
+
+        loaded = RAGPipeline.load_from_db(db_path, chunk_size=512)
+        results = loaded.query("machine learning")
+        assert len(results) > 0
+        assert any("machine" in r.chunk.text.lower() for r in results)
+
+    def test_ingest_creates_chunks_db(self, tmp_path, monkeypatch):
+        """cmd_ingest should persist chunks to rag_chunks.db."""
+        from agentos.cli import cmd_ingest
+        import argparse
+
+        monkeypatch.chdir(tmp_path)
+        doc = tmp_path / "doc.txt"
+        doc.write_text("Important document for RAG persistence testing.")
+
+        args = argparse.Namespace(files=[str(doc)], chunk_size=512)
+        cmd_ingest(args)
+
+        chunks_db = tmp_path / "data" / "rag_chunks.db"
+        assert chunks_db.exists(), "rag_chunks.db should be created by cmd_ingest"
+
+    def test_chunk_metadata_roundtrips(self, tmp_path):
+        """Chunk metadata should survive save/load cycle."""
+        from agentos.rag.pipeline import RAGPipeline
+
+        pipeline = RAGPipeline(chunk_size=512)
+        pipeline.ingest(
+            ["Test content for metadata roundtrip."],
+            [{"source": "/path/to/file.md", "filename": "file.md"}],
+        )
+        db_path = tmp_path / "rag_chunks.db"
+        pipeline.save_chunks(db_path)
+
+        loaded = RAGPipeline.load_from_db(db_path, chunk_size=512)
+        chunk = loaded.retriever._chunks[0]
+        assert chunk.metadata["source"] == "/path/to/file.md"
+        assert chunk.metadata["filename"] == "file.md"
+
+
+# ── Per-Tier Complexity Routing ──────────────────────────────────────────
+
+
+class TestPerTierComplexityRouting:
+    """Router should use per-tier models from config/default.json."""
+
+    def test_config_defines_different_models_per_tier(self):
+        config_path = Path(__file__).parent.parent / "config" / "default.json"
+        config = json.loads(config_path.read_text())
+        routing = config["llm"]["routing"]
+
+        models = {tier: routing[tier]["model"] for tier in routing}
+        # Each tier should have a different model
+        assert models["simple"] != models["complex"], (
+            "Simple and complex tiers should use different models"
+        )
+
+    def test_agent_registers_per_tier_providers(self, tmp_path, monkeypatch):
+        """Agent._build_harness should register different providers per tier."""
+        from agentos.agent import Agent, AgentConfig
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        config = AgentConfig(name="test-router", model="claude-sonnet-4-20250514")
+        agent = Agent(config)
+
+        router = agent._harness.llm_router
+        from agentos.llm.router import Complexity
+
+        simple_model = router._routes[Complexity.SIMPLE].provider.model_id
+        complex_model = router._routes[Complexity.COMPLEX].provider.model_id
+
+        # Per config: simple=haiku, complex=opus
+        assert "haiku" in simple_model, f"Simple tier should use haiku, got {simple_model}"
+        assert "opus" in complex_model, f"Complex tier should use opus, got {complex_model}"
+
+    def test_per_tier_max_tokens(self, tmp_path, monkeypatch):
+        """Each tier should have different max_tokens from config."""
+        from agentos.agent import Agent, AgentConfig
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+        config = AgentConfig(name="test-tokens", model="claude-sonnet-4-20250514")
+        agent = Agent(config)
+
+        router = agent._harness.llm_router
+        from agentos.llm.router import Complexity
+
+        simple_tokens = router._routes[Complexity.SIMPLE].max_tokens
+        complex_tokens = router._routes[Complexity.COMPLEX].max_tokens
+        assert simple_tokens < complex_tokens, (
+            f"Simple ({simple_tokens}) should have fewer max_tokens than complex ({complex_tokens})"
+        )
+
+
+# ── Cumulative Cost Tracking ─────────────────────────────────────────────
+
+
+class TestCumulativeCostTracking:
+    """TurnResult should accumulate costs across turns."""
+
+    def test_turn_result_has_cumulative_cost(self):
+        from agentos.core.harness import TurnResult
+        result = TurnResult(
+            turn_number=3, cost_usd=0.05, cumulative_cost_usd=0.15,
+        )
+        assert result.cost_usd == 0.05
+        assert result.cumulative_cost_usd == 0.15
+
+    @pytest.mark.asyncio
+    async def test_cumulative_cost_increases_over_turns(self, tmp_path, monkeypatch):
+        """Over multiple turns, cumulative_cost_usd should grow."""
+        from agentos.core.harness import AgentHarness
+
+        monkeypatch.chdir(tmp_path)
+        harness = AgentHarness()
+        results = await harness.run("hello world")
+
+        assert len(results) >= 1
+        last = results[-1]
+        # Cumulative cost should be >= the last turn's individual cost
+        assert last.cumulative_cost_usd >= last.cost_usd
+
+    @pytest.mark.asyncio
+    async def test_cumulative_cost_sums_correctly(self, tmp_path, monkeypatch):
+        """Cumulative cost on last result should equal sum of all turn costs."""
+        from agentos.core.harness import AgentHarness
+
+        monkeypatch.chdir(tmp_path)
+        harness = AgentHarness()
+        results = await harness.run("analyze this multi-step pipeline workflow")
+
+        if len(results) > 0:
+            total = sum(r.cost_usd for r in results)
+            last_cumulative = results[-1].cumulative_cost_usd
+            assert abs(last_cumulative - total) < 1e-9, (
+                f"Cumulative {last_cumulative} != sum {total}"
+            )
+
+
+# ── Docstring Coverage for RAG Retriever ─────────────────────────────────
+
+
+class TestRetrieverDocstrings:
+    """All public and private methods in HybridRetriever should have docstrings."""
+
+    def test_all_methods_have_docstrings(self):
+        from agentos.rag.retriever import HybridRetriever, RetrievalResult
+        import inspect
+
+        for name, method in inspect.getmembers(HybridRetriever, predicate=inspect.isfunction):
+            assert method.__doc__ is not None, (
+                f"HybridRetriever.{name} is missing a docstring"
+            )
+
+        assert RetrievalResult.__doc__ is not None, (
+            "RetrievalResult is missing a docstring"
+        )

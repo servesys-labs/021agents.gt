@@ -12,6 +12,8 @@ from agentos.rag.chunker import Chunk
 
 @dataclass
 class RetrievalResult:
+    """A single retrieval result pairing a chunk with its relevance score."""
+
     chunk: Chunk
     score: float
     source: str = ""
@@ -24,6 +26,7 @@ class HybridRetriever:
     """
 
     def __init__(self, alpha: float = 0.7) -> None:
+        """Initialize with blend weight alpha (1.0 = fully dense, 0.0 = fully sparse)."""
         self.alpha = alpha
         self._chunks: list[Chunk] = []
         self._embeddings: list[list[float]] = []
@@ -42,6 +45,7 @@ class HybridRetriever:
         self._build_bm25_index()
 
     def _build_bm25_index(self) -> None:
+        """Build BM25 inverted index from stored chunks (term frequencies, doc lengths)."""
         self._doc_freqs = {}
         self._doc_lens = []
         self._doc_term_counts = []
@@ -57,9 +61,11 @@ class HybridRetriever:
 
     @staticmethod
     def _tokenize(text: str) -> list[str]:
+        """Tokenize text into lowercase whitespace-delimited terms."""
         return text.lower().split()
 
     def _bm25_score(self, query_terms: list[str], doc_idx: int) -> float:
+        """Compute BM25 score for a single document against query terms."""
         n = len(self._chunks)
         score = 0.0
         dl = self._doc_lens[doc_idx]
@@ -77,6 +83,7 @@ class HybridRetriever:
 
     @staticmethod
     def _cosine(a: list[float], b: list[float]) -> float:
+        """Compute cosine similarity between two equal-length vectors."""
         if len(a) != len(b) or not a:
             return 0.0
         dot = sum(x * y for x, y in zip(a, b))
