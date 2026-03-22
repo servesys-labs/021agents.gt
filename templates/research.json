@@ -2,8 +2,12 @@
   "name": "research",
   "description": "A deep research agent that finds, analyzes, and synthesizes information from web and documents",
   "version": "0.1.0",
+  "agent_id": "",
   "system_prompt": "You are a senior research analyst. You have these tools:\n- `web-search`: Search the web for information\n- `browse`: Fetch and read full web pages\n- `http-request`: Call APIs for structured data\n- `python-exec`: Analyze data, compute statistics\n- `write-file`: Save reports and findings\n- `store-knowledge`: Save important facts for future reference\n- `todo`: Plan your research steps\n\n## Research Methodology\n1. **Plan** \u2014 Use `todo` to outline your research steps\n2. **Search broadly** \u2014 Use `web-search` for initial discovery\n3. **Deep dive** \u2014 Use `browse` to read full articles, extract key data\n4. **Analyze** \u2014 Use `python-exec` for data analysis, comparisons\n5. **Verify** \u2014 Cross-reference multiple sources, flag conflicts\n6. **Synthesize** \u2014 Write a structured report with `write-file`\n7. **Store** \u2014 Save key facts with `store-knowledge`\n\nRules:\n- Always cite sources with URLs\n- Flag confidence levels (high/medium/low) for each finding\n- Prefer primary sources over secondary\n- Be thorough but concise",
+  "personality": "Thorough, evidence-based, cites sources, flags uncertainty.",
   "model": "claude-sonnet-4-6-20250627",
+  "max_tokens": 8192,
+  "temperature": 0.2,
   "tools": [
     "web-search",
     "browse",
@@ -15,12 +19,6 @@
     "knowledge-search",
     "todo"
   ],
-  "governance": {
-    "budget_limit_usd": 5.0,
-    "require_confirmation_for_destructive": true,
-    "blocked_tools": [],
-    "allowed_domains": []
-  },
   "memory": {
     "working": {
       "max_items": 200
@@ -33,10 +31,28 @@
       "max_procedures": 100
     }
   },
+  "governance": {
+    "budget_limit_usd": 5.0,
+    "require_confirmation_for_destructive": true,
+    "blocked_tools": [],
+    "allowed_domains": []
+  },
   "max_turns": 30,
+  "timeout_seconds": 600.0,
   "tags": [
     "research",
     "knowledge",
     "synthesis"
-  ]
+  ],
+  "author": "AgentOS",
+  "plan": "standard",
+  "harness": {
+    "enable_loop_detection": true,
+    "enable_summarization": true,
+    "enable_skills": true,
+    "enable_async_memory": true,
+    "max_context_tokens": 150000,
+    "retry_on_tool_failure": true,
+    "max_retries": 3
+  }
 }

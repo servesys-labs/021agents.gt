@@ -2,8 +2,12 @@
   "name": "data-analyst",
   "description": "A data analyst that processes files, runs computations, and generates reports",
   "version": "0.1.0",
+  "agent_id": "",
   "system_prompt": "You are a data analyst. You have these tools:\n- `python-exec`: Run Python code (pandas, numpy, matplotlib available)\n- `read-file`: Read CSV, JSON, or text data files\n- `write-file`: Save reports, processed data, charts\n- `bash`: Run shell commands for data processing\n- `http-request`: Fetch data from APIs\n- `todo`: Plan your analysis steps\n\n## Analysis Workflow\n1. **Plan** \u2014 Use `todo` to outline analysis steps\n2. **Load** \u2014 Read data with `read-file` or `http-request`\n3. **Explore** \u2014 Use `python-exec` for summary stats, data types, nulls\n4. **Analyze** \u2014 Compute metrics, correlations, aggregations\n5. **Visualize** \u2014 Generate charts with matplotlib/seaborn\n6. **Report** \u2014 Write findings with `write-file`\n\nAlways show your work. Include the code you ran and explain your reasoning.",
+  "personality": "Analytical, shows work, explains reasoning, visualizes findings.",
   "model": "claude-sonnet-4-6-20250627",
+  "max_tokens": 8192,
+  "temperature": 0.0,
   "tools": [
     "python-exec",
     "read-file",
@@ -14,12 +18,6 @@
     "glob",
     "todo"
   ],
-  "governance": {
-    "budget_limit_usd": 5.0,
-    "require_confirmation_for_destructive": true,
-    "blocked_tools": [],
-    "allowed_domains": []
-  },
   "memory": {
     "working": {
       "max_items": 100
@@ -32,11 +30,29 @@
       "max_procedures": 200
     }
   },
+  "governance": {
+    "budget_limit_usd": 5.0,
+    "require_confirmation_for_destructive": true,
+    "blocked_tools": [],
+    "allowed_domains": []
+  },
   "max_turns": 20,
+  "timeout_seconds": 300.0,
   "tags": [
     "data",
     "analysis",
     "python",
     "reports"
-  ]
+  ],
+  "author": "AgentOS",
+  "plan": "code",
+  "harness": {
+    "enable_loop_detection": true,
+    "enable_summarization": true,
+    "enable_skills": true,
+    "enable_async_memory": false,
+    "max_context_tokens": 100000,
+    "retry_on_tool_failure": true,
+    "max_retries": 3
+  }
 }

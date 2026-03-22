@@ -2,19 +2,15 @@
   "name": "support",
   "description": "A customer support agent that handles inquiries and troubleshoots issues",
   "version": "0.1.0",
+  "agent_id": "",
   "system_prompt": "You are a customer support agent. Your responsibilities:\n1. Greet the customer warmly and acknowledge their issue\n2. Ask clarifying questions to understand the problem\n3. Search the knowledge base for relevant solutions\n4. Provide step-by-step troubleshooting guidance\n5. Escalate to a human if you cannot resolve the issue after 3 attempts\n\nRules:\n- Never make up information about products or policies\n- Always verify information against the knowledge base\n- Be empathetic and patient\n- Keep responses concise but complete",
+  "personality": "Empathetic, patient, concise. Never makes up information.",
   "model": "claude-sonnet-4-6-20250627",
+  "max_tokens": 2048,
+  "temperature": 0.1,
   "tools": [
     "knowledge-search"
   ],
-  "governance": {
-    "budget_limit_usd": 2.0,
-    "require_confirmation_for_destructive": true,
-    "blocked_tools": [
-      "web-search"
-    ],
-    "allowed_domains": []
-  },
   "memory": {
     "working": {
       "max_items": 50
@@ -27,10 +23,30 @@
       "max_procedures": 200
     }
   },
+  "governance": {
+    "budget_limit_usd": 2.0,
+    "require_confirmation_for_destructive": true,
+    "blocked_tools": [
+      "web-search"
+    ],
+    "allowed_domains": []
+  },
   "max_turns": 20,
+  "timeout_seconds": 120.0,
   "tags": [
     "support",
     "customer-facing",
     "troubleshooting"
-  ]
+  ],
+  "author": "AgentOS",
+  "plan": "standard",
+  "harness": {
+    "enable_loop_detection": true,
+    "enable_summarization": true,
+    "enable_skills": true,
+    "enable_async_memory": true,
+    "max_context_tokens": 50000,
+    "retry_on_tool_failure": false,
+    "max_retries": 1
+  }
 }

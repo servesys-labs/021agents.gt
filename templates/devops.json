@@ -2,8 +2,12 @@
   "name": "devops",
   "description": "A DevOps agent that manages infrastructure, CI/CD, deployments, and monitoring",
   "version": "0.1.0",
+  "agent_id": "",
   "system_prompt": "You are a senior DevOps engineer. You have these tools:\n- `bash`: Run shell commands (git, docker, kubectl, terraform, etc.)\n- `read-file`: Read configs (Dockerfile, yaml, terraform, etc.)\n- `write-file`: Create/update config files\n- `edit-file`: Modify existing configs\n- `grep`: Search configs and logs for patterns\n- `glob`: Find files across the project\n- `http-request`: Health checks, API calls to cloud providers\n- `connector`: Notify Slack/PagerDuty on deploy status\n- `todo`: Plan deployment steps\n\n## Workflow\n1. Use `todo` to plan the operation\n2. Use `glob`/`grep` to understand current state\n3. Use `read-file` to review configs before changing\n4. Use `bash` for all infrastructure operations\n5. Use `http-request` to verify health after changes\n6. Use `connector` to notify team on Slack\n\nRules:\n- Always check current state before making changes\n- Use dry-run flags when available\n- Verify health after every deployment\n- Log all actions for audit trail",
+  "personality": "Cautious, always checks state before changes, uses dry-run when available.",
   "model": "claude-sonnet-4-6-20250627",
+  "max_tokens": 4096,
+  "temperature": 0.0,
   "tools": [
     "bash",
     "read-file",
@@ -15,12 +19,6 @@
     "connector",
     "todo"
   ],
-  "governance": {
-    "budget_limit_usd": 10.0,
-    "require_confirmation_for_destructive": true,
-    "blocked_tools": [],
-    "allowed_domains": []
-  },
   "memory": {
     "working": {
       "max_items": 150
@@ -33,11 +31,29 @@
       "max_procedures": 500
     }
   },
+  "governance": {
+    "budget_limit_usd": 10.0,
+    "require_confirmation_for_destructive": true,
+    "blocked_tools": [],
+    "allowed_domains": []
+  },
   "max_turns": 25,
+  "timeout_seconds": 600.0,
   "tags": [
     "devops",
     "infrastructure",
     "deployment",
     "ci-cd"
-  ]
+  ],
+  "author": "AgentOS",
+  "plan": "standard",
+  "harness": {
+    "enable_loop_detection": true,
+    "enable_summarization": true,
+    "enable_skills": true,
+    "enable_async_memory": false,
+    "max_context_tokens": 100000,
+    "retry_on_tool_failure": true,
+    "max_retries": 5
+  }
 }

@@ -2,17 +2,15 @@
   "name": "blank",
   "description": "blank \u2014 customize me!",
   "version": "0.1.0",
+  "agent_id": "",
   "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
+  "personality": "",
   "model": "claude-sonnet-4-6-20250627",
+  "max_tokens": 4096,
+  "temperature": 0.0,
   "tools": [
     "example-search"
   ],
-  "governance": {
-    "budget_limit_usd": 10.0,
-    "require_confirmation_for_destructive": true,
-    "blocked_tools": [],
-    "allowed_domains": []
-  },
   "memory": {
     "working": {
       "max_items": 100
@@ -25,8 +23,26 @@
       "max_procedures": 500
     }
   },
+  "governance": {
+    "budget_limit_usd": 10.0,
+    "require_confirmation_for_destructive": true,
+    "blocked_tools": [],
+    "allowed_domains": []
+  },
   "max_turns": 50,
+  "timeout_seconds": 300.0,
   "tags": [
     "starter"
-  ]
+  ],
+  "author": "AgentOS",
+  "plan": "standard",
+  "harness": {
+    "enable_loop_detection": true,
+    "enable_summarization": false,
+    "enable_skills": true,
+    "enable_async_memory": false,
+    "max_context_tokens": 100000,
+    "retry_on_tool_failure": true,
+    "max_retries": 3
+  }
 }
