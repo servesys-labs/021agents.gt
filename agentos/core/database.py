@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -447,6 +447,99 @@ CREATE INDEX IF NOT EXISTS idx_eval_runs_agent ON eval_runs(agent_name);
 CREATE INDEX IF NOT EXISTS idx_eval_runs_created ON eval_runs(created_at);
 """
 
+# ── Migration from v2 → v3 (portal tables) ────────────────────────────────
+
+MIGRATION_V2_TO_V3 = """\
+CREATE TABLE IF NOT EXISTS users (
+    user_id         TEXT PRIMARY KEY,
+    email           TEXT NOT NULL UNIQUE,
+    name            TEXT NOT NULL DEFAULT '',
+    password_hash   TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT 'email',
+    avatar_url      TEXT NOT NULL DEFAULT '',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+CREATE TABLE IF NOT EXISTS orgs (
+    org_id          TEXT PRIMARY KEY,
+    name            TEXT NOT NULL,
+    slug            TEXT NOT NULL UNIQUE,
+    owner_user_id   TEXT NOT NULL,
+    plan            TEXT NOT NULL DEFAULT 'free',
+    stripe_customer_id  TEXT NOT NULL DEFAULT '',
+    stripe_subscription_id TEXT NOT NULL DEFAULT '',
+    settings_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_orgs_slug ON orgs(slug);
+
+CREATE TABLE IF NOT EXISTS org_members (
+    org_id          TEXT NOT NULL,
+    user_id         TEXT NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'member',
+    invited_by      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    PRIMARY KEY (org_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    key_id          TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    user_id         TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL DEFAULT '',
+    key_prefix      TEXT NOT NULL DEFAULT '',
+    key_hash        TEXT NOT NULL,
+    scopes          TEXT NOT NULL DEFAULT '["*"]',
+    last_used_at    REAL,
+    expires_at      REAL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_org ON api_keys(org_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+
+CREATE TABLE IF NOT EXISTS webhooks (
+    webhook_id      TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    url             TEXT NOT NULL,
+    secret          TEXT NOT NULL DEFAULT '',
+    events          TEXT NOT NULL DEFAULT '["*"]',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    last_triggered_at REAL,
+    failure_count   INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_webhooks_org ON webhooks(org_id);
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    webhook_id      TEXT NOT NULL,
+    event_type      TEXT NOT NULL,
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    response_status INTEGER,
+    response_body   TEXT NOT NULL DEFAULT '',
+    duration_ms     REAL NOT NULL DEFAULT 0.0,
+    success         INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+
+CREATE TABLE IF NOT EXISTS agent_versions (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL,
+    version         TEXT NOT NULL,
+    config_json     TEXT NOT NULL,
+    created_by      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    UNIQUE(agent_name, version)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_versions_name ON agent_versions(agent_name);
+"""
+
 
 # ── Database class ───────────────────────────────────────────────────────────
 
@@ -526,6 +619,18 @@ class AgentDB:
                 except sqlite3.OperationalError as exc:
                     if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
                         raise
+            self.conn.commit()
+        if from_version < 3:
+            logger.info("Migrating database from v%d to v3 (portal tables)", from_version)
+            for stmt in MIGRATION_V2_TO_V3.split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "already exists" not in str(exc).lower() and "duplicate" not in str(exc).lower():
+                        logger.debug("Migration stmt skipped: %s", exc)
             self.conn.commit()
 
     @contextmanager

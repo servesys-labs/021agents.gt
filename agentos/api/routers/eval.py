@@ -1,0 +1,134 @@
+"""Eval router — run evaluations, view results."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from agentos.api.deps import CurrentUser, get_current_user, _get_db
+from agentos.api.schemas import EvalRunResponse
+
+router = APIRouter(prefix="/eval", tags=["eval"])
+
+
+@router.get("/runs", response_model=list[EvalRunResponse])
+async def list_eval_runs(agent_name: str = "", limit: int = 20):
+    """List eval runs."""
+    db = _get_db()
+    sql = "SELECT * FROM eval_runs WHERE 1=1"
+    params: list[Any] = []
+    if agent_name:
+        sql += " AND agent_name = ?"
+        params.append(agent_name)
+    sql += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+
+    rows = db.conn.execute(sql, params).fetchall()
+    return [
+        EvalRunResponse(
+            run_id=r["id"], agent_name=r["agent_name"],
+            pass_rate=r["pass_rate"], avg_score=r["avg_score"],
+            avg_latency_ms=r["avg_latency_ms"],
+            total_cost_usd=r["total_cost_usd"],
+            total_tasks=r["total_tasks"], total_trials=r["total_trials"],
+        )
+        for r in rows
+    ]
+
+
+@router.get("/runs/{run_id}")
+async def get_eval_run(run_id: int):
+    """Get detailed eval run results."""
+    db = _get_db()
+    row = db.conn.execute("SELECT * FROM eval_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    return dict(row)
+
+
+@router.post("/run")
+async def run_eval(
+    agent_name: str,
+    eval_file: str,
+    trials: int = 3,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Run an evaluation from the API."""
+    from agentos.agent import Agent
+    from agentos.eval.gym import EvalGym, EvalTask
+    from agentos.eval.grader import ContainsGrader, LLMGrader
+
+    # Load agent
+    try:
+        agent = Agent.from_name(agent_name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
+
+    # Load eval tasks
+    eval_path = Path(eval_file)
+    if not eval_path.exists():
+        raise HTTPException(status_code=404, detail=f"Eval file not found: {eval_file}")
+
+    tasks_data = json.loads(eval_path.read_text())
+    gym = EvalGym()
+    gym.trials_per_task = trials
+
+    for t in tasks_data:
+        grader_type = t.get("grader", "contains")
+        if grader_type == "llm":
+            grader = LLMGrader(criteria=t.get("criteria", t.get("expected", "")))
+        else:
+            grader = ContainsGrader()
+        gym.add_task(EvalTask(
+            name=t.get("name", ""), input=t["input"],
+            expected=t["expected"], grader=grader,
+        ))
+
+    # Run eval
+    from agentos.eval.gym import AgentResult
+
+    async def agent_fn(task_input: str) -> AgentResult:
+        results = await agent.run(task_input)
+        output = ""
+        cost = 0.0
+        for r in results:
+            if r.llm_response:
+                output = r.llm_response.content
+                cost += r.cost_usd
+        return AgentResult(output=output, cost_usd=cost)
+
+    report = await gym.run(agent_fn)
+
+    return {
+        "pass_rate": report.pass_rate,
+        "avg_score": report.avg_score,
+        "avg_latency_ms": report.avg_latency_ms,
+        "total_cost_usd": report.total_cost_usd,
+        "total_tasks": report.total_tasks,
+        "total_trials": report.total_trials,
+        "pass_count": report.pass_count,
+    }
+
+
+@router.get("/tasks")
+async def list_eval_tasks():
+    """List available eval task files."""
+    eval_dir = Path.cwd() / "eval"
+    if not eval_dir.exists():
+        return {"tasks": []}
+    files = sorted(eval_dir.glob("*.json"))
+    tasks = []
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+            tasks.append({
+                "file": str(f.relative_to(Path.cwd())),
+                "name": f.stem,
+                "task_count": len(data),
+            })
+        except Exception:
+            continue
+    return {"tasks": tasks}

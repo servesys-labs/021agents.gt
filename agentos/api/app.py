@@ -150,13 +150,20 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
             logger.warning("Could not load default agent for harness: %s", exc)
     _harness = harness or AgentHarness.from_config_file()
 
-    # Mount auth routes (signup, login, /auth/me, token verify)
+    # Mount legacy auth routes
     from agentos.auth.middleware import mount_auth_routes
     mount_auth_routes(app)
 
     # Mount A2A protocol routes (agent discovery + JSON-RPC)
     from agentos.a2a.server import mount_a2a_routes
     mount_a2a_routes(app)
+
+    # Mount v1 API routers (portal backend)
+    from agentos.api.routers import auth, agents as agents_router, sessions, eval, billing, plans, schedules, api_keys, webhooks, orgs
+    for r in [auth.router, agents_router.router, sessions.router, eval.router,
+              billing.router, plans.router, schedules.router, api_keys.router,
+              webhooks.router, orgs.router]:
+        app.include_router(r, prefix="/api/v1")
 
     # Serve local dashboard (same SPA as CF deploy)
     import importlib.resources
