@@ -99,14 +99,32 @@ class PipedreamProvider(ConnectorProvider):
     def _headers(self, user_id: str = "", app: str = "") -> dict[str, str]:
         h = {
             "Authorization": f"Bearer {self._access_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
             "x-pd-project-id": self.project_id,
             "x-pd-environment": self.environment,
+            "x-pd-external-user-id": user_id or "default-user",
         }
-        if user_id:
-            h["x-pd-external-user-id"] = user_id
         if app:
             h["x-pd-app-slug"] = app
         return h
+
+    @staticmethod
+    def _parse_sse_or_json(text: str) -> dict:
+        """Parse response that may be JSON or SSE (text/event-stream)."""
+        text = text.strip()
+        if text.startswith("event:") or text.startswith("data:"):
+            for line in text.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        return json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+            return {}
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {}
 
     async def list_tools(self, app: str = "") -> list[ConnectorTool]:
         """List available tools, optionally filtered by app."""
@@ -118,20 +136,20 @@ class PipedreamProvider(ConnectorProvider):
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                # Use MCP JSON-RPC to list tools
                 resp = await client.post(
                     self.MCP_URL,
-                    headers={**self._headers(app=app), "Content-Type": "application/json"},
+                    headers=self._headers(app=app),
                     json={"jsonrpc": "2.0", "id": "1", "method": "tools/list"},
                 )
                 if resp.status_code != 200:
+                    logger.warning("Pipedream list_tools HTTP %s: %s", resp.status_code, resp.text[:200])
                     return []
-                data = resp.json()
+                data = self._parse_sse_or_json(resp.text)
                 tools_data = data.get("result", {}).get("tools", [])
                 return [
                     ConnectorTool(
                         name=t.get("name", ""),
-                        description=t.get("description", ""),
+                        description=t.get("description", t.get("title", "")),
                         app=app,
                         input_schema=t.get("inputSchema", {}),
                         provider="pipedream",
@@ -163,7 +181,7 @@ class PipedreamProvider(ConnectorProvider):
                     },
                 )
 
-                data = resp.json()
+                data = self._parse_sse_or_json(resp.text)
 
                 # Check for auth required response
                 if "error" in data:
