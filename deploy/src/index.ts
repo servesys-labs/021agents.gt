@@ -728,6 +728,72 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
         last_used INTEGER NOT NULL
       )`;
 
+      // Sessions — mirrors Python AgentDB.sessions (compliance & audit)
+      this.sql`CREATE TABLE IF NOT EXISTS sessions (
+        session_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL DEFAULT '',
+        agent_name TEXT NOT NULL DEFAULT '',
+        agent_version TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'unknown',
+        stop_reason TEXT NOT NULL DEFAULT 'completed',
+        stop_initiated_by TEXT NOT NULL DEFAULT '',
+        is_finished INTEGER NOT NULL DEFAULT 0,
+        finish_accepted INTEGER,
+        error_attribution TEXT,
+        step_count INTEGER NOT NULL DEFAULT 0,
+        action_count INTEGER NOT NULL DEFAULT 0,
+        time_to_first_action_ms REAL NOT NULL DEFAULT 0.0,
+        wall_clock_seconds REAL NOT NULL DEFAULT 0.0,
+        input_text TEXT NOT NULL DEFAULT '',
+        output_text TEXT NOT NULL DEFAULT '',
+        cost_llm_input_usd REAL NOT NULL DEFAULT 0.0,
+        cost_llm_output_usd REAL NOT NULL DEFAULT 0.0,
+        cost_tool_usd REAL NOT NULL DEFAULT 0.0,
+        cost_total_usd REAL NOT NULL DEFAULT 0.0,
+        benchmark_cost_llm_input_usd REAL NOT NULL DEFAULT 0.0,
+        benchmark_cost_llm_output_usd REAL NOT NULL DEFAULT 0.0,
+        benchmark_cost_tool_usd REAL NOT NULL DEFAULT 0.0,
+        benchmark_cost_total_usd REAL NOT NULL DEFAULT 0.0,
+        composition_json TEXT NOT NULL DEFAULT '{}',
+        eval_score REAL,
+        eval_passed INTEGER,
+        eval_task_name TEXT NOT NULL DEFAULT '',
+        eval_conditions_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL
+      )`;
+
+      // Turns — per-turn detail within a session
+      this.sql`CREATE TABLE IF NOT EXISTS turns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        turn_number INTEGER NOT NULL,
+        model_used TEXT NOT NULL DEFAULT '',
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        latency_ms REAL NOT NULL DEFAULT 0.0,
+        llm_content TEXT NOT NULL DEFAULT '',
+        cost_llm_input_usd REAL NOT NULL DEFAULT 0.0,
+        cost_llm_output_usd REAL NOT NULL DEFAULT 0.0,
+        cost_tool_usd REAL NOT NULL DEFAULT 0.0,
+        cost_total_usd REAL NOT NULL DEFAULT 0.0,
+        tool_calls_json TEXT NOT NULL DEFAULT '[]',
+        tool_results_json TEXT NOT NULL DEFAULT '[]',
+        errors_json TEXT NOT NULL DEFAULT '[]'
+      )`;
+
+      // Errors — structured error log
+      this.sql`CREATE TABLE IF NOT EXISTS errors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        message TEXT NOT NULL,
+        tool_name TEXT,
+        turn INTEGER NOT NULL DEFAULT 0,
+        recoverable INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      )`;
+
       this.sql`CREATE TABLE IF NOT EXISTS eval_results (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         task_name TEXT NOT NULL,
@@ -736,6 +802,34 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
         score REAL NOT NULL,
         latency_ms REAL NOT NULL,
         output TEXT DEFAULT '',
+        created_at INTEGER NOT NULL
+      )`;
+
+      // Eval runs — aggregate eval reports (mirrors Python eval_runs table)
+      this.sql`CREATE TABLE IF NOT EXISTS eval_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_name TEXT NOT NULL DEFAULT '',
+        agent_version TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        benchmark_name TEXT NOT NULL DEFAULT '',
+        benchmark_version TEXT NOT NULL DEFAULT '',
+        grader_type TEXT NOT NULL DEFAULT '',
+        protocol TEXT NOT NULL DEFAULT 'agentos',
+        total_tasks INTEGER NOT NULL DEFAULT 0,
+        total_trials INTEGER NOT NULL DEFAULT 0,
+        pass_count INTEGER NOT NULL DEFAULT 0,
+        fail_count INTEGER NOT NULL DEFAULT 0,
+        error_count INTEGER NOT NULL DEFAULT 0,
+        pass_rate REAL NOT NULL DEFAULT 0.0,
+        avg_score REAL NOT NULL DEFAULT 0.0,
+        avg_latency_ms REAL NOT NULL DEFAULT 0.0,
+        total_cost_usd REAL NOT NULL DEFAULT 0.0,
+        benchmark_cost_usd REAL NOT NULL DEFAULT 0.0,
+        avg_tool_calls REAL NOT NULL DEFAULT 0.0,
+        tool_efficiency REAL NOT NULL DEFAULT 1.0,
+        pass_at_1 REAL,
+        pass_at_3 REAL,
+        eval_conditions_json TEXT NOT NULL DEFAULT '{}',
         created_at INTEGER NOT NULL
       )`;
 
@@ -760,17 +854,63 @@ export class AgentOSWorker extends Agent<Env, AgentState> {
         keep_alive_ms INTEGER DEFAULT 300000
       )`;
 
-      // Evolution proposals table
-      this.sql`CREATE TABLE IF NOT EXISTS evolution_proposals (
+      // Evolution proposals — mirrors Python proposals table
+      this.sql`CREATE TABLE IF NOT EXISTS proposals (
         id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        rationale TEXT DEFAULT '',
-        category TEXT DEFAULT '',
-        priority REAL DEFAULT 0,
-        status TEXT DEFAULT 'pending',
-        modification TEXT DEFAULT '{}',
-        evidence TEXT DEFAULT '{}',
+        title TEXT NOT NULL DEFAULT '',
+        rationale TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT '',
+        modification_json TEXT NOT NULL DEFAULT '{}',
+        priority REAL NOT NULL DEFAULT 0.0,
+        evidence_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'pending',
+        surfaced INTEGER NOT NULL DEFAULT 0,
+        applied_version TEXT NOT NULL DEFAULT '',
+        reviewer_note TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        reviewed_at INTEGER
+      )`;
+
+      // Evolution entries — mirrors Python evolution_entries table
+      this.sql`CREATE TABLE IF NOT EXISTS evolution_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        version TEXT NOT NULL,
+        previous_version TEXT NOT NULL,
+        proposal_id TEXT NOT NULL DEFAULT '',
+        proposal_title TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT '',
+        modification_json TEXT NOT NULL DEFAULT '{}',
+        previous_config_json TEXT NOT NULL DEFAULT '{}',
+        new_config_json TEXT NOT NULL DEFAULT '{}',
+        reviewer TEXT NOT NULL DEFAULT '',
+        reviewer_note TEXT NOT NULL DEFAULT '',
+        metrics_before_json TEXT NOT NULL DEFAULT '{}',
+        metrics_after_json TEXT NOT NULL DEFAULT '{}',
+        impact_json TEXT NOT NULL DEFAULT '{}',
         created_at INTEGER NOT NULL
+      )`;
+
+      // Cost ledger — persistent cost tracking
+      this.sql`CREATE TABLE IF NOT EXISTS cost_ledger (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT '',
+        agent_name TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0.0,
+        created_at INTEGER NOT NULL
+      )`;
+
+      // Facts — semantic memory
+      this.sql`CREATE TABLE IF NOT EXISTS facts (
+        key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL DEFAULT '""',
+        embedding_json TEXT NOT NULL DEFAULT '[]',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
       )`;
     } catch (err) {
       console.error("Failed to initialize SQL tables:", err);

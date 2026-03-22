@@ -13,10 +13,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from agentos.defaults import DEFAULT_MODEL
+
 logger = logging.getLogger(__name__)
 
 def _resolve_agents_dir() -> Path:
-    """Resolve the agents directory — cwd/agents/ first, then package root."""
+    """Resolve the agents directory — cwd/agents/ first, then package root.
+
+    Called dynamically (not cached at import time) so that tests and
+    commands that change cwd after import still find the right directory.
+    """
     cwd_agents = Path.cwd() / "agents"
     if cwd_agents.is_dir():
         return cwd_agents
@@ -27,6 +33,8 @@ def _resolve_agents_dir() -> Path:
     return cwd_agents  # Default: will be created on save
 
 
+# Kept as a module-level alias for backward compatibility.
+# New code should call _resolve_agents_dir() for a fresh lookup.
 AGENTS_DIR = _resolve_agents_dir()
 
 
@@ -44,7 +52,7 @@ class AgentConfig:
     personality: str = ""
 
     # LLM settings
-    model: str = "claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODEL
     max_tokens: int = 4096
     temperature: float = 0.0
 
@@ -72,10 +80,11 @@ class AgentConfig:
     # Metadata
     tags: list[str] = field(default_factory=list)
     author: str = ""
+    built_with: str = ""  # "stub" | "anthropic" | "openai" | "" — how create built this agent
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict (for YAML/JSON output)."""
-        return {
+        d: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
             "version": self.version,
@@ -93,6 +102,9 @@ class AgentConfig:
             "tags": self.tags,
             "author": self.author,
         }
+        if self.built_with:
+            d["built_with"] = self.built_with
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> AgentConfig:
@@ -143,8 +155,9 @@ def load_agent_config(path: str | Path) -> AgentConfig:
 def save_agent_config(config: AgentConfig, path: str | Path | None = None) -> Path:
     """Save an agent definition to a YAML or JSON file."""
     if path is None:
-        AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-        path = AGENTS_DIR / f"{config.name}.json"
+        agents_dir = _resolve_agents_dir()
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        path = agents_dir / f"{config.name}.json"
     else:
         path = Path(path)
 
@@ -164,7 +177,7 @@ def save_agent_config(config: AgentConfig, path: str | Path | None = None) -> Pa
 
 def list_agents(directory: str | Path | None = None) -> list[AgentConfig]:
     """Discover all agent definitions in a directory."""
-    directory = Path(directory) if directory else AGENTS_DIR
+    directory = Path(directory) if directory else _resolve_agents_dir()
     if not directory.exists():
         return []
 
@@ -182,12 +195,48 @@ class Agent:
     """A runnable agent instance built from an AgentConfig.
 
     This is the primary user-facing class. It wires up the harness,
-    tools, memory, and governance from a single config object.
+    tools, memory, governance, and observability from a single config.
+
+    Observability is automatic: every ``run()`` call is traced and
+    recorded to SQLite (if data/ exists). No manual setup needed.
     """
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
+        self._apply_project_defaults()
+        self._db = None
+        self._observer = None
+        self._tracer = None
         self._harness = self._build_harness()
+        self._attach_observability()
+
+    def _apply_project_defaults(self) -> None:
+        """Apply project-level defaults from agentos.yaml (if present).
+
+        This runs automatically on construction so every code path
+        (run, chat, eval, evolve) inherits project settings without
+        each CLI command needing to call it separately.
+        """
+        config_path = Path.cwd() / "agentos.yaml"
+        if not config_path.exists():
+            return
+        try:
+            try:
+                import yaml
+                data = yaml.safe_load(config_path.read_text()) or {}
+            except ImportError:
+                data = {}
+            defaults = data.get("defaults", {}) if isinstance(data, dict) else {}
+            if not defaults:
+                return
+            from agentos.defaults import DEFAULT_MODEL
+            if defaults.get("model") and self.config.model == DEFAULT_MODEL:
+                self.config.model = defaults["model"]
+            budget = defaults.get("budget_limit_usd")
+            if budget and self.config.governance.get("budget_limit_usd") == 10.0:
+                self.config.governance["budget_limit_usd"] = budget
+        except Exception:
+            pass
 
     def _build_harness(self):
         """Wire up all subsystems from the agent config."""
@@ -299,9 +348,118 @@ class Agent:
 
         return harness
 
+    def _attach_observability(self) -> None:
+        """Auto-attach observer, tracer, and DB if data/ dir exists.
+
+        This makes every ``run()`` call automatically observed and
+        persisted — no manual setup in CLI commands needed.
+        """
+        from agentos.core.tracing import Tracer
+        from agentos.evolution.observer import Observer
+
+        self._tracer = Tracer()
+
+        # Auto-open DB if data/ directory exists (created by `agentos init`)
+        data_dir = Path.cwd() / "data"
+        db_path = data_dir / "agent.db"
+        if data_dir.is_dir():
+            try:
+                from agentos.core.database import AgentDB
+                self._db = AgentDB(db_path)
+                self._db.initialize()
+            except Exception as exc:
+                logger.warning("Could not open database at %s: %s", db_path, exc)
+                self._db = None
+
+        # Attach observer to the harness event bus
+        self._observer = Observer(
+            event_bus=self._harness.event_bus,
+            db=self._db,
+        )
+        self._observer.attach(
+            agent_name=self.config.name,
+            agent_config=self.config.to_dict(),
+        )
+
+    @property
+    def db(self):
+        """The agent's SQLite database (None if no data/ dir)."""
+        return self._db
+
+    @property
+    def tracer(self):
+        """The agent's span tracer."""
+        return self._tracer
+
+    @property
+    def observer(self):
+        """The agent's session observer."""
+        return self._observer
+
+    @property
+    def uses_stub_provider(self) -> bool:
+        """True if any LLM route uses the stub provider (no API key)."""
+        from agentos.llm.provider import StubProvider
+        return any(
+            isinstance(route.provider, StubProvider)
+            for route in self._harness.llm_router._routes.values()
+        )
+
+    def apply_overrides(
+        self,
+        *,
+        turns: int | None = None,
+        timeout: float | None = None,
+        budget: float | None = None,
+        model: str | None = None,
+    ) -> None:
+        """Apply runtime overrides and rebuild the harness.
+
+        This is the safe way to change agent settings at runtime —
+        modifies the config and rebuilds the harness so all subsystems
+        pick up the changes (governance budget, LLM router, etc.).
+        """
+        changed = False
+        if turns is not None:
+            self.config.max_turns = turns
+            changed = True
+        if timeout is not None:
+            self.config.timeout_seconds = timeout
+            changed = True
+        if budget is not None:
+            self.config.governance["budget_limit_usd"] = budget
+            changed = True
+        if model is not None:
+            self.config.model = model
+            changed = True
+        if changed:
+            self._harness = self._build_harness()
+            self._attach_observability()
+
     async def run(self, user_input: str) -> list:
-        """Execute the agent on a user task."""
-        return await self._harness.run(user_input)
+        """Execute the agent on a user task.
+
+        Every run is automatically:
+        - Traced (span-based tracing with parent-child hierarchy)
+        - Observed (SessionRecord built from EventBus events)
+        - Persisted (to SQLite if data/ dir exists)
+        """
+        from agentos.core.tracing import Tracer
+
+        results = await self._harness.run(user_input)
+
+        # Persist spans to DB if available
+        if self._db and self._tracer and self._tracer.span_count > 0:
+            try:
+                session_id = ""
+                if self._observer and self._observer.records:
+                    session_id = self._observer.records[-1].session_id
+                self._db.insert_spans(self._tracer.export(), session_id=session_id)
+                self._tracer.clear()
+            except Exception as exc:
+                logger.warning("Failed to persist spans: %s", exc)
+
+        return results
 
     @classmethod
     def from_file(cls, path: str | Path) -> Agent:
@@ -311,7 +469,7 @@ class Agent:
     @classmethod
     def from_name(cls, name: str, directory: str | Path | None = None) -> Agent:
         """Load a named agent from the agents directory."""
-        directory = Path(directory) if directory else AGENTS_DIR
+        directory = Path(directory) if directory else _resolve_agents_dir()
         for ext in (".yaml", ".yml", ".json"):
             p = directory / f"{name}{ext}"
             if p.exists():

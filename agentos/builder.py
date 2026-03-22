@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
-from agentos.agent import AgentConfig, save_agent_config
+from agentos.agent import AgentConfig, save_agent_config, AGENTS_DIR
+from agentos.defaults import DEFAULT_MODEL, slugify as _slugify
 from agentos.llm.provider import LLMProvider, LLMResponse, StubProvider
 from agentos.tools.registry import ToolRegistry
 
@@ -49,7 +51,7 @@ The JSON must conform to this schema:
   "description": "What this agent does",
   "system_prompt": "You are... (full system prompt for the agent)",
   "personality": "Brief personality description",
-  "model": "claude-sonnet-4-20250514",
+  "model": "{default_model}",
   "max_tokens": 4096,
   "temperature": 0.0,
   "tools": ["tool-name-1", "tool-name-2"],
@@ -75,8 +77,9 @@ The JSON must conform to this schema:
 
 def _extract_json(text: str) -> dict[str, Any] | None:
     """Extract a JSON object from LLM output (may be wrapped in ```json blocks)."""
-    # Try to find ```json ... ``` block
     import re
+
+    # Try to find ```json ... ``` block first (most reliable)
     match = re.search(r"```json\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     if match:
         try:
@@ -84,13 +87,42 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             pass
 
-    # Try to find raw JSON object
-    match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
+    # Fallback: find outermost balanced braces using a simple brace counter.
+    # This handles arbitrary nesting depth unlike the previous regex approach.
+    start = text.find("{")
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    # This brace pair wasn't valid JSON — keep searching
+                    next_start = text.find("{", start + 1)
+                    if next_start == -1:
+                        return None
+                    # Restart from next opening brace
+                    return _extract_json(text[next_start:])
 
     return None
 
@@ -140,7 +172,10 @@ class AgentBuilder:
 
         return {
             "role": "system",
-            "content": BUILDER_SYSTEM_PROMPT.format(available_tools=tools_text),
+            "content": BUILDER_SYSTEM_PROMPT.format(
+                available_tools=tools_text,
+                default_model=DEFAULT_MODEL,
+            ),
         }
 
     async def _call_llm(self) -> str:
@@ -217,24 +252,3 @@ class AgentBuilder:
         return str(path)
 
 
-_STOP_WORDS = frozenset({
-    "a", "an", "the", "that", "this", "my", "your", "our", "their",
-    "which", "who", "whom", "is", "are", "was", "were", "be", "been",
-    "and", "or", "but", "for", "with", "from", "into", "of", "to",
-    "in", "on", "at", "by", "it", "its", "i", "me", "we", "you",
-    "can", "will", "does", "do", "has", "have", "had",
-})
-
-
-def _slugify(text: str) -> str:
-    """Convert text to a concise, lowercase, hyphenated slug."""
-    import re
-    text = re.sub(r"[^a-z0-9\s-]", "", text.lower().strip())
-    words = text.split()
-    # Remove stop words but keep at least 2 words
-    meaningful = [w for w in words if w not in _STOP_WORDS]
-    if len(meaningful) < 2:
-        meaningful = words[:3]
-    slug = "-".join(meaningful[:5])  # Max 5 meaningful words
-    slug = re.sub(r"-+", "-", slug).strip("-")
-    return slug[:40].rstrip("-") or "my-agent"

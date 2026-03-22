@@ -103,9 +103,22 @@ class EvolutionLoop:
 
     # ── Step 1: Analyze ────────────────────────────────────────────
 
-    def analyze(self) -> AnalysisReport:
-        """Analyze all observed sessions for patterns."""
+    def analyze(self, db=None) -> AnalysisReport:
+        """Analyze all observed sessions for patterns.
+
+        If a database is provided, also incorporates human feedback
+        into the analysis recommendations.
+        """
         report = self.analyzer.analyze(self.observer.records)
+
+        # Incorporate human feedback from the database
+        if db is not None:
+            try:
+                feedback = db.feedback_summary(self.observer._agent_name)
+                self.analyzer.incorporate_feedback(report, feedback)
+            except Exception:
+                pass  # DB may not have feedback table (v1 schema)
+
         self._latest_report = report
         return report
 

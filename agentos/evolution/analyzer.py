@@ -225,6 +225,35 @@ class FailureAnalyzer:
                 sources[err.source.value] += 1
         return sources.most_common(10)
 
+    def incorporate_feedback(
+        self,
+        report: AnalysisReport,
+        feedback_summary: dict[str, Any],
+    ) -> None:
+        """Enrich analysis with human feedback data.
+
+        Connects the feedback collection system to the evolution loop —
+        human signals (thumbs up/down, corrections) inform recommendations.
+        """
+        if not feedback_summary or feedback_summary.get("total", 0) == 0:
+            return
+
+        total = feedback_summary["total"]
+        negative = feedback_summary.get("negative", 0)
+        approval = feedback_summary.get("approval_rate", 0.0)
+
+        if negative > 0 and approval < 0.5:
+            report.recommendations.append(
+                f"Human feedback: {negative}/{total} responses rated negative "
+                f"(approval rate {approval:.0%}). Review corrections and common "
+                "complaint patterns to improve system prompt or tool behavior."
+            )
+        elif approval >= 0.8:
+            report.recommendations.append(
+                f"Human feedback is positive ({approval:.0%} approval rate, "
+                f"{total} responses rated). Current agent behavior is well-received."
+            )
+
     def _generate_recommendations(
         self,
         report: AnalysisReport,
