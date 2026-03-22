@@ -2,10 +2,13 @@ import { useGetIdentity } from "@refinedev/core";
 import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useState } from "react";
 
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
+import { useToast } from "../../components/common/ToastProvider";
 import { safeArray } from "../../lib/adapters";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { isRequired, parseScopes } from "../../lib/validation";
 
 type ApiKey = {
   key_id: string;
@@ -24,10 +27,12 @@ type Organization = {
 
 export const SettingsPage = () => {
   const { data: identity } = useGetIdentity<{ name: string; email: string }>();
+  const { showToast } = useToast();
   const [newKeyName, setNewKeyName] = useState("portal-key");
   const [keyScope, setKeyScope] = useState("*");
   const [createdKey, setCreatedKey] = useState("");
   const [actionError, setActionError] = useState("");
+  const [pendingRevokeKeyId, setPendingRevokeKeyId] = useState<string | null>(null);
 
   const keysQuery = useApiQuery<ApiKey[]>("/api/v1/api-keys");
   const orgsQuery = useApiQuery<Organization[]>("/api/v1/orgs");
@@ -37,27 +42,43 @@ export const SettingsPage = () => {
   const createApiKey = async () => {
     setCreatedKey("");
     setActionError("");
+    if (!isRequired(newKeyName)) {
+      const message = "Key name is required.";
+      setActionError(message);
+      showToast(message, "error");
+      return;
+    }
+    const scopes = parseScopes(keyScope);
+    if (scopes.length === 0) {
+      const message = "At least one scope is required.";
+      setActionError(message);
+      showToast(message, "error");
+      return;
+    }
     try {
       const payload = await apiRequest<{ key: string }>("/api/v1/api-keys", "POST", {
         name: newKeyName,
-        scopes: keyScope.split(",").map((item) => item.trim()).filter(Boolean),
+        scopes,
       });
       setCreatedKey(payload.key);
       await keysQuery.refetch();
+      showToast("API key created successfully.", "success");
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to create key");
+      const message = err instanceof Error ? err.message : "Failed to create key";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
   const revokeApiKey = async (keyId: string) => {
-    if (!window.confirm(`Revoke API key ${keyId}?`)) {
-      return;
-    }
     try {
       await apiRequest(`/api/v1/api-keys/${encodeURIComponent(keyId)}`, "DELETE");
       await keysQuery.refetch();
+      showToast("API key revoked.", "success");
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to revoke key");
+      const message = err instanceof Error ? err.message : "Failed to revoke key";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
@@ -66,8 +87,11 @@ export const SettingsPage = () => {
       const payload = await apiRequest<{ key: string }>(`/api/v1/api-keys/${encodeURIComponent(keyId)}/rotate`, "POST");
       setCreatedKey(payload.key);
       await keysQuery.refetch();
+      showToast("API key rotated.", "success");
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to rotate key");
+      const message = err instanceof Error ? err.message : "Failed to rotate key";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
@@ -168,7 +192,7 @@ export const SettingsPage = () => {
                           <Button size="xs" variant="secondary" onClick={() => void rotateApiKey(key.key_id)}>
                             Rotate
                           </Button>
-                          <Button size="xs" color="red" onClick={() => void revokeApiKey(key.key_id)}>
+                          <Button size="xs" color="red" onClick={() => setPendingRevokeKeyId(key.key_id)}>
                             Revoke
                           </Button>
                         </>
@@ -181,6 +205,21 @@ export const SettingsPage = () => {
           </Table>
         </Card>
       </QueryState>
+      <ConfirmDialog
+        open={pendingRevokeKeyId !== null}
+        title="Revoke API key?"
+        description={`This key will stop working immediately.${pendingRevokeKeyId ? ` (${pendingRevokeKeyId})` : ""}`}
+        confirmLabel="Revoke"
+        tone="danger"
+        onCancel={() => setPendingRevokeKeyId(null)}
+        onConfirm={() => {
+          const keyId = pendingRevokeKeyId;
+          setPendingRevokeKeyId(null);
+          if (keyId) {
+            void revokeApiKey(keyId);
+          }
+        }}
+      />
     </div>
   );
 };

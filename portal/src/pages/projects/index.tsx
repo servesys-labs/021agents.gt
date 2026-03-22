@@ -3,12 +3,15 @@ import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
+import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { isRequired } from "../../lib/validation";
 
 type Project = { project_id: string; name: string; slug: string; description?: string; default_plan?: string };
 type Env = { env_id: string; name: string; plan?: string };
 
 export const ProjectsPage = () => {
+  const { showToast } = useToast();
   const projectsQuery = useApiQuery<{ projects: Project[] }>("/api/v1/projects");
   const projects = useMemo(() => projectsQuery.data?.projects ?? [], [projectsQuery.data]);
   const [name, setName] = useState("");
@@ -22,8 +25,16 @@ export const ProjectsPage = () => {
   const [actionError, setActionError] = useState("");
 
   const createProject = async () => {
-    if (!name.trim()) {
-      setActionError("Project name is required.");
+    if (!isRequired(name)) {
+      const message = "Project name is required.";
+      setActionError(message);
+      showToast(message, "error");
+      return;
+    }
+    if (!["starter", "standard", "pro", "enterprise"].includes(plan)) {
+      const message = "Plan must be one of starter, standard, pro, enterprise.";
+      setActionError(message);
+      showToast(message, "error");
       return;
     }
     setActionError("");
@@ -32,8 +43,11 @@ export const ProjectsPage = () => {
       setName("");
       setDescription("");
       await projectsQuery.refetch();
+      showToast("Project created.", "success");
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to create project");
+      const message = err instanceof Error ? err.message : "Failed to create project";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
@@ -48,8 +62,11 @@ export const ProjectsPage = () => {
         "PUT",
       );
       await envsQuery.refetch();
+      showToast(`Updated ${envName} environment plan.`, "success");
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to update environment");
+      const message = err instanceof Error ? err.message : "Failed to update environment";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 

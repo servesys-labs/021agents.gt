@@ -1,20 +1,26 @@
 import { Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useState } from "react";
 
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
+import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { isPositiveInteger, isRequired } from "../../lib/validation";
 
 type GpuEndpoint = { endpoint_id?: string; model_id?: string; gpu_type?: string; status?: string };
 type RetentionPolicy = { policy_id?: string; resource_type?: string; retention_days?: number };
 
 export const InfrastructurePage = () => {
+  const { showToast } = useToast();
   const [modelId, setModelId] = useState("meta-llama/Llama-3.3-70B-Instruct");
   const [gpuType, setGpuType] = useState("h200");
   const [gpuCount, setGpuCount] = useState("1");
   const [resourceType, setResourceType] = useState("sessions");
   const [retentionDays, setRetentionDays] = useState("90");
   const [message, setMessage] = useState("");
+  const [pendingEndpointId, setPendingEndpointId] = useState<string | null>(null);
+  const [pendingPolicyId, setPendingPolicyId] = useState<string | null>(null);
 
   const gpuQuery = useApiQuery<{ endpoints: GpuEndpoint[] }>("/api/v1/gpu/endpoints");
   const retentionQuery = useApiQuery<{ policies: RetentionPolicy[] }>("/api/v1/retention");
@@ -25,48 +31,70 @@ export const InfrastructurePage = () => {
   };
 
   const provisionGpu = async () => {
+    if (!isRequired(modelId)) {
+      showToast("Model id is required.", "error");
+      return;
+    }
+    if (!isPositiveInteger(gpuCount)) {
+      showToast("GPU count must be a positive integer.", "error");
+      return;
+    }
     try {
       const path = `/api/v1/gpu/endpoints?model_id=${encodeURIComponent(modelId)}&gpu_type=${encodeURIComponent(gpuType)}&gpu_count=${encodeURIComponent(gpuCount)}`;
       await apiRequest(path, "POST");
       setMessage("GPU endpoint provisioning requested.");
+      showToast("GPU endpoint provisioning requested.", "success");
       await gpuQuery.refetch();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to provision GPU endpoint");
+      const msg = err instanceof Error ? err.message : "Failed to provision GPU endpoint";
+      setMessage(msg);
+      showToast(msg, "error");
     }
   };
 
   const terminateGpu = async (endpointId: string) => {
-    if (!window.confirm(`Terminate endpoint ${endpointId}?`)) {
-      return;
-    }
     try {
       await apiRequest(`/api/v1/gpu/endpoints/${encodeURIComponent(endpointId)}`, "DELETE");
       await gpuQuery.refetch();
+      showToast(`Endpoint ${endpointId} terminated.`, "success");
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to terminate endpoint");
+      const msg = err instanceof Error ? err.message : "Failed to terminate endpoint";
+      setMessage(msg);
+      showToast(msg, "error");
     }
   };
 
   const createRetention = async () => {
+    if (!isRequired(resourceType)) {
+      showToast("Resource type is required.", "error");
+      return;
+    }
+    if (!isPositiveInteger(retentionDays)) {
+      showToast("Retention days must be a positive integer.", "error");
+      return;
+    }
     try {
       const path = `/api/v1/retention?resource_type=${encodeURIComponent(resourceType)}&retention_days=${encodeURIComponent(retentionDays)}`;
       await apiRequest(path, "POST");
       setMessage("Retention policy created.");
+      showToast("Retention policy created.", "success");
       await retentionQuery.refetch();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to create retention policy");
+      const msg = err instanceof Error ? err.message : "Failed to create retention policy";
+      setMessage(msg);
+      showToast(msg, "error");
     }
   };
 
   const deletePolicy = async (policyId: string) => {
-    if (!window.confirm(`Delete policy ${policyId}?`)) {
-      return;
-    }
     try {
       await apiRequest(`/api/v1/retention/${encodeURIComponent(policyId)}`, "DELETE");
       await retentionQuery.refetch();
+      showToast(`Policy ${policyId} deleted.`, "success");
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to delete retention policy");
+      const msg = err instanceof Error ? err.message : "Failed to delete retention policy";
+      setMessage(msg);
+      showToast(msg, "error");
     }
   };
 
@@ -74,9 +102,12 @@ export const InfrastructurePage = () => {
     try {
       await apiRequest("/api/v1/retention/apply", "POST");
       setMessage("Retention policies applied.");
+      showToast("Retention policies applied.", "success");
       await refresh();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : "Failed to apply retention");
+      const msg = err instanceof Error ? err.message : "Failed to apply retention";
+      setMessage(msg);
+      showToast(msg, "error");
     }
   };
 
@@ -113,7 +144,7 @@ export const InfrastructurePage = () => {
                     <TableCell><Text>{endpoint.status}</Text></TableCell>
                     <TableCell>
                       {endpoint.endpoint_id ? (
-                        <Button size="xs" color="red" onClick={() => void terminateGpu(endpoint.endpoint_id ?? "")}>Terminate</Button>
+                        <Button size="xs" color="red" onClick={() => setPendingEndpointId(endpoint.endpoint_id ?? null)}>Terminate</Button>
                       ) : null}
                     </TableCell>
                   </TableRow>
@@ -146,7 +177,7 @@ export const InfrastructurePage = () => {
                     <TableCell><Text>{policy.retention_days}</Text></TableCell>
                     <TableCell>
                       {policy.policy_id ? (
-                        <Button size="xs" color="red" onClick={() => void deletePolicy(policy.policy_id ?? "")}>Delete</Button>
+                        <Button size="xs" color="red" onClick={() => setPendingPolicyId(policy.policy_id ?? null)}>Delete</Button>
                       ) : null}
                     </TableCell>
                   </TableRow>
@@ -156,6 +187,36 @@ export const InfrastructurePage = () => {
           </QueryState>
         </Card>
       </div>
+      <ConfirmDialog
+        open={pendingEndpointId !== null}
+        title="Terminate GPU endpoint?"
+        description={pendingEndpointId ? `Endpoint ${pendingEndpointId} will be shut down and billed accordingly.` : "This action cannot be undone."}
+        confirmLabel="Terminate"
+        tone="danger"
+        onCancel={() => setPendingEndpointId(null)}
+        onConfirm={() => {
+          const id = pendingEndpointId;
+          setPendingEndpointId(null);
+          if (id) {
+            void terminateGpu(id);
+          }
+        }}
+      />
+      <ConfirmDialog
+        open={pendingPolicyId !== null}
+        title="Delete retention policy?"
+        description={pendingPolicyId ? `Policy ${pendingPolicyId} will be removed.` : "This action cannot be undone."}
+        confirmLabel="Delete"
+        tone="danger"
+        onCancel={() => setPendingPolicyId(null)}
+        onConfirm={() => {
+          const id = pendingPolicyId;
+          setPendingPolicyId(null);
+          if (id) {
+            void deletePolicy(id);
+          }
+        }}
+      />
     </div>
   );
 };

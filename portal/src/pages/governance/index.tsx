@@ -1,9 +1,12 @@
 import { Badge, Button, Card, Table, TableBody, TableCell, TableHead, TableHeaderCell, TableRow, Text, TextInput } from "@tremor/react";
 import { useState } from "react";
 
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
+import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { isRequired } from "../../lib/validation";
 
 type Policy = {
   policy_id?: string;
@@ -33,12 +36,14 @@ type SecretResponse = { secrets?: SecretEntry[] };
 type AuditResponse = { entries?: AuditEntry[] };
 
 export const GovernancePage = () => {
+  const { showToast } = useToast();
   const [secretName, setSecretName] = useState("");
   const [secretValue, setSecretValue] = useState("");
   const [auditFilter, setAuditFilter] = useState("");
   const [auditSinceDays, setAuditSinceDays] = useState(30);
   const [actionMessage, setActionMessage] = useState("");
   const [actionError, setActionError] = useState("");
+  const [pendingDeleteSecretName, setPendingDeleteSecretName] = useState<string | null>(null);
 
   const policiesQuery = useApiQuery<PolicyResponse>("/api/v1/policies");
   const secretsQuery = useApiQuery<SecretResponse>("/api/v1/secrets");
@@ -51,8 +56,10 @@ export const GovernancePage = () => {
   const events = auditQuery.data?.entries ?? [];
 
   const createSecret = async () => {
-    if (!secretName || !secretValue) {
-      setActionError("Secret name and value are required.");
+    if (!isRequired(secretName) || !isRequired(secretValue)) {
+      const message = "Secret name and value are required.";
+      setActionError(message);
+      showToast(message, "error");
       return;
     }
     setActionError("");
@@ -64,9 +71,12 @@ export const GovernancePage = () => {
       setSecretName("");
       setSecretValue("");
       setActionMessage(`Secret ${secretName} created.`);
+      showToast(`Secret ${secretName} created.`, "success");
       await secretsQuery.refetch();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to create secret");
+      const message = err instanceof Error ? err.message : "Failed to create secret";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
@@ -78,22 +88,25 @@ export const GovernancePage = () => {
     try {
       await apiRequest(`/api/v1/secrets/${encodeURIComponent(name)}/rotate?new_value=${encodeURIComponent(newValue)}`, "POST");
       setActionMessage(`Secret ${name} rotated.`);
+      showToast(`Secret ${name} rotated.`, "success");
       await secretsQuery.refetch();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to rotate secret");
+      const message = err instanceof Error ? err.message : "Failed to rotate secret";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
   const deleteSecret = async (name: string) => {
-    if (!window.confirm(`Delete secret ${name}?`)) {
-      return;
-    }
     try {
       await apiRequest(`/api/v1/secrets/${encodeURIComponent(name)}`, "DELETE");
       setActionMessage(`Secret ${name} deleted.`);
+      showToast(`Secret ${name} deleted.`, "success");
       await secretsQuery.refetch();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to delete secret");
+      const message = err instanceof Error ? err.message : "Failed to delete secret";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
@@ -110,8 +123,11 @@ export const GovernancePage = () => {
       link.click();
       URL.revokeObjectURL(url);
       setActionMessage("Audit export downloaded.");
+      showToast("Audit export downloaded.", "success");
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to export audit log");
+      const message = err instanceof Error ? err.message : "Failed to export audit log";
+      setActionError(message);
+      showToast(message, "error");
     }
   };
 
@@ -197,7 +213,7 @@ export const GovernancePage = () => {
                         {secret.name ? (
                           <>
                             <Button size="xs" variant="secondary" onClick={() => void rotateSecret(secret.name ?? "")}>Rotate</Button>
-                            <Button size="xs" color="red" onClick={() => void deleteSecret(secret.name ?? "")}>Delete</Button>
+                            <Button size="xs" color="red" onClick={() => setPendingDeleteSecretName(secret.name ?? "")}>Delete</Button>
                           </>
                         ) : null}
                       </div>
@@ -250,6 +266,21 @@ export const GovernancePage = () => {
           </Table>
         </QueryState>
       </Card>
+      <ConfirmDialog
+        open={pendingDeleteSecretName !== null}
+        title="Delete secret?"
+        description={pendingDeleteSecretName ? `This removes ${pendingDeleteSecretName} from the selected scope.` : "This action cannot be undone."}
+        confirmLabel="Delete"
+        tone="danger"
+        onCancel={() => setPendingDeleteSecretName(null)}
+        onConfirm={() => {
+          const name = pendingDeleteSecretName;
+          setPendingDeleteSecretName(null);
+          if (name) {
+            void deleteSecret(name);
+          }
+        }}
+      />
     </div>
   );
 };

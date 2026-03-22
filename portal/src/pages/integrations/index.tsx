@@ -3,7 +3,9 @@ import { useMemo, useState } from "react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
+import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { isRequired, isValidUrl } from "../../lib/validation";
 
 type ProviderResponse = {
   active?: string;
@@ -26,6 +28,7 @@ type Webhook = {
 };
 
 export const IntegrationsPage = () => {
+  const { showToast } = useToast();
   const [appName, setAppName] = useState("slack");
   const [authUrl, setAuthUrl] = useState<string>("");
   const [actionMessage, setActionMessage] = useState<string>("");
@@ -47,18 +50,31 @@ export const IntegrationsPage = () => {
   const webhooks = useMemo(() => webhooksQuery.data ?? [], [webhooksQuery.data]);
 
   const loadAuthUrl = async () => {
+    if (!isRequired(appName)) {
+      showToast("App name is required.", "error");
+      return;
+    }
     setActionMessage("");
     try {
       const result = await apiRequest<{ auth_url?: string }>(`/api/v1/connectors/auth/${encodeURIComponent(appName)}`);
       setAuthUrl(result.auth_url ?? "");
       setActionMessage(result.auth_url ? "Connector auth URL loaded." : "No auth URL returned.");
+      showToast(result.auth_url ? "Connector auth URL loaded." : "No auth URL returned.", "success");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Failed to load auth URL");
+      const message = error instanceof Error ? error.message : "Failed to load auth URL";
+      setActionMessage(message);
+      showToast(message, "error");
       setAuthUrl("");
     }
   };
 
   const registerMcp = async () => {
+    if (!isValidUrl(mcpUrl)) {
+      const message = "MCP URL must be a valid http/https URL.";
+      setActionMessage(message);
+      showToast(message, "error");
+      return;
+    }
     setActionMessage("");
     try {
       const payload = await apiRequest<{ server_id: string; status: string }>("/api/v1/mcp/servers", "POST", {
@@ -67,13 +83,22 @@ export const IntegrationsPage = () => {
         transport: mcpTransport,
       });
       setActionMessage(`Registered MCP server ${payload.server_id}`);
+      showToast(`Registered MCP server ${payload.server_id}`, "success");
       await mcpQuery.refetch();
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Failed to register MCP server");
+      const message = error instanceof Error ? error.message : "Failed to register MCP server";
+      setActionMessage(message);
+      showToast(message, "error");
     }
   };
 
   const callConnectorTool = async () => {
+    if (!isRequired(toolName)) {
+      const message = "Tool name is required.";
+      setActionMessage(message);
+      showToast(message, "error");
+      return;
+    }
     setActionMessage("");
     setToolResult("");
     try {
@@ -84,8 +109,11 @@ export const IntegrationsPage = () => {
         app: appName,
       });
       setToolResult(JSON.stringify(payload, null, 2));
+      showToast("Connector tool call completed.", "success");
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Failed to call connector tool");
+      const message = error instanceof Error ? error.message : "Failed to call connector tool";
+      setActionMessage(message);
+      showToast(message, "error");
     }
   };
 
