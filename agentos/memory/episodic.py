@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -19,17 +22,68 @@ class Episode:
 
 
 class EpisodicMemory:
-    """Stores and retrieves records of past interactions."""
+    """Stores and retrieves records of past interactions.
 
-    def __init__(self, max_episodes: int = 10000, ttl_days: int = 90) -> None:
+    When a database is provided, episodes are persisted to SQLite
+    and survive across process restarts.
+    """
+
+    def __init__(self, max_episodes: int = 10000, ttl_days: int = 90, db: Any = None) -> None:
         self._episodes: list[Episode] = []
         self.max_episodes = max_episodes
         self.ttl_seconds = ttl_days * 86400
+        self._db = db
+
+        # Load existing episodes from DB on init
+        if self._db is not None:
+            self._load_from_db()
+
+    def _load_from_db(self) -> None:
+        """Load recent episodes from SQLite into memory."""
+        try:
+            rows = self._db.recent_episodes(limit=self.max_episodes)
+            for row in rows:
+                import json as _json
+                metadata = row.get("metadata_json", "{}")
+                if isinstance(metadata, str):
+                    try:
+                        metadata = _json.loads(metadata)
+                    except Exception:
+                        metadata = {}
+                self._episodes.append(Episode(
+                    id=row["id"],
+                    input=row.get("input", ""),
+                    output=row.get("output", ""),
+                    outcome=row.get("outcome", ""),
+                    metadata=metadata,
+                    timestamp=row.get("created_at", 0),
+                ))
+            # Reverse so oldest first (recent_episodes returns newest first)
+            self._episodes.reverse()
+            if self._episodes:
+                logger.info("Loaded %d episodes from database", len(self._episodes))
+        except Exception as exc:
+            logger.warning("Could not load episodes from DB: %s", exc)
 
     def store(self, episode: Episode) -> str:
         self._episodes.append(episode)
         if len(self._episodes) > self.max_episodes:
             self._episodes = self._episodes[-self.max_episodes :]
+
+        # Persist to DB
+        if self._db is not None:
+            try:
+                self._db.insert_episode({
+                    "id": episode.id,
+                    "input": episode.input,
+                    "output": episode.output,
+                    "outcome": episode.outcome,
+                    "metadata": episode.metadata,
+                    "timestamp": episode.timestamp,
+                })
+            except Exception as exc:
+                logger.warning("Could not persist episode to DB: %s", exc)
+
         return episode.id
 
     def search(self, query: str, limit: int = 5) -> list[Episode]:
