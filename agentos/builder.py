@@ -30,12 +30,62 @@ a complete agent definition as a JSON object.
 
 1. **Purpose**: What should this agent do? (becomes the description)
 2. **Personality**: How should it behave? Tone, style, constraints.
-3. **Tools**: What capabilities does it need? (web search, file access, APIs, etc.)
+3. **Tools**: What capabilities does it need? Select from available tools below.
 4. **Guardrails**: Budget limits, blocked actions, confirmation requirements.
 5. **Name**: A short, lowercase, hyphenated identifier.
 
-## Available tools in the registry:
-{available_tools}
+## Available tools (by category):
+
+### Code & Execution
+- **bash**: Execute shell commands (ls, git, npm, etc.)
+- **python-exec**: Execute Python code with output capture
+- **read-file**: Read file contents with line numbers
+- **write-file**: Create or overwrite files
+- **edit-file**: Find-and-replace in files
+
+### Search & Discovery
+- **grep**: Search file contents by regex pattern
+- **glob**: Find files by glob pattern (e.g., **/*.py)
+- **web-search**: Search the web via DuckDuckGo
+- **knowledge-search**: Search the local knowledge store
+
+### Data & APIs
+- **http-request**: Make HTTP requests (GET, POST, PUT, DELETE)
+- **browse**: Fetch web pages and extract text, HTML, or links
+- **store-knowledge**: Store facts in semantic memory
+
+### Planning & Management
+- **todo**: Task list for planning and tracking work
+- **run-agent**: Delegate a task to another agent (sub-agent pattern)
+- **create-agent**: Create new agents
+- **eval-agent**: Evaluate an agent with test cases
+- **evolve-agent**: Analyze and improve an agent
+- **list-agents**: List all agents in the project
+- **list-tools**: List all available tools
+
+## IMPORTANT — Tool-aware system prompts:
+
+When you write the system_prompt for the agent, you MUST:
+1. Tell the agent what tools it has and what each one does
+2. Give specific instructions on WHEN and HOW to use each tool
+3. Include examples of tool usage patterns for the agent's task
+4. Tell the agent to plan with 'todo' before complex multi-step work
+
+Example for a coding agent:
+```
+You have these tools: bash, python-exec, read-file, write-file, edit-file, grep, glob, todo.
+
+Workflow:
+1. Use 'todo' to plan your tasks before starting
+2. Use 'glob' and 'grep' to explore the codebase
+3. Use 'read-file' to understand existing code
+4. Use 'write-file' for new files, 'edit-file' for changes
+5. Use 'bash' or 'python-exec' to test your work
+6. Mark todo items complete as you finish them
+```
+
+## Recommended tools by agent type:
+{tool_recommendations}
 
 ## Output format:
 
@@ -49,7 +99,7 @@ The JSON must conform to this schema:
 {{
   "name": "my-agent",
   "description": "What this agent does",
-  "system_prompt": "You are... (full system prompt for the agent)",
+  "system_prompt": "You are... (MUST reference tools and how to use them)",
   "personality": "Brief personality description",
   "model": "{default_model}",
   "max_tokens": 4096,
@@ -66,13 +116,66 @@ The JSON must conform to this schema:
 ```
 
 ## Rules:
-- Ask clarifying questions if the user's request is vague
-- Suggest tools from the available list when relevant
-- Write a detailed, specific system_prompt tailored to the agent's purpose
+- ALWAYS assign at least 'todo' for planning unless the agent is trivial
+- For any agent that works with files/code, include file tools (read-file, write-file, edit-file, grep, glob)
+- For agents that need to test or run things, include 'bash' and/or 'python-exec'
+- For agents that fetch external data, include 'http-request' and/or 'web-search'
+- For agents that delegate to other agents, include 'run-agent' and 'list-agents'
+- Write a detailed system_prompt that references each tool by name and explains WHEN to use each
 - Keep names lowercase with hyphens (no spaces or underscores)
 - Be concise in conversation — don't over-explain
-- When the user confirms they're happy, output the final JSON
 """
+
+# Tool recommendations by detected keywords in the description
+TOOL_RECOMMENDATIONS: dict[str, list[str]] = {
+    "code|program|develop|software|debug|fix|implement|refactor": [
+        "bash", "python-exec", "read-file", "write-file", "edit-file", "grep", "glob", "todo",
+    ],
+    "research|analyze|investigate|study|find|search": [
+        "web-search", "browse", "http-request", "read-file", "grep", "glob", "store-knowledge", "todo",
+    ],
+    "data|csv|json|api|fetch|scrape|extract": [
+        "python-exec", "http-request", "browse", "read-file", "write-file", "bash", "todo",
+    ],
+    "review|audit|check|inspect|quality": [
+        "read-file", "grep", "glob", "bash", "edit-file", "todo",
+    ],
+    "write|document|report|summarize|content": [
+        "write-file", "read-file", "web-search", "browse", "todo",
+    ],
+    "devops|deploy|ci|docker|kubernetes|infra": [
+        "bash", "read-file", "write-file", "edit-file", "grep", "glob", "http-request", "todo",
+    ],
+    "test|qa|verify|validate": [
+        "bash", "python-exec", "read-file", "grep", "glob", "todo",
+    ],
+    "manage|coordinate|delegate|orchestrate|project": [
+        "run-agent", "create-agent", "list-agents", "eval-agent", "todo",
+    ],
+}
+
+
+def recommend_tools(description: str) -> list[str]:
+    """Recommend tools based on keywords in the agent description."""
+    import re
+    desc_lower = description.lower()
+    recommended: set[str] = set()
+    for pattern, tools in TOOL_RECOMMENDATIONS.items():
+        if re.search(pattern, desc_lower):
+            recommended.update(tools)
+    # Always include todo for non-trivial agents
+    if recommended:
+        recommended.add("todo")
+    return sorted(recommended)
+
+
+def format_tool_recommendations() -> str:
+    """Format tool recommendations for the builder system prompt."""
+    lines = []
+    for pattern, tools in TOOL_RECOMMENDATIONS.items():
+        keywords = pattern.replace("|", ", ")
+        lines.append(f"- **{keywords}** agents → {', '.join(tools)}")
+    return "\n".join(lines)
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -162,18 +265,10 @@ class AgentBuilder:
         return self._result
 
     def _system_message(self) -> dict[str, str]:
-        available = self._registry.list_all()
-        if available:
-            tools_text = "\n".join(
-                f"- **{t.name}**: {t.description}" for t in available
-            )
-        else:
-            tools_text = "(No tools registered yet. The user can add tools later.)"
-
         return {
             "role": "system",
             "content": BUILDER_SYSTEM_PROMPT.format(
-                available_tools=tools_text,
+                tool_recommendations=format_tool_recommendations(),
                 default_model=DEFAULT_MODEL,
             ),
         }
@@ -233,13 +328,21 @@ class AgentBuilder:
             self._complete = True
             return self._result
 
-        # Fallback: generate a sensible config from the description
+        # Fallback: generate a sensible config from the description with auto-assigned tools
         name = _slugify(description)
+        tools = recommend_tools(description)
+        tool_section = ""
+        if tools:
+            tool_section = (
+                f"\n\nYou have these tools available: {', '.join(tools)}.\n"
+                "Use 'todo' to plan multi-step work. Use the right tool for each step."
+            )
         self._result = AgentConfig(
             name=name,
             description=description,
             system_prompt=f"You are an AI assistant specialized in: {description}. "
-            "Be helpful, accurate, and concise.",
+            f"Be helpful, accurate, and concise.{tool_section}",
+            tools=tools,
         )
         self._complete = True
         return self._result
