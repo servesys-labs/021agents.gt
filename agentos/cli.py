@@ -64,6 +64,10 @@ def main() -> None:
         choices=["orchestrator", "blank", "research", "support", "code-review"],
         help="Start from a preset agent template (default: orchestrator)",
     )
+    init_p.add_argument(
+        "--plan", type=str, default=None,
+        help="LLM plan: basic, standard, premium, code, private, or a custom plan name",
+    )
     init_p.add_argument("--dry-run", action="store_true", help="Preview what would be created without writing anything")
     init_p.add_argument("--force", action="store_true", help="Overwrite existing files during re-initialization")
 
@@ -102,6 +106,11 @@ def main() -> None:
         "--max-turns", type=int, default=20,
         help="Max conversation turns in interactive mode (default: 20)",
     )
+    create_p.add_argument(
+        "--tools", type=str, default=None,
+        help="Comma-separated list of tools to assign (e.g., 'bash,read-file,python-exec'). "
+        "Use 'auto' to auto-detect from description. Use 'none' for no tools.",
+    )
 
     # --- run ---
     run_p = sub.add_parser("run", help="Run an agent on a task")
@@ -116,6 +125,8 @@ def main() -> None:
     run_p.add_argument("--json", dest="json_output", action="store_true", help="Output results as JSON")
     run_p.add_argument("--quiet", "-q", action="store_true", help="Only print final output")
     run_p.add_argument("--verbose", "-v", action="store_true", help="Show all turns with tool details")
+    run_p.add_argument("--plan", type=str, default=None,
+        help="LLM plan override: basic, standard, premium, code, private, or custom plan name")
 
     # --- list ---
     sub.add_parser("list", help="List available agents")
@@ -129,6 +140,7 @@ def main() -> None:
 
     # --- ingest ---
     ingest_p = sub.add_parser("ingest", help="Ingest documents into RAG knowledge base")
+    ingest_p.add_argument("name", help="Agent name to associate documents with")
     ingest_p.add_argument("files", nargs="+", help="Files or directories to ingest")
     ingest_p.add_argument("--chunk-size", type=int, default=512, help="Chunk size (default: 512)")
 
@@ -145,6 +157,8 @@ def main() -> None:
     evolve_p.add_argument("--trials", type=int, default=3, help="Trials per task (default: 3)")
     evolve_p.add_argument("--min-sessions", type=int, default=5, help="Min sessions before analysis")
     evolve_p.add_argument("--surface-ratio", type=float, default=0.1, help="Fraction of proposals to surface (default: 0.1)")
+    evolve_p.add_argument("--max-cycles", type=int, default=1, help="Max evolution cycles (default: 1)")
+    evolve_p.add_argument("--auto-approve", action="store_true", help="Auto-approve all proposals (skip interactive review)")
     evolve_p.add_argument("--export", type=str, default=None, help="Export evolution state to JSON")
 
     # --- login ---
@@ -178,6 +192,18 @@ def main() -> None:
     sb_ls = sandbox_sub.add_parser("list", help="List active sandboxes")
     sb_kill = sandbox_sub.add_parser("kill", help="Kill a sandbox")
     sb_kill.add_argument("sandbox_id", help="Sandbox ID to kill")
+
+    # --- plans ---
+    plans_p = sub.add_parser("plans", help="List or create LLM plans")
+    plans_sub = plans_p.add_subparsers(dest="plans_command")
+    plans_sub.add_parser("list", help="List all available plans")
+    plans_create = plans_sub.add_parser("create", help="Create a custom plan")
+    plans_create.add_argument("name", help="Plan name")
+    plans_create.add_argument("--simple", type=str, required=True, help="Model for simple tasks (e.g., deepseek-ai/DeepSeek-V3.2)")
+    plans_create.add_argument("--moderate", type=str, required=True, help="Model for moderate tasks")
+    plans_create.add_argument("--complex", type=str, required=True, help="Model for complex tasks")
+    plans_create.add_argument("--tool-call", type=str, default=None, help="Model for tool-calling turns (defaults to moderate model)")
+    plans_create.add_argument("--provider", type=str, default="gmi", help="Provider for all tiers (default: gmi)")
 
     # --- deploy ---
     deploy_p = sub.add_parser("deploy", help="Deploy an agent")
@@ -227,6 +253,8 @@ def main() -> None:
             asyncio.run(cmd_sandbox(args))
         elif args.command == "deploy":
             cmd_deploy(args)
+        elif args.command == "plans":
+            cmd_plans(args)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -365,6 +393,7 @@ def cmd_init(args: argparse.Namespace) -> None:
             f"defaults:\n"
             f"  model: {DEFAULT_MODEL}\n"
             f"  provider: {DEFAULT_PROVIDER}\n"
+            f"  plan: {getattr(args, 'plan', None) or 'standard'}     # basic | standard | premium | code | private\n"
             f"  max_turns: 50\n"
             f"  budget_limit_usd: 10.0\n"
             f"\n"
@@ -491,6 +520,14 @@ def cmd_init(args: argparse.Namespace) -> None:
             "# LLM provider API keys (at least one required)\n"
             "ANTHROPIC_API_KEY=\n"
             "OPENAI_API_KEY=\n"
+            "\n"
+            "# GMI Cloud — private GPU inference (data stays on GMI's US GPUs)\n"
+            "# GMI_API_KEY=                    # Model inference (serverless)\n"
+            "# GMI_INFRA_API_KEY=              # Infrastructure (dedicated GPU provisioning)\n"
+            "# GMI_API_BASE=https://api.gmi-serving.com/v1\n"
+            "\n"
+            "# Local models — any OpenAI-compatible endpoint (Ollama, vLLM, etc.)\n"
+            "# LOCAL_LLM_BASE=http://localhost:11434/v1\n"
             "\n"
             "# Sandbox (optional — enables agentos sandbox)\n"
             "E2B_API_KEY=\n"
@@ -755,6 +792,20 @@ async def cmd_create(args: argparse.Namespace) -> None:
 
         config = builder.result
 
+    # ── Apply --tools override ────────────────────────────────────────────
+    tools_arg = getattr(args, "tools", None)
+    if tools_arg:
+        if tools_arg.lower() == "none":
+            config.tools = []
+        elif tools_arg.lower() == "auto":
+            from agentos.builder import recommend_tools
+            config.tools = recommend_tools(config.description)
+            if config.tools:
+                print(f"  Auto-assigned tools: {', '.join(config.tools)}")
+        else:
+            config.tools = [t.strip() for t in tools_arg.split(",") if t.strip()]
+            print(f"  Tools: {', '.join(config.tools)}")
+
     # ── Apply --name override ────────────────────────────────────────────
     if args.name:
         config = _rename_agent_config(config, args.name)
@@ -816,6 +867,13 @@ async def cmd_run(args: argparse.Namespace) -> None:
         budget=args.budget,
         model=args.model,
     )
+
+    # ── Apply --plan override ─────────────────────────────────────────────
+    plan = getattr(args, "plan", None)
+    if plan:
+        _apply_plan_to_agent(agent, plan)
+        if not quiet:
+            print(f"  Plan: {plan}")
 
     # ── Validate agent_id against project identity ───────────────────────
     if not quiet:
@@ -1037,6 +1095,15 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     from pathlib import Path
     from agentos.rag.pipeline import RAGPipeline
 
+    # Validate agent exists (warn but continue if not found)
+    agent_name = args.name
+    try:
+        _load_agent(agent_name)
+    except (FileNotFoundError, Exception) as exc:
+        print(f"Warning: Agent '{agent_name}' not found — ingesting documents globally.")
+        print(f"  Create the agent first with: agentos create --one-shot \"{agent_name}\"")
+        print()
+
     pipeline = RAGPipeline(chunk_size=args.chunk_size)
 
     documents: list[str] = []
@@ -1060,7 +1127,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
                 text = f.read_text(errors="replace")
                 if text.strip():
                     documents.append(text)
-                    metadatas.append({"source": str(f), "filename": f.name})
+                    metadatas.append({"source": str(f), "filename": f.name, "agent": agent_name})
             except Exception as exc:
                 print(f"Warning: Could not read {f}: {exc}")
 
@@ -1080,6 +1147,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
     index_path = data_dir / "rag_index.json"
     index_data = {
+        "agent": agent_name,
         "chunk_size": args.chunk_size,
         "documents": [
             {"length": len(doc), "metadata": meta}
@@ -1091,7 +1159,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     index_path.write_text(json.dumps(index_data, indent=2) + "\n")
 
     total_chunks = sum(len(pipeline.chunker.chunk(d)) for d in documents)
-    print(f"Ingested {len(documents)} documents ({total_chunks} chunks)")
+    print(f"Ingested {len(documents)} documents ({total_chunks} chunks) for agent '{agent_name}'")
     print(f"  Sources: {', '.join(m['filename'] for m in metadatas[:5])}")
     if len(metadatas) > 5:
         print(f"  ... and {len(metadatas) - 5} more")
@@ -1152,116 +1220,154 @@ async def cmd_evolve(args: argparse.Namespace) -> None:
 
     from agentos.evolution.loop import EvolutionLoop
 
+    max_cycles = getattr(args, "max_cycles", 1) or 1
+    auto_approve = getattr(args, "auto_approve", False)
+
     agent = _load_agent(args.name)
 
     gym, tasks_data = _load_eval_tasks(Path(args.tasks_file))
     gym.trials_per_task = args.trials
 
-    # Set up the evolution loop
-    loop = EvolutionLoop.for_agent(
-        agent,
-        min_sessions_for_analysis=args.min_sessions,
-        surface_ratio=args.surface_ratio,
-    )
-
     print(f"Evolution loop for '{agent.config.name}' v{agent.config.version}")
     print(f"  Tasks: {len(tasks_data)} | Trials: {args.trials} | Surface ratio: {args.surface_ratio:.0%}")
+    if max_cycles > 1:
+        print(f"  Max cycles: {max_cycles}")
+    if auto_approve:
+        print(f"  Mode: auto-approve (non-interactive)")
     print("=" * 60)
 
-    # Step 1: Run baseline eval (this populates the observer with session records)
-    print("\n[1/4] Running baseline evaluation...")
+    for cycle in range(1, max_cycles + 1):
+        if max_cycles > 1:
+            print(f"\n{'─' * 60}")
+            print(f"Cycle {cycle}/{max_cycles}")
+            print(f"{'─' * 60}")
 
-    baseline_report = await gym.run(_make_agent_fn(agent))
-    baseline_report.agent_name = agent.config.name
-    baseline_report.agent_version = agent.config.version
-    baseline_report.model = agent.config.model
+        # Set up the evolution loop (re-create each cycle to pick up config changes)
+        loop = EvolutionLoop.for_agent(
+            agent,
+            min_sessions_for_analysis=args.min_sessions,
+            surface_ratio=args.surface_ratio,
+        )
 
-    print(f"  Baseline: pass_rate={baseline_report.pass_rate:.1%}, "
-          f"avg_latency={baseline_report.avg_latency_ms:.0f}ms, "
-          f"cost=${baseline_report.total_cost_usd:.4f}")
+        # Step 1: Run baseline eval
+        print("\n[1/4] Running baseline evaluation...")
 
-    # Step 2: Analyze patterns
-    print("\n[2/4] Analyzing session patterns...")
-    report = loop.analyze(db=agent.db)
+        baseline_report = await gym.run(_make_agent_fn(agent))
+        baseline_report.agent_name = agent.config.name
+        baseline_report.agent_version = agent.config.version
+        baseline_report.model = agent.config.model
 
-    if report.recommendations:
-        print(f"  Found {len(report.recommendations)} recommendations:")
-        for rec in report.recommendations[:5]:
-            print(f"    - {rec}")
-    else:
-        print("  No significant patterns found (may need more sessions).")
+        print(f"  Baseline: pass_rate={baseline_report.pass_rate:.1%}, "
+              f"avg_latency={baseline_report.avg_latency_ms:.0f}ms, "
+              f"cost=${baseline_report.total_cost_usd:.4f}")
 
-    # Step 3: Generate proposals
-    print("\n[3/4] Generating improvement proposals...")
-    proposals = loop.propose(report)
+        # Step 2: Analyze patterns
+        print("\n[2/4] Analyzing session patterns...")
+        report = loop.analyze(db=agent.db)
 
-    if not proposals:
-        print("  No proposals generated. Agent may be performing well enough,")
-        print("  or more sessions are needed for meaningful analysis.")
-        if args.export:
-            path = loop.export(args.export)
-            print(f"\n  Evolution state exported to: {path}")
-        return
+        if report.recommendations:
+            print(f"  Found {len(report.recommendations)} recommendations:")
+            for rec in report.recommendations[:5]:
+                print(f"    - {rec}")
+        else:
+            print("  No significant patterns found (may need more sessions).")
 
-    # Step 4: Human review
-    print(f"\n[4/4] Review proposals ({len(proposals)} surfaced for review):")
-    print(loop.show_proposals())
-    print()
+        # Step 3: Generate proposals
+        print("\n[3/4] Generating improvement proposals...")
+        proposals = loop.propose(report)
 
-    # Interactive review loop
-    pending = loop.review_queue.pending
-    for proposal in pending:
-        print(f"\n--- Proposal: {proposal.title} ---")
-        print(f"    Priority: {proposal.priority:.0%}")
-        print(f"    {proposal.rationale}")
-        if proposal.modification:
-            mod_str = _json.dumps(proposal.modification, indent=2)
-            if len(mod_str) > 300:
-                mod_str = mod_str[:300] + "\n..."
-            print(f"    Change:\n{_indent(mod_str, 6)}")
-
-        try:
-            choice = input("\n    [a]pprove / [r]eject / [s]kip? ").strip().lower()
-        except EOFError:
+        if not proposals:
+            print("  No proposals generated. Agent may be performing well enough,")
+            print("  or more sessions are needed for meaningful analysis.")
             break
 
-        if choice in ("a", "approve", "y", "yes"):
-            note = ""
-            try:
-                note = input("    Note (optional): ").strip()
-            except EOFError:
-                pass
-            loop.approve(proposal.id, note=note)
-            print(f"    Approved.")
-        elif choice in ("r", "reject", "n", "no"):
-            note = ""
-            try:
-                note = input("    Reason (optional): ").strip()
-            except EOFError:
-                pass
-            loop.reject(proposal.id, note=note)
-            print(f"    Rejected.")
+        # Step 4: Review proposals
+        print(f"\n[4/4] Review proposals ({len(proposals)} surfaced for review):")
+        print(loop.show_proposals())
+        print()
+
+        pending = loop.review_queue.pending
+
+        if auto_approve:
+            # Auto-approve all proposals
+            for proposal in pending:
+                loop.approve(proposal.id, note="auto-approved")
+                print(f"  Auto-approved: {proposal.title}")
         else:
-            print(f"    Skipped.")
+            # Interactive review loop
+            for proposal in pending:
+                print(f"\n--- Proposal: {proposal.title} ---")
+                print(f"    Priority: {proposal.priority:.0%}")
+                print(f"    {proposal.rationale}")
+                if proposal.modification:
+                    mod_str = _json.dumps(proposal.modification, indent=2)
+                    if len(mod_str) > 300:
+                        mod_str = mod_str[:300] + "\n..."
+                    print(f"    Change:\n{_indent(mod_str, 6)}")
 
-    # Apply approved proposals
-    approved = loop.review_queue.approved
-    if approved:
-        metrics_before = {
-            "pass_rate": baseline_report.pass_rate,
-            "avg_score": baseline_report.avg_score,
-            "avg_latency_ms": baseline_report.avg_latency_ms,
-            "total_cost_usd": baseline_report.total_cost_usd,
-        }
+                try:
+                    choice = input("\n    [a]pprove / [r]eject / [s]kip? ").strip().lower()
+                except EOFError:
+                    break
 
-        new_config = loop.apply_approved(metrics_before=metrics_before)
-        if new_config:
-            print(f"\nApplied {len(approved)} change(s) → v{new_config.version}")
-            print(f"  Saved to: agents/{new_config.name}.json")
-            print(f"\n  Run 'agentos eval {new_config.name} {args.tasks_file}' to measure impact.")
-            print(f"  Run 'agentos evolve {new_config.name} {args.tasks_file}' again to continue evolving.")
-    else:
-        print("\nNo proposals approved. Agent config unchanged.")
+                if choice in ("a", "approve", "y", "yes"):
+                    note = ""
+                    try:
+                        note = input("    Note (optional): ").strip()
+                    except EOFError:
+                        pass
+                    loop.approve(proposal.id, note=note)
+                    print(f"    Approved.")
+                elif choice in ("r", "reject", "n", "no"):
+                    note = ""
+                    try:
+                        note = input("    Reason (optional): ").strip()
+                    except EOFError:
+                        pass
+                    loop.reject(proposal.id, note=note)
+                    print(f"    Rejected.")
+                else:
+                    print(f"    Skipped.")
+
+        # Apply approved proposals
+        approved = loop.review_queue.approved
+        if approved:
+            metrics_before = {
+                "pass_rate": baseline_report.pass_rate,
+                "avg_score": baseline_report.avg_score,
+                "avg_latency_ms": baseline_report.avg_latency_ms,
+                "total_cost_usd": baseline_report.total_cost_usd,
+            }
+
+            new_config = loop.apply_approved(metrics_before=metrics_before)
+            if new_config:
+                print(f"\nApplied {len(approved)} change(s) → v{new_config.version}")
+                print(f"  Saved to: agents/{new_config.name}.json")
+                # Reload agent for next cycle
+                agent = _load_agent(args.name)
+
+                # Post-apply verification: re-run eval to check quality
+                print(f"\n  Verifying changes...")
+                verify_report = await gym.run(_make_agent_fn(agent))
+                verify_pass = verify_report.pass_rate
+                baseline_pass = baseline_report.pass_rate
+
+                if verify_pass < baseline_pass * 0.8 and baseline_pass > 0:
+                    # Quality dropped by >20% — rollback
+                    print(f"  Quality regression: {baseline_pass:.0%} → {verify_pass:.0%}")
+                    print(f"  Rolling back to pre-v{new_config.version}...")
+                    rolled_back = loop.rollback(new_config.version)
+                    if rolled_back:
+                        agent = _load_agent(args.name)
+                        print(f"  Rolled back to v{rolled_back.version}")
+                    else:
+                        print(f"  Warning: Rollback failed — manually check agents/{args.name}.json")
+                else:
+                    print(f"  Verified: pass rate {verify_pass:.0%} (was {baseline_pass:.0%})")
+        else:
+            print("\nNo proposals approved. Agent config unchanged.")
+            if not auto_approve:
+                break  # No point continuing if human rejected everything
 
     # Export
     if args.export:
@@ -1311,7 +1417,7 @@ def _load_eval_tasks(tasks_path: Path):
     Exits with code 1 if the file is missing or malformed.
     """
     from agentos.eval.gym import EvalGym, EvalTask
-    from agentos.eval.grader import ContainsGrader, ExactMatchGrader
+    from agentos.eval.grader import ContainsGrader, ExactMatchGrader, LLMGrader
 
     if not tasks_path.exists():
         print(f"Error: Tasks file not found: {tasks_path}", file=sys.stderr)
@@ -1340,6 +1446,11 @@ def _load_eval_tasks(tasks_path: Path):
             grader = ExactMatchGrader()
         elif grader_type == "contains":
             grader = ContainsGrader()
+        elif grader_type == "llm":
+            # LLM grader: uses "expected" as a rubric/criteria for the LLM judge
+            criteria = t.get("criteria", t.get("expected", "correctness"))
+            provider = _get_grader_provider()
+            grader = LLMGrader(criteria=criteria, provider=provider, pass_threshold=t.get("pass_threshold", 0.5))
         else:
             print(f"Warning: Unknown grader type '{grader_type}', using 'contains'", file=sys.stderr)
             grader = ContainsGrader()
@@ -1614,25 +1725,119 @@ async def cmd_sandbox(args: argparse.Namespace) -> None:
 
 
 
+def cmd_plans(args: argparse.Namespace) -> None:
+    """List or create LLM plans."""
+    subcmd = getattr(args, "plans_command", None)
+
+    if subcmd == "create":
+        # Create a custom plan in agentos.yaml
+        project_yaml = Path.cwd() / "agentos.yaml"
+        if not project_yaml.exists():
+            print("Error: No agentos.yaml found. Run 'agentos init' first.", file=sys.stderr)
+            sys.exit(1)
+
+        plan_name = args.name
+        provider = args.provider
+        tool_call_model = getattr(args, "tool_call", None) or args.moderate
+        plan = {
+            "_description": f"Custom plan: {plan_name}",
+            "simple":    {"provider": provider, "model": args.simple,              "max_tokens": 1024},
+            "moderate":  {"provider": provider, "model": args.moderate,            "max_tokens": 4096},
+            "complex":   {"provider": provider, "model": getattr(args, "complex"), "max_tokens": 8192},
+            "tool_call": {"provider": provider, "model": tool_call_model,          "max_tokens": 4096},
+        }
+
+        # Read existing yaml, add plan
+        try:
+            import yaml
+            data = yaml.safe_load(project_yaml.read_text()) or {}
+        except ImportError:
+            print("Error: PyYAML required for custom plans. Install: pip install pyyaml", file=sys.stderr)
+            sys.exit(1)
+
+        if "plans" not in data:
+            data["plans"] = {}
+        data["plans"][plan_name] = plan
+
+        try:
+            import yaml
+            project_yaml.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
+        except Exception:
+            # Fallback: append as comment + JSON
+            import json as _json
+            with open(project_yaml, "a") as f:
+                f.write(f"\n# Custom plan: {plan_name}\n")
+                f.write(f"# {_json.dumps(plan)}\n")
+
+        print(f"Created custom plan '{plan_name}':")
+        print(f"  simple:   {args.simple}")
+        print(f"  moderate: {args.moderate}")
+        print(f"  complex:  {getattr(args, 'complex')}")
+        print(f"  provider: {provider}")
+        print(f"\nUse it: agentos run <agent> --plan {plan_name}")
+
+    else:
+        # List all plans
+        plans = _list_plans()
+        if not plans:
+            print("No plans found.")
+            return
+
+        print("Available LLM Plans:")
+        print("=" * 70)
+        for name, desc in plans.items():
+            print(f"\n  {name}")
+            if desc:
+                print(f"    {desc}")
+            plan = _load_plan(name.replace(" (custom)", ""))
+            if plan:
+                for tier in ["simple", "moderate", "complex", "tool_call"]:
+                    cfg = plan.get(tier, {})
+                    if cfg:
+                        model = cfg.get("model", "?").split("/")[-1]
+                        print(f"    {tier:10s} → {model}")
+
+        print(f"\n{'=' * 70}")
+        print("Usage:")
+        print("  agentos run <agent> --plan <name>")
+        print("  agentos init --plan <name>")
+        print("  agentos plans create <name> --simple <model> --moderate <model> --complex <model>")
+
+
 def cmd_deploy(args: argparse.Namespace) -> None:
     """Deploy an agent to Cloudflare Workers."""
+    import shutil
+    import subprocess
+
     config = _load_agent_config(args.name)
 
-    # Look for deploy/ in cwd first, then fall back to package
+    # Always write deploy scaffold into the current project directory
     deploy_dir = Path.cwd() / "deploy"
+    package_deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
+
+    # Copy deploy scaffold from package to project if it doesn't exist locally
     if not deploy_dir.exists():
-        deploy_dir = Path(__file__).resolve().parent.parent / "deploy"
-    if not deploy_dir.exists():
-        print("Error: No deploy/ directory found.", file=sys.stderr)
-        print("  Option 1: Run from the AgentOS source root", file=sys.stderr)
-        print("  Option 2: Copy the deploy/ directory to your project", file=sys.stderr)
-        sys.exit(1)
+        if package_deploy_dir.exists():
+            shutil.copytree(package_deploy_dir, deploy_dir)
+            print(f"Copied deploy scaffold to {deploy_dir}")
+        else:
+            print("Error: No deploy/ scaffold found in the AgentOS package.", file=sys.stderr)
+            sys.exit(1)
 
     # Validate governance structure before converting
     gov = config.governance
     if not isinstance(gov, dict):
         print(f"Error: Agent governance config is malformed (expected dict, got {type(gov).__name__})", file=sys.stderr)
         sys.exit(1)
+
+    # Determine provider from env
+    provider = ""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        provider = "anthropic"
+    elif os.environ.get("OPENAI_API_KEY"):
+        provider = "openai"
+    else:
+        provider = "workers-ai"
 
     # Convert Python agent config → CF worker config format
     cf_config = {
@@ -1645,8 +1850,7 @@ def cmd_deploy(args: argparse.Namespace) -> None:
         "requireConfirmationForDestructive": gov.get(
             "require_confirmation_for_destructive", True
         ),
-        # These are set during `npm run setup`
-        "provider": "",
+        "provider": provider,
         "model": config.model,
         "spentUsd": 0,
     }
@@ -1660,19 +1864,86 @@ def cmd_deploy(args: argparse.Namespace) -> None:
 
     print(f"Deploying agent '{config.name}' to Cloudflare Workers...")
     print(f"  Model: {config.model}")
+    print(f"  Provider: {provider}")
     print(f"  Tools: {', '.join(str(t) for t in config.tools) or 'none'}")
     print(f"  Budget: ${gov.get('budget_limit_usd', 10.0)}")
     print(f"  System prompt: {config.system_prompt[:60]}...")
     print()
-    print(f"Agent config written to: {deploy_config_path}")
+
+    # Check for required tools
+    npm_path = shutil.which("npm")
+    wrangler_path = shutil.which("wrangler")
+
+    if not npm_path:
+        print("Error: npm not found. Install Node.js to deploy.", file=sys.stderr)
+        sys.exit(1)
+
+    # Install dependencies
+    print("[1/4] Installing dependencies...")
+    try:
+        subprocess.run(["npm", "install"], cwd=str(deploy_dir), check=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"Error: npm install failed: {exc.stderr.decode()}", file=sys.stderr)
+        sys.exit(1)
+
+    # Use local wrangler if global not available
+    if not wrangler_path:
+        wrangler_path = str(deploy_dir / "node_modules" / ".bin" / "wrangler")
+        if not Path(wrangler_path).exists():
+            print("Error: wrangler not found. Install with: npm install -g wrangler", file=sys.stderr)
+            sys.exit(1)
+
+    # Create Vectorize index (ignore errors if it already exists)
+    print("[2/4] Creating Vectorize index...")
+    subprocess.run(
+        [wrangler_path, "vectorize", "create", "agentos-knowledge", "--dimensions", "768", "--metric", "cosine"],
+        cwd=str(deploy_dir), capture_output=True,
+    )
+
+    # Set secrets from environment
+    print("[3/4] Configuring secrets...")
+    for env_var, secret_name in [
+        ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+        ("OPENAI_API_KEY", "OPENAI_API_KEY"),
+        ("E2B_API_KEY", "E2B_API_KEY"),
+    ]:
+        value = os.environ.get(env_var, "")
+        if value:
+            subprocess.run(
+                [wrangler_path, "secret", "put", secret_name],
+                input=value.encode(), cwd=str(deploy_dir), capture_output=True,
+            )
+            print(f"  Set {secret_name}")
+
+    # Deploy
+    print("[4/4] Deploying to Cloudflare Workers...")
+    result = subprocess.run(
+        [wrangler_path, "deploy"], cwd=str(deploy_dir), capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"Deploy failed:\n{result.stderr}", file=sys.stderr)
+        print("\nAgent config written to:", deploy_config_path)
+        print("You can retry manually: cd deploy && npx wrangler deploy")
+        sys.exit(1)
+
+    # Extract worker URL from output (look for workers.dev URLs specifically)
+    import re as _re
+    worker_url = ""
+    for line in result.stdout.splitlines():
+        urls = _re.findall(r"https://[^\s]*\.workers\.dev[^\s]*", line)
+        if urls:
+            worker_url = urls[0].rstrip(".")
+            break
+
     print()
-    print("Next steps:")
-    print(f"  cd {deploy_dir} && npm run setup")
-    print()
-    print("After deployment, configure via:")
-    print(f"  curl -X PUT https://YOUR_WORKER.workers.dev/agents/agentos/{config.name}/config \\")
-    print(f"    -H 'Content-Type: application/json' \\")
-    print(f"    -d @{deploy_config_path}")
+    if worker_url:
+        print(f"Deployed successfully to: {worker_url}")
+        print(f"\n  Health: curl {worker_url}/agents/agentos/{config.name}/health")
+        print(f"  Run:    curl -X POST {worker_url}/agents/agentos/{config.name}/run \\")
+        print(f'            -H "Content-Type: application/json" -d \'{{"input":"hello"}}\'')
+    else:
+        print("Deploy completed. Check wrangler output for your Worker URL.")
+        print(result.stdout)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1709,6 +1980,127 @@ def _load_agent_config(name: str):
             return load_agent_config(p)
 
     raise FileNotFoundError(f"Agent '{name}' not found")
+
+
+def _load_plan(plan_name: str) -> dict[str, dict[str, Any]] | None:
+    """Load an LLM plan — checks project agentos.yaml first, then config/default.json."""
+    # 1. Check project-level custom plans (agentos.yaml)
+    project_yaml = Path.cwd() / "agentos.yaml"
+    if project_yaml.exists():
+        try:
+            try:
+                import yaml
+                data = yaml.safe_load(project_yaml.read_text()) or {}
+            except ImportError:
+                data = {}
+            custom_plans = data.get("plans", {})
+            if plan_name in custom_plans:
+                plan = custom_plans[plan_name]
+                return {k: v for k, v in plan.items() if not k.startswith("_")}
+        except Exception:
+            pass
+
+    # 2. Check built-in plans (config/default.json)
+    config_path = Path(__file__).resolve().parent.parent / "config" / "default.json"
+    if not config_path.exists():
+        return None
+    try:
+        raw = json.loads(config_path.read_text())
+        plans = raw.get("llm", {}).get("plans", {})
+        plan = plans.get(plan_name)
+        if plan:
+            return {k: v for k, v in plan.items() if not k.startswith("_")}
+        return None
+    except Exception:
+        return None
+
+
+def _list_plans() -> dict[str, str]:
+    """List all available plans with descriptions."""
+    plans: dict[str, str] = {}
+
+    # Built-in plans
+    config_path = Path(__file__).resolve().parent.parent / "config" / "default.json"
+    if config_path.exists():
+        try:
+            raw = json.loads(config_path.read_text())
+            for name, plan in raw.get("llm", {}).get("plans", {}).items():
+                plans[name] = plan.get("_description", "")
+        except Exception:
+            pass
+
+    # Project custom plans
+    project_yaml = Path.cwd() / "agentos.yaml"
+    if project_yaml.exists():
+        try:
+            try:
+                import yaml
+                data = yaml.safe_load(project_yaml.read_text()) or {}
+            except ImportError:
+                data = {}
+            for name, plan in data.get("plans", {}).items():
+                plans[f"{name} (custom)"] = plan.get("_description", "Custom plan")
+        except Exception:
+            pass
+
+    return plans
+
+
+def _apply_plan_to_agent(agent, plan_name: str) -> None:
+    """Override an agent's LLM router with a plan's routing config."""
+    plan = _load_plan(plan_name)
+    if not plan:
+        print(f"Warning: Plan '{plan_name}' not found, using default routing", file=sys.stderr)
+        return
+
+    from agentos.llm.router import Complexity
+    from agentos.llm.provider import HttpProvider
+
+    gmi_key = os.environ.get("GMI_API_KEY", "")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+
+    for tier in Complexity:
+        tier_cfg = plan.get(tier.value, {})
+        tier_model = tier_cfg.get("model", "")
+        tier_provider = tier_cfg.get("provider", "gmi")
+        tier_max_tokens = tier_cfg.get("max_tokens", 4096)
+
+        provider = None
+        if tier_provider == "gmi" and gmi_key:
+            provider = HttpProvider(model_id=tier_model, api_base="https://api.gmi-serving.com/v1", api_key=gmi_key)
+        elif tier_provider == "anthropic" and anthropic_key:
+            provider = HttpProvider(model_id=tier_model, api_base="https://api.anthropic.com", api_key=anthropic_key, headers={"anthropic-version": "2023-06-01"})
+        elif tier_provider == "openai" and openai_key:
+            provider = HttpProvider(model_id=tier_model, api_base="https://api.openai.com", api_key=openai_key)
+        # Fallback to GMI if available
+        if provider is None and gmi_key:
+            provider = HttpProvider(model_id=tier_model, api_base="https://api.gmi-serving.com/v1", api_key=gmi_key)
+
+        if provider is not None:
+            agent._harness.llm_router.register(tier, provider, max_tokens=tier_max_tokens)
+
+
+def _get_grader_provider():
+    """Get an LLM provider for the LLMGrader — uses the cheapest available model."""
+    from agentos.llm.provider import HttpProvider
+
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    openai_key = os.environ.get("OPENAI_API_KEY", "")
+
+    if anthropic_key:
+        return HttpProvider(
+            model_id="claude-haiku-4-5-20251001",
+            api_base="https://api.anthropic.com",
+            api_key=anthropic_key,
+        )
+    elif openai_key:
+        return HttpProvider(
+            model_id="gpt-4o-mini",
+            api_base="https://api.openai.com",
+            api_key=openai_key,
+        )
+    return None  # LLMGrader will fall back to heuristic
 
 
 def _warn_identity_mismatch(agent) -> None:

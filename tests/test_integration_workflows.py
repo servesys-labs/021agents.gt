@@ -176,7 +176,7 @@ class TestIngestToRunRAG:
 
         # Ingest it
         from agentos.cli import cmd_ingest
-        cmd_ingest(argparse.Namespace(files=[str(doc)], chunk_size=256))
+        cmd_ingest(argparse.Namespace(name="test-agent", files=[str(doc)], chunk_size=256))
 
         # Verify rag_index.json was created
         index_path = tmp_path / "data" / "rag_index.json"

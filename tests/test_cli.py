@@ -1000,7 +1000,11 @@ class TestCmdDeploy:
         class Args:
             name = str(agents_dir / "my-bot.json")
 
-        cmd_deploy(Args())
+        # Mock subprocess and shutil.which so deploy doesn't actually run npm/wrangler
+        mock_result = type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with patch("subprocess.run", return_value=mock_result), \
+             patch("shutil.which", return_value="/usr/bin/npm"):
+            cmd_deploy(Args())
 
         deploy_config = deploy_dir / "agent-config.json"
         assert deploy_config.exists()
@@ -1024,6 +1028,7 @@ class TestCmdIngest:
         (doc_dir / "test.txt").write_text("Hello world " * 100)
 
         class Args:
+            name = "test-agent"
             files = [str(doc_dir)]
             chunk_size = 500
 
