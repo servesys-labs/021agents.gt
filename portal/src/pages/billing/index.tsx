@@ -1,89 +1,87 @@
-import { useCustom } from "@refinedev/core";
-import { Card, Text, Metric, Flex, Grid, BarList, AreaChart } from "@tremor/react";
+import { AreaChart, BarList, Card, Grid, Metric, Text } from "@tremor/react";
 
-const API_URL = "/api/v1";
-const authHeaders = () => {
-  const token = localStorage.getItem("token");
-  return token ? { Authorization: `Bearer ${token}` } : {};
-};
+import { PageHeader } from "../../components/common/PageHeader";
+import { QueryState } from "../../components/common/QueryState";
+import { toNumber, type DailyUsageResponse, type UsageResponse } from "../../lib/adapters";
+import { useApiQuery } from "../../lib/api";
 
 export const BillingPage = () => {
-  const { data: usage } = useCustom({
-    url: `${API_URL}/billing/usage`,
-    method: "get",
-    config: { headers: authHeaders() },
-  });
+  const usageQuery = useApiQuery<UsageResponse>("/api/v1/billing/usage");
+  const dailyQuery = useApiQuery<DailyUsageResponse>("/api/v1/billing/usage/daily");
 
-  const { data: daily } = useCustom({
-    url: `${API_URL}/billing/usage/daily`,
-    method: "get",
-    config: { headers: authHeaders() },
-  });
-
-  const u = usage?.data as any;
-  const chartData = (daily?.data?.days || []).map((d: any) => ({
+  const usage = usageQuery.data;
+  const chartData = (dailyQuery.data?.days ?? []).map((d) => ({
     date: d.day,
-    Cost: d.cost || 0,
+    Cost: toNumber(d.cost),
   }));
 
-  const agentCosts = Object.entries(u?.by_agent || {}).map(([name, cost]) => ({
+  const agentCosts = Object.entries(usage?.by_agent ?? {}).map(([name, cost]) => ({
     name,
     value: Number(cost),
   }));
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-gray-900 mb-6">Billing</h1>
+      <PageHeader title="Billing" subtitle="Spend analytics and cost breakdown" />
+      <QueryState
+        loading={usageQuery.loading || dailyQuery.loading}
+        error={usageQuery.error ?? dailyQuery.error}
+        isEmpty={!usage}
+        onRetry={() => {
+          void usageQuery.refetch();
+          void dailyQuery.refetch();
+        }}
+      >
+        <Grid numItemsMd={2} numItemsLg={4} className="gap-4 mb-8">
+          <Card>
+            <Text>Total Spend</Text>
+            <Metric>${toNumber(usage?.total_cost_usd).toFixed(4)}</Metric>
+          </Card>
+          <Card>
+            <Text>Inference</Text>
+            <Metric>${toNumber(usage?.inference_cost_usd).toFixed(4)}</Metric>
+          </Card>
+          <Card>
+            <Text>Connectors</Text>
+            <Metric>${toNumber(usage?.connector_cost_usd).toFixed(4)}</Metric>
+          </Card>
+          <Card>
+            <Text>GPU Compute</Text>
+            <Metric>${toNumber(usage?.gpu_compute_cost_usd).toFixed(4)}</Metric>
+          </Card>
+        </Grid>
 
-      <Grid numItemsMd={2} numItemsLg={4} className="gap-4 mb-8">
-        <Card>
-          <Text>Total Spend</Text>
-          <Metric>${(u?.total_cost_usd || 0).toFixed(4)}</Metric>
-        </Card>
-        <Card>
-          <Text>Inference</Text>
-          <Metric>${(u?.inference_cost_usd || 0).toFixed(4)}</Metric>
-        </Card>
-        <Card>
-          <Text>Connectors</Text>
-          <Metric>${(u?.connector_cost_usd || 0).toFixed(4)}</Metric>
-        </Card>
-        <Card>
-          <Text>GPU Compute</Text>
-          <Metric>${(u?.gpu_compute_cost_usd || 0).toFixed(4)}</Metric>
-        </Card>
-      </Grid>
+        <Grid numItemsMd={2} className="gap-6">
+          <Card>
+            <Text className="font-bold">Daily Cost</Text>
+            {chartData.length > 0 ? (
+              <AreaChart
+                className="h-48 mt-4"
+                data={chartData}
+                index="date"
+                categories={["Cost"]}
+                colors={["emerald"]}
+                valueFormatter={(v: number) => `$${v.toFixed(4)}`}
+              />
+            ) : (
+              <Text className="mt-8 text-center text-gray-400">No usage data.</Text>
+            )}
+          </Card>
 
-      <Grid numItemsMd={2} className="gap-6">
-        <Card>
-          <Text className="font-bold">Daily Cost</Text>
-          {chartData.length > 0 ? (
-            <AreaChart
-              className="h-48 mt-4"
-              data={chartData}
-              index="date"
-              categories={["Cost"]}
-              colors={["emerald"]}
-              valueFormatter={(v) => `$${v.toFixed(4)}`}
-            />
-          ) : (
-            <Text className="mt-8 text-center text-gray-400">No data</Text>
-          )}
-        </Card>
-
-        <Card>
-          <Text className="font-bold">Cost by Agent</Text>
-          {agentCosts.length > 0 ? (
-            <BarList
-              data={agentCosts}
-              className="mt-4"
-              valueFormatter={(v) => `$${v.toFixed(4)}`}
-            />
-          ) : (
-            <Text className="mt-8 text-center text-gray-400">No agent data</Text>
-          )}
-        </Card>
-      </Grid>
+          <Card>
+            <Text className="font-bold">Cost by Agent</Text>
+            {agentCosts.length > 0 ? (
+              <BarList
+                data={agentCosts}
+                className="mt-4"
+                valueFormatter={(v: number) => `$${v.toFixed(4)}`}
+              />
+            ) : (
+              <Text className="mt-8 text-center text-gray-400">No agent cost data.</Text>
+            )}
+          </Card>
+        </Grid>
+      </QueryState>
     </div>
   );
 };

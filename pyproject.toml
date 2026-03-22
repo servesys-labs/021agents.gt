@@ -32,6 +32,9 @@ sandbox = [
     "e2b>=1.0",
     "e2b-code-interpreter>=1.0",
 ]
+postgres = [
+    "psycopg[binary]>=3.2",
+]
 
 [project.scripts]
 agentos = "agentos.cli:main"

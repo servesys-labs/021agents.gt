@@ -28,6 +28,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from agentos.auth.jwt import TokenClaims, create_token, verify_token
+from agentos.auth.clerk import clerk_enabled, verify_clerk_token
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +155,17 @@ def mount_auth_routes(app: FastAPI) -> None:
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
             claims = verify_token(token)
+            if claims is None and clerk_enabled():
+                clerk_claims = verify_clerk_token(token)
+                if clerk_claims is not None:
+                    claims = TokenClaims(
+                        sub=f"clerk:{clerk_claims.sub}",
+                        email=clerk_claims.email,
+                        name=clerk_claims.name,
+                        provider="clerk",
+                        iat=clerk_claims.iat,
+                        exp=clerk_claims.exp,
+                    )
             if claims is None:
                 return JSONResponse(
                     {"error": "Invalid or expired token"},

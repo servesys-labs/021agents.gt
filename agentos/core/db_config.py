@@ -1,4 +1,4 @@
-"""Database configuration — supports SQLite (default) and PostgreSQL (production).
+"""Database configuration — supports SQLite and PostgreSQL backends.
 
 Usage:
     # SQLite (default, zero-config)
@@ -18,6 +18,10 @@ Migration guide:
 """
 
 import os
+from pathlib import Path
+
+from agentos.core.database import AgentDB
+from agentos.core.postgres_database import PostgresAgentDB
 
 
 def get_database_url() -> str:
@@ -27,9 +31,20 @@ def get_database_url() -> str:
 
 def is_postgres() -> bool:
     """Check if we're using PostgreSQL."""
+    backend = os.environ.get("AGENTOS_DB_BACKEND", "").lower()
+    if backend == "postgres":
+        return True
     return get_database_url().startswith("postgresql")
 
 
 def is_sqlite() -> bool:
     """Check if we're using SQLite (default)."""
     return not is_postgres()
+
+
+def get_db():
+    """Create a DB handle for the configured backend."""
+    if is_postgres():
+        return PostgresAgentDB(get_database_url())
+    db_path = Path.cwd() / "data" / "agent.db"
+    return AgentDB(db_path)

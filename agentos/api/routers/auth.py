@@ -6,7 +6,6 @@ import hashlib
 import os
 import time
 import uuid
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -16,6 +15,10 @@ from agentos.api.schemas import (
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+def _password_auth_enabled() -> bool:
+    return os.environ.get("AGENTOS_AUTH_ALLOW_PASSWORD", "true").lower() in {"1", "true", "yes"}
 
 
 def _hash_password(password: str, salt: str = "") -> str:
@@ -40,6 +43,8 @@ def _verify_password(password: str, stored: str) -> bool:
 async def signup(request: SignupRequest):
     """Create a new user account with a personal org."""
     from agentos.auth.jwt import create_token
+    if not _password_auth_enabled():
+        raise HTTPException(status_code=400, detail="Password auth disabled for this deployment")
 
     db = _get_db()
 
@@ -72,13 +77,15 @@ async def signup(request: SignupRequest):
 
     token = create_token(user_id=user_id, email=request.email, extra={"org_id": org_id})
 
-    return TokenResponse(token=token, user_id=user_id, email=request.email, org_id=org_id)
+    return TokenResponse(token=token, user_id=user_id, email=request.email, org_id=org_id, provider="local")
 
 
 @router.post("/login", response_model=TokenResponse)
 async def login(request: LoginRequest):
     """Authenticate with email and password."""
     from agentos.auth.jwt import create_token
+    if not _password_auth_enabled():
+        raise HTTPException(status_code=400, detail="Password auth disabled for this deployment")
 
     db = _get_db()
     row = db.conn.execute(
@@ -103,7 +110,67 @@ async def login(request: LoginRequest):
         extra={"org_id": org_id},
     )
 
-    return TokenResponse(token=token, user_id=user["user_id"], email=user["email"], org_id=org_id)
+    return TokenResponse(token=token, user_id=user["user_id"], email=user["email"], org_id=org_id, provider="local")
+
+
+@router.get("/providers")
+async def auth_providers():
+    provider = os.environ.get("AGENTOS_AUTH_PROVIDER", "local").lower()
+    clerk_enabled = provider == "clerk"
+    allow_password = os.environ.get("AGENTOS_AUTH_ALLOW_PASSWORD", "true").lower() in {"1", "true", "yes"}
+    return {
+        "active_provider": provider,
+        "clerk_enabled": clerk_enabled,
+        "password_enabled": allow_password,
+    }
+
+
+@router.post("/clerk/exchange", response_model=TokenResponse)
+async def clerk_exchange(payload: dict[str, str]):
+    """Exchange a Clerk JWT for an AgentOS JWT.
+
+    This allows the backend to continue using its own org/role checks
+    while delegating end-user authentication to Clerk.
+    """
+    from agentos.auth.clerk import clerk_enabled, verify_clerk_token
+    from agentos.auth.provisioning import provision_clerk_identity
+    from agentos.auth.jwt import create_token
+
+    if not clerk_enabled():
+        raise HTTPException(status_code=400, detail="Clerk auth is not enabled")
+
+    clerk_token = payload.get("clerk_token", "")
+    if not clerk_token:
+        raise HTTPException(status_code=400, detail="clerk_token is required")
+
+    claims = verify_clerk_token(clerk_token)
+    if claims is None or not claims.sub or not claims.email:
+        raise HTTPException(status_code=401, detail="Invalid Clerk token")
+
+    db = _get_db()
+    provisioned = provision_clerk_identity(
+        db=db,
+        clerk_sub=claims.sub,
+        email=claims.email,
+        name=claims.name,
+        clerk_org_id=claims.org_id,
+        clerk_org_name=claims.org_name,
+        clerk_role=claims.org_role,
+    )
+    token = create_token(
+        user_id=provisioned.user_id,
+        email=provisioned.email,
+        name=provisioned.name,
+        provider="clerk",
+        extra={"org_id": provisioned.org_id, "role": provisioned.role},
+    )
+    return TokenResponse(
+        token=token,
+        user_id=provisioned.user_id,
+        email=provisioned.email,
+        org_id=provisioned.org_id,
+        provider="clerk",
+    )
 
 
 @router.get("/me", response_model=UserResponse)
@@ -131,6 +198,8 @@ async def change_password(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Change password."""
+    if not _password_auth_enabled():
+        raise HTTPException(status_code=400, detail="Password auth disabled for this deployment")
     db = _get_db()
     row = db.conn.execute(
         "SELECT password_hash FROM users WHERE user_id = ?",

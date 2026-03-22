@@ -176,6 +176,75 @@ uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8000
 - `GET /tools` — List available tools
 - `GET /memory/snapshot` — Current working memory
 
+## Portal (Refine + Tremor)
+
+The `portal/` app provides an operator UI for the control plane, including:
+
+- Dashboard, agents, sessions, workflows/jobs runtime, and billing
+- Sandbox Studio for create/exec/files lifecycle operations
+- Integrations surface for connectors, MCP servers, and webhooks
+- Governance views for policy templates, secret inventory, and audit trail
+- OpenAPI-backed API Explorer to surface the full endpoint inventory (v1 + legacy)
+
+Run locally:
+
+```bash
+cd portal
+npm install --legacy-peer-deps
+npm run dev
+```
+
+Default Vite proxy targets `http://localhost:8340` for API routes.
+
+### Auth Modes
+
+AgentOS now supports a hybrid auth strategy:
+
+- `local` (default): built-in email/password + AgentOS JWT
+- `clerk`: Clerk-managed sign-in with backend token exchange at `/api/v1/auth/clerk/exchange`
+
+Backend env:
+
+```bash
+# local or clerk
+export AGENTOS_AUTH_PROVIDER=local
+
+# optional: disable local password endpoints when using clerk
+export AGENTOS_AUTH_ALLOW_PASSWORD=true
+
+# required when AGENTOS_AUTH_PROVIDER=clerk
+export AGENTOS_CLERK_ISSUER="https://<your-clerk-issuer>"
+# optional audience check
+export AGENTOS_CLERK_AUDIENCE=""
+# optional claim->role mapping JSON
+export AGENTOS_CLERK_ROLE_MAP=""
+```
+
+Portal env (`portal/.env.local`):
+
+```bash
+VITE_AUTH_PROVIDER=local
+VITE_CLERK_PUBLISHABLE_KEY=""
+```
+
+Clerk mode includes silent token refresh and explicit session-expiry UX in the portal.
+
+### Database Backend
+
+Day-1 recommendation is Postgres-first:
+
+```bash
+export AGENTOS_DB_BACKEND=postgres
+export DATABASE_URL="postgresql://user:pass@host:5432/agentos"
+```
+
+Local fallback remains available:
+
+```bash
+export AGENTOS_DB_BACKEND=sqlite
+export DATABASE_URL="sqlite:///data/agent.db"
+```
+
 ## Configuration
 
 Edit `config/default.json` for global defaults, or set per-agent in the agent definition file.
@@ -191,6 +260,9 @@ scripts/prod_check.sh --quick
 # full pass
 scripts/prod_check.sh
 ```
+
+Portal checks are included by default (`typecheck`, `test`, `lint`, `build`).
+Use `--skip-portal` to bypass them in constrained environments.
 
 Optional smoke checks against a deployed URL:
 

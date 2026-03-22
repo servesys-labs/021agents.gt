@@ -40,6 +40,7 @@ class TokenResponse(BaseModel):
     user_id: str
     email: str
     org_id: str = ""
+    provider: str = "local"
 
 
 class UserResponse(BaseModel):

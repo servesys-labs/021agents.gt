@@ -102,6 +102,53 @@ class TestAuthRouter:
         resp = api_client.post("/api/v1/auth/logout", headers={"Authorization": f"Bearer {signup['token']}"})
         assert resp.status_code == 200
 
+    def test_auth_providers(self, api_client):
+        resp = api_client.get("/api/v1/auth/providers")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "active_provider" in data
+        assert "password_enabled" in data
+
+    def test_clerk_exchange_disabled(self, api_client):
+        resp = api_client.post("/api/v1/auth/clerk/exchange", json={"clerk_token": "abc"})
+        assert resp.status_code == 400
+
+    def test_clerk_exchange_enabled(self, api_client, monkeypatch):
+        monkeypatch.setenv("AGENTOS_AUTH_PROVIDER", "clerk")
+
+        from agentos.auth.clerk import ClerkClaims
+        import agentos.auth.clerk as clerk_mod
+
+        monkeypatch.setattr(
+            clerk_mod,
+            "verify_clerk_token",
+            lambda _token: ClerkClaims(
+                sub="user_123",
+                email="clerk@example.com",
+                name="Clerk User",
+                org_id="org_abc",
+                org_name="Acme",
+                org_role="org:admin",
+                iss="https://clerk.example",
+                exp=2_000_000_000,
+                iat=1_900_000_000,
+            ),
+        )
+
+        resp = api_client.post("/api/v1/auth/clerk/exchange", json={"clerk_token": "abc"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["provider"] == "clerk"
+        assert data["email"] == "clerk@example.com"
+        me = api_client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {data['token']}"})
+        assert me.status_code == 200
+        assert me.json()["role"] == "admin"
+
+    def test_password_auth_disabled(self, api_client, monkeypatch):
+        monkeypatch.setenv("AGENTOS_AUTH_ALLOW_PASSWORD", "false")
+        resp = api_client.post("/api/v1/auth/signup", json={"email": "blocked@example.com", "password": "p"})
+        assert resp.status_code == 400
+
 
 class TestAgentsRouter:
     def test_list_agents(self, api_client):

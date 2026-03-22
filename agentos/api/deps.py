@@ -98,13 +98,15 @@ class CurrentUser:
 
 def _get_db():
     """Get the project's AgentDB instance."""
+    from agentos.core.db_config import get_db, is_sqlite
     from pathlib import Path
-    from agentos.core.database import AgentDB
 
-    db_path = Path.cwd() / "data" / "agent.db"
-    if not db_path.exists():
-        raise HTTPException(status_code=503, detail="Database not initialized. Run 'agentos init' first.")
-    db = AgentDB(db_path)
+    if is_sqlite():
+        db_path = Path.cwd() / "data" / "agent.db"
+        if not db_path.exists():
+            raise HTTPException(status_code=503, detail="Database not initialized. Run 'agentos init' first.")
+
+    db = get_db()
     db.initialize()
     return db
 
@@ -175,16 +177,46 @@ def require_admin():
 def _resolve_jwt(token: str) -> CurrentUser:
     """Resolve a JWT token to a CurrentUser."""
     from agentos.auth.jwt import verify_token
+    from agentos.auth.clerk import clerk_enabled, verify_clerk_token
+    from agentos.auth.provisioning import provision_clerk_identity
 
     claims = verify_token(token)
+    if claims is None and clerk_enabled():
+        clerk_claims = verify_clerk_token(token)
+        if clerk_claims is not None and clerk_claims.sub and clerk_claims.email:
+            db = _get_db()
+            provisioned = provision_clerk_identity(
+                db=db,
+                clerk_sub=clerk_claims.sub,
+                email=clerk_claims.email,
+                name=clerk_claims.name,
+                clerk_org_id=clerk_claims.org_id,
+                clerk_org_name=clerk_claims.org_name,
+                clerk_role=clerk_claims.org_role,
+            )
+
+            return CurrentUser(
+                user_id=provisioned.user_id,
+                email=provisioned.email,
+                name=provisioned.name,
+                org_id=provisioned.org_id,
+                role=provisioned.role,
+                scopes=["*"],
+                auth_method="jwt",
+            )
+
     if claims is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user_id = claims.user_id
     org_id = getattr(claims, "org_id", "") or ""
+    role_from_token = getattr(claims, "extra", {}) or {}
+    token_role = role_from_token.get("role", "") if isinstance(role_from_token, dict) else ""
 
     # Look up role from org_members if org_id is available
     role = "member"
+    if token_role in ROLE_HIERARCHY:
+        role = token_role
     try:
         db = _get_db()
         # If token does not carry org context, resolve a default org membership.

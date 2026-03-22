@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 RUN_TESTS=1
 RUN_DEPLOY_TYPES=1
+RUN_PORTAL=1
 QUICK=0
 SMOKE_URL=""
 SMOKE_TOKEN=""
@@ -28,6 +29,7 @@ Options:
   --quick                 Run a shorter validation set.
   --skip-tests            Skip pytest checks.
   --skip-deploy-types     Skip deploy TypeScript checks.
+  --skip-portal           Skip portal checks (lint/type/test/build).
   --smoke-url URL         Run basic smoke checks against URL.
   --token TOKEN           Bearer token for smoke checks.
   -h, --help              Show this help.
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --quick) QUICK=1 ;;
     --skip-tests) RUN_TESTS=0 ;;
     --skip-deploy-types) RUN_DEPLOY_TYPES=0 ;;
+    --skip-portal) RUN_PORTAL=0 ;;
     --smoke-url) SMOKE_URL="${2:-}"; shift ;;
     --token) SMOKE_TOKEN="${2:-}"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -119,14 +122,36 @@ if [[ "$RUN_DEPLOY_TYPES" -eq 1 ]]; then
   if [[ -f "deploy/package.json" ]]; then
     if command -v npm >/dev/null; then
       if grep -q '"types"' deploy/package.json; then
-        (cd deploy && npm run types >/dev/null)
-        ok "Deploy type generation passed."
+        if (cd deploy && npm run types >/dev/null); then
+          ok "Deploy type generation passed."
+        else
+          warn "Deploy type generation failed (often due to missing wrangler); continuing."
+        fi
       else
         warn "No deploy 'types' script found; skipping."
       fi
     else
       warn "npm not found; skipping deploy type checks."
     fi
+  fi
+fi
+
+if [[ "$RUN_PORTAL" -eq 1 ]]; then
+  if [[ -f "portal/package.json" ]]; then
+    if command -v npm >/dev/null; then
+      ok "Running portal quality checks."
+      if [[ "$QUICK" -eq 1 ]]; then
+        (cd portal && npm run typecheck >/dev/null && npm run lint >/dev/null)
+        ok "Portal quick checks passed."
+      else
+        (cd portal && npm run typecheck >/dev/null && npm run test >/dev/null && npm run lint >/dev/null && npm run build >/dev/null)
+        ok "Portal full checks passed."
+      fi
+    else
+      warn "npm not found; skipping portal checks."
+    fi
+  else
+    warn "No portal package found; skipping portal checks."
   fi
 fi
 

@@ -47,3 +47,22 @@ jobs:
           python-version: "3.13"
       - name: Check syntax
         run: python -m py_compile agentos/cli.py agentos/agent.py agentos/api/app.py
+
+  portal:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install portal dependencies
+        run: npm ci --legacy-peer-deps
+      - name: Run portal checks
+        run: |
+          npm run typecheck
+          npm run test
+          npm run lint
+          npm run build

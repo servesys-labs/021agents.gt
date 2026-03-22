@@ -1,33 +1,46 @@
+import type { DataProvider } from "@refinedev/core";
 import dataProvider from "@refinedev/simple-rest";
 
 const API_URL = "/api/v1";
 
-// Wrap the simple-rest data provider to add auth headers
-const baseProvider = dataProvider(API_URL);
+const baseProvider = dataProvider(API_URL) as DataProvider;
 
-const authHeaders = () => {
+const authHeaders = (): Record<string, string> => {
   const token = localStorage.getItem("token");
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
-export const agentosDataProvider = {
+function withHeaders<TParams extends { meta?: Record<string, unknown> }>(params: TParams): TParams {
+  return {
+    ...params,
+    meta: {
+      ...params.meta,
+      headers: {
+        ...(params.meta?.headers as Record<string, string> | undefined),
+        ...authHeaders(),
+      },
+    },
+  };
+}
+
+export const agentosDataProvider: DataProvider = {
   ...baseProvider,
-  getList: async (params: any) => {
-    return baseProvider.getList({ ...params, meta: { ...params.meta, headers: authHeaders() } });
+  getList: async (params) => {
+    return baseProvider.getList(withHeaders(params));
   },
-  getOne: async (params: any) => {
-    return baseProvider.getOne({ ...params, meta: { ...params.meta, headers: authHeaders() } });
+  getOne: async (params) => {
+    return baseProvider.getOne(withHeaders(params));
   },
-  create: async (params: any) => {
-    return baseProvider.create({ ...params, meta: { ...params.meta, headers: authHeaders() } });
+  create: async (params) => {
+    return baseProvider.create(withHeaders(params));
   },
-  update: async (params: any) => {
-    return baseProvider.update({ ...params, meta: { ...params.meta, headers: authHeaders() } });
+  update: async (params) => {
+    return baseProvider.update(withHeaders(params));
   },
-  deleteOne: async (params: any) => {
-    return baseProvider.deleteOne({ ...params, meta: { ...params.meta, headers: authHeaders() } });
+  deleteOne: async (params) => {
+    return baseProvider.deleteOne(withHeaders(params));
   },
-  custom: async (params: any) => {
-    return baseProvider.custom?.({ ...params, meta: { ...params.meta, headers: authHeaders() } }) ?? { data: {} as any };
+  custom: async (params) => {
+    return baseProvider.custom!(withHeaders(params));
   },
 };
