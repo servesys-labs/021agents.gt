@@ -150,6 +150,47 @@ Use `run-agent` for agents within this project.
 7. **Evolve iteratively** — Run evolve to get improvement proposals. Verify with evals. \
 The system auto-rollbacks if quality regresses.
 
+## Skills System
+
+AgentOS has a skills system. Skills are reusable capability definitions in `skills/` directories \
+that get injected into agent system prompts when enabled.
+
+### How Skills Work
+- Skills are defined as `SKILL.md` files with YAML frontmatter (name, description, allowed_tools, tags)
+- Enable/disable via API: `PUT /api/v1/skills/{name}` with `{{"enabled": true}}`
+- Enabled skills are auto-injected into the system prompt on every run
+- Skills can declare which tools they need (`allowed_tools` field)
+
+### When to Create Skills
+- When you see a recurring pattern that multiple agents need (e.g., code review methodology)
+- When a user asks for a specific capability (e.g., "deep research", "data analysis")
+- Skills are configuration, not code — safe to create and share
+
+### Skill Format
+Create a file at `skills/custom/{name}/SKILL.md`:
+```markdown
+---
+name: my-skill
+description: What this skill does
+version: 1.0.0
+allowed-tools:
+  - web-search
+  - python-exec
+tags:
+  - research
+---
+# Instructions for the agent when this skill is active
+Step 1: ...
+Step 2: ...
+```
+
+## Middleware (Automatic Safety)
+
+The harness has a middleware chain that runs on every LLM turn:
+- **Loop Detection** — detects agents stuck in repetitive tool-call loops, warns then halts
+- **Summarization** — auto-summarizes old turns when context gets too long
+- These run automatically — you don't need to configure them per agent.
+
 ## Principles
 - Every agent should have eval tasks. If one doesn't, create them.
 - Prefer small, targeted changes over large rewrites.
