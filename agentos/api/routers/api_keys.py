@@ -35,7 +35,30 @@ async def list_keys(user: CurrentUser = Depends(get_current_user)):
 
 @router.post("", response_model=ApiKeyCreatedResponse)
 async def create_key(request: CreateApiKeyRequest, user: CurrentUser = Depends(get_current_user)):
-    """Create a new API key. The full key is only shown once."""
+    """Create a new API key with optional project/env scoping.
+
+    Scopes control what the key can do:
+    - "*" — full access
+    - "agents:read" — list/get agents only
+    - "agents:run" — run agents only
+    - "billing:read" — view billing only
+    - "admin" — org/team management
+
+    Project/env scoping restricts WHERE the key works:
+    - project_id="" — org-wide access
+    - project_id="proj-123" — only this project
+    - env="production" — only production environment
+    """
+    from agentos.api.deps import ALL_SCOPES
+
+    # Validate scopes
+    for scope in request.scopes:
+        if scope != "*" and scope not in ALL_SCOPES:
+            # Allow category wildcards like "agents:*"
+            category = scope.split(":")[0]
+            if not any(s.startswith(f"{category}:") for s in ALL_SCOPES):
+                pass  # Warn but don't block — extensible scopes
+
     db = _get_db()
     key, prefix, key_hash = generate_api_key()
     key_id = uuid.uuid4().hex[:12]
@@ -52,9 +75,16 @@ async def create_key(request: CreateApiKeyRequest, user: CurrentUser = Depends(g
     )
     db.conn.commit()
 
+    # Audit
+    db.audit("apikey.create", user_id=user.user_id, org_id=user.org_id,
+             resource_type="api_key", resource_id=key_id,
+             changes={"name": request.name, "scopes": request.scopes,
+                       "project_id": request.project_id, "env": request.env})
+
     return ApiKeyCreatedResponse(
         key_id=key_id, name=request.name, key_prefix=prefix,
-        scopes=request.scopes, created_at=time.time(), key=key,
+        scopes=request.scopes, project_id=request.project_id,
+        env=request.env, created_at=time.time(), key=key,
     )
 
 

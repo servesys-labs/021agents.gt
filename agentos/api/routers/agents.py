@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.responses import StreamingResponse
 
-from agentos.api.deps import CurrentUser, get_current_user, get_optional_user
+from agentos.api.deps import CurrentUser, get_current_user, get_optional_user, require_scope
 from agentos.api.schemas import (
     AgentCreateRequest, AgentResponse, AgentRunRequest, RunResponse,
 )
@@ -49,7 +49,7 @@ async def get_agent(name: str):
 
 
 @router.post("", response_model=AgentResponse)
-async def create_agent(request: AgentCreateRequest, user: CurrentUser = Depends(get_current_user)):
+async def create_agent(request: AgentCreateRequest, user: CurrentUser = Depends(require_scope("agents:write"))):
     """Create a new agent."""
     from agentos.agent import AgentConfig, save_agent_config
 
@@ -72,7 +72,7 @@ async def create_agent(request: AgentCreateRequest, user: CurrentUser = Depends(
 
 
 @router.put("/{name}", response_model=AgentResponse)
-async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser = Depends(get_current_user)):
+async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser = Depends(require_scope("agents:write"))):
     """Update an existing agent."""
     from agentos.agent import Agent, AgentConfig, save_agent_config
 
@@ -103,7 +103,7 @@ async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser
 
 
 @router.delete("/{name}")
-async def delete_agent(name: str, user: CurrentUser = Depends(get_current_user)):
+async def delete_agent(name: str, user: CurrentUser = Depends(require_scope("agents:write"))):
     """Delete an agent."""
     from pathlib import Path
     from agentos.agent import _resolve_agents_dir

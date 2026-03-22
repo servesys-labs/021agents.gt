@@ -8,7 +8,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from agentos.api.deps import CurrentUser, get_current_user, _get_db
+from agentos.api.deps import CurrentUser, get_current_user, _get_db, require_role, require_scope
 from agentos.api.schemas import CreateOrgRequest, OrgResponse, InviteMemberRequest
 
 router = APIRouter(prefix="/orgs", tags=["orgs"])
@@ -68,7 +68,7 @@ async def list_members(org_id: str, user: CurrentUser = Depends(get_current_user
 
 
 @router.post("/{org_id}/members")
-async def invite_member(org_id: str, request: InviteMemberRequest, user: CurrentUser = Depends(get_current_user)):
+async def invite_member(org_id: str, request: InviteMemberRequest, user: CurrentUser = Depends(require_role("admin"))):
     db = _get_db()
 
     # Find or create user
@@ -115,7 +115,7 @@ async def update_org(org_id: str, name: str = "", plan: str = "", user: CurrentU
 
 
 @router.delete("/{org_id}")
-async def delete_org(org_id: str, user: CurrentUser = Depends(get_current_user)):
+async def delete_org(org_id: str, user: CurrentUser = Depends(require_role("owner"))):
     """Delete an organization."""
     db = _get_db()
     db.conn.execute("DELETE FROM org_members WHERE org_id = ?", (org_id,))
@@ -125,7 +125,7 @@ async def delete_org(org_id: str, user: CurrentUser = Depends(get_current_user))
 
 
 @router.put("/{org_id}/members/{member_user_id}")
-async def update_member_role(org_id: str, member_user_id: str, role: str, user: CurrentUser = Depends(get_current_user)):
+async def update_member_role(org_id: str, member_user_id: str, role: str, user: CurrentUser = Depends(require_role("admin"))):
     """Change a member's role."""
     if role not in ("owner", "admin", "member", "viewer"):
         raise HTTPException(status_code=400, detail="Invalid role")
@@ -139,7 +139,7 @@ async def update_member_role(org_id: str, member_user_id: str, role: str, user: 
 
 
 @router.delete("/{org_id}/members/{member_user_id}")
-async def remove_member(org_id: str, member_user_id: str, user: CurrentUser = Depends(get_current_user)):
+async def remove_member(org_id: str, member_user_id: str, user: CurrentUser = Depends(require_role("admin"))):
     db = _get_db()
     db.conn.execute(
         "DELETE FROM org_members WHERE org_id = ? AND user_id = ?",

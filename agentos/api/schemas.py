@@ -73,6 +73,8 @@ class InviteMemberRequest(BaseModel):
 class CreateApiKeyRequest(BaseModel):
     name: str = "default"
     scopes: list[str] = ["*"]
+    project_id: str = ""  # Scope to specific project (empty = org-wide)
+    env: str = ""  # Scope to specific environment (empty = all envs)
     expires_in_days: int | None = None
 
 
@@ -81,6 +83,8 @@ class ApiKeyResponse(BaseModel):
     name: str
     key_prefix: str
     scopes: list[str]
+    project_id: str = ""
+    env: str = ""
     created_at: float
     last_used_at: float | None = None
     is_active: bool = True

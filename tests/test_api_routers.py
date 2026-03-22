@@ -14,17 +14,18 @@ def api_client(tmp_path, monkeypatch):
     (tmp_path / "agents").mkdir()
     (tmp_path / "eval").mkdir()
 
-    # Create DB with v3 schema (portal tables)
-    from agentos.core.database import create_database, MIGRATION_V2_TO_V3
+    # Create DB with v4 schema (all tables)
+    from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
     db = create_database(tmp_path / "data" / "agent.db")
-    # Force v3 tables
-    for stmt in MIGRATION_V2_TO_V3.split(";"):
-        stmt = stmt.strip()
-        if stmt:
-            try:
-                db.conn.execute(stmt)
-            except Exception:
-                pass
+    # Force v3+v4 tables
+    for migration in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
+        for stmt in migration.split(";"):
+            stmt = stmt.strip()
+            if stmt and not stmt.startswith("--"):
+                try:
+                    db.conn.execute(stmt)
+                except Exception:
+                    pass
     db.conn.commit()
     db.close()
 

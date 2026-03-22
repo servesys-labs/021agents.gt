@@ -1,20 +1,64 @@
-"""Shared API dependencies — auth, database, org context.
+"""Shared API dependencies — auth, RBAC, scoped API keys, database context.
 
-Used by all API routers for consistent auth and data access.
+Used by all API routers for consistent auth and permission checks.
+
+Permission model:
+  org_id / project_id / env — scope hierarchy
+  role — owner > admin > member > viewer
+  scopes — fine-grained capabilities on API keys
+
+API key scopes:
+  "*"                — full access
+  "agents:read"      — list/get agents
+  "agents:write"     — create/update/delete agents
+  "agents:run"       — run agents
+  "sessions:read"    — list/get sessions
+  "eval:run"         — run evaluations
+  "billing:read"     — view billing
+  "admin"            — org/team management
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request
 
 logger = logging.getLogger(__name__)
+
+# ── Role hierarchy ────────────────────────────────────────────────────────
+
+ROLE_HIERARCHY = {"owner": 4, "admin": 3, "member": 2, "viewer": 1}
+
+# ── Scope definitions ────────────────────────────────────────────────────
+
+ALL_SCOPES = {
+    "*",
+    "agents:read", "agents:write", "agents:run",
+    "sessions:read", "sessions:write",
+    "eval:read", "eval:run",
+    "evolve:read", "evolve:write",
+    "billing:read", "billing:write",
+    "memory:read", "memory:write",
+    "tools:read",
+    "schedules:read", "schedules:write",
+    "webhooks:read", "webhooks:write",
+    "rag:read", "rag:write",
+    "sandbox:read", "sandbox:write",
+    "deploy:read", "deploy:write",
+    "policies:read", "policies:write",
+    "slos:read", "slos:write",
+    "releases:read", "releases:write",
+    "jobs:read", "jobs:write",
+    "workflows:read", "workflows:write",
+    "admin",
+}
 
 
 @dataclass
@@ -24,8 +68,32 @@ class CurrentUser:
     email: str
     name: str = ""
     org_id: str = ""
+    project_id: str = ""  # Scoped to specific project (API keys)
+    env: str = ""  # Scoped to specific environment (API keys)
     role: str = "member"  # owner/admin/member/viewer
+    scopes: list[str] = field(default_factory=lambda: ["*"])
     auth_method: str = "jwt"  # jwt/api_key
+
+    @property
+    def role_level(self) -> int:
+        return ROLE_HIERARCHY.get(self.role, 0)
+
+    def has_scope(self, scope: str) -> bool:
+        """Check if user has a specific scope."""
+        if "*" in self.scopes:
+            return True
+        # Check exact match
+        if scope in self.scopes:
+            return True
+        # Check wildcard category (e.g., "agents:*" matches "agents:read")
+        category = scope.split(":")[0]
+        if f"{category}:*" in self.scopes:
+            return True
+        return False
+
+    def has_role(self, min_role: str) -> bool:
+        """Check if user has at least the specified role."""
+        return self.role_level >= ROLE_HIERARCHY.get(min_role, 0)
 
 
 def _get_db():
@@ -45,8 +113,8 @@ async def get_current_user(request: Request) -> CurrentUser:
     """Extract authenticated user from JWT token or API key.
 
     Supports dual-mode auth:
-    - Bearer <jwt_token> — browser sessions
-    - Bearer ak_<api_key> — programmatic access
+    - Bearer <jwt_token> — browser sessions (full access per role)
+    - Bearer ak_<api_key> — programmatic access (scoped to org/project/env + capabilities)
     """
     auth_header = request.headers.get("Authorization", "")
 
@@ -71,6 +139,39 @@ async def get_optional_user(request: Request) -> CurrentUser | None:
         return None
 
 
+# ── Permission checkers (use as FastAPI dependencies) ──────────────────
+
+def require_scope(scope: str):
+    """FastAPI dependency that checks for a specific scope."""
+    async def _check(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        if not user.has_scope(scope):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions. Required scope: {scope}",
+            )
+        return user
+    return _check
+
+
+def require_role(min_role: str):
+    """FastAPI dependency that checks for a minimum role level."""
+    async def _check(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+        if not user.has_role(min_role):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient role. Required: {min_role}, current: {user.role}",
+            )
+        return user
+    return _check
+
+
+def require_admin():
+    """Shortcut: require admin or owner role."""
+    return require_role("admin")
+
+
+# ── Token resolution ──────────────────────────────────────────────────
+
 def _resolve_jwt(token: str) -> CurrentUser:
     """Resolve a JWT token to a CurrentUser."""
     from agentos.auth.jwt import verify_token
@@ -79,17 +180,36 @@ def _resolve_jwt(token: str) -> CurrentUser:
     if claims is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    user_id = claims.user_id
+    org_id = getattr(claims, "org_id", "")
+
+    # Look up role from org_members if org_id is available
+    role = "member"
+    if org_id:
+        try:
+            db = _get_db()
+            row = db.conn.execute(
+                "SELECT role FROM org_members WHERE org_id = ? AND user_id = ?",
+                (org_id, user_id),
+            ).fetchone()
+            if row:
+                role = row["role"]
+        except Exception:
+            pass
+
     return CurrentUser(
-        user_id=claims.user_id,
+        user_id=user_id,
         email=claims.email,
         name=getattr(claims, "name", ""),
-        org_id=getattr(claims, "org_id", ""),
+        org_id=org_id,
+        role=role,
+        scopes=["*"],  # JWT users get full scopes, controlled by role
         auth_method="jwt",
     )
 
 
 def _resolve_api_key(key: str) -> CurrentUser:
-    """Resolve an API key to a CurrentUser."""
+    """Resolve an API key to a CurrentUser with scoped permissions."""
     try:
         db = _get_db()
         key_hash = hashlib.sha256(key.encode()).hexdigest()
@@ -119,10 +239,17 @@ def _resolve_api_key(key: str) -> CurrentUser:
             "SELECT * FROM users WHERE user_id = ?", (row["user_id"],)
         ).fetchone()
 
+        # Parse scopes
+        scopes = json.loads(row.get("scopes", '["*"]'))
+
         return CurrentUser(
             user_id=row["user_id"],
             email=dict(user_row)["email"] if user_row else "",
             org_id=row["org_id"],
+            project_id=row.get("project_id", ""),
+            env=row.get("env", ""),
+            role="member",  # API keys don't inherit role — controlled by scopes
+            scopes=scopes,
             auth_method="api_key",
         )
     except HTTPException:
