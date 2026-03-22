@@ -333,6 +333,43 @@ async def import_agent(config: dict[str, Any], user: CurrentUser = Depends(get_c
     )
 
 
+@router.post("/{name}/run/{session_id}/cancel")
+async def cancel_agent_run(
+    name: str,
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Cancel an active agent run by session ID."""
+    from agentos.agent import Agent
+
+    try:
+        agent = Agent.from_name(name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    # Attempt to cancel through the harness if it tracks active runs
+    if hasattr(agent._harness, "cancel"):
+        cancelled = agent._harness.cancel(session_id)
+        if not cancelled:
+            raise HTTPException(status_code=404, detail=f"No active run found for session '{session_id}'")
+        return {"cancelled": session_id, "agent": name}
+
+    # Fallback: mark the session as cancelled in the database
+    from agentos.api.deps import _get_db
+    db = _get_db()
+    row = db.conn.execute(
+        "SELECT session_id FROM sessions WHERE session_id = ? AND agent_name = ?",
+        (session_id, name),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found for agent '{name}'")
+    db.conn.execute(
+        "UPDATE sessions SET status = 'cancelled' WHERE session_id = ?", (session_id,)
+    )
+    db.conn.commit()
+    return {"cancelled": session_id, "agent": name}
+
+
 @router.get("/{name}/export")
 async def export_agent(name: str):
     """Export agent config as JSON for backup or sharing."""
