@@ -1,36 +1,38 @@
 import { Authenticated, Refine } from "@refinedev/core";
 import routerProvider, { NavigateToResource } from "@refinedev/react-router";
+import { Suspense, lazy } from "react";
 import { BrowserRouter, Routes, Route, Outlet } from "react-router-dom";
 
 import { authProvider } from "./providers/authProvider";
 import { agentosDataProvider } from "./providers/dataProvider";
 import { Sidebar } from "./components/layout/Sidebar";
-import { DashboardPage } from "./pages/dashboard";
-import { AgentsPage } from "./pages/agents";
-import { SessionsPage } from "./pages/sessions";
-import { BillingPage } from "./pages/billing";
-import { SettingsPage } from "./pages/settings";
-import { LoginPage } from "./pages/login";
-import { RuntimePage } from "./pages/runtime";
-import { SandboxPage } from "./pages/sandbox";
-import { IntegrationsPage } from "./pages/integrations";
-import { GovernancePage } from "./pages/governance";
-import { ApiExplorerPage } from "./pages/api-explorer";
-import { AgentChatPage } from "./pages/agent-chat";
-import { EvalPage } from "./pages/eval";
-import { SchedulesPage } from "./pages/schedules";
-import { WebhooksPage } from "./pages/webhooks";
-import { EvolutionPage } from "./pages/evolution";
-import { ProjectsPage } from "./pages/projects";
-import { ReleasesPage } from "./pages/releases";
-import { MemoryPage } from "./pages/memory";
-import { RagPage } from "./pages/rag";
-import { ReliabilityPage } from "./pages/reliability";
-import { InfrastructurePage } from "./pages/infrastructure";
 import { ClerkSessionManager } from "./auth/ClerkSessionManager";
 import { CLERK_PUBLISHABLE_KEY, isClerkMode } from "./auth/config";
 
 import "./index.css";
+
+const DashboardPage = lazy(() => import("./pages/dashboard").then((m) => ({ default: m.DashboardPage })));
+const AgentsPage = lazy(() => import("./pages/agents").then((m) => ({ default: m.AgentsPage })));
+const SessionsPage = lazy(() => import("./pages/sessions").then((m) => ({ default: m.SessionsPage })));
+const BillingPage = lazy(() => import("./pages/billing").then((m) => ({ default: m.BillingPage })));
+const SettingsPage = lazy(() => import("./pages/settings").then((m) => ({ default: m.SettingsPage })));
+const LoginPage = lazy(() => import("./pages/login").then((m) => ({ default: m.LoginPage })));
+const RuntimePage = lazy(() => import("./pages/runtime").then((m) => ({ default: m.RuntimePage })));
+const SandboxPage = lazy(() => import("./pages/sandbox").then((m) => ({ default: m.SandboxPage })));
+const IntegrationsPage = lazy(() => import("./pages/integrations").then((m) => ({ default: m.IntegrationsPage })));
+const GovernancePage = lazy(() => import("./pages/governance").then((m) => ({ default: m.GovernancePage })));
+const ApiExplorerPage = lazy(() => import("./pages/api-explorer").then((m) => ({ default: m.ApiExplorerPage })));
+const AgentChatPage = lazy(() => import("./pages/agent-chat").then((m) => ({ default: m.AgentChatPage })));
+const EvalPage = lazy(() => import("./pages/eval").then((m) => ({ default: m.EvalPage })));
+const SchedulesPage = lazy(() => import("./pages/schedules").then((m) => ({ default: m.SchedulesPage })));
+const WebhooksPage = lazy(() => import("./pages/webhooks").then((m) => ({ default: m.WebhooksPage })));
+const EvolutionPage = lazy(() => import("./pages/evolution").then((m) => ({ default: m.EvolutionPage })));
+const ProjectsPage = lazy(() => import("./pages/projects").then((m) => ({ default: m.ProjectsPage })));
+const ReleasesPage = lazy(() => import("./pages/releases").then((m) => ({ default: m.ReleasesPage })));
+const MemoryPage = lazy(() => import("./pages/memory").then((m) => ({ default: m.MemoryPage })));
+const RagPage = lazy(() => import("./pages/rag").then((m) => ({ default: m.RagPage })));
+const ReliabilityPage = lazy(() => import("./pages/reliability").then((m) => ({ default: m.ReliabilityPage })));
+const InfrastructurePage = lazy(() => import("./pages/infrastructure").then((m) => ({ default: m.InfrastructurePage })));
 
 function App() {
   return (
@@ -67,49 +69,51 @@ function App() {
         ]}
         options={{ syncWithLocation: true }}
       >
-        <Routes>
-          <Route
-            element={
-              <Authenticated key="private-routes" fallback={<NavigateToResource resource="login" />}>
-                <Sidebar>
-                  <Outlet />
-                </Sidebar>
-              </Authenticated>
-            }
-          >
-            <Route index element={<DashboardPage />} />
-            <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/sessions" element={<SessionsPage />} />
-            <Route path="/runtime" element={<RuntimePage />} />
-            <Route path="/agent-chat" element={<AgentChatPage />} />
-            <Route path="/eval" element={<EvalPage />} />
-            <Route path="/schedules" element={<SchedulesPage />} />
-            <Route path="/webhooks" element={<WebhooksPage />} />
-            <Route path="/sandbox" element={<SandboxPage />} />
-            <Route path="/integrations" element={<IntegrationsPage />} />
-            <Route path="/evolution" element={<EvolutionPage />} />
-            <Route path="/projects" element={<ProjectsPage />} />
-            <Route path="/releases" element={<ReleasesPage />} />
-            <Route path="/memory" element={<MemoryPage />} />
-            <Route path="/rag" element={<RagPage />} />
-            <Route path="/reliability" element={<ReliabilityPage />} />
-            <Route path="/infrastructure" element={<InfrastructurePage />} />
-            <Route path="/governance" element={<GovernancePage />} />
-            <Route path="/billing" element={<BillingPage />} />
-            <Route path="/api-explorer" element={<ApiExplorerPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-          </Route>
+        <Suspense fallback={<div className="p-6 text-sm text-gray-500">Loading page...</div>}>
+          <Routes>
+            <Route
+              element={
+                <Authenticated key="private-routes" fallback={<NavigateToResource resource="login" />}>
+                  <Sidebar>
+                    <Outlet />
+                  </Sidebar>
+                </Authenticated>
+              }
+            >
+              <Route index element={<DashboardPage />} />
+              <Route path="/agents" element={<AgentsPage />} />
+              <Route path="/sessions" element={<SessionsPage />} />
+              <Route path="/runtime" element={<RuntimePage />} />
+              <Route path="/agent-chat" element={<AgentChatPage />} />
+              <Route path="/eval" element={<EvalPage />} />
+              <Route path="/schedules" element={<SchedulesPage />} />
+              <Route path="/webhooks" element={<WebhooksPage />} />
+              <Route path="/sandbox" element={<SandboxPage />} />
+              <Route path="/integrations" element={<IntegrationsPage />} />
+              <Route path="/evolution" element={<EvolutionPage />} />
+              <Route path="/projects" element={<ProjectsPage />} />
+              <Route path="/releases" element={<ReleasesPage />} />
+              <Route path="/memory" element={<MemoryPage />} />
+              <Route path="/rag" element={<RagPage />} />
+              <Route path="/reliability" element={<ReliabilityPage />} />
+              <Route path="/infrastructure" element={<InfrastructurePage />} />
+              <Route path="/governance" element={<GovernancePage />} />
+              <Route path="/billing" element={<BillingPage />} />
+              <Route path="/api-explorer" element={<ApiExplorerPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+            </Route>
 
-          <Route
-            path="/login"
-            element={
-              <Authenticated key="public-routes" fallback={<LoginPage />}>
-                <NavigateToResource resource="dashboard" />
-              </Authenticated>
-            }
-          />
-          <Route path="*" element={<NavigateToResource resource="dashboard" />} />
-        </Routes>
+            <Route
+              path="/login"
+              element={
+                <Authenticated key="public-routes" fallback={<LoginPage />}>
+                  <NavigateToResource resource="dashboard" />
+                </Authenticated>
+              }
+            />
+            <Route path="*" element={<NavigateToResource resource="dashboard" />} />
+          </Routes>
+        </Suspense>
       </Refine>
     </BrowserRouter>
   );
