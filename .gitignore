@@ -5,3 +5,9 @@ __pycache__/
 dist/
 build/
 *.egg
+data/agent.db
+data/agent.db-wal
+data/agent.db-shm
+data/rag_index.json
+data/users.json
+data/knowledge.jsonl
