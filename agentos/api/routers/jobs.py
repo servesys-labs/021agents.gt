@@ -58,7 +58,7 @@ async def retry_job(job_id: str, user: CurrentUser = Depends(get_current_user)):
     return {"retried": job_id}
 
 
-@router.get("/dead-letter")
+@router.get("/dlq")
 async def dead_letter_queue(limit: int = 50):
     """List dead-letter (permanently failed) jobs."""
     db = _get_db()
