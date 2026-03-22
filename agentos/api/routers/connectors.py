@@ -65,8 +65,12 @@ async def call_connector_tool(
     If the user hasn't authenticated with the target app,
     returns an auth_url for them to connect their account.
     """
+    import time as _time
+    start = _time.time()
+
     hub = _get_hub()
     result = await hub.call_tool(tool_name, arguments or {}, user_id=user.user_id)
+    duration_ms = (_time.time() - start) * 1000
 
     if result.auth_required:
         return {
@@ -79,16 +83,51 @@ async def call_connector_tool(
     if not result.success:
         raise HTTPException(status_code=502, detail=result.error)
 
-    # Audit the tool call
+    # Track billing + audit
     db = _get_db()
+    db.record_billing(
+        cost_type="connector",
+        total_cost_usd=0.001,  # Per-call connector cost
+        org_id=user.org_id,
+        customer_id=user.user_id,
+        description=f"Connector: {tool_name}",
+        model=tool_name,
+        provider=os.environ.get("CONNECTOR_PROVIDER", "pipedream"),
+    )
     db.audit(
         "connector.tool_call",
         user_id=user.user_id, org_id=user.org_id,
         resource_type="connector", resource_id=tool_name,
-        changes={"arguments": arguments, "provider": "pipedream"},
+        changes={"arguments": arguments, "provider": "pipedream", "duration_ms": duration_ms},
     )
 
-    return {"success": True, "data": result.data}
+    return {"success": True, "data": result.data, "duration_ms": round(duration_ms, 1)}
+
+
+@router.get("/usage")
+async def connector_usage(since_days: int = 30, user: CurrentUser = Depends(get_current_user)):
+    """Get connector usage and costs for billing."""
+    import time as _time
+    db = _get_db()
+    since = _time.time() - (since_days * 86400)
+
+    rows = db.conn.execute(
+        """SELECT model as tool_name, COUNT(*) as calls, SUM(total_cost_usd) as cost
+        FROM billing_records
+        WHERE cost_type = 'connector' AND org_id = ? AND created_at >= ?
+        GROUP BY model ORDER BY calls DESC""",
+        (user.org_id, since),
+    ).fetchall()
+
+    total_calls = sum(r["calls"] for r in rows)
+    total_cost = sum(r["cost"] for r in rows)
+
+    return {
+        "total_calls": total_calls,
+        "total_cost_usd": total_cost,
+        "by_tool": [dict(r) for r in rows],
+        "since_days": since_days,
+    }
 
 
 @router.get("/auth/{app}")
