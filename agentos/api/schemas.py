@@ -236,3 +236,70 @@ class EvalRunResponse(BaseModel):
     total_cost_usd: float
     total_tasks: int
     total_trials: int
+
+
+# ── Skills ─────────────────────────────────────────────────────────────
+
+class SkillResponse(BaseModel):
+    name: str
+    description: str = ""
+    version: str = "1.0.0"
+    license: str = ""
+    allowed_tools: list[str] = []
+    tags: list[str] = []
+    enabled: bool = True
+    category: str = ""
+    content_length: int = 0
+
+
+class SkillUpdateRequest(BaseModel):
+    enabled: bool
+
+
+# ── Middleware ──────────────────────────────────────────────────────────
+
+class MiddlewareStatusResponse(BaseModel):
+    name: str
+    order: int
+    type: str
+    stats: dict[str, Any] = {}
+
+
+# ── Memory (Async) ─────────────────────────────────────────────────────
+
+class MemoryFactResponse(BaseModel):
+    id: str
+    content: str
+    category: str
+    confidence: float
+    source: str = ""
+    created_at: float = 0.0
+
+
+class UserMemoryResponse(BaseModel):
+    work_context: str = ""
+    personal_context: str = ""
+    top_of_mind: str = ""
+    facts: list[MemoryFactResponse] = []
+    last_updated: float = 0.0
+
+
+class AsyncMemoryStatsResponse(BaseModel):
+    queue_size: int = 0
+    total_facts: int = 0
+    total_updates_queued: int = 0
+    total_updates_processed: int = 0
+    total_facts_extracted: int = 0
+    total_facts_deduplicated: int = 0
+    running: bool = False
+
+
+# ── Sandbox Virtual Paths ──────────────────────────────────────────────
+
+class PathMappingResponse(BaseModel):
+    session_id: str
+    workspace: str
+    uploads: str
+    outputs: str
+    skills: str
+    virtual_prefix: str = "/mnt/user-data"
