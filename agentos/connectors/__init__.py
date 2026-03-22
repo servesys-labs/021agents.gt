@@ -7,7 +7,12 @@ handle OAuth, credential storage, and API normalization.
 Usage:
     from agentos.connectors import ConnectorHub
 
-    hub = ConnectorHub(provider="pipedream", api_key="...")
+    hub = ConnectorHub(
+        provider="pipedream",
+        project_id="proj_xxx",
+        client_id="...",
+        client_secret="...",
+    )
     tools = await hub.list_tools(app="slack")
     result = await hub.call_tool("slack_send_message", {"channel": "#general", "text": "hello"})
 """

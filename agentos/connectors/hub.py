@@ -45,8 +45,14 @@ class ConnectorProvider:
     async def list_tools(self, app: str = "") -> list[ConnectorTool]:
         raise NotImplementedError
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any],
-                        user_id: str = "") -> ConnectorResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        app: str = "",
+        user_id: str = "",
+    ) -> ConnectorResult:
         raise NotImplementedError
 
     async def get_auth_url(self, app: str, user_id: str) -> str:
@@ -114,12 +120,26 @@ class PipedreamProvider(ConnectorProvider):
         """Parse response that may be JSON or SSE (text/event-stream)."""
         text = text.strip()
         if text.startswith("event:") or text.startswith("data:"):
-            for line in text.split("\n"):
-                if line.startswith("data: "):
-                    try:
-                        return json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
+            # SSE may contain multi-line "data:" chunks terminated by blank lines.
+            chunks: list[str] = []
+            current: list[str] = []
+            for raw_line in text.splitlines():
+                line = raw_line.strip("\r")
+                if line == "":
+                    if current:
+                        chunks.append("\n".join(current))
+                        current = []
+                    continue
+                if line.startswith("data:"):
+                    current.append(line[5:].lstrip())
+            if current:
+                chunks.append("\n".join(current))
+
+            for chunk in chunks:
+                try:
+                    return json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
             return {}
         try:
             return json.loads(text)
@@ -160,8 +180,14 @@ class PipedreamProvider(ConnectorProvider):
             logger.warning("Pipedream list_tools failed: %s", exc)
             return []
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any],
-                        user_id: str = "") -> ConnectorResult:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        app: str = "",
+        user_id: str = "",
+    ) -> ConnectorResult:
         """Call a tool via Pipedream MCP."""
         import httpx
 
@@ -173,13 +199,18 @@ class PipedreamProvider(ConnectorProvider):
             async with httpx.AsyncClient(timeout=60) as client:
                 resp = await client.post(
                     self.MCP_URL,
-                    headers={**self._headers(user_id=user_id), "Content-Type": "application/json"},
+                    headers={**self._headers(user_id=user_id, app=app), "Content-Type": "application/json"},
                     json={
                         "jsonrpc": "2.0", "id": "1",
                         "method": "tools/call",
                         "params": {"name": tool_name, "arguments": arguments},
                     },
                 )
+                if resp.status_code != 200:
+                    return ConnectorResult(
+                        success=False,
+                        error=f"Pipedream HTTP {resp.status_code}: {resp.text[:300]}",
+                    )
 
                 data = self._parse_sse_or_json(resp.text)
 
@@ -196,6 +227,15 @@ class PipedreamProvider(ConnectorProvider):
                     return ConnectorResult(success=False, error=error_msg)
 
                 result = data.get("result", {})
+                if result.get("isError"):
+                    return ConnectorResult(
+                        success=False,
+                        error="".join(
+                            c.get("text", "")
+                            for c in result.get("content", [])
+                            if isinstance(c, dict) and c.get("type") == "text"
+                        ) or "Connector tool returned error",
+                    )
                 content = result.get("content", [])
                 text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
 
@@ -206,7 +246,18 @@ class PipedreamProvider(ConnectorProvider):
 
     async def get_auth_url(self, app: str, user_id: str) -> str:
         """Get the OAuth connection URL for a user + app."""
-        return f"https://pipedream.com/_static/connect.html?app={app}&connectLink=true"
+        from urllib.parse import urlencode
+
+        # Keep user/app/project context in the URL so the caller can complete
+        # auth for the intended tenant and app selection.
+        params = {
+            "app": app,
+            "connectLink": "true",
+            "external_user_id": user_id or "default-user",
+            "project_id": self.project_id,
+            "environment": self.environment,
+        }
+        return f"https://pipedream.com/_static/connect.html?{urlencode(params)}"
 
 
 class ConnectorHub:
@@ -231,9 +282,20 @@ class ConnectorHub:
     async def list_tools(self, app: str = "") -> list[ConnectorTool]:
         return await self._provider.list_tools(app=app)
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any],
-                        user_id: str = "") -> ConnectorResult:
-        return await self._provider.call_tool(tool_name, arguments, user_id=user_id)
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        app: str = "",
+        user_id: str = "",
+    ) -> ConnectorResult:
+        return await self._provider.call_tool(
+            tool_name,
+            arguments,
+            app=app,
+            user_id=user_id,
+        )
 
     async def get_auth_url(self, app: str, user_id: str) -> str:
         return await self._provider.get_auth_url(app, user_id)

@@ -858,7 +858,9 @@ async def connector_call(tool_name: str, app: str = "", arguments: dict[str, Any
             client_secret=os.environ.get("PIPEDREAM_CLIENT_SECRET", ""),
         )
 
+        start_time = time.time()
         result = await hub.call_tool(tool_name, arguments or {})
+        duration_ms = (time.time() - start_time) * 1000
 
         if result.auth_required:
             return (
@@ -866,6 +868,25 @@ async def connector_call(tool_name: str, app: str = "", arguments: dict[str, Any
                 f"Connect your account: {result.auth_url}\n"
                 f"Then retry the tool call."
             )
+
+        # Track billing for connector usage
+        try:
+            from pathlib import Path
+            from agentos.core.database import AgentDB
+            db_path = Path.cwd() / "data" / "agent.db"
+            if db_path.exists():
+                db = AgentDB(db_path)
+                db.initialize()
+                db.record_billing(
+                    cost_type="connector",
+                    total_cost_usd=0.001,  # Per-call connector cost (configurable)
+                    description=f"Connector: {tool_name} via {os.environ.get('CONNECTOR_PROVIDER', 'pipedream')}",
+                    model=tool_name,
+                    provider=os.environ.get("CONNECTOR_PROVIDER", "pipedream"),
+                )
+                db.conn.close()
+        except Exception:
+            pass  # Don't block tool call on billing failure
 
         if not result.success:
             return f"Connector error: {result.error}"
