@@ -68,16 +68,30 @@ class ToolRegistry:
             return
         self._discovered = True
 
-        if not self._plugins_dir.exists():
-            return
-
-        # Load built-in handlers for bundled tools
+        # Load built-in handlers and schemas (always available regardless of plugins dir)
         try:
             from agentos.tools.builtins import BUILTIN_HANDLERS
         except ImportError:
             BUILTIN_HANDLERS = {}
 
-        # Load JSON tool definitions
+        try:
+            from agentos.tools.builtins import BUILTIN_SCHEMAS
+        except ImportError:
+            BUILTIN_SCHEMAS = {}
+
+        for name, schema in BUILTIN_SCHEMAS.items():
+            if name not in self._tools:
+                self._tools[name] = ToolPlugin(
+                    name=name,
+                    description=schema.get("description", ""),
+                    input_schema=schema.get("input_schema", {}),
+                    handler=BUILTIN_HANDLERS.get(name),
+                )
+
+        if not self._plugins_dir.exists():
+            return
+
+        # Load JSON tool definitions (may override builtins with custom schemas)
         for p in sorted(self._plugins_dir.glob("*.json")):
             try:
                 data = json.loads(p.read_text())

@@ -216,7 +216,9 @@ class TestListTools:
         empty_tools.mkdir()
 
         result = await list_tools_handler()
-        assert "No tools" in result
+        # Builtins are always available even with an empty tools directory
+        assert "Available tools" in result
+        assert "create-agent" in result
 
     @pytest.mark.asyncio
     async def test_with_tools(self, tmp_path, monkeypatch):

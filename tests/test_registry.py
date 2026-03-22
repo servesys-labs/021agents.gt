@@ -4,6 +4,9 @@ import json
 import pytest
 
 from agentos.tools.registry import ToolPlugin, ToolRegistry
+from agentos.tools.builtins import BUILTIN_SCHEMAS
+
+NUM_BUILTINS = len(BUILTIN_SCHEMAS)
 
 
 class TestToolPlugin:
@@ -43,9 +46,11 @@ class TestToolRegistry:
 
         registry = ToolRegistry(plugins_dir=tmp_path)
         tools = registry.list_all()
-        assert len(tools) == 1
-        assert tools[0].name == "json-tool"
-        assert tools[0].description == "Loaded from JSON"
+        assert len(tools) == NUM_BUILTINS + 1
+        names = [t.name for t in tools]
+        assert "json-tool" in names
+        json_tool = registry.get("json-tool")
+        assert json_tool.description == "Loaded from JSON"
 
     def test_discover_json_array(self, tmp_path):
         """A JSON file can contain an array of tool definitions."""
@@ -57,7 +62,7 @@ class TestToolRegistry:
 
         registry = ToolRegistry(plugins_dir=tmp_path)
         tools = registry.list_all()
-        assert len(tools) == 2
+        assert len(tools) == NUM_BUILTINS + 2
         names = [t.name for t in tools]
         assert "tool-a" in names
         assert "tool-b" in names
@@ -77,16 +82,19 @@ TOOLS = [
 
         registry = ToolRegistry(plugins_dir=tmp_path)
         tools = registry.list_all()
-        assert len(tools) == 1
-        assert tools[0].name == "py-tool"
+        assert len(tools) == NUM_BUILTINS + 1
+        assert registry.get("py-tool").name == "py-tool"
 
     def test_empty_directory(self, tmp_path):
         registry = ToolRegistry(plugins_dir=tmp_path)
-        assert registry.list_all() == []
+        tools = registry.list_all()
+        # Only builtins should be present
+        assert len(tools) == NUM_BUILTINS
 
     def test_nonexistent_directory(self):
         registry = ToolRegistry(plugins_dir="/does/not/exist")
-        assert registry.list_all() == []
+        # Builtins are still loaded even without a plugins directory
+        assert len(registry.list_all()) == NUM_BUILTINS
 
     def test_get_returns_none_for_missing(self, tmp_path):
         registry = ToolRegistry(plugins_dir=tmp_path)
@@ -99,16 +107,27 @@ TOOLS = [
         registry = ToolRegistry(plugins_dir=tmp_path)
         client = registry.to_mcp_client()
         tools = client.list_tools()
-        assert len(tools) == 1
-        assert tools[0].name == "mcp-tool"
+        assert len(tools) == NUM_BUILTINS + 1
+        names = [t.name for t in tools]
+        assert "mcp-tool" in names
 
     def test_skips_invalid_json(self, tmp_path):
         (tmp_path / "bad.json").write_text("not valid json{{{")
         registry = ToolRegistry(plugins_dir=tmp_path)
-        assert registry.list_all() == []
+        # Only builtins — the bad JSON is skipped
+        assert len(registry.list_all()) == NUM_BUILTINS
 
     def test_skips_underscore_python(self, tmp_path):
         """Python files starting with _ are skipped."""
         (tmp_path / "_internal.py").write_text("TOOLS = [{'name': 'hidden'}]")
         registry = ToolRegistry(plugins_dir=tmp_path)
-        assert registry.list_all() == []
+        # Only builtins — underscore files are skipped
+        assert len(registry.list_all()) == NUM_BUILTINS
+
+    def test_builtins_always_available(self, tmp_path):
+        """All builtin tools should be available even with an empty plugins dir."""
+        registry = ToolRegistry(plugins_dir=tmp_path)
+        for name in BUILTIN_SCHEMAS:
+            tool = registry.get(name)
+            assert tool is not None, f"Builtin tool '{name}' not found"
+            assert tool.handler is not None, f"Builtin tool '{name}' has no handler"

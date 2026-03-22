@@ -156,9 +156,15 @@ async def knowledge_search(query: str, top_k: int = 5) -> str:
 # ---------------------------------------------------------------------------
 
 
-async def create_agent(description: str, name: str | None = None) -> str:
-    """Create a new agent from a description using the AgentBuilder."""
-    from agentos.builder import AgentBuilder
+async def create_agent(description: str, name: str | None = None, tools: list[str] | None = None) -> str:
+    """Create a new agent from a description using the AgentBuilder.
+
+    Args:
+        description: What the agent should do
+        name: Optional name override
+        tools: Optional list of tool names. If not provided, tools are auto-detected from description.
+    """
+    from agentos.builder import AgentBuilder, recommend_tools
     from agentos.agent import save_agent_config
 
     builder = AgentBuilder(tools_dir=str(_tools_dir()))
@@ -167,6 +173,13 @@ async def create_agent(description: str, name: str | None = None) -> str:
     # Override name if provided
     if name:
         config.name = name
+
+    # Apply tool override or auto-detect
+    if tools is not None:
+        config.tools = tools
+    elif not config.tools:
+        # Auto-detect tools from description if builder didn't assign any
+        config.tools = recommend_tools(description)
 
     path = save_agent_config(config, _agents_dir() / f"{config.name}.json")
 
@@ -397,6 +410,461 @@ async def list_tools_handler() -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Practical tools — bash, file ops, search, planning
+# ---------------------------------------------------------------------------
+
+async def bash_exec(command: str, timeout_seconds: int = 30) -> str:
+    """Execute a shell command and return stdout + stderr.
+
+    Capped at 30s by default. Returns exit code, stdout, stderr.
+    """
+    import asyncio
+    import shlex
+
+    # Safety: block obviously destructive commands
+    dangerous = ["rm -rf /", "mkfs", "dd if=", ":(){", "fork bomb"]
+    cmd_lower = command.lower()
+    for d in dangerous:
+        if d in cmd_lower:
+            return f"Blocked: command contains dangerous pattern '{d}'"
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"Command timed out after {timeout_seconds}s"
+
+        out = stdout.decode(errors="replace")[:10000]
+        err = stderr.decode(errors="replace")[:5000]
+        result = f"[exit code: {proc.returncode}]\n"
+        if out.strip():
+            result += f"stdout:\n{out}\n"
+        if err.strip():
+            result += f"stderr:\n{err}\n"
+        return result.strip()
+    except Exception as exc:
+        return f"Error executing command: {exc}"
+
+
+async def read_file(path: str, offset: int = 0, limit: int = 200) -> str:
+    """Read a file and return its contents with line numbers.
+
+    Args:
+        path: File path (relative to cwd or absolute)
+        offset: Line number to start from (0-based)
+        limit: Maximum number of lines to read
+    """
+    try:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            return f"File not found: {path}"
+        if not p.is_file():
+            return f"Not a file: {path}"
+        if p.stat().st_size > 5_000_000:
+            return f"File too large ({p.stat().st_size:,} bytes). Use offset/limit to read portions."
+
+        lines = p.read_text(errors="replace").splitlines()
+        total = len(lines)
+        selected = lines[offset:offset + limit]
+        numbered = [f"{i + offset + 1:4d} | {line}" for i, line in enumerate(selected)]
+        header = f"File: {path} ({total} lines total, showing {offset + 1}-{offset + len(selected)})\n"
+        return header + "\n".join(numbered)
+    except Exception as exc:
+        return f"Error reading file: {exc}"
+
+
+async def write_file(path: str, content: str) -> str:
+    """Write content to a file. Creates parent directories if needed."""
+    try:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content)
+        return f"Written {len(content)} bytes to {path}"
+    except Exception as exc:
+        return f"Error writing file: {exc}"
+
+
+async def edit_file(path: str, old_string: str, new_string: str) -> str:
+    """Replace a string in a file. The old_string must appear exactly once."""
+    try:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            return f"File not found: {path}"
+
+        content = p.read_text()
+        count = content.count(old_string)
+        if count == 0:
+            return f"String not found in {path}. No changes made."
+        if count > 1:
+            return f"String found {count} times in {path}. Provide more context to make it unique."
+
+        new_content = content.replace(old_string, new_string, 1)
+        p.write_text(new_content)
+        return f"Edited {path}: replaced 1 occurrence ({len(old_string)} chars → {len(new_string)} chars)"
+    except Exception as exc:
+        return f"Error editing file: {exc}"
+
+
+async def grep_search(pattern: str, path: str = ".", file_glob: str = "", max_results: int = 20) -> str:
+    """Search file contents for a regex pattern.
+
+    Args:
+        pattern: Regex pattern to search for
+        path: Directory or file to search in
+        file_glob: Optional glob filter (e.g., '*.py', '*.ts')
+        max_results: Maximum matches to return
+    """
+    import re
+
+    try:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+
+        if p.is_file():
+            files = [p]
+        elif p.is_dir():
+            if file_glob:
+                files = sorted(p.rglob(file_glob))
+            else:
+                files = sorted(p.rglob("*"))
+        else:
+            return f"Path not found: {path}"
+
+        regex = re.compile(pattern)
+        results: list[str] = []
+        for f in files:
+            if not f.is_file() or f.stat().st_size > 2_000_000:
+                continue
+            try:
+                for i, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+                    if regex.search(line):
+                        results.append(f"{f}:{i}: {line[:200]}")
+                        if len(results) >= max_results:
+                            break
+            except Exception:
+                continue
+            if len(results) >= max_results:
+                break
+
+        if not results:
+            return f"No matches for '{pattern}' in {path}"
+        return f"Found {len(results)} match(es):\n" + "\n".join(results)
+    except re.error as exc:
+        return f"Invalid regex pattern: {exc}"
+    except Exception as exc:
+        return f"Error searching: {exc}"
+
+
+async def glob_find(pattern: str, path: str = ".") -> str:
+    """Find files matching a glob pattern.
+
+    Args:
+        pattern: Glob pattern (e.g., '**/*.py', 'src/**/*.ts')
+        path: Base directory to search from
+    """
+    try:
+        p = Path(path).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.is_dir():
+            return f"Directory not found: {path}"
+
+        matches = sorted(p.glob(pattern))[:100]
+        if not matches:
+            return f"No files matching '{pattern}' in {path}"
+
+        lines = [f"Found {len(matches)} file(s):"]
+        for m in matches:
+            rel = m.relative_to(p) if m.is_relative_to(p) else m
+            size = m.stat().st_size if m.is_file() else 0
+            lines.append(f"  {rel} ({size:,} bytes)" if m.is_file() else f"  {rel}/")
+        return "\n".join(lines)
+    except Exception as exc:
+        return f"Error finding files: {exc}"
+
+
+async def python_exec(code: str, timeout_seconds: int = 30) -> str:
+    """Execute Python code and return the output.
+
+    The code runs in a subprocess with stdout/stderr captured.
+    Use print() to produce output. The code can import standard libraries.
+    """
+    import asyncio
+    import tempfile
+
+    # Write code to a temp file for clean execution
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        f.write(code)
+        tmp_path = f.name
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", tmp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return f"Code execution timed out after {timeout_seconds}s"
+
+        out = stdout.decode(errors="replace")[:10000]
+        err = stderr.decode(errors="replace")[:5000]
+        result = f"[exit code: {proc.returncode}]\n"
+        if out.strip():
+            result += f"Output:\n{out}\n"
+        if err.strip():
+            result += f"Errors:\n{err}\n"
+        if not out.strip() and not err.strip():
+            result += "(no output)\n"
+        return result.strip()
+    except Exception as exc:
+        return f"Error executing code: {exc}"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+async def http_request(url: str, method: str = "GET", headers: dict[str, str] | None = None,
+                       body: str = "", timeout_seconds: int = 30) -> str:
+    """Make an HTTP request and return the response.
+
+    Args:
+        url: The URL to request
+        method: HTTP method (GET, POST, PUT, DELETE, PATCH)
+        headers: Optional request headers
+        body: Optional request body (for POST/PUT/PATCH)
+        timeout_seconds: Request timeout
+    """
+    import httpx
+
+    method = method.upper()
+    if method not in ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+        return f"Invalid HTTP method: {method}"
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            kwargs: dict[str, Any] = {"headers": headers or {}}
+            if body and method in ("POST", "PUT", "PATCH"):
+                kwargs["content"] = body
+                if "content-type" not in {k.lower() for k in (headers or {})}:
+                    kwargs["headers"]["Content-Type"] = "application/json"
+
+            resp = await client.request(method, url, **kwargs)
+
+        # Format response
+        body_text = resp.text[:10000]
+        result = f"[{resp.status_code} {resp.reason_phrase}]\n"
+        result += f"Content-Type: {resp.headers.get('content-type', 'unknown')}\n"
+        result += f"Content-Length: {len(resp.content)}\n\n"
+        result += body_text
+        return result
+    except httpx.TimeoutException:
+        return f"Request timed out after {timeout_seconds}s"
+    except Exception as exc:
+        return f"HTTP request failed: {exc}"
+
+
+async def run_agent(agent_name: str, task: str, max_turns: int = 10,
+                    _parent_trace_id: str = "", _parent_session_id: str = "", _parent_depth: int = 0) -> str:
+    """Run another agent as a sub-agent and return its output.
+
+    This enables hierarchical agent workflows where a parent agent can
+    delegate tasks to specialized child agents. Trace context is automatically
+    propagated for audit/compliance.
+
+    Args:
+        agent_name: Name of the agent to invoke (must exist in agents/)
+        task: The task/input to give the sub-agent
+        max_turns: Max turns for the sub-agent (prevents runaway)
+    """
+    try:
+        from agentos.agent import Agent
+
+        agent = Agent.from_name(agent_name)
+
+        # Cap sub-agent turns to prevent infinite chains
+        if agent._harness.config.max_turns > max_turns:
+            agent._harness.config = type(agent._harness.config)(
+                max_turns=max_turns,
+                timeout_seconds=agent._harness.config.timeout_seconds,
+                retry_on_tool_failure=agent._harness.config.retry_on_tool_failure,
+                max_retries=agent._harness.config.max_retries,
+            )
+
+        # Propagate trace context for audit trail
+        if _parent_trace_id:
+            agent._harness.trace_id = _parent_trace_id
+            agent._harness.parent_session_id = _parent_session_id
+            agent._harness.depth = _parent_depth + 1
+
+        results = await agent.run(task)
+
+        # Extract the final output
+        output = ""
+        total_turns = len(results)
+        total_tool_calls = 0
+        total_cost = 0.0
+        for r in results:
+            if r.llm_response and r.llm_response.content:
+                output = r.llm_response.content
+            total_tool_calls += len(r.tool_results)
+            total_cost += r.cost_usd
+
+        return (
+            f"[Sub-agent '{agent_name}' completed]\n"
+            f"  Turns: {total_turns} | Tool calls: {total_tool_calls} | Cost: ${total_cost:.4f}\n\n"
+            f"{output}"
+        )
+    except FileNotFoundError:
+        return f"Agent '{agent_name}' not found. Use 'list-agents' to see available agents."
+    except Exception as exc:
+        return f"Sub-agent '{agent_name}' failed: {exc}"
+
+
+async def browse_page(url: str, extract: str = "text", selector: str = "") -> str:
+    """Fetch a web page and extract content.
+
+    Renders the page via HTTP (no JavaScript). For JS-heavy pages, use
+    the E2B sandbox with a headless browser.
+
+    Args:
+        url: URL to fetch
+        extract: What to extract — 'text' (readable text), 'html' (raw HTML), 'links' (all links)
+        selector: Optional CSS-like filter (e.g., 'title', 'h1', 'p', 'a')
+    """
+    import httpx
+    import re
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; AgentOS/0.2.0)",
+            })
+            resp.raise_for_status()
+
+        html = resp.text
+
+        if extract == "html":
+            if selector:
+                # Simple tag extraction
+                pattern = f"<{selector}[^>]*>(.*?)</{selector}>"
+                matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+                return "\n".join(_strip_tags(m) for m in matches[:20]) or f"No <{selector}> tags found"
+            return html[:15000]
+
+        if extract == "links":
+            links = re.findall(r'href="(https?://[^"]+)"', html)
+            unique = list(dict.fromkeys(links))[:50]
+            return f"Found {len(unique)} links:\n" + "\n".join(f"  {l}" for l in unique)
+
+        # Default: extract readable text
+        # Strip script/style tags
+        text = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+        # Strip remaining HTML tags
+        text = _strip_tags(text)
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        if selector:
+            # Extract text from specific tags before stripping
+            pattern = f"<{selector}[^>]*>(.*?)</{selector}>"
+            matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
+            if matches:
+                return "\n".join(_strip_tags(m).strip() for m in matches[:20])
+            return f"No <{selector}> tags found on page"
+
+        return text[:10000] if text else "(empty page)"
+
+    except httpx.TimeoutException:
+        return f"Page load timed out: {url}"
+    except Exception as exc:
+        return f"Failed to load page: {exc}"
+
+
+def _strip_tags(html: str) -> str:
+    """Remove HTML tags from a string."""
+    import re
+    return re.sub(r"<[^>]+>", "", html)
+
+
+# In-memory todo list for agent planning
+_todo_items: dict[str, list[dict[str, Any]]] = {}
+
+
+async def todo(action: str, text: str = "", item_id: int = 0, status: str = "") -> str:
+    """Manage a task/todo list for planning and tracking work.
+
+    Args:
+        action: 'add', 'list', 'update', 'complete', or 'clear'
+        text: Task description (for 'add' and 'update')
+        item_id: Task ID (for 'update' and 'complete')
+        status: New status (for 'update': 'pending', 'in_progress', 'done')
+    """
+    # Use a per-session key based on cwd
+    key = str(Path.cwd())
+    if key not in _todo_items:
+        _todo_items[key] = []
+    items = _todo_items[key]
+
+    if action == "add":
+        if not text:
+            return "Error: 'text' required for add"
+        item = {"id": len(items) + 1, "text": text, "status": "pending"}
+        items.append(item)
+        return f"Added task #{item['id']}: {text}"
+
+    elif action == "list":
+        if not items:
+            return "No tasks. Use todo(action='add', text='...') to create one."
+        lines = ["Tasks:"]
+        for item in items:
+            marker = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}.get(item["status"], "[ ]")
+            lines.append(f"  {marker} #{item['id']}: {item['text']}")
+        pending = sum(1 for i in items if i["status"] == "pending")
+        done = sum(1 for i in items if i["status"] == "done")
+        lines.append(f"\n{done}/{len(items)} completed, {pending} pending")
+        return "\n".join(lines)
+
+    elif action == "complete":
+        for item in items:
+            if item["id"] == item_id:
+                item["status"] = "done"
+                return f"Completed task #{item_id}: {item['text']}"
+        return f"Task #{item_id} not found"
+
+    elif action == "update":
+        for item in items:
+            if item["id"] == item_id:
+                if text:
+                    item["text"] = text
+                if status:
+                    item["status"] = status
+                return f"Updated task #{item_id}: {item['text']} [{item['status']}]"
+        return f"Task #{item_id} not found"
+
+    elif action == "clear":
+        count = len(items)
+        _todo_items[key] = []
+        return f"Cleared {count} tasks"
+
+    return f"Unknown action: {action}. Use 'add', 'list', 'update', 'complete', or 'clear'."
+
+
 # Registry of built-in handlers keyed by tool name
 BUILTIN_HANDLERS: dict[str, Any] = {
     "web-search": web_search,
@@ -407,4 +875,231 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "evolve-agent": evolve_agent,
     "list-agents": list_agents_handler,
     "list-tools": list_tools_handler,
+    "bash": bash_exec,
+    "read-file": read_file,
+    "write-file": write_file,
+    "edit-file": edit_file,
+    "grep": grep_search,
+    "glob": glob_find,
+    "todo": todo,
+    "python-exec": python_exec,
+    "http-request": http_request,
+    "run-agent": run_agent,
+    "browse": browse_page,
+}
+
+# Schemas for built-in tools so the registry can expose them without JSON files
+BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
+    "web-search": {
+        "description": "Search the web for information",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "max_results": {"type": "integer", "description": "Maximum results to return", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    "store-knowledge": {
+        "description": "Store knowledge in the agent's semantic memory",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "Key to store the knowledge under"},
+                "content": {"type": "string", "description": "Content to store"},
+                "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags"},
+            },
+            "required": ["key", "content"],
+        },
+    },
+    "knowledge-search": {
+        "description": "Search the local knowledge store for relevant information",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "top_k": {"type": "integer", "description": "Number of results", "default": 5},
+            },
+            "required": ["query"],
+        },
+    },
+    "create-agent": {
+        "description": "Create a new agent from a description. Auto-assigns tools based on the task, or accepts explicit tool list.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "description": "Description of the agent to create"},
+                "name": {"type": "string", "description": "Optional name for the agent"},
+                "tools": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "Optional list of tools to assign. Available: bash, python-exec, read-file, write-file, edit-file, grep, glob, web-search, http-request, store-knowledge, knowledge-search, todo, create-agent, eval-agent, evolve-agent, list-agents, list-tools. If omitted, tools are auto-detected from description.",
+                },
+            },
+            "required": ["description"],
+        },
+    },
+    "eval-agent": {
+        "description": "Run evaluation tasks against a named agent",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "description": "Name of the agent to evaluate"},
+                "eval_file": {"type": "string", "description": "Path to eval tasks JSON file"},
+                "trials": {"type": "integer", "description": "Number of trials per task", "default": 3},
+            },
+            "required": ["agent_name"],
+        },
+    },
+    "evolve-agent": {
+        "description": "Analyze, propose improvements, or show status for an agent",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "description": "Name of the agent to evolve"},
+                "action": {"type": "string", "enum": ["analyze", "propose", "status"], "default": "analyze"},
+            },
+            "required": ["agent_name"],
+        },
+    },
+    "list-agents": {
+        "description": "List all agent definitions in the project",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "list-tools": {
+        "description": "List all available tool plugins in the project",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "bash": {
+        "description": "Execute a shell command and return stdout/stderr",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "timeout_seconds": {"type": "integer", "description": "Max execution time in seconds", "default": 30},
+            },
+            "required": ["command"],
+        },
+    },
+    "read-file": {
+        "description": "Read a file and return its contents with line numbers",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to read"},
+                "offset": {"type": "integer", "description": "Starting line (0-based)", "default": 0},
+                "limit": {"type": "integer", "description": "Max lines to read", "default": 200},
+            },
+            "required": ["path"],
+        },
+    },
+    "write-file": {
+        "description": "Write content to a file, creating parent directories if needed",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to write"},
+                "content": {"type": "string", "description": "Content to write"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    "edit-file": {
+        "description": "Replace a string in a file (must appear exactly once)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path to edit"},
+                "old_string": {"type": "string", "description": "String to find and replace"},
+                "new_string": {"type": "string", "description": "Replacement string"},
+            },
+            "required": ["path", "old_string", "new_string"],
+        },
+    },
+    "grep": {
+        "description": "Search file contents for a regex pattern",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Regex pattern to search for"},
+                "path": {"type": "string", "description": "Directory or file to search", "default": "."},
+                "file_glob": {"type": "string", "description": "File filter (e.g., '*.py')"},
+                "max_results": {"type": "integer", "description": "Max matches to return", "default": 20},
+            },
+            "required": ["pattern"],
+        },
+    },
+    "glob": {
+        "description": "Find files matching a glob pattern",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Glob pattern (e.g., '**/*.py')"},
+                "path": {"type": "string", "description": "Base directory to search from", "default": "."},
+            },
+            "required": ["pattern"],
+        },
+    },
+    "todo": {
+        "description": "Manage a task list for planning and tracking work",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "list", "update", "complete", "clear"], "description": "Action to perform"},
+                "text": {"type": "string", "description": "Task description (for add/update)"},
+                "item_id": {"type": "integer", "description": "Task ID (for update/complete)"},
+                "status": {"type": "string", "enum": ["pending", "in_progress", "done"], "description": "New status (for update)"},
+            },
+            "required": ["action"],
+        },
+    },
+    "python-exec": {
+        "description": "Execute Python code and return the output. Use print() to produce output.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Python code to execute"},
+                "timeout_seconds": {"type": "integer", "description": "Max execution time", "default": 30},
+            },
+            "required": ["code"],
+        },
+    },
+    "http-request": {
+        "description": "Make an HTTP request and return the response",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to request"},
+                "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"], "default": "GET"},
+                "headers": {"type": "object", "description": "Request headers"},
+                "body": {"type": "string", "description": "Request body (for POST/PUT/PATCH)"},
+                "timeout_seconds": {"type": "integer", "description": "Request timeout", "default": 30},
+            },
+            "required": ["url"],
+        },
+    },
+    "run-agent": {
+        "description": "Run another agent as a sub-agent and return its output. Enables hierarchical delegation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "description": "Name of the agent to invoke"},
+                "task": {"type": "string", "description": "Task to give the sub-agent"},
+                "max_turns": {"type": "integer", "description": "Max turns for sub-agent", "default": 10},
+            },
+            "required": ["agent_name", "task"],
+        },
+    },
+    "browse": {
+        "description": "Fetch a web page and extract readable text, HTML, or links",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to fetch"},
+                "extract": {"type": "string", "enum": ["text", "html", "links"], "description": "What to extract", "default": "text"},
+                "selector": {"type": "string", "description": "Optional tag filter (e.g., 'h1', 'p', 'title')"},
+            },
+            "required": ["url"],
+        },
+    },
 }
