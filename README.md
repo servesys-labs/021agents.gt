@@ -180,6 +180,24 @@ uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8000
 
 Edit `config/default.json` for global defaults, or set per-agent in the agent definition file.
 
+## Production Preflight
+
+Use the preflight script before releases to validate security/env/test basics:
+
+```bash
+# quick pass (recommended for frequent checks)
+scripts/prod_check.sh --quick
+
+# full pass
+scripts/prod_check.sh
+```
+
+Optional smoke checks against a deployed URL:
+
+```bash
+scripts/prod_check.sh --smoke-url "https://<your-domain>" --token "$TOKEN"
+```
+
 ## License
 
 MIT

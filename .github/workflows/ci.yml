@@ -25,15 +25,15 @@ jobs:
         run: |
           pip install -e ".[dev]"
           pip install pyyaml python-multipart
+          chmod +x scripts/prod_check.sh
 
-      - name: Run tests
+      - name: Run preflight (quick)
         env:
-          E2B_API_KEY: ""
-          GMI_API_KEY: ""
-          ANTHROPIC_API_KEY: ""
-          OPENAI_API_KEY: ""
+          AGENTOS_AUTH_REQUIRED: "true"
+          AGENTOS_JWT_SECRET: "ci-jwt-secret-not-for-prod"
+          AGENTOS_SECRET_ENCRYPTION_KEY: "ci-encryption-secret-not-for-prod"
         run: |
-          python -m pytest tests/ -q --tb=short
+          scripts/prod_check.sh --quick
 
       - name: Check import
         run: python -c "import agentos; print(f'AgentOS {agentos.__version__}')"
