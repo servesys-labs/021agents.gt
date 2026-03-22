@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -112,14 +113,45 @@ class HttpProvider:
     ) -> LLMResponse:
         import httpx
 
-        # Separate system message from conversation messages
+        # Separate system messages, and convert tool-related messages
+        # to Anthropic's expected format (tool_use blocks on assistant,
+        # tool_result blocks on user messages).
         system_text = ""
-        chat_messages = []
-        for m in messages:
+        chat_messages: list[dict[str, Any]] = []
+        i = 0
+        while i < len(messages):
+            m = messages[i]
             if m.get("role") == "system":
                 system_text += m.get("content", "") + "\n"
+            elif m.get("role") == "assistant" and m.get("tool_calls"):
+                # Convert to Anthropic content blocks
+                content_blocks: list[dict[str, Any]] = []
+                if m.get("content"):
+                    content_blocks.append({"type": "text", "text": m["content"]})
+                for tc in m["tool_calls"]:
+                    content_blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": tc.get("name", ""),
+                        "input": tc.get("arguments", {}),
+                    })
+                chat_messages.append({"role": "assistant", "content": content_blocks})
+            elif m.get("role") == "tool":
+                # Collect consecutive tool results into a single user message
+                tool_results: list[dict[str, Any]] = []
+                while i < len(messages) and messages[i].get("role") == "tool":
+                    tm = messages[i]
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tm.get("tool_call_id", ""),
+                        "content": tm.get("content", ""),
+                    })
+                    i += 1
+                chat_messages.append({"role": "user", "content": tool_results})
+                continue  # skip i += 1 at end
             else:
-                chat_messages.append(m)
+                chat_messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+            i += 1
 
         payload: dict[str, Any] = {
             "model": self._model_id,
@@ -157,6 +189,7 @@ class HttpProvider:
                 content += block.get("text", "")
             elif block.get("type") == "tool_use":
                 tool_calls.append({
+                    "id": block.get("id", ""),
                     "name": block["name"],
                     "arguments": block.get("input", {}),
                 })
@@ -179,9 +212,35 @@ class HttpProvider:
     ) -> LLMResponse:
         import httpx
 
+        # Convert harness messages to OpenAI format
+        oai_messages: list[dict[str, Any]] = []
+        for m in messages:
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                # Convert to OpenAI tool_calls format
+                oai_tool_calls = []
+                for tc in m["tool_calls"]:
+                    oai_tool_calls.append({
+                        "id": tc.get("id", ""),
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("name", ""),
+                            "arguments": json.dumps(tc.get("arguments", {})),
+                        },
+                    })
+                msg: dict[str, Any] = {"role": "assistant", "content": m.get("content") or None, "tool_calls": oai_tool_calls}
+                oai_messages.append(msg)
+            elif m.get("role") == "tool":
+                oai_messages.append({
+                    "role": "tool",
+                    "tool_call_id": m.get("tool_call_id", ""),
+                    "content": m.get("content", ""),
+                })
+            else:
+                oai_messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+
         payload: dict[str, Any] = {
             "model": self._model_id,
-            "messages": messages,
+            "messages": oai_messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
@@ -229,7 +288,7 @@ class HttpProvider:
                 args = _json.loads(fn.get("arguments", "{}"))
             except _json.JSONDecodeError:
                 args = {}
-            tool_calls.append({"name": fn.get("name", ""), "arguments": args})
+            tool_calls.append({"id": tc.get("id", ""), "name": fn.get("name", ""), "arguments": args})
 
         usage = body.get("usage", {})
         return LLMResponse(

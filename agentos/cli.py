@@ -1079,6 +1079,7 @@ def cmd_ingest(args: argparse.Namespace) -> None:
             for doc, meta in zip(documents, metadatas)
         ],
         "total_chunks": len(pipeline.retriever._chunks) if hasattr(pipeline.retriever, '_chunks') else 0,
+        "source_files": [m.get("source", "") for m in metadatas],
     }
     index_path.write_text(json.dumps(index_data, indent=2) + "\n")
 
@@ -1450,13 +1451,23 @@ def cmd_login(args: argparse.Namespace) -> None:
         print(f" done!")
         print()
 
-        # Issue AgentOS JWT
-        token = create_token(
-            user_id=user.id,
-            email=user.email,
-            name=user.name,
-            provider=user.provider,
-        )
+        # If targeting a remote server, exchange the OAuth token there
+        # so the JWT is signed with the server's secret.
+        if server and server != "local":
+            token = _exchange_token_with_server(
+                server_url=server,
+                oauth_token=access_token,
+                provider=provider,
+                user=user,
+            )
+        else:
+            # Local mode: sign locally (secret is persisted to disk)
+            token = create_token(
+                user_id=user.id,
+                email=user.email,
+                name=user.name,
+                provider=user.provider,
+            )
 
         # Store credential
         store = CredentialsStore.load()
@@ -1529,8 +1540,10 @@ def cmd_serve(args: argparse.Namespace) -> None:
         print("Error: uvicorn not installed. Run: pip install uvicorn")
         sys.exit(1)
 
+    dashboard_dir = Path(__file__).resolve().parent / "dashboard"
     print(f"Starting AgentOS server on http://{args.host}:{args.port}")
-    print(f"  Dashboard: http://{args.host}:{args.port}/dashboard")
+    if dashboard_dir.is_dir():
+        print(f"  Dashboard: http://{args.host}:{args.port}/dashboard")
     print(f"  API:       http://{args.host}:{args.port}/health")
     print()
 
@@ -1754,6 +1767,45 @@ def _oauth_device_flow(provider: str):
 
     user = user_fn(access_token)
     return access_token, user
+
+
+def _exchange_token_with_server(
+    server_url: str, oauth_token: str, provider: str, user: Any
+) -> str:
+    """Exchange an OAuth access token with a remote AgentOS server for a server-signed JWT.
+
+    The server verifies the OAuth token, creates a user record if needed,
+    and returns a JWT signed with its own secret.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"{server_url.rstrip('/')}/auth/token/exchange"
+    payload = json.dumps({
+        "oauth_token": oauth_token,
+        "provider": provider,
+        "user_id": user.id,
+        "email": user.email,
+        "name": user.name,
+    }).encode()
+
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read())
+            return data["token"]
+    except (urllib.error.HTTPError, urllib.error.URLError, KeyError) as exc:
+        print(f"Warning: Could not exchange token with server {server_url}: {exc}")
+        print("  Falling back to local JWT (may not work with this server).")
+        from agentos.auth.jwt import create_token
+        return create_token(
+            user_id=user.id,
+            email=user.email,
+            name=user.name,
+            provider=user.provider,
+        )
 
 
 def _get_builder_provider(args: argparse.Namespace):

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from agentos.core.harness import AgentHarness
@@ -166,25 +166,58 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         return _agent_cache[agent_name]._harness.tool_executor.available_tools()
 
     # ── Sandbox endpoints ────────────────────────────────────────────────
+    # Always require auth — these endpoints can execute arbitrary commands.
 
-    from agentos.sandbox import SandboxManager
-    _sandbox_mgr = SandboxManager()
+    from agentos.auth.middleware import require_auth as _require_sandbox_auth
+
+    _sandbox_mgr_instance: list = []  # lazy singleton
+
+    def _sandbox_mgr():
+        if not _sandbox_mgr_instance:
+            from agentos.sandbox import SandboxManager
+            mgr = SandboxManager()
+            # Block local fallback in API mode — it's host RCE without sandboxing
+            if not mgr.has_api_key:
+                logger.warning(
+                    "E2B_API_KEY not set — sandbox endpoints will reject requests "
+                    "to prevent unauthenticated host command execution"
+                )
+            _sandbox_mgr_instance.append(mgr)
+        return _sandbox_mgr_instance[0]
+
+    def _check_sandbox_available():
+        """Raise 503 if sandbox is in local-fallback mode (unsafe for API)."""
+        mgr = _sandbox_mgr()
+        if not mgr.has_api_key:
+            raise HTTPException(
+                status_code=503,
+                detail="Sandbox unavailable: E2B_API_KEY not configured. "
+                "Local fallback is disabled in API mode for security.",
+            )
 
     @app.post("/sandbox/create")
-    async def sandbox_create(request: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def sandbox_create(
+        request: dict[str, Any] | None = None,
+        _user=Depends(_require_sandbox_auth),
+    ) -> dict[str, Any]:
         """Create a new E2B sandbox."""
+        _check_sandbox_available()
         template = (request or {}).get("template", "base")
         timeout_sec = (request or {}).get("timeout_sec", 300)
-        session = await _sandbox_mgr.create(template=template, timeout_sec=timeout_sec)
+        session = await _sandbox_mgr().create(template=template, timeout_sec=timeout_sec)
         return {"sandbox_id": session.sandbox_id, "template": session.template, "status": session.status}
 
     @app.post("/sandbox/exec")
-    async def sandbox_exec(request: dict[str, Any]) -> dict[str, Any]:
+    async def sandbox_exec(
+        request: dict[str, Any],
+        _user=Depends(_require_sandbox_auth),
+    ) -> dict[str, Any]:
         """Execute a command in a sandbox."""
+        _check_sandbox_available()
         command = request.get("command", "")
         if not command:
             raise HTTPException(status_code=400, detail="command required")
-        result = await _sandbox_mgr.exec(
+        result = await _sandbox_mgr().exec(
             command=command,
             sandbox_id=request.get("sandbox_id"),
             timeout_ms=int(request.get("timeout_ms", 30000)),
@@ -198,46 +231,61 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         }
 
     @app.post("/sandbox/file/write")
-    async def sandbox_file_write(request: dict[str, Any]) -> dict[str, Any]:
+    async def sandbox_file_write(
+        request: dict[str, Any],
+        _user=Depends(_require_sandbox_auth),
+    ) -> dict[str, Any]:
         """Write a file in a sandbox."""
+        _check_sandbox_available()
         path = request.get("path", "")
         content = request.get("content")
         if not path or content is None:
             raise HTTPException(status_code=400, detail="path and content required")
-        result = await _sandbox_mgr.file_write(path=path, content=content, sandbox_id=request.get("sandbox_id"))
+        result = await _sandbox_mgr().file_write(path=path, content=content, sandbox_id=request.get("sandbox_id"))
         return {"sandbox_id": result.sandbox_id, "path": result.path, "success": result.success, "error": result.error}
 
     @app.post("/sandbox/file/read")
-    async def sandbox_file_read(request: dict[str, Any]) -> dict[str, Any]:
+    async def sandbox_file_read(
+        request: dict[str, Any],
+        _user=Depends(_require_sandbox_auth),
+    ) -> dict[str, Any]:
         """Read a file from a sandbox."""
+        _check_sandbox_available()
         path = request.get("path", "")
         if not path:
             raise HTTPException(status_code=400, detail="path required")
-        result = await _sandbox_mgr.file_read(path=path, sandbox_id=request.get("sandbox_id"))
+        result = await _sandbox_mgr().file_read(path=path, sandbox_id=request.get("sandbox_id"))
         return {"sandbox_id": result.sandbox_id, "path": result.path, "content": result.content, "success": result.success, "error": result.error}
 
     @app.get("/sandbox/list")
-    async def sandbox_list() -> dict[str, Any]:
+    async def sandbox_list(_user=Depends(_require_sandbox_auth)) -> dict[str, Any]:
         """List all active sandboxes."""
-        sandboxes = await _sandbox_mgr.list_sandboxes()
+        sandboxes = await _sandbox_mgr().list_sandboxes()
         return {"sandboxes": sandboxes}
 
     @app.post("/sandbox/kill")
-    async def sandbox_kill_endpoint(request: dict[str, Any]) -> dict[str, Any]:
+    async def sandbox_kill_endpoint(
+        request: dict[str, Any],
+        _user=Depends(_require_sandbox_auth),
+    ) -> dict[str, Any]:
         """Kill a sandbox."""
+        _check_sandbox_available()
         sandbox_id = request.get("sandbox_id", "")
         if not sandbox_id:
             raise HTTPException(status_code=400, detail="sandbox_id required")
-        killed = await _sandbox_mgr.kill(sandbox_id=sandbox_id)
+        killed = await _sandbox_mgr().kill(sandbox_id=sandbox_id)
         return {"killed": killed, "sandbox_id": sandbox_id}
 
     @app.post("/sandbox/keepalive")
-    async def sandbox_keepalive(request: dict[str, Any]) -> dict[str, Any]:
+    async def sandbox_keepalive(
+        request: dict[str, Any],
+        _user=Depends(_require_sandbox_auth),
+    ) -> dict[str, Any]:
         """Extend sandbox timeout."""
         sandbox_id = request.get("sandbox_id", "")
         if not sandbox_id:
             raise HTTPException(status_code=400, detail="sandbox_id required")
-        ok = await _sandbox_mgr.keepalive(sandbox_id=sandbox_id, timeout_sec=int(request.get("timeout_sec", 300)))
+        ok = await _sandbox_mgr().keepalive(sandbox_id=sandbox_id, timeout_sec=int(request.get("timeout_sec", 300)))
         return {"kept_alive": ok, "sandbox_id": sandbox_id}
 
     # ── Dashboard ─────────────────────────────────────────────────────────

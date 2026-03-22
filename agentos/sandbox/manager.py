@@ -167,6 +167,12 @@ class SandboxManager:
                 duration_ms=(time.time() - start) * 1000,
             )
         except asyncio.TimeoutError:
+            # Kill the subprocess to prevent it from running in the background
+            try:
+                proc.kill()
+                await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
             return ExecResult(
                 sandbox_id=sid,
                 stdout="",

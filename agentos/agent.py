@@ -304,8 +304,41 @@ class Agent:
         procedural = ProceduralMemory(
             max_procedures=mem_cfg.get("procedural", {}).get("max_procedures", 500),
         )
+        # RAG — load pipeline if ingested documents exist
+        rag_pipeline = None
+        rag_index_path = Path.cwd() / "data" / "rag_index.json"
+        if rag_index_path.exists():
+            try:
+                import json as _json
+                rag_data = _json.loads(rag_index_path.read_text())
+                source_files = rag_data.get("source_files", [])
+                if source_files:
+                    from agentos.rag.pipeline import RAGPipeline
+                    rag_pipeline = RAGPipeline(
+                        chunk_size=rag_data.get("chunk_size", 512),
+                    )
+                    docs = []
+                    metas = []
+                    for src in source_files:
+                        p = Path(src)
+                        if p.exists():
+                            try:
+                                text = p.read_text(errors="replace")
+                                if text.strip():
+                                    docs.append(text)
+                                    metas.append({"source": src, "filename": p.name})
+                            except Exception:
+                                pass
+                    if docs:
+                        rag_pipeline.ingest(docs, metas)
+                    else:
+                        rag_pipeline = None
+            except Exception as exc:
+                logger.warning("Could not load RAG index: %s", exc)
+
         memory_manager = MemoryManager(
-            working=working, episodic=episodic, procedural=procedural
+            working=working, episodic=episodic, procedural=procedural,
+            rag=rag_pipeline,
         )
 
         # Tools — load from registry + inline definitions
