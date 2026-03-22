@@ -78,7 +78,7 @@ async def test_connector_router_redacts_sensitive_audit_fields(monkeypatch):
 
     def _hub_factory():
         class _Hub:
-            async def call_tool(self, tool_name, arguments, *, app="", user_id=""):
+            async def call_tool(self, tool_name, arguments, *, app="", user_id="", org_id=""):
                 return await provider.call_tool(tool_name, arguments, app=app, user_id=user_id)
 
         return _Hub()
