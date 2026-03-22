@@ -10,6 +10,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -58,6 +59,13 @@ class SandboxManager:
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or os.environ.get("E2B_API_KEY", "")
+        self.allow_local_fallback = (
+            os.environ.get("AGENTOS_ALLOW_LOCAL_SANDBOX", "").lower()
+            in {"1", "true", "yes"}
+            or "PYTEST_CURRENT_TEST" in os.environ
+        )
+        root = os.environ.get("AGENTOS_LOCAL_SANDBOX_ROOT", ".agentos_sandbox")
+        self.local_sandbox_root = (Path.cwd() / root).resolve()
         self._sessions: dict[str, SandboxSession] = {}
         self._default_sandbox_id: str | None = None
 
@@ -73,8 +81,14 @@ class SandboxManager:
     ) -> SandboxSession:
         """Create a new E2B sandbox."""
         if not self.has_api_key:
+            if not self.allow_local_fallback:
+                raise RuntimeError(
+                    "E2B_API_KEY is not set and local fallback is disabled. "
+                    "Set AGENTOS_ALLOW_LOCAL_SANDBOX=1 for local development."
+                )
             # Local fallback — fake sandbox ID
             session = SandboxSession(sandbox_id=f"local-{int(time.time())}", template="local")
+            self._local_session_dir(session.sandbox_id)
             self._sessions[session.sandbox_id] = session
             self._default_sandbox_id = session.sandbox_id
             logger.info("Created local fallback sandbox: %s", session.sandbox_id)
@@ -151,10 +165,13 @@ class SandboxManager:
 
         start = time.time()
         try:
-            proc = await asyncio.create_subprocess_shell(
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-lc",
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                cwd=str(self._local_session_dir(sid)),
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout_ms / 1000
@@ -189,8 +206,7 @@ class SandboxManager:
 
         if sid.startswith("local-"):
             try:
-                from pathlib import Path as P
-                p = P(path)
+                p = self._resolve_local_path(sid, path)
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content)
                 return FileResult(sandbox_id=sid, path=path, success=True)
@@ -217,8 +233,7 @@ class SandboxManager:
 
         if sid.startswith("local-"):
             try:
-                from pathlib import Path as P
-                content = P(path).read_text()
+                content = self._resolve_local_path(sid, path).read_text(errors="replace")
                 return FileResult(sandbox_id=sid, path=path, content=content, success=True)
             except Exception as e:
                 return FileResult(sandbox_id=sid, path=path, success=False, error=str(e))
@@ -302,3 +317,25 @@ class SandboxManager:
         """Update last activity timestamp."""
         if sandbox_id in self._sessions:
             self._sessions[sandbox_id].last_activity_at = time.time()
+
+    def _local_session_dir(self, sandbox_id: str) -> Path:
+        """Return the local session directory for fallback mode."""
+        p = (self.local_sandbox_root / sandbox_id).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _resolve_local_path(self, sandbox_id: str, raw_path: str) -> Path:
+        """Resolve and constrain local file paths to a session directory."""
+        if not raw_path.strip():
+            raise ValueError("path cannot be empty")
+
+        session_dir = self._local_session_dir(sandbox_id)
+        requested = Path(raw_path)
+        if requested.is_absolute():
+            requested = Path(*requested.parts[1:])
+        resolved = (session_dir / requested).resolve()
+        try:
+            resolved.relative_to(session_dir)
+        except ValueError as exc:
+            raise ValueError(f"path escapes local sandbox: {raw_path}") from exc
+        return resolved

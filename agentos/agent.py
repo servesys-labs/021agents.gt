@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agentos.defaults import DEFAULT_MODEL
+from agentos.env import load_dotenv_if_present
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,8 @@ class Agent:
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
+        # Allow programmatic usage without manual shell exports.
+        load_dotenv_if_present()
         self._apply_project_defaults()
         self._db = None
         self._observer = None

@@ -490,6 +490,34 @@ class TestSandboxSubprocessKill:
         assert result.exit_code == -1
         assert "timed out" in result.stderr.lower()
 
+    @pytest.mark.asyncio
+    async def test_local_file_path_escape_blocked(self, monkeypatch):
+        from agentos.sandbox.manager import SandboxManager
+
+        monkeypatch.setenv("AGENTOS_ALLOW_LOCAL_SANDBOX", "1")
+        mgr = SandboxManager()
+        session = await mgr.create()
+
+        result = await mgr.file_write(
+            path="../../outside.txt",
+            content="blocked",
+            sandbox_id=session.sandbox_id,
+        )
+        assert result.success is False
+        assert "escapes local sandbox" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_local_fallback_can_be_disabled(self, monkeypatch):
+        from agentos.sandbox.manager import SandboxManager
+
+        monkeypatch.delenv("E2B_API_KEY", raising=False)
+        monkeypatch.delenv("AGENTOS_ALLOW_LOCAL_SANDBOX", raising=False)
+        monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+
+        mgr = SandboxManager()
+        with pytest.raises(RuntimeError, match="local fallback is disabled"):
+            await mgr.create()
+
 
 # ── Telemetry Accuracy (harness.py + observer.py) ────────────────────────
 

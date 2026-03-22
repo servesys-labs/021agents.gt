@@ -239,6 +239,27 @@ class TestToolFailureRetry:
         assert len(results) == 2
         assert results[1].done is True
 
+    @pytest.mark.asyncio
+    async def test_retry_limit_stops_with_tool_error(self):
+        """When failures exceed max_retries, harness should stop with tool_error."""
+        provider = _make_always_tool_calling_provider()
+
+        harness = AgentHarness(
+            config=HarnessConfig(
+                max_turns=10,
+                retry_on_tool_failure=True,
+                max_retries=1,
+            ),
+            llm_router=_make_router(provider),
+            tool_executor=_make_failing_tool_executor(),
+        )
+
+        results = await harness.run("Search forever")
+        assert len(results) == 2
+        assert results[-1].done is True
+        assert results[-1].stop_reason == "tool_error"
+        assert "retry limit" in (results[-1].error or "").lower()
+
 
 # ── Governance Blocks Tools at Runtime ───────────────────────────────────
 

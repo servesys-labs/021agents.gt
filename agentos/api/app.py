@@ -9,7 +9,10 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from agentos.core.events import EventBus
+from agentos.core.governance import GovernanceLayer, GovernancePolicy
 from agentos.core.harness import AgentHarness
+from agentos.env import load_dotenv_if_present
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +70,70 @@ def _build_run_response(results: list) -> RunResponse:
     return RunResponse(turns=turns, final_output=final_output)
 
 
+def _build_harness_with_overrides(
+    base: AgentHarness,
+    overrides: dict[str, Any],
+) -> AgentHarness:
+    """Build a request-scoped harness with safe config overrides."""
+    base_cfg = base.config
+    cfg = {
+        "max_turns": base_cfg.max_turns,
+        "timeout_seconds": base_cfg.timeout_seconds,
+        "retry_on_tool_failure": base_cfg.retry_on_tool_failure,
+        "max_retries": base_cfg.max_retries,
+    }
+    gov_base = base.governance.policy
+    gov = {
+        "require_confirmation_for_destructive": gov_base.require_confirmation_for_destructive,
+        "budget_limit_usd": gov_base.budget_limit_usd,
+        "allowed_domains": list(gov_base.allowed_domains),
+        "blocked_tools": list(gov_base.blocked_tools),
+        "max_tokens_per_turn": gov_base.max_tokens_per_turn,
+    }
+
+    for key in ("max_turns", "timeout_seconds", "retry_on_tool_failure", "max_retries"):
+        if key in overrides:
+            cfg[key] = overrides[key]
+    for key in (
+        "budget_limit_usd",
+        "blocked_tools",
+        "require_confirmation_for_destructive",
+        "allowed_domains",
+        "max_tokens_per_turn",
+    ):
+        if key in overrides:
+            gov[key] = overrides[key]
+
+    # Guardrails against malformed request values.
+    cfg["max_turns"] = max(1, int(cfg["max_turns"]))
+    cfg["timeout_seconds"] = max(0.01, float(cfg["timeout_seconds"]))
+    cfg["max_retries"] = max(0, int(cfg["max_retries"]))
+    cfg["retry_on_tool_failure"] = bool(cfg["retry_on_tool_failure"])
+    gov["budget_limit_usd"] = max(0.0, float(gov["budget_limit_usd"]))
+    gov["blocked_tools"] = [str(t) for t in gov["blocked_tools"]]
+    gov["allowed_domains"] = [str(d) for d in gov["allowed_domains"]]
+    gov["require_confirmation_for_destructive"] = bool(
+        gov["require_confirmation_for_destructive"]
+    )
+    gov["max_tokens_per_turn"] = max(1, int(gov["max_tokens_per_turn"]))
+
+    request_harness = AgentHarness(
+        config=type(base_cfg)(**cfg),
+        llm_router=base.llm_router,
+        tool_executor=base.tool_executor,
+        memory_manager=base.memory_manager,
+        governance=GovernanceLayer(GovernancePolicy(**gov)),
+        event_bus=EventBus(),
+    )
+    request_harness.system_prompt = base.system_prompt
+    return request_harness
+
+
 def create_app(harness: AgentHarness | None = None) -> FastAPI:
     """Create the AgentOS FastAPI application."""
     from fastapi.staticfiles import StaticFiles
+
+    load_dotenv_if_present()
 
     app = FastAPI(title="AgentOS", version="0.1.0", description="Composable Autonomous Agent Framework")
     _harness = harness or AgentHarness.from_config_file()
@@ -94,7 +158,12 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
 
     @app.post("/run", response_model=RunResponse)
     async def run(request: RunRequest) -> RunResponse:
-        results = await _harness.run(request.input)
+        runner = (
+            _build_harness_with_overrides(_harness, request.config)
+            if request.config
+            else _harness
+        )
+        results = await runner.run(request.input)
         return _build_run_response(results)
 
     @app.get("/tools")

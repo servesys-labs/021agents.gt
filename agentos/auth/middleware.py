@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 # Simple file-based user store for local dev
 # In production (CF), users are stored in D1
-USERS_FILE = Path("data/users.json")
+USERS_FILE = (Path.cwd() / "data" / "users.json").resolve()
 
 security = HTTPBearer(auto_error=False)
 
@@ -137,7 +137,7 @@ def mount_auth_routes(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        """Check auth on protected routes if AUTH_REQUIRED is set."""
+        """Check auth on protected routes if AGENTOS_AUTH_REQUIRED is set."""
         # Skip auth check if not required
         if not os.environ.get("AGENTOS_AUTH_REQUIRED"):
             return await call_next(request)

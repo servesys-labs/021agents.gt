@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent.parent / "config" / "default.json"
 
 
+def _default_config_candidates() -> list[Path]:
+    """Return possible default-config paths in priority order."""
+    return [
+        DEFAULT_CONFIG,
+        Path.cwd() / "config" / "default.json",
+    ]
+
+
 @dataclass
 class HarnessConfig:
     max_turns: int = 50
@@ -70,9 +78,13 @@ class AgentHarness:
 
     @classmethod
     def from_config_file(cls, path: str | Path | None = None) -> AgentHarness:
-        path = Path(path) if path else DEFAULT_CONFIG
-        if path.exists():
-            raw = json.loads(path.read_text())
+        if path:
+            config_path = Path(path)
+        else:
+            config_path = next((p for p in _default_config_candidates() if p.exists()), None)
+
+        if config_path and config_path.exists():
+            raw = json.loads(config_path.read_text())
         else:
             raw = {}
 
@@ -145,6 +157,7 @@ class AgentHarness:
 
         # Track successful tool sequences for procedural memory
         tool_sequence: list[dict[str, Any]] = []
+        failure_retries = 0
 
         for turn in range(1, self.config.max_turns + 1):
             self._turn = turn
@@ -174,6 +187,24 @@ class AgentHarness:
                 # Check for failures and attempt alternative approaches
                 failed = [tr for tr in tool_results if "error" in tr]
                 if failed and self.config.retry_on_tool_failure:
+                    if failure_retries >= self.config.max_retries:
+                        result = TurnResult(
+                            turn_number=turn,
+                            llm_response=llm_response,
+                            tool_results=tool_results,
+                            error=(
+                                "Tool failures exceeded retry limit "
+                                f"({self.config.max_retries})"
+                            ),
+                            done=True,
+                            stop_reason="tool_error",
+                            cost_usd=llm_response.cost_usd,
+                            cumulative_cost_usd=cumulative_cost,
+                            model_used=llm_response.model,
+                        )
+                        results.append(result)
+                        break
+                    failure_retries += 1
                     # Inject failure context so LLM can try alternative approach
                     error_summary = "; ".join(
                         f"{tr.get('tool', '?')}: {tr['error']}" for tr in failed
@@ -215,6 +246,7 @@ class AgentHarness:
                         model_used=llm_response.model,
                     )
                     results.append(result)
+                    failure_retries = 0
                     messages.append({
                         "role": "assistant",
                         "content": llm_response.content,
@@ -244,6 +276,7 @@ class AgentHarness:
                 # Store successful tool sequence in procedural memory
                 if tool_sequence:
                     await self._store_procedure(user_input, tool_sequence)
+                failure_retries = 0
 
                 break
 

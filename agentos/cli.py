@@ -39,9 +39,13 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 from agentos.defaults import DEFAULT_MODEL, DEFAULT_PROVIDER, AGENT_TEMPLATES, slugify as _slugify
+from agentos.env import load_dotenv_if_present
 
 
 def main() -> None:
+    # Honor project-local .env for CLI commands.
+    load_dotenv_if_present()
+
     parser = argparse.ArgumentParser(
         prog="agentos",
         description="AgentOS — Build, run, and deploy autonomous agents",

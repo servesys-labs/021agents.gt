@@ -1,13 +1,105 @@
+# ------------------------------
+# Python bytecode / caches
+# ------------------------------
 __pycache__/
-*.pyc
-*.egg-info/
+*.py[cod]
+*$py.class
 .pytest_cache/
-dist/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+
+# ------------------------------
+# Virtual environments
+# ------------------------------
+.venv/
+venv/
+ENV/
+env/
+
+# ------------------------------
+# Build / packaging artifacts
+# ------------------------------
 build/
+dist/
+site/
 *.egg
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ------------------------------
+# Test / coverage artifacts
+# ------------------------------
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+
+# ------------------------------
+# Runtime logs / temp files
+# ------------------------------
+*.log
+*.pid
+*.out
+*.err
+tmp/
+.tmp/
+
+# ------------------------------
+# AgentOS local runtime data
+# ------------------------------
 data/agent.db
 data/agent.db-wal
 data/agent.db-shm
+data/rag_chunks.db
 data/rag_index.json
 data/users.json
 data/knowledge.jsonl
+data/cache/
+data/embeddings/
+data/*.sqlite
+data/*.sqlite3
+data/*.db
+data/*.db-wal
+data/*.db-shm
+sessions/*.json
+sessions/*.jsonl
+!sessions/.gitkeep
+evolution_state*.json
+
+# ------------------------------
+# Secrets / credentials
+# ------------------------------
+.env
+.env.*
+!.env.example
+.keys/agent.key
+*.pem
+*.key
+
+# ------------------------------
+# Node / frontend artifacts (deploy/)
+# ------------------------------
+node_modules/
+deploy/node_modules/
+deploy/.wrangler/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ------------------------------
+# Editor / IDE
+# ------------------------------
+.vscode/
+.idea/
+*.iml
+
+# ------------------------------
+# OS files
+# ------------------------------
+.DS_Store
+Thumbs.db
