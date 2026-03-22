@@ -101,14 +101,27 @@ class TestTokenExchange:
             users_file.unlink()
 
     def test_exchange_returns_valid_jwt(self):
-        resp = self.client.post("/auth/token/exchange", json={
-            "oauth_token": "fake-token",
-            "provider": "github",
-            "user_id": "github:12345",
-            "email": "dev@example.com",
-            "name": "Dev User",
-        })
+        from agentos.auth.oauth import OAuthUser
+
+        with patch(
+            "agentos.auth.oauth.github_get_user",
+            return_value=OAuthUser(
+                id="github:12345",
+                email="dev@example.com",
+                name="Dev User",
+                provider="github",
+                access_token="fake-token",
+            ),
+        ) as mock_get_user:
+            resp = self.client.post("/auth/token/exchange", json={
+                "oauth_token": "fake-token",
+                "provider": "github",
+                "user_id": "github:12345",
+                "email": "dev@example.com",
+                "name": "Dev User",
+            })
         assert resp.status_code == 200
+        mock_get_user.assert_called_once_with("fake-token")
         data = resp.json()
         assert "token" in data
         assert data["user_id"] == "github:12345"
@@ -120,11 +133,43 @@ class TestTokenExchange:
         assert claims.sub == "github:12345"
         assert claims.email == "dev@example.com"
 
-    def test_exchange_requires_user_id(self):
+    def test_exchange_requires_provider_and_token(self):
         resp = self.client.post("/auth/token/exchange", json={
             "email": "a@b.com",
         })
-        assert resp.status_code == 400
+        assert resp.status_code == 422
+
+    def test_exchange_rejects_invalid_oauth_token(self):
+        with patch(
+            "agentos.auth.oauth.github_get_user",
+            side_effect=ValueError("bad token"),
+        ):
+            resp = self.client.post("/auth/token/exchange", json={
+                "oauth_token": "bad-token",
+                "provider": "github",
+            })
+        assert resp.status_code == 401
+
+    def test_exchange_rejects_spoofed_identity(self):
+        from agentos.auth.oauth import OAuthUser
+
+        with patch(
+            "agentos.auth.oauth.github_get_user",
+            return_value=OAuthUser(
+                id="github:12345",
+                email="dev@example.com",
+                name="Dev User",
+                provider="github",
+                access_token="real-token",
+            ),
+        ):
+            resp = self.client.post("/auth/token/exchange", json={
+                "oauth_token": "real-token",
+                "provider": "github",
+                "user_id": "github:99999",
+                "email": "attacker@example.com",
+            })
+        assert resp.status_code == 401
 
 
 # ── Tool-Call ID Handling (provider.py + harness.py) ─────────────────────

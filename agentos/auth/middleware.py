@@ -52,6 +52,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class TokenExchangeRequest(BaseModel):
+    oauth_token: str = Field(..., min_length=1)
+    provider: str = Field(..., description="OAuth provider")
+    user_id: str = ""
+    email: str = ""
+    name: str = ""
+
+
 class AuthResponse(BaseModel):
     token: str
     user_id: str
@@ -231,38 +239,55 @@ def mount_auth_routes(app: FastAPI) -> None:
         return {"status": "logged_out"}
 
     @app.post("/auth/token/exchange")
-    async def exchange(req: dict[str, Any]) -> dict[str, Any]:
+    async def exchange(req: TokenExchangeRequest) -> dict[str, Any]:
         """Exchange an OAuth token for a server-signed JWT.
 
         Called by ``agentos login --server <url>`` so the CLI gets a JWT
         signed with this server's secret rather than a client-minted one.
         """
-        user_id = req.get("user_id", "")
-        email = req.get("email", "")
-        name = req.get("name", "")
-        provider = req.get("provider", "")
-        if not user_id:
-            raise HTTPException(status_code=400, detail="user_id required")
+        from agentos.auth import oauth
+
+        if req.provider not in ("github", "google"):
+            raise HTTPException(status_code=400, detail="Unsupported OAuth provider")
+
+        try:
+            if req.provider == "github":
+                verified = oauth.github_get_user(req.oauth_token)
+            else:
+                verified = oauth.google_get_user(req.oauth_token)
+        except Exception as exc:
+            logger.warning(
+                "OAuth token exchange failed for provider %s: %s",
+                req.provider,
+                exc,
+            )
+            raise HTTPException(status_code=401, detail="Invalid OAuth token")
+
+        if req.user_id and req.user_id != verified.id:
+            raise HTTPException(status_code=401, detail="OAuth identity mismatch")
+        if req.email and req.email != verified.email:
+            raise HTTPException(status_code=401, detail="OAuth identity mismatch")
 
         # Ensure user exists in the local store
         users = _load_users()
-        if email not in users:
-            users[email] = {
-                "user_id": user_id,
-                "email": email,
-                "name": name or email.split("@")[0],
+        user_key = verified.email or verified.id
+        if user_key not in users:
+            users[user_key] = {
+                "user_id": verified.id,
+                "email": verified.email,
+                "name": verified.name or verified.email.split("@")[0],
                 "password_hash": "",  # OAuth users have no password
-                "provider": provider,
+                "provider": verified.provider,
             }
             _save_users(users)
 
         token = create_token(
-            user_id=user_id,
-            email=email,
-            name=name,
-            provider=provider,
+            user_id=verified.id,
+            email=verified.email,
+            name=verified.name,
+            provider=verified.provider,
         )
-        return {"token": token, "user_id": user_id}
+        return {"token": token, "user_id": verified.id}
 
     @app.post("/auth/token/verify")
     async def verify(user: TokenClaims | None = Depends(get_current_user)) -> dict[str, Any]:
