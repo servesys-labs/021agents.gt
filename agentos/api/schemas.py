@@ -206,9 +206,12 @@ class UsageResponse(BaseModel):
     total_cost_usd: float
     inference_cost_usd: float
     gpu_compute_cost_usd: float
+    connector_cost_usd: float = 0.0
     total_input_tokens: int
     total_output_tokens: int
-    total_sessions: int
+    total_billing_records: int = 0
+    total_gpu_hours: float = 0.0
+    by_cost_type: dict[str, float] = {}
     by_model: dict[str, float] = {}
     by_agent: dict[str, float] = {}
 

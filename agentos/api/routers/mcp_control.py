@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 import uuid
 
@@ -45,7 +46,7 @@ async def register_mcp_server(
         """INSERT INTO mcp_servers (server_id, org_id, name, url, transport, auth_token, metadata_json, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (server_id, user.org_id, request.name, request.url, request.transport,
-         request.auth_token, str(request.metadata), "registered", now),
+         request.auth_token, json.dumps(request.metadata), "registered", now),
     )
     db.conn.commit()
     return {"server_id": server_id, "name": request.name, "status": "registered"}

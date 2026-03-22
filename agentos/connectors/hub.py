@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -80,10 +81,11 @@ class PipedreamProvider(ConnectorProvider):
         self.client_secret = client_secret
         self.environment = environment
         self._access_token: str = ""
+        self._access_token_expires_at: float = 0.0
 
     async def _get_token(self) -> str:
         """Get or refresh the Pipedream access token."""
-        if self._access_token:
+        if self._access_token and time.time() < self._access_token_expires_at:
             return self._access_token
 
         import httpx
@@ -97,7 +99,11 @@ class PipedreamProvider(ConnectorProvider):
                 },
             )
             if resp.status_code == 200:
-                self._access_token = resp.json().get("access_token", "")
+                payload = resp.json()
+                self._access_token = payload.get("access_token", "")
+                expires_in = int(payload.get("expires_in", 3600))
+                # Refresh slightly early to avoid edge expiry race.
+                self._access_token_expires_at = time.time() + max(expires_in - 30, 30)
             else:
                 logger.warning("Pipedream token request failed: %s", resp.status_code)
         return self._access_token
@@ -191,58 +197,71 @@ class PipedreamProvider(ConnectorProvider):
         """Call a tool via Pipedream MCP."""
         import httpx
 
-        token = await self._get_token()
-        if not token:
-            return ConnectorResult(success=False, error="No Pipedream access token")
+        async def _post_call() -> ConnectorResult:
+            token = await self._get_token()
+            if not token:
+                return ConnectorResult(success=False, error="No Pipedream access token")
 
-        try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    self.MCP_URL,
-                    headers={**self._headers(user_id=user_id, app=app), "Content-Type": "application/json"},
-                    json={
-                        "jsonrpc": "2.0", "id": "1",
-                        "method": "tools/call",
-                        "params": {"name": tool_name, "arguments": arguments},
-                    },
-                )
-                if resp.status_code != 200:
-                    return ConnectorResult(
-                        success=False,
-                        error=f"Pipedream HTTP {resp.status_code}: {resp.text[:300]}",
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    resp = await client.post(
+                        self.MCP_URL,
+                        headers={**self._headers(user_id=user_id, app=app), "Content-Type": "application/json"},
+                        json={
+                            "jsonrpc": "2.0", "id": "1",
+                            "method": "tools/call",
+                            "params": {"name": tool_name, "arguments": arguments},
+                        },
                     )
-
-                data = self._parse_sse_or_json(resp.text)
-
-                # Check for auth required response
-                if "error" in data:
-                    error_msg = data["error"].get("message", "")
-                    if "connect" in error_msg.lower() or "auth" in error_msg.lower():
+                    if resp.status_code == 401:
+                        return ConnectorResult(success=False, error="__AUTH_EXPIRED__")
+                    if resp.status_code != 200:
                         return ConnectorResult(
                             success=False,
-                            auth_required=True,
-                            auth_url=error_msg,
-                            error="User authentication required for this app",
+                            error=f"Pipedream HTTP {resp.status_code}: {resp.text[:300]}",
                         )
-                    return ConnectorResult(success=False, error=error_msg)
 
-                result = data.get("result", {})
-                if result.get("isError"):
-                    return ConnectorResult(
-                        success=False,
-                        error="".join(
-                            c.get("text", "")
-                            for c in result.get("content", [])
-                            if isinstance(c, dict) and c.get("type") == "text"
-                        ) or "Connector tool returned error",
-                    )
-                content = result.get("content", [])
-                text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
+                    data = self._parse_sse_or_json(resp.text)
 
-                return ConnectorResult(success=True, data=text)
+                    # Check for auth required response
+                    if "error" in data:
+                        error_msg = data["error"].get("message", "")
+                        if "connect" in error_msg.lower() or "auth" in error_msg.lower():
+                            return ConnectorResult(
+                                success=False,
+                                auth_required=True,
+                                auth_url=error_msg,
+                                error="User authentication required for this app",
+                            )
+                        return ConnectorResult(success=False, error=error_msg)
 
-        except Exception as exc:
-            return ConnectorResult(success=False, error=str(exc))
+                    result = data.get("result", {})
+                    if result.get("isError"):
+                        return ConnectorResult(
+                            success=False,
+                            error="".join(
+                                c.get("text", "")
+                                for c in result.get("content", [])
+                                if isinstance(c, dict) and c.get("type") == "text"
+                            ) or "Connector tool returned error",
+                        )
+                    content = result.get("content", [])
+                    text = "".join(c.get("text", "") for c in content if c.get("type") == "text")
+                    return ConnectorResult(success=True, data=text)
+
+            except Exception as exc:
+                return ConnectorResult(success=False, error=str(exc))
+
+        first = await _post_call()
+        if first.error == "__AUTH_EXPIRED__":
+            # Force token refresh and retry once.
+            self._access_token = ""
+            self._access_token_expires_at = 0.0
+            second = await _post_call()
+            if second.error == "__AUTH_EXPIRED__":
+                return ConnectorResult(success=False, error="Pipedream authorization failed after token refresh")
+            return second
+        return first
 
     async def get_auth_url(self, app: str, user_id: str) -> str:
         """Get the OAuth connection URL for a user + app."""
@@ -289,13 +308,43 @@ class ConnectorHub:
         *,
         app: str = "",
         user_id: str = "",
+        org_id: str = "",
     ) -> ConnectorResult:
-        return await self._provider.call_tool(
+        import time as _time
+        start = _time.time()
+
+        result = await self._provider.call_tool(
             tool_name,
             arguments,
             app=app,
             user_id=user_id,
         )
+
+        duration_ms = (_time.time() - start) * 1000
+
+        # Track billing at the hub level — ensures ALL connector calls are billed
+        # regardless of whether they come from API, CLI, or agent tool
+        try:
+            from pathlib import Path
+            from agentos.core.database import AgentDB
+            db_path = Path.cwd() / "data" / "agent.db"
+            if db_path.exists():
+                db = AgentDB(db_path)
+                db.initialize()
+                db.record_billing(
+                    cost_type="connector",
+                    total_cost_usd=0.001,
+                    org_id=org_id,
+                    customer_id=user_id,
+                    description=f"Connector: {tool_name}",
+                    model=tool_name,
+                    provider=self._provider.name,
+                )
+                db.conn.close()
+        except Exception:
+            pass  # Don't block tool call on billing failure
+
+        return result
 
     async def get_auth_url(self, app: str, user_id: str) -> str:
         return await self._provider.get_auth_url(app, user_id)

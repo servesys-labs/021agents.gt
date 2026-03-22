@@ -38,6 +38,13 @@ async def list_jobs(status: str = "", limit: int = 50):
     return {"jobs": db.list_jobs(status=status, limit=limit)}
 
 
+@router.get("/dlq")
+async def dead_letter_queue(limit: int = 50):
+    """List dead-letter (permanently failed) jobs."""
+    db = _get_db()
+    return {"jobs": db.list_jobs(status="dead", limit=limit)}
+
+
 @router.get("/{job_id}")
 async def get_job(job_id: str):
     db = _get_db()
@@ -106,8 +113,3 @@ async def resume_job(job_id: str, user: CurrentUser = Depends(get_current_user))
     return {"resumed": job_id}
 
 
-@router.get("/dlq")
-async def dead_letter_queue(limit: int = 50):
-    """List dead-letter (permanently failed) jobs."""
-    db = _get_db()
-    return {"jobs": db.list_jobs(status="dead", limit=limit)}

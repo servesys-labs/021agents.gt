@@ -128,7 +128,11 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
         "trace_id": trace_id,
         "total_cost_usd": total_cost,
         "steps": step_status,
-        "final_output": step_outputs.get(steps[-1].get("id", ""), ""),
+        "final_output": (
+            step_outputs.get(steps[-1].get("id", ""), "")
+            if steps
+            else step_outputs.get("input", "")
+        ),
     }
 
 

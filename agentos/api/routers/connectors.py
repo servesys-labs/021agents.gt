@@ -61,7 +61,7 @@ def _get_hub():
 
 
 @router.get("/providers")
-async def list_providers():
+async def list_providers(user: CurrentUser = Depends(get_current_user)):
     """List available connector providers."""
     from agentos.connectors.hub import ConnectorHub
     return {
@@ -102,11 +102,13 @@ async def call_connector_tool(
     start = _time.time()
 
     hub = _get_hub()
+    # Billing tracked inside ConnectorHub.call_tool() — single source of truth
     result = await hub.call_tool(
         request.tool_name,
         request.arguments or {},
         app=request.app,
         user_id=user.user_id,
+        org_id=user.org_id,
     )
     duration_ms = (_time.time() - start) * 1000
 
@@ -121,17 +123,8 @@ async def call_connector_tool(
     if not result.success:
         raise HTTPException(status_code=502, detail=result.error)
 
-    # Track billing + audit
+    # Audit only (billing already handled by hub)
     db = _get_db()
-    db.record_billing(
-        cost_type="connector",
-        total_cost_usd=0.001,  # Per-call connector cost
-        org_id=user.org_id,
-        customer_id=user.user_id,
-        description=f"Connector: {request.tool_name}",
-        model=request.tool_name,
-        provider=os.environ.get("CONNECTOR_PROVIDER", "pipedream"),
-    )
     db.audit(
         "connector.tool_call",
         user_id=user.user_id, org_id=user.org_id,
