@@ -56,7 +56,8 @@ a complete agent definition as a JSON object.
 
 ### Planning & Management
 - **todo**: Task list for planning and tracking work
-- **run-agent**: Delegate a task to another agent (sub-agent pattern)
+- **run-agent**: Delegate a task to another agent within this project
+- **a2a-send**: Send a message to an external A2A agent (LangChain, CrewAI, AWS Bedrock)
 - **create-agent**: Create new agents
 - **eval-agent**: Evaluate an agent with test cases
 - **evolve-agent**: Analyze and improve an agent
