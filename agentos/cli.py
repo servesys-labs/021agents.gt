@@ -2054,15 +2054,15 @@ def cmd_mcp_serve(args: argparse.Namespace) -> None:
             },
         })
 
-    print(f"AgentOS MCP Server")
-    print(f"  Exposing {len(tools)} agent(s) as MCP tools:")
+    print(f"AgentOS MCP Server", file=sys.stderr)
+    print(f"  Exposing {len(tools)} agent(s) as MCP tools:", file=sys.stderr)
     for t in tools:
-        print(f"    - {t['name']}: {t['description'][:60]}")
-    print(f"\n  Connect from Claude Code:")
-    print(f"    claude mcp add agentos -- agentos mcp-serve")
-    print(f"\n  Or add to .claude/settings.json:")
-    print(f'    "mcpServers": {{"agentos": {{"command": "agentos", "args": ["mcp-serve"]}}}}')
-    print()
+        print(f"    - {t['name']}: {t['description'][:60]}", file=sys.stderr)
+    print(f"\n  Connect from Claude Code:", file=sys.stderr)
+    print(f"    claude mcp add agentos -- agentos mcp-serve", file=sys.stderr)
+    print(f"\n  Or add to .claude/settings.json:", file=sys.stderr)
+    print(f'    "mcpServers": {{"agentos": {{"command": "agentos", "args": ["mcp-serve"]}}}}', file=sys.stderr)
+    print(file=sys.stderr)
 
     # Run MCP stdio server
     _run_mcp_stdio(agents, tools)
@@ -2071,25 +2071,58 @@ def cmd_mcp_serve(args: argparse.Namespace) -> None:
 def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
     """Run an MCP server over stdio (JSON-RPC)."""
     import sys
+    import traceback
 
-    def _write_response(id: Any, result: Any) -> None:
-        resp = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
-        sys.stdout.write(f"Content-Length: {len(resp)}\r\n\r\n{resp}")
+    def _write_jsonrpc(payload: dict[str, Any]) -> None:
+        resp = json.dumps(payload, ensure_ascii=False)
+        resp_bytes = resp.encode("utf-8")
+        sys.stdout.write(f"Content-Length: {len(resp_bytes)}\r\n\r\n")
+        sys.stdout.buffer.write(resp_bytes)
         sys.stdout.flush()
 
+    def _write_response(id: Any, result: Any) -> None:
+        _write_jsonrpc({"jsonrpc": "2.0", "id": id, "result": result})
+
+    def _write_error(id: Any, code: int, message: str) -> None:
+        _write_jsonrpc({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": code, "message": message},
+        })
+
     def _read_request() -> dict | None:
-        # Read Content-Length header
-        line = sys.stdin.readline()
-        if not line:
+        # Read headers until blank line (MCP/JSON-RPC over stdio framing).
+        first = sys.stdin.readline()
+        if not first:
             return None
-        if line.startswith("Content-Length:"):
-            length = int(line.split(":")[1].strip())
-            sys.stdin.readline()  # empty line
-            body = sys.stdin.read(length)
-            return json.loads(body)
+        headers: list[str] = [first.rstrip("\r\n")]
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                return None
+            stripped = line.rstrip("\r\n")
+            if stripped == "":
+                break
+            headers.append(stripped)
+
+        content_length: int | None = None
+        for h in headers:
+            if h.lower().startswith("content-length:"):
+                try:
+                    content_length = int(h.split(":", 1)[1].strip())
+                except ValueError:
+                    return None
+                break
+
+        if content_length is not None:
+            body_bytes = sys.stdin.buffer.read(content_length)
+            if not body_bytes:
+                return None
+            return json.loads(body_bytes.decode("utf-8"))
+
         # Fallback: try reading as plain JSON line
         try:
-            return json.loads(line)
+            return json.loads(first)
         except json.JSONDecodeError:
             return None
 
@@ -2143,10 +2176,14 @@ def _run_mcp_stdio(agents: list, tools: list[dict]) -> None:
                 pass  # Acknowledgement, no response needed
 
             else:
-                _write_response(req_id, {"error": f"Unknown method: {method}"})
+                _write_error(req_id, -32601, f"Method not found: {method}")
 
         except (KeyboardInterrupt, EOFError):
             break
+        except Exception as exc:
+            # Keep server alive and return a protocol-level error.
+            logger.debug("MCP stdio server error: %s\n%s", exc, traceback.format_exc())
+            _write_error(None, -32000, f"Internal error: {exc}")
 
 
 def cmd_deploy(args: argparse.Namespace) -> None:

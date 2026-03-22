@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import io
 import subprocess
 import sys
 import pytest
@@ -1067,3 +1068,89 @@ class TestCLIEntrypoint:
         assert "init" in result.stdout
         assert "create" in result.stdout
         assert "run" in result.stdout
+
+
+class _StdoutCapture:
+    """Capture stdout text writes and binary buffer writes."""
+
+    def __init__(self):
+        self._bytes = bytearray()
+        self.buffer = self
+
+    def write(self, data):
+        if isinstance(data, str):
+            self._bytes.extend(data.encode("utf-8"))
+        else:
+            self._bytes.extend(data)
+        return len(data)
+
+    def flush(self):
+        return None
+
+    @property
+    def text(self) -> str:
+        return self._bytes.decode("utf-8", errors="replace")
+
+
+class TestMcpStdioServer:
+    def test_mcp_serve_logs_to_stderr_not_stdout(self, tmp_path, monkeypatch, capsys):
+        """Human-readable startup logs must not pollute stdout MCP stream."""
+        from agentos.cli import cmd_mcp_serve
+
+        monkeypatch.chdir(tmp_path)
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        _write_stub_agent(agents_dir, name="mcp-agent")
+
+        class Args:
+            agent = None
+            port = 3000
+
+        # Force stdio loop to exit immediately.
+        monkeypatch.setattr("agentos.cli._run_mcp_stdio", lambda agents, tools: None)
+        cmd_mcp_serve(Args())
+
+        captured = capsys.readouterr()
+        assert "AgentOS MCP Server" in captured.err
+        assert "AgentOS MCP Server" not in captured.out
+
+    def test_run_mcp_stdio_utf8_content_length_uses_bytes(self, monkeypatch):
+        """Content-Length should be byte length, not character length."""
+        from agentos.cli import _run_mcp_stdio
+
+        # One initialize call with non-ASCII id, then EOF.
+        req = json.dumps(
+            {"jsonrpc": "2.0", "id": "ü", "method": "initialize", "params": {}},
+            ensure_ascii=False,
+        )
+        input_stream = io.StringIO(req + "\n")
+        output_stream = _StdoutCapture()
+
+        monkeypatch.setattr("sys.stdin", input_stream)
+        monkeypatch.setattr("sys.stdout", output_stream)
+
+        _run_mcp_stdio([], [])
+        raw = output_stream.text
+        assert "Content-Length:" in raw
+        header, body = raw.split("\r\n\r\n", 1)
+        length = int(header.split("Content-Length:", 1)[1].strip())
+        # Byte length and character length differ when body contains "ü".
+        assert len(body.encode("utf-8")) == length
+
+    def test_run_mcp_stdio_unknown_method_returns_jsonrpc_error(self, monkeypatch):
+        """Unknown methods should return protocol-level JSON-RPC error."""
+        from agentos.cli import _run_mcp_stdio
+
+        req = json.dumps({"jsonrpc": "2.0", "id": "1", "method": "unknown/method"})
+        input_stream = io.StringIO(req + "\n")
+        output_stream = _StdoutCapture()
+        monkeypatch.setattr("sys.stdin", input_stream)
+        monkeypatch.setattr("sys.stdout", output_stream)
+
+        _run_mcp_stdio([], [])
+        _, body = output_stream.text.split("\r\n\r\n", 1)
+        payload = json.loads(body)
+        assert payload.get("jsonrpc") == "2.0"
+        assert payload.get("id") == "1"
+        assert "error" in payload
+        assert payload["error"]["code"] == -32601
