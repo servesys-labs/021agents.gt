@@ -112,6 +112,7 @@ class PostgresAgentDB(AgentDB):
     def initialize(self) -> None:
         # Day-1 path: create full schema from current DDL.
         self.conn.executescript(SCHEMA_SQL)
+        self._ensure_runtime_tables()
         self.conn.execute(
             "INSERT INTO _meta (key, value) VALUES (?, ?)",
             ("schema_version", "4"),

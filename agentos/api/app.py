@@ -207,12 +207,10 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
             from agentos.scheduler import scheduler_loop
 
             async def _run_scheduler() -> None:
-                while True:
-                    try:
-                        scheduler_loop()
-                    except Exception as exc:
-                        logger.warning("Scheduler tick error: %s", exc)
-                    await asyncio.sleep(60)
+                try:
+                    await scheduler_loop(check_interval=60)
+                except Exception as exc:
+                    logger.warning("Scheduler loop error: %s", exc)
 
             asyncio.create_task(_run_scheduler())
             logger.info("Background scheduler started")

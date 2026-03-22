@@ -10,7 +10,8 @@ import time
 from collections import defaultdict
 from typing import Any
 
-from fastapi import HTTPException, Request
+from fastapi import Request
+from starlette.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 
@@ -78,9 +79,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         if not _limiter.check(key):
             remaining = _limiter.remaining(key)
-            raise HTTPException(
+            return JSONResponse(
                 status_code=429,
-                detail="Rate limit exceeded. Try again in a few seconds.",
+                content={"detail": "Rate limit exceeded. Try again in a few seconds."},
                 headers={
                     "Retry-After": "5",
                     "X-RateLimit-Remaining": str(remaining),

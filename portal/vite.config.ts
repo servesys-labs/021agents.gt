@@ -27,6 +27,7 @@ export default defineConfig({
     proxy: {
       "/api": "http://localhost:8340",
       "/health": "http://localhost:8340",
+      "/openapi.json": "http://localhost:8340",
       "/.well-known": "http://localhost:8340",
       "/a2a": "http://localhost:8340",
       "/docs": "http://localhost:8340",

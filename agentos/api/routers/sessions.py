@@ -33,17 +33,24 @@ async def list_sessions(
     params.extend([limit, offset])
 
     rows = db.conn.execute(sql, params).fetchall()
-    return [
-        SessionResponse(
-            session_id=r["session_id"], agent_name=r["agent_name"],
-            status=r["status"], input_text=r["input_text"][:200],
-            output_text=r["output_text"][:200], step_count=r["step_count"],
-            cost_total_usd=r["cost_total_usd"],
-            wall_clock_seconds=r["wall_clock_seconds"],
-            trace_id=r["trace_id"], created_at=r["created_at"],
+    sessions: list[SessionResponse] = []
+    for row in rows:
+        r = dict(row)
+        sessions.append(
+            SessionResponse(
+                session_id=r.get("session_id", ""),
+                agent_name=r.get("agent_name", ""),
+                status=r.get("status", ""),
+                input_text=(r.get("input_text", "") or "")[:200],
+                output_text=(r.get("output_text", "") or "")[:200],
+                step_count=int(r.get("step_count", 0) or 0),
+                cost_total_usd=float(r.get("cost_total_usd", 0) or 0),
+                wall_clock_seconds=float(r.get("wall_clock_seconds", 0) or 0),
+                trace_id=r.get("trace_id", "") or "",
+                created_at=float(r.get("created_at", 0) or 0),
+            )
         )
-        for r in rows
-    ]
+    return sessions
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
@@ -55,12 +62,16 @@ async def get_session(session_id: str):
         raise HTTPException(status_code=404, detail="Session not found")
     r = dict(row)
     return SessionResponse(
-        session_id=r["session_id"], agent_name=r["agent_name"],
-        status=r["status"], input_text=r["input_text"],
-        output_text=r["output_text"], step_count=r["step_count"],
-        cost_total_usd=r["cost_total_usd"],
-        wall_clock_seconds=r["wall_clock_seconds"],
-        trace_id=r["trace_id"], created_at=r["created_at"],
+        session_id=r.get("session_id", ""),
+        agent_name=r.get("agent_name", ""),
+        status=r.get("status", ""),
+        input_text=r.get("input_text", "") or "",
+        output_text=r.get("output_text", "") or "",
+        step_count=int(r.get("step_count", 0) or 0),
+        cost_total_usd=float(r.get("cost_total_usd", 0) or 0),
+        wall_clock_seconds=float(r.get("wall_clock_seconds", 0) or 0),
+        trace_id=r.get("trace_id", "") or "",
+        created_at=float(r.get("created_at", 0) or 0),
     )
 
 
@@ -72,17 +83,29 @@ async def get_turns(session_id: str):
     rows = db.conn.execute(
         "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_number", (session_id,)
     ).fetchall()
-    return [
-        TurnResponse(
-            turn_number=r["turn_number"], model_used=r["model_used"],
-            input_tokens=r["input_tokens"], output_tokens=r["output_tokens"],
-            latency_ms=r["latency_ms"], content=r["llm_content"],
-            cost_total_usd=r["cost_total_usd"],
-            tool_calls=json.loads(r["tool_calls_json"]),
-            started_at=r["started_at"], ended_at=r["ended_at"],
+    turns: list[TurnResponse] = []
+    for row in rows:
+        r = dict(row)
+        tool_calls_raw = r.get("tool_calls_json", "[]")
+        try:
+            tool_calls = json.loads(tool_calls_raw) if isinstance(tool_calls_raw, str) else []
+        except Exception:
+            tool_calls = []
+        turns.append(
+            TurnResponse(
+                turn_number=int(r.get("turn_number", 0) or 0),
+                model_used=r.get("model_used", "") or "",
+                input_tokens=int(r.get("input_tokens", 0) or 0),
+                output_tokens=int(r.get("output_tokens", 0) or 0),
+                latency_ms=float(r.get("latency_ms", 0) or 0),
+                content=r.get("llm_content", "") or "",
+                cost_total_usd=float(r.get("cost_total_usd", 0) or 0),
+                tool_calls=tool_calls,
+                started_at=float(r.get("started_at", 0) or 0),
+                ended_at=float(r.get("ended_at", 0) or 0),
+            )
         )
-        for r in rows
-    ]
+    return turns
 
 
 @router.get("/{session_id}/trace")

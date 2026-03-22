@@ -855,6 +855,246 @@ ALTER TABLE sessions ADD COLUMN skills_active_json TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE sessions ADD COLUMN middleware_chain_json TEXT NOT NULL DEFAULT '[]';
 """;
 
+RUNTIME_TABLES_SQL = """\
+CREATE TABLE IF NOT EXISTS billing_records (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    customer_id     TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    cost_type       TEXT NOT NULL DEFAULT 'inference',
+    description     TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    gpu_type        TEXT NOT NULL DEFAULT '',
+    gpu_hours       REAL NOT NULL DEFAULT 0.0,
+    gpu_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    session_id      TEXT NOT NULL DEFAULT '',
+    trace_id        TEXT NOT NULL DEFAULT '',
+    period_start    REAL,
+    period_end      REAL,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_billing_org ON billing_records(org_id);
+CREATE INDEX IF NOT EXISTS idx_billing_customer ON billing_records(customer_id);
+CREATE INDEX IF NOT EXISTS idx_billing_created ON billing_records(created_at);
+CREATE INDEX IF NOT EXISTS idx_billing_type ON billing_records(cost_type);
+
+CREATE TABLE IF NOT EXISTS projects (
+    project_id      TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    slug            TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    default_env     TEXT NOT NULL DEFAULT 'development',
+    default_plan    TEXT NOT NULL DEFAULT 'standard',
+    settings_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT 0,
+    updated_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(org_id);
+CREATE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug);
+
+CREATE TABLE IF NOT EXISTS environments (
+    env_id          TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL DEFAULT 'development',
+    plan            TEXT NOT NULL DEFAULT '',
+    provider_config_json TEXT NOT NULL DEFAULT '{}',
+    secrets_json    TEXT NOT NULL DEFAULT '{}',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_env_project ON environments(project_id);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    project_id      TEXT NOT NULL DEFAULT '',
+    user_id         TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL,
+    resource_type   TEXT NOT NULL DEFAULT '',
+    resource_id     TEXT NOT NULL DEFAULT '',
+    changes_json    TEXT NOT NULL DEFAULT '{}',
+    ip_address      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_audit_org ON audit_log(org_id);
+CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
+
+CREATE TABLE IF NOT EXISTS event_types (
+    event_type      TEXT PRIMARY KEY,
+    category        TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    schema_json     TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS policy_templates (
+    policy_id       TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    policy_json     TEXT NOT NULL DEFAULT '{}',
+    is_default      INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT 0,
+    updated_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_policy_org ON policy_templates(org_id);
+
+CREATE TABLE IF NOT EXISTS slo_definitions (
+    slo_id          TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    env             TEXT NOT NULL DEFAULT '',
+    metric          TEXT NOT NULL,
+    threshold       REAL NOT NULL,
+    operator        TEXT NOT NULL DEFAULT 'gte',
+    window_hours    INTEGER NOT NULL DEFAULT 24,
+    alert_on_breach INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_slo_org ON slo_definitions(org_id);
+CREATE INDEX IF NOT EXISTS idx_slo_agent ON slo_definitions(agent_name);
+
+CREATE TABLE IF NOT EXISTS release_channels (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL,
+    channel         TEXT NOT NULL DEFAULT 'draft',
+    version         TEXT NOT NULL,
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    promoted_by     TEXT NOT NULL DEFAULT '',
+    promoted_at     REAL,
+    created_at      REAL NOT NULL DEFAULT 0,
+    UNIQUE(agent_name, channel)
+);
+CREATE INDEX IF NOT EXISTS idx_release_agent ON release_channels(agent_name);
+
+CREATE TABLE IF NOT EXISTS canary_splits (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name      TEXT NOT NULL,
+    env             TEXT NOT NULL DEFAULT 'production',
+    primary_version TEXT NOT NULL,
+    canary_version  TEXT NOT NULL,
+    canary_weight   REAL NOT NULL DEFAULT 0.1,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS workflows (
+    workflow_id     TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    steps_json      TEXT NOT NULL DEFAULT '[]',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_org ON workflows(org_id);
+
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    run_id            TEXT PRIMARY KEY,
+    workflow_id       TEXT NOT NULL,
+    status            TEXT NOT NULL DEFAULT 'running',
+    steps_status_json TEXT NOT NULL DEFAULT '{}',
+    trace_id          TEXT NOT NULL DEFAULT '',
+    total_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    started_at        REAL NOT NULL DEFAULT 0,
+    completed_at      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_wfrun_workflow ON workflow_runs(workflow_id);
+
+CREATE TABLE IF NOT EXISTS retention_policies (
+    policy_id       TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    resource_type   TEXT NOT NULL,
+    retention_days  INTEGER NOT NULL DEFAULT 90,
+    redact_pii      INTEGER NOT NULL DEFAULT 0,
+    redact_fields   TEXT NOT NULL DEFAULT '[]',
+    archive_before_delete INTEGER NOT NULL DEFAULT 1,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_retention_org ON retention_policies(org_id);
+
+CREATE TABLE IF NOT EXISTS secrets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    project_id      TEXT NOT NULL DEFAULT '',
+    env             TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    value_encrypted TEXT NOT NULL DEFAULT '',
+    created_by      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT 0,
+    updated_at      REAL NOT NULL DEFAULT 0,
+    UNIQUE(org_id, project_id, env, name)
+);
+CREATE INDEX IF NOT EXISTS idx_secrets_org ON secrets(org_id);
+
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    server_id       TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    url             TEXT NOT NULL DEFAULT '',
+    transport       TEXT NOT NULL DEFAULT 'stdio',
+    auth_token      TEXT NOT NULL DEFAULT '',
+    tools_json      TEXT NOT NULL DEFAULT '[]',
+    status          TEXT NOT NULL DEFAULT 'registered',
+    last_health_at  REAL,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_org ON mcp_servers(org_id);
+
+CREATE TABLE IF NOT EXISTS gpu_endpoints (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    endpoint_id     TEXT NOT NULL UNIQUE,
+    org_id          TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT 'gmi',
+    gpu_type        TEXT NOT NULL DEFAULT 'h100',
+    gpu_count       INTEGER NOT NULL DEFAULT 1,
+    model_id        TEXT NOT NULL DEFAULT '',
+    api_base        TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'provisioning',
+    hourly_rate_usd REAL NOT NULL DEFAULT 2.98,
+    started_at      REAL,
+    stopped_at      REAL,
+    total_hours     REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_endpoint_id ON gpu_endpoints(endpoint_id);
+CREATE INDEX IF NOT EXISTS idx_gpu_status ON gpu_endpoints(status);
+CREATE INDEX IF NOT EXISTS idx_gpu_org ON gpu_endpoints(org_id);
+
+CREATE TABLE IF NOT EXISTS job_queue (
+    job_id          TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL,
+    task            TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    priority        INTEGER NOT NULL DEFAULT 0,
+    retries         INTEGER NOT NULL DEFAULT 0,
+    max_retries     INTEGER NOT NULL DEFAULT 3,
+    result_json     TEXT NOT NULL DEFAULT '{}',
+    error           TEXT NOT NULL DEFAULT '',
+    session_id      TEXT NOT NULL DEFAULT '',
+    scheduled_at    REAL,
+    started_at      REAL,
+    completed_at    REAL,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_job_status ON job_queue(status);
+CREATE INDEX IF NOT EXISTS idx_job_agent ON job_queue(agent_name);
+CREATE INDEX IF NOT EXISTS idx_job_idempotency ON job_queue(idempotency_key);
+"""
+
 
 # ── Database class ───────────────────────────────────────────────────────────
 
@@ -903,6 +1143,7 @@ class AgentDB:
         else:
             # Existing database — apply migrations
             self._migrate(current)
+        self._ensure_runtime_tables()
 
         self.conn.execute(
             "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
@@ -910,6 +1151,10 @@ class AgentDB:
         )
         self.conn.commit()
         logger.info("Database initialized at %s (schema v%d)", self.path, SCHEMA_VERSION)
+
+    def _ensure_runtime_tables(self) -> None:
+        """Ensure operational tables exist even on partially migrated DBs."""
+        self.conn.executescript(RUNTIME_TABLES_SQL)
 
     def _migrate(self, from_version: int) -> None:
         """Apply schema migrations incrementally."""

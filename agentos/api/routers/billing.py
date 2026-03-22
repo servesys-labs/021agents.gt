@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -59,20 +60,30 @@ async def get_daily_usage(days: int = 30, user: CurrentUser = Depends(get_curren
     db = _get_db()
     since = time.time() - (days * 86400)
 
+    # Use DB-agnostic grouping in Python to avoid SQLite/Postgres date SQL drift.
     rows = db.conn.execute(
-        """SELECT
-            date(created_at, 'unixepoch') as day,
-            SUM(total_cost_usd) as cost,
-            SUM(input_tokens) as input_tokens,
-            SUM(output_tokens) as output_tokens,
-            COUNT(*) as call_count
+        """SELECT created_at, total_cost_usd, input_tokens, output_tokens
         FROM billing_records
         WHERE org_id = ? AND created_at >= ?
-        GROUP BY day ORDER BY day""",
+        ORDER BY created_at""",
         (user.org_id, since),
     ).fetchall()
 
-    return {"days": [dict(r) for r in rows]}
+    daily: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"cost": 0.0, "input_tokens": 0, "output_tokens": 0, "call_count": 0}
+    )
+    for row in rows:
+        entry = dict(row)
+        created_at = float(entry.get("created_at", 0) or 0)
+        day = time.strftime("%Y-%m-%d", time.gmtime(created_at))
+        bucket = daily[day]
+        bucket["cost"] += float(entry.get("total_cost_usd", 0) or 0)
+        bucket["input_tokens"] += int(entry.get("input_tokens", 0) or 0)
+        bucket["output_tokens"] += int(entry.get("output_tokens", 0) or 0)
+        bucket["call_count"] += 1
+
+    out = [{"day": day, **daily[day]} for day in sorted(daily.keys())]
+    return {"days": out}
 
 
 @router.get("/trace/{trace_id}")

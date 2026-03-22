@@ -42,7 +42,14 @@ export async function apiRequest<TResponse>(
     throw new ApiError(message, response.status);
   }
 
-  return (await response.json()) as TResponse;
+  try {
+    return (await response.json()) as TResponse;
+  } catch {
+    throw new ApiError(
+      "Expected JSON response but received a non-JSON payload. Verify the API path/proxy.",
+      response.status || 500,
+    );
+  }
 }
 
 export type UseApiQueryResult<T> = {
