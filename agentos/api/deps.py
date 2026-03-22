@@ -111,6 +111,14 @@ def _get_db():
     return db
 
 
+def _get_db_safe():
+    """Get DB instance without raising HTTPException (for background tasks)."""
+    try:
+        return _get_db()
+    except Exception:
+        return None
+
+
 async def get_current_user(request: Request) -> CurrentUser:
     """Extract authenticated user from JWT token or API key.
 

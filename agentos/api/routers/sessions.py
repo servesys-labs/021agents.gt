@@ -125,6 +125,30 @@ async def session_stats(agent_name: str = "", since_days: int = 30):
     }
 
 
+@router.post("/{session_id}/feedback")
+async def submit_feedback(
+    session_id: str,
+    rating: int = 0,
+    comment: str = "",
+    tags: str = "",
+):
+    """Submit human feedback for a session output."""
+    db = _get_db()
+    row = db.conn.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.insert_feedback(session_id=session_id, rating=rating, comment=comment, tags=tags)
+    return {"submitted": True, "session_id": session_id}
+
+
+@router.get("/{session_id}/feedback")
+async def get_feedback(session_id: str):
+    """Get all feedback for a session."""
+    db = _get_db()
+    rows = db.query_feedback(session_id=session_id)
+    return {"feedback": rows}
+
+
 @router.delete("")
 async def cleanup_sessions(before_days: int = 90):
     """Delete sessions older than N days."""

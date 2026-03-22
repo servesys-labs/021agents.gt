@@ -459,11 +459,15 @@ class TestSandboxEndpointSecurity:
 
     def test_sandbox_blocks_local_fallback_with_auth(self):
         """Even with valid auth, sandbox should refuse if no E2B key."""
+        from unittest.mock import patch, PropertyMock
         from agentos.auth.jwt import create_token
+        from agentos.sandbox.manager import SandboxManager
         token = create_token(user_id="u1", email="a@b.com")
         headers = {"Authorization": f"Bearer {token}"}
 
-        resp = self.client.post("/sandbox/create", json={}, headers=headers)
+        # Mock has_api_key to return False, simulating missing E2B_API_KEY
+        with patch.object(SandboxManager, "has_api_key", new_callable=PropertyMock, return_value=False):
+            resp = self.client.post("/sandbox/create", json={}, headers=headers)
         # Should get 503 because E2B_API_KEY is not set
         assert resp.status_code == 503
         assert "E2B_API_KEY" in resp.json()["detail"]
@@ -473,9 +477,12 @@ class TestSandboxSubprocessKill:
     """Timed-out local sandbox commands should kill the subprocess."""
 
     @pytest.mark.asyncio
-    async def test_timeout_kills_process(self):
+    async def test_timeout_kills_process(self, monkeypatch):
         from agentos.sandbox.manager import SandboxManager
 
+        # Force local mode by clearing E2B key
+        monkeypatch.delenv("E2B_API_KEY", raising=False)
+        monkeypatch.setenv("AGENTOS_ALLOW_LOCAL_SANDBOX", "1")
         mgr = SandboxManager()
         # Create a local sandbox
         session = await mgr.create()
@@ -494,6 +501,7 @@ class TestSandboxSubprocessKill:
     async def test_local_file_path_escape_blocked(self, monkeypatch):
         from agentos.sandbox.manager import SandboxManager
 
+        monkeypatch.delenv("E2B_API_KEY", raising=False)
         monkeypatch.setenv("AGENTOS_ALLOW_LOCAL_SANDBOX", "1")
         mgr = SandboxManager()
         session = await mgr.create()
@@ -918,7 +926,8 @@ class TestPerTierComplexityRouting:
         (tmp_path / "data").mkdir()
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-        config = AgentConfig(name="test-router", model="claude-sonnet-4-20250514")
+        # Use plan="" to fall back to default routing config (not plan-based)
+        config = AgentConfig(name="test-router", model="claude-sonnet-4-20250514", plan="")
         agent = Agent(config)
 
         router = agent._harness.llm_router
@@ -927,7 +936,7 @@ class TestPerTierComplexityRouting:
         simple_model = router._routes[Complexity.SIMPLE].provider.model_id
         complex_model = router._routes[Complexity.COMPLEX].provider.model_id
 
-        # Per config: simple=haiku (anthropic), complex=gpt-5.4 (openai) but falls back to anthropic
+        # Per default routing config: simple=haiku, complex=sonnet (anthropic fallback)
         assert "haiku" in simple_model, f"Simple tier should use haiku, got {simple_model}"
         # Without OPENAI_API_KEY, complex tier falls back to Anthropic with agent's model
         assert complex_model is not None, f"Complex tier should have a provider, got None"

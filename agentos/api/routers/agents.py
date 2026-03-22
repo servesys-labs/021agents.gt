@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from starlette.responses import StreamingResponse
 
-from agentos.api.deps import CurrentUser, get_current_user, get_optional_user, require_scope
+from agentos.api.deps import CurrentUser, get_current_user, get_optional_user, require_scope, _get_db
 from agentos.api.schemas import (
     AgentCreateRequest, AgentResponse, AgentRunRequest, RunResponse,
 )
@@ -65,10 +65,27 @@ async def create_agent(request: AgentCreateRequest, user: CurrentUser = Depends(
     config.governance["budget_limit_usd"] = request.budget_limit_usd
     save_agent_config(config)
 
+    # Snapshot version in agent_versions table
+    _snapshot_version(config, user.user_id)
+
     return AgentResponse(
         name=config.name, description=config.description, model=config.model,
         tools=config.tools, tags=config.tags, version=config.version,
     )
+
+
+def _snapshot_version(config: Any, created_by: str = "") -> None:
+    """Store a version snapshot in agent_versions table."""
+    try:
+        db = _get_db()
+        db.conn.execute(
+            """INSERT OR REPLACE INTO agent_versions (agent_name, version, config_json, created_by)
+            VALUES (?, ?, ?, ?)""",
+            (config.name, config.version, json.dumps(config.to_dict()), created_by),
+        )
+        db.conn.commit()
+    except Exception:
+        pass  # Non-critical
 
 
 @router.put("/{name}", response_model=AgentResponse)
@@ -95,6 +112,9 @@ async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser
     config.max_turns = request.max_turns
     config.governance["budget_limit_usd"] = request.budget_limit_usd
     save_agent_config(config)
+
+    # Snapshot updated version
+    _snapshot_version(config, user.user_id)
 
     return AgentResponse(
         name=config.name, description=config.description, model=config.model,
@@ -205,21 +225,37 @@ async def run_agent_stream(name: str, request: AgentRunRequest):
 
 @router.get("/{name}/versions")
 async def list_versions(name: str):
-    """List all versions of an agent from the evolution ledger."""
+    """List all versions of an agent from DB + evolution ledger."""
     from pathlib import Path
 
-    ledger_path = Path.cwd() / "data" / "evolution" / name / "ledger.json"
-    if not ledger_path.exists():
-        return {"versions": [], "current": "0.1.0"}
-
+    # Query agent_versions table
+    db_versions: list[dict] = []
     try:
-        ledger = json.loads(ledger_path.read_text())
-        return {
-            "versions": ledger.get("entries", []),
-            "current": ledger.get("current_version", "0.1.0"),
-        }
+        db = _get_db()
+        rows = db.conn.execute(
+            "SELECT version, config_json, created_by, created_at FROM agent_versions WHERE agent_name = ? ORDER BY created_at DESC",
+            (name,),
+        ).fetchall()
+        db_versions = [dict(r) for r in rows]
     except Exception:
-        return {"versions": [], "current": "0.1.0"}
+        pass
+
+    # Also check evolution ledger for backward compatibility
+    ledger_path = Path.cwd() / "data" / "evolution" / name / "ledger.json"
+    ledger_entries: list = []
+    current = "0.1.0"
+    if ledger_path.exists():
+        try:
+            ledger = json.loads(ledger_path.read_text())
+            ledger_entries = ledger.get("entries", [])
+            current = ledger.get("current_version", "0.1.0")
+        except Exception:
+            pass
+
+    return {
+        "versions": db_versions or ledger_entries,
+        "current": current,
+    }
 
 
 @router.post("/create-from-description")

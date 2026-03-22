@@ -126,6 +126,8 @@ class LoopDetectionMiddleware(Middleware):
                 "tool_call_hash": current_hash,
                 "session_id": session_id,
             })
+            # Persist to database
+            self._persist_event(session_id, "hard_stop", consecutive, current_hash)
 
         elif consecutive >= self.warn_threshold:
             # Warning: inject a system message
@@ -150,6 +152,27 @@ class LoopDetectionMiddleware(Middleware):
                 "tool_call_hash": current_hash,
                 "session_id": session_id,
             })
+            # Persist to database
+            self._persist_event(session_id, "warning", consecutive, current_hash)
+
+    def _persist_event(self, session_id: str, action: str, repeats: int, tool_hash: str) -> None:
+        """Persist middleware event to database."""
+        try:
+            from pathlib import Path as _Path
+            from agentos.core.database import AgentDB
+            db_path = _Path.cwd() / "data" / "agent.db"
+            if db_path.exists():
+                db = AgentDB(db_path)
+                db.initialize()
+                db.insert_middleware_event(
+                    session_id=session_id,
+                    middleware_name="loop_detection",
+                    event_type=action,
+                    details=json.dumps({"consecutive_repeats": repeats, "tool_call_hash": tool_hash}),
+                )
+                db.conn.close()
+        except Exception as exc:
+            logger.debug("Could not persist middleware event: %s", exc)
 
     async def on_session_start(self, ctx: MiddlewareContext) -> None:
         """Reset tracking for a new session."""

@@ -13,7 +13,7 @@ from agentos.core.events import EventBus
 from agentos.core.governance import GovernanceLayer, GovernancePolicy
 from agentos.core.harness import AgentHarness
 from agentos.env import load_dotenv_if_present
-from agentos.api.deps import CurrentUser, get_current_user
+from agentos.api.deps import CurrentUser, get_current_user, _get_db_safe
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +196,63 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         skills_router.router, middleware_router.router,
     ]:
         app.include_router(r, prefix="/api/v1")
+
+    # Auto-start scheduler and job worker as background tasks
+    @app.on_event("startup")
+    async def _start_background_services() -> None:
+        import asyncio
+
+        # Background scheduler — checks for due schedules every 60s
+        try:
+            from agentos.scheduler import scheduler_loop
+
+            async def _run_scheduler() -> None:
+                while True:
+                    try:
+                        scheduler_loop()
+                    except Exception as exc:
+                        logger.warning("Scheduler tick error: %s", exc)
+                    await asyncio.sleep(60)
+
+            asyncio.create_task(_run_scheduler())
+            logger.info("Background scheduler started")
+        except Exception as exc:
+            logger.warning("Could not start background scheduler: %s", exc)
+
+        # Background job worker — dequeues and processes async jobs
+        async def _run_job_worker() -> None:
+            while True:
+                try:
+                    db = _get_db_safe()
+                    if db is None:
+                        await asyncio.sleep(10)
+                        continue
+                    job = db.dequeue_job()
+                    if job is None:
+                        await asyncio.sleep(5)
+                        continue
+                    # Process the job by running the agent
+                    job_id = job["job_id"]
+                    agent_name = job.get("agent_name", "")
+                    task = job.get("task", "")
+                    logger.info("Job worker: processing job %s (agent=%s)", job_id, agent_name)
+                    try:
+                        from agentos.agent import Agent
+                        agent = Agent.from_name(agent_name)
+                        results = await agent.run(task)
+                        output = results[-1].llm_response.text if results and results[-1].llm_response else ""
+                        session_id = getattr(agent._harness, "_current_session_id", "")
+                        db.complete_job(job_id, result={"output": output[:500]}, session_id=session_id)
+                        logger.info("Job %s completed", job_id)
+                    except Exception as exc:
+                        db.fail_job(job_id, error=str(exc)[:500])
+                        logger.error("Job %s failed: %s", job_id, exc)
+                except Exception as exc:
+                    logger.warning("Job worker error: %s", exc)
+                    await asyncio.sleep(10)
+
+        asyncio.create_task(_run_job_worker())
+        logger.info("Background job worker started")
 
     # Serve local dashboard (same SPA as CF deploy)
     import importlib.resources

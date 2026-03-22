@@ -616,6 +616,8 @@ class TestCmdRun:
         # Ensure no API keys so stub provider is used
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GMI_API_KEY", raising=False)
+        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
 
         args = _make_run_args(
             str(agents_dir / "test-agent.json"),
@@ -737,6 +739,8 @@ class TestCmdRun:
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("GMI_API_KEY", raising=False)
+        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
 
         # Create agent marked as stub-built
         config = AgentConfig(name="stub-agent", built_with="stub")
