@@ -39,6 +39,7 @@ class TurnResult:
     done: bool = False
     stop_reason: str = ""  # completed / max_turns / budget / timeout / llm_error
     cost_usd: float = 0.0
+    cumulative_cost_usd: float = 0.0
     model_used: str = ""
 
 
@@ -108,6 +109,7 @@ class AgentHarness:
     async def _run_inner(self, user_input: str) -> list[TurnResult]:
         """Inner run loop — separated so timeout can wrap it."""
         results: list[TurnResult] = []
+        cumulative_cost = 0.0
         await self.event_bus.emit(Event(type=EventType.SESSION_START, data={"input": user_input}))
 
         # --- Initialization Sequence ---
@@ -154,9 +156,12 @@ class AgentHarness:
                 stop = "budget" if not self.governance.check_budget(0.01) else "llm_error"
                 result = TurnResult(
                     turn_number=turn, error="LLM call failed", done=True, stop_reason=stop,
+                    cumulative_cost_usd=cumulative_cost,
                 )
                 results.append(result)
                 break
+
+            cumulative_cost += llm_response.cost_usd
 
             # 2. Check for tool calls
             if llm_response.tool_calls:
@@ -196,6 +201,7 @@ class AgentHarness:
                         llm_response=llm_response,
                         tool_results=tool_results,
                         cost_usd=llm_response.cost_usd,
+                        cumulative_cost_usd=cumulative_cost,
                         model_used=llm_response.model,
                     )
                     results.append(result)
@@ -205,6 +211,7 @@ class AgentHarness:
                         llm_response=llm_response,
                         tool_results=tool_results,
                         cost_usd=llm_response.cost_usd,
+                        cumulative_cost_usd=cumulative_cost,
                         model_used=llm_response.model,
                     )
                     results.append(result)
@@ -226,6 +233,7 @@ class AgentHarness:
                     turn_number=turn, llm_response=llm_response, done=True,
                     stop_reason="completed",
                     cost_usd=llm_response.cost_usd,
+                    cumulative_cost_usd=cumulative_cost,
                     model_used=llm_response.model,
                 )
                 results.append(result)

@@ -1071,6 +1071,9 @@ def cmd_ingest(args: argparse.Namespace) -> None:
     data_dir = Path.cwd() / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    # Persist chunks to SQLite for fast loading on startup
+    pipeline.save_chunks(data_dir / "rag_chunks.db")
+
     index_path = data_dir / "rag_index.json"
     index_data = {
         "chunk_size": args.chunk_size,
