@@ -13,6 +13,7 @@ from agentos.core.events import EventBus
 from agentos.core.governance import GovernanceLayer, GovernancePolicy
 from agentos.core.harness import AgentHarness
 from agentos.env import load_dotenv_if_present
+from agentos.api.deps import CurrentUser, get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,16 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
 
     load_dotenv_if_present()
 
-    app = FastAPI(title="AgentOS", version="0.1.0", description="Composable Autonomous Agent Framework")
+    app = FastAPI(
+        title="AgentOS",
+        version="0.2.0",
+        description="Agent Control Plane — build, test, govern, deploy, and observe AI agents. "
+        "165+ API endpoints, 21 builtin tools, 3,000+ app integrations via Pipedream, "
+        "A2A + MCP protocol support, multi-provider LLM routing (GMI, Anthropic, OpenAI, Cloudflare).",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json",
+    )
 
     # Build a real harness from the first available agent so /run uses a real LLM.
     if harness is None:
@@ -149,6 +159,10 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         except Exception as exc:
             logger.warning("Could not load default agent for harness: %s", exc)
     _harness = harness or AgentHarness.from_config_file()
+
+    # Rate limiting
+    from agentos.api.ratelimit import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware)
 
     # Mount legacy auth routes
     from agentos.auth.middleware import mount_auth_routes
@@ -165,7 +179,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         tools as tools_router, sandbox as sandbox_router,
         rag, compare, observability, memory, deploy, gpu, config,
         projects, audit, policies, slos, releases, jobs, workflows, retention,
-        secrets, mcp_control, connectors,
+        secrets, mcp_control, connectors, stripe_billing,
     )
     for r in [
         auth.router, agents_router.router, sessions.router,
@@ -177,6 +191,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         projects.router, audit.router, policies.router, slos.router,
         releases.router, jobs.router, workflows.router, retention.router,
         secrets.router, mcp_control.router, connectors.router,
+        stripe_billing.router,
     ]:
         app.include_router(r, prefix="/api/v1")
 
@@ -195,7 +210,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         return HealthResponse(status="ok", version=__version__)
 
     @app.post("/run", response_model=RunResponse)
-    async def run(request: RunRequest) -> RunResponse:
+    async def run(request: RunRequest, user: CurrentUser = Depends(get_current_user)) -> RunResponse:
         runner = (
             _build_harness_with_overrides(_harness, request.config)
             if request.config
@@ -205,7 +220,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         return _build_run_response(results)
 
     @app.post("/run/stream")
-    async def run_stream(request: RunRequest):
+    async def run_stream(request: RunRequest, user: CurrentUser = Depends(get_current_user)):
         """Stream agent run results as Server-Sent Events."""
         import asyncio
         from starlette.responses import StreamingResponse
@@ -251,17 +266,17 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.get("/tools")
-    async def list_tools() -> list[dict[str, Any]]:
+    async def list_tools(user: CurrentUser = Depends(get_current_user)) -> list[dict[str, Any]]:
         return _harness.tool_executor.available_tools()
 
     @app.get("/memory/snapshot")
-    async def memory_snapshot() -> dict[str, Any]:
+    async def memory_snapshot(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
         return _harness.memory_manager.working.snapshot()
 
     # ── Agent-specific endpoints ──────────────────────────────────────────
 
     @app.get("/agents", response_model=list[AgentInfo])
-    async def list_agents_api() -> list[AgentInfo]:
+    async def list_agents_api(user: CurrentUser = Depends(get_current_user)) -> list[AgentInfo]:
         """List all available agents."""
         from agentos.agent import list_agents
         agents = list_agents()
@@ -277,7 +292,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         ]
 
     @app.get("/agents/{agent_name}", response_model=AgentInfo)
-    async def get_agent_info(agent_name: str) -> AgentInfo:
+    async def get_agent_info(agent_name: str, user: CurrentUser = Depends(get_current_user)) -> AgentInfo:
         """Get info about a specific agent."""
         from agentos.agent import Agent
         try:
@@ -293,7 +308,11 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         )
 
     @app.post("/agents/{agent_name}/run", response_model=RunResponse)
-    async def run_agent(agent_name: str, request: AgentRunRequest) -> RunResponse:
+    async def run_agent(
+        agent_name: str,
+        request: AgentRunRequest,
+        user: CurrentUser = Depends(get_current_user),
+    ) -> RunResponse:
         """Run a named agent on a task."""
         from agentos.agent import Agent
         # Cache agent instances for reuse (preserves memory across calls)
@@ -308,7 +327,10 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         return _build_run_response(results)
 
     @app.get("/agents/{agent_name}/tools")
-    async def get_agent_tools(agent_name: str) -> list[dict[str, Any]]:
+    async def get_agent_tools(
+        agent_name: str,
+        user: CurrentUser = Depends(get_current_user),
+    ) -> list[dict[str, Any]]:
         """List tools available to a specific agent."""
         from agentos.agent import Agent
         if agent_name not in _agent_cache:

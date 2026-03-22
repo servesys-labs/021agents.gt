@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import secrets
 import time
 import uuid
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -15,6 +17,22 @@ from agentos.api.deps import CurrentUser, get_current_user, _get_db
 from agentos.api.schemas import CreateWebhookRequest, WebhookResponse
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+def _validate_callback_url(url: str) -> None:
+    parsed = urlparse(url)
+    host = parsed.hostname or ""
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise HTTPException(status_code=400, detail="Invalid webhook URL")
+    if host in {"localhost"} or host.endswith(".local") or host.endswith(".internal"):
+        raise HTTPException(status_code=400, detail="Webhook URL host is not allowed")
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            raise HTTPException(status_code=400, detail="Webhook URL host is not allowed")
+    except ValueError:
+        # Non-IP hostnames are allowed; DNS-level filtering can be added upstream.
+        pass
 
 
 @router.get("", response_model=list[WebhookResponse])
@@ -35,18 +53,20 @@ async def list_webhooks(user: CurrentUser = Depends(get_current_user)):
 
 @router.post("", response_model=WebhookResponse)
 async def create_webhook(request: CreateWebhookRequest, user: CurrentUser = Depends(get_current_user)):
+    url_str = str(request.url)
+    _validate_callback_url(url_str)
     db = _get_db()
     webhook_id = uuid.uuid4().hex[:12]
     secret = uuid.uuid4().hex
 
     db.conn.execute(
         "INSERT INTO webhooks (webhook_id, org_id, url, secret, events) VALUES (?, ?, ?, ?, ?)",
-        (webhook_id, user.org_id, request.url, secret, json.dumps(request.events)),
+        (webhook_id, user.org_id, url_str, secret, json.dumps(request.events)),
     )
     db.conn.commit()
 
     return WebhookResponse(
-        webhook_id=webhook_id, url=request.url, events=request.events,
+        webhook_id=webhook_id, url=url_str, events=request.events,
     )
 
 
@@ -62,6 +82,7 @@ async def update_webhook(
     db = _get_db()
     updates, params = [], []
     if url:
+        _validate_callback_url(url)
         updates.append("url = ?")
         params.append(url)
     if events is not None:
@@ -231,8 +252,8 @@ async def rotate_secret(
 
     new_secret = secrets.token_hex(32)
     db.conn.execute(
-        "UPDATE webhooks SET secret = ? WHERE webhook_id = ?",
-        (new_secret, webhook_id),
+        "UPDATE webhooks SET secret = ? WHERE webhook_id = ? AND org_id = ?",
+        (new_secret, webhook_id, user.org_id),
     )
     db.conn.commit()
 

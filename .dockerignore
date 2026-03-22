@@ -1,0 +1,16 @@
+.venv
+venv
+__pycache__
+*.pyc
+.git
+.github
+node_modules
+deploy/node_modules
+.env
+.keys/agent.key
+data/agent.db
+data/agent.db-wal
+data/agent.db-shm
+sessions/
+*.egg-info
+dist/

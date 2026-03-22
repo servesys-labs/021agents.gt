@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
 
@@ -20,6 +20,7 @@ async def get_usage(
 
     All queries are org-scoped to prevent cross-tenant data leakage.
     """
+    since_days = max(1, min(365, int(since_days)))
     import time
     db = _get_db()
     since = time.time() - (since_days * 86400)
@@ -53,6 +54,7 @@ async def get_usage(
 @router.get("/usage/daily")
 async def get_daily_usage(days: int = 30, user: CurrentUser = Depends(get_current_user)):
     """Get daily cost breakdown for charts. Org-scoped."""
+    days = max(1, min(365, int(days)))
     import time
     db = _get_db()
     since = time.time() - (days * 86400)
@@ -77,15 +79,24 @@ async def get_daily_usage(days: int = 30, user: CurrentUser = Depends(get_curren
 async def billing_by_trace(trace_id: str, user: CurrentUser = Depends(get_current_user)):
     """Get billing breakdown for a specific trace. Org-scoped."""
     db = _get_db()
-    rollup = db.trace_cost_rollup(trace_id)
     records = db.conn.execute(
         "SELECT * FROM billing_records WHERE trace_id = ? AND org_id = ? ORDER BY created_at",
         (trace_id, user.org_id),
     ).fetchall()
+    records_list = [dict(r) for r in records]
+    if not records_list:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    rollup = {
+        "total_sessions": len({r.get("session_id", "") for r in records_list if r.get("session_id")}),
+        "total_cost_usd": float(sum(float(r.get("total_cost_usd", 0) or 0) for r in records_list)),
+        "total_tokens": int(
+            sum(int(r.get("input_tokens", 0) or 0) + int(r.get("output_tokens", 0) or 0) for r in records_list)
+        ),
+    }
     return {
         "trace_id": trace_id,
         "rollup": rollup,
-        "records": [dict(r) for r in records],
+        "records": records_list,
     }
 
 
@@ -98,6 +109,9 @@ async def list_invoices(user: CurrentUser = Depends(get_current_user)):
 @router.post("/checkout")
 async def create_checkout(plan: str = "standard", user: CurrentUser = Depends(get_current_user)):
     """Create a Stripe checkout session for plan upgrade."""
+    allowed = {"starter", "standard", "pro", "enterprise"}
+    if plan not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid plan")
     return {
         "checkout_url": f"https://checkout.stripe.com/placeholder?plan={plan}",
         "note": "Stripe integration pending",

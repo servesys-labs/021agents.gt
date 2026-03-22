@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import time
 import uuid
 from typing import Any
@@ -17,10 +18,28 @@ from agentos.api.schemas import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+def _hash_password(password: str, salt: str = "") -> str:
+    """Hash password using PBKDF2-HMAC-SHA256 with per-user salt."""
+    if not salt:
+        salt = os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 600_000).hex()
+    return f"{salt}:{digest}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """Verify current PBKDF2 hash or legacy unsalted SHA256 hash."""
+    if ":" in stored:
+        salt, expected = stored.split(":", 1)
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 600_000).hex()
+        return actual == expected
+    # Backward compatibility for legacy rows written as raw SHA256(password)
+    return hashlib.sha256(password.encode()).hexdigest() == stored
+
+
 @router.post("/signup", response_model=TokenResponse)
 async def signup(request: SignupRequest):
     """Create a new user account with a personal org."""
-    from agentos.auth.jwt import create_token, set_secret
+    from agentos.auth.jwt import create_token
 
     db = _get_db()
 
@@ -30,7 +49,7 @@ async def signup(request: SignupRequest):
         raise HTTPException(status_code=409, detail="Email already registered")
 
     user_id = uuid.uuid4().hex[:16]
-    password_hash = hashlib.sha256(request.password.encode()).hexdigest()
+    password_hash = _hash_password(request.password)
 
     # Create user
     db.conn.execute(
@@ -51,7 +70,7 @@ async def signup(request: SignupRequest):
     )
     db.conn.commit()
 
-    token = create_token(user_id=user_id, email=request.email)
+    token = create_token(user_id=user_id, email=request.email, extra={"org_id": org_id})
 
     return TokenResponse(token=token, user_id=user_id, email=request.email, org_id=org_id)
 
@@ -62,14 +81,12 @@ async def login(request: LoginRequest):
     from agentos.auth.jwt import create_token
 
     db = _get_db()
-    password_hash = hashlib.sha256(request.password.encode()).hexdigest()
-
     row = db.conn.execute(
-        "SELECT user_id, email, name FROM users WHERE email = ? AND password_hash = ?",
-        (request.email, password_hash),
+        "SELECT user_id, email, name, password_hash FROM users WHERE email = ?",
+        (request.email,),
     ).fetchone()
 
-    if not row:
+    if not row or not _verify_password(request.password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     user = dict(row)
@@ -80,7 +97,11 @@ async def login(request: LoginRequest):
     ).fetchone()
     org_id = dict(org_row)["org_id"] if org_row else ""
 
-    token = create_token(user_id=user["user_id"], email=user["email"])
+    token = create_token(
+        user_id=user["user_id"],
+        email=user["email"],
+        extra={"org_id": org_id},
+    )
 
     return TokenResponse(token=token, user_id=user["user_id"], email=user["email"], org_id=org_id)
 
@@ -111,16 +132,14 @@ async def change_password(
 ):
     """Change password."""
     db = _get_db()
-    current_hash = hashlib.sha256(current_password.encode()).hexdigest()
-
     row = db.conn.execute(
-        "SELECT user_id FROM users WHERE user_id = ? AND password_hash = ?",
-        (user.user_id, current_hash),
+        "SELECT password_hash FROM users WHERE user_id = ?",
+        (user.user_id,),
     ).fetchone()
-    if not row:
+    if not row or not _verify_password(current_password, row["password_hash"]):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
 
-    new_hash = hashlib.sha256(new_password.encode()).hexdigest()
+    new_hash = _hash_password(new_password)
     db.conn.execute(
         "UPDATE users SET password_hash = ?, updated_at = ? WHERE user_id = ?",
         (new_hash, time.time(), user.user_id),

@@ -292,6 +292,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const url = new URL(request.url);
     const path = url.pathname.split("/").pop() || "";
 
+    if (path !== "health") {
+      const authorized = await this._isAuthorized(request);
+      if (!authorized) {
+        return Response.json({ error: "Unauthorized" }, { status: 401 });
+      }
+    }
+
     // Health
     if (path === "health") {
       return Response.json({ status: "ok", agent: this.state.config.agentName });
@@ -307,6 +314,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         output: last?.content ?? "",
         turns: results.length,
         costUsd: this.state.totalCostUsd,
+        turnResults: results,
       });
     }
 
@@ -331,10 +339,23 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // Memory
     if (path === "memory") {
-      return Response.json(this.getEpisodes());
+      return Response.json({
+        working: this.getWorkingMemory(),
+        episodes: this.getEpisodes(),
+        procedures: [],
+      });
     }
 
     return new Response("Not found", { status: 404 });
+  }
+
+  private async _isAuthorized(request: Request): Promise<boolean> {
+    const secret = this.env.AUTH_JWT_SECRET;
+    if (!secret) return true;
+    const auth = request.headers.get("Authorization") || "";
+    if (!auth.startsWith("Bearer ")) return false;
+    const token = auth.slice(7).trim();
+    return verifyHs256Jwt(token, secret);
   }
 
   // ── WebSocket (real-time streaming) ─────────────────────────────
@@ -386,6 +407,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         const apiKey = provider === "gmi"
           ? this.env.GMI_API_KEY
           : this.env.OPENAI_API_KEY;
+        if (!apiKey) {
+          return {
+            content: `${provider.toUpperCase()} API key not configured`,
+            model,
+            toolCalls: [],
+            inputTokens: 0,
+            outputTokens: 0,
+            costUsd: 0,
+          };
+        }
 
         const resp = await fetch(`${apiBase}/chat/completions`, {
           method: "POST",
@@ -444,7 +475,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const results: any[] = [];
     for (const tc of toolCalls) {
       const name = tc.name || tc.function?.name || "";
-      const args = tc.arguments || tc.function?.arguments || {};
+      const args = tc.arguments || tc.input || tc.function?.arguments || {};
       const parsedArgs = typeof args === "string" ? JSON.parse(args) : args;
 
       try {
@@ -473,6 +504,40 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       default:
         return `Unknown tool: ${name}`;
     }
+  }
+}
+
+function base64UrlToBytes(input: string): Uint8Array {
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - (normalized.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function verifyHs256Jwt(token: string, secret: string): Promise<boolean> {
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  const [headerB64, payloadB64, signatureB64] = parts;
+  try {
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
+    const signature = base64UrlToBytes(signatureB64);
+    const valid = await crypto.subtle.verify("HMAC", key, signature, signingInput);
+    if (!valid) return false;
+    const payloadRaw = new TextDecoder().decode(base64UrlToBytes(payloadB64));
+    const payload = JSON.parse(payloadRaw) as { exp?: number };
+    if (payload.exp && Date.now() / 1000 > payload.exp) return false;
+    return true;
+  } catch {
+    return false;
   }
 }
 

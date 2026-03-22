@@ -31,6 +31,10 @@ class GovernanceLayer:
     def record_cost(self, cost_usd: float) -> None:
         self._spent_usd += cost_usd
 
+    def reset_for_session(self) -> None:
+        """Reset budget tracking for a new run/session."""
+        self._spent_usd = 0.0
+
     def check_budget(self, estimated_cost: float) -> bool:
         return (self._spent_usd + estimated_cost) <= self.policy.budget_limit_usd
 

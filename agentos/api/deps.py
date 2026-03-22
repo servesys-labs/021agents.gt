@@ -181,21 +181,30 @@ def _resolve_jwt(token: str) -> CurrentUser:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user_id = claims.user_id
-    org_id = getattr(claims, "org_id", "")
+    org_id = getattr(claims, "org_id", "") or ""
 
     # Look up role from org_members if org_id is available
     role = "member"
-    if org_id:
-        try:
-            db = _get_db()
+    try:
+        db = _get_db()
+        # If token does not carry org context, resolve a default org membership.
+        if not org_id:
+            org_row = db.conn.execute(
+                "SELECT org_id, role FROM org_members WHERE user_id = ? ORDER BY created_at ASC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if org_row:
+                org_id = org_row["org_id"]
+                role = org_row["role"]
+        if org_id:
             row = db.conn.execute(
                 "SELECT role FROM org_members WHERE org_id = ? AND user_id = ?",
                 (org_id, user_id),
             ).fetchone()
             if row:
                 role = row["role"]
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     return CurrentUser(
         user_id=user_id,

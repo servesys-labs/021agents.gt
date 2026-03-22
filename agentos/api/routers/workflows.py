@@ -63,7 +63,10 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
     import time
 
     db = _get_db()
-    row = db.conn.execute("SELECT * FROM workflows WHERE workflow_id = ?", (workflow_id,)).fetchone()
+    row = db.conn.execute(
+        "SELECT * FROM workflows WHERE workflow_id = ? AND org_id = ?",
+        (workflow_id, user.org_id),
+    ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
@@ -137,8 +140,18 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
 
 
 @router.get("/{workflow_id}/runs")
-async def list_workflow_runs(workflow_id: str, limit: int = 20):
+async def list_workflow_runs(
+    workflow_id: str,
+    limit: int = 20,
+    user: CurrentUser = Depends(get_current_user),
+):
     db = _get_db()
+    wf = db.conn.execute(
+        "SELECT workflow_id FROM workflows WHERE workflow_id = ? AND org_id = ?",
+        (workflow_id, user.org_id),
+    ).fetchone()
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
     rows = db.conn.execute(
         "SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY started_at DESC LIMIT ?",
         (workflow_id, limit),
@@ -147,9 +160,19 @@ async def list_workflow_runs(workflow_id: str, limit: int = 20):
 
 
 @router.get("/{workflow_id}/runs/{run_id}")
-async def get_workflow_run(workflow_id: str, run_id: str):
+async def get_workflow_run(
+    workflow_id: str,
+    run_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Get run detail with step-level status."""
     db = _get_db()
+    wf = db.conn.execute(
+        "SELECT workflow_id FROM workflows WHERE workflow_id = ? AND org_id = ?",
+        (workflow_id, user.org_id),
+    ).fetchone()
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
     row = db.conn.execute(
         "SELECT * FROM workflow_runs WHERE run_id = ? AND workflow_id = ?",
         (run_id, workflow_id),
@@ -169,6 +192,12 @@ async def cancel_workflow_run(
 ):
     """Cancel a running workflow."""
     db = _get_db()
+    wf = db.conn.execute(
+        "SELECT workflow_id FROM workflows WHERE workflow_id = ? AND org_id = ?",
+        (workflow_id, user.org_id),
+    ).fetchone()
+    if not wf:
+        raise HTTPException(status_code=404, detail="Workflow not found")
     row = db.conn.execute(
         "SELECT status FROM workflow_runs WHERE run_id = ? AND workflow_id = ?",
         (run_id, workflow_id),

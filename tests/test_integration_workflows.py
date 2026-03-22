@@ -287,6 +287,8 @@ class TestAPIServerIntegration:
     def setup_method(self):
         from agentos.auth import jwt
         jwt.set_secret("test-api-integration")
+        self._token = jwt.create_token(user_id="test", email="test@test.com")
+        self._auth = {"Authorization": f"Bearer {self._token}"}
 
     def teardown_method(self):
         from agentos.auth import jwt
@@ -300,7 +302,7 @@ class TestAPIServerIntegration:
         app = create_app(AgentHarness())
         client = TestClient(app)
 
-        resp = client.post("/run", json={"input": "Say hello"})
+        resp = client.post("/run", json={"input": "Say hello"}, headers=self._auth)
         assert resp.status_code == 200
         data = resp.json()
         assert "turns" in data
@@ -309,7 +311,6 @@ class TestAPIServerIntegration:
         assert data["final_output"]  # non-empty
 
     def test_run_named_agent(self, tmp_path, monkeypatch):
-        """POST /agents/{name}/run should work for an existing agent."""
         from agentos.api.app import create_app
         from agentos.core.harness import AgentHarness
         from fastapi.testclient import TestClient
@@ -320,13 +321,12 @@ class TestAPIServerIntegration:
         app = create_app(AgentHarness())
         client = TestClient(app)
 
-        resp = client.post("/agents/api-bot/run", json={"input": "hello"})
+        resp = client.post("/agents/api-bot/run", json={"input": "hello"}, headers=self._auth)
         assert resp.status_code == 200
         data = resp.json()
         assert data["final_output"]
 
     def test_agent_tools_endpoint(self, tmp_path, monkeypatch):
-        """GET /agents/{name}/tools should return tool list."""
         from agentos.api.app import create_app
         from agentos.core.harness import AgentHarness
         from fastapi.testclient import TestClient
@@ -337,7 +337,7 @@ class TestAPIServerIntegration:
         app = create_app(AgentHarness())
         client = TestClient(app)
 
-        resp = client.get("/agents/tools-bot/tools")
+        resp = client.get("/agents/tools-bot/tools", headers=self._auth)
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 

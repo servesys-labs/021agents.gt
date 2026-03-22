@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 from typing import Any
+from typing import Literal
+from pydantic import HttpUrl
 
 
 # ── Pagination ──────────────────────────────────────────────────────────
@@ -65,7 +67,7 @@ class OrgResponse(BaseModel):
 
 class InviteMemberRequest(BaseModel):
     email: str
-    role: str = "member"
+    role: Literal["owner", "admin", "member", "viewer"] = "member"
 
 
 # ── API Keys ────────────────────────────────────────────────────────────
@@ -169,7 +171,7 @@ class TurnResponse(BaseModel):
 # ── Webhooks ────────────────────────────────────────────────────────────
 
 class CreateWebhookRequest(BaseModel):
-    url: str
+    url: HttpUrl
     events: list[str] = ["*"]
 
 
