@@ -1,8 +1,25 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useRef } from "react";
+import {
+  Play,
+  Upload,
+  Eye,
+  BarChart3,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  Target,
+} from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
-import type { AgentInfo } from "../../lib/adapters";
+import { FormField } from "../../components/common/FormField";
+import { SlidePanel } from "../../components/common/SlidePanel";
+import { StatusBadge } from "../../components/common/StatusBadge";
+import { EmptyState } from "../../components/common/EmptyState";
+import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
+import { Tabs } from "../../components/common/Tabs";
+import { useToast } from "../../components/common/ToastProvider";
+import { safeArray, type AgentInfo } from "../../lib/adapters";
 import { apiRequest, useApiQuery } from "../../lib/api";
 
 type EvalTaskInfo = { file: string; name: string; task_count: number };
@@ -16,178 +33,411 @@ type EvalRun = {
   total_cost_usd: number;
   total_tasks: number;
   total_trials: number;
+  status?: string;
+  started_at?: string;
+  completed_at?: string;
 };
 
 export const EvalPage = () => {
+  const { showToast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /* ── Queries ──────────────────────────────────────────────── */
   const agentsQuery = useApiQuery<AgentInfo[]>("/api/v1/agents");
   const tasksQuery = useApiQuery<EvalTasksResponse>("/api/v1/eval/tasks");
-  const runsQuery = useApiQuery<EvalRun[]>("/api/v1/eval/runs?limit=25");
-
+  const runsQuery = useApiQuery<EvalRun[]>("/api/v1/eval/runs?limit=50");
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data]);
   const runs = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
 
+  /* ── Run form ─────────────────────────────────────────────── */
   const [agentName, setAgentName] = useState("");
   const [evalFile, setEvalFile] = useState("");
   const [trials, setTrials] = useState(3);
   const [running, setRunning] = useState(false);
-  const [error, setError] = useState("");
-  const [lastRun, setLastRun] = useState<Record<string, unknown> | null>(null);
+
+  /* ── Detail drawer ────────────────────────────────────────── */
+  const [detailOpen, setDetailOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const runDetailQuery = useApiQuery<Record<string, unknown>>(
     `/api/v1/eval/runs/${selectedRunId ?? 0}`,
     selectedRunId !== null,
   );
 
+  /* ── Upload task file ─────────────────────────────────────── */
+  const handleUploadTasks = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    try {
+      const formData = new FormData();
+      for (const file of Array.from(files)) {
+        formData.append("files", file);
+      }
+      const token = localStorage.getItem("token");
+      const headers: Record<string, string> = {};
+      if (token) headers.Authorization = `Bearer ${token}`;
+
+      const response = await fetch("/api/v1/eval/tasks/upload", {
+        method: "POST",
+        headers,
+        body: formData,
+      });
+      if (!response.ok) throw new Error(`Upload failed (${response.status})`);
+      showToast("Task file uploaded", "success");
+      void tasksQuery.refetch();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Upload failed",
+        "error",
+      );
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  /* ── Run eval ─────────────────────────────────────────────── */
   const runEval = async () => {
     const selectedAgent = agentName || agents[0]?.name;
     const selectedFile = evalFile || tasks[0]?.file;
     if (!selectedAgent || !selectedFile) {
-      setError("Select an agent and eval task file.");
+      showToast("Select an agent and eval task file", "error");
       return;
     }
-    setError("");
     setRunning(true);
     try {
       const path = `/api/v1/eval/run?agent_name=${encodeURIComponent(selectedAgent)}&eval_file=${encodeURIComponent(selectedFile)}&trials=${trials}`;
-      const result = await apiRequest<Record<string, unknown>>(path, "POST");
-      setLastRun(result);
-      await runsQuery.refetch();
+      await apiRequest(path, "POST");
+      showToast("Eval run started", "success");
+      void runsQuery.refetch();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to run eval");
+      showToast(
+        err instanceof Error ? err.message : "Failed to start eval",
+        "error",
+      );
     } finally {
       setRunning(false);
     }
   };
 
-  return (
-    <div>
-      <PageHeader title="Eval Runner" subtitle="Run evaluation suites and inspect benchmark outcomes" />
+  /* ── Row actions ──────────────────────────────────────────── */
+  const getRunActions = (run: EvalRun): ActionMenuItem[] => [
+    {
+      label: "View Details",
+      icon: <Eye size={12} />,
+      onClick: () => {
+        setSelectedRunId(run.run_id);
+        setDetailOpen(true);
+      },
+    },
+  ];
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <div className="card">
-          <p className="font-semibold text-white mb-3">Run Evaluation</p>
-          <span className="text-xs text-gray-500 mb-2">Agent</span>
-          <select className="input-field" value={agentName || agents[0]?.name || ""} onChange={(e) => setAgentName(e.target.value)}>
-            {agents.map((agent) => (
-              <option key={agent.name} value={agent.name}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
-          <span className="text-xs text-gray-500 mt-3 mb-2">Eval Task File</span>
-          <select className="input-field" value={evalFile || tasks[0]?.file || ""} onChange={(e) => setEvalFile(e.target.value)}>
-            {tasks.map((task) => (
-              <option key={task.file} value={task.file}>
-                {task.name} ({task.task_count} tasks)
-              </option>
-            ))}
-          </select>
-          <span className="text-xs text-gray-500 mt-3 mb-2">Trials</span>
-          <input
-            className="w-24 rounded-md border border-[#2a2a2a] px-2 py-1 text-sm"
-            type="number"
-            min={1}
-            max={20}
-            value={trials}
-            onChange={(event) => setTrials(Number(event.target.value) || 1)}
-          />
-          <div className="mt-4">
-            <button className="btn-primary" disabled={running} onClick={() => void runEval()}>
-              Run Eval
-            </button>
-          </div>
-          {error ? <span className="mt-3 text-red-600">{error}</span> : null}
-          {lastRun ? (
-            <pre className="mt-3 max-h-64 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">
-              {JSON.stringify(lastRun, null, 2)}
-            </pre>
-          ) : null}
+  /* ── Stats ────────────────────────────────────────────────── */
+  const avgPassRate =
+    runs.length > 0
+      ? runs.reduce((s, r) => s + (r.pass_rate ?? 0), 0) / runs.length
+      : 0;
+  const totalCost = runs.reduce((s, r) => s + (r.total_cost_usd ?? 0), 0);
+  const runningCount = runs.filter(
+    (r) => r.status === "running",
+  ).length;
+
+  /* ── Run Config tab ───────────────────────────────────────── */
+  const configTab = (
+    <div className="card">
+      <div className="grid gap-4 md:grid-cols-2">
+        <div>
+          <FormField label="Agent" required>
+            <select
+              value={agentName || agents[0]?.name || ""}
+              onChange={(e) => setAgentName(e.target.value)}
+              className="text-sm"
+            >
+              {agents.map((a) => (
+                <option key={a.name} value={a.name}>
+                  {a.name}
+                </option>
+              ))}
+            </select>
+          </FormField>
+          <FormField label="Eval Task File" required>
+            <select
+              value={evalFile || tasks[0]?.file || ""}
+              onChange={(e) => setEvalFile(e.target.value)}
+              className="text-sm"
+            >
+              {tasks.map((t) => (
+                <option key={t.file} value={t.file}>
+                  {t.name} ({t.task_count} tasks)
+                </option>
+              ))}
+            </select>
+          </FormField>
+          <FormField label="Trials" hint="Number of times to run each task">
+            <input
+              type="number"
+              value={trials}
+              onChange={(e) => setTrials(Number(e.target.value))}
+              min={1}
+              max={50}
+              className="text-sm"
+            />
+          </FormField>
+          <button
+            className="btn btn-primary text-xs mt-2"
+            onClick={() => void runEval()}
+            disabled={running}
+          >
+            <Play size={14} />
+            {running ? "Running..." : "Start Eval Run"}
+          </button>
         </div>
+        <div>
+          <FormField label="Upload Task File" hint="JSON or JSONL format">
+            <div
+              className="border-2 border-dashed border-border-default rounded-lg p-6 text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-colors"
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <Upload size={20} className="mx-auto mb-1 text-text-muted" />
+              <p className="text-xs text-text-secondary">
+                Click to upload task file
+              </p>
+              <p className="text-[10px] text-text-muted mt-0.5">
+                JSON, JSONL
+              </p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                accept=".json,.jsonl"
+                onChange={(e) => void handleUploadTasks(e.target.files)}
+              />
+            </div>
+          </FormField>
 
-        <QueryState
-          loading={tasksQuery.loading}
-          error={tasksQuery.error}
-          isEmpty={tasks.length === 0}
-          emptyMessage="No eval task files found in /eval."
-          onRetry={() => void tasksQuery.refetch()}
-        >
-          <div className="card">
-            <p className="font-semibold text-white mb-3">Available Task Suites</p>
-            <table className="os-table">
+          {/* Task files list */}
+          <div className="mt-3">
+            <p className="text-xs text-text-muted mb-2">
+              Available task files ({tasks.length})
+            </p>
+            {tasks.length === 0 ? (
+              <p className="text-xs text-text-muted">No task files uploaded</p>
+            ) : (
+              <div className="space-y-1">
+                {tasks.map((t) => (
+                  <div
+                    key={t.file}
+                    className="flex items-center justify-between px-3 py-1.5 bg-surface-base border border-border-default rounded-md"
+                  >
+                    <span className="text-xs text-text-secondary">
+                      {t.name}
+                    </span>
+                    <span className="text-[10px] text-text-muted font-mono">
+                      {t.task_count} tasks
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  /* ── Results tab ──────────────────────────────────────────── */
+  const resultsTab = (
+    <div>
+      {runs.length === 0 ? (
+        <EmptyState
+          icon={<BarChart3 size={40} />}
+          title="No eval runs yet"
+          description="Run an evaluation from the Config tab to see results here"
+        />
+      ) : (
+        <div className="card p-0">
+          <div className="overflow-x-auto">
+            <table>
               <thead>
                 <tr>
-                  <th>Name</th>
-                  <th>File</th>
+                  <th>Run</th>
+                  <th>Agent</th>
+                  <th>Status</th>
+                  <th>Pass Rate</th>
+                  <th>Avg Score</th>
+                  <th>Latency</th>
+                  <th>Cost</th>
                   <th>Tasks</th>
+                  <th style={{ width: "48px" }}></th>
                 </tr>
               </thead>
               <tbody>
-                {tasks.map((task) => (
-                  <tr key={task.file}>
-                    <td><span className="text-gray-400">{task.name}</span></td>
-                    <td><span className="font-mono text-xs text-gray-300">{task.file}</span></td>
-                    <td><span className="text-gray-400">{task.task_count}</span></td>
+                {runs.map((run) => (
+                  <tr key={run.run_id}>
+                    <td>
+                      <span className="font-mono text-xs text-text-primary">
+                        #{run.run_id}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-text-secondary text-sm">
+                        {run.agent_name}
+                      </span>
+                    </td>
+                    <td>
+                      <StatusBadge
+                        status={run.status ?? "completed"}
+                      />
+                    </td>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <div className="w-12 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
+                          <div
+                            className={`h-full rounded-full ${
+                              (run.pass_rate ?? 0) >= 0.8
+                                ? "bg-chart-green"
+                                : (run.pass_rate ?? 0) >= 0.5
+                                  ? "bg-status-warning"
+                                  : "bg-status-error"
+                            }`}
+                            style={{
+                              width: `${((run.pass_rate ?? 0) * 100).toFixed(0)}%`,
+                            }}
+                          />
+                        </div>
+                        <span className="text-xs text-text-secondary font-mono">
+                          {((run.pass_rate ?? 0) * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    </td>
+                    <td>
+                      <span className="text-text-muted text-xs font-mono">
+                        {(run.avg_score ?? 0).toFixed(2)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-text-muted text-xs font-mono">
+                        {(run.avg_latency_ms ?? 0).toFixed(0)}ms
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-text-muted text-xs font-mono">
+                        ${(run.total_cost_usd ?? 0).toFixed(4)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-text-muted text-xs font-mono">
+                        {run.total_tasks ?? 0}
+                      </span>
+                    </td>
+                    <td>
+                      <ActionMenu items={getRunActions(run)} />
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        </QueryState>
-      </div>
-
-      <div className="card mt-6">
-        <p className="font-semibold text-white mb-3">Recent Eval Runs</p>
-        <QueryState
-          loading={runsQuery.loading}
-          error={runsQuery.error}
-          isEmpty={runs.length === 0}
-          emptyMessage="No eval runs yet."
-          onRetry={() => void runsQuery.refetch()}
-        >
-          <table className="os-table">
-            <thead>
-              <tr>
-                <th>Run</th>
-                <th>Agent</th>
-                <th>Pass Rate</th>
-                <th>Score</th>
-                <th>Cost</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {runs.map((run) => (
-                <tr key={run.run_id}>
-                  <td><span className="text-gray-400">{run.run_id}</span></td>
-                  <td><span className="text-gray-400">{run.agent_name}</span></td>
-                  <td><span className="text-gray-400">{(run.pass_rate * 100).toFixed(1)}%</span></td>
-                  <td><span className="text-gray-400">{run.avg_score.toFixed(3)}</span></td>
-                  <td><span className="text-gray-400">${run.total_cost_usd.toFixed(4)}</span></td>
-                  <td>
-                    <button className="btn-primary text-xs" onClick={() => setSelectedRunId(run.run_id)}>
-                      Detail
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </QueryState>
-      </div>
-
-      {selectedRunId !== null ? (
-        <div className="card mt-6">
-          <p className="font-semibold text-white mb-2">Run Detail: {selectedRunId}</p>
-          {runDetailQuery.loading ? <span className="text-gray-400">Loading detail...</span> : null}
-          {runDetailQuery.error ? <p className="text-red-500">{runDetailQuery.error}</p> : null}
-          {runDetailQuery.data ? (
-            <pre className="max-h-80 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">
-              {JSON.stringify(runDetailQuery.data, null, 2)}
-            </pre>
-          ) : null}
         </div>
-      ) : null}
+      )}
+    </div>
+  );
+
+  return (
+    <div>
+      <PageHeader
+        title="Eval Runner"
+        subtitle="Run evaluation suites and inspect benchmark outcomes"
+        liveCount={runningCount}
+        liveLabel="Running"
+        onRefresh={() => {
+          void runsQuery.refetch();
+          void tasksQuery.refetch();
+        }}
+      />
+
+      {/* Stats */}
+      <div className="grid grid-cols-4 gap-3 mb-4">
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-chart-green/10">
+            <Target size={14} className="text-chart-green" />
+          </div>
+          <div>
+            <p className="text-lg font-bold text-text-primary font-mono">
+              {runs.length}
+            </p>
+            <p className="text-[10px] text-text-muted uppercase">Total Runs</p>
+          </div>
+        </div>
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-chart-blue/10">
+            <CheckCircle2 size={14} className="text-chart-blue" />
+          </div>
+          <div>
+            <p className="text-lg font-bold text-text-primary font-mono">
+              {(avgPassRate * 100).toFixed(1)}%
+            </p>
+            <p className="text-[10px] text-text-muted uppercase">Avg Pass Rate</p>
+          </div>
+        </div>
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-accent/10">
+            <Clock size={14} className="text-accent" />
+          </div>
+          <div>
+            <p className="text-lg font-bold text-text-primary font-mono">
+              {runs.length > 0
+                ? (
+                    runs.reduce((s, r) => s + (r.avg_latency_ms ?? 0), 0) /
+                    runs.length
+                  ).toFixed(0)
+                : "0"}
+              ms
+            </p>
+            <p className="text-[10px] text-text-muted uppercase">Avg Latency</p>
+          </div>
+        </div>
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-chart-purple/10">
+            <BarChart3 size={14} className="text-chart-purple" />
+          </div>
+          <div>
+            <p className="text-lg font-bold text-text-primary font-mono">
+              ${totalCost.toFixed(4)}
+            </p>
+            <p className="text-[10px] text-text-muted uppercase">Total Cost</p>
+          </div>
+        </div>
+      </div>
+
+      <Tabs
+        tabs={[
+          { id: "config", label: "Run Config", content: configTab },
+          { id: "results", label: "Results", count: runs.length, content: resultsTab },
+        ]}
+      />
+
+      {/* Detail drawer */}
+      <SlidePanel
+        isOpen={detailOpen}
+        onClose={() => {
+          setDetailOpen(false);
+          setSelectedRunId(null);
+        }}
+        title={`Eval Run #${selectedRunId}`}
+        subtitle="Full run details"
+        width="560px"
+      >
+        {runDetailQuery.loading && (
+          <p className="text-sm text-text-muted">Loading...</p>
+        )}
+        {runDetailQuery.error && (
+          <p className="text-sm text-status-error">{runDetailQuery.error}</p>
+        )}
+        {runDetailQuery.data && (
+          <pre className="text-xs font-mono bg-surface-base border border-border-default rounded-md p-4 overflow-x-auto max-h-[70vh]">
+            {JSON.stringify(runDetailQuery.data, null, 2)}
+          </pre>
+        )}
+      </SlidePanel>
     </div>
   );
 };

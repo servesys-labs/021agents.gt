@@ -1,73 +1,779 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
+import {
+  Plus,
+  Search,
+  Bot,
+  Pencil,
+  Copy,
+  Trash2,
+  MessageSquare,
+  Rocket,
+  Download,
+  ChevronRight,
+} from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
-import { safeArray, type AgentInfo } from "../../lib/adapters";
-import { useApiQuery } from "../../lib/api";
+import { SlidePanel } from "../../components/common/SlidePanel";
+import { FormField } from "../../components/common/FormField";
+import { TagInput } from "../../components/common/TagInput";
+import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
+import { StatusBadge } from "../../components/common/StatusBadge";
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { EmptyState } from "../../components/common/EmptyState";
+import { useToast } from "../../components/common/ToastProvider";
+import {
+  safeArray,
+  type AgentInfo,
+  type AgentCreateRequest,
+  type AgentConfig,
+} from "../../lib/adapters";
+import { useApiQuery, useApiMutation, apiRequest } from "../../lib/api";
+
+/* ── Models available ────────────────────────────────────────── */
+const MODELS = [
+  "gpt-4.1-mini",
+  "gpt-4.1-nano",
+  "gpt-4o",
+  "gpt-4o-mini",
+  "claude-sonnet-4-20250514",
+  "claude-3.5-haiku",
+  "gemini-2.5-flash",
+];
+
+/* ── Default form state ──────────────────────────────────────── */
+const emptyForm: AgentCreateRequest = {
+  name: "",
+  description: "",
+  system_prompt: "",
+  personality: "",
+  model: "gpt-4.1-mini",
+  max_tokens: 4096,
+  temperature: 0.7,
+  tools: [],
+  max_turns: 25,
+  timeout_seconds: 300,
+  tags: [],
+  governance: {
+    budget_limit_usd: 10,
+    blocked_tools: [],
+    require_confirmation_for_destructive: true,
+  },
+};
 
 export const AgentsPage = () => {
-  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const { showToast } = useToast();
+
+  /* ── Query state ──────────────────────────────────────────── */
   const [limit, setLimit] = useState(25);
   const [offset, setOffset] = useState(0);
+  const [search, setSearch] = useState("");
 
-  const agentsQuery = useApiQuery<AgentInfo[]>(`/api/v1/agents?limit=${limit}&offset=${offset}`);
-  const detailQuery = useApiQuery<Record<string, unknown>>(
+  const agentsQuery = useApiQuery<AgentInfo[]>(
+    `/api/v1/agents?limit=${limit}&offset=${offset}`,
+  );
+  const agents = safeArray<AgentInfo>(agentsQuery.data);
+  const filtered = search
+    ? agents.filter(
+        (a) =>
+          a.name.toLowerCase().includes(search.toLowerCase()) ||
+          a.description?.toLowerCase().includes(search.toLowerCase()),
+      )
+    : agents;
+
+  /* ── Tools list for the form ──────────────────────────────── */
+  const toolsQuery = useApiQuery<Array<{ name: string }>>("/api/v1/tools");
+  const availableTools = safeArray<{ name: string }>(toolsQuery.data).map(
+    (t) => t.name,
+  );
+
+  /* ── Panel state ──────────────────────────────────────────── */
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelMode, setPanelMode] = useState<"create" | "edit">("create");
+  const [form, setForm] = useState<AgentCreateRequest>({ ...emptyForm });
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+
+  /* ── Detail state ─────────────────────────────────────────── */
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const detailQuery = useApiQuery<AgentConfig>(
     `/api/v1/agents/${selectedAgent ?? ""}/config`,
     Boolean(selectedAgent),
   );
-  const agents = safeArray<AgentInfo>(agentsQuery.data);
+
+  /* ── Confirm dialog ───────────────────────────────────────── */
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
+
+  /* ── Mutations ────────────────────────────────────────────── */
+  const createMutation = useApiMutation<AgentInfo, AgentCreateRequest>(
+    "/api/v1/agents",
+    "POST",
+  );
+  const deleteMutation = useApiMutation<void>(
+    `/api/v1/agents/${confirmTarget}`,
+    "DELETE",
+  );
+
+  /* ── Form helpers ─────────────────────────────────────────── */
+  const updateField = useCallback(
+    <K extends keyof AgentCreateRequest>(key: K, value: AgentCreateRequest[K]) => {
+      setForm((prev) => ({ ...prev, [key]: value }));
+      setFormErrors((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    },
+    [],
+  );
+
+  const validateForm = (): boolean => {
+    const errors: Record<string, string> = {};
+    if (!form.name?.trim()) errors.name = "Name is required";
+    else if (!/^[a-z0-9_-]+$/.test(form.name))
+      errors.name = "Use lowercase letters, numbers, hyphens, underscores";
+    if (!form.model) errors.model = "Model is required";
+    setFormErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  /* ── Actions ──────────────────────────────────────────────── */
+  const openCreate = () => {
+    setForm({ ...emptyForm });
+    setPanelMode("create");
+    setPanelOpen(true);
+    setFormErrors({});
+  };
+
+  const openEdit = async (name: string) => {
+    try {
+      const config = await apiRequest<AgentConfig>(
+        `/api/v1/agents/${name}/config`,
+      );
+      setForm({
+        name: config.name,
+        description: config.description,
+        system_prompt: config.system_prompt,
+        personality: config.personality,
+        model: config.model,
+        max_tokens: config.max_tokens,
+        temperature: config.temperature,
+        tools: config.tools,
+        max_turns: config.max_turns,
+        timeout_seconds: config.timeout_seconds,
+        tags: config.tags,
+        governance: config.governance,
+      });
+      setPanelMode("edit");
+      setPanelOpen(true);
+      setFormErrors({});
+    } catch {
+      showToast("Failed to load agent config", "error");
+    }
+  };
+
+  const handleSave = async () => {
+    if (!validateForm()) return;
+    try {
+      if (panelMode === "create") {
+        await createMutation.mutate(form);
+        showToast(`Agent "${form.name}" created`, "success");
+      } else {
+        await apiRequest(`/api/v1/agents/${form.name}`, "PUT", form);
+        showToast(`Agent "${form.name}" updated`, "success");
+      }
+      setPanelOpen(false);
+      void agentsQuery.refetch();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Save failed",
+        "error",
+      );
+    }
+  };
+
+  const handleClone = async (name: string) => {
+    try {
+      await apiRequest(`/api/v1/agents/${name}/clone`, "POST", {
+        new_name: `${name}-copy`,
+      });
+      showToast(`Agent "${name}" cloned`, "success");
+      void agentsQuery.refetch();
+    } catch {
+      showToast("Clone failed", "error");
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!confirmTarget) return;
+    try {
+      await deleteMutation.mutate();
+      showToast(`Agent "${confirmTarget}" deleted`, "success");
+      setConfirmOpen(false);
+      setConfirmTarget(null);
+      if (selectedAgent === confirmTarget) setSelectedAgent(null);
+      void agentsQuery.refetch();
+    } catch {
+      showToast("Delete failed", "error");
+    }
+  };
+
+  const handleExport = async (name: string) => {
+    try {
+      const data = await apiRequest<Record<string, unknown>>(
+        `/api/v1/agents/${name}/export`,
+      );
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${name}.agent.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Exported "${name}"`, "success");
+    } catch {
+      showToast("Export failed", "error");
+    }
+  };
+
+  /* ── Row actions ──────────────────────────────────────────── */
+  const getRowActions = (agent: AgentInfo): ActionMenuItem[] => [
+    {
+      label: "Chat",
+      icon: <MessageSquare size={12} />,
+      onClick: () => navigate(`/agent-chat?agent=${agent.name}`),
+    },
+    {
+      label: "Edit",
+      icon: <Pencil size={12} />,
+      onClick: () => void openEdit(agent.name),
+    },
+    {
+      label: "Clone",
+      icon: <Copy size={12} />,
+      onClick: () => void handleClone(agent.name),
+    },
+    {
+      label: "Export JSON",
+      icon: <Download size={12} />,
+      onClick: () => void handleExport(agent.name),
+    },
+    {
+      label: "Deploy",
+      icon: <Rocket size={12} />,
+      onClick: () => navigate(`/releases?agent=${agent.name}`),
+    },
+    {
+      label: "Delete",
+      icon: <Trash2 size={12} />,
+      onClick: () => {
+        setConfirmTarget(agent.name);
+        setConfirmOpen(true);
+      },
+      danger: true,
+    },
+  ];
+
+  /* ── Live count ───────────────────────────────────────────── */
+  const liveCount = agents.filter(
+    (a) => a.status === "online" || a.status === "live",
+  ).length;
 
   return (
     <div>
-      <PageHeader title="Agents" subtitle={`${agents.length} configured agents`} />
-      <div className="mb-4 flex items-center gap-2">
-        <button className="btn-secondary text-xs" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - limit))}>Previous</button>
-        <button className="btn-secondary text-xs" onClick={() => setOffset(offset + limit)}>Next</button>
-        <select className="input-field w-auto text-xs" value={limit} onChange={(e) => { setLimit(Number(e.target.value)); setOffset(0); }}>
-          <option value={10}>10</option>
-          <option value={25}>25</option>
-          <option value={50}>50</option>
-          <option value={100}>100</option>
-        </select>
+      <PageHeader
+        title="Agents"
+        subtitle={`${agents.length} configured agents`}
+        liveCount={liveCount}
+        liveLabel="Live"
+        onRefresh={() => void agentsQuery.refetch()}
+        actions={
+          <button className="btn btn-primary text-xs" onClick={openCreate}>
+            <Plus size={14} />
+            New Agent
+          </button>
+        }
+      />
+
+      {/* Search & pagination bar */}
+      <div className="flex items-center justify-between mb-4 gap-3">
+        <div className="relative flex-1 max-w-xs">
+          <Search
+            size={14}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
+          />
+          <input
+            type="text"
+            placeholder="Search agents..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-8 text-xs"
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            className="btn btn-secondary text-xs"
+            disabled={offset === 0}
+            onClick={() => setOffset(Math.max(0, offset - limit))}
+          >
+            Previous
+          </button>
+          <button
+            className="btn btn-secondary text-xs"
+            onClick={() => setOffset(offset + limit)}
+          >
+            Next
+          </button>
+          <select
+            className="text-xs w-auto"
+            value={limit}
+            onChange={(e) => {
+              setLimit(Number(e.target.value));
+              setOffset(0);
+            }}
+          >
+            <option value={10}>10</option>
+            <option value={25}>25</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </div>
       </div>
 
-      <QueryState loading={agentsQuery.loading} error={agentsQuery.error} isEmpty={agents.length === 0} emptyMessage="No agents found." onRetry={() => void agentsQuery.refetch()}>
-        <div className="card">
-          <div className="overflow-x-auto">
-            <table className="os-table">
-              <thead><tr><th>Name</th><th>Model</th><th>Tools</th><th>Tags</th><th>Actions</th></tr></thead>
-              <tbody>
-                {agents.map((agent) => (
-                  <tr key={agent.name}>
-                    <td>
-                      <span className="font-medium text-white">{agent.name}</span>
-                      <span className="block text-xs text-gray-500">{agent.description?.slice(0, 60) ?? "No description"}</span>
-                    </td>
-                    <td><span className="badge">{agent.model?.split("/").pop() || "n/a"}</span></td>
-                    <td>{safeArray(agent.tools).length} tools</td>
-                    <td>
-                      <div className="flex gap-1 flex-wrap">
-                        {safeArray<string>(agent.tags).map((tag) => (<span key={tag} className="badge badge-muted">{tag}</span>))}
-                      </div>
-                    </td>
-                    <td><button className="btn-primary text-xs" onClick={() => setSelectedAgent(agent.name)}>View Config</button></td>
+      {/* Agent table */}
+      <QueryState
+        loading={agentsQuery.loading}
+        error={agentsQuery.error}
+        isEmpty={agents.length === 0}
+        emptyMessage=""
+        onRetry={() => void agentsQuery.refetch()}
+      >
+        {filtered.length === 0 && !agentsQuery.loading ? (
+          <EmptyState
+            icon={<Bot size={40} />}
+            title="No agents found"
+            description={
+              search
+                ? "Try a different search term"
+                : "Create your first agent to get started"
+            }
+            action={
+              !search ? (
+                <button
+                  className="btn btn-primary text-xs"
+                  onClick={openCreate}
+                >
+                  <Plus size={14} />
+                  Create Agent
+                </button>
+              ) : undefined
+            }
+          />
+        ) : (
+          <div className="card p-0">
+            <div className="overflow-x-auto">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Agent</th>
+                    <th>Model</th>
+                    <th>Status</th>
+                    <th>Tools</th>
+                    <th>Tags</th>
+                    <th style={{ width: "48px" }}></th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {filtered.map((agent) => (
+                    <tr key={agent.name}>
+                      <td>
+                        <button
+                          className="text-left group"
+                          onClick={() =>
+                            setSelectedAgent(
+                              selectedAgent === agent.name
+                                ? null
+                                : agent.name,
+                            )
+                          }
+                        >
+                          <span className="font-medium text-text-primary group-hover:text-accent transition-colors flex items-center gap-1">
+                            {agent.name}
+                            <ChevronRight
+                              size={12}
+                              className={`text-text-muted transition-transform ${
+                                selectedAgent === agent.name
+                                  ? "rotate-90"
+                                  : ""
+                              }`}
+                            />
+                          </span>
+                          <span className="block text-xs text-text-muted mt-0.5">
+                            {agent.description?.slice(0, 60) || "No description"}
+                          </span>
+                        </button>
+                      </td>
+                      <td>
+                        <span className="px-2 py-0.5 text-[10px] font-mono bg-surface-overlay text-text-secondary rounded border border-border-default">
+                          {agent.model?.split("/").pop() || "n/a"}
+                        </span>
+                      </td>
+                      <td>
+                        <StatusBadge status={agent.status || "draft"} />
+                      </td>
+                      <td>
+                        <span className="text-xs text-text-muted">
+                          {safeArray(agent.tools).length} tools
+                        </span>
+                      </td>
+                      <td>
+                        <div className="flex gap-1 flex-wrap">
+                          {safeArray<string>(agent.tags)
+                            .slice(0, 3)
+                            .map((tag) => (
+                              <span
+                                key={tag}
+                                className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          {safeArray(agent.tags).length > 3 && (
+                            <span className="text-[10px] text-text-muted">
+                              +{safeArray(agent.tags).length - 3}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td>
+                        <ActionMenu items={getRowActions(agent)} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
+        )}
       </QueryState>
 
-      {selectedAgent ? (
-        <div className="card mt-6">
-          <p className="font-bold text-white mb-2">Agent Config: {selectedAgent}</p>
-          {detailQuery.loading ? <p className="text-gray-400">Loading config...</p> : null}
-          {detailQuery.error ? <p className="text-red-500">{detailQuery.error}</p> : null}
-          {detailQuery.data ? <pre className="code-block">{JSON.stringify(detailQuery.data, null, 2)}</pre> : null}
-          <button className="btn-secondary text-xs mt-2" onClick={() => setSelectedAgent(null)}>Close</button>
+      {/* Agent detail panel (inline expand) */}
+      {selectedAgent && (
+        <div className="card mt-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-text-primary">
+              Agent Config: {selectedAgent}
+            </h3>
+            <div className="flex items-center gap-2">
+              <button
+                className="btn btn-secondary text-xs"
+                onClick={() => void openEdit(selectedAgent)}
+              >
+                <Pencil size={12} />
+                Edit
+              </button>
+              <button
+                className="btn btn-secondary text-xs"
+                onClick={() => setSelectedAgent(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+          {detailQuery.loading && (
+            <p className="text-sm text-text-muted">Loading config...</p>
+          )}
+          {detailQuery.error && (
+            <p className="text-sm text-status-error">{detailQuery.error}</p>
+          )}
+          {detailQuery.data && (
+            <pre className="text-xs font-mono bg-surface-base
+ border border-border-default rounded-md p-4 overflow-x-auto max-h-80">
+              {JSON.stringify(detailQuery.data, null, 2)}
+            </pre>
+          )}
         </div>
-      ) : null}
+      )}
+
+      {/* Create / Edit slide panel */}
+      <SlidePanel
+        isOpen={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        title={panelMode === "create" ? "Create Agent" : `Edit: ${form.name}`}
+        subtitle={
+          panelMode === "create"
+            ? "Configure a new agent from scratch"
+            : "Modify agent configuration"
+        }
+        footer={
+          <>
+            <button
+              className="btn btn-secondary text-xs"
+              onClick={() => setPanelOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary text-xs"
+              onClick={() => void handleSave()}
+              disabled={createMutation.loading}
+            >
+              {createMutation.loading
+                ? "Saving..."
+                : panelMode === "create"
+                  ? "Create Agent"
+                  : "Save Changes"}
+            </button>
+          </>
+        }
+      >
+        {/* Basic Info */}
+        <div className="mb-6">
+          <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">
+            Basic Info
+          </h4>
+          <FormField
+            label="Name"
+            htmlFor="agent-name"
+            required
+            error={formErrors.name}
+            hint="Lowercase slug: my-agent-name"
+          >
+            <input
+              id="agent-name"
+              type="text"
+              value={form.name || ""}
+              onChange={(e) => updateField("name", e.target.value)}
+              placeholder="support-bot"
+              disabled={panelMode === "edit"}
+              className="text-sm"
+            />
+          </FormField>
+
+          <FormField label="Description" htmlFor="agent-desc">
+            <input
+              id="agent-desc"
+              type="text"
+              value={form.description || ""}
+              onChange={(e) => updateField("description", e.target.value)}
+              placeholder="A helpful support agent..."
+              className="text-sm"
+            />
+          </FormField>
+
+          <FormField label="Tags">
+            <TagInput
+              value={form.tags || []}
+              onChange={(tags) => updateField("tags", tags)}
+              placeholder="Add tags..."
+            />
+          </FormField>
+        </div>
+
+        {/* Identity */}
+        <div className="mb-6">
+          <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">
+            Identity
+          </h4>
+          <FormField
+            label="System Prompt"
+            htmlFor="agent-prompt"
+            hint="The core instructions that define this agent's behavior"
+          >
+            <textarea
+              id="agent-prompt"
+              value={form.system_prompt || ""}
+              onChange={(e) => updateField("system_prompt", e.target.value)}
+              placeholder="You are a helpful assistant that..."
+              rows={5}
+              className="text-sm font-mono"
+            />
+          </FormField>
+
+          <FormField label="Personality" htmlFor="agent-personality">
+            <input
+              id="agent-personality"
+              type="text"
+              value={form.personality || ""}
+              onChange={(e) => updateField("personality", e.target.value)}
+              placeholder="Friendly, professional, concise"
+              className="text-sm"
+            />
+          </FormField>
+        </div>
+
+        {/* LLM Settings */}
+        <div className="mb-6">
+          <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">
+            LLM Settings
+          </h4>
+          <FormField label="Model" htmlFor="agent-model" required error={formErrors.model}>
+            <select
+              id="agent-model"
+              value={form.model || ""}
+              onChange={(e) => updateField("model", e.target.value)}
+              className="text-sm"
+            >
+              {MODELS.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </FormField>
+
+          <div className="grid grid-cols-2 gap-3">
+            <FormField label="Temperature" htmlFor="agent-temp">
+              <input
+                id="agent-temp"
+                type="number"
+                min={0}
+                max={2}
+                step={0.1}
+                value={form.temperature ?? 0.7}
+                onChange={(e) =>
+                  updateField("temperature", parseFloat(e.target.value))
+                }
+                className="text-sm"
+              />
+            </FormField>
+            <FormField label="Max Tokens" htmlFor="agent-tokens">
+              <input
+                id="agent-tokens"
+                type="number"
+                min={1}
+                max={128000}
+                value={form.max_tokens ?? 4096}
+                onChange={(e) =>
+                  updateField("max_tokens", parseInt(e.target.value))
+                }
+                className="text-sm"
+              />
+            </FormField>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <FormField label="Max Turns" htmlFor="agent-turns">
+              <input
+                id="agent-turns"
+                type="number"
+                min={1}
+                max={100}
+                value={form.max_turns ?? 25}
+                onChange={(e) =>
+                  updateField("max_turns", parseInt(e.target.value))
+                }
+                className="text-sm"
+              />
+            </FormField>
+            <FormField label="Timeout (sec)" htmlFor="agent-timeout">
+              <input
+                id="agent-timeout"
+                type="number"
+                min={10}
+                max={3600}
+                value={form.timeout_seconds ?? 300}
+                onChange={(e) =>
+                  updateField("timeout_seconds", parseInt(e.target.value))
+                }
+                className="text-sm"
+              />
+            </FormField>
+          </div>
+        </div>
+
+        {/* Tools */}
+        <div className="mb-6">
+          <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">
+            Tools
+          </h4>
+          <FormField
+            label="Attached Tools"
+            hint="Select tools this agent can use"
+          >
+            <TagInput
+              value={form.tools || []}
+              onChange={(tools) => updateField("tools", tools)}
+              suggestions={
+                availableTools.length > 0
+                  ? availableTools
+                  : [
+                      "web_search",
+                      "sandbox_exec",
+                      "file_read",
+                      "file_write",
+                      "slack_send_message",
+                      "search_docs",
+                      "create_ticket",
+                      "query_database",
+                      "send_email",
+                      "http_request",
+                    ]
+              }
+              placeholder="Type to search tools..."
+            />
+          </FormField>
+        </div>
+
+        {/* Governance */}
+        <div className="mb-6">
+          <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">
+            Governance
+          </h4>
+          <FormField label="Budget Limit (USD)" htmlFor="agent-budget">
+            <input
+              id="agent-budget"
+              type="number"
+              min={0}
+              step={0.5}
+              value={form.governance?.budget_limit_usd ?? 10}
+              onChange={(e) =>
+                updateField("governance", {
+                  ...form.governance,
+                  budget_limit_usd: parseFloat(e.target.value),
+                })
+              }
+              className="text-sm"
+            />
+          </FormField>
+
+          <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={
+                form.governance?.require_confirmation_for_destructive ?? true
+              }
+              onChange={(e) =>
+                updateField("governance", {
+                  ...form.governance,
+                  require_confirmation_for_destructive: e.target.checked,
+                })
+              }
+              className="w-3.5 h-3.5 rounded border-border-default bg-surface-base accent-accent"
+            />
+            Require confirmation for destructive actions
+          </label>
+        </div>
+      </SlidePanel>
+
+      {/* Delete confirmation */}
+      {confirmOpen && confirmTarget && (
+        <ConfirmDialog
+          title="Delete Agent"
+          description={`Are you sure you want to delete "${confirmTarget}"? This action cannot be undone.`}
+          confirmLabel="Delete"
+          tone="danger"
+          onConfirm={() => void handleDelete()}
+          onCancel={() => {
+            setConfirmOpen(false);
+            setConfirmTarget(null);
+          }}
+        />
+      )}
     </div>
   );
 };

@@ -1,224 +1,233 @@
-import { useGetIdentity } from "@refinedev/core";
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { Plus, Settings, Users, Key, Trash2, Copy, Eye, EyeOff, RefreshCw, UserPlus } from "lucide-react";
 
-import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
+import { FormField } from "../../components/common/FormField";
+import { SlidePanel } from "../../components/common/SlidePanel";
+import { StatusBadge } from "../../components/common/StatusBadge";
+import { EmptyState } from "../../components/common/EmptyState";
+import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
-import { safeArray } from "../../lib/adapters";
 import { apiRequest, useApiQuery } from "../../lib/api";
-import { isRequired, parseScopes } from "../../lib/validation";
 
-type ApiKey = {
-  key_id: string;
-  name: string;
-  key_prefix: string;
-  scopes?: string[];
-  is_active?: boolean;
-};
-
-type Organization = {
-  org_id: string;
-  name: string;
-  plan?: string;
-  member_count?: number;
-};
+type TeamMember = { user_id: string; name: string; email: string; role: string; joined_at?: string };
+type ApiKey = { key_id: string; name: string; prefix: string; created_at?: string; last_used?: string; scopes?: string[] };
 
 export const SettingsPage = () => {
-  const { data: identity } = useGetIdentity<{ name: string; email: string }>();
   const { showToast } = useToast();
-  const [newKeyName, setNewKeyName] = useState("portal-key");
-  const [keyScope, setKeyScope] = useState("*");
-  const [createdKey, setCreatedKey] = useState("");
-  const [actionError, setActionError] = useState("");
-  const [pendingRevokeKeyId, setPendingRevokeKeyId] = useState<string | null>(null);
+  const teamQuery = useApiQuery<{ members: TeamMember[] }>("/api/v1/team/members");
+  const keysQuery = useApiQuery<{ keys: ApiKey[] }>("/api/v1/api-keys");
+  const members = useMemo(() => teamQuery.data?.members ?? [], [teamQuery.data]);
+  const keys = useMemo(() => keysQuery.data?.keys ?? [], [keysQuery.data]);
 
-  const keysQuery = useApiQuery<ApiKey[]>("/api/v1/api-keys");
-  const orgsQuery = useApiQuery<Organization[]>("/api/v1/orgs");
-  const keys = safeArray<ApiKey>(keysQuery.data);
-  const orgs = safeArray<Organization>(orgsQuery.data);
+  /* ── Invite member panel ──────────────────────────────────── */
+  const [invitePanelOpen, setInvitePanelOpen] = useState(false);
+  const [inviteForm, setInviteForm] = useState({ email: "", role: "member" });
 
-  const createApiKey = async () => {
-    setCreatedKey("");
-    setActionError("");
-    if (!isRequired(newKeyName)) {
-      const message = "Key name is required.";
-      setActionError(message);
-      showToast(message, "error");
-      return;
-    }
-    const scopes = parseScopes(keyScope);
-    if (scopes.length === 0) {
-      const message = "At least one scope is required.";
-      setActionError(message);
-      showToast(message, "error");
-      return;
-    }
+  /* ── API key panel ────────────────────────────────────────── */
+  const [keyPanelOpen, setKeyPanelOpen] = useState(false);
+  const [keyForm, setKeyForm] = useState({ name: "", scopes: "read,write" });
+  const [newKeyValue, setNewKeyValue] = useState("");
+  const [showKeyValues, setShowKeyValues] = useState<Record<string, boolean>>({});
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<{ title: string; desc: string; action: () => Promise<void> } | null>(null);
+
+  const handleInvite = async () => {
+    if (!inviteForm.email.trim()) return;
     try {
-      const payload = await apiRequest<{ key: string }>("/api/v1/api-keys", "POST", {
-        name: newKeyName,
-        scopes,
+      await apiRequest("/api/v1/team/invite", "POST", inviteForm);
+      showToast(`Invitation sent to ${inviteForm.email}`, "success");
+      setInvitePanelOpen(false);
+      void teamQuery.refetch();
+    } catch { showToast("Invite failed", "error"); }
+  };
+
+  const handleRemoveMember = (m: TeamMember) => {
+    setConfirmAction({ title: "Remove Member", desc: `Remove ${m.name} (${m.email}) from the team?`, action: async () => {
+      await apiRequest(`/api/v1/team/members/${m.user_id}`, "DELETE");
+      showToast("Member removed", "success");
+      void teamQuery.refetch();
+    }});
+    setConfirmOpen(true);
+  };
+
+  const handleCreateKey = async () => {
+    if (!keyForm.name.trim()) return;
+    try {
+      const result = await apiRequest<{ key?: string }>("/api/v1/api-keys", "POST", {
+        name: keyForm.name,
+        scopes: keyForm.scopes.split(",").map((s) => s.trim()),
       });
-      setCreatedKey(payload.key);
-      await keysQuery.refetch();
-      showToast("API key created successfully.", "success");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to create key";
-      setActionError(message);
-      showToast(message, "error");
-    }
+      setNewKeyValue(result.key ?? "sk-...");
+      showToast("API key created", "success");
+      void keysQuery.refetch();
+    } catch { showToast("Failed to create key", "error"); }
   };
 
-  const revokeApiKey = async (keyId: string) => {
-    try {
-      await apiRequest(`/api/v1/api-keys/${encodeURIComponent(keyId)}`, "DELETE");
-      await keysQuery.refetch();
-      showToast("API key revoked.", "success");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to revoke key";
-      setActionError(message);
-      showToast(message, "error");
-    }
+  const handleRevokeKey = (k: ApiKey) => {
+    setConfirmAction({ title: "Revoke API Key", desc: `Revoke "${k.name}" (${k.prefix}...)? This cannot be undone.`, action: async () => {
+      await apiRequest(`/api/v1/api-keys/${k.key_id}`, "DELETE");
+      showToast("Key revoked", "success");
+      void keysQuery.refetch();
+    }});
+    setConfirmOpen(true);
   };
 
-  const rotateApiKey = async (keyId: string) => {
-    try {
-      const payload = await apiRequest<{ key: string }>(`/api/v1/api-keys/${encodeURIComponent(keyId)}/rotate`, "POST");
-      setCreatedKey(payload.key);
-      await keysQuery.refetch();
-      showToast("API key rotated.", "success");
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to rotate key";
-      setActionError(message);
-      showToast(message, "error");
-    }
+  const copyToClipboard = (text: string) => {
+    void navigator.clipboard.writeText(text);
+    showToast("Copied to clipboard", "success");
   };
+
+  const getMemberActions = (m: TeamMember): ActionMenuItem[] => [
+    { label: "Remove", icon: <Trash2 size={12} />, onClick: () => handleRemoveMember(m), danger: true },
+  ];
+
+  const getKeyActions = (k: ApiKey): ActionMenuItem[] => [
+    { label: "Copy Prefix", icon: <Copy size={12} />, onClick: () => copyToClipboard(k.prefix) },
+    { label: "Revoke", icon: <Trash2 size={12} />, onClick: () => handleRevokeKey(k), danger: true },
+  ];
+
+  /* ── Team tab ─────────────────────────────────────────────── */
+  const teamTab = (
+    <div>
+      <div className="flex items-center justify-end mb-4">
+        <button className="btn btn-primary text-xs" onClick={() => { setInviteForm({ email: "", role: "member" }); setInvitePanelOpen(true); }}>
+          <UserPlus size={12} /> Invite Member
+        </button>
+      </div>
+      <QueryState loading={teamQuery.loading} error={teamQuery.error} isEmpty={members.length === 0} emptyMessage="">
+        {members.length === 0 ? (
+          <EmptyState icon={<Users size={40} />} title="No team members" description="Invite members to collaborate" />
+        ) : (
+          <div className="card p-0"><div className="overflow-x-auto">
+            <table><thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Joined</th><th style={{ width: "48px" }}></th></tr></thead>
+              <tbody>{members.map((m) => (
+                <tr key={m.user_id}>
+                  <td><span className="text-text-primary text-sm">{m.name}</span></td>
+                  <td><span className="text-text-muted text-xs">{m.email}</span></td>
+                  <td><StatusBadge status={m.role} /></td>
+                  <td><span className="text-[10px] text-text-muted">{m.joined_at ? new Date(m.joined_at).toLocaleDateString() : "--"}</span></td>
+                  <td><ActionMenu items={getMemberActions(m)} /></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div></div>
+        )}
+      </QueryState>
+    </div>
+  );
+
+  /* ── API Keys tab ─────────────────────────────────────────── */
+  const keysTab = (
+    <div>
+      <div className="flex items-center justify-end mb-4">
+        <button className="btn btn-primary text-xs" onClick={() => { setKeyForm({ name: "", scopes: "read,write" }); setNewKeyValue(""); setKeyPanelOpen(true); }}>
+          <Plus size={12} /> New API Key
+        </button>
+      </div>
+      <QueryState loading={keysQuery.loading} error={keysQuery.error} isEmpty={keys.length === 0} emptyMessage="">
+        {keys.length === 0 ? (
+          <EmptyState icon={<Key size={40} />} title="No API keys" description="Create an API key to access the platform programmatically" />
+        ) : (
+          <div className="card p-0"><div className="overflow-x-auto">
+            <table><thead><tr><th>Name</th><th>Key</th><th>Scopes</th><th>Last Used</th><th style={{ width: "48px" }}></th></tr></thead>
+              <tbody>{keys.map((k) => (
+                <tr key={k.key_id}>
+                  <td><span className="text-text-primary text-sm">{k.name}</span></td>
+                  <td>
+                    <div className="flex items-center gap-1">
+                      <span className="font-mono text-xs text-text-muted">{showKeyValues[k.key_id] ? k.prefix + "..." : "sk-••••••••"}</span>
+                      <button className="p-0.5 text-text-muted hover:text-text-primary" onClick={() => setShowKeyValues({ ...showKeyValues, [k.key_id]: !showKeyValues[k.key_id] })}>
+                        {showKeyValues[k.key_id] ? <EyeOff size={10} /> : <Eye size={10} />}
+                      </button>
+                    </div>
+                  </td>
+                  <td><div className="flex flex-wrap gap-1">{(k.scopes ?? []).map((s) => <span key={s} className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default">{s}</span>)}</div></td>
+                  <td><span className="text-[10px] text-text-muted">{k.last_used ? new Date(k.last_used).toLocaleDateString() : "Never"}</span></td>
+                  <td><ActionMenu items={getKeyActions(k)} /></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div></div>
+        )}
+      </QueryState>
+    </div>
+  );
+
+  /* ── Profile tab ──────────────────────────────────────────── */
+  const profileTab = (
+    <div className="max-w-lg">
+      <div className="card">
+        <h3 className="text-sm font-semibold text-text-primary mb-4">Profile Settings</h3>
+        <FormField label="Display Name"><input type="text" defaultValue="Dev User" className="text-sm" /></FormField>
+        <FormField label="Email"><input type="email" defaultValue="dev@oneshots.co" className="text-sm" disabled /></FormField>
+        <FormField label="Timezone">
+          <select defaultValue="America/New_York" className="text-sm">
+            <option value="America/New_York">Eastern (ET)</option>
+            <option value="America/Chicago">Central (CT)</option>
+            <option value="America/Denver">Mountain (MT)</option>
+            <option value="America/Los_Angeles">Pacific (PT)</option>
+            <option value="UTC">UTC</option>
+          </select>
+        </FormField>
+        <div className="flex justify-end mt-4">
+          <button className="btn btn-primary text-xs" onClick={() => showToast("Profile saved", "success")}>Save Changes</button>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div>
-      <PageHeader title="Settings" subtitle="Identity, organizations, and API credentials" />
+      <PageHeader title="Settings" subtitle="Team management, API keys, and profile configuration" onRefresh={() => { void teamQuery.refetch(); void keysQuery.refetch(); }} />
 
-      <div className="card mb-6">
-        <p className="font-bold text-white mb-2">Profile</p>
-        <span className="text-gray-400">Email: {identity?.email}</span>
-        <span className="text-gray-400">Name: {identity?.name || "(not set)"}</span>
-      </div>
+      <Tabs tabs={[
+        { id: "team", label: "Team", count: members.length, content: teamTab },
+        { id: "keys", label: "API Keys", count: keys.length, content: keysTab },
+        { id: "profile", label: "Profile", content: profileTab },
+      ]} />
 
-      <QueryState
-        loading={orgsQuery.loading}
-        error={orgsQuery.error}
-        isEmpty={orgs.length === 0}
-        emptyMessage="No organizations available."
-        onRetry={() => void orgsQuery.refetch()}
-      >
-        <div className="card mb-6">
-          <p className="font-bold text-white mb-2">Organizations</p>
-          <table className="os-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Plan</th>
-                <th>Members</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orgs.map((org) => (
-                <tr key={org.org_id}>
-                  <td><span className="font-medium text-white">{org.name}</span></td>
-                  <td><span className="badge">{org.plan ?? "free"}</span></td>
-                  <td><span className="text-gray-400">{org.member_count ?? 0}</span></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </QueryState>
+      {/* Invite panel */}
+      <SlidePanel isOpen={invitePanelOpen} onClose={() => setInvitePanelOpen(false)} title="Invite Team Member"
+        footer={<><button className="btn btn-secondary text-xs" onClick={() => setInvitePanelOpen(false)}>Cancel</button><button className="btn btn-primary text-xs" onClick={() => void handleInvite()}>Send Invite</button></>}>
+        <FormField label="Email" required><input type="email" value={inviteForm.email} onChange={(e) => setInviteForm({ ...inviteForm, email: e.target.value })} placeholder="colleague@company.com" className="text-sm" /></FormField>
+        <FormField label="Role">
+          <select value={inviteForm.role} onChange={(e) => setInviteForm({ ...inviteForm, role: e.target.value })} className="text-sm">
+            <option value="admin">Admin</option>
+            <option value="member">Member</option>
+            <option value="viewer">Viewer</option>
+          </select>
+        </FormField>
+      </SlidePanel>
 
-      <QueryState
-        loading={keysQuery.loading}
-        error={keysQuery.error}
-        isEmpty={keys.length === 0}
-        emptyMessage="No API keys created yet."
-        onRetry={() => void keysQuery.refetch()}
-      >
-        <div className="card">
-          <div className="flex justify-between mb-2">
-            <p className="font-bold text-white">API Keys</p>
-            <span className="text-xs text-gray-500">{keys.length} key(s)</span>
+      {/* API key panel */}
+      <SlidePanel isOpen={keyPanelOpen} onClose={() => setKeyPanelOpen(false)} title="Create API Key"
+        footer={<><button className="btn btn-secondary text-xs" onClick={() => setKeyPanelOpen(false)}>Close</button>{!newKeyValue && <button className="btn btn-primary text-xs" onClick={() => void handleCreateKey()}>Create Key</button>}</>}>
+        {newKeyValue ? (
+          <div>
+            <p className="text-xs text-text-muted mb-2">Copy your API key now. It will not be shown again.</p>
+            <div className="flex items-center gap-2 p-3 bg-surface-base border border-border-default rounded-lg">
+              <code className="text-xs font-mono text-accent flex-1 break-all">{newKeyValue}</code>
+              <button className="p-1.5 text-text-muted hover:text-accent" onClick={() => copyToClipboard(newKeyValue)}><Copy size={14} /></button>
+            </div>
           </div>
-          <div className="mb-4 grid gap-2 md:grid-cols-3">
-            <input className="input-field" value={newKeyName} onChange={(event) => setNewKeyName(event.target.value)} placeholder="Key name" />
-            <input className="input-field" value={keyScope} onChange={(event) => setKeyScope(event.target.value)} placeholder="Scopes e.g. * or agents:read" />
-            <button className="btn-primary" onClick={() => void createApiKey()}>Create Key</button>
-          </div>
-          {createdKey ? (
-            <p className="text-emerald-400 mb-3 break-all">Created/rotated key: {createdKey}</p>
-          ) : null}
-          {actionError ? (
-            <span className="text-red-600 mb-3">{actionError}</span>
-          ) : null}
-          <table className="os-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Prefix</th>
-                <th>Scopes</th>
-                <th>Status</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {keys.map((key) => (
-                <tr key={key.key_id}>
-                  <td><span className="text-gray-400">{key.name}</span></td>
-                  <td><span className="font-mono text-xs text-gray-300">{key.key_prefix}...</span></td>
-                  <td>
-                    <div className="flex gap-1">
-                      {safeArray<string>(key.scopes).slice(0, 3).map((scope) => (
-                        <span key={scope} className="badge badge-muted">{scope}</span>
-                      ))}
-                    </div>
-                  </td>
-                  <td>
-                    <span className="badge">
-                      {key.is_active ? "Active" : "Revoked"}
-                    </span>
-                  </td>
-                  <td>
-                    <div className="flex gap-2">
-                      {key.is_active ? (
-                        <>
-                          <button className="btn-secondary text-xs" onClick={() => void rotateApiKey(key.key_id)}>
-                            Rotate
-                          </button>
-                          <button className="btn-danger text-xs" onClick={() => setPendingRevokeKeyId(key.key_id)}>
-                            Revoke
-                          </button>
-                        </>
-                      ) : null}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </QueryState>
-      <ConfirmDialog
-        open={pendingRevokeKeyId !== null}
-        title="Revoke API key?"
-        description={`This key will stop working immediately.${pendingRevokeKeyId ? ` (${pendingRevokeKeyId})` : ""}`}
-        confirmLabel="Revoke"
-        tone="danger"
-        onCancel={() => setPendingRevokeKeyId(null)}
-        onConfirm={() => {
-          const keyId = pendingRevokeKeyId;
-          setPendingRevokeKeyId(null);
-          if (keyId) {
-            void revokeApiKey(keyId);
-          }
-        }}
-      />
+        ) : (
+          <>
+            <FormField label="Key Name" required><input type="text" value={keyForm.name} onChange={(e) => setKeyForm({ ...keyForm, name: e.target.value })} placeholder="production-key" className="text-sm" /></FormField>
+            <FormField label="Scopes" hint="Comma-separated"><input type="text" value={keyForm.scopes} onChange={(e) => setKeyForm({ ...keyForm, scopes: e.target.value })} placeholder="read,write" className="text-sm font-mono" /></FormField>
+          </>
+        )}
+      </SlidePanel>
+
+      {confirmOpen && confirmAction && (
+        <ConfirmDialog title={confirmAction.title} description={confirmAction.desc} confirmLabel="Confirm" tone="danger"
+          onConfirm={async () => { try { await confirmAction.action(); } catch { showToast("Action failed", "error"); } setConfirmOpen(false); setConfirmAction(null); }}
+          onCancel={() => { setConfirmOpen(false); setConfirmAction(null); }} />
+      )}
     </div>
   );
 };

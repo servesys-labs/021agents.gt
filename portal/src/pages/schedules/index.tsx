@@ -1,193 +1,162 @@
 import { useMemo, useState } from "react";
+import { Plus, Clock, Trash2, Pencil, Search, ToggleLeft, ToggleRight, Play, Eye } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
-import type { AgentInfo } from "../../lib/adapters";
+import { FormField } from "../../components/common/FormField";
+import { SlidePanel } from "../../components/common/SlidePanel";
+import { StatusBadge } from "../../components/common/StatusBadge";
+import { EmptyState } from "../../components/common/EmptyState";
+import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
 
 type Schedule = {
   schedule_id: string;
-  agent_name: string;
-  cron: string;
-  task: string;
-  is_enabled: boolean;
-  run_count: number;
-  last_run_at?: number | null;
+  name?: string;
+  agent_name?: string;
+  cron?: string;
+  task?: string;
+  is_active?: boolean;
+  last_run?: string;
+  next_run?: string;
 };
 
 export const SchedulesPage = () => {
-  const schedulesQuery = useApiQuery<Schedule[]>("/api/v1/schedules");
-  const agentsQuery = useApiQuery<AgentInfo[]>("/api/v1/agents");
+  const { showToast } = useToast();
+  const schedulesQuery = useApiQuery<{ schedules: Schedule[] }>("/api/v1/schedules");
+  const schedules = useMemo(() => schedulesQuery.data?.schedules ?? [], [schedulesQuery.data]);
 
-  const schedules = useMemo(() => schedulesQuery.data ?? [], [schedulesQuery.data]);
-  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
+  const [search, setSearch] = useState("");
+  const filtered = search ? schedules.filter((s) => ((s.name ?? "") + (s.agent_name ?? "")).toLowerCase().includes(search.toLowerCase())) : schedules;
 
-  const [agentName, setAgentName] = useState("");
-  const [cron, setCron] = useState("0 * * * *");
-  const [task, setTask] = useState("Run scheduled health check");
-  const [actionError, setActionError] = useState("");
-  const [history, setHistory] = useState<Record<string, unknown> | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelMode, setPanelMode] = useState<"create" | "edit">("create");
+  const [form, setForm] = useState({ name: "", agent_name: "", cron: "", task: "" });
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailItem, setDetailItem] = useState<unknown>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<{ title: string; desc: string; action: () => Promise<void> } | null>(null);
 
-  const refresh = async () => {
-    await schedulesQuery.refetch();
-  };
-
-  const createSchedule = async () => {
-    const selectedAgent = agentName || agents[0]?.name;
-    if (!selectedAgent || !cron.trim() || !task.trim()) {
-      setActionError("Agent, cron, and task are required.");
-      return;
-    }
-    setActionError("");
+  const handleSave = async () => {
+    const errors: Record<string, string> = {};
+    if (!form.name.trim()) errors.name = "Required";
+    if (!form.cron.trim()) errors.cron = "Required";
+    if (!form.task.trim()) errors.task = "Required";
+    setFormErrors(errors);
+    if (Object.keys(errors).length > 0) return;
     try {
-      await apiRequest("/api/v1/schedules", "POST", { agent_name: selectedAgent, cron, task });
-      await refresh();
-      setTask("");
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to create schedule");
-    }
+      if (panelMode === "create") {
+        await apiRequest("/api/v1/schedules", "POST", form);
+        showToast("Schedule created", "success");
+      } else {
+        await apiRequest(`/api/v1/schedules/${editingId}`, "PUT", form);
+        showToast("Schedule updated", "success");
+      }
+      setPanelOpen(false);
+      void schedulesQuery.refetch();
+    } catch { showToast("Failed to save schedule", "error"); }
   };
 
-  const toggleSchedule = async (schedule: Schedule) => {
-    const action = schedule.is_enabled ? "disable" : "enable";
+  const handleToggle = async (s: Schedule) => {
     try {
-      await apiRequest(`/api/v1/schedules/${encodeURIComponent(schedule.schedule_id)}/${action}`, "POST");
-      await refresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to toggle schedule");
-    }
+      await apiRequest(`/api/v1/schedules/${s.schedule_id}`, "PUT", { is_active: !s.is_active });
+      showToast(s.is_active ? "Schedule paused" : "Schedule activated", "success");
+      void schedulesQuery.refetch();
+    } catch { showToast("Toggle failed", "error"); }
   };
 
-  const updateSchedule = async (schedule: Schedule) => {
-    const nextCron = window.prompt("Cron expression", schedule.cron);
-    const nextTask = window.prompt("Task", schedule.task);
-    if (nextCron === null && nextTask === null) {
-      return;
-    }
-    const params = new URLSearchParams();
-    if (nextCron && nextCron !== schedule.cron) {
-      params.set("cron", nextCron);
-    }
-    if (nextTask && nextTask !== schedule.task) {
-      params.set("task", nextTask);
-    }
-    if (!params.toString()) {
-      return;
-    }
+  const handleTrigger = async (s: Schedule) => {
     try {
-      await apiRequest(`/api/v1/schedules/${encodeURIComponent(schedule.schedule_id)}?${params.toString()}`, "PUT");
-      await refresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to update schedule");
-    }
+      await apiRequest(`/api/v1/schedules/${s.schedule_id}/trigger`, "POST");
+      showToast("Schedule triggered", "success");
+    } catch { showToast("Trigger failed", "error"); }
   };
 
-  const deleteSchedule = async (schedule: Schedule) => {
-    if (!window.confirm(`Delete schedule ${schedule.schedule_id}?`)) {
-      return;
-    }
-    try {
-      await apiRequest(`/api/v1/schedules/${encodeURIComponent(schedule.schedule_id)}`, "DELETE");
-      await refresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to delete schedule");
-    }
+  const handleDelete = (s: Schedule) => {
+    setConfirmAction({ title: "Delete Schedule", desc: `Delete "${s.name ?? s.schedule_id}"?`, action: async () => {
+      await apiRequest(`/api/v1/schedules/${s.schedule_id}`, "DELETE");
+      showToast("Schedule deleted", "success");
+      void schedulesQuery.refetch();
+    }});
+    setConfirmOpen(true);
   };
 
-  const loadHistory = async (schedule: Schedule) => {
-    try {
-      const data = await apiRequest<Record<string, unknown>>(`/api/v1/schedules/${encodeURIComponent(schedule.schedule_id)}/history`);
-      setHistory(data);
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to fetch history");
-    }
-  };
+  const getActions = (s: Schedule): ActionMenuItem[] => [
+    { label: "Edit", icon: <Pencil size={12} />, onClick: () => { setForm({ name: s.name ?? "", agent_name: s.agent_name ?? "", cron: s.cron ?? "", task: s.task ?? "" }); setEditingId(s.schedule_id); setPanelMode("edit"); setFormErrors({}); setPanelOpen(true); } },
+    { label: "Trigger Now", icon: <Play size={12} />, onClick: () => void handleTrigger(s) },
+    { label: s.is_active ? "Pause" : "Activate", icon: s.is_active ? <ToggleLeft size={12} /> : <ToggleRight size={12} />, onClick: () => void handleToggle(s) },
+    { label: "View Details", icon: <Eye size={12} />, onClick: () => { setDetailItem(s); setDetailOpen(true); } },
+    { label: "Delete", icon: <Trash2 size={12} />, onClick: () => handleDelete(s), danger: true },
+  ];
+
+  const activeCount = schedules.filter((s) => s.is_active).length;
 
   return (
     <div>
-      <PageHeader title="Schedules" subtitle="Create and manage cron-based agent runs" />
+      <PageHeader title="Schedules" subtitle="Create and manage cron-based agent schedules" liveCount={activeCount} liveLabel="Active" onRefresh={() => void schedulesQuery.refetch()}
+        actions={<button className="btn btn-primary text-xs" onClick={() => { setForm({ name: "", agent_name: "", cron: "", task: "" }); setPanelMode("create"); setFormErrors({}); setPanelOpen(true); }}><Plus size={14} /> New Schedule</button>} />
 
-      <div className="grid gap-6 lg:grid-cols-2">
-        <div className="card">
-          <p className="font-semibold text-white mb-3">Create Schedule</p>
-          <span className="text-xs text-gray-500 mb-1">Agent</span>
-          <input className="input-field" value={agentName} onChange={(event) => setAgentName(event.target.value)} placeholder={agents[0]?.name ?? "agent-name"} />
-          <span className="text-xs text-gray-500 mt-3 mb-1">Cron</span>
-          <input className="input-field" value={cron} onChange={(event) => setCron(event.target.value)} placeholder="0 * * * *" />
-          <span className="text-xs text-gray-500 mt-3 mb-1">Task</span>
-          <textarea className="input-field" value={task} onChange={(event) => setTask(event.target.value)} rows={4} />
-          <button className="btn-primary mt-4" onClick={() => void createSchedule()}>
-            Create
-          </button>
-          {actionError ? <span className="mt-3 text-red-600">{actionError}</span> : null}
+      <div className="grid grid-cols-2 gap-3 mb-4">
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-chart-blue/10"><Clock size={14} className="text-chart-blue" /></div>
+          <div><p className="text-lg font-bold text-text-primary font-mono">{schedules.length}</p><p className="text-[10px] text-text-muted uppercase">Total Schedules</p></div>
         </div>
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-chart-green/10"><ToggleRight size={14} className="text-chart-green" /></div>
+          <div><p className="text-lg font-bold text-text-primary font-mono">{activeCount}</p><p className="text-[10px] text-text-muted uppercase">Active</p></div>
+        </div>
+      </div>
 
-        {history ? (
-          <div className="card">
-            <p className="font-semibold text-white mb-2">Schedule History</p>
-            <pre className="max-h-80 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{JSON.stringify(history, null, 2)}</pre>
-          </div>
+      <div className="flex items-center justify-between mb-3">
+        <div className="relative flex-1 max-w-xs">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+          <input type="text" placeholder="Search schedules..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-8 text-xs" />
+        </div>
+      </div>
+
+      <QueryState loading={schedulesQuery.loading} error={schedulesQuery.error} isEmpty={schedules.length === 0} emptyMessage="" onRetry={() => void schedulesQuery.refetch()}>
+        {filtered.length === 0 ? (
+          <EmptyState icon={<Clock size={40} />} title="No schedules" description="Create a schedule to run agents on a cron basis" action={<button className="btn btn-primary text-xs" onClick={() => { setForm({ name: "", agent_name: "", cron: "", task: "" }); setPanelMode("create"); setPanelOpen(true); }}><Plus size={14} /> New Schedule</button>} />
         ) : (
-          <div className="card">
-            <span className="text-gray-500">Select a schedule and click History to inspect run metadata.</span>
-          </div>
-        )}
-      </div>
-
-      <div className="card mt-6">
-        <p className="font-semibold text-white mb-3">Existing Schedules</p>
-        <QueryState
-          loading={schedulesQuery.loading}
-          error={schedulesQuery.error}
-          isEmpty={schedules.length === 0}
-          emptyMessage="No schedules configured."
-          onRetry={() => void schedulesQuery.refetch()}
-        >
-          <table className="os-table">
-            <thead>
-              <tr>
-                <th>Agent</th>
-                <th>Cron</th>
-                <th>Task</th>
-                <th>Status</th>
-                <th>Runs</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {schedules.map((schedule) => (
-                <tr key={schedule.schedule_id}>
-                  <td><span className="text-gray-400">{schedule.agent_name}</span></td>
-                  <td><span className="font-mono text-xs text-gray-300">{schedule.cron}</span></td>
-                  <td><span className="text-gray-400">{schedule.task}</span></td>
-                  <td>
-                    <span className="badge">
-                      {schedule.is_enabled ? "enabled" : "disabled"}
-                    </span>
-                  </td>
-                  <td><span className="text-gray-400">{schedule.run_count}</span></td>
-                  <td>
-                    <div className="flex flex-wrap gap-2">
-                      <button className="btn-primary text-xs" onClick={() => void toggleSchedule(schedule)}>
-                        {schedule.is_enabled ? "Disable" : "Enable"}
-                      </button>
-                      <button className="btn-secondary text-xs" onClick={() => void updateSchedule(schedule)}>
-                        Edit
-                      </button>
-                      <button className="btn-secondary text-xs" onClick={() => void loadHistory(schedule)}>
-                        History
-                      </button>
-                      <button className="btn-danger text-xs" onClick={() => void deleteSchedule(schedule)}>
-                        Delete
-                      </button>
-                    </div>
-                  </td>
+          <div className="card p-0"><div className="overflow-x-auto">
+            <table><thead><tr><th>Name</th><th>Agent</th><th>Cron</th><th>Status</th><th>Last Run</th><th>Next Run</th><th style={{ width: "48px" }}></th></tr></thead>
+              <tbody>{filtered.map((s) => (
+                <tr key={s.schedule_id}>
+                  <td><span className="text-text-primary text-sm font-medium">{s.name ?? s.schedule_id.slice(0, 12)}</span></td>
+                  <td><span className="text-text-secondary text-sm">{s.agent_name ?? "n/a"}</span></td>
+                  <td><span className="font-mono text-xs text-text-muted bg-surface-overlay px-1.5 py-0.5 rounded">{s.cron ?? "--"}</span></td>
+                  <td><StatusBadge status={s.is_active ? "active" : "paused"} /></td>
+                  <td><span className="text-[10px] text-text-muted">{s.last_run ? new Date(s.last_run).toLocaleString() : "--"}</span></td>
+                  <td><span className="text-[10px] text-text-muted">{s.next_run ? new Date(s.next_run).toLocaleString() : "--"}</span></td>
+                  <td><ActionMenu items={getActions(s)} /></td>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </QueryState>
-      </div>
+              ))}</tbody>
+            </table>
+          </div></div>
+        )}
+      </QueryState>
+
+      <SlidePanel isOpen={panelOpen} onClose={() => setPanelOpen(false)} title={panelMode === "create" ? "Create Schedule" : "Edit Schedule"} subtitle="Define a cron-based agent schedule"
+        footer={<><button className="btn btn-secondary text-xs" onClick={() => setPanelOpen(false)}>Cancel</button><button className="btn btn-primary text-xs" onClick={() => void handleSave()}>{panelMode === "create" ? "Create" : "Update"}</button></>}>
+        <FormField label="Name" required error={formErrors.name}><input type="text" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="daily-report" className="text-sm" /></FormField>
+        <FormField label="Agent Name"><input type="text" value={form.agent_name} onChange={(e) => setForm({ ...form, agent_name: e.target.value })} placeholder="report-agent" className="text-sm" /></FormField>
+        <FormField label="Cron Expression" required error={formErrors.cron} hint="e.g. 0 9 * * 1-5 (weekdays at 9am)"><input type="text" value={form.cron} onChange={(e) => setForm({ ...form, cron: e.target.value })} placeholder="0 9 * * 1-5" className="text-sm font-mono" /></FormField>
+        <FormField label="Task" required error={formErrors.task}><textarea value={form.task} onChange={(e) => setForm({ ...form, task: e.target.value })} placeholder="Generate daily summary report..." rows={4} className="text-sm" /></FormField>
+      </SlidePanel>
+
+      <SlidePanel isOpen={detailOpen} onClose={() => { setDetailOpen(false); setDetailItem(null); }} title="Schedule Details">
+        <pre className="text-xs font-mono bg-surface-base border border-border-default rounded-md p-4 overflow-x-auto max-h-96">{JSON.stringify(detailItem, null, 2)}</pre>
+      </SlidePanel>
+
+      {confirmOpen && confirmAction && (
+        <ConfirmDialog title={confirmAction.title} description={confirmAction.desc} confirmLabel="Delete" tone="danger"
+          onConfirm={async () => { try { await confirmAction.action(); } catch { showToast("Action failed", "error"); } setConfirmOpen(false); setConfirmAction(null); }}
+          onCancel={() => { setConfirmOpen(false); setConfirmAction(null); }} />
+      )}
     </div>
   );
 };

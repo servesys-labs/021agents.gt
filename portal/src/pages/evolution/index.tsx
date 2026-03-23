@@ -1,152 +1,156 @@
 import { useMemo, useState } from "react";
+import { TrendingUp, BarChart3, GitCompare, RefreshCw } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
-import type { AgentInfo } from "../../lib/adapters";
-import { apiRequest, useApiQuery } from "../../lib/api";
+import { StatusBadge } from "../../components/common/StatusBadge";
+import { EmptyState } from "../../components/common/EmptyState";
+import { Tabs } from "../../components/common/Tabs";
+import { useApiQuery } from "../../lib/api";
 
-type Proposal = { id?: string; title?: string; rationale?: string; priority?: number };
-type LedgerEntry = { version?: string; proposal_title?: string; created_at?: number };
+type EvolutionEntry = {
+  version: string;
+  agent_name: string;
+  score?: number;
+  latency_ms?: number;
+  cost_usd?: number;
+  created_at?: string;
+  improvement_pct?: number;
+};
 
 export const EvolutionPage = () => {
-  const agentsQuery = useApiQuery<AgentInfo[]>("/api/v1/agents");
-  const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
-  const [agentName, setAgentName] = useState("");
-  const [evalFile, setEvalFile] = useState("eval/smoke-test.json");
-  const [cycles, setCycles] = useState(1);
-  const [actionMessage, setActionMessage] = useState("");
-  const [actionError, setActionError] = useState("");
+  const evoQuery = useApiQuery<{ entries: EvolutionEntry[] }>("/api/v1/evolution?limit=50");
+  const entries = useMemo(() => evoQuery.data?.entries ?? [], [evoQuery.data]);
 
-  const selectedAgent = agentName || agents[0]?.name || "";
-  const proposalsQuery = useApiQuery<{ proposals: Proposal[] }>(
-    `/api/v1/evolve/${encodeURIComponent(selectedAgent)}/proposals`,
-    Boolean(selectedAgent),
+  const [compareA, setCompareA] = useState("");
+  const [compareB, setCompareB] = useState("");
+
+  const agents = [...new Set(entries.map((e) => e.agent_name))];
+  const entriesA = entries.filter((e) => e.agent_name === compareA);
+  const entriesB = entries.filter((e) => e.agent_name === compareB);
+
+  /* ── Sparkline bar ────────────────────────────────────────── */
+  const SparkBar = ({ value, max, color }: { value: number; max: number; color: string }) => (
+    <div className="flex items-center gap-2">
+      <div className="flex-1 h-2 bg-surface-overlay rounded-full overflow-hidden max-w-[100px]">
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${max > 0 ? (value / max) * 100 : 0}%` }} />
+      </div>
+      <span className="text-xs font-mono text-text-muted">{value.toFixed(1)}</span>
+    </div>
   );
-  const ledgerQuery = useApiQuery<{ entries: LedgerEntry[]; current_version?: string }>(
-    `/api/v1/evolve/${encodeURIComponent(selectedAgent)}/ledger`,
-    Boolean(selectedAgent),
+
+  const maxScore = Math.max(...entries.map((e) => e.score ?? 0), 1);
+  const maxLatency = Math.max(...entries.map((e) => e.latency_ms ?? 0), 1);
+
+  /* ── Timeline tab ─────────────────────────────────────────── */
+  const timelineTab = (
+    <div>
+      <QueryState loading={evoQuery.loading} error={evoQuery.error} isEmpty={entries.length === 0} emptyMessage="" onRetry={() => void evoQuery.refetch()}>
+        {entries.length === 0 ? (
+          <EmptyState icon={<TrendingUp size={40} />} title="No evolution data" description="Deploy agent versions to track evolution over time" />
+        ) : (
+          <div className="card p-0"><div className="overflow-x-auto">
+            <table><thead><tr><th>Agent</th><th>Version</th><th>Score</th><th>Latency</th><th>Cost</th><th>Improvement</th><th>Date</th></tr></thead>
+              <tbody>{entries.map((e, i) => (
+                <tr key={`${e.agent_name}-${e.version}-${i}`}>
+                  <td><span className="text-text-primary text-sm">{e.agent_name}</span></td>
+                  <td><span className="font-mono text-xs text-text-muted">v{e.version}</span></td>
+                  <td><SparkBar value={e.score ?? 0} max={maxScore} color="bg-chart-green" /></td>
+                  <td><SparkBar value={e.latency_ms ?? 0} max={maxLatency} color="bg-chart-blue" /></td>
+                  <td><span className="font-mono text-xs text-text-muted">${(e.cost_usd ?? 0).toFixed(3)}</span></td>
+                  <td>
+                    {e.improvement_pct !== undefined ? (
+                      <span className={`text-xs font-mono ${e.improvement_pct >= 0 ? "text-chart-green" : "text-status-error"}`}>
+                        {e.improvement_pct >= 0 ? "+" : ""}{e.improvement_pct.toFixed(1)}%
+                      </span>
+                    ) : <span className="text-xs text-text-muted">--</span>}
+                  </td>
+                  <td><span className="text-[10px] text-text-muted">{e.created_at ? new Date(e.created_at).toLocaleDateString() : "--"}</span></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div></div>
+        )}
+      </QueryState>
+    </div>
   );
 
-  const runEvolution = async () => {
-    if (!selectedAgent) {
-      setActionError("Select an agent first.");
-      return;
-    }
-    setActionError("");
-    try {
-      const path = `/api/v1/evolve/${encodeURIComponent(selectedAgent)}/run?eval_file=${encodeURIComponent(evalFile)}&max_cycles=${cycles}`;
-      const response = await apiRequest<Record<string, unknown>>(path, "POST");
-      setActionMessage(`Evolution run completed: ${JSON.stringify(response)}`);
-      await proposalsQuery.refetch();
-      await ledgerQuery.refetch();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Evolution run failed");
-    }
-  };
-
-  const decideProposal = async (proposalId: string, decision: "approve" | "reject") => {
-    try {
-      await apiRequest(
-        `/api/v1/evolve/${encodeURIComponent(selectedAgent)}/proposals/${encodeURIComponent(proposalId)}/${decision}?note=${encodeURIComponent("approved from portal")}`,
-        "POST",
-      );
-      await proposalsQuery.refetch();
-      await ledgerQuery.refetch();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to update proposal");
-    }
-  };
+  /* ── Compare tab ──────────────────────────────────────────── */
+  const compareTab = (
+    <div>
+      <div className="flex items-center gap-3 mb-4">
+        <select value={compareA} onChange={(e) => setCompareA(e.target.value)} className="text-sm flex-1">
+          <option value="">Select Agent A</option>
+          {agents.map((a) => <option key={a} value={a}>{a}</option>)}
+        </select>
+        <GitCompare size={16} className="text-text-muted" />
+        <select value={compareB} onChange={(e) => setCompareB(e.target.value)} className="text-sm flex-1">
+          <option value="">Select Agent B</option>
+          {agents.map((a) => <option key={a} value={a}>{a}</option>)}
+        </select>
+      </div>
+      {compareA && compareB ? (
+        <div className="grid grid-cols-2 gap-4">
+          {[{ name: compareA, data: entriesA }, { name: compareB, data: entriesB }].map(({ name, data }) => {
+            const avgScore = data.length > 0 ? data.reduce((s, e) => s + (e.score ?? 0), 0) / data.length : 0;
+            const avgLatency = data.length > 0 ? data.reduce((s, e) => s + (e.latency_ms ?? 0), 0) / data.length : 0;
+            const avgCost = data.length > 0 ? data.reduce((s, e) => s + (e.cost_usd ?? 0), 0) / data.length : 0;
+            return (
+              <div key={name} className="card">
+                <h3 className="text-sm font-semibold text-text-primary mb-3">{name}</h3>
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-muted">Versions</span>
+                    <span className="font-mono text-sm text-text-primary">{data.length}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-muted">Avg Score</span>
+                    <span className="font-mono text-sm text-chart-green">{avgScore.toFixed(2)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-muted">Avg Latency</span>
+                    <span className="font-mono text-sm text-chart-blue">{avgLatency.toFixed(0)}ms</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-muted">Avg Cost</span>
+                    <span className="font-mono text-sm text-text-secondary">${avgCost.toFixed(3)}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs text-text-muted">Latest</span>
+                    <span className="font-mono text-xs text-text-muted">v{data[0]?.version ?? "--"}</span>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <EmptyState icon={<GitCompare size={40} />} title="Select two agents" description="Choose agents above to compare their evolution" />
+      )}
+    </div>
+  );
 
   return (
     <div>
-      <PageHeader title="Evolve & Proposals" subtitle="Run evolution cycles and review proposal queue" />
-      <div className="card mb-6">
-        <div className="grid gap-2 md:grid-cols-4">
-          <select className="input-field" value={selectedAgent} onChange={(e) => setAgentName(e.target.value)}>
-            {agents.map((agent) => (
-              <option key={agent.name} value={agent.name}>{agent.name}</option>
-            ))}
-          </select>
-          <input className="input-field" value={evalFile} onChange={(event) => setEvalFile(event.target.value)} placeholder="eval/smoke-test.json" />
-          <input
-            className="rounded-md border border-[#2a2a2a] px-2 py-1 text-sm"
-            type="number"
-            min={1}
-            max={10}
-            value={cycles}
-            onChange={(event) => setCycles(Number(event.target.value) || 1)}
-          />
-          <button className="btn-primary" onClick={() => void runEvolution()}>Run Evolution</button>
+      <PageHeader title="Evolution" subtitle="Track agent performance across versions and compare improvements" onRefresh={() => void evoQuery.refetch()} />
+      <div className="grid grid-cols-3 gap-3 mb-4">
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-chart-green/10"><TrendingUp size={14} className="text-chart-green" /></div>
+          <div><p className="text-lg font-bold text-text-primary font-mono">{entries.length}</p><p className="text-[10px] text-text-muted uppercase">Versions Tracked</p></div>
         </div>
-        {actionMessage ? <span className="mt-3 text-emerald-600 break-all">{actionMessage}</span> : null}
-        {actionError ? <span className="mt-3 text-red-600">{actionError}</span> : null}
-      </div>
-
-      <div className="grid gap-6 lg:grid-cols-2">
-        <div className="card">
-          <p className="font-semibold text-white mb-3">Proposal Queue</p>
-          <QueryState
-            loading={proposalsQuery.loading}
-            error={proposalsQuery.error}
-            isEmpty={(proposalsQuery.data?.proposals ?? []).length === 0}
-            emptyMessage="No proposals yet."
-          >
-            <table className="os-table">
-              <thead>
-                <tr>
-                  <th>Title</th>
-                  <th>Priority</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(proposalsQuery.data?.proposals ?? []).map((proposal) => (
-                  <tr key={proposal.id}>
-                    <td><span className="text-gray-400">{proposal.title ?? proposal.id}</span></td>
-                    <td><span className="text-gray-400">{proposal.priority ?? 0}</span></td>
-                    <td>
-                      <div className="flex gap-2">
-                        {proposal.id ? (
-                          <>
-                            <button className="btn-primary text-xs" onClick={() => void decideProposal(proposal.id ?? "", "approve")}>Approve</button>
-                            <button className="btn-danger text-xs" onClick={() => void decideProposal(proposal.id ?? "", "reject")}>Reject</button>
-                          </>
-                        ) : null}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </QueryState>
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-chart-blue/10"><BarChart3 size={14} className="text-chart-blue" /></div>
+          <div><p className="text-lg font-bold text-text-primary font-mono">{agents.length}</p><p className="text-[10px] text-text-muted uppercase">Agents</p></div>
         </div>
-        <div className="card">
-          <p className="font-semibold text-white mb-3">Version Ledger</p>
-          <QueryState
-            loading={ledgerQuery.loading}
-            error={ledgerQuery.error}
-            isEmpty={(ledgerQuery.data?.entries ?? []).length === 0}
-            emptyMessage="No ledger entries."
-          >
-            <table className="os-table">
-              <thead>
-                <tr>
-                  <th>Version</th>
-                  <th>Proposal</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(ledgerQuery.data?.entries ?? []).map((entry, index) => (
-                  <tr key={`${entry.version}-${index}`}>
-                    <td><span className="text-gray-400">{entry.version ?? "-"}</span></td>
-                    <td><span className="text-gray-400">{entry.proposal_title ?? "-"}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </QueryState>
+        <div className="card flex items-center gap-3 py-3">
+          <div className="p-2 rounded-lg bg-accent/10"><RefreshCw size={14} className="text-accent" /></div>
+          <div><p className="text-lg font-bold text-text-primary font-mono">{entries.filter((e) => (e.improvement_pct ?? 0) > 0).length}</p><p className="text-[10px] text-text-muted uppercase">Improvements</p></div>
         </div>
       </div>
+      <Tabs tabs={[
+        { id: "timeline", label: "Timeline", count: entries.length, content: timelineTab },
+        { id: "compare", label: "Compare", content: compareTab },
+      ]} />
     </div>
   );
 };
