@@ -48,6 +48,7 @@ import {
   Plus,
   Command,
   Search,
+  MessageSquare,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -246,6 +247,7 @@ export function CanvasWorkspacePage() {
   // Meta-agent
   const [metaProcessing, setMetaProcessing] = useState(false);
   const [metaResult, setMetaResult] = useState<string | undefined>();
+  const [agentRailOpen, setAgentRailOpen] = useState(false);
 
   // Agent log
   const [logEntries, setLogEntries] = useState<LogEntry[]>([
@@ -774,8 +776,16 @@ export function CanvasWorkspacePage() {
           Reset
         </button>
 
-        <button className="flex items-center justify-center w-7 h-7 text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1">
-          <Sparkles size={13} />
+        <button
+          onClick={() => setAgentRailOpen(!agentRailOpen)}
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium rounded-md transition-colors mr-1 ${
+            agentRailOpen
+              ? "bg-accent/15 text-accent border border-accent/30"
+              : "text-text-muted hover:text-text-primary hover:bg-surface-overlay border border-transparent"
+          }`}
+        >
+          <MessageSquare size={12} />
+          Agent
         </button>
 
         <button className="flex items-center justify-center w-7 h-7 text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1">
@@ -846,12 +856,6 @@ export function CanvasWorkspacePage() {
 
         <AgentLog entries={logEntries} onClear={clearLog} />
 
-        <MetaAgentAssist
-          onSubmit={handleMetaSubmit}
-          isProcessing={metaProcessing}
-          lastResult={metaResult}
-        />
-
         {/* Context menu */}
         {contextMenu && (
           <CanvasContextMenu
@@ -874,6 +878,15 @@ export function CanvasWorkspacePage() {
             onClone={handleCloneNode}
             onDeploy={handleDeploy}
             onUpdateNode={handleUpdateNode}
+          />
+        )}
+
+        {/* Railway-style Agent rail — inline right panel */}
+        {agentRailOpen && (
+          <MetaAgentAssist
+            onSubmit={handleMetaSubmit}
+            isProcessing={metaProcessing}
+            lastResult={metaResult}
           />
         )}
       </div>

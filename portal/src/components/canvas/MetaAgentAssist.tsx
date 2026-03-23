@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from "react";
-import { Sparkles, Send, Loader2, X, ChevronUp, ChevronDown } from "lucide-react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
+import { Sparkles, Send, Loader2, Settings, MessageSquare } from "lucide-react";
 
 type Props = {
   onSubmit: (prompt: string) => void;
@@ -7,8 +7,17 @@ type Props = {
   lastResult?: string;
 };
 
+/* ── Quick-action suggestion chips (like Railway) ──────────────── */
+const SUGGESTIONS = [
+  { icon: "?", label: "How can I configure my agent?" },
+  { icon: "🚀", label: "Deploy to production" },
+  { icon: "⚙", label: "Manage environment variables" },
+  { icon: "⏰", label: "Set up a cron schedule" },
+  { icon: "❓", label: "Why is my agent failing?" },
+  { icon: "📦", label: "Deploy Knowledge Base" },
+];
+
 export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
-  const [expanded, setExpanded] = useState(false);
   const [input, setInput] = useState("");
   const [history, setHistory] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -28,13 +37,12 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
     }
   }, [lastResult]);
 
-  const handleSubmit = () => {
-    const trimmed = input.trim();
+  const handleSubmit = (text?: string) => {
+    const trimmed = (text || input).trim();
     if (!trimmed || isProcessing) return;
     setHistory((prev) => [...prev, { role: "user", text: trimmed }]);
     onSubmit(trimmed);
     setInput("");
-    setExpanded(true);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -45,38 +53,48 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
   };
 
   return (
-    <div className="absolute bottom-6 right-6 z-40 w-[360px]">
-      {/* Conversation history */}
-      {expanded && history.length > 0 && (
-        <div className="mb-2 rounded-xl border border-border-default bg-surface-raised shadow-[0_8px_40px_rgba(0,0,0,0.4)] overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-2 border-b border-border-default">
-            <div className="flex items-center gap-2">
-              <Sparkles size={12} className="text-accent" />
-              <span className="text-[11px] font-semibold text-text-primary">Meta-Agent</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setHistory([])}
-                className="text-[10px] text-text-muted hover:text-text-secondary transition-colors px-1.5"
-              >
-                Clear
-              </button>
-              <button
-                onClick={() => setExpanded(false)}
-                className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors"
-              >
-                <ChevronDown size={12} />
-              </button>
+    <div className="h-full flex flex-col bg-surface-raised border-l border-border-default flex-shrink-0"
+      style={{ width: 280 }}>
+
+      {/* ── Header ──────────────────────────────────────────── */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border-default flex-shrink-0">
+        <div className="flex items-center gap-2">
+          <MessageSquare size={14} className="text-accent" />
+          <span className="text-sm font-semibold text-text-primary">Agent</span>
+        </div>
+        <button className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors">
+          <Settings size={13} />
+        </button>
+      </div>
+
+      {/* ── Chat history ────────────────────────────────────── */}
+      <div ref={historyRef} className="flex-1 overflow-y-auto">
+        {history.length === 0 ? (
+          /* Empty state: show suggestion chips like Railway */
+          <div className="p-4">
+            <div className="flex flex-wrap gap-2">
+              {SUGGESTIONS.map((s, i) => (
+                <button
+                  key={i}
+                  onClick={() => handleSubmit(s.label)}
+                  className="flex items-center gap-1.5 px-3 py-2 text-[11px] text-text-secondary bg-surface-base border border-border-default rounded-lg hover:bg-surface-hover hover:border-border-hover transition-colors text-left leading-snug"
+                >
+                  <span className="text-[10px] flex-shrink-0">{s.icon}</span>
+                  <span>{s.label}</span>
+                </button>
+              ))}
             </div>
           </div>
-          <div ref={historyRef} className="max-h-[240px] overflow-y-auto p-3 space-y-2.5">
+        ) : (
+          /* Chat messages */
+          <div className="p-3 space-y-3">
             {history.map((msg, i) => (
               <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div
-                  className={`max-w-[85%] px-3 py-2 rounded-lg text-[12px] leading-relaxed ${
+                  className={`max-w-[90%] px-3 py-2 rounded-lg text-[12px] leading-relaxed ${
                     msg.role === "user"
-                      ? "bg-accent text-white rounded-br-sm"
-                      : "bg-surface-overlay text-text-secondary rounded-bl-sm"
+                      ? "bg-accent/15 text-text-primary rounded-br-sm"
+                      : "bg-surface-base text-text-secondary rounded-bl-sm border border-border-default"
                   }`}
                 >
                   {msg.text}
@@ -85,7 +103,7 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
             ))}
             {isProcessing && (
               <div className="flex justify-start">
-                <div className="bg-surface-overlay px-3 py-2 rounded-lg rounded-bl-sm">
+                <div className="bg-surface-base px-3 py-2 rounded-lg rounded-bl-sm border border-border-default">
                   <div className="flex items-center gap-1.5">
                     <div className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce" style={{ animationDelay: "0ms" }} />
                     <div className="w-1.5 h-1.5 rounded-full bg-accent animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -95,39 +113,35 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
               </div>
             )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Input bar */}
-      <div className="meta-agent-bar flex items-end gap-2 px-3 py-2.5">
-        <button
-          onClick={() => setExpanded(!expanded)}
-          className="flex-shrink-0 w-7 h-7 rounded-lg bg-accent-muted flex items-center justify-center text-accent hover:bg-accent hover:text-white transition-colors"
-        >
-          <Sparkles size={14} />
-        </button>
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Describe an agent to create..."
-          rows={1}
-          className="flex-1 bg-transparent border-none outline-none text-[12px] text-text-primary placeholder:text-text-muted resize-none max-h-[80px] py-1"
-          style={{ minHeight: "24px" }}
-          disabled={isProcessing}
-        />
-        <button
-          onClick={handleSubmit}
-          disabled={!input.trim() || isProcessing}
-          className="flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-accent text-white hover:bg-accent-hover"
-        >
-          {isProcessing ? (
-            <Loader2 size={13} className="animate-spin" />
-          ) : (
-            <Send size={13} />
-          )}
-        </button>
+      {/* ── Input area (pinned to bottom like Railway) ───── */}
+      <div className="border-t border-border-default p-3 flex-shrink-0">
+        <div className="flex items-end gap-2 bg-surface-base border border-border-default rounded-lg px-3 py-2 focus-within:border-accent/40 transition-colors">
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Develop, debug, deploy anything..."
+            rows={1}
+            className="flex-1 bg-transparent border-none outline-none text-[12px] text-text-primary placeholder:text-text-muted resize-none max-h-[80px] py-0.5"
+            style={{ minHeight: "20px" }}
+            disabled={isProcessing}
+          />
+          <button
+            onClick={() => handleSubmit()}
+            disabled={!input.trim() || isProcessing}
+            className="flex-shrink-0 w-6 h-6 rounded-md flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-text-muted hover:text-accent"
+          >
+            {isProcessing ? (
+              <Loader2 size={13} className="animate-spin" />
+            ) : (
+              <Send size={13} />
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );
