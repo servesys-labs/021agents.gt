@@ -3,7 +3,6 @@ import {
   ReactFlow,
   ReactFlowProvider,
   Background,
-  Controls,
   addEdge,
   useNodesState,
   useEdgesState,
@@ -26,6 +25,7 @@ import { CanvasContextMenu } from "../../components/canvas/CanvasContextMenu";
 import { MetaAgentAssist } from "../../components/canvas/MetaAgentAssist";
 import { AgentLog, type LogEntry } from "../../components/canvas/AgentLog";
 import { AddNodeToolbar } from "../../components/canvas/AddNodeToolbar";
+import { CanvasControls } from "../../components/canvas/CanvasControls";
 import { NodeDetailPanel } from "../../components/canvas/NodeDetailPanel";
 import { CommandPalette, type CommandAction } from "../../components/canvas/CommandPalette";
 import { CanvasOverlayPanel } from "../../components/canvas/CanvasOverlayPanel";
@@ -273,6 +273,9 @@ function CanvasWorkspaceInner() {
   const [currentEnv, setCurrentEnv] = useState("production");
 
   const reactFlowRef = useRef<HTMLDivElement>(null);
+
+  // Grid visibility
+  const [showGrid, setShowGrid] = useState(true);
 
   /* ── Log helper ──────────────────────────────────────────── */
   const addLogEntry = useCallback((message: string, status: LogEntry["status"]) => {
@@ -855,21 +858,23 @@ function CanvasWorkspaceInner() {
           snapToGrid
           snapGrid={[20, 20]}
         >
-          <Background
-            variant={BackgroundVariant.Dots}
-            gap={20}
-            size={1}
-            color="var(--color-border-default)"
-          />
-          <Controls
-            position="top-left"
-            style={{ left: "16px", top: "16px" }}
-            showInteractive={false}
-          />
+          {showGrid && (
+            <Background
+              variant={BackgroundVariant.Dots}
+              gap={14}
+              size={1.5}
+              color="rgba(168, 162, 158, 0.35)"
+            />
+          )}
 
         </ReactFlow>
 
         {/* ── Canvas overlays ────────────────────────────────── */}
+        <CanvasControls
+          showGrid={showGrid}
+          onToggleGrid={() => setShowGrid(!showGrid)}
+        />
+
         <AddNodeToolbar onAdd={addNode} />
 
         <AgentLog entries={logEntries} onClear={clearLog} />

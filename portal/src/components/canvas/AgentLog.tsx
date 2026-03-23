@@ -47,7 +47,7 @@ export function AgentLog({ entries, onClear }: Props) {
   const errorCount = entries.filter((e) => e.status === "error").length;
 
   return (
-    <div className="absolute bottom-6 left-6 z-40">
+    <div className="absolute bottom-6 left-16 z-40">
       {/* Expanded log panel */}
       {expanded && entries.length > 0 && (
         <div className="agent-log-panel mb-2 w-[280px] overflow-hidden">
