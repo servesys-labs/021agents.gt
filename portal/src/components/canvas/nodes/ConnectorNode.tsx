@@ -2,6 +2,7 @@ import { memo } from "react";
 import { type NodeProps } from "@xyflow/react";
 import { Plug, Zap, Shield } from "lucide-react";
 import { BaseNode } from "./BaseNode";
+import { apiRequest } from "../../../lib/api";
 
 export type ConnectorNodeData = {
   name: string;
@@ -56,11 +57,15 @@ export const ConnectorNode = memo(({ data, selected }: NodeProps & { data: Conne
       {status === "pending" && (
         <div className="px-3.5 pb-2.5">
           <button
-            className="flex items-center gap-1.5 px-2 py-1 min-h-[var(--touch-target-min)] rounded-md bg-node-glow-green border border-node-glow-green-border text-[length:var(--text-2xs)] text-chart-green transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled
-            title="Coming soon"
-            aria-label="Connect OAuth — coming soon"
-            onClick={(e) => e.stopPropagation()}
+            className="flex items-center gap-1.5 px-2 py-1 min-h-[var(--touch-target-min)] rounded-md bg-node-glow-green border border-node-glow-green-border text-[length:var(--text-2xs)] text-chart-green transition-colors hover:bg-node-glow-green-strong"
+            aria-label="Connect OAuth"
+            onClick={async (e) => {
+              e.stopPropagation();
+              try {
+                const resp = await apiRequest<{ auth_url: string }>(`/api/v1/connectors/auth/${encodeURIComponent(nodeData.app || nodeData.name)}`);
+                if (resp.auth_url) window.open(resp.auth_url, '_blank');
+              } catch { /* auth request failed */ }
+            }}
           >
             <Shield size={10} />
             <span className="font-medium">Connect OAuth</span>

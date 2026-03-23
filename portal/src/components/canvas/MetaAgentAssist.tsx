@@ -121,7 +121,7 @@ export function MetaAgentAssist({
                   onClick={onDeployDraft}
                   className="flex items-center justify-center gap-1 text-[11px] py-1.5 rounded-md bg-accent text-text-inverse hover:bg-accent/90"
                 >
-                  <Rocket size={11} /> Deploy
+                  <Rocket size={11} /> Approve & Create
                 </button>
               </div>
             </div>

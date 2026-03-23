@@ -140,12 +140,12 @@ export const AgentNode = memo(({ data, selected }: NodeProps & { data: AgentNode
             {nodeData.tools?.length || 0} tools
           </span>
         </div>
-        {status === "online" && (nodeData as any).onRun && (
+        {status === "online" && (
           <button
             className="flex items-center gap-1 min-h-[var(--touch-target-min)] text-[length:var(--text-2xs)] text-accent hover:text-accent-hover transition-colors"
             onClick={(e) => {
               e.stopPropagation();
-              (nodeData as any).onRun?.();
+              window.dispatchEvent(new CustomEvent("canvas:run-agent", { detail: { name: nodeData.name } }));
             }}
             aria-label={`Run agent ${nodeData.name}`}
           >

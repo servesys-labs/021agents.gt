@@ -1,7 +1,8 @@
-import { memo } from "react";
+import { memo, useState } from "react";
 import { type NodeProps } from "@xyflow/react";
 import { Server, Zap, RefreshCw } from "lucide-react";
 import { BaseNode } from "./BaseNode";
+import { apiRequest } from "../../../lib/api";
 
 export type McpServerNodeData = {
   name: string;
@@ -9,6 +10,7 @@ export type McpServerNodeData = {
   status: "healthy" | "degraded" | "offline";
   toolCount: number;
   lastSync?: string;
+  serverId?: string;
 };
 
 const statusConfig: Record<string, { dot: string; label: string }> = {
@@ -21,6 +23,7 @@ export const McpServerNode = memo(({ data, selected }: NodeProps & { data: McpSe
   const nodeData = data as McpServerNodeData;
   const status = nodeData.status || "offline";
   const cfg = statusConfig[status] || statusConfig.offline;
+  const [syncing, setSyncing] = useState(false);
 
   return (
     <BaseNode
@@ -60,14 +63,21 @@ export const McpServerNode = memo(({ data, selected }: NodeProps & { data: McpSe
       {status === "healthy" && (
         <div className="px-3.5 pb-2.5">
           <button
-            className="flex items-center gap-1.5 min-h-[var(--touch-target-min)] text-[length:var(--text-2xs)] text-chart-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled
-            title="Coming soon"
-            aria-label="Sync Tools — coming soon"
-            onClick={(e) => e.stopPropagation()}
+            className="flex items-center gap-1.5 min-h-[var(--touch-target-min)] text-[length:var(--text-2xs)] text-chart-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed hover:text-chart-blue/80"
+            disabled={!nodeData.serverId || syncing}
+            aria-label={syncing ? "Syncing tools" : "Sync Tools"}
+            onClick={async (e) => {
+              e.stopPropagation();
+              if (!nodeData.serverId || syncing) return;
+              setSyncing(true);
+              try {
+                await apiRequest(`/api/v1/mcp/servers/${nodeData.serverId}/sync`, "POST");
+              } catch { /* sync request failed */ }
+              setSyncing(false);
+            }}
           >
-            <RefreshCw size={9} />
-            <span className="font-medium">Sync Tools</span>
+            <RefreshCw size={9} className={syncing ? "animate-spin" : ""} />
+            <span className="font-medium">{syncing ? "Syncing..." : "Sync Tools"}</span>
           </button>
         </div>
       )}

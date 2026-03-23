@@ -37,6 +37,7 @@ import {
   ProjectsPanel,
   ReleasesPanel,
   InfrastructurePanel,
+  SecretsPanel,
 } from "../../components/canvas/OverlayPanels";
 import { apiRequest } from "../../lib/api";
 import { useUndoRedo } from "../../hooks/useUndoRedo";
@@ -124,6 +125,7 @@ type MetaResource = { type: "connector" | "datasource" | "knowledge" | "mcpServe
 type MetaDraft = {
   agentNodeId: string;
   clusterNodeIds: string[];
+  prompt: string;
   agentName: string;
   model: string;
   tools: string[];
@@ -339,6 +341,7 @@ function CanvasWorkspaceInner() {
 
   const reactFlowRef = useRef<HTMLDivElement>(null);
   const skipLayoutPersistRef = useRef(false);
+  const deployPollRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
   // Grid visibility
   const [showGrid, setShowGrid] = useState(true);
@@ -531,20 +534,68 @@ function CanvasWorkspaceInner() {
       addLogEntry(`Deploying ${agentName}...`, "running");
       try {
         await apiRequest(`/api/v1/deploy/${agentName}`, "POST");
+
+        // Set status to "deploying" immediately
         setNodes((nds) =>
           nds.map((n) =>
             n.type === "agent" && String(n.data?.name || "") === agentName
-              ? { ...n, data: { ...n.data, status: "online" } }
+              ? { ...n, data: { ...n.data, status: "deploying" } }
               : n,
           ),
         );
-        addLogEntry(`Deployed ${agentName} successfully`, "done");
+
+        // Clear any existing poll for this agent
+        if (deployPollRef.current[agentName]) {
+          clearInterval(deployPollRef.current[agentName]);
+        }
+
+        // Poll deploy status every 3 seconds, timeout after 60s
+        const startTime = Date.now();
+        deployPollRef.current[agentName] = setInterval(async () => {
+          try {
+            const status = await apiRequest<{ status: string }>(`/api/v1/deploy/${agentName}/status`, "GET");
+            if (status.status === "deployed" || status.status === "online") {
+              clearInterval(deployPollRef.current[agentName]);
+              delete deployPollRef.current[agentName];
+              setNodes((nds) =>
+                nds.map((n) =>
+                  n.type === "agent" && String(n.data?.name || "") === agentName
+                    ? { ...n, data: { ...n.data, status: "online" } }
+                    : n,
+                ),
+              );
+              addLogEntry(`Deployed ${agentName} successfully`, "done");
+            }
+          } catch {
+            // Status endpoint may not be ready yet, keep polling
+          }
+          // Timeout after 60 seconds
+          if (Date.now() - startTime > 60_000) {
+            clearInterval(deployPollRef.current[agentName]);
+            delete deployPollRef.current[agentName];
+            setNodes((nds) =>
+              nds.map((n) =>
+                n.type === "agent" && String(n.data?.name || "") === agentName
+                  ? { ...n, data: { ...n.data, status: "error" } }
+                  : n,
+              ),
+            );
+            addLogEntry(`Deploy timeout for ${agentName}`, "error");
+          }
+        }, 3000);
       } catch (err) {
         addLogEntry(`Deploy failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
       }
     },
     [addLogEntry, setNodes],
   );
+
+  // Cleanup deploy polling on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(deployPollRef.current).forEach((id) => clearInterval(id));
+    };
+  }, []);
 
   /* ── Edge connection ─────────────────────────────────────── */
   const onConnect = useCallback(
@@ -696,6 +747,7 @@ function CanvasWorkspaceInner() {
       if (action === "open-projects") { setOverlayPanel("projects"); return; }
       if (action === "open-releases") { setOverlayPanel("releases"); return; }
       if (action === "open-infrastructure") { setOverlayPanel("infrastructure"); return; }
+      if (action === "open-secrets") { setOverlayPanel("secrets"); return; }
 
       // Navigation actions
       if (action === "open-overview") { navigate("/overview"); return; }
@@ -777,6 +829,14 @@ function CanvasWorkspaceInner() {
           if (node) setDetailNode(node);
           break;
         }
+        case "run": {
+          const runNode = nodes.find((n) => n.id === nodeId);
+          if (runNode) {
+            addLogEntry(`Opening ${runNode.data?.name || "agent"} for run...`, "running");
+            setDetailNode(runNode);
+          }
+          break;
+        }
         case "chat": {
           addLogEntry("Opening agent chat...", "running");
           const node = nodes.find((n) => n.id === nodeId);
@@ -809,6 +869,7 @@ function CanvasWorkspaceInner() {
         case "open-projects": setOverlayPanel("projects"); break;
         case "open-releases": setOverlayPanel("releases"); break;
         case "open-infrastructure": setOverlayPanel("infrastructure"); break;
+        case "open-secrets": setOverlayPanel("secrets"); break;
         default:
           addLogEntry(`Action: ${action}`, "done");
       }
@@ -824,13 +885,13 @@ function CanvasWorkspaceInner() {
       addLogEntry(`Meta-Agent: "${prompt.slice(0, 60)}${prompt.length > 60 ? "..." : ""}"`, "running");
 
       try {
+        const draftPath = `/api/v1/agents/create-from-description?draft_only=true&description=${encodeURIComponent(prompt)}`;
         const result = await apiRequest<{ name?: string; model?: string; tools?: string[] }>(
-          "/api/v1/agents/create-from-description",
+          draftPath,
           "POST",
-          { description: prompt },
         );
 
-        const msg = "Meta-Agent generated a project-ready draft.";
+        const msg = "Meta-Agent generated a draft. Approve & Create to persist it.";
         setMetaResult(msg);
         addLogEntry("Meta-Agent completed", "done");
 
@@ -910,6 +971,7 @@ function CanvasWorkspaceInner() {
         setMetaDraft({
           agentNodeId: agentId,
           clusterNodeIds,
+          prompt,
           agentName,
           model,
           tools,
@@ -951,9 +1013,29 @@ function CanvasWorkspaceInner() {
 
   const handleMetaDeployDraft = useCallback(async () => {
     if (!metaDraft) return;
-    addLogEntry(`Approved draft for ${metaDraft.agentName}`, "done");
-    await deployAgentByName(metaDraft.agentName);
-  }, [metaDraft, deployAgentByName, addLogEntry]);
+    addLogEntry(`Approving draft ${metaDraft.agentName}...`, "running");
+    try {
+      const createPath = `/api/v1/agents/create-from-description?draft_only=false&description=${encodeURIComponent(metaDraft.prompt)}&name=${encodeURIComponent(metaDraft.agentName)}&tools=${encodeURIComponent(metaDraft.tools.length ? metaDraft.tools.join(",") : "none")}`;
+      const created = await apiRequest<{ created?: boolean; name?: string; model?: string; tools?: string[] }>(
+        createPath,
+        "POST",
+      );
+      const createdName = String(created.name || metaDraft.agentName);
+      setNodes((nds) =>
+        nds.map((n) =>
+          n.id === metaDraft.agentNodeId
+            ? { ...n, data: { ...n.data, name: createdName, model: created.model || metaDraft.model } }
+            : n,
+        ),
+      );
+      setMetaDraft((prev) => (prev ? { ...prev, agentName: createdName } : prev));
+      addLogEntry(`Approved draft for ${createdName}`, "done");
+      await deployAgentByName(createdName);
+    } catch (err) {
+      addLogEntry(`Approve failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
+      return;
+    }
+  }, [metaDraft, deployAgentByName, addLogEntry, setNodes, setMetaDraft]);
 
   /* ── Snapshot before drag starts (for undo) ─────────────── */
   const onNodeDragStart = useCallback(
@@ -1031,6 +1113,23 @@ function CanvasWorkspaceInner() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [detailNode, handleDeleteNode, cmdPaletteOpen, overlayPanel, handleUndo, handleRedo]);
+
+  /* ── Listen for canvas:run-agent events from AgentNode ──── */
+  useEffect(() => {
+    const handleRunAgent = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { name: string } | undefined;
+      if (!detail?.name) return;
+      const agentNode = nodes.find(
+        (n) => n.type === "agent" && String(n.data?.name || "") === detail.name,
+      );
+      if (agentNode) {
+        addLogEntry(`Opening ${detail.name} for run...`, "running");
+        setDetailNode(agentNode);
+      }
+    };
+    window.addEventListener("canvas:run-agent", handleRunAgent);
+    return () => window.removeEventListener("canvas:run-agent", handleRunAgent);
+  }, [nodes, addLogEntry]);
 
   /* ── Default edge options ────────────────────────────────── */
   const defaultEdgeOptions = useMemo(
@@ -1337,6 +1436,7 @@ function CanvasWorkspaceInner() {
       <ProjectsPanel open={overlayPanel === "projects"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
       <ReleasesPanel open={overlayPanel === "releases"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
       <InfrastructurePanel open={overlayPanel === "infrastructure"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
+      <SecretsPanel open={overlayPanel === "secrets"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
     </div>
   );
 }

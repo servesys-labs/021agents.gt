@@ -50,6 +50,22 @@ type SessionTurn = {
 };
 
 type ToolCall = { name?: string; function?: { name?: string } };
+type TraceResponse = {
+  trace_id?: string;
+  sessions?: TraceSession[];
+  cost_rollup?: {
+    total_cost_usd?: number;
+    by_agent?: Record<string, number>;
+  };
+};
+type TraceSession = {
+  session_id?: string;
+  agent_name?: string;
+  status?: string;
+  step_count?: number;
+  created_at?: number;
+  cost_total_usd?: number;
+};
 
 export const SessionsPage = () => {
   const { showToast } = useToast();
@@ -62,6 +78,7 @@ export const SessionsPage = () => {
   /* ── Detail drawer ────────────────────────────────────────── */
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
+  const [traceCursor, setTraceCursor] = useState(0);
 
   /* ── Confirm dialog ───────────────────────────────────────── */
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -73,6 +90,10 @@ export const SessionsPage = () => {
   );
   const turnsQuery = useApiQuery<SessionTurn[]>(
     `/api/v1/sessions/${selectedSession ?? ""}/turns`,
+    Boolean(selectedSession),
+  );
+  const traceQuery = useApiQuery<TraceResponse>(
+    `/api/v1/sessions/${selectedSession ?? ""}/trace`,
     Boolean(selectedSession),
   );
 
@@ -95,6 +116,7 @@ export const SessionsPage = () => {
   /* ── Actions ──────────────────────────────────────────────── */
   const openDetail = (sessionId: string) => {
     setSelectedSession(sessionId);
+    setTraceCursor(0);
     setDrawerOpen(true);
   };
 
@@ -154,6 +176,8 @@ export const SessionsPage = () => {
   );
 
   const turns = safeArray<SessionTurn>(turnsQuery.data);
+  const traceSessions = safeArray<TraceSession>(traceQuery.data?.sessions);
+  const traceStep = traceSessions[traceCursor] ?? null;
 
   return (
     <div>
@@ -361,6 +385,49 @@ export const SessionsPage = () => {
         subtitle="Turn-by-turn execution trace"
         width="560px"
       >
+        <div className="mb-3 border border-border-default rounded-lg p-3 bg-surface-base">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-semibold text-text-primary">Trace Step-Through</p>
+            <span className="text-[10px] text-text-muted font-mono">
+              {traceSessions.length > 0 ? `${traceCursor + 1}/${traceSessions.length}` : "0/0"}
+            </span>
+          </div>
+          {traceQuery.loading ? (
+            <p className="text-[11px] text-text-muted">Loading trace chain...</p>
+          ) : traceQuery.error ? (
+            <p className="text-[11px] text-text-muted">No trace chain available for this session.</p>
+          ) : traceStep ? (
+            <>
+              <div className="grid grid-cols-2 gap-2 text-[11px] text-text-secondary">
+                <p>Agent: <span className="text-text-primary">{traceStep.agent_name ?? "unknown"}</span></p>
+                <p>Status: <span className="text-text-primary">{traceStep.status ?? "unknown"}</span></p>
+                <p>Turns: <span className="font-mono">{toNumber(traceStep.step_count)}</span></p>
+                <p>Cost: <span className="font-mono">${toNumber(traceStep.cost_total_usd).toFixed(6)}</span></p>
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  className="btn btn-secondary text-[11px] px-2 py-1"
+                  disabled={traceCursor <= 0}
+                  onClick={() => setTraceCursor((v) => Math.max(0, v - 1))}
+                >
+                  Previous Step
+                </button>
+                <button
+                  className="btn btn-secondary text-[11px] px-2 py-1"
+                  disabled={traceCursor >= traceSessions.length - 1}
+                  onClick={() => setTraceCursor((v) => Math.min(traceSessions.length - 1, v + 1))}
+                >
+                  Next Step
+                </button>
+                <span className="text-[10px] text-text-muted ml-auto">
+                  trace: {traceQuery.data?.trace_id?.slice(0, 10) ?? "n/a"}...
+                </span>
+              </div>
+            </>
+          ) : (
+            <p className="text-[11px] text-text-muted">Trace chain is empty.</p>
+          )}
+        </div>
         {turnsQuery.loading && (
           <p className="text-sm text-text-muted">Loading turns...</p>
         )}
