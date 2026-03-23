@@ -119,6 +119,11 @@ export function NodeDetailPanel({
 
   const nodeType = node?.type || "agent";
   const tabs = tabsByType[nodeType] || tabsByType.agent;
+
+  /* Reset activeTab when selected node changes */
+  useEffect(() => {
+    setActiveTab(tabs[0]?.id || "overview");
+  }, [node?.id]);
   const data = node?.data || {};
 
   /* Escape to close */
@@ -517,6 +522,13 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
   const [newFact, setNewFact] = useState({ key: "", value: "" });
   const [sessionFilter, setSessionFilter] = useState("all");
 
+  /* Sync local state when data props change */
+  useEffect(() => {
+    setEditSystemPrompt(data?.systemPrompt || data?.system_prompt || "You are a helpful AI assistant.");
+    setEditTemp(data?.temperature?.toString() ?? "0.7");
+    setEditMaxTokens(data?.maxTokens?.toString() ?? data?.max_tokens?.toString() ?? "4096");
+  }, [data?.systemPrompt, data?.system_prompt, data?.temperature, data?.maxTokens, data?.max_tokens]);
+
   switch (section) {
     /* ── Tools ─────────────────────────────────────────────── */
     case "tools":
@@ -628,7 +640,13 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                   className="flex-1 px-3 py-2 text-sm font-mono bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
                 <input value={newFact.value} onChange={(e) => setNewFact({ ...newFact, value: e.target.value })} placeholder="value"
                   className="flex-[2] px-3 py-2 text-sm bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
-                <button onClick={() => { if (newFact.key.trim()) setNewFact({ key: "", value: "" }); }}
+                <button onClick={() => {
+                  if (newFact.key.trim() && newFact.value.trim()) {
+                    const facts = [...(data?.facts || []), { key: newFact.key, value: newFact.value }];
+                    onUpdateNode?.(nodeId, { ...data, facts });
+                    setNewFact({ key: "", value: "" });
+                  }
+                }}
                   className="px-4 py-2 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Add</button>
               </div>
             </div>
@@ -678,7 +696,22 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
       );
 
     /* ── Chat ─────────────────────────────────────────────── */
-    case "chat":
+    case "chat": {
+      const handleSendMessage = () => {
+        if (chatInput.trim() && !chatLoading) {
+          const userMsg = chatInput.trim();
+          setChatMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+          setChatInput("");
+          setChatLoading(true);
+          setTimeout(() => {
+            setChatMessages((prev) => [...prev, {
+              role: "assistant",
+              content: `I've processed your request: "${userMsg}". Based on my configuration as ${data.name || "an agent"} using ${data.model || "gpt-4.1-mini"}, here's my response. (This is a demo — connect to the API for live responses.)`
+            }]);
+            setChatLoading(false);
+          }, 1500);
+        }
+      };
       return (
         <div className="flex flex-col" style={{ height: "calc(92vh - 200px)" }}>
           <div className="flex-1 overflow-y-auto space-y-3 mb-4">
@@ -716,39 +749,13 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && chatInput.trim() && !chatLoading) {
-                    const userMsg = chatInput.trim();
-                    setChatMessages((prev) => [...prev, { role: "user", content: userMsg }]);
-                    setChatInput("");
-                    setChatLoading(true);
-                    setTimeout(() => {
-                      setChatMessages((prev) => [...prev, {
-                        role: "assistant",
-                        content: `I've processed your request: "${userMsg}". Based on my configuration as ${data.name || "an agent"} using ${data.model || "gpt-4.1-mini"}, here's my response. (This is a demo — connect to the API for live responses.)`
-                      }]);
-                      setChatLoading(false);
-                    }, 1500);
-                  }
+                  if (e.key === "Enter") handleSendMessage();
                 }}
                 placeholder={`Message ${data.name || "agent"}...`}
                 className="flex-1 px-3 py-2.5 text-sm bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
               />
               <button
-                onClick={() => {
-                  if (chatInput.trim() && !chatLoading) {
-                    const userMsg = chatInput.trim();
-                    setChatMessages((prev) => [...prev, { role: "user", content: userMsg }]);
-                    setChatInput("");
-                    setChatLoading(true);
-                    setTimeout(() => {
-                      setChatMessages((prev) => [...prev, {
-                        role: "assistant",
-                        content: `I've processed your request: "${userMsg}". Based on my configuration as ${data.name || "an agent"} using ${data.model || "gpt-4.1-mini"}, here's my response. (This is a demo — connect to the API for live responses.)`
-                      }]);
-                      setChatLoading(false);
-                    }, 1500);
-                  }
-                }}
+                onClick={handleSendMessage}
                 disabled={!chatInput.trim() || chatLoading}
                 className="flex items-center justify-center w-10 h-10 bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-40"
               >
@@ -758,6 +765,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           </div>
         </div>
       );
+    }
 
     /* ── Eval ─────────────────────────────────────────────── */
     case "eval":

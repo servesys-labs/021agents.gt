@@ -11,6 +11,7 @@ type AgentConfig = {
   tools: string[];
   budget_limit: number;
   timeout_seconds: number;
+  approvalRequired: string;
 };
 
 type Props = {
@@ -46,6 +47,7 @@ export function AgentConfigDrawer({ isOpen, onClose, agentData, onSave, availabl
     tools: [],
     budget_limit: 1.0,
     timeout_seconds: 300,
+    approvalRequired: "Destructive actions",
   });
 
   useEffect(() => {
@@ -60,6 +62,7 @@ export function AgentConfigDrawer({ isOpen, onClose, agentData, onSave, availabl
         tools: agentData.tools || [],
         budget_limit: agentData.budget_limit ?? 1.0,
         timeout_seconds: agentData.timeout_seconds ?? 300,
+        approvalRequired: agentData.approvalRequired || "Destructive actions",
       });
       setActiveTab("general");
     }
@@ -340,7 +343,8 @@ export function AgentConfigDrawer({ isOpen, onClose, agentData, onSave, availabl
                         type="radio"
                         name="approval"
                         className="accent-accent w-3.5 h-3.5"
-                        defaultChecked={option === "Destructive actions"}
+                        checked={config.approvalRequired === option}
+                        onChange={() => setConfig((p) => ({ ...p, approvalRequired: option }))}
                       />
                       <span className="text-[12px] text-text-secondary">{option}</span>
                     </label>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   MessageSquare,
   Play,
@@ -28,7 +28,6 @@ import {
   FolderKanban,
   Tag,
   Cpu,
-  Command,
 } from "lucide-react";
 
 type ContextMenuAction = {
@@ -81,18 +80,15 @@ const mcpServerActions: ContextMenuAction[] = [
 ];
 
 const canvasActions: ContextMenuAction[] = [
-  // Add nodes
   { label: "Add Agent", icon: <Bot size={13} />, action: "add-agent", shortcut: "A" },
   { label: "Add Knowledge Base", icon: <FileText size={13} />, action: "add-knowledge", shortcut: "K" },
   { label: "Add Data Source", icon: <Database size={13} />, action: "add-datasource" },
   { label: "Add Connector", icon: <Plug size={13} />, action: "add-connector" },
   { label: "Add MCP Server", icon: <Server size={13} />, action: "add-mcp" },
-  // Operations — accessible from canvas background right-click
   { label: "Workflows & Jobs", icon: <Workflow size={13} />, action: "open-workflows", dividerBefore: true },
   { label: "Schedules", icon: <Clock size={13} />, action: "open-schedules" },
   { label: "Webhooks", icon: <Webhook size={13} />, action: "open-webhooks" },
   { label: "Governance", icon: <ShieldCheck size={13} />, action: "open-governance" },
-  // Project-level
   { label: "Projects & Envs", icon: <FolderKanban size={13} />, action: "open-projects", dividerBefore: true },
   { label: "Release Channels", icon: <Tag size={13} />, action: "open-releases" },
   { label: "Infrastructure", icon: <Cpu size={13} />, action: "open-infrastructure" },
@@ -118,7 +114,9 @@ type Props = {
 
 export function CanvasContextMenu({ x, y, nodeType, nodeId, onAction, onClose }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const actions = actionsByType[nodeType] || canvasActions;
+  const [focusIndex, setFocusIndex] = useState(0);
 
   const handleClickOutside = useCallback(
     (e: MouseEvent) => {
@@ -131,11 +129,48 @@ export function CanvasContextMenu({ x, y, nodeType, nodeId, onAction, onClose }:
 
   useEffect(() => {
     document.addEventListener("mousedown", handleClickOutside);
+    // Focus first item on mount
+    itemRefs.current[0]?.focus();
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [handleClickOutside]);
 
+  // Keyboard navigation
+  useEffect(() => {
+    if (focusIndex >= 0 && itemRefs.current[focusIndex]) {
+      itemRefs.current[focusIndex]?.focus();
+    }
+  }, [focusIndex]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          setFocusIndex((prev) => (prev + 1) % actions.length);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          setFocusIndex((prev) => (prev - 1 + actions.length) % actions.length);
+          break;
+        case "Escape":
+          e.preventDefault();
+          onClose();
+          break;
+        case "Home":
+          e.preventDefault();
+          setFocusIndex(0);
+          break;
+        case "End":
+          e.preventDefault();
+          setFocusIndex(actions.length - 1);
+          break;
+      }
+    },
+    [actions.length, onClose],
+  );
+
   // Adjust position to keep menu in viewport
-  const menuHeight = actions.length * 32 + 20;
+  const menuHeight = actions.length * 36 + 40; // account for dividers
   const adjustedX = Math.min(x, window.innerWidth - 240);
   const adjustedY = Math.min(y, window.innerHeight - menuHeight);
 
@@ -144,40 +179,40 @@ export function CanvasContextMenu({ x, y, nodeType, nodeId, onAction, onClose }:
       ref={menuRef}
       className="fixed z-50 min-w-[220px] py-1 rounded-xl border border-border-default glass-dropdown animate-[fadeIn_0.1s_ease-out]"
       style={{ left: adjustedX, top: adjustedY, maxHeight: "80vh", overflowY: "auto" }}
+      role="menu"
+      aria-label={`${nodeType === "mcpServer" ? "MCP Server" : nodeType} actions`}
+      onKeyDown={handleKeyDown}
     >
       {/* Header label */}
-      {nodeType !== "canvas" ? (
-        <div className="px-3 py-1.5 text-[10px] font-semibold text-text-muted uppercase tracking-widest border-b border-border-default mb-1">
-          {nodeType === "mcpServer" ? "MCP Server" : nodeType}
-        </div>
-      ) : (
-        <div className="px-3 py-1.5 text-[10px] font-semibold text-text-muted uppercase tracking-widest border-b border-border-default mb-1">
-          Canvas
-        </div>
-      )}
+      <div className="px-3 py-1.5 text-[length:var(--text-2xs)] font-semibold text-text-muted uppercase tracking-widest border-b border-border-default mb-1" aria-hidden="true">
+        {nodeType === "mcpServer" ? "MCP Server" : nodeType === "canvas" ? "Canvas" : nodeType}
+      </div>
 
       {actions.map((item, i) => (
         <div key={item.action}>
           {item.dividerBefore && i > 0 && (
-            <div className="my-1 mx-2 border-t border-border-default" />
+            <div className="my-1 mx-2 border-t border-border-default" role="separator" />
           )}
           <button
+            ref={(el) => { itemRefs.current[i] = el; }}
             onClick={() => {
               onAction(item.action, nodeId);
               onClose();
             }}
+            role="menuitem"
+            tabIndex={focusIndex === i ? 0 : -1}
             className={`
-              w-full flex items-center gap-2.5 px-3 py-1.5 text-[12px] transition-colors group
+              w-full flex items-center gap-2.5 px-3 py-2 min-h-[var(--touch-target-min)] text-[length:var(--text-sm)] transition-colors group
               ${item.variant === "danger"
-                ? "text-status-error hover:bg-[rgba(239,68,68,0.08)]"
+                ? "text-status-error hover:bg-node-glow-red"
                 : "text-text-secondary hover:bg-surface-overlay hover:text-text-primary"
               }
             `}
           >
-            <span className="flex-shrink-0 opacity-70 group-hover:opacity-100 transition-opacity">{item.icon}</span>
+            <span className="flex-shrink-0 opacity-70 group-hover:opacity-100 transition-opacity" aria-hidden="true">{item.icon}</span>
             <span className="flex-1 text-left">{item.label}</span>
             {item.shortcut && (
-              <kbd className="text-[9px] px-1.5 py-0.5 rounded bg-surface-base border border-border-default text-text-muted font-mono">
+              <kbd className="text-[length:var(--text-2xs)] px-1.5 py-0.5 rounded bg-surface-base border border-border-default text-text-muted font-mono" aria-hidden="true">
                 {item.shortcut}
               </kbd>
             )}

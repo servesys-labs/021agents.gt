@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 import asyncio
 import time
@@ -10,6 +11,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
 from agentos.core.runtime_dag import (
@@ -24,11 +27,21 @@ from agentos.core.runtime_dag import (
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
+# Module-level dict of cancel tokens. The run loop should check
+# `_cancel_tokens.get(run_id)` periodically and abort if True.
+# NOTE: This only works within a single process. For multi-process
+# deployments, a shared store (e.g., Redis, DB polling) is needed.
+_cancel_tokens: dict[str, bool] = {}
+
 
 class CreateWorkflowRequest(BaseModel):
-    name: str
+    name: str = Field(..., min_length=1, max_length=200)
     description: str = ""
-    steps: list[dict] = Field(default_factory=list)
+    steps: list[dict] = Field(default_factory=list, max_length=50)
+
+
+class RunWorkflowRequest(BaseModel):
+    input_text: str = ""
 
 
 def _derive_run_metadata(
@@ -114,6 +127,8 @@ def _normalize_steps(steps: list[dict]) -> list[dict]:
             node_type = "parallel_group"
         if node_type == "task":
             node_type = "llm"
+        retries = min(10, max(0, int(step.get("retries", 0) or 0)))
+        budget_usd = max(0.0, float(step.get("budget_usd", 0) or 0))
         normalized.append({
             "id": step_id,
             "type": node_type,
@@ -122,9 +137,9 @@ def _normalize_steps(steps: list[dict]) -> list[dict]:
             "depends_on": step.get("depends_on", []),
             "branches": step.get("branches", []),
             "config": step.get("config", {}),
-            "retries": int(step.get("retries", 0) or 0),
+            "retries": retries,
             "timeout_ms": int(step.get("timeout_ms", 30000) or 30000),
-            "budget_usd": float(step.get("budget_usd", 0) or 0),
+            "budget_usd": budget_usd,
         })
     return normalized
 
@@ -168,9 +183,11 @@ async def create_workflow(
 
 
 @router.post("/{workflow_id}/run")
-async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser = Depends(get_current_user)):
+async def run_workflow(workflow_id: str, request: RunWorkflowRequest | None = None, user: CurrentUser = Depends(get_current_user)):
     """Execute a workflow with typed DAG runner and node policies."""
     from agentos.agent import Agent
+
+    input_text = request.input_text if request else ""
 
     db = _get_db()
     row = db.conn.execute(
@@ -362,16 +379,17 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
             total_budget_usd=0.0,
         )
     except Exception as exc:
+        logger.exception("Workflow run %s failed: %s", run_id, exc)
         db.conn.execute(
             "UPDATE workflow_runs SET status = 'failed', steps_status_json = ?, dag_json = ?, reflection_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
-            (json.dumps({"error": str(exc)}), "{}", "{}", 0.0, time.time(), run_id),
+            (json.dumps({"error": "internal_error"}), "{}", "{}", 0.0, time.time(), run_id),
         )
         db.conn.commit()
         return {
             "run_id": run_id,
             "status": "failed",
             "trace_id": trace_id,
-            "error": str(exc),
+            "error": "An internal error occurred while executing the workflow.",
         }
 
     step_status = {node_id: result.status for node_id, result in dag_results.items()}
@@ -508,7 +526,8 @@ async def cancel_workflow_run(
         raise HTTPException(status_code=404, detail="Workflow run not found")
     if row["status"] not in ("running", "pending"):
         raise HTTPException(status_code=409, detail=f"Cannot cancel run with status '{row['status']}'")
-    import time
+    # Signal the run loop to stop (best-effort, single-process only).
+    _cancel_tokens[run_id] = True
     db.conn.execute(
         "UPDATE workflow_runs SET status = 'cancelled', completed_at = ? WHERE run_id = ?",
         (time.time(), run_id),
@@ -602,6 +621,8 @@ async def validate_workflow(
 @router.delete("/{workflow_id}")
 async def delete_workflow(workflow_id: str, user: CurrentUser = Depends(get_current_user)):
     db = _get_db()
-    db.conn.execute("DELETE FROM workflows WHERE workflow_id = ? AND org_id = ?", (workflow_id, user.org_id))
+    result = db.conn.execute("DELETE FROM workflows WHERE workflow_id = ? AND org_id = ?", (workflow_id, user.org_id))
     db.conn.commit()
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Workflow not found")
     return {"deleted": workflow_id}

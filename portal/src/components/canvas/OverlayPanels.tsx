@@ -99,10 +99,19 @@ function ToggleRow({ label, description, checked, onChange }: {
   );
 }
 
+function ReadOnlyNotice({ editable }: { editable: boolean }) {
+  if (editable) return null;
+  return (
+    <div className="mb-3 text-[10px] text-yellow-500 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1">
+      View mode: editing actions are disabled for this panel.
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    WORKFLOWS & JOBS PANEL
    ═══════════════════════════════════════════════════════════════════ */
-export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function WorkflowsPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
   const [tab, setTab] = useState<"workflows" | "jobs">("workflows");
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -137,6 +146,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Workflows & Jobs" icon={<Workflow size={16} className="text-accent" />} width="780px">
+      <ReadOnlyNotice editable={editable} />
       {/* Tabs */}
       <div className="flex items-center gap-1 mb-4">
         {(["workflows", "jobs"] as const).map((t) => (
@@ -147,7 +157,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
         ))}
         <div className="flex-1" />
         {tab === "workflows" && (
-          <button onClick={() => setShowCreate(!showCreate)}
+          <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
             <Plus size={12} /> New Workflow
           </button>
@@ -164,6 +174,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
             <button
               className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
               onClick={async () => {
+                if (!editable) return;
                 if (!wfName.trim()) return;
                 try {
                   await apiRequest("/api/v1/workflows", "POST", {
@@ -219,6 +230,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
                 <button
                   className="flex items-center gap-1 px-2 py-1 text-[10px] bg-accent/10 text-accent rounded hover:bg-accent/20 transition-colors"
                   onClick={async () => {
+                    if (!editable) return;
                     try {
                       await apiRequest(`/api/v1/workflows/${wf.id}/run`, "POST");
                       setActionMessage("Workflow run started");
@@ -236,6 +248,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
                 <button
                   className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
                   onClick={async () => {
+                    if (!editable) return;
                     try {
                       await apiRequest(`/api/v1/workflows/${wf.id}`, "DELETE");
                       setActionMessage("Workflow deleted");
@@ -279,6 +292,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
                   <button
                     className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors"
                     onClick={async () => {
+                      if (!editable) return;
                       try {
                         await apiRequest(`/api/v1/jobs/${job.id}/cancel`, "POST");
                         setActionMessage("Job cancelled");
@@ -295,6 +309,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
                   <button
                     className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors"
                     onClick={async () => {
+                      if (!editable) return;
                       try {
                         await apiRequest(`/api/v1/jobs/${job.id}/retry`, "POST");
                         setActionMessage("Job retried");
@@ -325,7 +340,7 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
 /* ═══════════════════════════════════════════════════════════════════
    SCHEDULES PANEL
    ═══════════════════════════════════════════════════════════════════ */
-export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SchedulesPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 0 9 * * 1-5");
@@ -348,9 +363,10 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Schedules" icon={<Clock size={16} className="text-accent" />}>
+      <ReadOnlyNotice editable={editable} />
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs text-text-muted">{schedules.length} schedules configured</p>
-        <button onClick={() => setShowCreate(!showCreate)}
+        <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
           <Plus size={12} /> New Schedule
         </button>
@@ -369,6 +385,7 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
             <button
               className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
               onClick={async () => {
+                if (!editable) return;
                 if (!agent.trim() || !cron.trim() || !task.trim()) return;
                 try {
                   await apiRequest("/api/v1/schedules", "POST", {
@@ -421,6 +438,7 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
                   sch.status === "enabled" ? "text-yellow-500 hover:bg-yellow-500/10" : "text-status-live hover:bg-status-live/10"
                 }`}
                 onClick={async () => {
+                  if (!editable) return;
                   try {
                     await apiRequest(
                       `/api/v1/schedules/${sch.id}/${sch.status === "enabled" ? "disable" : "enable"}`,
@@ -438,6 +456,7 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
               <button
                 className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
                 onClick={async () => {
+                  if (!editable) return;
                   try {
                     await apiRequest(`/api/v1/schedules/${sch.id}`, "DELETE");
                     setActionMessage("Schedule deleted");
@@ -460,7 +479,7 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
 /* ═══════════════════════════════════════════════════════════════════
    WEBHOOKS PANEL
    ═══════════════════════════════════════════════════════════════════ */
-export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function WebhooksPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
   const [showCreate, setShowCreate] = useState(false);
   const [url, setUrl] = useState("");
   const [events, setEvents] = useState("");
@@ -480,9 +499,10 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Webhooks" icon={<Webhook size={16} className="text-accent" />}>
+      <ReadOnlyNotice editable={editable} />
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs text-text-muted">{webhooks.length} webhooks configured</p>
-        <button onClick={() => setShowCreate(!showCreate)}
+        <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
           <Plus size={12} /> New Webhook
         </button>
@@ -497,6 +517,7 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
             <button
               className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
               onClick={async () => {
+                if (!editable) return;
                 try {
                   const nextEvents = events
                     .split(",")
@@ -547,6 +568,7 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
               <button
                 className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors"
                 onClick={async () => {
+                if (!editable) return;
                   try {
                     const result = await apiRequest<{ success?: boolean; status?: number }>(
                       `/api/v1/webhooks/${wh.id}/test`,
@@ -570,6 +592,7 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
               <button
                 className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors"
                 onClick={async () => {
+                if (!editable) return;
                   try {
                     const nextState = wh.status !== "active";
                     await apiRequest(
@@ -588,6 +611,7 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
               <button
                 className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
                 onClick={async () => {
+                if (!editable) return;
                   try {
                     await apiRequest(`/api/v1/webhooks/${wh.id}`, "DELETE");
                     setActionMessage("Webhook deleted");
@@ -610,15 +634,48 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
 /* ═══════════════════════════════════════════════════════════════════
    GOVERNANCE PANEL
    ═══════════════════════════════════════════════════════════════════ */
-export function GovernancePanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function GovernancePanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
   const [tab, setTab] = useState<"policies" | "budgets" | "approvals">("policies");
-  const [requireApproval, setRequireApproval] = useState(true);
-  const [humanInLoop, setHumanInLoop] = useState(true);
-  const [auditLog, setAuditLog] = useState(true);
-  const [maxTokens, setMaxTokens] = useState(true);
+  const [policyName, setPolicyName] = useState("");
+  const [policyBudget, setPolicyBudget] = useState("10");
+  const [blockedToolsRaw, setBlockedToolsRaw] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
+  const policiesQuery = useApiQuery<{ policies?: Array<Record<string, unknown>> }>(
+    "/api/v1/policies",
+    open,
+  );
+  const usageQuery = useApiQuery<Record<string, unknown>>(
+    "/api/v1/billing/usage?since_days=30",
+    open && tab === "budgets",
+  );
+  const auditQuery = useApiQuery<{ entries?: Array<Record<string, unknown>> }>(
+    "/api/v1/audit/log?limit=30&since_days=30",
+    open && tab === "approvals",
+  );
+  const policies = (policiesQuery.data?.policies ?? []).map((p) => ({
+    id: String(p.policy_id ?? ""),
+    name: String(p.name ?? "Unnamed policy"),
+    orgId: String(p.org_id ?? ""),
+    policy: (() => {
+      try {
+        return typeof p.policy_json === "string"
+          ? (JSON.parse(p.policy_json) as Record<string, unknown>)
+          : {};
+      } catch {
+        return {};
+      }
+    })(),
+  }));
+  const totalCostUsd = Number(usageQuery.data?.total_cost_usd ?? 0);
+  const inferenceCostUsd = Number(usageQuery.data?.inference_cost_usd ?? 0);
+  const gpuCostUsd = Number(usageQuery.data?.gpu_compute_cost_usd ?? 0);
+  const connectorCostUsd = Number(usageQuery.data?.connector_cost_usd ?? 0);
+  const policyBudgetValue = Number(policyBudget || "0") || 0;
+  const usagePct = policyBudgetValue > 0 ? Math.min(100, (totalCostUsd / policyBudgetValue) * 100) : 0;
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Governance" icon={<ShieldCheck size={16} className="text-accent" />}>
+      <ReadOnlyNotice editable={editable} />
       <div className="flex items-center gap-1 mb-4">
         {(["policies", "budgets", "approvals"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)}
@@ -627,23 +684,70 @@ export function GovernancePanel({ open, onClose }: { open: boolean; onClose: () 
           </button>
         ))}
       </div>
+      {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
 
       {tab === "policies" && (
         <div>
           <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
-            <SectionTitle>Global Policies</SectionTitle>
-            <ToggleRow label="Require deployment approval" description="All agent deployments must be approved by an admin" checked={requireApproval} onChange={setRequireApproval} />
-            <ToggleRow label="Human-in-the-loop for sensitive actions" description="Agents must get human confirmation before executing destructive operations" checked={humanInLoop} onChange={setHumanInLoop} />
-            <ToggleRow label="Audit logging" description="Log all agent actions and tool invocations" checked={auditLog} onChange={setAuditLog} />
-            <ToggleRow label="Max token limit per request" description="Enforce a maximum token budget per single request" checked={maxTokens} onChange={setMaxTokens} />
+            <SectionTitle>Create Policy</SectionTitle>
+            <InlineInput label="Policy Name" value={policyName} onChange={setPolicyName} placeholder="e.g. strict-prod" />
+            <InlineInput label="Budget Limit (USD)" value={policyBudget} onChange={setPolicyBudget} type="number" />
+            <InlineInput label="Blocked Tools (comma-separated)" value={blockedToolsRaw} onChange={setBlockedToolsRaw} placeholder="sandbox_exec, web_search" />
+            <button
+              disabled={!editable}
+              className="w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+              onClick={async () => {
+                if (!editable) return;
+                if (!policyName.trim()) return;
+                const query = new URLSearchParams({
+                  name: policyName.trim(),
+                  budget_limit_usd: String(Number(policyBudget || "0") || 0),
+                }).toString();
+                try {
+                  await apiRequest(`/api/v1/policies?${query}`, "POST");
+                  setActionMessage("Policy created");
+                  setPolicyName("");
+                  setBlockedToolsRaw("");
+                  void policiesQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to create policy");
+                }
+              }}
+            >
+              Create Policy
+            </button>
           </div>
           <div className="bg-surface-base rounded-lg border border-border-default p-4">
-            <SectionTitle>Content Filters</SectionTitle>
-            <div className="space-y-1.5">
-              {["PII Detection", "Profanity Filter", "Code Injection Guard", "Prompt Injection Shield"].map((f) => (
-                <div key={f} className="flex items-center justify-between py-2 border-b border-border-default last:border-0">
-                  <span className="text-xs text-text-primary">{f}</span>
-                  <StatusPill status="enabled" />
+            <SectionTitle>Policy Templates</SectionTitle>
+            {policiesQuery.loading && <p className="text-xs text-text-muted">Loading policies...</p>}
+            {policiesQuery.error && <p className="text-xs text-status-error">{policiesQuery.error}</p>}
+            <div className="space-y-2">
+              {policies.map((policy) => (
+                <div key={policy.id} className="border border-border-default rounded p-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-text-primary flex-1">{policy.name}</span>
+                    <span className="text-[10px] text-text-muted font-mono">{policy.orgId || "global"}</span>
+                    <button
+                      disabled={!editable}
+                      className="text-[10px] text-status-error disabled:opacity-50"
+                      onClick={async () => {
+                        if (!editable) return;
+                        try {
+                          await apiRequest(`/api/v1/policies/${policy.id}`, "DELETE");
+                          setActionMessage("Policy deleted");
+                          void policiesQuery.refetch();
+                        } catch (err) {
+                          setActionMessage(err instanceof Error ? err.message : "Failed to delete policy");
+                        }
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                  <div className="text-[10px] text-text-muted mt-1">
+                    Budget: ${Number(policy.policy.budget_limit_usd ?? 0).toFixed(2)} ·
+                    Blocked: {Array.isArray(policy.policy.blocked_tools) ? policy.policy.blocked_tools.length : 0}
+                  </div>
                 </div>
               ))}
             </div>
@@ -653,54 +757,49 @@ export function GovernancePanel({ open, onClose }: { open: boolean; onClose: () 
 
       {tab === "budgets" && (
         <div>
-          <div className="grid grid-cols-3 gap-3 mb-4">
-            {[
-              { label: "Monthly Budget", value: "$500", used: "$127.40", pct: 25 },
-              { label: "Daily Limit", value: "$50", used: "$12.30", pct: 25 },
-              { label: "Per-Agent Cap", value: "$100", used: "$34.50", pct: 35 },
-            ].map((b) => (
-              <div key={b.label} className="bg-surface-base rounded-lg border border-border-default p-3">
-                <p className="text-[10px] text-text-muted">{b.label}</p>
-                <p className="text-lg font-semibold text-text-primary">{b.value}</p>
-                <p className="text-[10px] text-text-muted">Used: {b.used}</p>
-                <div className="mt-1.5 h-1 bg-surface-overlay rounded-full overflow-hidden">
-                  <div className="h-full bg-accent rounded-full" style={{ width: `${b.pct}%` }} />
-                </div>
+          <div className="grid grid-cols-2 gap-3 mb-4">
+            <div className="bg-surface-base rounded-lg border border-border-default p-3">
+              <p className="text-[10px] text-text-muted">30d Spend</p>
+              <p className="text-lg font-semibold text-text-primary">${totalCostUsd.toFixed(2)}</p>
+              <p className="text-[10px] text-text-muted">vs configured policy budget</p>
+              <div className="mt-1.5 h-1 bg-surface-overlay rounded-full overflow-hidden">
+                <div className="h-full bg-accent rounded-full" style={{ width: `${usagePct}%` }} />
               </div>
-            ))}
+            </div>
+            <div className="bg-surface-base rounded-lg border border-border-default p-3">
+              <p className="text-[10px] text-text-muted">Cost Split</p>
+              <div className="text-[11px] text-text-secondary mt-1 space-y-1">
+                <p>Inference: ${inferenceCostUsd.toFixed(2)}</p>
+                <p>GPU: ${gpuCostUsd.toFixed(2)}</p>
+                <p>Connectors: ${connectorCostUsd.toFixed(2)}</p>
+              </div>
+            </div>
           </div>
-          <div className="bg-surface-base rounded-lg border border-border-default p-4">
-            <SectionTitle>Budget Alerts</SectionTitle>
-            <InlineInput label="Alert at % of budget" value="80" onChange={() => {}} type="number" />
-            <InlineInput label="Hard stop at % of budget" value="100" onChange={() => {}} type="number" />
-            <InlineInput label="Alert email" value="admin@oneshots.co" onChange={() => {}} />
-          </div>
+          {usageQuery.loading && <p className="text-xs text-text-muted">Loading usage...</p>}
+          {usageQuery.error && <p className="text-xs text-status-error">{usageQuery.error}</p>}
         </div>
       )}
 
       {tab === "approvals" && (
         <div className="space-y-2">
-          {[
-            { trigger: "Agent Deployment", approvers: ["admin@oneshots.co"], status: "enabled" },
-            { trigger: "Budget Override", approvers: ["admin@oneshots.co", "finance@oneshots.co"], status: "enabled" },
-            { trigger: "Tool Permission Grant", approvers: ["admin@oneshots.co"], status: "disabled" },
-          ].map((rule) => (
-            <div key={rule.trigger} className="bg-surface-base rounded-lg border border-border-default p-3">
-              <div className="flex items-center gap-2 mb-2">
+          {auditQuery.loading && <p className="text-xs text-text-muted">Loading recent governance events...</p>}
+          {auditQuery.error && <p className="text-xs text-status-error">{auditQuery.error}</p>}
+          {(auditQuery.data?.entries ?? []).slice(0, 20).map((entry, idx) => (
+            <div key={`${entry.id ?? entry.created_at ?? idx}`} className="bg-surface-base rounded-lg border border-border-default p-3">
+              <div className="flex items-center gap-2 mb-1">
                 <ShieldCheck size={12} className="text-accent" />
-                <span className="text-[11px] font-medium text-text-primary flex-1">{rule.trigger}</span>
-                <StatusPill status={rule.status} />
+                <span className="text-[11px] font-medium text-text-primary flex-1">
+                  {String(entry.action ?? "event")}
+                </span>
+                <span className="text-[10px] text-text-muted">
+                  {entry.created_at ? new Date(Number(entry.created_at) * 1000).toLocaleString() : ""}
+                </span>
               </div>
-              <div className="flex flex-wrap gap-1">
-                {rule.approvers.map((a) => (
-                  <span key={a} className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-surface-overlay text-text-muted">{a}</span>
-                ))}
+              <div className="text-[10px] text-text-muted">
+                user: {String(entry.user_id ?? "system")} · resource: {String(entry.resource_type ?? "n/a")}
               </div>
             </div>
           ))}
-          <button className="w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
-            + Add Approval Rule
-          </button>
         </div>
       )}
     </CanvasOverlayPanel>
@@ -710,34 +809,46 @@ export function GovernancePanel({ open, onClose }: { open: boolean; onClose: () 
 /* ═══════════════════════════════════════════════════════════════════
    PROJECTS & ENVIRONMENTS PANEL
    ═══════════════════════════════════════════════════════════════════ */
-export function ProjectsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+export function ProjectsPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
+  const [selectedProject, setSelectedProject] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
   const [projName, setProjName] = useState("");
   const [projDesc, setProjDesc] = useState("");
-
-  const projects = [
-    { id: "proj_1", name: "my-agents", description: "Primary agent workspace", envs: ["production", "staging", "development"], varsCount: 12 },
-    { id: "proj_2", name: "experiments", description: "Testing and prototyping", envs: ["sandbox"], varsCount: 4 },
-  ];
-
-  const envVars = [
-    { key: "OPENAI_API_KEY", value: "sk-***", secret: true },
-    { key: "DATABASE_URL", value: "postgres://...", secret: true },
-    { key: "LOG_LEVEL", value: "info", secret: false },
-    { key: "MAX_RETRIES", value: "3", secret: false },
-    { key: "SLACK_WEBHOOK_URL", value: "https://hooks.slack.com/...", secret: true },
-  ];
+  const [envPlan, setEnvPlan] = useState("standard");
+  const [actionMessage, setActionMessage] = useState("");
+  const projectsQuery = useApiQuery<{ projects?: Array<Record<string, unknown>> }>(
+    "/api/v1/projects",
+    open,
+  );
+  const envsQuery = useApiQuery<{ environments?: Array<Record<string, unknown>> }>(
+    `/api/v1/projects/${selectedProject}/envs`,
+    open && Boolean(selectedProject),
+  );
+  const projects = (projectsQuery.data?.projects ?? []).map((p) => ({
+    id: String(p.project_id ?? ""),
+    name: String(p.name ?? "project"),
+    description: String(p.description ?? ""),
+    slug: String(p.slug ?? ""),
+    plan: String(p.default_plan ?? "standard"),
+    createdAt: Number(p.created_at ?? 0),
+  }));
+  const envs = (envsQuery.data?.environments ?? []).map((e) => ({
+    id: String(e.env_id ?? ""),
+    name: String(e.name ?? ""),
+    plan: String(e.plan ?? "standard"),
+  }));
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Projects & Environments" icon={<FolderKanban size={16} className="text-accent" />}>
+      <ReadOnlyNotice editable={editable} />
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs text-text-muted">{projects.length} projects</p>
-        <button onClick={() => setShowCreate(!showCreate)}
+        <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
           className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
           <Plus size={12} /> New Project
         </button>
       </div>
+      {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
 
       {showCreate && (
         <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
@@ -745,23 +856,58 @@ export function ProjectsPanel({ open, onClose }: { open: boolean; onClose: () =>
           <InlineInput label="Name" value={projName} onChange={setProjName} placeholder="e.g. my-agents" />
           <InlineTextarea label="Description" value={projDesc} onChange={setProjDesc} placeholder="What is this project for?" />
           <div className="flex gap-2 mt-2">
-            <button className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Create</button>
+            <button
+              disabled={!editable}
+              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+              onClick={async () => {
+                if (!editable) return;
+                if (!projName.trim()) return;
+                const qs = new URLSearchParams({
+                  name: projName.trim(),
+                  description: projDesc.trim(),
+                  plan: "standard",
+                }).toString();
+                try {
+                  const created = await apiRequest<{ meta_agent?: { name?: string; created?: boolean } }>(
+                    `/api/v1/projects?${qs}`,
+                    "POST",
+                  );
+                  const metaName = created.meta_agent?.name || "meta-agent";
+                  const metaCreated = created.meta_agent?.created;
+                  setActionMessage(
+                    metaCreated
+                      ? `Project created and ${metaName} initialized`
+                      : `Project created (${metaName} already existed)`,
+                  );
+                  setProjName("");
+                  setProjDesc("");
+                  setShowCreate(false);
+                  void projectsQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to create project");
+                }
+              }}
+            >
+              Create
+            </button>
             <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-xs text-text-muted hover:text-text-primary transition-colors">Cancel</button>
           </div>
         </div>
       )}
 
       <div className="space-y-3">
+        {projectsQuery.loading && <p className="text-xs text-text-muted">Loading projects...</p>}
+        {projectsQuery.error && <p className="text-xs text-status-error">{projectsQuery.error}</p>}
         {projects.map((proj) => (
           <div key={proj.id} className="bg-surface-base rounded-lg border border-border-default overflow-hidden">
-            <button onClick={() => setSelectedProject(selectedProject === proj.id ? null : proj.id)}
+            <button onClick={() => setSelectedProject(selectedProject === proj.id ? "" : proj.id)}
               className="w-full flex items-center gap-3 p-3 hover:bg-surface-overlay/50 transition-colors">
               <FolderKanban size={14} className="text-accent flex-shrink-0" />
               <div className="flex-1 text-left min-w-0">
                 <p className="text-[11px] font-medium text-text-primary">{proj.name}</p>
                 <p className="text-[10px] text-text-muted">{proj.description}</p>
               </div>
-              <span className="text-[10px] text-text-muted">{proj.envs.length} envs</span>
+              <span className="text-[10px] text-text-muted">{proj.plan}</span>
               <ChevronRight size={12} className={`text-text-muted transition-transform ${selectedProject === proj.id ? "rotate-90" : ""}`} />
             </button>
 
@@ -770,27 +916,32 @@ export function ProjectsPanel({ open, onClose }: { open: boolean; onClose: () =>
                 <div className="flex items-center gap-2 mb-3">
                   <SectionTitle>Environments</SectionTitle>
                 </div>
+                {envsQuery.loading && <p className="text-xs text-text-muted">Loading environments...</p>}
+                {envsQuery.error && <p className="text-xs text-status-error">{envsQuery.error}</p>}
                 <div className="flex gap-2 mb-4">
-                  {proj.envs.map((env) => (
-                    <span key={env} className="text-[10px] px-2 py-1 rounded-md bg-surface-overlay text-text-secondary">{env}</span>
+                  {envs.map((env) => (
+                    <button
+                      key={env.id}
+                      disabled={!editable}
+                      className="text-[10px] px-2 py-1 rounded-md bg-surface-overlay text-text-secondary disabled:opacity-50"
+                      onClick={async () => {
+                        if (!editable) return;
+                        const nextPlan = envPlan === "standard" ? "pro" : "standard";
+                        const qs = new URLSearchParams({ plan: nextPlan }).toString();
+                        try {
+                          await apiRequest(`/api/v1/projects/${proj.id}/envs/${env.name}?${qs}`, "PUT");
+                          setActionMessage(`Updated ${env.name} plan to ${nextPlan}`);
+                          setEnvPlan(nextPlan);
+                          void envsQuery.refetch();
+                        } catch (err) {
+                          setActionMessage(err instanceof Error ? err.message : "Failed to update environment");
+                        }
+                      }}
+                    >
+                      {env.name} ({env.plan})
+                    </button>
                   ))}
                 </div>
-
-                <SectionTitle>Environment Variables</SectionTitle>
-                <div className="bg-surface-raised rounded-lg border border-border-default overflow-hidden">
-                  {envVars.map((v) => (
-                    <div key={v.key} className="flex items-center gap-2 px-3 py-2 border-b border-border-default last:border-0">
-                      {v.secret ? <Lock size={9} className="text-yellow-500 flex-shrink-0" /> : <Unlock size={9} className="text-text-muted flex-shrink-0" />}
-                      <code className="text-[10px] text-accent font-mono flex-shrink-0">{v.key}</code>
-                      <span className="text-[10px] text-text-muted">=</span>
-                      <code className="text-[10px] text-text-secondary font-mono truncate flex-1">{v.value}</code>
-                      <button className="text-text-muted hover:text-status-error flex-shrink-0"><Trash2 size={9} /></button>
-                    </div>
-                  ))}
-                </div>
-                <button className="mt-2 w-full py-1.5 text-[10px] font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
-                  + Add Variable
-                </button>
               </div>
             )}
           </div>
@@ -803,24 +954,42 @@ export function ProjectsPanel({ open, onClose }: { open: boolean; onClose: () =>
 /* ═══════════════════════════════════════════════════════════════════
    RELEASES PANEL
    ═══════════════════════════════════════════════════════════════════ */
-export function ReleasesPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function ReleasesPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
   const [tab, setTab] = useState<"channels" | "releases">("channels");
-
-  const channels = [
-    { name: "production", version: "v1.3.2", traffic: 100, status: "active", agent: "support-bot" },
-    { name: "staging", version: "v1.4.0-rc1", traffic: 100, status: "active", agent: "support-bot" },
-    { name: "canary", version: "v1.4.0-beta", traffic: 5, status: "active", agent: "support-bot" },
-  ];
-
-  const releases = [
-    { version: "v1.4.0-rc1", agent: "support-bot", channel: "staging", status: "active", date: "2 hours ago" },
-    { version: "v1.3.2", agent: "support-bot", channel: "production", status: "active", date: "1 day ago" },
-    { version: "v1.3.1", agent: "data-analyst", channel: "production", status: "superseded", date: "3 days ago" },
-    { version: "v1.4.0-beta", agent: "support-bot", channel: "canary", status: "active", date: "5 hours ago" },
-  ];
+  const [agentName, setAgentName] = useState("support-bot");
+  const [canaryVersion, setCanaryVersion] = useState("v-next");
+  const [canaryWeight, setCanaryWeight] = useState("0.1");
+  const [actionMessage, setActionMessage] = useState("");
+  const channelsQuery = useApiQuery<{ channels?: Array<Record<string, unknown>> }>(
+    `/api/v1/releases/${encodeURIComponent(agentName)}/channels`,
+    open,
+  );
+  const canaryQuery = useApiQuery<{ canary?: Record<string, unknown> | null }>(
+    `/api/v1/releases/${encodeURIComponent(agentName)}/canary`,
+    open,
+  );
+  const channels = (channelsQuery.data?.channels ?? []).map((c) => ({
+    name: String(c.channel ?? ""),
+    version: String(c.version ?? ""),
+    status: "active",
+    promotedAt: Number(c.promoted_at ?? 0),
+  }));
+  const releases = channels.map((c) => ({
+    version: c.version,
+    agent: agentName,
+    channel: c.name,
+    status: c.status,
+    date: c.promotedAt ? new Date(c.promotedAt * 1000).toLocaleString() : "n/a",
+  }));
+  const canary = canaryQuery.data?.canary ?? null;
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Release Channels" icon={<Tag size={16} className="text-accent" />}>
+      <ReadOnlyNotice editable={editable} />
+      <div className="mb-3">
+        <InlineInput label="Agent Name" value={agentName} onChange={setAgentName} placeholder="support-bot" />
+      </div>
+      {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
       <div className="flex items-center gap-1 mb-4">
         {(["channels", "releases"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)}
@@ -832,6 +1001,8 @@ export function ReleasesPanel({ open, onClose }: { open: boolean; onClose: () =>
 
       {tab === "channels" && (
         <div className="space-y-2">
+          {channelsQuery.loading && <p className="text-xs text-text-muted">Loading channels...</p>}
+          {channelsQuery.error && <p className="text-xs text-status-error">{channelsQuery.error}</p>}
           {channels.map((ch) => (
             <div key={ch.name} className="bg-surface-base rounded-lg border border-border-default p-3">
               <div className="flex items-center gap-2 mb-2">
@@ -840,17 +1011,79 @@ export function ReleasesPanel({ open, onClose }: { open: boolean; onClose: () =>
                 <code className="text-[10px] font-mono text-text-muted">{ch.version}</code>
                 <StatusPill status={ch.status} />
               </div>
-              <div className="flex items-center gap-2">
-                <div className="flex-1 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
-                  <div className="h-full bg-accent rounded-full" style={{ width: `${ch.traffic}%` }} />
-                </div>
-                <span className="text-[10px] text-text-muted">{ch.traffic}% traffic</span>
-              </div>
+              <div className="text-[10px] text-text-muted">Promoted: {ch.promotedAt ? new Date(ch.promotedAt * 1000).toLocaleString() : "n/a"}</div>
             </div>
           ))}
-          <button className="w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
-            + Create Channel
-          </button>
+          <div className="bg-surface-base rounded-lg border border-border-default p-3">
+            <p className="text-[10px] text-text-muted mb-2">Promote Draft → Staging</p>
+            <button
+              disabled={!editable}
+              className="w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors disabled:opacity-50"
+              onClick={async () => {
+                if (!editable) return;
+                try {
+                  const qs = new URLSearchParams({ from_channel: "draft", to_channel: "staging" }).toString();
+                  await apiRequest(`/api/v1/releases/${encodeURIComponent(agentName)}/promote?${qs}`, "POST");
+                  setActionMessage("Promoted draft to staging");
+                  void channelsQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to promote");
+                }
+              }}
+            >
+              Promote
+            </button>
+          </div>
+          <div className="bg-surface-base rounded-lg border border-border-default p-3">
+            <p className="text-[10px] text-text-muted mb-2">Canary Split</p>
+            <InlineInput label="Canary Version" value={canaryVersion} onChange={setCanaryVersion} placeholder="v-next" />
+            <InlineInput label="Canary Weight (0-1)" value={canaryWeight} onChange={setCanaryWeight} type="number" />
+            <div className="flex gap-2">
+              <button
+                disabled={!editable}
+                className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+                onClick={async () => {
+                  if (!editable) return;
+                  try {
+                    const primary = channels.find((c) => c.name === "production")?.version || "current";
+                    const qs = new URLSearchParams({
+                      primary_version: primary,
+                      canary_version: canaryVersion,
+                      canary_weight: String(Number(canaryWeight || "0.1")),
+                    }).toString();
+                    await apiRequest(`/api/v1/releases/${encodeURIComponent(agentName)}/canary?${qs}`, "POST");
+                    setActionMessage("Canary updated");
+                    void canaryQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to set canary");
+                  }
+                }}
+              >
+                Set Canary
+              </button>
+              <button
+                disabled={!editable || !canary}
+                className="px-3 py-2 text-xs border border-border-default rounded-lg text-text-muted disabled:opacity-50"
+                onClick={async () => {
+                  if (!editable) return;
+                  try {
+                    await apiRequest(`/api/v1/releases/${encodeURIComponent(agentName)}/canary`, "DELETE");
+                    setActionMessage("Canary removed");
+                    void canaryQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to remove canary");
+                  }
+                }}
+              >
+                Remove
+              </button>
+            </div>
+            {canary && (
+              <p className="mt-2 text-[10px] text-text-muted">
+                Active canary: {String(canary.canary_version ?? "")} @ {Number(canary.canary_weight ?? 0) * 100}%
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -880,22 +1113,41 @@ export function ReleasesPanel({ open, onClose }: { open: boolean; onClose: () =>
 /* ═══════════════════════════════════════════════════════════════════
    INFRASTRUCTURE PANEL
    ═══════════════════════════════════════════════════════════════════ */
-export function InfrastructurePanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function InfrastructurePanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
   const [tab, setTab] = useState<"gpu" | "retention">("gpu");
-
-  const gpuEndpoints = [
-    { id: "gpu_1", name: "inference-a100", type: "A100 80GB", status: "healthy", utilization: 72, cost: "$2.40/hr" },
-    { id: "gpu_2", name: "training-h100", type: "H100 80GB", status: "provisioning", utilization: 0, cost: "$3.80/hr" },
-  ];
-
-  const retentionPolicies = [
-    { name: "Session Logs", retention: "90 days", size: "12.4 GB", status: "active" },
-    { name: "Agent Traces", retention: "30 days", size: "4.2 GB", status: "active" },
-    { name: "Eval Results", retention: "365 days", size: "1.8 GB", status: "active" },
-  ];
+  const [modelId, setModelId] = useState("gpt-4.1-mini");
+  const [gpuType, setGpuType] = useState("h200");
+  const [gpuCount, setGpuCount] = useState("1");
+  const [resourceType, setResourceType] = useState("sessions");
+  const [retentionDays, setRetentionDays] = useState("90");
+  const [actionMessage, setActionMessage] = useState("");
+  const gpuQuery = useApiQuery<{ endpoints?: Array<Record<string, unknown>> }>(
+    "/api/v1/gpu/endpoints",
+    open && tab === "gpu",
+  );
+  const retentionQuery = useApiQuery<{ policies?: Array<Record<string, unknown>> }>(
+    "/api/v1/retention",
+    open && tab === "retention",
+  );
+  const gpuEndpoints = (gpuQuery.data?.endpoints ?? []).map((gpu) => ({
+    id: String(gpu.endpoint_id ?? ""),
+    modelId: String(gpu.model_id ?? ""),
+    type: String(gpu.gpu_type ?? ""),
+    status: String(gpu.status ?? "unknown"),
+    count: Number(gpu.gpu_count ?? 1),
+    cost: Number(gpu.hourly_rate_usd ?? 0),
+  }));
+  const retentionPolicies = (retentionQuery.data?.policies ?? []).map((rp) => ({
+    id: String(rp.policy_id ?? ""),
+    type: String(rp.resource_type ?? ""),
+    retention: Number(rp.retention_days ?? 0),
+    status: Boolean(rp.is_active ?? true) ? "active" : "disabled",
+  }));
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Infrastructure" icon={<Cpu size={16} className="text-accent" />}>
+      <ReadOnlyNotice editable={editable} />
+      {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
       <div className="flex items-center gap-1 mb-4">
         {(["gpu", "retention"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)}
@@ -907,54 +1159,157 @@ export function InfrastructurePanel({ open, onClose }: { open: boolean; onClose:
 
       {tab === "gpu" && (
         <div>
+          <div className="bg-surface-base rounded-lg border border-border-default p-3 mb-3">
+            <SectionTitle>Provision Endpoint</SectionTitle>
+            <InlineInput label="Model ID" value={modelId} onChange={setModelId} placeholder="gpt-4.1-mini" />
+            <InlineSelect label="GPU Type" value={gpuType} onChange={setGpuType} options={[
+              { value: "h200", label: "H200" },
+              { value: "h100", label: "H100" },
+            ]} />
+            <InlineInput label="GPU Count" value={gpuCount} onChange={setGpuCount} type="number" />
+            <button
+              disabled={!editable}
+              className="w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+              onClick={async () => {
+                if (!editable) return;
+                const qs = new URLSearchParams({
+                  model_id: modelId,
+                  gpu_type: gpuType,
+                  gpu_count: String(Number(gpuCount || "1") || 1),
+                }).toString();
+                try {
+                  await apiRequest(`/api/v1/gpu/endpoints?${qs}`, "POST");
+                  setActionMessage("GPU provisioning requested");
+                  void gpuQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to provision endpoint");
+                }
+              }}
+            >
+              Provision
+            </button>
+          </div>
           <div className="space-y-2 mb-4">
+            {gpuQuery.loading && <p className="text-xs text-text-muted">Loading GPU endpoints...</p>}
+            {gpuQuery.error && <p className="text-xs text-status-error">{gpuQuery.error}</p>}
             {gpuEndpoints.map((gpu) => (
               <div key={gpu.id} className="bg-surface-base rounded-lg border border-border-default p-3">
                 <div className="flex items-center gap-2 mb-2">
                   <Cpu size={12} className="text-accent" />
-                  <span className="text-[11px] font-medium text-text-primary flex-1">{gpu.name}</span>
+                  <span className="text-[11px] font-medium text-text-primary flex-1">{gpu.id}</span>
                   <StatusPill status={gpu.status} />
                 </div>
                 <div className="flex items-center gap-3 text-[10px] text-text-muted mb-2">
-                  <span>{gpu.type}</span>
-                  <span>{gpu.cost}</span>
+                  <span>{gpu.type} x{gpu.count}</span>
+                  <span>${gpu.cost.toFixed(2)}/hr</span>
+                  <span>{gpu.modelId}</span>
                 </div>
-                {gpu.status === "healthy" && (
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
-                      <div className="h-full bg-accent rounded-full" style={{ width: `${gpu.utilization}%` }} />
-                    </div>
-                    <span className="text-[10px] text-text-muted">{gpu.utilization}% util</span>
-                  </div>
-                )}
                 <div className="flex gap-2 mt-2">
-                  <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors">
+                  <button
+                    disabled={!editable}
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors disabled:opacity-50"
+                    onClick={async () => {
+                      if (!editable) return;
+                      try {
+                        await apiRequest(`/api/v1/gpu/endpoints/${gpu.id}`, "DELETE");
+                        setActionMessage("GPU endpoint terminated");
+                        void gpuQuery.refetch();
+                      } catch (err) {
+                        setActionMessage(err instanceof Error ? err.message : "Failed to terminate endpoint");
+                      }
+                    }}
+                  >
                     <Pause size={9} /> Terminate
                   </button>
                 </div>
               </div>
             ))}
           </div>
-          <button className="w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
-            + Provision GPU Endpoint
-          </button>
         </div>
       )}
 
       {tab === "retention" && (
-        <div className="space-y-2">
+        <div>
+          <div className="bg-surface-base rounded-lg border border-border-default p-3 mb-3">
+            <SectionTitle>Create Retention Policy</SectionTitle>
+            <InlineSelect label="Resource Type" value={resourceType} onChange={setResourceType} options={[
+              { value: "sessions", label: "sessions" },
+              { value: "turns", label: "turns" },
+              { value: "episodes", label: "episodes" },
+              { value: "billing_records", label: "billing_records" },
+              { value: "audit_log", label: "audit_log" },
+              { value: "cost_ledger", label: "cost_ledger" },
+            ]} />
+            <InlineInput label="Retention Days" value={retentionDays} onChange={setRetentionDays} type="number" />
+            <div className="flex gap-2">
+              <button
+                disabled={!editable}
+                className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+                onClick={async () => {
+                  if (!editable) return;
+                  const qs = new URLSearchParams({
+                    resource_type: resourceType,
+                    retention_days: String(Number(retentionDays || "90") || 90),
+                  }).toString();
+                  try {
+                    await apiRequest(`/api/v1/retention?${qs}`, "POST");
+                    setActionMessage("Retention policy created");
+                    void retentionQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to create retention policy");
+                  }
+                }}
+              >
+                Create
+              </button>
+              <button
+                disabled={!editable}
+                className="px-3 py-2 text-xs border border-border-default rounded-lg text-text-muted disabled:opacity-50"
+                onClick={async () => {
+                  if (!editable) return;
+                  try {
+                    await apiRequest("/api/v1/retention/apply", "POST");
+                    setActionMessage("Retention policies applied");
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to apply retention");
+                  }
+                }}
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+          <div className="space-y-2">
+          {retentionQuery.loading && <p className="text-xs text-text-muted">Loading retention policies...</p>}
+          {retentionQuery.error && <p className="text-xs text-status-error">{retentionQuery.error}</p>}
           {retentionPolicies.map((rp) => (
-            <div key={rp.name} className="bg-surface-base rounded-lg border border-border-default p-3 flex items-center gap-3">
+            <div key={rp.id} className="bg-surface-base rounded-lg border border-border-default p-3 flex items-center gap-3">
               <div className="flex-1">
-                <p className="text-[11px] font-medium text-text-primary">{rp.name}</p>
+                <p className="text-[11px] font-medium text-text-primary">{rp.type}</p>
                 <div className="flex items-center gap-3 text-[10px] text-text-muted mt-1">
-                  <span>Retention: {rp.retention}</span>
-                  <span>Size: {rp.size}</span>
+                  <span>Retention: {rp.retention} days</span>
                 </div>
               </div>
               <StatusPill status={rp.status} />
+              <button
+                disabled={!editable}
+                className="text-[10px] text-status-error disabled:opacity-50"
+                onClick={async () => {
+                  if (!editable) return;
+                  try {
+                    await apiRequest(`/api/v1/retention/${rp.id}`, "DELETE");
+                    setActionMessage("Retention policy deleted");
+                    void retentionQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to delete retention policy");
+                  }
+                }}
+              >
+                Delete
+              </button>
             </div>
           ))}
+          </div>
         </div>
       )}
     </CanvasOverlayPanel>

@@ -1387,19 +1387,26 @@ class AgentDB:
         self.conn.commit()
 
     def dequeue_job(self) -> dict[str, Any] | None:
-        """Get the next pending job (highest priority, oldest first)."""
+        """Get the next pending job (highest priority, oldest first).
+
+        Uses BEGIN IMMEDIATE to prevent TOCTOU race where two workers
+        could claim the same job via a non-atomic SELECT then UPDATE.
+        """
+        now = time.time()
+        self.conn.execute("BEGIN IMMEDIATE")
         row = self.conn.execute(
             """SELECT * FROM job_queue WHERE status = 'pending'
             AND (scheduled_at IS NULL OR scheduled_at <= ?)
             ORDER BY priority DESC, created_at ASC LIMIT 1""",
-            (time.time(),),
+            (now,),
         ).fetchone()
         if not row:
+            self.conn.commit()
             return None
         job = dict(row)
         self.conn.execute(
             "UPDATE job_queue SET status = 'running', started_at = ? WHERE job_id = ?",
-            (time.time(), job["job_id"]),
+            (now, job["job_id"]),
         )
         self.conn.commit()
         return job
@@ -1441,6 +1448,11 @@ class AgentDB:
 
     # ── Retention ──────────────────────────────────────────────────────
 
+    _RETENTION_ALLOWED_TABLES = frozenset({
+        "sessions", "turns", "errors", "feedback", "cost_ledger",
+        "job_queue", "workflow_runs", "traces", "billing",
+    })
+
     def apply_retention(self) -> dict[str, int]:
         """Apply all active retention policies. Returns counts of deleted rows."""
         policies = self.conn.execute(
@@ -1451,6 +1463,9 @@ class AgentDB:
             p = dict(p)
             cutoff = time.time() - (p["retention_days"] * 86400)
             table = p["resource_type"]
+            if table not in self._RETENTION_ALLOWED_TABLES:
+                deleted[table] = -1
+                continue
             try:
                 result = self.conn.execute(f"DELETE FROM {table} WHERE created_at < ?", (cutoff,))
                 deleted[table] = result.rowcount
@@ -2307,7 +2322,7 @@ class AgentDB:
         feedback_rows = self.conn.execute(
             "SELECT * FROM feedback WHERE session_id = ?", (session_id,)
         ).fetchall()
-        spans = self.query_trace(session.get("session_id", ""))
+        spans = self.query_trace(session.get("trace_id", ""))
 
         return {
             "session": {

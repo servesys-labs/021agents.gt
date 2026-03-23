@@ -1,6 +1,7 @@
 import { memo } from "react";
-import { Handle, Position, useNodeConnections, type NodeProps } from "@xyflow/react";
+import { type NodeProps } from "@xyflow/react";
 import { Database, Wifi, WifiOff } from "lucide-react";
+import { BaseNode } from "./BaseNode";
 
 export type DataSourceNodeData = {
   name: string;
@@ -30,59 +31,32 @@ export const DataSourceNode = memo(({ data, selected }: NodeProps & { data: Data
   const cfg = statusConfig[status] || statusConfig.disconnected;
   const dbLabel = dbLabels[nodeData.type] || nodeData.type;
 
-  const sourceConns = useNodeConnections({ handleType: "source" });
-  const targetConns = useNodeConnections({ handleType: "target" });
-  const hasSource = sourceConns.length > 0;
-  const hasTarget = targetConns.length > 0;
-
   return (
-    <div
-      className={`
-        relative min-w-[190px] max-w-[220px] rounded-xl border transition-all duration-200
-        ${selected
-          ? "border-chart-cyan shadow-[0_0_20px_rgba(6,182,212,0.2)]"
-          : "border-border-default hover:border-border-strong"
-        }
-      `}
-      style={{ background: 'rgba(28, 25, 23, 0.45)', backdropFilter: 'blur(40px) saturate(1.8)', WebkitBackdropFilter: 'blur(40px) saturate(1.8)' }}
+    <BaseNode
+      accentColor="chart-cyan"
+      selectedShadow="shadow-[var(--shadow-node)]"
+      stripColor="bg-chart-cyan"
+      selected={selected}
     >
-      <Handle
-        type="target"
-        position={Position.Left}
-        className={`!w-2.5 !h-2.5 !border-2 !border-chart-cyan !-left-[5px] transition-all ${
-          hasTarget ? "!bg-surface-overlay hover:!bg-chart-cyan !opacity-100" : "!opacity-0 !pointer-events-none"
-        }`}
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        className={`!w-2.5 !h-2.5 !border-2 !border-chart-cyan !-right-[5px] transition-all ${
-          hasSource ? "!bg-surface-overlay hover:!bg-chart-cyan !opacity-100" : "!opacity-0 !pointer-events-none"
-        }`}
-      />
-
-      {/* Cyan accent strip */}
-      <div className="absolute top-0 left-4 right-4 h-[2px] rounded-b bg-chart-cyan opacity-60" />
-
       <div className="px-3.5 py-3 flex items-start gap-2.5">
-        <div className="w-8 h-8 rounded-lg bg-[rgba(6,182,212,0.1)] flex items-center justify-center flex-shrink-0">
+        <div className="w-8 h-8 rounded-lg bg-node-glow-cyan flex items-center justify-center flex-shrink-0">
           <Database size={15} className="text-chart-cyan" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-text-primary leading-tight truncate">
+          <div className="text-[length:var(--text-base)] font-semibold text-text-primary leading-tight truncate">
             {nodeData.name}
           </div>
-          <div className="text-[10px] text-text-muted mt-0.5 font-mono">{dbLabel}</div>
+          <div className="text-[length:var(--text-2xs)] text-text-muted mt-0.5 font-mono">{dbLabel}</div>
           <div className="flex items-center gap-1.5 mt-1.5">
             <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
-            <span className="text-[10px] text-text-muted">{cfg.label}</span>
+            <span className="text-[length:var(--text-2xs)] text-text-muted">{cfg.label}</span>
             {nodeData.tableCount !== undefined && (
-              <span className="text-[10px] text-text-muted ml-1">&middot; {nodeData.tableCount} tables</span>
+              <span className="text-[length:var(--text-2xs)] text-text-muted ml-1">&middot; {nodeData.tableCount} tables</span>
             )}
           </div>
         </div>
       </div>
-    </div>
+    </BaseNode>
   );
 });
 

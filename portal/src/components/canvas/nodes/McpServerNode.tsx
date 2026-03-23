@@ -1,6 +1,7 @@
 import { memo } from "react";
-import { Handle, Position, useNodeConnections, type NodeProps } from "@xyflow/react";
+import { type NodeProps } from "@xyflow/react";
 import { Server, Zap, RefreshCw } from "lucide-react";
+import { BaseNode } from "./BaseNode";
 
 export type McpServerNodeData = {
   name: string;
@@ -21,60 +22,34 @@ export const McpServerNode = memo(({ data, selected }: NodeProps & { data: McpSe
   const status = nodeData.status || "offline";
   const cfg = statusConfig[status] || statusConfig.offline;
 
-  const sourceConns = useNodeConnections({ handleType: "source" });
-  const targetConns = useNodeConnections({ handleType: "target" });
-  const hasSource = sourceConns.length > 0;
-  const hasTarget = targetConns.length > 0;
-
   return (
-    <div
-      className={`
-        relative min-w-[190px] max-w-[240px] rounded-xl border transition-all duration-200
-        ${selected
-          ? "border-chart-blue shadow-[0_0_20px_rgba(59,130,246,0.2)]"
-          : "border-border-default hover:border-border-strong"
-        }
-      `}
-      style={{ background: 'rgba(28, 25, 23, 0.45)', backdropFilter: 'blur(40px) saturate(1.8)', WebkitBackdropFilter: 'blur(40px) saturate(1.8)' }}
+    <BaseNode
+      accentColor="chart-blue"
+      selectedShadow="shadow-[var(--shadow-node)]"
+      stripColor="bg-chart-blue"
+      selected={selected}
+      widthClasses="min-w-[190px] max-w-[240px]"
     >
-      <Handle
-        type="target"
-        position={Position.Left}
-        className={`!w-2.5 !h-2.5 !border-2 !border-chart-blue !-left-[5px] transition-all ${
-          hasTarget ? "!bg-surface-overlay hover:!bg-chart-blue !opacity-100" : "!opacity-0 !pointer-events-none"
-        }`}
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        className={`!w-2.5 !h-2.5 !border-2 !border-chart-blue !-right-[5px] transition-all ${
-          hasSource ? "!bg-surface-overlay hover:!bg-chart-blue !opacity-100" : "!opacity-0 !pointer-events-none"
-        }`}
-      />
-
-      {/* Blue accent strip */}
-      <div className="absolute top-0 left-4 right-4 h-[2px] rounded-b bg-chart-blue opacity-60" />
-
       <div className="px-3.5 py-3 flex items-start gap-2.5">
-        <div className="w-8 h-8 rounded-lg bg-[rgba(59,130,246,0.1)] flex items-center justify-center flex-shrink-0">
+        <div className="w-8 h-8 rounded-lg bg-node-glow-blue flex items-center justify-center flex-shrink-0">
           <Server size={15} className="text-chart-blue" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-text-primary leading-tight truncate">
+          <div className="text-[length:var(--text-base)] font-semibold text-text-primary leading-tight truncate">
             {nodeData.name}
           </div>
-          <div className="text-[10px] text-text-muted mt-0.5 font-mono truncate max-w-[140px]">
+          <div className="text-[length:var(--text-2xs)] text-text-muted mt-0.5 font-mono truncate max-w-[140px]">
             {nodeData.url}
           </div>
           <div className="flex items-center gap-2 mt-1.5">
             <div className="flex items-center gap-1">
               <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
-              <span className="text-[10px] text-text-muted">{cfg.label}</span>
+              <span className="text-[length:var(--text-2xs)] text-text-muted">{cfg.label}</span>
             </div>
             {nodeData.toolCount > 0 && (
               <div className="flex items-center gap-1">
                 <Zap size={9} className="text-text-muted" />
-                <span className="text-[10px] text-text-muted">{nodeData.toolCount}</span>
+                <span className="text-[length:var(--text-2xs)] text-text-muted">{nodeData.toolCount}</span>
               </div>
             )}
           </div>
@@ -85,7 +60,10 @@ export const McpServerNode = memo(({ data, selected }: NodeProps & { data: McpSe
       {status === "healthy" && (
         <div className="px-3.5 pb-2.5">
           <button
-            className="flex items-center gap-1.5 text-[10px] text-chart-blue hover:text-blue-400 transition-colors"
+            className="flex items-center gap-1.5 min-h-[var(--touch-target-min)] text-[length:var(--text-2xs)] text-chart-blue transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled
+            title="Coming soon"
+            aria-label="Sync Tools — coming soon"
             onClick={(e) => e.stopPropagation()}
           >
             <RefreshCw size={9} />
@@ -93,7 +71,7 @@ export const McpServerNode = memo(({ data, selected }: NodeProps & { data: McpSe
           </button>
         </div>
       )}
-    </div>
+    </BaseNode>
   );
 });
 

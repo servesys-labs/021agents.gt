@@ -1,3 +1,6 @@
+export { BaseNode } from "./BaseNode";
+export type { BaseNodeProps } from "./BaseNode";
+
 export { AgentNode } from "./AgentNode";
 export type { AgentNodeData } from "./AgentNode";
 

@@ -30,7 +30,8 @@ def _convert_query(sql: str) -> str:
     query = query.replace("INSERT OR REPLACE INTO _meta", "INSERT INTO _meta")
     query = query.replace("INSERT OR REPLACE INTO", "INSERT INTO")
     # sqlite uses ? placeholders; psycopg expects %s
-    query = query.replace("?", "%s")
+    # Only replace ? outside of quoted strings to avoid corrupting string literals
+    query = re.sub(r"\?(?=([^']*'[^']*')*[^']*$)", "%s", query)
     if "INSERT INTO _meta" in query and "ON CONFLICT" not in query:
         query += " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
     if "INSERT INTO event_types" in query and "ON CONFLICT" not in query:

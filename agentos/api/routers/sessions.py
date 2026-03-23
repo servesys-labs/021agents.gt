@@ -5,20 +5,24 @@ from __future__ import annotations
 from typing import Any
 import time as _time
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
-from agentos.api.deps import _get_db
+from agentos.api.deps import CurrentUser, get_current_user, _get_db
 from agentos.api.schemas import SessionResponse, TurnResponse
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 @router.get("/runtime/insights")
-async def runtime_insights(since_days: int = 30, limit_sessions: int = 200):
+async def runtime_insights(
+    since_days: int = 30,
+    limit_sessions: int = 200,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Runtime telemetry rollup for portal observability cards."""
     db = _get_db()
     since_days = max(1, min(365, int(since_days)))
-    limit_sessions = max(10, min(2000, int(limit_sessions)))
+    limit_sessions = max(10, min(200, int(limit_sessions)))
     since = _time.time() - (since_days * 86400)
     return db.runtime_insights(since=since, limit_sessions=limit_sessions)
 
@@ -29,11 +33,16 @@ async def list_sessions(
     status: str = "",
     limit: int = 50,
     offset: int = 0,
+    user: CurrentUser = Depends(get_current_user),
 ):
     """List sessions with optional filters."""
+    # Bounds validation
+    limit = max(1, min(200, limit))
+    offset = max(0, offset)
+
     db = _get_db()
-    sql = "SELECT * FROM sessions WHERE 1=1"
-    params: list[Any] = []
+    sql = "SELECT * FROM sessions WHERE org_id = ?"
+    params: list[Any] = [user.org_id]
     if agent_name:
         sql += " AND agent_name = ?"
         params.append(agent_name)
@@ -65,7 +74,10 @@ async def list_sessions(
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
-async def get_session(session_id: str):
+async def get_session(
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Get full session details."""
     db = _get_db()
     row = db.conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
@@ -87,7 +99,10 @@ async def get_session(session_id: str):
 
 
 @router.get("/{session_id}/turns", response_model=list[TurnResponse])
-async def get_turns(session_id: str):
+async def get_turns(
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Get all turns for a session."""
     import json
     db = _get_db()
@@ -133,7 +148,10 @@ async def get_turns(session_id: str):
 
 
 @router.get("/{session_id}/runtime")
-async def get_session_runtime(session_id: str):
+async def get_session_runtime(
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Get plan/reflection/execution telemetry for one session."""
     db = _get_db()
     row = db.conn.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
@@ -143,7 +161,10 @@ async def get_session_runtime(session_id: str):
 
 
 @router.get("/{session_id}/trace")
-async def get_trace(session_id: str):
+async def get_trace(
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Get the full trace chain for a session."""
     db = _get_db()
     row = db.conn.execute("SELECT trace_id FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
@@ -156,23 +177,33 @@ async def get_trace(session_id: str):
 
 
 @router.get("/stats/summary")
-async def session_stats(agent_name: str = "", since_days: int = 30):
+async def session_stats(
+    agent_name: str = "",
+    since_days: int = 30,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Get aggregate session statistics."""
     import time as _time
+
+    since_days = max(1, min(365, since_days))
     db = _get_db()
     since = _time.time() - (since_days * 86400)
-    sql = "SELECT COUNT(*) as total, SUM(cost_total_usd) as cost, AVG(wall_clock_seconds) as avg_duration FROM sessions WHERE created_at >= ?"
+
+    # Build WHERE clause properly instead of fragile string replacement
+    where_parts = ["created_at >= ?"]
     params: list[Any] = [since]
     if agent_name:
-        sql = sql.replace("WHERE", "WHERE agent_name = ? AND")
-        params.insert(0, agent_name)
+        where_parts.append("agent_name = ?")
+        params.append(agent_name)
+    where_clause = " AND ".join(where_parts)
+
+    sql = f"SELECT COUNT(*) as total, SUM(cost_total_usd) as cost, AVG(wall_clock_seconds) as avg_duration FROM sessions WHERE {where_clause}"
     row = db.conn.execute(sql, params).fetchone()
     r = dict(row)
 
-    # Status breakdown
-    status_rows = db.conn.execute(
-        "SELECT status, COUNT(*) as cnt FROM sessions WHERE created_at >= ? GROUP BY status", (since,)
-    ).fetchall()
+    # Status breakdown — include agent_name filter if provided
+    status_sql = f"SELECT status, COUNT(*) as cnt FROM sessions WHERE {where_clause} GROUP BY status"
+    status_rows = db.conn.execute(status_sql, params).fetchall()
 
     return {
         "total_sessions": r["total"] or 0,
@@ -188,6 +219,7 @@ async def submit_feedback(
     rating: int = 0,
     comment: str = "",
     tags: str = "",
+    user: CurrentUser = Depends(get_current_user),
 ):
     """Submit human feedback for a session output."""
     db = _get_db()
@@ -199,7 +231,10 @@ async def submit_feedback(
 
 
 @router.get("/{session_id}/feedback")
-async def get_feedback(session_id: str):
+async def get_feedback(
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
     """Get all feedback for a session."""
     db = _get_db()
     rows = db.query_feedback(session_id=session_id)
@@ -207,24 +242,19 @@ async def get_feedback(session_id: str):
 
 
 @router.delete("")
-async def cleanup_sessions(before_days: int = 90):
-    """Delete sessions older than N days."""
+async def cleanup_sessions(
+    before_days: int = 90,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete sessions older than N days (minimum 7)."""
     import time as _time
+
+    before_days = max(7, before_days)
     db = _get_db()
     cutoff = _time.time() - (before_days * 86400)
-    result = db.conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+    result = db.conn.execute(
+        "DELETE FROM sessions WHERE created_at < ? AND org_id = ?", (cutoff, user.org_id)
+    )
     db.conn.execute("DELETE FROM turns WHERE session_id NOT IN (SELECT session_id FROM sessions)")
     db.conn.commit()
     return {"deleted": result.rowcount, "before_days": before_days}
-
-
-@router.post("/{session_id}/feedback")
-async def submit_feedback(session_id: str, rating: int = 1, comment: str = ""):
-    """Submit feedback for a session (-1=negative, 0=neutral, 1=positive)."""
-    db = _get_db()
-    db.conn.execute(
-        "INSERT INTO feedback (session_id, rating, comment, created_at) VALUES (?, ?, ?, ?)",
-        (session_id, rating, comment, __import__("time").time()),
-    )
-    db.conn.commit()
-    return {"submitted": True}

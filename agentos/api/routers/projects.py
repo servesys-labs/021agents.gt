@@ -3,15 +3,74 @@
 from __future__ import annotations
 
 import json
-import time
+import logging
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
+from agentos.agent import AgentConfig, list_agents, save_agent_config
+from agentos.defaults import AGENT_TEMPLATES, DEFAULT_MODEL
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+logger = logging.getLogger(__name__)
+
+
+def _project_plan_to_agent_plan(project_plan: str) -> str:
+    """Map project commercial tiers to runtime routing plans."""
+    mapping = {
+        "starter": "basic",
+        "standard": "standard",
+        "pro": "premium",
+        "enterprise": "premium",
+    }
+    return mapping.get(project_plan, "standard")
+
+
+def _bootstrap_project_meta_agent(
+    *,
+    project_id: str,
+    slug: str,
+    project_name: str,
+    project_description: str,
+    project_plan: str,
+) -> dict[str, Any]:
+    """Create (or reuse) a project-scoped orchestrator meta-agent."""
+    base_name = f"{slug}-meta-agent".strip("-") or f"project-{project_id[:8]}-meta-agent"
+    existing_names = {a.name for a in list_agents()}
+    if base_name in existing_names:
+        return {"name": base_name, "created": False}
+
+    agent_name = base_name
+
+    tpl = AGENT_TEMPLATES["orchestrator"]
+    project_context = (
+        f"\n\n## Project Context\n"
+        f"- project_id: {project_id}\n"
+        f"- project_name: {project_name}\n"
+        f"- project_slug: {slug}\n"
+        f"- plan: {project_plan}\n"
+        f"- description: {project_description or 'n/a'}\n"
+        f"Prioritize work and recommendations for this project context."
+    )
+    config = AgentConfig(
+        name=agent_name,
+        description=f"Project Meta-Agent for {project_name}",
+        system_prompt=f"{tpl['system_prompt']}{project_context}",
+        model=DEFAULT_MODEL,
+        tools=list(tpl["tools"]),
+        governance={
+            **tpl["governance"],
+            "budget_limit_usd": float(tpl["governance"].get("budget_limit_usd", 20.0)),
+        },
+        memory=tpl["memory"],
+        max_turns=int(tpl.get("max_turns", 50)),
+        tags=list(dict.fromkeys([*tpl["tags"], "project-meta-agent", f"project:{project_id}"])),
+        plan=_project_plan_to_agent_plan(project_plan),
+    )
+    save_agent_config(config)
+    return {"name": config.name, "created": True}
 
 
 def _require_project_org(project_id: str, user: CurrentUser) -> dict[str, Any]:
@@ -55,9 +114,27 @@ async def create_project(name: str, description: str = "", plan: str = "standard
             (uuid.uuid4().hex[:16], project_id, env_name),
         )
     db.conn.commit()
+    meta_agent: dict[str, Any] | None = None
+    try:
+        meta_agent = _bootstrap_project_meta_agent(
+            project_id=project_id,
+            slug=slug,
+            project_name=name,
+            project_description=description,
+            project_plan=plan,
+        )
+    except Exception as exc:
+        logger.warning("Project %s created but meta-agent bootstrap failed: %s", project_id, exc)
+        meta_agent = {"name": "", "created": False, "error": "bootstrap_failed"}
     db.audit("project.create", user_id=user.user_id, org_id=user.org_id,
              resource_type="project", resource_id=project_id, changes={"name": name})
-    return {"project_id": project_id, "name": name, "slug": slug, "envs": ["development", "staging", "production"]}
+    return {
+        "project_id": project_id,
+        "name": name,
+        "slug": slug,
+        "envs": ["development", "staging", "production"],
+        "meta_agent": meta_agent,
+    }
 
 
 @router.get("/{project_id}")

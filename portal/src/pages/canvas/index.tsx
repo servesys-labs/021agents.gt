@@ -40,6 +40,7 @@ import {
 } from "../../components/canvas/OverlayPanels";
 import { apiRequest } from "../../lib/api";
 import { useUndoRedo } from "../../hooks/useUndoRedo";
+import { getStoredUserRole } from "../../auth/tokens";
 import {
   RotateCcw,
   ChevronDown,
@@ -277,6 +278,12 @@ function CanvasWorkspaceInner() {
   const [envDropdown, setEnvDropdown] = useState(false);
   const [currentProject, setCurrentProject] = useState("my-agents");
   const [currentEnv, setCurrentEnv] = useState("production");
+  const userRole = getStoredUserRole();
+  const roleCanEdit = useMemo(
+    () => ["admin", "owner", "editor", "developer"].includes(userRole),
+    [userRole],
+  );
+  const [editMode, setEditMode] = useState(roleCanEdit);
 
   const reactFlowRef = useRef<HTMLDivElement>(null);
 
@@ -307,11 +314,23 @@ function CanvasWorkspaceInner() {
     [edges, agentsOnly],
   );
 
+  /* ── Sync detailNode when nodes change (e.g., after deploy) ── */
+  useEffect(() => {
+    if (detailNode) {
+      const updated = nodes.find(n => n.id === detailNode.id);
+      if (updated) {
+        setDetailNode(updated);
+      } else {
+        setDetailNode(null);
+      }
+    }
+  }, [nodes]);
+
   /* ── Log helper ──────────────────────────────────────────── */
   const addLogEntry = useCallback((message: string, status: LogEntry["status"]) => {
     setLogEntries((prev) => [
       ...prev,
-      { id: Date.now().toString(), message, status, timestamp: Date.now() },
+      { id: crypto.randomUUID(), message, status, timestamp: Date.now() },
     ]);
   }, []);
 
@@ -396,7 +415,7 @@ function CanvasWorkspaceInner() {
   /* ── Add node ────────────────────────────────────────────── */
   const addNode = useCallback(
     (type: string) => {
-      const id = `${type}-${Date.now()}`;
+      const id = `${type}-${crypto.randomUUID().slice(0, 8)}`;
       const centerX = 350 + Math.random() * 300;
       const centerY = 200 + Math.random() * 200;
 
@@ -478,72 +497,6 @@ function CanvasWorkspaceInner() {
     [addNode, navigate],
   );
 
-  /* ── Context menu actions ────────────────────────────────── */
-  const handleContextAction = useCallback(
-    (action: string, nodeId?: string) => {
-      switch (action) {
-        case "edit": {
-          const node = nodes.find((n) => n.id === nodeId);
-          if (node) setDetailNode(node);
-          break;
-        }
-        case "chat": {
-          addLogEntry("Opening agent chat...", "running");
-          const node = nodes.find((n) => n.id === nodeId);
-          if (node) setDetailNode(node);
-          break;
-        }
-        case "deploy": {
-          if (nodeId) handleDeploy(nodeId);
-          break;
-        }
-        case "delete": {
-          const node = nodes.find((n) => n.id === nodeId);
-          setNodes((nds) => nds.filter((n) => n.id !== nodeId));
-          setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
-          if (detailNode?.id === nodeId) {
-            setDetailNode(null);
-            setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 50);
-          }
-          addLogEntry(`Deleted ${node?.data?.name || "node"}`, "done");
-          break;
-        }
-        case "clone": {
-          const node = nodes.find((n) => n.id === nodeId);
-          if (node) {
-            const newId = `${node.type}-${Date.now()}`;
-            const newNode: Node = {
-              ...node,
-              id: newId,
-              position: { x: node.position.x + 40, y: node.position.y + 40 },
-              data: { ...node.data, name: `${node.data.name} (copy)` },
-            };
-            setNodes((nds) => [...nds, newNode]);
-            addLogEntry(`Cloned ${node.data.name}`, "done");
-          }
-          break;
-        }
-        // Canvas-level context menu actions
-        case "add-agent": addNode("agent"); break;
-        case "add-knowledge": addNode("knowledge"); break;
-        case "add-datasource": addNode("datasource"); break;
-        case "add-connector": addNode("connector"); break;
-        case "add-mcp": addNode("mcpServer"); break;
-        // Overlay panels from context menu
-        case "open-workflows": setOverlayPanel("workflows"); break;
-        case "open-schedules": setOverlayPanel("schedules"); break;
-        case "open-webhooks": setOverlayPanel("webhooks"); break;
-        case "open-governance": setOverlayPanel("governance"); break;
-        case "open-projects": setOverlayPanel("projects"); break;
-        case "open-releases": setOverlayPanel("releases"); break;
-        case "open-infrastructure": setOverlayPanel("infrastructure"); break;
-        default:
-          addLogEntry(`Action: ${action}`, "done");
-      }
-    },
-    [nodes, setNodes, setEdges, addNode, addLogEntry, detailNode],
-  );
-
   /* ── Deploy ──────────────────────────────────────────────── */
   const handleDeploy = useCallback(
     async (nodeId: string) => {
@@ -577,7 +530,7 @@ function CanvasWorkspaceInner() {
     [setNodes, addLogEntry],
   );
 
-  /* ── Delete node from detail panel ───────────────────────── */
+  /* ── Delete node ─────────────────────────────────────────── */
   const handleDeleteNode = useCallback(
     (nodeId: string) => {
       const node = nodes.find((n) => n.id === nodeId);
@@ -590,12 +543,12 @@ function CanvasWorkspaceInner() {
     [nodes, setNodes, setEdges, addLogEntry, fitView],
   );
 
-  /* ── Clone node from detail panel ────────────────────────── */
+  /* ── Clone node ──────────────────────────────────────────── */
   const handleCloneNode = useCallback(
     (nodeId: string) => {
       const node = nodes.find((n) => n.id === nodeId);
       if (node) {
-        const newId = `${node.type}-${Date.now()}`;
+        const newId = `${node.type}-${crypto.randomUUID().slice(0, 8)}`;
         const newNode: Node = {
           ...node,
           id: newId,
@@ -607,6 +560,62 @@ function CanvasWorkspaceInner() {
       }
     },
     [nodes, setNodes, addLogEntry],
+  );
+
+  /* ── Context menu actions ────────────────────────────────── */
+  const handleContextAction = useCallback(
+    (action: string, nodeId?: string) => {
+      const mutatingActions = new Set([
+        "edit", "deploy", "delete", "clone", "add-agent", "add-knowledge",
+        "add-datasource", "add-connector", "add-mcp",
+      ]);
+      if (!editMode && mutatingActions.has(action)) {
+        addLogEntry(`Blocked in view mode: ${action}`, "error");
+        return;
+      }
+      switch (action) {
+        case "edit": {
+          const node = nodes.find((n) => n.id === nodeId);
+          if (node) setDetailNode(node);
+          break;
+        }
+        case "chat": {
+          addLogEntry("Opening agent chat...", "running");
+          const node = nodes.find((n) => n.id === nodeId);
+          if (node) setDetailNode(node);
+          break;
+        }
+        case "deploy": {
+          if (nodeId) handleDeploy(nodeId);
+          break;
+        }
+        case "delete": {
+          if (nodeId) handleDeleteNode(nodeId);
+          break;
+        }
+        case "clone": {
+          if (nodeId) handleCloneNode(nodeId);
+          break;
+        }
+        // Canvas-level context menu actions
+        case "add-agent": addNode("agent"); break;
+        case "add-knowledge": addNode("knowledge"); break;
+        case "add-datasource": addNode("datasource"); break;
+        case "add-connector": addNode("connector"); break;
+        case "add-mcp": addNode("mcpServer"); break;
+        // Overlay panels from context menu
+        case "open-workflows": setOverlayPanel("workflows"); break;
+        case "open-schedules": setOverlayPanel("schedules"); break;
+        case "open-webhooks": setOverlayPanel("webhooks"); break;
+        case "open-governance": setOverlayPanel("governance"); break;
+        case "open-projects": setOverlayPanel("projects"); break;
+        case "open-releases": setOverlayPanel("releases"); break;
+        case "open-infrastructure": setOverlayPanel("infrastructure"); break;
+        default:
+          addLogEntry(`Action: ${action}`, "done");
+      }
+    },
+    [nodes, addNode, addLogEntry, editMode, handleDeploy, handleDeleteNode, handleCloneNode],
   );
 
   /* ── Meta-agent ──────────────────────────────────────────── */
@@ -628,7 +637,7 @@ function CanvasWorkspaceInner() {
         addLogEntry("Meta-Agent completed", "done");
 
         if (result.config) {
-          const id = `agent-${Date.now()}`;
+          const id = `agent-${crypto.randomUUID().slice(0, 8)}`;
           const newNode: Node = {
             id,
             type: "agent",
@@ -860,6 +869,22 @@ function CanvasWorkspaceInner() {
           </kbd>
         </button>
 
+        <button
+          onClick={() => {
+            if (!roleCanEdit) return;
+            setEditMode((v) => !v);
+          }}
+          disabled={!roleCanEdit}
+          className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded-md transition-colors mr-1 ${
+            editMode
+              ? "bg-accent/15 text-accent border border-accent/30"
+              : "text-text-muted hover:text-text-primary hover:bg-surface-overlay border border-transparent"
+          } ${!roleCanEdit ? "opacity-50 cursor-not-allowed" : ""}`}
+          title={roleCanEdit ? "Toggle canvas edit mode" : "Insufficient permissions"}
+        >
+          {editMode ? "Edit" : "View"}
+        </button>
+
         {/* Reset */}
         <button
           onClick={() => {
@@ -1000,13 +1025,13 @@ function CanvasWorkspaceInner() {
       />
 
       {/* ── Overlay Panels ───────────────────────────────────── */}
-      <WorkflowsPanel open={overlayPanel === "workflows"} onClose={() => setOverlayPanel(null)} />
-      <SchedulesPanel open={overlayPanel === "schedules"} onClose={() => setOverlayPanel(null)} />
-      <WebhooksPanel open={overlayPanel === "webhooks"} onClose={() => setOverlayPanel(null)} />
-      <GovernancePanel open={overlayPanel === "governance"} onClose={() => setOverlayPanel(null)} />
-      <ProjectsPanel open={overlayPanel === "projects"} onClose={() => setOverlayPanel(null)} />
-      <ReleasesPanel open={overlayPanel === "releases"} onClose={() => setOverlayPanel(null)} />
-      <InfrastructurePanel open={overlayPanel === "infrastructure"} onClose={() => setOverlayPanel(null)} />
+      <WorkflowsPanel open={overlayPanel === "workflows"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
+      <SchedulesPanel open={overlayPanel === "schedules"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
+      <WebhooksPanel open={overlayPanel === "webhooks"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
+      <GovernancePanel open={overlayPanel === "governance"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
+      <ProjectsPanel open={overlayPanel === "projects"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
+      <ReleasesPanel open={overlayPanel === "releases"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
+      <InfrastructurePanel open={overlayPanel === "infrastructure"} onClose={() => setOverlayPanel(null)} editable={editMode && roleCanEdit} />
     </div>
   );
 }
