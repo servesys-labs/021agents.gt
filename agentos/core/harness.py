@@ -51,6 +51,9 @@ class HarnessConfig:
     reflection_min_confidence: float = 0.6
     max_reflection_attempts: int = 1
     parallel_tool_calls: bool = True
+    reasoning_strategy: str = "direct"  # direct | step_back | tree_of_thought
+    enable_backlog_prioritization: bool = True
+    backlog_max_items: int = 8
     max_context_tokens: int = 100_000
     skills_dir: str = ""
 
@@ -263,6 +266,7 @@ class AgentHarness:
             system_parts.append(async_memory_section)
         if procedures_section:
             system_parts.append(procedures_section)
+        system_parts.append(self._reasoning_instruction(self.config.reasoning_strategy))
         if system_parts:
             messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
@@ -270,6 +274,7 @@ class AgentHarness:
         tool_sequence: list[dict[str, Any]] = []
         failure_retries = 0
         reflection_retries = 0
+        backlog = self._build_initial_backlog(user_input, complexity.value)
 
         for turn in range(1, self.config.max_turns + 1):
             self._turn = turn
@@ -356,6 +361,8 @@ class AgentHarness:
                     execution_mode=execution_mode,
                     has_tool_calls=True,
                     done=False,
+                    reasoning_strategy=self.config.reasoning_strategy,
+                    backlog=backlog,
                 )
 
                 # Track tool results for procedural memory
@@ -491,6 +498,8 @@ class AgentHarness:
                     execution_mode="sequential",
                     has_tool_calls=False,
                     done=True,
+                    reasoning_strategy=self.config.reasoning_strategy,
+                    backlog=backlog,
                 )
                 reflection = self._build_reflection_artifact(
                     llm_response=llm_response,
@@ -525,6 +534,7 @@ class AgentHarness:
                             "Revise your answer with clearer reasoning and verification."
                         ),
                     })
+                    backlog = self._update_backlog_from_reflection(backlog, reflection)
                     await self.event_bus.emit(Event(type=EventType.TURN_END, data={
                         "turn": turn,
                         "execution_mode": result.execution_mode,
@@ -564,6 +574,7 @@ class AgentHarness:
                     await self._store_procedure(user_input, tool_sequence)
                 failure_retries = 0
                 reflection_retries = 0
+                backlog = self._update_backlog_from_reflection(backlog, reflection)
 
                 await self.event_bus.emit(Event(type=EventType.TURN_END, data={
                     "turn": turn,
@@ -658,6 +669,8 @@ class AgentHarness:
         execution_mode: str,
         has_tool_calls: bool,
         done: bool,
+        reasoning_strategy: str,
+        backlog: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Generate a typed DAG-like plan artifact for each runtime turn."""
         if not self.config.enable_planner_artifact:
@@ -688,6 +701,11 @@ class AgentHarness:
             "complexity": complexity,
             "tool_candidates": [str(t.get("name", "")) for t in available_tools[:20]],
             "execution_mode": execution_mode,
+            "reasoning": {"strategy": reasoning_strategy, "fallback": "direct"},
+            "prioritization": {
+                "enabled": self.config.enable_backlog_prioritization,
+                "backlog": backlog[: self.config.backlog_max_items],
+            },
             "dag": {"nodes": nodes, "edges": edges},
         }
 
@@ -718,7 +736,14 @@ class AgentHarness:
             "warnings": middleware_warnings,
             "response_chars": len(llm_response.content or ""),
             "error": error,
-            "next_action": "finalize" if done and not error else ("recover" if failed_tools or error else "continue"),
+            "issues": (
+                ([f"tool_failure:{name}" for name in failed_tools] if failed_tools else [])
+                + (["middleware_warning"] if middleware_warnings else [])
+                + ([f"error:{error}"] if error else [])
+            ),
+            "action": "revise" if (failed_tools or error or confidence < 0.6) else "continue",
+            # Backward compatibility with existing portal adapter.
+            "next_action": "revise" if (failed_tools or error or confidence < 0.6) else "continue",
         }
 
     def _should_retry_for_reflection(
@@ -739,7 +764,56 @@ class AgentHarness:
         confidence = reflection.get("confidence")
         if not isinstance(confidence, (int, float)):
             return False
+        action = str(reflection.get("action", "continue"))
+        if action == "revise":
+            return True
         return float(confidence) < float(self.config.reflection_min_confidence)
+
+    def _reasoning_instruction(self, strategy: str) -> str:
+        if strategy == "step_back":
+            return (
+                "Reasoning strategy: step_back. First extract 1-3 high-level principles, "
+                "then solve against those principles, then give the answer."
+            )
+        if strategy == "tree_of_thought":
+            return (
+                "Reasoning strategy: tree_of_thought. Generate 2-3 candidate approaches, "
+                "critique briefly, then choose the strongest final answer."
+            )
+        return "Reasoning strategy: direct. Be concise and explicit."
+
+    def _build_initial_backlog(self, user_input: str, complexity: str) -> list[dict[str, Any]]:
+        if not self.config.enable_backlog_prioritization:
+            return []
+        return [{
+            "id": "primary_goal",
+            "title": user_input[:120],
+            "priority": 100 if complexity == "complex" else 80,
+            "status": "active",
+        }]
+
+    def _update_backlog_from_reflection(
+        self,
+        backlog: list[dict[str, Any]],
+        reflection: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not self.config.enable_backlog_prioritization:
+            return backlog
+        issues = reflection.get("issues") or []
+        action = str(reflection.get("action", "continue"))
+        updated = [dict(item) for item in backlog]
+        if action == "revise" and issues:
+            updated.insert(0, {
+                "id": f"revise_{len(updated) + 1}",
+                "title": "Revise response to address reflection issues",
+                "priority": 120,
+                "status": "active",
+                "issues": issues[:5],
+            })
+        for item in updated[1:]:
+            if item.get("status") == "active":
+                item["status"] = "queued"
+        return updated[: self.config.backlog_max_items]
 
     async def _store_procedure(
         self, task_description: str, tool_sequence: list[dict[str, Any]]

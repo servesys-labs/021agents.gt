@@ -5,11 +5,22 @@ from __future__ import annotations
 import json
 import uuid
 import asyncio
+import time
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
+from agentos.core.runtime_dag import (
+    JoinStrategy,
+    NodePolicy,
+    NodeResult,
+    NodeSpec,
+    NodeType,
+    RuntimeDAGRunner,
+    reduce_join_outputs,
+)
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -30,6 +41,10 @@ def _normalize_steps(steps: list[dict]) -> list[dict]:
         if not node_type:
             # Backward compatibility: agent/task step becomes llm node.
             node_type = "llm" if step.get("agent") else "task"
+        if node_type == "parallel":
+            node_type = "parallel_group"
+        if node_type == "task":
+            node_type = "llm"
         normalized.append({
             "id": step_id,
             "type": node_type,
@@ -38,6 +53,9 @@ def _normalize_steps(steps: list[dict]) -> list[dict]:
             "depends_on": step.get("depends_on", []),
             "branches": step.get("branches", []),
             "config": step.get("config", {}),
+            "retries": int(step.get("retries", 0) or 0),
+            "timeout_ms": int(step.get("timeout_ms", 30000) or 30000),
+            "budget_usd": float(step.get("budget_usd", 0) or 0),
         })
     return normalized
 
@@ -82,9 +100,8 @@ async def create_workflow(
 
 @router.post("/{workflow_id}/run")
 async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser = Depends(get_current_user)):
-    """Execute a workflow — runs each step in order, passing outputs between agents."""
+    """Execute a workflow with typed DAG runner and node policies."""
     from agentos.agent import Agent
-    import time
 
     db = _get_db()
     row = db.conn.execute(
@@ -95,7 +112,7 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
         raise HTTPException(status_code=404, detail="Workflow not found")
 
     workflow = dict(row)
-    steps = json.loads(workflow.get("steps_json", "[]"))
+    steps = _normalize_steps(json.loads(workflow.get("steps_json", "[]")))
 
     run_id = uuid.uuid4().hex[:16]
     trace_id = uuid.uuid4().hex[:16]
@@ -105,12 +122,12 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
     )
     db.conn.commit()
 
-    step_outputs: dict[str, str] = {"input": input_text}
-    step_status: dict[str, str] = {}
-    total_cost = 0.0
+    step_outputs: dict[str, Any] = {"input": input_text}
 
     async def _run_llm_step(step: dict, resolved_task: str) -> tuple[str, float]:
         agent_name = step.get("agent", "")
+        if not agent_name:
+            raise ValueError(f"Step '{step.get('id', '?')}' missing agent")
         agent = Agent.from_name(agent_name)
         agent._harness.trace_id = trace_id
         results = await agent.run(resolved_task)
@@ -122,64 +139,179 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
             step_cost += r.cost_usd
         return output, step_cost
 
+    def _resolve_template(text: str, prior_results: dict[str, NodeResult]) -> str:
+        rendered = text
+        for key, value in step_outputs.items():
+            rendered = rendered.replace(f"{{{{{key}.output}}}}", str(value)).replace(f"{{{{{key}}}}}", str(value))
+        for key, result in prior_results.items():
+            rendered = rendered.replace(f"{{{{{key}.output}}}}", str(result.output)).replace(f"{{{{{key}}}}}", str(result.output))
+        return rendered
+
+    specs: list[NodeSpec] = []
+    if not steps:
+        steps = [{
+            "id": "finalize_input",
+            "type": "finalize",
+            "depends_on": [],
+            "config": {"target": "input"},
+            "retries": 0,
+            "timeout_ms": 30000,
+            "budget_usd": 0.0,
+        }]
     for step in steps:
-        step_id = step.get("id", step.get("agent", ""))
         step_type = step.get("type", "llm")
-        task_template = step.get("task", "")
-
-        # Resolve template variables
-        task = task_template
-        for key, val in step_outputs.items():
-            task = task.replace(f"{{{{{key}.output}}}}", val).replace(f"{{{{{key}}}}}", val)
-
         try:
-            if step_type == "parallel":
-                branches = step.get("branches", [])
-                normalized_branches = _normalize_steps(branches)
-                async_calls = []
-                branch_ids: list[str] = []
-                for branch in normalized_branches:
-                    if branch.get("type") != "llm":
-                        continue
-                    branch_task = branch.get("task", "")
-                    for key, val in step_outputs.items():
-                        branch_task = branch_task.replace(f"{{{{{key}.output}}}}", val).replace(f"{{{{{key}}}}}", val)
-                    async_calls.append(_run_llm_step(branch, branch_task))
-                    branch_ids.append(branch.get("id", "branch"))
-                branch_results = await asyncio.gather(*async_calls)
-                merged = []
-                for bid, (output, cost) in zip(branch_ids, branch_results):
-                    merged.append(f"[{bid}] {output}".strip())
-                    step_outputs[bid] = output
-                    total_cost += cost
-                step_outputs[step_id] = "\n\n".join(merged).strip()
-            elif step_type == "reflect":
-                prior = step_outputs.get(step.get("config", {}).get("target", ""), "")
-                if not prior:
-                    prior = step_outputs.get("input", "")
-                reflection = {
-                    "summary": prior[:500],
-                    "issues": [] if prior else ["No prior output to reflect on"],
-                    "confidence": 0.75 if prior else 0.2,
-                    "next_action": "continue" if prior else "recover",
-                }
-                step_outputs[step_id] = json.dumps(reflection)
-            else:
-                output, step_cost = await _run_llm_step(step, task)
-                total_cost += step_cost
-                step_outputs[step_id] = output
-            step_status[step_id] = "completed"
-
-        except Exception as exc:
-            step_status[step_id] = f"failed: {exc}"
-            db.conn.execute(
-                "UPDATE workflow_runs SET status = 'failed', steps_status_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
-                (json.dumps(step_status), total_cost, time.time(), run_id),
+            node_type = NodeType(step_type)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Unsupported node type '{step_type}'")
+        specs.append(
+            NodeSpec(
+                node_id=step.get("id", ""),
+                node_type=node_type,
+                depends_on=list(step.get("depends_on", [])),
+                policy=NodePolicy(
+                    retries=int(step.get("retries", 0) or 0),
+                    timeout_ms=int(step.get("timeout_ms", 30000) or 30000),
+                    budget_usd=float(step.get("budget_usd", 0) or 0),
+                ),
+                config=step,
             )
-            db.conn.commit()
-            return {"run_id": run_id, "status": "failed", "failed_step": step_id, "error": str(exc), "step_outputs": step_outputs}
+        )
 
-    # All steps completed
+    async def _execute_node(spec: NodeSpec, prior_results: dict[str, NodeResult]) -> NodeResult:
+        node = spec.config
+        node_type = spec.node_type
+        node_id = spec.node_id
+        if node_type == NodeType.PLAN:
+            output = {
+                "goal": input_text[:400],
+                "node_id": node_id,
+                "depends_on": spec.depends_on,
+                "strategy": node.get("config", {}).get("strategy", "direct"),
+            }
+            step_outputs[node_id] = output
+            return NodeResult(node_id=node_id, status="completed", output=output)
+
+        if node_type in (NodeType.LLM, NodeType.TOOL):
+            task = _resolve_template(node.get("task", ""), prior_results)
+            output, cost = await _run_llm_step(node, task)
+            step_outputs[node_id] = output
+            return NodeResult(node_id=node_id, status="completed", output=output, cost_usd=cost)
+
+        if node_type == NodeType.PARALLEL_GROUP:
+            branches = _normalize_steps(node.get("branches", []))
+            async_calls = []
+            branch_ids: list[str] = []
+            for branch in branches:
+                if branch.get("type") not in {"llm", "tool"}:
+                    continue
+                branch_task = _resolve_template(branch.get("task", ""), prior_results)
+                async_calls.append(_run_llm_step(branch, branch_task))
+                branch_ids.append(branch.get("id", "branch"))
+            branch_results = await asyncio.gather(*async_calls)
+            outputs: list[str] = []
+            total_cost = 0.0
+            for branch_id, (branch_output, branch_cost) in zip(branch_ids, branch_results):
+                step_outputs[branch_id] = branch_output
+                outputs.append(branch_output)
+                total_cost += branch_cost
+            step_outputs[node_id] = outputs
+            return NodeResult(
+                node_id=node_id,
+                status="completed",
+                output=outputs,
+                cost_usd=total_cost,
+                metadata={"branch_ids": branch_ids},
+            )
+
+        if node_type == NodeType.JOIN:
+            dep_outputs = [prior_results[d].output for d in spec.depends_on if d in prior_results]
+            strategy_raw = str(node.get("config", {}).get("strategy", "merge"))
+            try:
+                strategy = JoinStrategy(strategy_raw)
+            except ValueError:
+                strategy = JoinStrategy.MERGE
+            reduced = reduce_join_outputs(strategy, dep_outputs)
+            step_outputs[node_id] = reduced
+            return NodeResult(
+                node_id=node_id,
+                status="completed",
+                output=reduced,
+                metadata={"strategy": strategy.value, "input_count": len(dep_outputs)},
+            )
+
+        if node_type == NodeType.REFLECT:
+            target = node.get("config", {}).get("target", "")
+            prior = ""
+            if target and target in prior_results:
+                prior = str(prior_results[target].output)
+            if not prior and spec.depends_on:
+                first_dep = spec.depends_on[-1]
+                prior = str(prior_results.get(first_dep, NodeResult(node_id=first_dep, status="missing")).output or "")
+            if not prior:
+                prior = str(step_outputs.get("input", ""))
+            issues = [] if prior else ["No prior output to reflect on"]
+            confidence = 0.75 if prior else 0.2
+            action = "continue" if confidence >= 0.6 else "revise"
+            reflection = {
+                "summary": prior[:500],
+                "issues": issues,
+                "confidence": confidence,
+                "action": action,
+            }
+            step_outputs[node_id] = reflection
+            return NodeResult(node_id=node_id, status="completed", output=reflection)
+
+        if node_type == NodeType.VERIFY:
+            dep = spec.depends_on[-1] if spec.depends_on else ""
+            output = str(prior_results.get(dep, NodeResult(node_id=dep, status="missing")).output or "")
+            verdict = {
+                "passed": bool(output.strip()),
+                "reason": "non_empty_output" if output.strip() else "empty_output",
+            }
+            step_outputs[node_id] = verdict
+            return NodeResult(node_id=node_id, status="completed", output=verdict)
+
+        if node_type == NodeType.FINALIZE:
+            target = node.get("config", {}).get("target", "")
+            if target and target in prior_results:
+                final = prior_results[target].output
+            elif spec.depends_on:
+                final = prior_results[spec.depends_on[-1]].output
+            else:
+                final = step_outputs.get("input", "")
+            step_outputs[node_id] = final
+            return NodeResult(node_id=node_id, status="completed", output=final)
+
+        return NodeResult(node_id=node_id, status="skipped", output="")
+
+    runner = RuntimeDAGRunner(max_parallel=8)
+    try:
+        dag_results = await runner.run(
+            nodes=specs,
+            execute_node=_execute_node,
+            total_budget_usd=0.0,
+        )
+    except Exception as exc:
+        db.conn.execute(
+            "UPDATE workflow_runs SET status = 'failed', steps_status_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
+            (json.dumps({"error": str(exc)}), 0.0, time.time(), run_id),
+        )
+        db.conn.commit()
+        return {
+            "run_id": run_id,
+            "status": "failed",
+            "trace_id": trace_id,
+            "error": str(exc),
+        }
+
+    step_status = {node_id: result.status for node_id, result in dag_results.items()}
+    total_cost = sum(float(r.cost_usd) for r in dag_results.values())
+    final_output = ""
+    if specs:
+        last_id = specs[-1].node_id
+        final_output = str(dag_results.get(last_id, NodeResult(node_id=last_id, status="missing")).output or "")
+
     db.conn.execute(
         "UPDATE workflow_runs SET status = 'completed', steps_status_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
         (json.dumps(step_status), total_cost, time.time(), run_id),
@@ -192,11 +324,19 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
         "trace_id": trace_id,
         "total_cost_usd": total_cost,
         "steps": step_status,
-        "final_output": (
-            step_outputs.get(steps[-1].get("id", ""), "")
-            if steps
-            else step_outputs.get("input", "")
-        ),
+        "final_output": final_output,
+        "dag": {
+            "nodes": [s.node_id for s in specs],
+            "results": {
+                node_id: {
+                    "status": result.status,
+                    "cost_usd": result.cost_usd,
+                    "attempts": result.attempts,
+                    "metadata": result.metadata,
+                }
+                for node_id, result in dag_results.items()
+            },
+        },
     }
 
 
@@ -310,7 +450,18 @@ async def validate_workflow(
     for step in steps:
         step_id = step.get("id", "")
         step_type = step.get("type", "")
-        if step_type and step_type not in {"llm", "task", "parallel", "reflect"}:
+        if step_type and step_type not in {
+            "llm",
+            "tool",
+            "task",
+            "parallel",
+            "parallel_group",
+            "join",
+            "reflect",
+            "verify",
+            "finalize",
+            "plan",
+        }:
             errors.append(f"Step '{step_id}' has unsupported type '{step_type}'")
         deps = step.get("depends_on", [])
         graph[step_id] = deps

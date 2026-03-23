@@ -82,6 +82,8 @@ async def test_reflection_gate_retries_before_finalizing() -> None:
     assert results[-1].done is True
     assert results[-1].stop_reason == "completed"
     assert results[0].plan_artifact.get("dag", {}).get("nodes")
+    assert results[0].reflection.get("action") in {"revise", "continue"}
+    assert isinstance(results[0].reflection.get("issues"), list)
 
 
 @pytest.mark.asyncio
@@ -116,3 +118,4 @@ async def test_parallel_tool_fanout_updates_execution_mode_and_dag() -> None:
     assert len(parallel_turns[0].tool_results) == 2
     dag_nodes = parallel_turns[0].plan_artifact.get("dag", {}).get("nodes", [])
     assert any(n.get("type") == "tool_fanout" for n in dag_nodes)
+    assert parallel_turns[0].plan_artifact.get("prioritization", {}).get("enabled") is True
