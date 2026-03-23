@@ -82,8 +82,9 @@ export const AgentNode = memo(({ data, selected }: NodeProps & { data: AgentNode
 
   const sourceConns = useNodeConnections({ handleType: "source" });
   const targetConns = useNodeConnections({ handleType: "target" });
-  const hasSource = sourceConns.length > 0;
-  const hasTarget = targetConns.length > 0;
+  const hideHandles = !!(data as any).hideHandles;
+  const hasSource = !hideHandles && sourceConns.length > 0;
+  const hasTarget = !hideHandles && targetConns.length > 0;
 
   return (
     <div
