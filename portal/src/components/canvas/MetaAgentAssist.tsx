@@ -54,7 +54,7 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
 
   return (
     <div className="h-full flex flex-col bg-surface-raised border-l border-border-default flex-shrink-0"
-      style={{ width: 280 }}>
+      style={{ width: 340 }}>
 
       {/* ── Header ──────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border-default flex-shrink-0">
@@ -71,15 +71,15 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
       <div ref={historyRef} className="flex-1 overflow-y-auto">
         {history.length === 0 ? (
           /* Empty state: show suggestion chips like Railway */
-          <div className="p-4">
-            <div className="flex flex-wrap gap-2">
+          <div className="p-5">
+            <div className="flex flex-col gap-2">
               {SUGGESTIONS.map((s, i) => (
                 <button
                   key={i}
                   onClick={() => handleSubmit(s.label)}
-                  className="flex items-center gap-1.5 px-3 py-2 text-[11px] text-text-secondary bg-surface-base border border-border-default rounded-lg hover:bg-surface-hover hover:border-border-hover transition-colors text-left leading-snug"
+                  className="flex items-center gap-2 px-4 py-3 text-[13px] text-text-secondary bg-surface-base border border-border-default rounded-xl hover:bg-surface-hover hover:border-border-hover transition-colors text-left leading-normal"
                 >
-                  <span className="text-[10px] flex-shrink-0">{s.icon}</span>
+                  <span className="text-[13px] flex-shrink-0">{s.icon}</span>
                   <span>{s.label}</span>
                 </button>
               ))}
@@ -117,8 +117,8 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
       </div>
 
       {/* ── Input area (pinned to bottom like Railway) ───── */}
-      <div className="border-t border-border-default p-3 flex-shrink-0">
-        <div className="flex items-end gap-2 bg-surface-base border border-border-default rounded-lg px-3 py-2 focus-within:border-accent/40 transition-colors">
+      <div className="border-t border-border-default p-4 flex-shrink-0">
+        <div className="flex items-end gap-2 bg-surface-base border border-border-default rounded-xl px-4 py-3 focus-within:border-accent/40 transition-colors">
           <textarea
             ref={inputRef}
             value={input}
@@ -126,19 +126,19 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
             onKeyDown={handleKeyDown}
             placeholder="Develop, debug, deploy anything..."
             rows={1}
-            className="flex-1 bg-transparent border-none outline-none text-[12px] text-text-primary placeholder:text-text-muted resize-none max-h-[80px] py-0.5"
-            style={{ minHeight: "20px" }}
+            className="flex-1 bg-transparent border-none outline-none text-[13px] text-text-primary placeholder:text-text-muted resize-none max-h-[100px] py-0.5"
+            style={{ minHeight: "24px" }}
             disabled={isProcessing}
           />
           <button
             onClick={() => handleSubmit()}
             disabled={!input.trim() || isProcessing}
-            className="flex-shrink-0 w-6 h-6 rounded-md flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-text-muted hover:text-accent"
+            className="flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-text-muted hover:text-accent"
           >
             {isProcessing ? (
-              <Loader2 size={13} className="animate-spin" />
+              <Loader2 size={14} className="animate-spin" />
             ) : (
-              <Send size={13} />
+              <Send size={14} />
             )}
           </button>
         </div>

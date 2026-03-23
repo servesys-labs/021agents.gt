@@ -4,7 +4,6 @@ import {
   ReactFlowProvider,
   Background,
   Controls,
-  MiniMap,
   addEdge,
   useNodesState,
   useEdgesState,
@@ -867,21 +866,7 @@ function CanvasWorkspaceInner() {
             style={{ left: "16px", top: "16px" }}
             showInteractive={false}
           />
-          <MiniMap
-            nodeColor={(node) => {
-              switch (node.type) {
-                case "agent": return "var(--color-accent)";
-                case "knowledge": return "var(--color-chart-purple)";
-                case "datasource": return "var(--color-chart-cyan)";
-                case "connector": return "var(--color-chart-green)";
-                case "mcpServer": return "var(--color-chart-blue)";
-                default: return "var(--color-surface-hover)";
-              }
-            }}
-            maskColor="rgba(12,10,9,0.85)"
-            className="!bg-surface-raised !border-border-default !rounded-xl"
-            style={{ width: 140, height: 90 }}
-          />
+
         </ReactFlow>
 
         {/* ── Canvas overlays ────────────────────────────────── */}
