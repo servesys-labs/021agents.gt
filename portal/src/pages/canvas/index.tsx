@@ -28,6 +28,7 @@ import { AddNodeToolbar } from "../../components/canvas/AddNodeToolbar";
 import { DeployButton } from "../../components/canvas/DeployButton";
 import { AgentConfigDrawer } from "../../components/canvas/AgentConfigDrawer";
 import { apiRequest } from "../../lib/api";
+import { RotateCcw } from "lucide-react";
 
 /* ── Node type registry ──────────────────────────────────────── */
 const nodeTypes = {
@@ -44,8 +45,20 @@ const LAYOUT_KEY = "oneshots-canvas-layout";
 function loadLayout(): { nodes: Node[]; edges: Edge[] } | null {
   try {
     const raw = localStorage.getItem(LAYOUT_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    // Validate: must have at least 2 nodes and 1 edge to be considered valid
+    if (
+      !parsed?.nodes?.length ||
+      parsed.nodes.length < 2 ||
+      !parsed?.edges?.length
+    ) {
+      localStorage.removeItem(LAYOUT_KEY);
+      return null;
+    }
+    return parsed;
   } catch {
+    localStorage.removeItem(LAYOUT_KEY);
     return null;
   }
 }
@@ -617,6 +630,21 @@ export function CanvasWorkspacePage() {
 
       {/* Overlays */}
       <AddNodeToolbar onAdd={addNode} />
+
+      {/* Reset canvas button */}
+      <button
+        onClick={() => {
+          localStorage.removeItem(LAYOUT_KEY);
+          setNodes(demoNodes);
+          setEdges(demoEdges);
+          addLogEntry("Canvas reset to default layout", "done");
+        }}
+        className="absolute top-4 right-4 z-10 flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-medium text-text-muted bg-surface-raised/80 backdrop-blur border border-border-default rounded-full hover:text-text-primary hover:border-accent/40 transition-all"
+        title="Reset canvas to demo layout"
+      >
+        <RotateCcw size={10} />
+        Reset
+      </button>
 
       <AgentLog entries={logEntries} onClear={clearLog} />
 
