@@ -131,6 +131,18 @@ type MetaDraft = {
   createdAt: number;
 };
 
+type ProjectSummary = {
+  project_id: string;
+  name: string;
+  slug: string;
+};
+
+type CanvasLayoutResponse = {
+  nodes?: Node[];
+  edges?: Edge[];
+  assignments?: Array<Record<string, unknown>>;
+};
+
 function inferResourcesFromPromptAndTools(prompt: string, tools: string[]): MetaResource[] {
   const normalized = `${prompt} ${(tools || []).join(" ")}`.toLowerCase();
   const resources: MetaResource[] = [];
@@ -276,9 +288,12 @@ export function CanvasWorkspacePage() {
 function CanvasWorkspaceInner() {
   const navigate = useNavigate();
   const { setCenter, getZoom, fitView } = useReactFlow();
-  const saved = loadLayout();
-  const [nodes, setNodes, onNodesChange] = useNodesState(saved?.nodes || demoNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(saved?.edges || demoEdges);
+  // Start empty — project-scoped layout loads via API effect below.
+  // localStorage is only an offline/instant-render fallback.
+  const localFallback = loadLayout();
+  const [nodes, setNodes, onNodesChange] = useNodesState(localFallback?.nodes || []);
+  const [edges, setEdges, onEdgesChange] = useEdgesState(localFallback?.edges || []);
+  const [canvasReady, setCanvasReady] = useState(false);
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<{
@@ -313,6 +328,8 @@ function CanvasWorkspaceInner() {
   const [envDropdown, setEnvDropdown] = useState(false);
   const [currentProject, setCurrentProject] = useState("my-agents");
   const [currentEnv, setCurrentEnv] = useState("production");
+  const [projectOptions, setProjectOptions] = useState<ProjectSummary[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState("");
   const userRole = getStoredUserRole();
   const roleCanEdit = useMemo(
     () => ["admin", "owner", "editor", "developer"].includes(userRole),
@@ -321,6 +338,7 @@ function CanvasWorkspaceInner() {
   const [editMode, setEditMode] = useState(roleCanEdit);
 
   const reactFlowRef = useRef<HTMLDivElement>(null);
+  const skipLayoutPersistRef = useRef(false);
 
   // Grid visibility
   const [showGrid, setShowGrid] = useState(true);
@@ -400,6 +418,112 @@ function CanvasWorkspaceInner() {
   }, []);
 
   const clearLog = useCallback(() => setLogEntries([]), []);
+
+  useEffect(() => {
+    let active = true;
+    const loadProjects = async () => {
+      try {
+        const resp = await apiRequest<{ projects?: Array<Record<string, unknown>> }>("/api/v1/projects");
+        const rows = Array.isArray(resp.projects) ? resp.projects : [];
+        const mapped: ProjectSummary[] = rows.map((p) => ({
+          project_id: String(p.project_id || ""),
+          name: String(p.name || ""),
+          slug: String(p.slug || ""),
+        })).filter((p) => p.project_id);
+        if (!active) return;
+        setProjectOptions(mapped);
+        if (mapped.length > 0) {
+          const preferred = mapped.find((p) => p.slug === currentProject || p.name === currentProject) ?? mapped[0];
+          setCurrentProject(preferred.slug || preferred.name);
+          setActiveProjectId(preferred.project_id);
+        }
+      } catch {
+        // Keep local defaults if API is unavailable.
+      }
+    };
+    void loadProjects();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!projectOptions.length) return;
+    const match = projectOptions.find((p) => p.slug === currentProject || p.name === currentProject);
+    if (match?.project_id && match.project_id !== activeProjectId) {
+      setActiveProjectId(match.project_id);
+    }
+  }, [currentProject, projectOptions, activeProjectId]);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    let active = true;
+
+    // Immediately clear canvas when switching projects to avoid stale flash
+    skipLayoutPersistRef.current = true;
+    setNodes([]);
+    setEdges([]);
+
+    const loadRemoteLayout = async () => {
+      try {
+        const resp = await apiRequest<CanvasLayoutResponse>(`/api/v1/projects/${activeProjectId}/canvas-layout`);
+        if (!active) return;
+        const loadedNodes = Array.isArray(resp.nodes) ? resp.nodes : [];
+        const loadedEdges = Array.isArray(resp.edges) ? resp.edges : [];
+
+        if (loadedNodes.length > 0) {
+          setNodes(loadedNodes as Node[]);
+          setEdges(loadedEdges as Edge[]);
+          setTimeout(() => {
+            fitView({ padding: 0.2, duration: 300 });
+            skipLayoutPersistRef.current = false;
+          }, 120);
+          addLogEntry(`Loaded canvas for ${currentProject}`, "done");
+        } else {
+          // Empty project — load demo data for first-time experience
+          setNodes(demoNodes);
+          setEdges(demoEdges);
+          setTimeout(() => {
+            fitView({ padding: 0.2, duration: 300 });
+            skipLayoutPersistRef.current = false;
+          }, 120);
+          addLogEntry(`New project — starter canvas loaded`, "done");
+        }
+        setCanvasReady(true);
+      } catch {
+        // API unavailable — try localStorage fallback
+        const local = loadLayout();
+        if (!active) return;
+        if (local) {
+          setNodes(local.nodes);
+          setEdges(local.edges);
+        } else {
+          setNodes(demoNodes);
+          setEdges(demoEdges);
+        }
+        skipLayoutPersistRef.current = false;
+        setCanvasReady(true);
+      }
+    };
+    void loadRemoteLayout();
+    return () => {
+      active = false;
+    };
+  }, [activeProjectId, setNodes, setEdges, fitView, addLogEntry, currentProject]);
+
+  useEffect(() => {
+    // Don't persist during project switch transitions or when canvas is empty (cleared state)
+    if (!activeProjectId || skipLayoutPersistRef.current || nodes.length === 0) return;
+    const timer = setTimeout(() => {
+      const safeNodes = nodes.map((n) => ({ ...n, selected: false }));
+      saveLayout(safeNodes, edges);
+      void apiRequest(`/api/v1/projects/${activeProjectId}/canvas-layout`, "PUT", {
+        nodes: safeNodes,
+        edges,
+      }).catch(() => undefined);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [nodes, edges, activeProjectId]);
 
   const deployAgentByName = useCallback(
     async (agentName: string) => {
@@ -827,8 +951,9 @@ function CanvasWorkspaceInner() {
 
   const handleMetaDeployDraft = useCallback(async () => {
     if (!metaDraft) return;
+    addLogEntry(`Approved draft for ${metaDraft.agentName}`, "done");
     await deployAgentByName(metaDraft.agentName);
-  }, [metaDraft, deployAgentByName]);
+  }, [metaDraft, deployAgentByName, addLogEntry]);
 
   /* ── Snapshot before drag starts (for undo) ─────────────── */
   const onNodeDragStart = useCallback(
@@ -943,7 +1068,9 @@ function CanvasWorkspaceInner() {
                 <div className="px-3 py-2 border-b border-border-default">
                   <p className="text-[10px] text-text-muted uppercase tracking-wider font-medium">Projects</p>
                 </div>
-                {["my-agents", "production-bots", "experimental"].map((p) => (
+                {(projectOptions.length
+                  ? projectOptions.map((p) => p.slug || p.name)
+                  : ["my-agents", "production-bots", "experimental"]).map((p) => (
                   <button
                     key={p}
                     onClick={() => { setCurrentProject(p); setProjectDropdown(false); }}
