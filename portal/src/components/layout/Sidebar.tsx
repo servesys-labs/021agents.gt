@@ -197,7 +197,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        <main className="flex-1 overflow-auto">
+        <main className={`flex-1 ${isCanvasPage ? "overflow-hidden" : "overflow-auto"}`}>
           <div className={isCanvasPage ? "h-full" : "p-6"}>
             {children}
           </div>

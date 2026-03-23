@@ -830,7 +830,7 @@ function CanvasWorkspaceInner() {
       </div>
 
       {/* ── Canvas area ─────────────────────────────────────── */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex overflow-hidden min-h-0">
         {/* React Flow canvas — shrinks when detail panel opens */}
         <div className="flex-1 relative" style={{ transition: 'width 0.3s ease' }}>
         <ReactFlow
