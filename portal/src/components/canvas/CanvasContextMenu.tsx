@@ -21,6 +21,14 @@ import {
   Database,
   Plug,
   Server,
+  Workflow,
+  Clock,
+  Webhook,
+  ShieldCheck,
+  FolderKanban,
+  Tag,
+  Cpu,
+  Command,
 } from "lucide-react";
 
 type ContextMenuAction = {
@@ -73,11 +81,21 @@ const mcpServerActions: ContextMenuAction[] = [
 ];
 
 const canvasActions: ContextMenuAction[] = [
+  // Add nodes
   { label: "Add Agent", icon: <Bot size={13} />, action: "add-agent", shortcut: "A" },
   { label: "Add Knowledge Base", icon: <FileText size={13} />, action: "add-knowledge", shortcut: "K" },
   { label: "Add Data Source", icon: <Database size={13} />, action: "add-datasource" },
   { label: "Add Connector", icon: <Plug size={13} />, action: "add-connector" },
   { label: "Add MCP Server", icon: <Server size={13} />, action: "add-mcp" },
+  // Operations — accessible from canvas background right-click
+  { label: "Workflows & Jobs", icon: <Workflow size={13} />, action: "open-workflows", dividerBefore: true },
+  { label: "Schedules", icon: <Clock size={13} />, action: "open-schedules" },
+  { label: "Webhooks", icon: <Webhook size={13} />, action: "open-webhooks" },
+  { label: "Governance", icon: <ShieldCheck size={13} />, action: "open-governance" },
+  // Project-level
+  { label: "Projects & Envs", icon: <FolderKanban size={13} />, action: "open-projects", dividerBefore: true },
+  { label: "Release Channels", icon: <Tag size={13} />, action: "open-releases" },
+  { label: "Infrastructure", icon: <Cpu size={13} />, action: "open-infrastructure" },
 ];
 
 const actionsByType: Record<string, ContextMenuAction[]> = {
@@ -117,19 +135,24 @@ export function CanvasContextMenu({ x, y, nodeType, nodeId, onAction, onClose }:
   }, [handleClickOutside]);
 
   // Adjust position to keep menu in viewport
-  const adjustedX = Math.min(x, window.innerWidth - 220);
-  const adjustedY = Math.min(y, window.innerHeight - actions.length * 36);
+  const menuHeight = actions.length * 32 + 20;
+  const adjustedX = Math.min(x, window.innerWidth - 240);
+  const adjustedY = Math.min(y, window.innerHeight - menuHeight);
 
   return (
     <div
       ref={menuRef}
-      className="fixed z-50 min-w-[200px] py-1 rounded-xl border border-border-default bg-surface-raised shadow-[0_8px_40px_rgba(0,0,0,0.5)] backdrop-blur-sm animate-[fadeIn_0.1s_ease-out]"
-      style={{ left: adjustedX, top: adjustedY }}
+      className="fixed z-50 min-w-[220px] py-1 rounded-xl border border-border-default bg-surface-raised shadow-[0_8px_40px_rgba(0,0,0,0.5)] backdrop-blur-sm animate-[fadeIn_0.1s_ease-out]"
+      style={{ left: adjustedX, top: adjustedY, maxHeight: "80vh", overflowY: "auto" }}
     >
       {/* Header label */}
-      {nodeType !== "canvas" && (
+      {nodeType !== "canvas" ? (
         <div className="px-3 py-1.5 text-[10px] font-semibold text-text-muted uppercase tracking-widest border-b border-border-default mb-1">
           {nodeType === "mcpServer" ? "MCP Server" : nodeType}
+        </div>
+      ) : (
+        <div className="px-3 py-1.5 text-[10px] font-semibold text-text-muted uppercase tracking-widest border-b border-border-default mb-1">
+          Canvas
         </div>
       )}
 
