@@ -51,6 +51,51 @@ async def test_workflow_run_with_no_steps_returns_input(monkeypatch):
     out = await workflows.run_workflow("wf-empty", input_text="hello", user=user)
     assert out["status"] == "completed"
     assert out["final_output"] == "hello"
+    assert out["run_metadata"]["execution_mode"] == "sequential"
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_endpoint_handles_legacy_or_invalid_json(monkeypatch):
+    class _Cursor:
+        def __init__(self, row=None, rows=None):
+            self._row = row
+            self._rows = rows or []
+
+        def fetchone(self):
+            return self._row
+
+        def fetchall(self):
+            return self._rows
+
+    class _Conn:
+        def execute(self, query, params=()):
+            if "SELECT workflow_id FROM workflows" in query:
+                return _Cursor({"workflow_id": params[0]})
+            if "SELECT * FROM workflow_runs" in query:
+                return _Cursor(rows=[{
+                    "run_id": "r1",
+                    "workflow_id": params[0],
+                    "status": "completed",
+                    "steps_status_json": "{bad-json",
+                    "dag_json": "{bad-json",
+                    "reflection_json": "{}",
+                    "total_cost_usd": 0.0,
+                }])
+            return _Cursor()
+
+    class _DB:
+        def __init__(self):
+            self.conn = _Conn()
+
+    monkeypatch.setattr(workflows, "_get_db", lambda: _DB())
+    user = CurrentUser(user_id="u1", email="u1@example.com", org_id="o1")
+    out = await workflows.list_workflow_runs("wf-legacy", limit=20, user=user)
+    assert "runs" in out and len(out["runs"]) == 1
+    run = out["runs"][0]
+    assert run["steps"] == {}
+    assert run["dag"] == {}
+    assert run["run_metadata"]["execution_mode"] == "sequential"
+    assert run["run_metadata"]["reflection_rollup"]["node_count"] == 0
 
 
 @pytest.mark.asyncio

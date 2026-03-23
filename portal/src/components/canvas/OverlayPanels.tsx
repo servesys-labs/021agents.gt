@@ -6,6 +6,7 @@ import {
   MoreVertical, ChevronRight, Zap, Activity, Code, Lock, Unlock,
 } from "lucide-react";
 import { CanvasOverlayPanel } from "./CanvasOverlayPanel";
+import { apiRequest, useApiQuery } from "../../lib/api";
 
 /* ── Shared helpers ────────────────────────────────────────────── */
 function StatusPill({ status }: { status: string }) {
@@ -107,21 +108,32 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
   const [showCreate, setShowCreate] = useState(false);
   const [wfName, setWfName] = useState("");
   const [wfDesc, setWfDesc] = useState("");
-  const [wfAgent, setWfAgent] = useState("support-bot");
+  const [actionMessage, setActionMessage] = useState("");
 
-  const workflows = [
-    { id: "wf_001", name: "Customer Onboarding", agent: "support-bot", status: "active", runs: 142, lastRun: "5 min ago", successRate: 96 },
-    { id: "wf_002", name: "Daily Report Gen", agent: "data-analyst", status: "active", runs: 365, lastRun: "1 hour ago", successRate: 99 },
-    { id: "wf_003", name: "PR Review Pipeline", agent: "code-reviewer", status: "active", runs: 87, lastRun: "3 hours ago", successRate: 91 },
-  ];
-
-  const jobs = [
-    { id: "job_a1", workflow: "Customer Onboarding", status: "running", started: "2 min ago", progress: 65 },
-    { id: "job_b2", workflow: "Daily Report Gen", status: "completed", started: "1 hour ago", progress: 100 },
-    { id: "job_c3", workflow: "PR Review Pipeline", status: "failed", started: "3 hours ago", progress: 42 },
-    { id: "job_d4", workflow: "Customer Onboarding", status: "completed", started: "5 hours ago", progress: 100 },
-    { id: "job_e5", workflow: "Daily Report Gen", status: "cancelled", started: "1 day ago", progress: 30 },
-  ];
+  const workflowsQuery = useApiQuery<{ workflows?: Array<Record<string, unknown>> }>(
+    "/api/v1/workflows",
+    open,
+  );
+  const jobsQuery = useApiQuery<{ jobs?: Array<Record<string, unknown>> }>(
+    "/api/v1/jobs?limit=50",
+    open,
+  );
+  const workflows = (workflowsQuery.data?.workflows ?? []).map((wf) => ({
+    id: String(wf.workflow_id ?? ""),
+    name: String(wf.name ?? "Unnamed workflow"),
+    description: String(wf.description ?? ""),
+    status: String(wf.status ?? "active"),
+    createdAt: Number(wf.created_at ?? 0),
+    steps: Array.isArray(wf.steps) ? wf.steps.length : Number(wf.step_count ?? 0),
+  }));
+  const jobs = (jobsQuery.data?.jobs ?? []).map((job) => ({
+    id: String(job.job_id ?? ""),
+    workflow: String(job.workflow_id ?? job.agent_name ?? "n/a"),
+    status: String(job.status ?? "unknown"),
+    task: String(job.task ?? ""),
+    progress: Number(job.progress ?? 0),
+    retries: Number(job.retries ?? 0),
+  }));
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Workflows & Jobs" icon={<Workflow size={16} className="text-accent" />} width="780px">
@@ -148,13 +160,35 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
           <SectionTitle>Create Workflow</SectionTitle>
           <InlineInput label="Name" value={wfName} onChange={setWfName} placeholder="e.g. Customer Onboarding" />
           <InlineTextarea label="Description" value={wfDesc} onChange={setWfDesc} placeholder="What does this workflow do?" />
-          <InlineSelect label="Agent" value={wfAgent} onChange={setWfAgent}
-            options={[{ value: "support-bot", label: "Support Bot" }, { value: "data-analyst", label: "Data Analyst" }, { value: "code-reviewer", label: "Code Reviewer" }]} />
           <div className="flex gap-2 mt-2">
-            <button className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Create</button>
+            <button
+              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+              onClick={async () => {
+                if (!wfName.trim()) return;
+                try {
+                  await apiRequest("/api/v1/workflows", "POST", {
+                    name: wfName.trim(),
+                    description: wfDesc.trim(),
+                    steps: [],
+                  });
+                  setWfName("");
+                  setWfDesc("");
+                  setShowCreate(false);
+                  setActionMessage("Workflow created");
+                  void workflowsQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to create workflow");
+                }
+              }}
+            >
+              Create
+            </button>
             <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-xs text-text-muted hover:text-text-primary transition-colors">Cancel</button>
           </div>
         </div>
+      )}
+      {actionMessage && (
+        <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>
       )}
 
       {/* Search */}
@@ -167,6 +201,8 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
       {/* Workflows list */}
       {tab === "workflows" && (
         <div className="space-y-2">
+          {workflowsQuery.loading && <p className="text-xs text-text-muted">Loading workflows...</p>}
+          {workflowsQuery.error && <p className="text-xs text-status-error">{workflowsQuery.error}</p>}
           {workflows.filter((w) => w.name.toLowerCase().includes(search.toLowerCase())).map((wf) => (
             <div key={wf.id} className="bg-surface-base rounded-lg border border-border-default p-3">
               <div className="flex items-center gap-2 mb-2">
@@ -175,19 +211,40 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
                 <StatusPill status={wf.status} />
               </div>
               <div className="flex items-center gap-4 text-[10px] text-text-muted">
-                <span>Agent: <span className="text-text-secondary">{wf.agent}</span></span>
-                <span>{wf.runs} runs</span>
-                <span>Last: {wf.lastRun}</span>
-                <span className="text-status-live">{wf.successRate}% success</span>
+                <span>Workflow: <span className="text-text-secondary font-mono">{wf.id.slice(0, 10)}</span></span>
+                <span>{wf.steps} steps</span>
+                <span>Created: {wf.createdAt ? new Date(wf.createdAt * 1000).toLocaleDateString() : "n/a"}</span>
               </div>
               <div className="flex gap-2 mt-2">
-                <button className="flex items-center gap-1 px-2 py-1 text-[10px] bg-accent/10 text-accent rounded hover:bg-accent/20 transition-colors">
+                <button
+                  className="flex items-center gap-1 px-2 py-1 text-[10px] bg-accent/10 text-accent rounded hover:bg-accent/20 transition-colors"
+                  onClick={async () => {
+                    try {
+                      await apiRequest(`/api/v1/workflows/${wf.id}/run`, "POST");
+                      setActionMessage("Workflow run started");
+                      void jobsQuery.refetch();
+                    } catch (err) {
+                      setActionMessage(err instanceof Error ? err.message : "Failed to run workflow");
+                    }
+                  }}
+                >
                   <Play size={9} /> Run
                 </button>
                 <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors">
-                  <Settings size={9} /> Edit
+                  <Settings size={9} /> Configure
                 </button>
-                <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto">
+                <button
+                  className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
+                  onClick={async () => {
+                    try {
+                      await apiRequest(`/api/v1/workflows/${wf.id}`, "DELETE");
+                      setActionMessage("Workflow deleted");
+                      void workflowsQuery.refetch();
+                    } catch (err) {
+                      setActionMessage(err instanceof Error ? err.message : "Failed to delete workflow");
+                    }
+                  }}
+                >
                   <Trash2 size={9} /> Delete
                 </button>
               </div>
@@ -199,14 +256,17 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
       {/* Jobs list */}
       {tab === "jobs" && (
         <div className="space-y-2">
+          {jobsQuery.loading && <p className="text-xs text-text-muted">Loading jobs...</p>}
+          {jobsQuery.error && <p className="text-xs text-status-error">{jobsQuery.error}</p>}
           {jobs.filter((j) => j.workflow.toLowerCase().includes(search.toLowerCase())).map((job) => (
             <div key={job.id} className="bg-surface-base rounded-lg border border-border-default p-3">
               <div className="flex items-center gap-2 mb-1.5">
                 <code className="text-[10px] font-mono text-accent">{job.id}</code>
                 <StatusPill status={job.status} />
-                <span className="ml-auto text-[10px] text-text-muted">{job.started}</span>
+                <span className="ml-auto text-[10px] text-text-muted">retries {job.retries}</span>
               </div>
-              <p className="text-[11px] text-text-primary mb-2">{job.workflow}</p>
+              <p className="text-[11px] text-text-primary mb-1">{job.workflow}</p>
+              <p className="text-[10px] text-text-muted mb-2 truncate">{job.task || "No task details"}</p>
               <div className="h-1.5 bg-surface-overlay rounded-full overflow-hidden mb-2">
                 <div className={`h-full rounded-full transition-all ${
                   job.status === "failed" ? "bg-status-error" :
@@ -216,16 +276,41 @@ export function WorkflowsPanel({ open, onClose }: { open: boolean; onClose: () =
               </div>
               <div className="flex gap-2">
                 {job.status === "running" && (
-                  <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors">
+                  <button
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors"
+                    onClick={async () => {
+                      try {
+                        await apiRequest(`/api/v1/jobs/${job.id}/cancel`, "POST");
+                        setActionMessage("Job cancelled");
+                        void jobsQuery.refetch();
+                      } catch (err) {
+                        setActionMessage(err instanceof Error ? err.message : "Failed to cancel job");
+                      }
+                    }}
+                  >
                     <Pause size={9} /> Cancel
                   </button>
                 )}
                 {job.status === "failed" && (
-                  <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors">
+                  <button
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors"
+                    onClick={async () => {
+                      try {
+                        await apiRequest(`/api/v1/jobs/${job.id}/retry`, "POST");
+                        setActionMessage("Job retried");
+                        void jobsQuery.refetch();
+                      } catch (err) {
+                        setActionMessage(err instanceof Error ? err.message : "Failed to retry job");
+                      }
+                    }}
+                  >
                     <RotateCcw size={9} /> Retry
                   </button>
                 )}
-                <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors">
+                <button
+                  className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors"
+                  onClick={() => setActionMessage(`Job ${job.id}: ${job.status}`)}
+                >
                   <Eye size={9} /> Details
                 </button>
               </div>
@@ -245,12 +330,21 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
   const [name, setName] = useState("");
   const [cron, setCron] = useState("0 0 9 * * 1-5");
   const [agent, setAgent] = useState("support-bot");
-
-  const schedules = [
-    { id: "sch_1", name: "Morning Report", cron: "0 0 9 * * 1-5", agent: "data-analyst", status: "enabled", nextRun: "Tomorrow 9:00 AM", lastRun: "Today 9:00 AM" },
-    { id: "sch_2", name: "Weekly Digest", cron: "0 0 17 * * 5", agent: "support-bot", status: "enabled", nextRun: "Friday 5:00 PM", lastRun: "Last Friday" },
-    { id: "sch_3", name: "DB Cleanup", cron: "0 0 2 * * 0", agent: "data-analyst", status: "disabled", nextRun: "—", lastRun: "2 weeks ago" },
-  ];
+  const [task, setTask] = useState("Run scheduled task");
+  const [actionMessage, setActionMessage] = useState("");
+  const schedulesQuery = useApiQuery<Array<Record<string, unknown>>>(
+    "/api/v1/schedules",
+    open,
+  );
+  const schedules = (schedulesQuery.data ?? []).map((s) => ({
+    id: String(s.schedule_id ?? ""),
+    cron: String(s.cron ?? ""),
+    agent: String(s.agent_name ?? ""),
+    task: String(s.task ?? ""),
+    status: Boolean(s.is_enabled) ? "enabled" : "disabled",
+    runCount: Number(s.run_count ?? 0),
+    lastRun: Number(s.last_run_at ?? 0),
+  }));
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Schedules" icon={<Clock size={16} className="text-accent" />}>
@@ -268,21 +362,46 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
           <InlineInput label="Name" value={name} onChange={setName} placeholder="e.g. Morning Report" />
           <InlineInput label="Cron Expression" value={cron} onChange={setCron} placeholder="0 0 9 * * 1-5" />
           <p className="text-[10px] text-text-muted -mt-2 mb-3">Format: sec min hour day month weekday</p>
+          <InlineInput label="Task" value={task} onChange={setTask} placeholder="Describe scheduled task" />
           <InlineSelect label="Agent" value={agent} onChange={setAgent}
             options={[{ value: "support-bot", label: "Support Bot" }, { value: "data-analyst", label: "Data Analyst" }]} />
           <div className="flex gap-2 mt-2">
-            <button className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Create</button>
+            <button
+              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+              onClick={async () => {
+                if (!agent.trim() || !cron.trim() || !task.trim()) return;
+                try {
+                  await apiRequest("/api/v1/schedules", "POST", {
+                    agent_name: agent.trim(),
+                    cron: cron.trim(),
+                    task: task.trim(),
+                  });
+                  setShowCreate(false);
+                  setName("");
+                  setTask("Run scheduled task");
+                  setActionMessage("Schedule created");
+                  void schedulesQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to create schedule");
+                }
+              }}
+            >
+              Create
+            </button>
             <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-xs text-text-muted hover:text-text-primary transition-colors">Cancel</button>
           </div>
         </div>
       )}
+      {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
 
       <div className="space-y-2">
+        {schedulesQuery.loading && <p className="text-xs text-text-muted">Loading schedules...</p>}
+        {schedulesQuery.error && <p className="text-xs text-status-error">{schedulesQuery.error}</p>}
         {schedules.map((sch) => (
           <div key={sch.id} className="bg-surface-base rounded-lg border border-border-default p-3">
             <div className="flex items-center gap-2 mb-2">
               <Clock size={12} className="text-accent" />
-              <span className="text-[11px] font-medium text-text-primary flex-1">{sch.name}</span>
+              <span className="text-[11px] font-medium text-text-primary flex-1">{sch.task || sch.id}</span>
               <StatusPill status={sch.status} />
             </div>
             <div className="flex items-center gap-3 text-[10px] text-text-muted mb-2">
@@ -290,19 +409,44 @@ export function SchedulesPanel({ open, onClose }: { open: boolean; onClose: () =
               <span>Agent: {sch.agent}</span>
             </div>
             <div className="flex items-center gap-3 text-[10px] text-text-muted">
-              <span>Next: <span className="text-text-secondary">{sch.nextRun}</span></span>
-              <span>Last: {sch.lastRun}</span>
+              <span>Runs: <span className="text-text-secondary">{sch.runCount}</span></span>
+              <span>Last: {sch.lastRun ? new Date(sch.lastRun * 1000).toLocaleString() : "never"}</span>
             </div>
             <div className="flex gap-2 mt-2">
               <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors">
                 <Settings size={9} /> Edit
               </button>
-              <button className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded transition-colors ${
-                sch.status === "enabled" ? "text-yellow-500 hover:bg-yellow-500/10" : "text-status-live hover:bg-status-live/10"
-              }`}>
+              <button
+                className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded transition-colors ${
+                  sch.status === "enabled" ? "text-yellow-500 hover:bg-yellow-500/10" : "text-status-live hover:bg-status-live/10"
+                }`}
+                onClick={async () => {
+                  try {
+                    await apiRequest(
+                      `/api/v1/schedules/${sch.id}/${sch.status === "enabled" ? "disable" : "enable"}`,
+                      "POST",
+                    );
+                    setActionMessage(`Schedule ${sch.status === "enabled" ? "disabled" : "enabled"}`);
+                    void schedulesQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to toggle schedule");
+                  }
+                }}
+              >
                 {sch.status === "enabled" ? <><Pause size={9} /> Disable</> : <><Play size={9} /> Enable</>}
               </button>
-              <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto">
+              <button
+                className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
+                onClick={async () => {
+                  try {
+                    await apiRequest(`/api/v1/schedules/${sch.id}`, "DELETE");
+                    setActionMessage("Schedule deleted");
+                    void schedulesQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to delete schedule");
+                  }
+                }}
+              >
                 <Trash2 size={9} /> Delete
               </button>
             </div>
@@ -320,12 +464,19 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
   const [showCreate, setShowCreate] = useState(false);
   const [url, setUrl] = useState("");
   const [events, setEvents] = useState("");
-
-  const webhooks = [
-    { id: "wh_1", url: "https://api.example.com/hooks/agent-events", events: ["agent.run.completed", "agent.run.failed"], status: "active", deliveries: 1247, lastDelivery: "5 min ago" },
-    { id: "wh_2", url: "https://slack.com/api/incoming-webhooks/T01234", events: ["agent.deployed"], status: "active", deliveries: 42, lastDelivery: "2 days ago" },
-    { id: "wh_3", url: "https://monitoring.internal/alerts", events: ["agent.error", "budget.exceeded"], status: "active", deliveries: 8, lastDelivery: "1 week ago" },
-  ];
+  const [actionMessage, setActionMessage] = useState("");
+  const webhooksQuery = useApiQuery<Array<Record<string, unknown>>>(
+    "/api/v1/webhooks",
+    open,
+  );
+  const webhooks = (webhooksQuery.data ?? []).map((wh) => ({
+    id: String(wh.webhook_id ?? ""),
+    url: String(wh.url ?? ""),
+    events: Array.isArray(wh.events) ? wh.events.map((e) => String(e)) : [],
+    status: Boolean(wh.is_active) ? "active" : "disabled",
+    failureCount: Number(wh.failure_count ?? 0),
+    lastTriggeredAt: Number(wh.last_triggered_at ?? 0),
+  }));
 
   return (
     <CanvasOverlayPanel open={open} onClose={onClose} title="Webhooks" icon={<Webhook size={16} className="text-accent" />}>
@@ -343,13 +494,39 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
           <InlineInput label="Endpoint URL" value={url} onChange={setUrl} placeholder="https://..." />
           <InlineInput label="Events (comma-separated)" value={events} onChange={setEvents} placeholder="agent.run.completed, agent.deployed" />
           <div className="flex gap-2 mt-2">
-            <button className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Create</button>
+            <button
+              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+              onClick={async () => {
+                try {
+                  const nextEvents = events
+                    .split(",")
+                    .map((e) => e.trim())
+                    .filter(Boolean);
+                  await apiRequest("/api/v1/webhooks", "POST", {
+                    url: url.trim(),
+                    events: nextEvents.length > 0 ? nextEvents : ["*"],
+                  });
+                  setShowCreate(false);
+                  setUrl("");
+                  setEvents("");
+                  setActionMessage("Webhook created");
+                  void webhooksQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to create webhook");
+                }
+              }}
+            >
+              Create
+            </button>
             <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-xs text-text-muted hover:text-text-primary transition-colors">Cancel</button>
           </div>
         </div>
       )}
+      {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
 
       <div className="space-y-2">
+        {webhooksQuery.loading && <p className="text-xs text-text-muted">Loading webhooks...</p>}
+        {webhooksQuery.error && <p className="text-xs text-status-error">{webhooksQuery.error}</p>}
         {webhooks.map((wh) => (
           <div key={wh.id} className="bg-surface-base rounded-lg border border-border-default p-3">
             <div className="flex items-center gap-2 mb-2">
@@ -363,20 +540,63 @@ export function WebhooksPanel({ open, onClose }: { open: boolean; onClose: () =>
               ))}
             </div>
             <div className="flex items-center gap-3 text-[10px] text-text-muted">
-              <span>{wh.deliveries} deliveries</span>
-              <span>Last: {wh.lastDelivery}</span>
+              <span>Failures: {wh.failureCount}</span>
+              <span>Last: {wh.lastTriggeredAt ? new Date(wh.lastTriggeredAt * 1000).toLocaleString() : "never"}</span>
             </div>
             <div className="flex gap-2 mt-2">
-              <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors">
+              <button
+                className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors"
+                onClick={async () => {
+                  try {
+                    const result = await apiRequest<{ success?: boolean; status?: number }>(
+                      `/api/v1/webhooks/${wh.id}/test`,
+                      "POST",
+                    );
+                    setActionMessage(
+                      result.success
+                        ? `Webhook test succeeded (${result.status ?? 200})`
+                        : `Webhook test failed (${result.status ?? 0})`,
+                    );
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Webhook test failed");
+                  }
+                }}
+              >
                 <Send size={9} /> Test
               </button>
               <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors">
                 <Eye size={9} /> Deliveries
               </button>
-              <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors">
-                <Settings size={9} /> Edit
+              <button
+                className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors"
+                onClick={async () => {
+                  try {
+                    const nextState = wh.status !== "active";
+                    await apiRequest(
+                      `/api/v1/webhooks/${wh.id}?is_active=${nextState ? "true" : "false"}`,
+                      "PUT",
+                    );
+                    setActionMessage(`Webhook ${wh.status === "active" ? "disabled" : "enabled"}`);
+                    void webhooksQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to update webhook");
+                  }
+                }}
+              >
+                <Settings size={9} /> {wh.status === "active" ? "Disable" : "Enable"}
               </button>
-              <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto">
+              <button
+                className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
+                onClick={async () => {
+                  try {
+                    await apiRequest(`/api/v1/webhooks/${wh.id}`, "DELETE");
+                    setActionMessage("Webhook deleted");
+                    void webhooksQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to delete webhook");
+                  }
+                }}
+              >
                 <Trash2 size={9} /> Delete
               </button>
             </div>

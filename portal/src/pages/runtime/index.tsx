@@ -64,6 +64,16 @@ type WorkflowRun = {
     node_count?: number;
     nodes?: Record<string, { confidence?: number; action?: string; issues?: string[] }>;
   };
+  run_metadata?: {
+    execution_mode?: string;
+    reducer_strategies?: string[];
+    reflection_rollup?: {
+      avg_confidence?: number;
+      revise_count?: number;
+      continue_count?: number;
+      node_count?: number;
+    };
+  };
 };
 type WorkflowRunsResponse = { runs?: WorkflowRun[] };
 
@@ -117,6 +127,13 @@ export const RuntimePage = () => {
   /* ── Detail panel ─────────────────────────────────────────── */
   const [detailOpen, setDetailOpen] = useState(false);
   const [detailItem, setDetailItem] = useState<Workflow | Job | WorkflowRun | null>(null);
+  const [selectedRunNode, setSelectedRunNode] = useState<{
+    runId: string;
+    nodeId: string;
+    nodeType: string;
+    nodeSpec: { id?: string; type?: string; depends_on?: string[] } | null;
+    nodeResult: { status?: string; cost_usd?: number; attempts?: number; metadata?: unknown } | null;
+  } | null>(null);
 
   /* ── Confirm dialog ───────────────────────────────────────── */
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -639,23 +656,97 @@ export const RuntimePage = () => {
                 <span>
                   Reflection nodes: {toNumber(run.reflection?.node_count)}
                 </span>
+                <span>
+                  Mode: {run.run_metadata?.execution_mode ?? "sequential"}
+                </span>
+                <span>
+                  Avg conf: {((toNumber(run.run_metadata?.reflection_rollup?.avg_confidence) || 0) * 100).toFixed(1)}%
+                </span>
               </div>
+              {Array.isArray(run.run_metadata?.reducer_strategies) && run.run_metadata?.reducer_strategies?.length > 0 && (
+                <div className="text-[10px] text-text-muted mb-2">
+                  Reducers: {run.run_metadata?.reducer_strategies?.join(", ")}
+                </div>
+              )}
               <div className="flex flex-wrap gap-1">
                 {(run.dag?.nodes ?? []).slice(0, 12).map((node, i) => {
-                  const nodeStatus = run.dag?.results?.[node.id ?? ""]?.status ?? "unknown";
+                  const nodeId = node.id ?? "";
+                  const nodeStatus = run.dag?.results?.[nodeId]?.status ?? "unknown";
                   return (
-                    <span
+                    <button
+                      type="button"
                       key={`${node.id ?? node.type ?? "node"}-${i}`}
-                      className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default"
+                      className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default hover:border-accent hover:text-text-primary transition-colors"
+                      onClick={() =>
+                        setSelectedRunNode({
+                          runId: run.run_id ?? "run",
+                          nodeId: node.id ?? `n${i + 1}`,
+                          nodeType: node.type ?? "node",
+                          nodeSpec: node,
+                          nodeResult: (run.dag?.results?.[nodeId] as { status?: string; cost_usd?: number; attempts?: number; metadata?: unknown } | undefined) ?? null,
+                        })
+                      }
                     >
                       {node.type ?? "node"}:{node.id ?? `n${i + 1}`} ({nodeStatus})
-                    </span>
+                    </button>
                   );
                 })}
               </div>
             </div>
           ))}
         </div>
+      </SlidePanel>
+
+      {/* Run node detail panel */}
+      <SlidePanel
+        isOpen={Boolean(selectedRunNode)}
+        onClose={() => setSelectedRunNode(null)}
+        title={
+          selectedRunNode
+            ? `Node ${selectedRunNode.nodeType}:${selectedRunNode.nodeId}`
+            : "Node"
+        }
+        subtitle={
+          selectedRunNode
+            ? `Run ${selectedRunNode.runId.slice(0, 12)}`
+            : "Workflow run node detail"
+        }
+        width="560px"
+      >
+        {selectedRunNode ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="card py-2">
+                <p className="text-[10px] uppercase text-text-muted">Status</p>
+                <p className="font-mono">{selectedRunNode.nodeResult?.status ?? "unknown"}</p>
+              </div>
+              <div className="card py-2">
+                <p className="text-[10px] uppercase text-text-muted">Attempts</p>
+                <p className="font-mono">{toNumber(selectedRunNode.nodeResult?.attempts)}</p>
+              </div>
+              <div className="card py-2">
+                <p className="text-[10px] uppercase text-text-muted">Cost</p>
+                <p className="font-mono">${toNumber(selectedRunNode.nodeResult?.cost_usd).toFixed(6)}</p>
+              </div>
+              <div className="card py-2">
+                <p className="text-[10px] uppercase text-text-muted">Depends On</p>
+                <p className="font-mono">
+                  {(selectedRunNode.nodeSpec?.depends_on ?? []).join(", ") || "--"}
+                </p>
+              </div>
+            </div>
+            <pre className="text-xs font-mono bg-surface-base border border-border-default rounded-md p-4 overflow-x-auto max-h-80">
+              {JSON.stringify(
+                {
+                  node: selectedRunNode.nodeSpec,
+                  result: selectedRunNode.nodeResult,
+                },
+                null,
+                2,
+              )}
+            </pre>
+          </div>
+        ) : null}
       </SlidePanel>
 
       {/* Confirm dialog */}

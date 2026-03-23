@@ -31,6 +31,75 @@ class CreateWorkflowRequest(BaseModel):
     steps: list[dict] = Field(default_factory=list)
 
 
+def _derive_run_metadata(
+    dag: dict[str, Any],
+    reflection: dict[str, Any],
+) -> dict[str, Any]:
+    nodes = dag.get("nodes", []) if isinstance(dag, dict) else []
+    results = dag.get("results", {}) if isinstance(dag, dict) else {}
+    node_types = [str(n.get("type", "")) for n in nodes if isinstance(n, dict)]
+    execution_mode = "parallel" if "parallel_group" in node_types else "sequential"
+    reducer_strategies: list[str] = []
+    if isinstance(results, dict):
+        for result in results.values():
+            if not isinstance(result, dict):
+                continue
+            metadata = result.get("metadata", {})
+            if isinstance(metadata, dict):
+                strategy = metadata.get("strategy")
+                if strategy:
+                    reducer_strategies.append(str(strategy))
+    unique_strategies = sorted(set(reducer_strategies))
+    reflection_nodes = reflection.get("nodes", {}) if isinstance(reflection, dict) else {}
+    confidences: list[float] = []
+    revise_count = 0
+    continue_count = 0
+    if isinstance(reflection_nodes, dict):
+        for node in reflection_nodes.values():
+            if not isinstance(node, dict):
+                continue
+            conf = node.get("confidence")
+            if isinstance(conf, (float, int)):
+                confidences.append(float(conf))
+            action = str(node.get("action", ""))
+            if action == "revise":
+                revise_count += 1
+            elif action == "continue":
+                continue_count += 1
+    avg_confidence = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+    return {
+        "execution_mode": execution_mode,
+        "reducer_strategies": unique_strategies,
+        "reflection_rollup": {
+            "avg_confidence": avg_confidence,
+            "revise_count": revise_count,
+            "continue_count": continue_count,
+            "node_count": len(reflection_nodes) if isinstance(reflection_nodes, dict) else 0,
+        },
+    }
+
+
+def _decode_run_row(row: dict[str, Any]) -> dict[str, Any]:
+    item = dict(row)
+    try:
+        item["steps"] = json.loads(item.pop("steps_status_json", "{}"))
+    except Exception:
+        item["steps"] = {}
+    try:
+        item["dag"] = json.loads(item.pop("dag_json", "{}"))
+    except Exception:
+        item["dag"] = {}
+    try:
+        item["reflection"] = json.loads(item.pop("reflection_json", "{}"))
+    except Exception:
+        item["reflection"] = {}
+    item["run_metadata"] = _derive_run_metadata(
+        item.get("dag", {}),
+        item.get("reflection", {}),
+    )
+    return item
+
+
 def _normalize_steps(steps: list[dict]) -> list[dict]:
     """Normalize legacy workflow steps into typed nodes."""
     normalized: list[dict] = []
@@ -345,6 +414,7 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
         "node_count": len(reflection_nodes),
         "nodes": reflection_nodes,
     }
+    run_metadata = _derive_run_metadata(dag_artifact, reflection_artifact)
 
     db.conn.execute(
         "UPDATE workflow_runs SET status = 'completed', steps_status_json = ?, dag_json = ?, reflection_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
@@ -368,6 +438,7 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
         "final_output": final_output,
         "dag": dag_artifact,
         "reflection": reflection_artifact,
+        "run_metadata": run_metadata,
     }
 
 
@@ -388,22 +459,7 @@ async def list_workflow_runs(
         "SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY started_at DESC LIMIT ?",
         (workflow_id, limit),
     ).fetchall()
-    runs: list[dict[str, Any]] = []
-    for row in rows:
-        item = dict(row)
-        try:
-            item["steps"] = json.loads(item.pop("steps_status_json", "{}"))
-        except Exception:
-            item["steps"] = {}
-        try:
-            item["dag"] = json.loads(item.pop("dag_json", "{}"))
-        except Exception:
-            item["dag"] = {}
-        try:
-            item["reflection"] = json.loads(item.pop("reflection_json", "{}"))
-        except Exception:
-            item["reflection"] = {}
-        runs.append(item)
+    runs = [_decode_run_row(dict(row)) for row in rows]
     return {"runs": runs}
 
 
@@ -427,20 +483,7 @@ async def get_workflow_run(
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Workflow run not found")
-    result = dict(row)
-    try:
-        result["steps"] = json.loads(result.pop("steps_status_json", "{}"))
-    except Exception:
-        result["steps"] = {}
-    try:
-        result["dag"] = json.loads(result.pop("dag_json", "{}"))
-    except Exception:
-        result["dag"] = {}
-    try:
-        result["reflection"] = json.loads(result.pop("reflection_json", "{}"))
-    except Exception:
-        result["reflection"] = {}
-    return result
+    return _decode_run_row(dict(row))
 
 
 @router.post("/{workflow_id}/runs/{run_id}/cancel")
