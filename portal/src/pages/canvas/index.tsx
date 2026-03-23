@@ -1,12 +1,14 @@
 import { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import {
   ReactFlow,
+  ReactFlowProvider,
   Background,
   Controls,
   MiniMap,
   addEdge,
   useNodesState,
   useEdgesState,
+  useReactFlow,
   type Connection,
   type Edge,
   type Node,
@@ -221,8 +223,19 @@ const demoEdges: Edge[] = [
 /* ═══════════════════════════════════════════════════════════════
    CANVAS WORKSPACE — Railway-style
    ═══════════════════════════════════════════════════════════════ */
+/* ── Outer wrapper provides ReactFlow context ─────────────── */
 export function CanvasWorkspacePage() {
+  return (
+    <ReactFlowProvider>
+      <CanvasWorkspaceInner />
+    </ReactFlowProvider>
+  );
+}
+
+/* ── Inner component with access to useReactFlow ──────────── */
+function CanvasWorkspaceInner() {
   const navigate = useNavigate();
+  const { setCenter, getZoom } = useReactFlow();
   const saved = loadLayout();
   const [nodes, setNodes, onNodesChange] = useNodesState(saved?.nodes || demoNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(saved?.edges || demoEdges);
@@ -319,13 +332,33 @@ export function CanvasWorkspacePage() {
     setContextMenu(null);
   }, []);
 
-  /* ── Node click → open detail panel (Railway-style) ──────── */
+  /* ── Node click → open detail panel + center node in remaining canvas ── */
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
       setDetailNode(node);
       setContextMenu(null);
+
+      // Auto-center the clicked node in the LEFT half of the viewport
+      // The detail panel takes ~50% of the viewport from the right,
+      // so we need to shift the center point leftward in flow-coordinates.
+      // setCenter(x,y) puts (x,y) at the center of the ReactFlow container.
+      // After the panel opens, the RF container shrinks to ~50% width.
+      // We want the node centered within that remaining 50% container,
+      // so we just center on the node — React Flow handles the rest
+      // because the container itself shrinks.
+      const nodeWidth = node.measured?.width ?? 220;
+      const nodeHeight = node.measured?.height ?? 140;
+      const x = node.position.x + nodeWidth / 2;
+      const y = node.position.y + nodeHeight / 2;
+      const zoom = getZoom();
+
+      // Delay to let the panel render and the RF container resize,
+      // then center the node in the now-smaller container
+      setTimeout(() => {
+        setCenter(x, y, { zoom: Math.max(zoom, 0.65), duration: 500 });
+      }, 120);
     },
-    [],
+    [setCenter, getZoom],
   );
 
   /* ── Add node ────────────────────────────────────────────── */
