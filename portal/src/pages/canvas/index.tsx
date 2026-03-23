@@ -594,8 +594,9 @@ export function CanvasWorkspacePage() {
           color="var(--color-border-default)"
         />
         <Controls
-          position="bottom-left"
-          style={{ left: "280px", bottom: "24px" }}
+          position="top-left"
+          style={{ left: "60px", top: "16px" }}
+          showInteractive={false}
         />
         <MiniMap
           nodeColor={(node) => {

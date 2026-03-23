@@ -474,6 +474,8 @@ textarea::placeholder {
 }
 
 .react-flow__controls {
+  display: flex !important;
+  flex-direction: row !important;
   border-radius: 0.75rem !important;
   border: 1px solid var(--color-border-default) !important;
   background: var(--color-surface-raised) !important;
@@ -482,8 +484,11 @@ textarea::placeholder {
 
 .react-flow__controls-button {
   background: transparent !important;
-  border-bottom: 1px solid var(--color-border-default) !important;
+  border-bottom: none !important;
+  border-right: 1px solid var(--color-border-default) !important;
   fill: var(--color-text-muted) !important;
+  width: 28px !important;
+  height: 28px !important;
 }
 
 .react-flow__controls-button:hover {
@@ -492,5 +497,5 @@ textarea::placeholder {
 }
 
 .react-flow__controls-button:last-child {
-  border-bottom: none !important;
+  border-right: none !important;
 }
