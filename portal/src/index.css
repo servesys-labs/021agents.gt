@@ -324,7 +324,7 @@ textarea::placeholder {
 
 .btn-primary {
   background-color: var(--color-accent);
-  color: white;
+  color: var(--color-text-inverse);
 }
 
 .btn-primary:hover {

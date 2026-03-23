@@ -1,10 +1,20 @@
 import { useState, useRef, useEffect } from "react";
-import { Send, Loader2, Settings, MessageSquare } from "lucide-react";
+import { Send, Loader2, Settings, MessageSquare, Eye, LocateFixed, Rocket } from "lucide-react";
 
 type Props = {
   onSubmit: (prompt: string) => void;
   isProcessing: boolean;
   lastResult?: string;
+  latestDraft?: {
+    agentName: string;
+    model: string;
+    tools: string[];
+    resources: Array<{ type: string; name: string }>;
+    createdAt: number;
+  } | null;
+  onReviewDraft?: () => void;
+  onCenterDraft?: () => void;
+  onDeployDraft?: () => void;
 };
 
 /* ── Quick-action suggestion chips (like Railway) ──────────────── */
@@ -17,9 +27,18 @@ const SUGGESTIONS = [
   { icon: "📦", label: "Deploy Knowledge Base" },
 ];
 
-export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
+export function MetaAgentAssist({
+  onSubmit,
+  isProcessing,
+  lastResult,
+  latestDraft,
+  onReviewDraft,
+  onCenterDraft,
+  onDeployDraft,
+}: Props) {
   const [input, setInput] = useState("");
-  const [history, setHistory] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
+  type ChatMessage = { role: "user" | "assistant"; text: string };
+  const [history, setHistory] = useState<ChatMessage[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const historyRef = useRef<HTMLDivElement>(null);
 
@@ -33,14 +52,14 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
   // Add result to history
   useEffect(() => {
     if (lastResult) {
-      setHistory((prev) => [...prev, { role: "assistant", text: lastResult }].slice(-100));
+      setHistory((prev) => [...prev, { role: "assistant" as const, text: lastResult }].slice(-100));
     }
   }, [lastResult]);
 
   const handleSubmit = (text?: string) => {
     const trimmed = (text || input).trim();
     if (!trimmed || isProcessing) return;
-    setHistory((prev) => [...prev, { role: "user", text: trimmed }].slice(-100));
+    setHistory((prev) => [...prev, { role: "user" as const, text: trimmed }].slice(-100));
     onSubmit(trimmed);
     setInput("");
   };
@@ -59,7 +78,7 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
       <div className="flex items-center justify-between px-5 py-3 border-b border-border-default flex-shrink-0">
         <div className="flex items-center gap-2">
           <MessageSquare size={14} className="text-accent" />
-          <span className="text-sm font-semibold text-text-primary">Agent</span>
+          <span className="text-sm font-semibold text-text-primary">Meta-Agent</span>
         </div>
         <button className="p-1 rounded text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors">
           <Settings size={13} />
@@ -68,6 +87,46 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
 
       {/* ── Chat history ────────────────────────────────────── */}
       <div ref={historyRef} className="flex-1 overflow-y-auto min-h-0">
+        {latestDraft && (
+          <div className="p-4 border-b border-border-default">
+            <div className="rounded-xl border border-accent/30 bg-accent/5 p-3">
+              <p className="text-[11px] font-semibold text-accent mb-2">Draft Ready</p>
+              <div className="space-y-1 text-[11px] text-text-secondary">
+                <p><span className="text-text-muted">Agent:</span> {latestDraft.agentName}</p>
+                <p><span className="text-text-muted">Model:</span> {latestDraft.model}</p>
+                <p><span className="text-text-muted">Tools:</span> {latestDraft.tools.length}</p>
+                <p><span className="text-text-muted">Resources:</span> {latestDraft.resources.length}</p>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-1">
+                {latestDraft.resources.slice(0, 6).map((r, idx) => (
+                  <span key={`${r.type}-${r.name}-${idx}`} className="text-[10px] px-2 py-1 rounded-md bg-surface-base border border-border-default text-text-muted">
+                    {r.type}: {r.name}
+                  </span>
+                ))}
+              </div>
+              <div className="mt-3 grid grid-cols-3 gap-2">
+                <button
+                  onClick={onReviewDraft}
+                  className="flex items-center justify-center gap-1 text-[11px] py-1.5 rounded-md border border-border-default text-text-secondary hover:text-text-primary hover:border-accent/40"
+                >
+                  <Eye size={11} /> Review
+                </button>
+                <button
+                  onClick={onCenterDraft}
+                  className="flex items-center justify-center gap-1 text-[11px] py-1.5 rounded-md border border-border-default text-text-secondary hover:text-text-primary hover:border-accent/40"
+                >
+                  <LocateFixed size={11} /> Focus
+                </button>
+                <button
+                  onClick={onDeployDraft}
+                  className="flex items-center justify-center gap-1 text-[11px] py-1.5 rounded-md bg-accent text-text-inverse hover:bg-accent/90"
+                >
+                  <Rocket size={11} /> Deploy
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {history.length === 0 ? (
           /* Empty state: show suggestion chips like Railway */
           <div className="p-5">

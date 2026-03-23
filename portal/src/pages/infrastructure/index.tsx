@@ -118,7 +118,7 @@ export const InfrastructurePage = () => {
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="card">
-          <p className="font-semibold text-white mb-3">GPU Endpoint Provisioning</p>
+          <p className="font-semibold text-text-primary mb-3">GPU Endpoint Provisioning</p>
           <div className="grid gap-2 md:grid-cols-4">
             <input className="input-field" value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="model id" />
             <input className="input-field" value={gpuType} onChange={(event) => setGpuType(event.target.value)} placeholder="h200" />
@@ -153,7 +153,7 @@ export const InfrastructurePage = () => {
           </QueryState>
         </div>
         <div className="card">
-          <p className="font-semibold text-white mb-3">Retention Policies</p>
+          <p className="font-semibold text-text-primary mb-3">Retention Policies</p>
           <div className="grid gap-2 md:grid-cols-3">
             <input className="input-field" value={resourceType} onChange={(event) => setResourceType(event.target.value)} placeholder="sessions" />
             <input className="input-field" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} placeholder="90" />

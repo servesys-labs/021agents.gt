@@ -31,6 +31,8 @@ interface CanvasControlsProps {
   onRedo?: () => void;
   canUndo?: boolean;
   canRedo?: boolean;
+  hiddenLayers: Set<string>;
+  onToggleLayer: (layer: string) => void;
 }
 
 export function CanvasControls({
@@ -42,6 +44,8 @@ export function CanvasControls({
   onRedo,
   canUndo = false,
   canRedo = false,
+  hiddenLayers,
+  onToggleLayer,
 }: CanvasControlsProps) {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
   const [layersOpen, setLayersOpen] = useState(false);
@@ -130,18 +134,22 @@ export function CanvasControls({
                 onClick={onToggleAgentsOnly}
               />
               <div className="h-px bg-border-default" />
-              <LayerItem
+              <LayerToggleItem
                 icon={<Network size={16} />}
                 label="Network Traffic"
-                description="Show traffic between services"
-                onClick={() => setLayersOpen(false)}
+                description={hiddenLayers.has("network") ? "Edges are hidden" : "Show traffic between services"}
+                active={!hiddenLayers.has("network")}
+                onClick={() => onToggleLayer("network")}
+                hidden={hiddenLayers.has("network")}
               />
               <div className="h-px bg-border-default" />
-              <LayerItem
+              <LayerToggleItem
                 icon={<GitFork size={16} />}
                 label="Variable References"
-                description="Show variable connections"
-                onClick={() => setLayersOpen(false)}
+                description={hiddenLayers.has("variables") ? "Non-agent nodes are hidden" : "Show variable connections"}
+                active={!hiddenLayers.has("variables")}
+                onClick={() => onToggleLayer("variables")}
+                hidden={hiddenLayers.has("variables")}
               />
             </div>
           </>
@@ -218,26 +226,28 @@ function LayerToggleItem({
   description,
   active,
   onClick,
+  hidden = false,
 }: {
   icon: React.ReactNode;
   label: string;
   description: string;
   active: boolean;
   onClick: () => void;
+  hidden?: boolean;
 }) {
   return (
     <button
       onClick={onClick}
       className={`flex items-center gap-3 w-full px-3.5 py-3 text-left transition-colors ${
-        active ? "bg-accent/10" : "hover:bg-surface-overlay/40"
+        hidden ? "opacity-50 hover:opacity-75" : active ? "bg-accent/10" : "hover:bg-surface-overlay/40"
       }`}
     >
-      <span className={`flex-shrink-0 ${active ? "text-accent" : "text-text-muted"}`}>{icon}</span>
+      <span className={`flex-shrink-0 ${hidden ? "text-text-muted" : active ? "text-accent" : "text-text-muted"}`}>{icon}</span>
       <div className="min-w-0 flex-1">
-        <p className={`text-[12px] font-medium ${active ? "text-accent" : "text-text-primary"}`}>{label}</p>
+        <p className={`text-[12px] font-medium ${hidden ? "line-through text-text-muted" : active ? "text-accent" : "text-text-primary"}`}>{label}</p>
         <p className="text-[10px] text-text-muted">{description}</p>
       </div>
-      {active && (
+      {active && !hidden && (
         <span className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0" />
       )}
     </button>

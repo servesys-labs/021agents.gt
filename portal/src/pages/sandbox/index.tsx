@@ -102,7 +102,7 @@ export const SandboxPage = () => {
 
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="card">
-          <p className="font-semibold text-white mb-3">Actions</p>
+          <p className="font-semibold text-text-primary mb-3">Actions</p>
           <div className="space-y-3">
             <div>
               <span className="text-gray-400">Template</span>
@@ -130,14 +130,14 @@ export const SandboxPage = () => {
         </div>
 
         <div className="card">
-          <p className="font-semibold text-white mb-3">Operation Timeline</p>
+          <p className="font-semibold text-text-primary mb-3">Operation Timeline</p>
           {timeline.length === 0 ? (
             <span className="text-gray-500">No operations yet.</span>
           ) : (
             <div className="space-y-2">
               {timeline.map((entry, index) => (
                 <div key={`${entry.at}-${entry.action}-${index}`} className="rounded border border-[#2a2a2a] p-2">
-                  <span className="font-medium text-white">{entry.action}</span>
+                  <span className="font-medium text-text-primary">{entry.action}</span>
                   <span className="text-xs text-gray-500">{entry.at}</span>
                   <span className="text-gray-400">{entry.result}</span>
                 </div>
@@ -148,7 +148,7 @@ export const SandboxPage = () => {
       </div>
 
       <div className="card mt-6">
-        <p className="font-semibold text-white mb-2">Output</p>
+        <p className="font-semibold text-text-primary mb-2">Output</p>
         <pre className="max-h-72 overflow-auto rounded bg-[#111] border border-[#2a2a2a] p-3 text-xs">{output || "(no output yet)"}</pre>
       </div>
 
@@ -161,7 +161,7 @@ export const SandboxPage = () => {
           onRetry={() => void sandboxesQuery.refetch()}
         >
           <div className="card">
-            <p className="font-semibold text-white mb-3">Active Sandboxes</p>
+            <p className="font-semibold text-text-primary mb-3">Active Sandboxes</p>
             <table className="os-table">
               <thead>
                 <tr>

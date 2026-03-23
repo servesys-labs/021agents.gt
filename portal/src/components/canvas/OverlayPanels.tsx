@@ -7,106 +7,7 @@ import {
 } from "lucide-react";
 import { CanvasOverlayPanel } from "./CanvasOverlayPanel";
 import { apiRequest, useApiQuery } from "../../lib/api";
-
-/* ── Shared helpers ────────────────────────────────────────────── */
-function StatusPill({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    active: "bg-status-live/10 text-status-live",
-    running: "bg-yellow-500/10 text-yellow-500",
-    completed: "bg-status-live/10 text-status-live",
-    failed: "bg-status-error/10 text-status-error",
-    cancelled: "bg-surface-overlay text-text-muted",
-    enabled: "bg-status-live/10 text-status-live",
-    disabled: "bg-surface-overlay text-text-muted",
-    pending: "bg-yellow-500/10 text-yellow-500",
-    healthy: "bg-status-live/10 text-status-live",
-    degraded: "bg-yellow-500/10 text-yellow-500",
-    provisioning: "bg-yellow-500/10 text-yellow-500",
-    terminated: "bg-status-error/10 text-status-error",
-  };
-  const dotColors: Record<string, string> = {
-    active: "bg-status-live", running: "bg-yellow-500", completed: "bg-status-live",
-    failed: "bg-status-error", cancelled: "bg-text-muted", enabled: "bg-status-live",
-    disabled: "bg-text-muted", pending: "bg-yellow-500", healthy: "bg-status-live",
-    degraded: "bg-yellow-500", provisioning: "bg-yellow-500", terminated: "bg-status-error",
-  };
-  return (
-    <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full ${colors[status] || "bg-surface-overlay text-text-muted"}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${dotColors[status] || "bg-text-muted"}`} />
-      {status}
-    </span>
-  );
-}
-
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <h3 className="text-xs font-semibold text-text-primary mb-3 uppercase tracking-wider">{children}</h3>;
-}
-
-function InlineInput({ label, value, onChange, placeholder, type = "text" }: {
-  label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string;
-}) {
-  return (
-    <div className="mb-3">
-      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">{label}</label>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
-        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors" />
-    </div>
-  );
-}
-
-function InlineSelect({ label, value, onChange, options }: {
-  label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[];
-}) {
-  return (
-    <div className="mb-3">
-      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">{label}</label>
-      <select value={value} onChange={(e) => onChange(e.target.value)}
-        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary focus:outline-none focus:border-accent/50 transition-colors">
-        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </div>
-  );
-}
-
-function InlineTextarea({ label, value, onChange, placeholder, rows = 3 }: {
-  label: string; value: string; onChange: (v: string) => void; placeholder?: string; rows?: number;
-}) {
-  return (
-    <div className="mb-3">
-      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">{label}</label>
-      <textarea value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows}
-        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors font-mono resize-none" />
-    </div>
-  );
-}
-
-function ToggleRow({ label, description, checked, onChange }: {
-  label: string; description?: string; checked: boolean; onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-start justify-between py-3 border-b border-border-default last:border-0">
-      <div>
-        <p className="text-xs text-text-primary">{label}</p>
-        {description && <p className="text-[10px] text-text-muted mt-0.5">{description}</p>}
-      </div>
-      <button onClick={() => onChange(!checked)}
-        className={`relative rounded-full transition-colors flex-shrink-0 ${checked ? "bg-accent" : "bg-surface-overlay"}`}
-        style={{ minWidth: 32, height: 18 }}>
-        <span className={`absolute top-0.5 left-0.5 rounded-full bg-white transition-transform ${checked ? "translate-x-3.5" : ""}`}
-          style={{ width: 14, height: 14 }} />
-      </button>
-    </div>
-  );
-}
-
-function ReadOnlyNotice({ editable }: { editable: boolean }) {
-  if (editable) return null;
-  return (
-    <div className="mb-3 text-[10px] text-yellow-500 bg-yellow-500/10 border border-yellow-500/20 rounded px-2 py-1">
-      View mode: editing actions are disabled for this panel.
-    </div>
-  );
-}
+import { StatusPill, SectionTitle, InlineInput, InlineSelect, InlineTextarea, ToggleRow, ReadOnlyNotice } from "./primitives";
 
 /* ═══════════════════════════════════════════════════════════════════
    WORKFLOWS & JOBS PANEL
@@ -158,7 +59,7 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
         <div className="flex-1" />
         {tab === "workflows" && (
           <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-text-inverse rounded-md hover:bg-accent/90 transition-colors">
             <Plus size={12} /> New Workflow
           </button>
         )}
@@ -168,11 +69,11 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
       {showCreate && tab === "workflows" && (
         <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
           <SectionTitle>Create Workflow</SectionTitle>
-          <InlineInput label="Name" value={wfName} onChange={setWfName} placeholder="e.g. Customer Onboarding" />
-          <InlineTextarea label="Description" value={wfDesc} onChange={setWfDesc} placeholder="What does this workflow do?" />
+          <InlineInput compact label="Name" value={wfName} onChange={setWfName} placeholder="e.g. Customer Onboarding" />
+          <InlineTextarea compact label="Description" value={wfDesc} onChange={setWfDesc} placeholder="What does this workflow do?" />
           <div className="flex gap-2 mt-2">
             <button
-              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+              className="flex-1 py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors"
               onClick={async () => {
                 if (!editable) return;
                 if (!wfName.trim()) return;
@@ -283,7 +184,7 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
               <div className="h-1.5 bg-surface-overlay rounded-full overflow-hidden mb-2">
                 <div className={`h-full rounded-full transition-all ${
                   job.status === "failed" ? "bg-status-error" :
-                  job.status === "running" ? "bg-yellow-500" :
+                  job.status === "running" ? "bg-status-warning" :
                   job.status === "completed" ? "bg-status-live" : "bg-text-muted"
                 }`} style={{ width: `${job.progress}%` }} />
               </div>
@@ -367,7 +268,7 @@ export function SchedulesPanel({ open, onClose, editable = true }: { open: boole
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs text-text-muted">{schedules.length} schedules configured</p>
         <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-text-inverse rounded-md hover:bg-accent/90 transition-colors">
           <Plus size={12} /> New Schedule
         </button>
       </div>
@@ -375,15 +276,15 @@ export function SchedulesPanel({ open, onClose, editable = true }: { open: boole
       {showCreate && (
         <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
           <SectionTitle>Create Schedule</SectionTitle>
-          <InlineInput label="Name" value={name} onChange={setName} placeholder="e.g. Morning Report" />
-          <InlineInput label="Cron Expression" value={cron} onChange={setCron} placeholder="0 0 9 * * 1-5" />
+          <InlineInput compact label="Name" value={name} onChange={setName} placeholder="e.g. Morning Report" />
+          <InlineInput compact label="Cron Expression" value={cron} onChange={setCron} placeholder="0 0 9 * * 1-5" />
           <p className="text-[10px] text-text-muted -mt-2 mb-3">Format: sec min hour day month weekday</p>
-          <InlineInput label="Task" value={task} onChange={setTask} placeholder="Describe scheduled task" />
-          <InlineSelect label="Agent" value={agent} onChange={setAgent}
+          <InlineInput compact label="Task" value={task} onChange={setTask} placeholder="Describe scheduled task" />
+          <InlineSelect compact label="Agent" value={agent} onChange={setAgent}
             options={[{ value: "support-bot", label: "Support Bot" }, { value: "data-analyst", label: "Data Analyst" }]} />
           <div className="flex gap-2 mt-2">
             <button
-              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+              className="flex-1 py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors"
               onClick={async () => {
                 if (!editable) return;
                 if (!agent.trim() || !cron.trim() || !task.trim()) return;
@@ -435,7 +336,7 @@ export function SchedulesPanel({ open, onClose, editable = true }: { open: boole
               </button>
               <button
                 className={`flex items-center gap-1 px-2 py-1 text-[10px] rounded transition-colors ${
-                  sch.status === "enabled" ? "text-yellow-500 hover:bg-yellow-500/10" : "text-status-live hover:bg-status-live/10"
+                  sch.status === "enabled" ? "text-status-warning hover:bg-status-warning/10" : "text-status-live hover:bg-status-live/10"
                 }`}
                 onClick={async () => {
                   if (!editable) return;
@@ -503,7 +404,7 @@ export function WebhooksPanel({ open, onClose, editable = true }: { open: boolea
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs text-text-muted">{webhooks.length} webhooks configured</p>
         <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-text-inverse rounded-md hover:bg-accent/90 transition-colors">
           <Plus size={12} /> New Webhook
         </button>
       </div>
@@ -511,11 +412,11 @@ export function WebhooksPanel({ open, onClose, editable = true }: { open: boolea
       {showCreate && (
         <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
           <SectionTitle>Create Webhook</SectionTitle>
-          <InlineInput label="Endpoint URL" value={url} onChange={setUrl} placeholder="https://..." />
-          <InlineInput label="Events (comma-separated)" value={events} onChange={setEvents} placeholder="agent.run.completed, agent.deployed" />
+          <InlineInput compact label="Endpoint URL" value={url} onChange={setUrl} placeholder="https://..." />
+          <InlineInput compact label="Events (comma-separated)" value={events} onChange={setEvents} placeholder="agent.run.completed, agent.deployed" />
           <div className="flex gap-2 mt-2">
             <button
-              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
+              className="flex-1 py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors"
               onClick={async () => {
                 if (!editable) return;
                 try {
@@ -690,12 +591,12 @@ export function GovernancePanel({ open, onClose, editable = true }: { open: bool
         <div>
           <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
             <SectionTitle>Create Policy</SectionTitle>
-            <InlineInput label="Policy Name" value={policyName} onChange={setPolicyName} placeholder="e.g. strict-prod" />
-            <InlineInput label="Budget Limit (USD)" value={policyBudget} onChange={setPolicyBudget} type="number" />
-            <InlineInput label="Blocked Tools (comma-separated)" value={blockedToolsRaw} onChange={setBlockedToolsRaw} placeholder="sandbox_exec, web_search" />
+            <InlineInput compact label="Policy Name" value={policyName} onChange={setPolicyName} placeholder="e.g. strict-prod" />
+            <InlineInput compact label="Budget Limit (USD)" value={policyBudget} onChange={setPolicyBudget} type="number" />
+            <InlineInput compact label="Blocked Tools (comma-separated)" value={blockedToolsRaw} onChange={setBlockedToolsRaw} placeholder="sandbox_exec, web_search" />
             <button
               disabled={!editable}
-              className="w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+              className="w-full py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
               onClick={async () => {
                 if (!editable) return;
                 if (!policyName.trim()) return;
@@ -844,7 +745,7 @@ export function ProjectsPanel({ open, onClose, editable = true }: { open: boolea
       <div className="flex items-center justify-between mb-4">
         <p className="text-xs text-text-muted">{projects.length} projects</p>
         <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-text-inverse rounded-md hover:bg-accent/90 transition-colors">
           <Plus size={12} /> New Project
         </button>
       </div>
@@ -853,12 +754,12 @@ export function ProjectsPanel({ open, onClose, editable = true }: { open: boolea
       {showCreate && (
         <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
           <SectionTitle>Create Project</SectionTitle>
-          <InlineInput label="Name" value={projName} onChange={setProjName} placeholder="e.g. my-agents" />
-          <InlineTextarea label="Description" value={projDesc} onChange={setProjDesc} placeholder="What is this project for?" />
+          <InlineInput compact label="Name" value={projName} onChange={setProjName} placeholder="e.g. my-agents" />
+          <InlineTextarea compact label="Description" value={projDesc} onChange={setProjDesc} placeholder="What is this project for?" />
           <div className="flex gap-2 mt-2">
             <button
               disabled={!editable}
-              className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+              className="flex-1 py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
               onClick={async () => {
                 if (!editable) return;
                 if (!projName.trim()) return;
@@ -987,7 +888,7 @@ export function ReleasesPanel({ open, onClose, editable = true }: { open: boolea
     <CanvasOverlayPanel open={open} onClose={onClose} title="Release Channels" icon={<Tag size={16} className="text-accent" />}>
       <ReadOnlyNotice editable={editable} />
       <div className="mb-3">
-        <InlineInput label="Agent Name" value={agentName} onChange={setAgentName} placeholder="support-bot" />
+        <InlineInput compact label="Agent Name" value={agentName} onChange={setAgentName} placeholder="support-bot" />
       </div>
       {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
       <div className="flex items-center gap-1 mb-4">
@@ -1036,12 +937,12 @@ export function ReleasesPanel({ open, onClose, editable = true }: { open: boolea
           </div>
           <div className="bg-surface-base rounded-lg border border-border-default p-3">
             <p className="text-[10px] text-text-muted mb-2">Canary Split</p>
-            <InlineInput label="Canary Version" value={canaryVersion} onChange={setCanaryVersion} placeholder="v-next" />
-            <InlineInput label="Canary Weight (0-1)" value={canaryWeight} onChange={setCanaryWeight} type="number" />
+            <InlineInput compact label="Canary Version" value={canaryVersion} onChange={setCanaryVersion} placeholder="v-next" />
+            <InlineInput compact label="Canary Weight (0-1)" value={canaryWeight} onChange={setCanaryWeight} type="number" />
             <div className="flex gap-2">
               <button
                 disabled={!editable}
-                className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+                className="flex-1 py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
                 onClick={async () => {
                   if (!editable) return;
                   try {
@@ -1161,15 +1062,15 @@ export function InfrastructurePanel({ open, onClose, editable = true }: { open: 
         <div>
           <div className="bg-surface-base rounded-lg border border-border-default p-3 mb-3">
             <SectionTitle>Provision Endpoint</SectionTitle>
-            <InlineInput label="Model ID" value={modelId} onChange={setModelId} placeholder="gpt-4.1-mini" />
-            <InlineSelect label="GPU Type" value={gpuType} onChange={setGpuType} options={[
+            <InlineInput compact label="Model ID" value={modelId} onChange={setModelId} placeholder="gpt-4.1-mini" />
+            <InlineSelect compact label="GPU Type" value={gpuType} onChange={setGpuType} options={[
               { value: "h200", label: "H200" },
               { value: "h100", label: "H100" },
             ]} />
-            <InlineInput label="GPU Count" value={gpuCount} onChange={setGpuCount} type="number" />
+            <InlineInput compact label="GPU Count" value={gpuCount} onChange={setGpuCount} type="number" />
             <button
               disabled={!editable}
-              className="w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+              className="w-full py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
               onClick={async () => {
                 if (!editable) return;
                 const qs = new URLSearchParams({
@@ -1232,7 +1133,7 @@ export function InfrastructurePanel({ open, onClose, editable = true }: { open: 
         <div>
           <div className="bg-surface-base rounded-lg border border-border-default p-3 mb-3">
             <SectionTitle>Create Retention Policy</SectionTitle>
-            <InlineSelect label="Resource Type" value={resourceType} onChange={setResourceType} options={[
+            <InlineSelect compact label="Resource Type" value={resourceType} onChange={setResourceType} options={[
               { value: "sessions", label: "sessions" },
               { value: "turns", label: "turns" },
               { value: "episodes", label: "episodes" },
@@ -1240,11 +1141,11 @@ export function InfrastructurePanel({ open, onClose, editable = true }: { open: 
               { value: "audit_log", label: "audit_log" },
               { value: "cost_ledger", label: "cost_ledger" },
             ]} />
-            <InlineInput label="Retention Days" value={retentionDays} onChange={setRetentionDays} type="number" />
+            <InlineInput compact label="Retention Days" value={retentionDays} onChange={setRetentionDays} type="number" />
             <div className="flex gap-2">
               <button
                 disabled={!editable}
-                className="flex-1 py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
+                className="flex-1 py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50"
                 onClick={async () => {
                   if (!editable) return;
                   const qs = new URLSearchParams({

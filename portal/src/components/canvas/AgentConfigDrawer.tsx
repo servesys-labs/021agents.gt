@@ -14,10 +14,24 @@ type AgentConfig = {
   approvalRequired: string;
 };
 
+type AgentData = {
+  name?: string;
+  systemPrompt?: string;
+  system_prompt?: string;
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  max_turns?: number;
+  tools?: string[];
+  budget_limit?: number;
+  timeout_seconds?: number;
+  approvalRequired?: string;
+};
+
 type Props = {
   isOpen: boolean;
   onClose: () => void;
-  agentData: any;
+  agentData: AgentData | null;
   onSave: (config: AgentConfig) => Promise<void>;
   availableTools: string[];
 };
@@ -366,7 +380,7 @@ export function AgentConfigDrawer({ isOpen, onClose, agentData, onSave, availabl
           <button
             onClick={handleSave}
             disabled={saving || !config.name.trim()}
-            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-accent text-white text-[12px] font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="flex items-center gap-2 px-5 py-2 rounded-lg bg-accent text-text-inverse text-[length:var(--text-sm)] font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {saving ? (
               <Loader2 size={13} className="animate-spin" />

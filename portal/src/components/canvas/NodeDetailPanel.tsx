@@ -7,9 +7,68 @@ import {
   ChevronRight, Cpu,
 } from "lucide-react";
 import type { Node } from "@xyflow/react";
+import { SectionTitle, InlineInput, InlineTextarea, InlineSelect, ToggleRow, StatusPill, InfoRow, EmptyTab } from "./primitives";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 type Tab = { id: string; label: string; icon: ReactNode };
+
+type AgentNodeData = {
+  name?: string;
+  model?: string;
+  status?: string;
+  tools?: string[];
+  efficiency?: number;
+  activity?: number[];
+  variables?: { key: string; value: string }[];
+  systemPrompt?: string;
+  system_prompt?: string;
+  temperature?: number;
+  maxTokens?: number;
+  max_tokens?: number;
+  budgetLimit?: number;
+  requireApproval?: boolean;
+  humanInLoop?: boolean;
+  facts?: { key: string; value: string }[];
+  hideHandles?: boolean;
+};
+
+type KnowledgeNodeData = {
+  name?: string;
+  docCount?: number;
+  totalSize?: string;
+  status?: string;
+  chunkCount?: number;
+};
+
+type DataSourceNodeData = {
+  name?: string;
+  type?: string;
+  dbType?: string;
+  status?: string;
+  tableCount?: number;
+  host?: string;
+  port?: number;
+  database?: string;
+};
+
+type ConnectorNodeData = {
+  name?: string;
+  app?: string;
+  status?: string;
+  toolCount?: number;
+  provider?: string;
+  toolList?: string[];
+};
+
+type McpServerNodeData = {
+  name?: string;
+  url?: string;
+  status?: string;
+  toolCount?: number;
+  toolList?: string[];
+};
+
+type NodeData = AgentNodeData | KnowledgeNodeData | DataSourceNodeData | ConnectorNodeData | McpServerNodeData;
 
 interface NodeDetailPanelProps {
   node: Node | null;
@@ -17,7 +76,7 @@ interface NodeDetailPanelProps {
   onDelete?: (nodeId: string) => void;
   onClone?: (nodeId: string) => void;
   onDeploy?: (nodeId: string) => void;
-  onUpdateNode?: (nodeId: string, data: any) => void;
+  onUpdateNode?: (nodeId: string, data: NodeData) => void;
 }
 
 /* ── Tab configs per node type ──────────────────────────────────
@@ -99,7 +158,7 @@ function getStatusColor(status: string): string {
     case "authed": case "healthy": case "ready": case "active": case "passed":
       return "bg-status-live";
     case "draft": case "pending": case "sleeping": case "running": case "in_progress":
-      return "bg-yellow-500";
+      return "bg-status-warning";
     case "offline": case "disconnected": case "error": case "failed": case "terminated":
       return "bg-status-error";
     default: return "bg-text-muted";
@@ -124,7 +183,7 @@ export function NodeDetailPanel({
   useEffect(() => {
     setActiveTab(tabs[0]?.id || "overview");
   }, [node?.id]);
-  const data = node?.data || {};
+  const data = (node?.data || {}) as NodeData;
 
   /* Escape to close */
   useEffect(() => {
@@ -145,17 +204,17 @@ export function NodeDetailPanel({
       >
         {/* ── Header ──────────────────────────────────────────── */}
         <div className="flex items-center gap-3 px-6 py-4 border-b border-border-default flex-shrink-0">
-          <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-white/8">
+          <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-white-alpha-8">
             {getNodeIcon(nodeType)}
           </div>
           <div className="flex-1 min-w-0">
             <h2 className="text-base font-semibold text-text-primary truncate">
-              {(data as any).name || "Untitled"}
+              {data.name || "Untitled"}
             </h2>
             <div className="flex items-center gap-2 mt-0.5">
-              <span className={`inline-block w-2 h-2 rounded-full ${getStatusColor((data as any).status || "")}`} />
+              <span className={`inline-block w-2 h-2 rounded-full ${getStatusColor(data.status || "")}`} />
               <span className="text-xs text-text-muted">
-                {(data as any).status || "unknown"}
+                {data.status || "unknown"}
               </span>
               <span className="text-xs text-text-muted opacity-50">|</span>
               <span className="text-xs text-text-muted">{getNodeTypeLabel(nodeType)}</span>
@@ -172,13 +231,13 @@ export function NodeDetailPanel({
             )}
             <div className="relative">
               <button onClick={() => setActionMenuOpen(!actionMenuOpen)}
-                className="flex items-center justify-center w-8 h-8 rounded-md text-text-muted hover:bg-white/8 hover:text-text-primary transition-colors">
+                className="flex items-center justify-center w-8 h-8 rounded-md text-text-muted hover:bg-white-alpha-8 hover:text-text-primary transition-colors">
                 <MoreVertical size={15} />
               </button>
               {actionMenuOpen && (
                 <>
                   <div className="fixed inset-0 z-50" onClick={() => setActionMenuOpen(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-50 w-44 bg-white/8 border border-border-default rounded-lg shadow-xl overflow-hidden">
+                  <div className="absolute right-0 top-full mt-1 z-50 w-44 bg-white-alpha-8 border border-border-default rounded-lg shadow-xl overflow-hidden">
                     {onClone && (
                       <button onClick={() => { onClone(node.id); setActionMenuOpen(false); }}
                         className="flex items-center gap-2 w-full px-3 py-2.5 text-xs text-text-secondary hover:bg-surface-hover transition-colors">
@@ -196,7 +255,7 @@ export function NodeDetailPanel({
               )}
             </div>
             <button onClick={onClose}
-              className="flex items-center justify-center w-8 h-8 rounded-md text-text-muted hover:bg-white/8 hover:text-text-primary transition-colors">
+              className="flex items-center justify-center w-8 h-8 rounded-md text-text-muted hover:bg-white-alpha-8 hover:text-text-primary transition-colors">
               <X size={16} />
             </button>
           </div>
@@ -223,7 +282,7 @@ export function NodeDetailPanel({
             <div className="ml-auto flex items-center gap-2 text-text-muted">
               <Search size={13} />
               <span className="text-[11px]">Filter Settings...</span>
-              <kbd className="text-[10px] px-1.5 py-0.5 bg-white/8 rounded border border-border-default">/</kbd>
+              <kbd className="text-[10px] px-1.5 py-0.5 bg-white-alpha-8 rounded border border-border-default">/</kbd>
             </div>
           )}
         </div>
@@ -234,7 +293,7 @@ export function NodeDetailPanel({
           <div className="flex flex-1 overflow-hidden">
             {/* Main content */}
             <div className="flex-1 overflow-y-auto p-6">
-              <AgentSettingsContent section={settingsSection} data={data} nodeId={node.id} onUpdateNode={onUpdateNode} />
+              <AgentSettingsContent section={settingsSection} data={data as AgentNodeData} nodeId={node.id} onUpdateNode={onUpdateNode} />
             </div>
             {/* Right section nav */}
             <div className="w-[140px] border-l border-border-default py-4 px-2 flex-shrink-0 overflow-y-auto">
@@ -245,7 +304,7 @@ export function NodeDetailPanel({
                   className={`flex items-center gap-2 w-full px-3 py-2 text-[12px] rounded-md transition-colors mb-0.5 ${
                     settingsSection === s.id
                       ? "text-accent font-medium bg-accent/5"
-                      : "text-text-muted hover:text-text-secondary hover:bg-white/8"
+                      : "text-text-muted hover:text-text-secondary hover:bg-white-alpha-8"
                   }`}
                 >
                   {s.icon}
@@ -268,116 +327,25 @@ export function NodeDetailPanel({
    TAB CONTENT ROUTER (non-settings tabs)
    ═══════════════════════════════════════════════════════════════════ */
 function TabContent({ nodeType, tabId, data, nodeId, onUpdateNode }: {
-  nodeType: string; tabId: string; data: any; nodeId: string;
-  onUpdateNode?: (nodeId: string, data: any) => void;
+  nodeType: string; tabId: string; data: NodeData; nodeId: string;
+  onUpdateNode?: (nodeId: string, data: NodeData) => void;
 }) {
   switch (nodeType) {
-    case "agent": return <AgentTabContent tabId={tabId} data={data} nodeId={nodeId} onUpdateNode={onUpdateNode} />;
-    case "knowledge": return <KnowledgeTabContent tabId={tabId} data={data} nodeId={nodeId} />;
-    case "datasource": return <DataSourceTabContent tabId={tabId} data={data} nodeId={nodeId} />;
-    case "connector": return <ConnectorTabContent tabId={tabId} data={data} nodeId={nodeId} />;
-    case "mcpServer": return <McpServerTabContent tabId={tabId} data={data} nodeId={nodeId} />;
+    case "agent": return <AgentTabContent tabId={tabId} data={data as AgentNodeData} nodeId={nodeId} onUpdateNode={onUpdateNode} />;
+    case "knowledge": return <KnowledgeTabContent tabId={tabId} data={data as KnowledgeNodeData} nodeId={nodeId} />;
+    case "datasource": return <DataSourceTabContent tabId={tabId} data={data as DataSourceNodeData} nodeId={nodeId} />;
+    case "connector": return <ConnectorTabContent tabId={tabId} data={data as ConnectorNodeData} nodeId={nodeId} />;
+    case "mcpServer": return <McpServerTabContent tabId={tabId} data={data as McpServerNodeData} nodeId={nodeId} />;
     default: return <EmptyTab message="Unknown node type" />;
   }
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   SHARED COMPONENTS
-   ═══════════════════════════════════════════════════════════════════ */
-function SectionTitle({ children }: { children: ReactNode }) {
-  return <h3 className="text-xs font-semibold text-text-primary mb-3 uppercase tracking-wider">{children}</h3>;
-}
-
-function InfoRow({ label, value, mono }: { label: string; value: string | ReactNode; mono?: boolean }) {
-  return (
-    <div className="flex items-start justify-between py-2.5 border-b border-border-default last:border-0">
-      <span className="text-xs text-text-muted">{label}</span>
-      <span className={`text-xs text-text-primary text-right max-w-[60%] ${mono ? "font-mono" : ""}`}>{value}</span>
-    </div>
-  );
-}
-
-function EmptyTab({ message }: { message: string }) {
-  return <div className="flex items-center justify-center h-32 text-sm text-text-muted">{message}</div>;
-}
-
-function InlineInput({ label, value, onChange, placeholder, type = "text" }: {
-  label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string;
-}) {
-  return (
-    <div className="mb-4">
-      <label className="block text-xs font-medium text-text-muted uppercase tracking-wider mb-1.5">{label}</label>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
-        className="w-full px-3 py-2.5 text-sm bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors" />
-    </div>
-  );
-}
-
-function InlineTextarea({ label, value, onChange, placeholder, rows = 4 }: {
-  label: string; value: string; onChange: (v: string) => void; placeholder?: string; rows?: number;
-}) {
-  return (
-    <div className="mb-4">
-      <label className="block text-xs font-medium text-text-muted uppercase tracking-wider mb-1.5">{label}</label>
-      <textarea value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows}
-        className="w-full px-3 py-2.5 text-sm bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors font-mono resize-none" />
-    </div>
-  );
-}
-
-function InlineSelect({ label, value, onChange, options }: {
-  label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[];
-}) {
-  return (
-    <div className="mb-4">
-      <label className="block text-xs font-medium text-text-muted uppercase tracking-wider mb-1.5">{label}</label>
-      <select value={value} onChange={(e) => onChange(e.target.value)}
-        className="w-full px-3 py-2.5 text-sm bg-white/5 border border-border-default rounded-lg text-text-primary focus:outline-none focus:border-accent/50 transition-colors">
-        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
-    </div>
-  );
-}
-
-function ToggleRow({ label, description, checked, onChange }: {
-  label: string; description?: string; checked: boolean; onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-start justify-between py-3 border-b border-border-default last:border-0">
-      <div>
-        <p className="text-sm text-text-primary">{label}</p>
-        {description && <p className="text-xs text-text-muted mt-0.5">{description}</p>}
-      </div>
-      <button onClick={() => onChange(!checked)}
-        className={`relative rounded-full transition-colors flex-shrink-0 ${checked ? "bg-accent" : "bg-white/8"}`}
-        style={{ minWidth: 36, height: 20 }}>
-        <span className={`absolute top-0.5 left-0.5 rounded-full bg-white transition-transform ${checked ? "translate-x-4" : ""}`}
-          style={{ width: 16, height: 16 }} />
-      </button>
-    </div>
-  );
-}
-
-function StatusPill({ status }: { status: string }) {
-  return (
-    <span className={`inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full ${
-      status === "active" || status === "live" || status === "passed" ? "bg-status-live/10 text-status-live" :
-      status === "running" || status === "in_progress" ? "bg-yellow-500/10 text-yellow-500" :
-      status === "failed" || status === "error" || status === "terminated" ? "bg-status-error/10 text-status-error" :
-      "bg-white/8 text-text-muted"
-    }`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(status)}`} />
-      {status}
-    </span>
-  );
 }
 
 /* ═══════════════════════════════════════════════════════════════════
    AGENT TAB CONTENT (top-level tabs: Overview, Deployments, Variables, Metrics)
    ═══════════════════════════════════════════════════════════════════ */
 function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
-  tabId: string; data: any; nodeId: string;
-  onUpdateNode?: (nodeId: string, data: any) => void;
+  tabId: string; data: AgentNodeData; nodeId: string;
+  onUpdateNode?: (nodeId: string, data: NodeData) => void;
 }) {
   const [vars, setVars] = useState<{ key: string; value: string }[]>(
     data.variables || [{ key: "OPENAI_API_KEY", value: "sk-***" }, { key: "LOG_LEVEL", value: "info" }],
@@ -391,7 +359,7 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
       return (
         <div className="max-w-2xl">
           <SectionTitle>Agent Configuration</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5 mb-6">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5 mb-6">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="Model" value={data.model || "—"} mono />
             <InfoRow label="Status" value={
@@ -404,7 +372,7 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
             <InfoRow label="Efficiency" value={data.efficiency ? `${data.efficiency}%` : "—"} />
           </div>
           <SectionTitle>Recent Activity</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <div className="flex items-center gap-2 mb-3">
               <Activity size={14} className="text-text-muted" />
               <span className="text-xs text-text-muted uppercase">24h Sparkline</span>
@@ -429,7 +397,7 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
               { id: "d2", version: "v1.3.1", status: "superseded", time: "1 day ago", env: "production" },
               { id: "d3", version: "v1.3.0", status: "superseded", time: "3 days ago", env: "staging" },
             ].map((d) => (
-              <div key={d.id} className="bg-white/5 rounded-lg border border-border-default p-4 flex items-center gap-3">
+              <div key={d.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4 flex items-center gap-3">
                 <span className={`w-2.5 h-2.5 rounded-full ${d.status === "active" ? "bg-status-live" : "bg-text-muted"}`} />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-text-primary font-mono">{d.version}</p>
@@ -450,7 +418,7 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
       return (
         <div className="max-w-2xl">
           <SectionTitle>Environment Variables</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default overflow-hidden mb-4">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default overflow-hidden mb-4">
             {vars.map((v, i) => (
               <div key={i} className="flex items-center gap-3 px-4 py-3 border-b border-border-default last:border-0">
                 <code className="text-sm text-accent font-mono flex-shrink-0">{v.key}</code>
@@ -464,11 +432,11 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
           </div>
           <div className="flex gap-2">
             <input value={newVarKey} onChange={(e) => setNewVarKey(e.target.value)} placeholder="KEY"
-              className="flex-1 px-3 py-2 text-sm font-mono bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+              className="flex-1 px-3 py-2 text-sm font-mono bg-white-alpha-5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
             <input value={newVarValue} onChange={(e) => setNewVarValue(e.target.value)} placeholder="value"
-              className="flex-1 px-3 py-2 text-sm font-mono bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+              className="flex-1 px-3 py-2 text-sm font-mono bg-white-alpha-5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
             <button onClick={() => { if (newVarKey.trim()) { setVars([...vars, { key: newVarKey.trim(), value: newVarValue }]); setNewVarKey(""); setNewVarValue(""); } }}
-              className="px-4 py-2 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Add</button>
+              className="px-4 py-2 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors">Add</button>
           </div>
         </div>
       );
@@ -485,10 +453,10 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
               { label: "Token Usage", value: "12.4K/day", trend: "+12%" },
               { label: "Cost (24h)", value: "$2.41", trend: "-8%" },
             ].map((m) => (
-              <div key={m.label} className="bg-white/5 rounded-lg border border-border-default p-4">
+              <div key={m.label} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <p className="text-xs text-text-muted">{m.label}</p>
                 <p className="text-xl font-semibold text-text-primary mt-1">{m.value}</p>
-                <p className={`text-xs mt-1 ${m.trend.startsWith("-") ? "text-status-live" : "text-yellow-500"}`}>{m.trend}</p>
+                <p className={`text-xs mt-1 ${m.trend.startsWith("-") ? "text-status-live" : "text-status-warning"}`}>{m.trend}</p>
               </div>
             ))}
           </div>
@@ -504,8 +472,8 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
    AGENT SETTINGS CONTENT (vertical section nav)
    ═══════════════════════════════════════════════════════════════════ */
 function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
-  section: string; data: any; nodeId: string;
-  onUpdateNode?: (nodeId: string, data: any) => void;
+  section: string; data: AgentNodeData; nodeId: string;
+  onUpdateNode?: (nodeId: string, data: NodeData) => void;
 }) {
   const [editName, setEditName] = useState(data.name || "");
   const [editModel, setEditModel] = useState(data.model || "gpt-4.1-mini");
@@ -537,7 +505,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           <SectionTitle>Configured Tools</SectionTitle>
           <div className="space-y-2 mb-6">
             {(data.tools || []).map((tool: string, i: number) => (
-              <div key={i} className="flex items-center gap-3 px-4 py-3 bg-white/5 rounded-lg border border-border-default">
+              <div key={i} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Zap size={13} className="text-accent flex-shrink-0" />
                 <code className="text-sm font-mono text-text-primary flex-1">{tool}</code>
                 <button className="text-text-muted hover:text-status-error transition-colors"><Trash2 size={13} /></button>
@@ -548,7 +516,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           <SectionTitle>Available Tools</SectionTitle>
           <div className="space-y-1.5 max-h-64 overflow-y-auto">
             {["web_search", "sandbox_exec", "file_read", "file_write", "send_email", "http_request", "create_chart", "query_database"].map((tool) => (
-              <div key={tool} className="flex items-center gap-3 px-4 py-2.5 bg-white/5 rounded-lg border border-border-default">
+              <div key={tool} className="flex items-center gap-3 px-4 py-2.5 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Zap size={12} className="text-text-muted flex-shrink-0" />
                 <code className="text-xs font-mono text-text-secondary flex-1">{tool}</code>
                 <button className="text-xs text-accent hover:underline">+ Add</button>
@@ -567,7 +535,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
             <div className="flex gap-1">
               {["all", "active", "completed", "failed"].map((f) => (
                 <button key={f} onClick={() => setSessionFilter(f)}
-                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${sessionFilter === f ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-white/8"}`}>
+                  className={`px-2.5 py-1 text-xs rounded-md transition-colors ${sessionFilter === f ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-white-alpha-8"}`}>
                   {f}
                 </button>
               ))}
@@ -581,7 +549,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
               { id: "sess_g7h8", status: "failed", turns: 3, started: "5 hours ago", tokens: "0.4K", task: "API integration test" },
               { id: "sess_i9j0", status: "completed", turns: 15, started: "1 day ago", tokens: "5.3K", task: "Code review PR #287" },
             ].filter((s) => sessionFilter === "all" || s.status === sessionFilter).map((s) => (
-              <div key={s.id} className="bg-white/5 rounded-lg border border-border-default p-4">
+              <div key={s.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <code className="text-xs font-mono text-accent">{s.id}</code>
                   <StatusPill status={s.status} />
@@ -610,7 +578,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           <div className="flex items-center gap-1 mb-4">
             {(["facts", "episodes", "procedures"] as const).map((t) => (
               <button key={t} onClick={() => setMemoryTab(t)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${memoryTab === t ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-white/8"}`}>
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${memoryTab === t ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-white-alpha-8"}`}>
                 {t.charAt(0).toUpperCase() + t.slice(1)}
               </button>
             ))}
@@ -626,7 +594,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                   { key: "communication_style", value: "Direct and data-driven" },
                   { key: "project_context", value: "Working on Q1 2026 product roadmap" },
                 ].map((f) => (
-                  <div key={f.key} className="bg-white/5 rounded-lg border border-border-default p-3">
+                  <div key={f.key} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
                     <div className="flex items-center gap-2 mb-1">
                       <code className="text-xs font-mono text-accent">{f.key}</code>
                       <button className="ml-auto text-text-muted hover:text-status-error"><Trash2 size={11} /></button>
@@ -637,9 +605,9 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
               </div>
               <div className="flex gap-2">
                 <input value={newFact.key} onChange={(e) => setNewFact({ ...newFact, key: e.target.value })} placeholder="key"
-                  className="flex-1 px-3 py-2 text-sm font-mono bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+                  className="flex-1 px-3 py-2 text-sm font-mono bg-white-alpha-5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
                 <input value={newFact.value} onChange={(e) => setNewFact({ ...newFact, value: e.target.value })} placeholder="value"
-                  className="flex-[2] px-3 py-2 text-sm bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+                  className="flex-[2] px-3 py-2 text-sm bg-white-alpha-5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
                 <button onClick={() => {
                   if (newFact.key.trim() && newFact.value.trim()) {
                     const facts = [...(data?.facts || []), { key: newFact.key, value: newFact.value }];
@@ -647,7 +615,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                     setNewFact({ key: "", value: "" });
                   }
                 }}
-                  className="px-4 py-2 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Add</button>
+                  className="px-4 py-2 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors">Add</button>
               </div>
             </div>
           )}
@@ -659,7 +627,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                 { id: "ep_2", summary: "Analyzed competitor pricing data from CSV upload", turns: 8, time: "5 hours ago" },
                 { id: "ep_3", summary: "Debugged API integration with Stripe webhooks", turns: 22, time: "1 day ago" },
               ].map((ep) => (
-                <div key={ep.id} className="bg-white/5 rounded-lg border border-border-default p-3">
+                <div key={ep.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
                   <div className="flex items-center gap-2 mb-1">
                     <code className="text-xs font-mono text-accent">{ep.id}</code>
                     <span className="text-xs text-text-muted">{ep.time}</span>
@@ -679,13 +647,13 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                 { name: "code_review", description: "Review PR against team coding standards", successRate: 88 },
                 { name: "customer_response", description: "Draft customer support response using knowledge base", successRate: 92 },
               ].map((p) => (
-                <div key={p.name} className="bg-white/5 rounded-lg border border-border-default p-3">
+                <div key={p.name} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
                   <div className="flex items-center gap-2 mb-1">
                     <code className="text-xs font-mono text-accent">{p.name}</code>
                     <span className="ml-auto text-xs text-status-live">{p.successRate}%</span>
                   </div>
                   <p className="text-sm text-text-secondary">{p.description}</p>
-                  <div className="mt-2 h-1.5 bg-white/8 rounded-full overflow-hidden">
+                  <div className="mt-2 h-1.5 bg-white-alpha-8 rounded-full overflow-hidden">
                     <div className="h-full bg-status-live rounded-full" style={{ width: `${p.successRate}%` }} />
                   </div>
                 </div>
@@ -725,7 +693,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
             {chatMessages.map((msg, i) => (
               <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                 <div className={`max-w-[80%] rounded-lg px-4 py-2.5 text-sm ${
-                  msg.role === "user" ? "bg-accent/20 text-text-primary" : "bg-white/5 border border-border-default text-text-primary"
+                  msg.role === "user" ? "bg-accent/20 text-text-primary" : "bg-white-alpha-5 border border-border-default text-text-primary"
                 }`}>
                   {msg.content}
                 </div>
@@ -733,7 +701,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
             ))}
             {chatLoading && (
               <div className="flex justify-start">
-                <div className="bg-white/5 border border-border-default rounded-lg px-4 py-2.5">
+                <div className="bg-white-alpha-5 border border-border-default rounded-lg px-4 py-2.5">
                   <div className="flex gap-1">
                     <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
                     <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -752,12 +720,12 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                   if (e.key === "Enter") handleSendMessage();
                 }}
                 placeholder={`Message ${data.name || "agent"}...`}
-                className="flex-1 px-3 py-2.5 text-sm bg-white/5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
+                className="flex-1 px-3 py-2.5 text-sm bg-white-alpha-5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
               />
               <button
                 onClick={handleSendMessage}
                 disabled={!chatInput.trim() || chatLoading}
-                className="flex items-center justify-center w-10 h-10 bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-40"
+                className="flex items-center justify-center w-10 h-10 bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-40"
               >
                 <Send size={16} />
               </button>
@@ -778,7 +746,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
               { id: "eval_002", taskFile: "coding-tasks.jsonl", status: "passed", score: 87, tasks: 30, time: "1 day ago", latency: "2.4s", cost: "$1.20" },
               { id: "eval_003", taskFile: "reasoning-tasks.jsonl", status: "failed", score: 62, tasks: 25, time: "3 days ago", latency: "3.1s", cost: "$0.95" },
             ].map((ev) => (
-              <div key={ev.id} className="bg-white/5 rounded-lg border border-border-default p-4">
+              <div key={ev.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <code className="text-xs font-mono text-accent">{ev.id}</code>
                   <StatusPill status={ev.status} />
@@ -798,8 +766,8 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                     </div>
                   ))}
                 </div>
-                <div className="mt-2 h-1.5 bg-white/8 rounded-full overflow-hidden">
-                  <div className={`h-full rounded-full ${ev.score >= 80 ? "bg-status-live" : ev.score >= 60 ? "bg-yellow-500" : "bg-status-error"}`}
+                <div className="mt-2 h-1.5 bg-white-alpha-8 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${ev.score >= 80 ? "bg-status-live" : ev.score >= 60 ? "bg-status-warning" : "bg-status-error"}`}
                     style={{ width: `${ev.score}%` }} />
                 </div>
               </div>
@@ -807,14 +775,14 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           </div>
 
           <SectionTitle>Run New Evaluation</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <InlineSelect label="Task File" value="support-tasks.jsonl" onChange={() => {}}
               options={[
                 { value: "support-tasks.jsonl", label: "support-tasks.jsonl (50 tasks)" },
                 { value: "coding-tasks.jsonl", label: "coding-tasks.jsonl (30 tasks)" },
                 { value: "reasoning-tasks.jsonl", label: "reasoning-tasks.jsonl (25 tasks)" },
               ]} />
-            <button className="w-full py-2.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors flex items-center justify-center gap-2">
+            <button className="w-full py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors flex items-center justify-center gap-2">
               <Play size={14} /> Start Eval Run
             </button>
           </div>
@@ -835,7 +803,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
               { name: "staging", version: "v1.4.0-rc1", traffic: 100, status: "active" },
               { name: "canary", version: "v1.4.0-beta", traffic: 5, status: "active" },
             ].map((ch) => (
-              <div key={ch.name} className="bg-white/5 rounded-lg border border-border-default p-4">
+              <div key={ch.name} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <Tag size={13} className="text-accent" />
                   <span className="text-sm font-medium text-text-primary">{ch.name}</span>
@@ -843,7 +811,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                   <span className="ml-auto text-xs font-mono text-text-muted">{ch.version}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <div className="flex-1 h-1.5 bg-white/8 rounded-full overflow-hidden">
+                  <div className="flex-1 h-1.5 bg-white-alpha-8 rounded-full overflow-hidden">
                     <div className="h-full bg-accent rounded-full" style={{ width: `${ch.traffic}%` }} />
                   </div>
                   <span className="text-xs text-text-muted">{ch.traffic}%</span>
@@ -853,13 +821,13 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           </div>
 
           <SectionTitle>Promote</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <InlineSelect label="From" value="staging" onChange={() => {}}
               options={[{ value: "staging", label: "staging (v1.4.0-rc1)" }, { value: "canary", label: "canary (v1.4.0-beta)" }]} />
             <InlineSelect label="To" value="production" onChange={() => {}}
               options={[{ value: "production", label: "production" }, { value: "staging", label: "staging" }]} />
             <InlineInput label="Traffic %" value="100" onChange={() => {}} type="number" />
-            <button className="w-full py-2.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors flex items-center justify-center gap-2">
+            <button className="w-full py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors flex items-center justify-center gap-2">
               <Rocket size={14} /> Promote Release
             </button>
           </div>
@@ -871,7 +839,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
       return (
         <div>
           <SectionTitle>Governance Rules</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5 space-y-0">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5 space-y-0">
             <ToggleRow label="Require approval for deployment" description="All deployments must be approved by a team admin" checked={requireApproval} onChange={setRequireApproval} />
             <ToggleRow label="Human-in-the-loop" description="Agent must get human confirmation for sensitive actions" checked={humanInLoop} onChange={setHumanInLoop} />
           </div>
@@ -900,7 +868,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           <InlineInput label="Temperature" value={editTemp} onChange={setEditTemp} type="number" placeholder="0.7" />
           <InlineInput label="Max Tokens" value={editMaxTokens} onChange={setEditMaxTokens} type="number" placeholder="4096" />
           <button onClick={() => { onUpdateNode?.(nodeId, { ...data, name: editName, model: editModel, systemPrompt: editSystemPrompt, temperature: parseFloat(editTemp), maxTokens: parseInt(editMaxTokens) }); }}
-            className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
+            className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
         </div>
       );
 
@@ -909,7 +877,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
       return (
         <div>
           <SectionTitle>Danger Zone</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-status-error/20 p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-status-error/20 p-5">
             <p className="text-sm text-text-primary mb-1">Delete this agent</p>
             <p className="text-xs text-text-muted mb-4">Permanently delete this agent and all associated data. This action cannot be undone.</p>
             <button className="px-5 py-2 text-sm font-medium text-status-error border border-status-error/30 rounded-lg hover:bg-status-error/10 transition-colors">Delete Agent</button>
@@ -925,13 +893,13 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
 /* ═══════════════════════════════════════════════════════════════════
    KNOWLEDGE TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any; nodeId: string }) {
+function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: KnowledgeNodeData; nodeId: string }) {
   switch (tabId) {
     case "overview":
       return (
         <div className="max-w-2xl">
           <SectionTitle>Knowledge Base</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="Documents" value={`${data.docCount || 0}`} />
             <InfoRow label="Total Size" value={data.totalSize || "—"} />
@@ -952,7 +920,7 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any
               { name: "troubleshooting.pdf", size: "2.1 MB", chunks: 142 },
               { name: "changelog.md", size: "45 KB", chunks: 28 },
             ].map((doc) => (
-              <div key={doc.name} className="flex items-center gap-3 px-4 py-3 bg-white/5 rounded-lg border border-border-default">
+              <div key={doc.name} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <FileText size={14} className="text-chart-purple flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-mono text-text-primary truncate">{doc.name}</p>
@@ -977,7 +945,7 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any
               { id: "chunk_002", source: "getting-started.md", text: "To create your first agent, navigate to the Canvas and right-click to add a new Agent node..." },
               { id: "chunk_003", source: "faq.md", text: "Q: How do I connect a knowledge base? A: Click the Knowledge node and use the Documents tab to upload files..." },
             ].map((chunk) => (
-              <div key={chunk.id} className="bg-white/5 rounded-lg border border-border-default p-4">
+              <div key={chunk.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <code className="text-xs font-mono text-accent">{chunk.id}</code>
                   <span className="text-xs text-text-muted">{chunk.source}</span>
@@ -1000,7 +968,7 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any
             ]} />
           <InlineInput label="Chunk Size" value="512" onChange={() => {}} type="number" />
           <InlineInput label="Chunk Overlap" value="50" onChange={() => {}} type="number" />
-          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
+          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
         </div>
       );
     default:
@@ -1011,13 +979,13 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any
 /* ═══════════════════════════════════════════════════════════════════
    DATA SOURCE TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: any; nodeId: string }) {
+function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: DataSourceNodeData; nodeId: string }) {
   switch (tabId) {
     case "overview":
       return (
         <div className="max-w-2xl">
           <SectionTitle>Data Source</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="Type" value={data.dbType || "—"} />
             <InfoRow label="Status" value={<span className="flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "unknown").toUpperCase()}</span>} />
@@ -1031,7 +999,7 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: an
           <SectionTitle>Tables</SectionTitle>
           <div className="space-y-1.5">
             {["users", "orders", "products", "analytics_events", "sessions", "invoices"].map((t) => (
-              <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white/5 rounded-lg border border-border-default">
+              <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Layers size={13} className="text-chart-cyan flex-shrink-0" />
                 <code className="text-sm font-mono text-text-primary">{t}</code>
               </div>
@@ -1048,9 +1016,9 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: an
               { name: "Active users", query: "SELECT COUNT(*) FROM users WHERE last_active > NOW() - INTERVAL '7 days'" },
               { name: "Revenue today", query: "SELECT SUM(amount) FROM orders WHERE created_at::date = CURRENT_DATE" },
             ].map((q) => (
-              <div key={q.name} className="bg-white/5 rounded-lg border border-border-default p-4">
+              <div key={q.name} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <p className="text-sm font-medium text-text-primary mb-2">{q.name}</p>
-                <code className="text-xs font-mono text-text-secondary block bg-white/8 rounded p-2">{q.query}</code>
+                <code className="text-xs font-mono text-text-secondary block bg-white-alpha-8 rounded p-2">{q.query}</code>
               </div>
             ))}
           </div>
@@ -1063,7 +1031,7 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: an
           <InlineInput label="Host" value={data.host || "localhost"} onChange={() => {}} />
           <InlineInput label="Port" value={data.port?.toString() || "5432"} onChange={() => {}} type="number" />
           <InlineInput label="Database" value={data.database || "mydb"} onChange={() => {}} />
-          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
+          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
         </div>
       );
     default:
@@ -1074,13 +1042,13 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: an
 /* ═══════════════════════════════════════════════════════════════════
    CONNECTOR TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any; nodeId: string }) {
+function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: ConnectorNodeData; nodeId: string }) {
   switch (tabId) {
     case "overview":
       return (
         <div className="max-w-2xl">
           <SectionTitle>Connector</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="Provider" value={data.provider || "—"} />
             <InfoRow label="Status" value={<span className="flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "unknown").toUpperCase()}</span>} />
@@ -1094,7 +1062,7 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <SectionTitle>Available Tools</SectionTitle>
           <div className="space-y-1.5">
             {(data.toolList || ["send_message", "list_channels", "create_channel", "upload_file", "search_messages"]).map((t: string) => (
-              <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white/5 rounded-lg border border-border-default">
+              <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Zap size={13} className="text-chart-green flex-shrink-0" />
                 <code className="text-sm font-mono text-text-primary">{t}</code>
               </div>
@@ -1106,7 +1074,7 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any
       return (
         <div className="max-w-2xl">
           <SectionTitle>OAuth Configuration</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <InfoRow label="Auth Status" value={<StatusPill status={data.status === "authed" ? "active" : "pending"} />} />
             <InfoRow label="Scopes" value="read, write, admin" />
             <InfoRow label="Token Expires" value="in 30 days" />
@@ -1122,7 +1090,7 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <SectionTitle>Connector Settings</SectionTitle>
           <InlineInput label="Display Name" value={data.name || ""} onChange={() => {}} />
           <InlineInput label="Webhook URL" value="" onChange={() => {}} placeholder="https://..." />
-          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
+          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
         </div>
       );
     default:
@@ -1133,13 +1101,13 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any
 /* ═══════════════════════════════════════════════════════════════════
    MCP SERVER TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any; nodeId: string }) {
+function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: McpServerNodeData; nodeId: string }) {
   switch (tabId) {
     case "overview":
       return (
         <div className="max-w-2xl">
           <SectionTitle>MCP Server</SectionTitle>
-          <div className="bg-white/5 rounded-lg border border-border-default p-5">
+          <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="URL" value={data.url || "—"} mono />
             <InfoRow label="Status" value={<span className="flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "unknown").toUpperCase()}</span>} />
@@ -1153,7 +1121,7 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <SectionTitle>Server Tools</SectionTitle>
           <div className="space-y-1.5">
             {(data.toolList || ["get_customer", "update_customer", "list_tickets", "create_ticket", "search_kb", "get_order", "update_order", "send_notification"]).map((t: string) => (
-              <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white/5 rounded-lg border border-border-default">
+              <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Zap size={13} className="text-chart-blue flex-shrink-0" />
                 <code className="text-sm font-mono text-text-primary">{t}</code>
               </div>
@@ -1172,7 +1140,7 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any
               { label: "Requests (24h)", value: "12,847" },
               { label: "Errors (24h)", value: "3" },
             ].map((m) => (
-              <div key={m.label} className="bg-white/5 rounded-lg border border-border-default p-4">
+              <div key={m.label} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <p className="text-xs text-text-muted">{m.label}</p>
                 <p className="text-xl font-semibold text-text-primary mt-1">{m.value}</p>
               </div>
@@ -1187,7 +1155,7 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <InlineInput label="Display Name" value={data.name || ""} onChange={() => {}} />
           <InlineInput label="Server URL" value={data.url || ""} onChange={() => {}} placeholder="https://..." />
           <InlineInput label="API Key" value="***" onChange={() => {}} type="password" />
-          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
+          <button className="mt-2 w-full py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
         </div>
       );
     default:

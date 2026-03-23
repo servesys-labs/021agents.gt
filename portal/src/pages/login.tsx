@@ -41,8 +41,8 @@ const LocalLoginPage = () => {
     <div className="min-h-screen flex items-center justify-center bg-[#0d0d0d]">
       <div className="card w-full max-w-md">
         <div className="text-center mb-6">
-          <h1 className="text-2xl font-bold text-white">oneshots<span className="text-[#ff8c00]">.co</span></h1>
-          <span className="text-gray-500 text-sm">Agent Infrastructure Platform</span>
+          <h1 className="text-2xl font-bold text-text-primary">oneshots<span className="text-accent">.co</span></h1>
+          <span className="text-text-muted text-sm">Agent Infrastructure Platform</span>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -145,8 +145,8 @@ const ClerkLoginPage = () => {
     <div className="min-h-screen flex items-center justify-center bg-[#0d0d0d] p-6">
       <div className="card w-full max-w-md">
         <div className="text-center mb-4">
-          <h1 className="text-2xl font-bold text-white">oneshots<span className="text-[#ff8c00]">.co</span></h1>
-          <span className="text-gray-500 text-sm">Sign in with Clerk</span>
+          <h1 className="text-2xl font-bold text-text-primary">oneshots<span className="text-accent">.co</span></h1>
+          <span className="text-text-muted text-sm">Sign in with Clerk</span>
         </div>
         <SignedOut>
           <SignIn routing="hash" />

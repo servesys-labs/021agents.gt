@@ -66,15 +66,15 @@ export const ApiExplorerPage = () => {
       <div className="grid gap-4 md:grid-cols-4 mb-6">
         <div className="card">
           <span className="text-gray-400">Total Endpoints</span>
-          <p className="text-3xl font-bold text-white">{coverage.total}</p>
+          <p className="text-3xl font-bold text-text-primary">{coverage.total}</p>
         </div>
         <div className="card">
           <span className="text-gray-400">v1 Endpoints</span>
-          <p className="text-3xl font-bold text-white">{coverage.v1}</p>
+          <p className="text-3xl font-bold text-text-primary">{coverage.v1}</p>
         </div>
         <div className="card">
           <span className="text-gray-400">Legacy Endpoints</span>
-          <p className="text-3xl font-bold text-white">{coverage.legacy}</p>
+          <p className="text-3xl font-bold text-text-primary">{coverage.legacy}</p>
         </div>
         <div className="card">
           <span className="text-gray-400">Document</span>

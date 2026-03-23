@@ -80,7 +80,7 @@ export const ReliabilityPage = () => {
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
         <div className="card">
-          <p className="font-semibold text-white mb-3">SLO Definitions</p>
+          <p className="font-semibold text-text-primary mb-3">SLO Definitions</p>
           <QueryState loading={slosQuery.loading} error={slosQuery.error} isEmpty={(slosQuery.data?.slos ?? []).length === 0}>
             <table className="os-table">
               <thead>
@@ -109,7 +109,7 @@ export const ReliabilityPage = () => {
           </QueryState>
         </div>
         <div className="card">
-          <p className="font-semibold text-white mb-3">A/B Compare</p>
+          <p className="font-semibold text-text-primary mb-3">A/B Compare</p>
           <div className="grid gap-2 md:grid-cols-4">
             <input className="input-field" value={compareAgent} onChange={(event) => setCompareAgent(event.target.value)} placeholder="agent name" />
             <input className="input-field" value={versionA} onChange={(event) => setVersionA(event.target.value)} placeholder="version A" />

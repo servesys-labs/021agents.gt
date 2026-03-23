@@ -91,7 +91,7 @@ export const AgentChatPage = () => {
       >
         <div className="grid gap-6 lg:grid-cols-2">
           <div className="card">
-            <p className="font-semibold text-white mb-3">Run Agent Task</p>
+            <p className="font-semibold text-text-primary mb-3">Run Agent Task</p>
             <span className="text-xs text-gray-500 mb-2">Agent</span>
             <select className="input-field" value={selectedAgent} onChange={(e) => setAgentName(e.target.value)}>
               {agents.map((agent) => (
@@ -121,7 +121,7 @@ export const AgentChatPage = () => {
           </div>
 
           <div className="card">
-            <p className="font-semibold text-white mb-3">Chat Turn</p>
+            <p className="font-semibold text-text-primary mb-3">Chat Turn</p>
             <span className="text-xs text-gray-500 mb-2">Session ID (optional)</span>
             <input
               className="w-full rounded-md border border-[#2a2a2a] px-2 py-1 text-sm"

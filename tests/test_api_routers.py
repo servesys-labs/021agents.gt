@@ -336,8 +336,16 @@ class TestCanvasOverlayApiContracts:
     """Regression coverage for canvas overlay CRUD wiring."""
 
     def _auth_header(self, api_client, email: str = "canvas@test.com"):
-        signup = api_client.post("/api/v1/auth/signup", json={"email": email, "password": "p"}).json()
-        return {"Authorization": f"Bearer {signup['token']}"}
+        password = "pass12345"
+        signup_resp = api_client.post("/api/v1/auth/signup", json={"email": email, "password": password})
+        signup = signup_resp.json()
+        token = signup.get("token")
+        if not token:
+            login_resp = api_client.post("/api/v1/auth/login", json={"email": email, "password": password})
+            login = login_resp.json()
+            token = login.get("token")
+        assert token, f"Unable to authenticate test user: signup={signup}"
+        return {"Authorization": f"Bearer {token}"}
 
     def test_projects_create_list_and_env_update(self, api_client):
         headers = self._auth_header(api_client, "canvas-projects@test.com")
@@ -537,7 +545,7 @@ class TestCanvasOverlayApiContracts:
         headers = self._auth_header(api_client, "canvas-schedules@test.com")
         create = api_client.post(
             "/api/v1/schedules",
-            json={"agent_name": "test-agent", "cron": "@daily", "task": "check status"},
+            json={"agent_name": "test-agent", "cron": "* * * * *", "task": "check status"},
             headers=headers,
         )
         assert create.status_code == 200

@@ -120,6 +120,40 @@ function makeEdge(id: string, source: string, target: string, color: string): Ed
   };
 }
 
+type MetaResource = { type: "connector" | "datasource" | "knowledge" | "mcpServer"; name: string };
+type MetaDraft = {
+  agentNodeId: string;
+  clusterNodeIds: string[];
+  agentName: string;
+  model: string;
+  tools: string[];
+  resources: Array<{ type: string; name: string }>;
+  createdAt: number;
+};
+
+function inferResourcesFromPromptAndTools(prompt: string, tools: string[]): MetaResource[] {
+  const normalized = `${prompt} ${(tools || []).join(" ")}`.toLowerCase();
+  const resources: MetaResource[] = [];
+  const pushUnique = (res: MetaResource) => {
+    if (!resources.find((r) => r.type === res.type && r.name === res.name)) resources.push(res);
+  };
+
+  if (/\bslack\b/.test(normalized)) pushUnique({ type: "connector", name: "Slack" });
+  if (/\bgithub\b/.test(normalized)) pushUnique({ type: "connector", name: "GitHub" });
+  if (/\bnotion\b/.test(normalized)) pushUnique({ type: "connector", name: "Notion" });
+  if (/\bteams\b|\bmicrosoft teams\b/.test(normalized)) pushUnique({ type: "connector", name: "Microsoft Teams" });
+  if (/\bpostgres\b|\bmysql\b|\bsnowflake\b|\bdatabase\b|\bsql\b/.test(normalized)) {
+    pushUnique({ type: "datasource", name: "Primary Database" });
+  }
+  if (/\bknowledge\b|\brag\b|\bdocs?\b|\bpdf\b/.test(normalized)) {
+    pushUnique({ type: "knowledge", name: "Knowledge Base" });
+  }
+  if (/\bmcp\b|\binternal api\b|\btool server\b/.test(normalized)) {
+    pushUnique({ type: "mcpServer", name: "Internal MCP Server" });
+  }
+  return resources;
+}
+
 /* ── Demo data ───────────────────────────────────────────────── */
 const demoNodes: Node[] = [
   {
@@ -267,6 +301,7 @@ function CanvasWorkspaceInner() {
   const [metaProcessing, setMetaProcessing] = useState(false);
   const [metaResult, setMetaResult] = useState<string | undefined>();
   const [agentRailOpen, setAgentRailOpen] = useState(false);
+  const [metaDraft, setMetaDraft] = useState<MetaDraft | null>(null);
 
   // Agent log
   const [logEntries, setLogEntries] = useState<LogEntry[]>([
@@ -291,27 +326,57 @@ function CanvasWorkspaceInner() {
   const [showGrid, setShowGrid] = useState(true);
   const [agentsOnly, setAgentsOnly] = useState(false);
 
+  // Layer toggles
+  const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
+  const handleToggleLayer = useCallback((layer: string) => {
+    setHiddenLayers((prev) => {
+      const next = new Set(prev);
+      if (next.has(layer)) {
+        next.delete(layer);
+      } else {
+        next.add(layer);
+      }
+      return next;
+    });
+  }, []);
+
   // Undo/redo for node positions
   const { takeSnapshot, undo, redo, canUndo, canRedo } = useUndoRedo();
 
   /* ── Derived display nodes/edges using `hidden` property (best practice) ── */
   const displayNodes = useMemo(
-    () =>
-      agentsOnly
-        ? nodes.map((n) =>
-            n.type === 'agent'
-              ? { ...n, hidden: false, data: { ...n.data, hideHandles: true } }
-              : { ...n, hidden: true }
-          )
-        : nodes.map((n) =>
-            n.data?.hideHandles ? { ...n, data: { ...n.data, hideHandles: false } } : n
-          ),
-    [nodes, agentsOnly],
+    () => {
+      let result = nodes;
+      if (agentsOnly) {
+        result = result.map((n) =>
+          n.type === 'agent'
+            ? { ...n, hidden: false, data: { ...n.data, hideHandles: true } }
+            : { ...n, hidden: true }
+        );
+      } else {
+        result = result.map((n) =>
+          n.data?.hideHandles ? { ...n, data: { ...n.data, hideHandles: false } } : n
+        );
+        // "variables" layer toggle: hide non-agent nodes
+        if (hiddenLayers.has("variables")) {
+          result = result.map((n) =>
+            n.type !== 'agent' ? { ...n, hidden: true } : n
+          );
+        }
+      }
+      return result;
+    },
+    [nodes, agentsOnly, hiddenLayers],
   );
 
   const displayEdges = useMemo(
-    () => (agentsOnly ? edges.map((e) => ({ ...e, hidden: true })) : edges),
-    [edges, agentsOnly],
+    () => {
+      if (agentsOnly) return edges.map((e) => ({ ...e, hidden: true }));
+      // "network" layer toggle: hide all edges
+      if (hiddenLayers.has("network")) return edges.map((e) => ({ ...e, hidden: true }));
+      return edges;
+    },
+    [edges, agentsOnly, hiddenLayers],
   );
 
   /* ── Sync detailNode when nodes change (e.g., after deploy) ── */
@@ -335,6 +400,27 @@ function CanvasWorkspaceInner() {
   }, []);
 
   const clearLog = useCallback(() => setLogEntries([]), []);
+
+  const deployAgentByName = useCallback(
+    async (agentName: string) => {
+      if (!agentName) return;
+      addLogEntry(`Deploying ${agentName}...`, "running");
+      try {
+        await apiRequest(`/api/v1/deploy/${agentName}`, "POST");
+        setNodes((nds) =>
+          nds.map((n) =>
+            n.type === "agent" && String(n.data?.name || "") === agentName
+              ? { ...n, data: { ...n.data, status: "online" } }
+              : n,
+          ),
+        );
+        addLogEntry(`Deployed ${agentName} successfully`, "done");
+      } catch (err) {
+        addLogEntry(`Deploy failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
+      }
+    },
+    [addLogEntry, setNodes],
+  );
 
   /* ── Edge connection ─────────────────────────────────────── */
   const onConnect = useCallback(
@@ -419,7 +505,7 @@ function CanvasWorkspaceInner() {
       const centerX = 350 + Math.random() * 300;
       const centerY = 200 + Math.random() * 200;
 
-      const defaults: Record<string, any> = {
+      const defaults: Record<string, Record<string, unknown>> = {
         agent: {
           name: "New Agent",
           model: "gpt-4.1-mini",
@@ -502,30 +588,18 @@ function CanvasWorkspaceInner() {
     async (nodeId: string) => {
       const node = nodes.find((n) => n.id === nodeId);
       if (!node || node.type !== "agent") return;
-
-      addLogEntry(`Deploying ${node.data.name}...`, "running");
-      try {
-        await apiRequest(`/api/v1/deploy/${node.data.name}`, "POST");
-        setNodes((nds) =>
-          nds.map((n) =>
-            n.id === nodeId ? { ...n, data: { ...n.data, status: "online" } } : n,
-          ),
-        );
-        addLogEntry(`Deployed ${node.data.name} successfully`, "done");
-      } catch (err) {
-        addLogEntry(`Deploy failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
-      }
+      await deployAgentByName(String(node.data?.name || ""));
     },
-    [nodes, setNodes, addLogEntry],
+    [nodes, deployAgentByName],
   );
 
   /* ── Update node data from detail panel ──────────────────── */
   const handleUpdateNode = useCallback(
-    (nodeId: string, data: any) => {
+    (nodeId: string, data: Record<string, unknown>) => {
       setNodes((nds) =>
         nds.map((n) => (n.id === nodeId ? { ...n, data } : n)),
       );
-      addLogEntry(`Updated ${data.name || "node"}`, "done");
+      addLogEntry(`Updated ${(data.name as string) || "node"}`, "done");
     },
     [setNodes, addLogEntry],
   );
@@ -626,33 +700,102 @@ function CanvasWorkspaceInner() {
       addLogEntry(`Meta-Agent: "${prompt.slice(0, 60)}${prompt.length > 60 ? "..." : ""}"`, "running");
 
       try {
-        const result = await apiRequest<{ config: any; message: string }>(
+        const result = await apiRequest<{ name?: string; model?: string; tools?: string[] }>(
           "/api/v1/agents/create-from-description",
           "POST",
           { description: prompt },
         );
 
-        const msg = result.message || "Agent configuration generated.";
+        const msg = "Meta-Agent generated a project-ready draft.";
         setMetaResult(msg);
         addLogEntry("Meta-Agent completed", "done");
 
-        if (result.config) {
-          const id = `agent-${crypto.randomUUID().slice(0, 8)}`;
-          const newNode: Node = {
+        const agentName = String(result.name || "Generated Agent");
+        const model = String(result.model || "gpt-4.1-mini");
+        const tools = Array.isArray(result.tools) ? result.tools.map(String) : [];
+        const resources = inferResourcesFromPromptAndTools(prompt, tools);
+
+        const clusterNodeIds: string[] = [];
+        const agentId = `agent-${crypto.randomUUID().slice(0, 8)}`;
+        clusterNodeIds.push(agentId);
+        const agentNode: Node = {
+          id: agentId,
+          type: "agent",
+          position: { x: 420 + Math.random() * 40, y: 230 + Math.random() * 40 },
+          data: {
+            name: agentName,
+            model,
+            status: "draft",
+            tools,
+            activity: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+          },
+        };
+
+        const resourceNodes: Node[] = resources.map((resource, index) => {
+          const spacingY = 140;
+          const top = 120;
+          const y = top + index * spacingY;
+          const x = resource.type === "knowledge" || resource.type === "datasource" ? 150 : 760;
+          const idPrefix = resource.type === "datasource" ? "datasource" : resource.type;
+          const id = `${idPrefix}-${crypto.randomUUID().slice(0, 8)}`;
+          clusterNodeIds.push(id);
+          if (resource.type === "knowledge") {
+            return {
+              id,
+              type: "knowledge",
+              position: { x, y },
+              data: { name: resource.name, docCount: 0, totalSize: "0 MB", status: "empty", chunkCount: 0 },
+            };
+          }
+          if (resource.type === "datasource") {
+            return {
+              id,
+              type: "datasource",
+              position: { x, y },
+              data: { name: resource.name, type: "postgres", status: "disconnected", tableCount: 0 },
+            };
+          }
+          if (resource.type === "mcpServer") {
+            return {
+              id,
+              type: "mcpServer",
+              position: { x, y },
+              data: { name: resource.name, url: "https://...", status: "offline", toolCount: 0 },
+            };
+          }
+          return {
             id,
-            type: "agent",
-            position: { x: 400 + Math.random() * 100, y: 250 + Math.random() * 100 },
-            data: {
-              name: result.config.name || "Generated Agent",
-              model: result.config.model || "gpt-4.1-mini",
-              status: "draft",
-              tools: result.config.tools || [],
-              activity: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            },
+            type: "connector",
+            position: { x, y },
+            data: { name: resource.name, app: `${resource.name} Workspace`, status: "pending", toolCount: 0 },
           };
-          setNodes((nds) => [...nds, newNode]);
-          setDetailNode(newNode);
-        }
+        });
+
+        const resourceEdges: Edge[] = resourceNodes.map((r) =>
+          makeEdge(
+            `e-${r.id}-${agentId}`,
+            r.id,
+            agentId,
+            getEdgeColor(r.type, "agent"),
+          ),
+        );
+
+        setNodes((nds) => [...nds, agentNode, ...resourceNodes]);
+        setEdges((eds) => [...eds, ...resourceEdges]);
+        setDetailNode(agentNode);
+        setMetaDraft({
+          agentNodeId: agentId,
+          clusterNodeIds,
+          agentName,
+          model,
+          tools,
+          resources,
+          createdAt: Date.now(),
+        });
+        addLogEntry(
+          `Meta-Agent created ${agentName}${resources.length ? ` with ${resources.length} resource nodes` : ""}`,
+          "done",
+        );
       } catch (err) {
         const errMsg = `Error: ${err instanceof Error ? err.message : "Failed to create agent"}`;
         setMetaResult(errMsg);
@@ -661,8 +804,31 @@ function CanvasWorkspaceInner() {
         setMetaProcessing(false);
       }
     },
-    [setNodes, addLogEntry],
+    [setNodes, setEdges, addLogEntry],
   );
+
+  const handleMetaReviewDraft = useCallback(() => {
+    if (!metaDraft) return;
+    const node = nodes.find((n) => n.id === metaDraft.agentNodeId);
+    if (!node) return;
+    setDetailNode(node);
+    addLogEntry(`Reviewing ${metaDraft.agentName}`, "running");
+  }, [metaDraft, nodes, addLogEntry]);
+
+  const handleMetaCenterDraft = useCallback(() => {
+    if (!metaDraft) return;
+    const clusterNodes = nodes.filter((n) => metaDraft.clusterNodeIds.includes(n.id));
+    if (!clusterNodes.length) return;
+    const centerX = clusterNodes.reduce((sum, n) => sum + n.position.x, 0) / clusterNodes.length;
+    const centerY = clusterNodes.reduce((sum, n) => sum + n.position.y, 0) / clusterNodes.length;
+    setCenter(centerX + 120, centerY + 60, { zoom: 0.85, duration: 500 });
+    addLogEntry(`Centered on ${metaDraft.agentName} cluster`, "done");
+  }, [metaDraft, nodes, setCenter, addLogEntry]);
+
+  const handleMetaDeployDraft = useCallback(async () => {
+    if (!metaDraft) return;
+    await deployAgentByName(metaDraft.agentName);
+  }, [metaDraft, deployAgentByName]);
 
   /* ── Snapshot before drag starts (for undo) ─────────────── */
   const onNodeDragStart = useCallback(
@@ -830,7 +996,7 @@ function CanvasWorkspaceInner() {
                 </div>
                 {[
                   { name: "production", icon: <Globe size={10} className="text-status-live" /> },
-                  { name: "staging", icon: <GitBranch size={10} className="text-yellow-500" /> },
+                  { name: "staging", icon: <GitBranch size={10} className="text-status-warning" /> },
                   { name: "development", icon: <GitBranch size={10} className="text-chart-blue" /> },
                 ].map((env) => (
                   <button
@@ -911,7 +1077,7 @@ function CanvasWorkspaceInner() {
           }`}
         >
           <MessageSquare size={12} />
-          Agent
+          Meta-Agent
         </button>
 
         <button className="flex items-center justify-center w-7 h-7 text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1">
@@ -968,6 +1134,8 @@ function CanvasWorkspaceInner() {
           onRedo={handleRedo}
           canUndo={canUndo}
           canRedo={canRedo}
+          hiddenLayers={hiddenLayers}
+          onToggleLayer={handleToggleLayer}
         />
 
         <AddNodeToolbar onAdd={addNode} />
@@ -1012,6 +1180,16 @@ function CanvasWorkspaceInner() {
               onSubmit={handleMetaSubmit}
               isProcessing={metaProcessing}
               lastResult={metaResult}
+              latestDraft={metaDraft ? {
+                agentName: metaDraft.agentName,
+                model: metaDraft.model,
+                tools: metaDraft.tools,
+                resources: metaDraft.resources,
+                createdAt: metaDraft.createdAt,
+              } : null}
+              onReviewDraft={handleMetaReviewDraft}
+              onCenterDraft={handleMetaCenterDraft}
+              onDeployDraft={handleMetaDeployDraft}
             />
           </div>
         )}
