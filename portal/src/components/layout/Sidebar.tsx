@@ -7,12 +7,10 @@ import { getAuthToken } from "../../auth/tokens";
 import {
   LayoutDashboard,
   Bot,
-  MessageSquare,
   Play,
   FlaskConical,
   Clock,
   Webhook,
-  Box,
   Plug,
   GitBranch,
   FolderKanban,
@@ -21,13 +19,9 @@ import {
   Database,
   ShieldCheck,
   Activity,
-  Server,
   Key,
   Users,
-  BarChart3,
-  Gauge,
   CreditCard,
-  Compass,
   Settings,
   ExternalLink,
   BookOpen,
@@ -36,6 +30,8 @@ import {
   PanelLeft,
   ChevronDown,
   CircleDot,
+  Layers,
+  Server,
 } from "lucide-react";
 
 type NavItem = {
@@ -57,56 +53,51 @@ const navGroups: NavGroup[] = [
     label: "",
     items: [
       { path: "/", label: "Dashboard", icon: <LayoutDashboard size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/agents", label: "Agents", icon: <Bot size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/canvas", label: "Canvas", icon: <Layers size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    label: "OBSERVE",
+    items: [
       { path: "/sessions", label: "Sessions", icon: <Play size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/sandbox", label: "Sandbox Studio", icon: <Box size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "WORKFLOWS",
-    items: [
       { path: "/runtime", label: "Workflows & Jobs", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/agent-chat", label: "Agent Chat", icon: <MessageSquare size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/eval", label: "Eval Runner", icon: <FlaskConical size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/schedules", label: "Schedules", icon: <Clock size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "INTEGRATION",
-    items: [
-      { path: "/webhooks", label: "Webhooks", icon: <Webhook size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/integrations", label: "Connectors", icon: <Plug size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/api-explorer", label: "API Explorer", icon: <Compass size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/evolution", label: "Evolution", icon: <GitBranch size={iconSize} strokeWidth={iconStroke} /> },
     ],
   },
   {
     label: "INTELLIGENCE",
     items: [
-      { path: "/evolution", label: "Evolve & Proposals", icon: <GitBranch size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/memory", label: "Memory Manager", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/rag", label: "RAG Ingest", icon: <Database size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/eval", label: "Eval Runner", icon: <FlaskConical size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/memory", label: "Memory", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/rag", label: "Knowledge", icon: <Database size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    label: "INTEGRATION",
+    items: [
+      { path: "/integrations", label: "Connectors", icon: <Plug size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/webhooks", label: "Webhooks", icon: <Webhook size={iconSize} strokeWidth={iconStroke} /> },
     ],
   },
   {
     label: "OPERATIONS",
     items: [
       { path: "/projects", label: "Projects & Envs", icon: <FolderKanban size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/releases", label: "Releases & Canary", icon: <Rocket size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/reliability", label: "SLO & Compare", icon: <Gauge size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/infrastructure", label: "Infrastructure", icon: <Server size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/releases", label: "Releases", icon: <Rocket size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/schedules", label: "Schedules", icon: <Clock size={iconSize} strokeWidth={iconStroke} /> },
       { path: "/governance", label: "Governance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    label: "TEAM",
+    items: [
+      { path: "/settings", label: "General", icon: <Settings size={iconSize} strokeWidth={iconStroke} /> },
     ],
   },
   {
     label: "BILLING",
     items: [
       { path: "/billing", label: "Billing & Usage", icon: <CreditCard size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "SETTINGS",
-    items: [
-      { path: "/settings", label: "Settings", icon: <Settings size={iconSize} strokeWidth={iconStroke} /> },
     ],
   },
 ];
@@ -118,6 +109,9 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
   const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+
+  // Auto-collapse sidebar when on canvas page
+  const isCanvasPage = pathname === "/canvas";
 
   useEffect(() => {
     const update = () => {
@@ -133,6 +127,8 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
     if (path === "/") return pathname === "/";
     return pathname.startsWith(path);
   };
+
+  const sidebarCollapsed = collapsed || isCanvasPage;
 
   return (
     <div className="flex h-screen bg-surface-base">
@@ -156,31 +152,35 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
       {/* Sidebar */}
       <aside
         className={`fixed md:static z-40 h-full flex flex-col bg-surface-raised border-r border-border-default transition-all duration-200 ${
-          collapsed ? "w-16" : "w-60"
+          sidebarCollapsed ? "w-14" : "w-56"
         } ${mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}
       >
         {/* Logo + Team */}
-        <div className="p-4 border-b border-border-default">
+        <div className={`border-b border-border-default ${sidebarCollapsed ? "p-2.5" : "p-3.5"}`}>
           <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-lg bg-accent flex items-center justify-center">
+            <Link to="/" className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-accent flex items-center justify-center flex-shrink-0">
                 <CircleDot size={16} className="text-white" strokeWidth={2.5} />
               </div>
-              {!collapsed && (
-                <span className="text-sm font-semibold text-text-primary tracking-tight">oneshots</span>
+              {!sidebarCollapsed && (
+                <span className="text-sm font-semibold text-text-primary tracking-tight">
+                  oneshots<span className="text-accent">.co</span>
+                </span>
               )}
-            </div>
-            <button
-              onClick={() => setCollapsed(!collapsed)}
-              className="hidden md:flex items-center justify-center w-6 h-6 rounded text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors"
-            >
-              {collapsed ? <PanelLeft size={14} /> : <PanelLeftClose size={14} />}
-            </button>
+            </Link>
+            {!isCanvasPage && (
+              <button
+                onClick={() => setCollapsed(!collapsed)}
+                className="hidden md:flex items-center justify-center w-6 h-6 rounded text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors"
+              >
+                {collapsed ? <PanelLeft size={14} /> : <PanelLeftClose size={14} />}
+              </button>
+            )}
           </div>
 
           {/* Team selector */}
-          {!collapsed && (
-            <button className="mt-3 w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md bg-surface-base border border-border-default text-xs text-text-secondary hover:border-border-strong transition-colors">
+          {!sidebarCollapsed && (
+            <button className="mt-2.5 w-full flex items-center gap-2 px-2 py-1.5 rounded-md bg-surface-base border border-border-default text-xs text-text-secondary hover:border-border-strong transition-colors">
               <div className="w-5 h-5 rounded bg-surface-overlay flex items-center justify-center text-[10px] font-bold text-text-primary">
                 {identity?.name?.[0]?.toUpperCase() || "T"}
               </div>
@@ -192,8 +192,8 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
           )}
 
           {/* Search */}
-          {!collapsed && (
-            <button className="mt-2 w-full flex items-center gap-2 px-2.5 py-1.5 rounded-md text-xs text-text-muted hover:bg-surface-overlay transition-colors">
+          {!sidebarCollapsed && (
+            <button className="mt-1.5 w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-text-muted hover:bg-surface-overlay transition-colors">
               <Search size={13} />
               <span>Go to</span>
               <kbd className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-surface-overlay border border-border-default text-text-muted">
@@ -204,16 +204,16 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 overflow-y-auto py-2 px-2">
+        <nav className="flex-1 overflow-y-auto py-2 px-1.5">
           {navGroups.map((group, gi) => (
-            <div key={gi} className={gi > 0 ? "mt-4" : ""}>
-              {group.label && !collapsed && (
-                <div className="px-2.5 mb-1.5 text-[10px] font-semibold tracking-widest text-text-muted uppercase">
+            <div key={gi} className={gi > 0 ? "mt-3" : ""}>
+              {group.label && !sidebarCollapsed && (
+                <div className="px-2 mb-1 text-[10px] font-semibold tracking-widest text-text-muted uppercase">
                   {group.label}
                 </div>
               )}
-              {group.label && collapsed && gi > 0 && (
-                <div className="mx-2 mb-2 border-t border-border-default" />
+              {group.label && sidebarCollapsed && gi > 0 && (
+                <div className="mx-1.5 mb-1.5 border-t border-border-default" />
               )}
               <div className="space-y-0.5">
                 {group.items.map((item) => (
@@ -221,17 +221,17 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                     key={item.path}
                     to={item.path}
                     onClick={() => setMobileOpen(false)}
-                    title={collapsed ? item.label : undefined}
-                    className={`flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] transition-colors ${
+                    title={sidebarCollapsed ? item.label : undefined}
+                    className={`flex items-center gap-2 px-2 py-1.5 rounded-md text-[12px] transition-colors ${
                       isActive(item.path)
                         ? "bg-accent-muted text-accent"
                         : "text-text-secondary hover:bg-surface-overlay hover:text-text-primary"
-                    } ${collapsed ? "justify-center px-0" : ""}`}
+                    } ${sidebarCollapsed ? "justify-center px-0" : ""}`}
                   >
                     <span className={`flex-shrink-0 ${isActive(item.path) ? "text-accent" : ""}`}>
                       {item.icon}
                     </span>
-                    {!collapsed && <span>{item.label}</span>}
+                    {!sidebarCollapsed && <span>{item.label}</span>}
                   </Link>
                 ))}
               </div>
@@ -240,13 +240,13 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
         </nav>
 
         {/* External links */}
-        {!collapsed && (
-          <div className="px-2 py-2 space-y-0.5">
+        {!sidebarCollapsed && (
+          <div className="px-1.5 py-1.5 space-y-0.5">
             <a
               href="https://github.com/eprasad7/one-shot"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors"
+              className="flex items-center gap-2 px-2 py-1.5 rounded-md text-[12px] text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors"
             >
               <ExternalLink size={14} strokeWidth={1.5} />
               <span>GitHub</span>
@@ -256,7 +256,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
               href="https://oneshots.co/docs"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2.5 px-2.5 py-1.5 rounded-md text-[13px] text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors"
+              className="flex items-center gap-2 px-2 py-1.5 rounded-md text-[12px] text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors"
             >
               <BookOpen size={14} strokeWidth={1.5} />
               <span>Documentation</span>
@@ -266,9 +266,9 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
         )}
 
         {/* Footer */}
-        {!collapsed && (
+        {!sidebarCollapsed && (
           <div className="border-t border-border-default">
-            <div className="flex items-center gap-3 px-4 py-2">
+            <div className="flex items-center gap-3 px-3 py-2">
               <button className="text-[11px] text-text-muted hover:text-text-secondary transition-colors">
                 Feedback
               </button>
@@ -289,7 +289,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
       {/* Main content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <main className="flex-1 overflow-auto">
-          <div className="p-6 pt-14 md:pt-6">
+          <div className={isCanvasPage ? "h-full" : "p-6 pt-14 md:pt-6"}>
             {children}
           </div>
         </main>

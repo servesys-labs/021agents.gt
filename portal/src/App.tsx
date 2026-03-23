@@ -13,16 +13,15 @@ import { ToastProvider } from "./components/common/ToastProvider";
 import "./index.css";
 
 const DashboardPage = lazy(() => import("./pages/dashboard").then((m) => ({ default: m.DashboardPage })));
+const CanvasWorkspacePage = lazy(() => import("./pages/canvas").then((m) => ({ default: m.CanvasWorkspacePage })));
 const AgentsPage = lazy(() => import("./pages/agents").then((m) => ({ default: m.AgentsPage })));
 const SessionsPage = lazy(() => import("./pages/sessions").then((m) => ({ default: m.SessionsPage })));
 const BillingPage = lazy(() => import("./pages/billing").then((m) => ({ default: m.BillingPage })));
 const SettingsPage = lazy(() => import("./pages/settings").then((m) => ({ default: m.SettingsPage })));
 const LoginPage = lazy(() => import("./pages/login").then((m) => ({ default: m.LoginPage })));
 const RuntimePage = lazy(() => import("./pages/runtime").then((m) => ({ default: m.RuntimePage })));
-const SandboxPage = lazy(() => import("./pages/sandbox").then((m) => ({ default: m.SandboxPage })));
 const IntegrationsPage = lazy(() => import("./pages/integrations").then((m) => ({ default: m.IntegrationsPage })));
 const GovernancePage = lazy(() => import("./pages/governance").then((m) => ({ default: m.GovernancePage })));
-const ApiExplorerPage = lazy(() => import("./pages/api-explorer").then((m) => ({ default: m.ApiExplorerPage })));
 const AgentChatPage = lazy(() => import("./pages/agent-chat").then((m) => ({ default: m.AgentChatPage })));
 const EvalPage = lazy(() => import("./pages/eval").then((m) => ({ default: m.EvalPage })));
 const SchedulesPage = lazy(() => import("./pages/schedules").then((m) => ({ default: m.SchedulesPage })));
@@ -48,6 +47,7 @@ function App() {
           authProvider={authProvider}
           resources={[
             { name: "dashboard", list: "/" },
+            { name: "canvas", list: "/canvas" },
             { name: "agents", list: "/agents" },
             { name: "sessions", list: "/sessions" },
             { name: "runtime", list: "/runtime" },
@@ -55,7 +55,6 @@ function App() {
             { name: "eval", list: "/eval" },
             { name: "schedules", list: "/schedules" },
             { name: "webhooks", list: "/webhooks" },
-            { name: "sandbox", list: "/sandbox" },
             { name: "integrations", list: "/integrations" },
             { name: "evolution", list: "/evolution" },
             { name: "projects", list: "/projects" },
@@ -66,7 +65,6 @@ function App() {
             { name: "infrastructure", list: "/infrastructure" },
             { name: "governance", list: "/governance" },
             { name: "billing", list: "/billing" },
-            { name: "api-explorer", list: "/api-explorer" },
             { name: "settings", list: "/settings" },
             { name: "login", list: "/login" },
           ]}
@@ -84,6 +82,7 @@ function App() {
                 }
               >
                 <Route index element={<DashboardPage />} />
+                <Route path="/canvas" element={<CanvasWorkspacePage />} />
                 <Route path="/agents" element={<AgentsPage />} />
                 <Route path="/sessions" element={<SessionsPage />} />
                 <Route path="/runtime" element={<RuntimePage />} />
@@ -91,7 +90,6 @@ function App() {
                 <Route path="/eval" element={<EvalPage />} />
                 <Route path="/schedules" element={<SchedulesPage />} />
                 <Route path="/webhooks" element={<WebhooksPage />} />
-                <Route path="/sandbox" element={<SandboxPage />} />
                 <Route path="/integrations" element={<IntegrationsPage />} />
                 <Route path="/evolution" element={<EvolutionPage />} />
                 <Route path="/projects" element={<ProjectsPage />} />
@@ -102,7 +100,6 @@ function App() {
                 <Route path="/infrastructure" element={<InfrastructurePage />} />
                 <Route path="/governance" element={<GovernancePage />} />
                 <Route path="/billing" element={<BillingPage />} />
-                <Route path="/api-explorer" element={<ApiExplorerPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Route>
 
