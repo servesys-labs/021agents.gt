@@ -90,7 +90,7 @@ export const AgentNode = memo(({ data, selected }: NodeProps & { data: AgentNode
         }
         bg-glass-heavy backdrop-blur-[20px] backdrop-saturate-[1.5]
       `}
-      style={{ background: 'rgba(28, 25, 23, 0.82)', backdropFilter: 'blur(20px) saturate(1.5)', WebkitBackdropFilter: 'blur(20px) saturate(1.5)' }}
+      style={{ background: 'rgba(28, 25, 23, 0.45)', backdropFilter: 'blur(40px) saturate(1.8)', WebkitBackdropFilter: 'blur(40px) saturate(1.8)' }}
     >
       {/* Connection handles */}
       <Handle

@@ -39,7 +39,7 @@ export const DataSourceNode = memo(({ data, selected }: NodeProps & { data: Data
           : "border-border-default hover:border-border-strong"
         }
       `}
-      style={{ background: 'rgba(28, 25, 23, 0.82)', backdropFilter: 'blur(20px) saturate(1.5)', WebkitBackdropFilter: 'blur(20px) saturate(1.5)' }}
+      style={{ background: 'rgba(28, 25, 23, 0.45)', backdropFilter: 'blur(40px) saturate(1.8)', WebkitBackdropFilter: 'blur(40px) saturate(1.8)' }}
     >
       <Handle
         type="target"
