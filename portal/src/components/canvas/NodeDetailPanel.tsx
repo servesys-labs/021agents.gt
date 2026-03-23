@@ -133,22 +133,10 @@ export function NodeDetailPanel({
   const isSettingsTab = activeTab === "settings" && nodeType === "agent";
 
   return (
-    <>
-      {/* Backdrop */}
-      <div className="fixed inset-0 z-30 bg-black/30 backdrop-blur-[2px]" onClick={onClose} />
-
-      {/* Floating card */}
       <div
         ref={panelRef}
-        className="fixed z-40 bg-surface-raised border border-border-default rounded-xl shadow-2xl flex flex-col overflow-hidden"
-        style={{
-          top: "4%",
-          left: "50%",
-          transform: "translateX(-50%)",
-          width: "min(900px, calc(100vw - 120px))",
-          maxHeight: "92vh",
-          animation: "panelFadeIn 0.2s ease-out",
-        }}
+        className="h-full bg-surface-raised border-l border-border-default flex flex-col overflow-hidden flex-shrink-0"
+        style={{ width: "50%", minWidth: 420, maxWidth: 720 }}
       >
         {/* ── Header ──────────────────────────────────────────── */}
         <div className="flex items-center gap-3 px-6 py-4 border-b border-border-default flex-shrink-0">
@@ -244,7 +232,7 @@ export function NodeDetailPanel({
               <AgentSettingsContent section={settingsSection} data={data} nodeId={node.id} onUpdateNode={onUpdateNode} />
             </div>
             {/* Right section nav */}
-            <div className="w-48 border-l border-border-default py-4 px-2 flex-shrink-0 overflow-y-auto">
+            <div className="w-[140px] border-l border-border-default py-4 px-2 flex-shrink-0 overflow-y-auto">
               {agentSettingsSections.map((s) => (
                 <button
                   key={s.id}
@@ -256,7 +244,7 @@ export function NodeDetailPanel({
                   }`}
                 >
                   {s.icon}
-                  {s.label}
+                  <span className="truncate">{s.label}</span>
                 </button>
               ))}
             </div>
@@ -268,14 +256,6 @@ export function NodeDetailPanel({
           </div>
         )}
       </div>
-
-      <style>{`
-        @keyframes panelFadeIn {
-          from { transform: translateX(-50%) translateY(12px); opacity: 0; }
-          to { transform: translateX(-50%) translateY(0); opacity: 1; }
-        }
-      `}</style>
-    </>
   );
 }
 
