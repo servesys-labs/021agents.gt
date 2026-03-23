@@ -165,6 +165,9 @@ class TurnResponse(BaseModel):
     content: str
     cost_total_usd: float
     tool_calls: list[dict[str, Any]] = []
+    execution_mode: str = "sequential"
+    plan_artifact: dict[str, Any] = {}
+    reflection: dict[str, Any] = {}
     started_at: float = 0
     ended_at: float = 0
 

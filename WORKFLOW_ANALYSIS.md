@@ -1,3 +1,158 @@
+# AgentOS Workflow Analysis (Current State)
+
+This document reflects the current implementation state after recent platform expansion and hardening passes.
+
+## High-Level Architecture
+
+```
+User/Client
+  |\
+  | \-- Portal UI (Refine + Tremor, Vite)
+  |       |
+  |       +-- /api/v1/* and /openapi.json (proxy) -> FastAPI
+  |
+  \---- CLI (init/create/run/chat/eval/evolve/ingest/codemap/serve/deploy)
+          |
+          +-- Agent runtime (Agent -> AgentHarness)
+                  |
+                  +-- LLM routing
+                  +-- Governance checks
+                  +-- Tool execution (builtin/MCP/sandbox)
+                  +-- Memory tiers + retrieval
+                  +-- Event bus + tracing
+                  +-- DB persistence (SQLite default, Postgres option)
+```
+
+## Core Workflows
+
+### 1) Bootstrap (`agentos init`)
+- Scaffolds project structure and default config.
+- Initializes database metadata/schema.
+
+### 2) Agent Authoring (`agentos create`)
+- Builds agent config from prompt/template inputs.
+- Persists definitions in `agents/`.
+
+### 3) Agent Execution (`agentos run`, `agentos chat`, API run endpoints)
+- Resolves config -> builds harness -> executes multi-turn loop.
+- Applies governance before tool calls.
+- Persists sessions, turns, and tracing records.
+
+### 4) Evaluation (`agentos eval`, `/api/v1/eval/*`)
+- Runs task sets with graders.
+- Stores and lists eval runs/tasks in API + portal.
+
+### 5) Evolution (`agentos evolve`, `/api/v1/evolve/*`)
+- Produces proposals and maintains evolution ledger.
+- Supports approve/reject operations.
+
+### 6) RAG Ingestion (`agentos ingest`, `/api/v1/rag/*`)
+- Ingests files and exposes status/documents.
+- Surfaced in portal RAG page.
+
+### 7) Async Runtime (`/api/v1/jobs/*`, `/api/v1/workflows/*`)
+- Job queue supports retries/dead-letter semantics.
+- Workflow DAG execution with run status and trace references.
+- Background worker + scheduler start on API startup.
+
+### 8) Sandbox Operations (`/api/v1/sandbox/*`, builtin sandbox tools)
+- Create/exec/read/write/list/kill/keepalive flows.
+- Sandbox tool handlers are wired into builtin tool registry.
+- Virtual path translation is integrated in local fallback runtime.
+
+### 9) Governance + Infra Control Plane
+- Policies, audit, secrets, SLOs, releases/canary, projects/envs, retention, GPU endpoints.
+- Connectors and MCP control surfaces are available via API + portal.
+
+### 10) Deployment (`agentos deploy`)
+- Cloudflare-oriented deploy path via `deploy/`.
+
+### 11) Code Intelligence (`agentos codemap`)
+- Generates:
+  - `data/codemap.json`
+  - `docs/codemap.dot`
+- Includes Python/TS module graphing and UI-to-API linkage extraction.
+
+## API Surface Organization
+
+Current `api/v1` routers include:
+- `auth`, `agents`, `sessions`
+- `eval`, `evolve`, `billing`, `plans`
+- `schedules`, `api-keys`, `webhooks`, `orgs`
+- `tools`, `sandbox`, `rag`, `compare`, `observability`, `memory`
+- `deploy`, `gpu`, `config`, `projects`, `audit`, `policies`
+- `slos`, `releases`, `jobs`, `workflows`, `retention`
+- `secrets`, `mcp-control`, `connectors`, `stripe-billing`
+- `skills`, `middleware`
+
+Legacy endpoints in `api/app.py` remain for compatibility.
+
+## Auth and Tenancy Flow
+
+### Browser/Portal
+- Local JWT auth is supported (`signup/login/me`).
+- Clerk mode is integrated with token exchange/provisioning flow.
+- Portal supports session refresh/expiry UX handling.
+
+### Programmatic Access
+- API keys (`ak_...`) support scope and org/project/env constraints.
+- Role/scope checks are enforced in shared API dependencies.
+
+### Multi-Tenant Model
+- Org-centric model with role hierarchy:
+  - `owner > admin > member > viewer`
+
+## Data Layer and Persistence
+
+- Default database: SQLite (`data/agent.db`)
+- Optional: Postgres via `DATABASE_URL`
+
+Recent hardening introduced runtime table guards so partially migrated legacy databases do not crash control-plane endpoints.
+
+Guarded operational tables now include:
+- `billing_records`, `job_queue`
+- `workflows`, `workflow_runs`
+- `policy_templates`, `audit_log`, `secrets`
+- `gpu_endpoints`, `retention_policies`
+- `projects`, `environments`, `mcp_servers`
+- `release_channels`, `canary_splits`, `slo_definitions`, `event_types`
+
+## Portal Workflows (Refine + Tremor)
+
+Active portal surfaces include:
+- Dashboard, Agents, Sessions, Agent Chat
+- Eval, Evolution, Runtime (jobs/workflows), Sandbox
+- Integrations, Governance, Projects, Releases
+- Memory, RAG, Reliability, Infrastructure
+- Billing, Schedules, Webhooks, Settings, API Explorer
+
+UX hardening in place:
+- Global error boundary
+- Query loading/error/empty states
+- Confirm dialog + toast patterns
+- Pagination on major list pages
+- Lazy route loading and chunking
+- OpenAPI dev proxy support for API Explorer
+
+## Recent Reliability Improvements
+
+- Scheduler startup fixed to properly await async loop.
+- Middleware rate-limiting now returns clean `429` JSON (no middleware-raised 500s).
+- Session/turn serializers now tolerate legacy rows with missing columns.
+- Billing daily usage aggregation made DB-agnostic.
+- Runtime schema safety net added to prevent missing-table 500s.
+
+## Current Operational Notes
+
+- Legacy DB column drift can still produce persistence warnings; runtime serializers now default missing values, but schema alignment should still be monitored.
+- High-frequency polling may hit rate limits; clients should respect `Retry-After`.
+- `data/schedules.json` is runtime state and should remain untracked.
+
+## Suggested Next Steps
+
+- Add a schema drift health endpoint/CLI check (tables + required columns).
+- Add regression tests using legacy-seeded SQLite snapshots.
+- Publish a docs matrix mapping portal pages -> API endpoints -> scopes/roles.
 # AgentOS Workflow Analysis & Flow Diagram
 
 ## System Flow Diagram

@@ -318,7 +318,7 @@ function CanvasWorkspaceInner() {
     });
   }, []);
 
-  const onPaneContextMenu = useCallback((event: React.MouseEvent) => {
+  const onPaneContextMenu = useCallback((event: MouseEvent | React.MouseEvent<Element, MouseEvent>) => {
     event.preventDefault();
     setContextMenu({
       x: event.clientX,

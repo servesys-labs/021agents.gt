@@ -28,6 +28,9 @@ type SessionTurn = {
   content?: string;
   role?: string;
   tool_calls?: Array<{ name?: string; function?: { name?: string } }>;
+  execution_mode?: string;
+  plan_artifact?: { complexity?: string; stages?: Array<{ type?: string }>; tool_candidates?: string[] };
+  reflection?: { confidence?: number; next_action?: string; tool_failures?: string[]; error?: string };
 };
 
 type ToolCall = { name?: string; function?: { name?: string } };
@@ -362,6 +365,9 @@ export const SessionsPage = () => {
                   <span className="px-2 py-0.5 text-[10px] font-semibold bg-accent/10 text-accent rounded-full">
                     Turn {turn.turn_number}
                   </span>
+                  <span className="px-2 py-0.5 text-[10px] font-semibold bg-surface-overlay text-text-muted rounded-full border border-border-default uppercase">
+                    {turn.execution_mode ?? "sequential"}
+                  </span>
                   {turn.role && (
                     <span className="text-[10px] text-text-muted uppercase">
                       {turn.role}
@@ -377,6 +383,22 @@ export const SessionsPage = () => {
               <p className="text-xs text-text-secondary whitespace-pre-wrap leading-relaxed">
                 {turn.content?.slice(0, 800) ?? ""}
               </p>
+              <div className="mt-2 text-[10px] text-text-muted flex flex-wrap gap-2">
+                <span>
+                  Confidence: {((toNumber(turn.reflection?.confidence) || 0) * 100).toFixed(1)}%
+                </span>
+                <span>
+                  Next: {turn.reflection?.next_action ?? "n/a"}
+                </span>
+                <span>
+                  Plan stages: {safeArray<{ type?: string }>(turn.plan_artifact?.stages).length}
+                </span>
+              </div>
+              {safeArray<string>(turn.reflection?.tool_failures).length > 0 && (
+                <div className="mt-1 text-[10px] text-status-warning">
+                  Tool failures: {safeArray<string>(turn.reflection?.tool_failures).join(", ")}
+                </div>
+              )}
               {safeArray<ToolCall>(turn.tool_calls).length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1">
                   {safeArray<ToolCall>(turn.tool_calls).map((tc, i) => (

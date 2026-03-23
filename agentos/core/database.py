@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS turns (
     tool_calls_json     TEXT NOT NULL DEFAULT '[]',
     tool_results_json   TEXT NOT NULL DEFAULT '[]',
     errors_json         TEXT NOT NULL DEFAULT '[]',
+    execution_mode      TEXT NOT NULL DEFAULT 'sequential',
+    plan_json           TEXT NOT NULL DEFAULT '{}',
+    reflection_json     TEXT NOT NULL DEFAULT '{}',
     -- Timestamps
     started_at          REAL NOT NULL DEFAULT (unixepoch('now')),
     ended_at            REAL NOT NULL DEFAULT (unixepoch('now'))
@@ -1144,6 +1147,7 @@ class AgentDB:
             # Existing database — apply migrations
             self._migrate(current)
         self._ensure_runtime_tables()
+        self._ensure_runtime_columns()
 
         self.conn.execute(
             "INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)",
@@ -1155,6 +1159,25 @@ class AgentDB:
     def _ensure_runtime_tables(self) -> None:
         """Ensure operational tables exist even on partially migrated DBs."""
         self.conn.executescript(RUNTIME_TABLES_SQL)
+
+    def _ensure_runtime_columns(self) -> None:
+        """Add runtime observability columns for legacy SQLite databases."""
+        try:
+            turn_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(turns)").fetchall()}
+        except Exception:
+            return
+        if "execution_mode" not in turn_cols:
+            self.conn.execute(
+                "ALTER TABLE turns ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'sequential'"
+            )
+        if "plan_json" not in turn_cols:
+            self.conn.execute(
+                "ALTER TABLE turns ADD COLUMN plan_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "reflection_json" not in turn_cols:
+            self.conn.execute(
+                "ALTER TABLE turns ADD COLUMN reflection_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
     def _migrate(self, from_version: int) -> None:
         """Apply schema migrations incrementally."""
@@ -1543,8 +1566,9 @@ class AgentDB:
                         cost_llm_input_usd, cost_llm_output_usd,
                         cost_tool_usd, cost_total_usd,
                         tool_calls_json, tool_results_json, errors_json,
+                        execution_mode, plan_json, reflection_json,
                         started_at, ended_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         turn.get("turn_number", 0),
@@ -1563,6 +1587,9 @@ class AgentDB:
                             {"source": e.get("source", "unknown"), "message": e.get("message", "")}
                             for e in turn.get("errors", [])
                         ]),
+                        turn.get("execution_mode", "sequential"),
+                        json.dumps(turn.get("plan_artifact", {})),
+                        json.dumps(turn.get("reflection", {})),
                         turn.get("started_at", time.time()),
                         turn.get("ended_at", time.time()),
                     ),
@@ -1677,6 +1704,108 @@ class AgentDB:
             (trace_id,),
         ).fetchone()
         return dict(row) if row else {}
+
+    def runtime_insights(self, since: float | None = None, limit_sessions: int = 200) -> dict[str, Any]:
+        """Aggregate runtime telemetry from turn artifacts for portal observability."""
+        session_sql = "SELECT session_id FROM sessions WHERE 1=1"
+        params: list[Any] = []
+        if since:
+            session_sql += " AND created_at >= ?"
+            params.append(since)
+        session_sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit_sessions)
+        session_rows = self.conn.execute(session_sql, params).fetchall()
+        session_ids = [r["session_id"] for r in session_rows]
+        if not session_ids:
+            return {
+                "sessions_scanned": 0,
+                "turns_scanned": 0,
+                "parallel_turns": 0,
+                "sequential_turns": 0,
+                "parallel_ratio": 0.0,
+                "avg_reflection_confidence": 0.0,
+                "next_actions": {},
+                "tool_failures_total": 0,
+            }
+
+        placeholders = ",".join("?" for _ in session_ids)
+        turn_rows = self.conn.execute(
+            f"SELECT execution_mode, reflection_json FROM turns WHERE session_id IN ({placeholders})",
+            session_ids,
+        ).fetchall()
+
+        turns_scanned = len(turn_rows)
+        parallel_turns = 0
+        sequential_turns = 0
+        confidence_sum = 0.0
+        confidence_count = 0
+        next_actions: dict[str, int] = {}
+        tool_failures_total = 0
+
+        for row in turn_rows:
+            execution_mode = (row["execution_mode"] or "sequential") if "execution_mode" in row.keys() else "sequential"
+            if execution_mode == "parallel":
+                parallel_turns += 1
+            else:
+                sequential_turns += 1
+
+            reflection_raw = row["reflection_json"] if "reflection_json" in row.keys() else "{}"
+            try:
+                reflection = json.loads(reflection_raw) if isinstance(reflection_raw, str) else {}
+            except Exception:
+                reflection = {}
+            conf = reflection.get("confidence")
+            if isinstance(conf, (int, float)):
+                confidence_sum += float(conf)
+                confidence_count += 1
+            next_action = str(reflection.get("next_action", "") or "").strip()
+            if next_action:
+                next_actions[next_action] = next_actions.get(next_action, 0) + 1
+            failures = reflection.get("tool_failures", [])
+            if isinstance(failures, list):
+                tool_failures_total += len(failures)
+
+        return {
+            "sessions_scanned": len(session_ids),
+            "turns_scanned": turns_scanned,
+            "parallel_turns": parallel_turns,
+            "sequential_turns": sequential_turns,
+            "parallel_ratio": (parallel_turns / turns_scanned) if turns_scanned else 0.0,
+            "avg_reflection_confidence": (confidence_sum / confidence_count) if confidence_count else 0.0,
+            "next_actions": next_actions,
+            "tool_failures_total": tool_failures_total,
+        }
+
+    def session_runtime_profile(self, session_id: str) -> dict[str, Any]:
+        """Return runtime profile for a session from turn-level artifacts."""
+        rows = self.conn.execute(
+            "SELECT turn_number, execution_mode, plan_json, reflection_json FROM turns WHERE session_id = ? ORDER BY turn_number",
+            (session_id,),
+        ).fetchall()
+        profile_turns: list[dict[str, Any]] = []
+        for row in rows:
+            plan_raw = row["plan_json"] if "plan_json" in row.keys() else "{}"
+            reflection_raw = row["reflection_json"] if "reflection_json" in row.keys() else "{}"
+            try:
+                plan = json.loads(plan_raw) if isinstance(plan_raw, str) else {}
+            except Exception:
+                plan = {}
+            try:
+                reflection = json.loads(reflection_raw) if isinstance(reflection_raw, str) else {}
+            except Exception:
+                reflection = {}
+            profile_turns.append({
+                "turn_number": row["turn_number"],
+                "execution_mode": row["execution_mode"] if "execution_mode" in row.keys() else "sequential",
+                "plan_artifact": plan,
+                "reflection": reflection,
+            })
+
+        return {
+            "session_id": session_id,
+            "turn_count": len(profile_turns),
+            "turns": profile_turns,
+        }
 
     def session_summary(self, agent_id: str | None = None) -> dict[str, Any]:
         """Aggregate stats across sessions."""

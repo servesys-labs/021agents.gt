@@ -1,5 +1,5 @@
 type ConfirmDialogProps = {
-  open: boolean;
+  open?: boolean;
   title: string;
   description: string;
   confirmLabel?: string;
@@ -10,7 +10,7 @@ type ConfirmDialogProps = {
 };
 
 export function ConfirmDialog({
-  open,
+  open = true,
   title,
   description,
   confirmLabel = "Confirm",
