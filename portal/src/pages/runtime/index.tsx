@@ -48,6 +48,24 @@ type Job = {
 
 type WorkflowResponse = { workflows?: Workflow[] };
 type JobsResponse = { jobs?: Job[] };
+type WorkflowRun = {
+  run_id?: string;
+  workflow_id?: string;
+  status?: string;
+  total_cost_usd?: number;
+  started_at?: number;
+  completed_at?: number;
+  steps?: Record<string, string>;
+  dag?: {
+    nodes?: Array<{ id?: string; type?: string; depends_on?: string[] }>;
+    results?: Record<string, { status?: string; cost_usd?: number; attempts?: number }>;
+  };
+  reflection?: {
+    node_count?: number;
+    nodes?: Record<string, { confidence?: number; action?: string; issues?: string[] }>;
+  };
+};
+type WorkflowRunsResponse = { runs?: WorkflowRun[] };
 
 export const RuntimePage = () => {
   const { showToast } = useToast();
@@ -56,6 +74,15 @@ export const RuntimePage = () => {
   const workflowsQuery = useApiQuery<WorkflowResponse>("/api/v1/workflows");
   const jobsQuery = useApiQuery<JobsResponse>("/api/v1/jobs?limit=50");
   const runtimeInsightsQuery = useApiQuery<RuntimeInsightsResponse>("/api/v1/sessions/runtime/insights?since_days=30&limit_sessions=300");
+  const [selectedWorkflowForRuns, setSelectedWorkflowForRuns] = useState<string | null>(null);
+  const workflowRunsQuery = useApiQuery<WorkflowRunsResponse>(
+    `/api/v1/workflows/${selectedWorkflowForRuns ?? ""}/runs?limit=25`,
+    Boolean(selectedWorkflowForRuns),
+  );
+  const workflowRuns = useMemo(
+    () => workflowRunsQuery.data?.runs ?? [],
+    [workflowRunsQuery.data],
+  );
   const workflows = useMemo(
     () => workflowsQuery.data?.workflows ?? [],
     [workflowsQuery.data],
@@ -89,7 +116,7 @@ export const RuntimePage = () => {
 
   /* ── Detail panel ─────────────────────────────────────────── */
   const [detailOpen, setDetailOpen] = useState(false);
-  const [detailItem, setDetailItem] = useState<Workflow | Job | null>(null);
+  const [detailItem, setDetailItem] = useState<Workflow | Job | WorkflowRun | null>(null);
 
   /* ── Confirm dialog ───────────────────────────────────────── */
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -180,6 +207,13 @@ export const RuntimePage = () => {
       },
     },
     {
+      label: "View Runs",
+      icon: <GitBranch size={12} />,
+      onClick: () => {
+        setSelectedWorkflowForRuns(wf.workflow_id ?? null);
+      },
+    },
+    {
       label: "Edit",
       icon: <Pencil size={12} />,
       onClick: () => {
@@ -227,6 +261,7 @@ export const RuntimePage = () => {
   const runningJobs = jobs.filter((j) => j.status === "running").length;
   const insights = runtimeInsightsQuery.data;
   const parallelRatio = toNumber(insights?.parallel_ratio) * 100;
+  const actionCounts = insights?.next_actions ?? {};
 
   /* ── Workflows tab content ────────────────────────────────── */
   const workflowsTab = (
@@ -464,6 +499,23 @@ export const RuntimePage = () => {
             <p className="text-lg font-bold font-mono">{toNumber(insights?.tool_failures_total)}</p>
           </div>
         </div>
+        <div className="card py-3 mb-4">
+          <p className="text-[10px] uppercase text-text-muted mb-2">Reflection Actions (30d)</p>
+          <div className="flex flex-wrap gap-2">
+            {Object.keys(actionCounts).length === 0 ? (
+              <span className="text-xs text-text-muted">No reflection action signals yet</span>
+            ) : (
+              Object.entries(actionCounts).map(([action, count]) => (
+                <span
+                  key={action}
+                  className="px-2 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default"
+                >
+                  {action}: {toNumber(count)}
+                </span>
+              ))
+            )}
+          </div>
+        </div>
 
         <Tabs
           tabs={[
@@ -541,6 +593,69 @@ export const RuntimePage = () => {
         <pre className="text-xs font-mono bg-surface-base border border-border-default rounded-md p-4 overflow-x-auto max-h-96">
           {JSON.stringify(detailItem, null, 2)}
         </pre>
+      </SlidePanel>
+
+      {/* Workflow runs panel */}
+      <SlidePanel
+        isOpen={Boolean(selectedWorkflowForRuns)}
+        onClose={() => {
+          setSelectedWorkflowForRuns(null);
+        }}
+        title={`Workflow Runs ${selectedWorkflowForRuns?.slice(0, 10) ?? ""}`}
+        subtitle="Node-level DAG and reflection telemetry"
+        width="620px"
+      >
+        {workflowRunsQuery.loading && <p className="text-sm text-text-muted">Loading runs...</p>}
+        {workflowRunsQuery.error && (
+          <p className="text-sm text-status-error">{workflowRunsQuery.error}</p>
+        )}
+        {!workflowRunsQuery.loading && !workflowRunsQuery.error && workflowRuns.length === 0 && (
+          <p className="text-sm text-text-muted">No runs recorded for this workflow yet.</p>
+        )}
+        <div className="space-y-3">
+          {workflowRuns.map((run) => (
+            <div
+              key={run.run_id}
+              className="border border-border-default rounded-lg p-3 bg-surface-base"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <span className="px-2 py-0.5 text-[10px] font-semibold bg-accent/10 text-accent rounded-full">
+                    {run.run_id?.slice(0, 12) ?? "run"}
+                  </span>
+                  <StatusBadge status={run.status ?? "unknown"} />
+                </div>
+                <span className="text-[10px] text-text-muted font-mono">
+                  ${toNumber(run.total_cost_usd).toFixed(4)}
+                </span>
+              </div>
+              <div className="text-[10px] text-text-muted flex flex-wrap gap-2 mb-2">
+                <span>
+                  Nodes: {toNumber(run.dag?.nodes?.length)}
+                </span>
+                <span>
+                  Steps: {Object.keys(run.steps ?? {}).length}
+                </span>
+                <span>
+                  Reflection nodes: {toNumber(run.reflection?.node_count)}
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {(run.dag?.nodes ?? []).slice(0, 12).map((node, i) => {
+                  const nodeStatus = run.dag?.results?.[node.id ?? ""]?.status ?? "unknown";
+                  return (
+                    <span
+                      key={`${node.id ?? node.type ?? "node"}-${i}`}
+                      className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default"
+                    >
+                      {node.type ?? "node"}:{node.id ?? `n${i + 1}`} ({nodeStatus})
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
       </SlidePanel>
 
       {/* Confirm dialog */}

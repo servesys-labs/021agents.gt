@@ -117,8 +117,8 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
     run_id = uuid.uuid4().hex[:16]
     trace_id = uuid.uuid4().hex[:16]
     db.conn.execute(
-        "INSERT INTO workflow_runs (run_id, workflow_id, trace_id) VALUES (?, ?, ?)",
-        (run_id, workflow_id, trace_id),
+        "INSERT INTO workflow_runs (run_id, workflow_id, trace_id, dag_json, reflection_json) VALUES (?, ?, ?, ?, ?)",
+        (run_id, workflow_id, trace_id, "{}", "{}"),
     )
     db.conn.commit()
 
@@ -294,8 +294,8 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
         )
     except Exception as exc:
         db.conn.execute(
-            "UPDATE workflow_runs SET status = 'failed', steps_status_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
-            (json.dumps({"error": str(exc)}), 0.0, time.time(), run_id),
+            "UPDATE workflow_runs SET status = 'failed', steps_status_json = ?, dag_json = ?, reflection_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
+            (json.dumps({"error": str(exc)}), "{}", "{}", 0.0, time.time(), run_id),
         )
         db.conn.commit()
         return {
@@ -311,10 +311,51 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
     if specs:
         last_id = specs[-1].node_id
         final_output = str(dag_results.get(last_id, NodeResult(node_id=last_id, status="missing")).output or "")
+    dag_artifact = {
+        "nodes": [
+            {
+                "id": spec.node_id,
+                "type": spec.node_type.value,
+                "depends_on": spec.depends_on,
+                "policy": {
+                    "retries": spec.policy.retries,
+                    "timeout_ms": spec.policy.timeout_ms,
+                    "budget_usd": spec.policy.budget_usd,
+                },
+            }
+            for spec in specs
+        ],
+        "results": {
+            node_id: {
+                "status": result.status,
+                "cost_usd": result.cost_usd,
+                "attempts": result.attempts,
+                "metadata": result.metadata,
+            }
+            for node_id, result in dag_results.items()
+        },
+    }
+    reflection_nodes = {
+        node_id: result.output
+        for node_id, result in dag_results.items()
+        if isinstance(result.output, dict)
+        and {"confidence", "action"}.issubset(set(result.output.keys()))
+    }
+    reflection_artifact = {
+        "node_count": len(reflection_nodes),
+        "nodes": reflection_nodes,
+    }
 
     db.conn.execute(
-        "UPDATE workflow_runs SET status = 'completed', steps_status_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
-        (json.dumps(step_status), total_cost, time.time(), run_id),
+        "UPDATE workflow_runs SET status = 'completed', steps_status_json = ?, dag_json = ?, reflection_json = ?, total_cost_usd = ?, completed_at = ? WHERE run_id = ?",
+        (
+            json.dumps(step_status),
+            json.dumps(dag_artifact),
+            json.dumps(reflection_artifact),
+            total_cost,
+            time.time(),
+            run_id,
+        ),
     )
     db.conn.commit()
 
@@ -325,18 +366,8 @@ async def run_workflow(workflow_id: str, input_text: str = "", user: CurrentUser
         "total_cost_usd": total_cost,
         "steps": step_status,
         "final_output": final_output,
-        "dag": {
-            "nodes": [s.node_id for s in specs],
-            "results": {
-                node_id: {
-                    "status": result.status,
-                    "cost_usd": result.cost_usd,
-                    "attempts": result.attempts,
-                    "metadata": result.metadata,
-                }
-                for node_id, result in dag_results.items()
-            },
-        },
+        "dag": dag_artifact,
+        "reflection": reflection_artifact,
     }
 
 
@@ -357,7 +388,23 @@ async def list_workflow_runs(
         "SELECT * FROM workflow_runs WHERE workflow_id = ? ORDER BY started_at DESC LIMIT ?",
         (workflow_id, limit),
     ).fetchall()
-    return {"runs": [dict(r) for r in rows]}
+    runs: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["steps"] = json.loads(item.pop("steps_status_json", "{}"))
+        except Exception:
+            item["steps"] = {}
+        try:
+            item["dag"] = json.loads(item.pop("dag_json", "{}"))
+        except Exception:
+            item["dag"] = {}
+        try:
+            item["reflection"] = json.loads(item.pop("reflection_json", "{}"))
+        except Exception:
+            item["reflection"] = {}
+        runs.append(item)
+    return {"runs": runs}
 
 
 @router.get("/{workflow_id}/runs/{run_id}")
@@ -381,7 +428,18 @@ async def get_workflow_run(
     if not row:
         raise HTTPException(status_code=404, detail="Workflow run not found")
     result = dict(row)
-    result["steps"] = json.loads(result.pop("steps_status_json", "{}"))
+    try:
+        result["steps"] = json.loads(result.pop("steps_status_json", "{}"))
+    except Exception:
+        result["steps"] = {}
+    try:
+        result["dag"] = json.loads(result.pop("dag_json", "{}"))
+    except Exception:
+        result["dag"] = {}
+    try:
+        result["reflection"] = json.loads(result.pop("reflection_json", "{}"))
+    except Exception:
+        result["reflection"] = {}
     return result
 
 

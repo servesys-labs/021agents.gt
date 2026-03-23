@@ -29,8 +29,24 @@ type SessionTurn = {
   role?: string;
   tool_calls?: Array<{ name?: string; function?: { name?: string } }>;
   execution_mode?: string;
-  plan_artifact?: { complexity?: string; stages?: Array<{ type?: string }>; tool_candidates?: string[] };
-  reflection?: { confidence?: number; next_action?: string; tool_failures?: string[]; error?: string };
+  plan_artifact?: {
+    complexity?: string;
+    tool_candidates?: string[];
+    reasoning?: { strategy?: string };
+    prioritization?: { backlog?: Array<{ id?: string; status?: string; title?: string }> };
+    dag?: {
+      nodes?: Array<{ id?: string; type?: string; status?: string }>;
+      edges?: Array<{ from?: string; to?: string }>;
+    };
+  };
+  reflection?: {
+    confidence?: number;
+    next_action?: string;
+    action?: string;
+    tool_failures?: string[];
+    issues?: string[];
+    error?: string;
+  };
 };
 
 type ToolCall = { name?: string; function?: { name?: string } };
@@ -388,15 +404,38 @@ export const SessionsPage = () => {
                   Confidence: {((toNumber(turn.reflection?.confidence) || 0) * 100).toFixed(1)}%
                 </span>
                 <span>
-                  Next: {turn.reflection?.next_action ?? "n/a"}
+                  Action: {turn.reflection?.action ?? turn.reflection?.next_action ?? "n/a"}
                 </span>
                 <span>
-                  Plan stages: {safeArray<{ type?: string }>(turn.plan_artifact?.stages).length}
+                  DAG nodes: {safeArray<{ type?: string }>(turn.plan_artifact?.dag?.nodes).length}
+                </span>
+                <span>
+                  Reasoning: {turn.plan_artifact?.reasoning?.strategy ?? "direct"}
+                </span>
+                <span>
+                  Backlog items: {safeArray<{ id?: string }>(turn.plan_artifact?.prioritization?.backlog).length}
                 </span>
               </div>
               {safeArray<string>(turn.reflection?.tool_failures).length > 0 && (
                 <div className="mt-1 text-[10px] text-status-warning">
                   Tool failures: {safeArray<string>(turn.reflection?.tool_failures).join(", ")}
+                </div>
+              )}
+              {safeArray<string>(turn.reflection?.issues).length > 0 && (
+                <div className="mt-1 text-[10px] text-status-warning">
+                  Issues: {safeArray<string>(turn.reflection?.issues).slice(0, 5).join(", ")}
+                </div>
+              )}
+              {safeArray<{ id?: string; type?: string }>(turn.plan_artifact?.dag?.nodes).length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {safeArray<{ id?: string; type?: string }>(turn.plan_artifact?.dag?.nodes).map((node, i) => (
+                    <span
+                      key={`${node.id ?? node.type ?? "node"}-${i}`}
+                      className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default"
+                    >
+                      {node.type ?? "node"}:{node.id ?? `n${i + 1}`}
+                    </span>
+                  ))}
                 </div>
               )}
               {safeArray<ToolCall>(turn.tool_calls).length > 0 && (

@@ -751,6 +751,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     workflow_id     TEXT NOT NULL,
     status          TEXT NOT NULL DEFAULT 'running',  -- running/completed/failed/canceled
     steps_status_json TEXT NOT NULL DEFAULT '{}',     -- per-step status
+    dag_json        TEXT NOT NULL DEFAULT '{}',
+    reflection_json TEXT NOT NULL DEFAULT '{}',
     trace_id        TEXT NOT NULL DEFAULT '',
     total_cost_usd  REAL NOT NULL DEFAULT 0.0,
     started_at      REAL NOT NULL DEFAULT (unixepoch('now')),
@@ -1006,6 +1008,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     workflow_id       TEXT NOT NULL,
     status            TEXT NOT NULL DEFAULT 'running',
     steps_status_json TEXT NOT NULL DEFAULT '{}',
+    dag_json          TEXT NOT NULL DEFAULT '{}',
+    reflection_json   TEXT NOT NULL DEFAULT '{}',
     trace_id          TEXT NOT NULL DEFAULT '',
     total_cost_usd    REAL NOT NULL DEFAULT 0.0,
     started_at        REAL NOT NULL DEFAULT 0,
@@ -1177,6 +1181,20 @@ class AgentDB:
         if "reflection_json" not in turn_cols:
             self.conn.execute(
                 "ALTER TABLE turns ADD COLUMN reflection_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        try:
+            wfr_cols = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(workflow_runs)").fetchall()
+            }
+        except Exception:
+            wfr_cols = set()
+        if "dag_json" not in wfr_cols:
+            self.conn.execute(
+                "ALTER TABLE workflow_runs ADD COLUMN dag_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        if "reflection_json" not in wfr_cols:
+            self.conn.execute(
+                "ALTER TABLE workflow_runs ADD COLUMN reflection_json TEXT NOT NULL DEFAULT '{}'"
             )
 
     def _migrate(self, from_version: int) -> None:

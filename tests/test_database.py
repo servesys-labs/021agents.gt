@@ -49,6 +49,14 @@ class TestSchemaInit:
         assert "eval_conditions_json" in cols
         db.close()
 
+    def test_workflow_runs_runtime_columns_exist(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        cols = {row[1] for row in db.conn.execute("PRAGMA table_info(workflow_runs)").fetchall()}
+        assert "steps_status_json" in cols
+        assert "dag_json" in cols
+        assert "reflection_json" in cols
+        db.close()
+
 
 class TestMigration:
     """Tests for v1 → v2 migration."""

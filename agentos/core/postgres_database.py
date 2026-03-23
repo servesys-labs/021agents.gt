@@ -135,6 +135,18 @@ class PostgresAgentDB(AgentDB):
             if row:
                 continue
             self.conn.execute(f"ALTER TABLE turns ADD COLUMN {col} {ddl}")
+        workflow_checks = (
+            ("dag_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("reflection_json", "TEXT NOT NULL DEFAULT '{}'"),
+        )
+        for col, ddl in workflow_checks:
+            row = self.conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+                ("workflow_runs", col),
+            ).fetchone()
+            if row:
+                continue
+            self.conn.execute(f"ALTER TABLE workflow_runs ADD COLUMN {col} {ddl}")
 
     @contextmanager
     def tx(self) -> Generator[Any, None, None]:
