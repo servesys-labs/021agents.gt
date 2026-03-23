@@ -23,6 +23,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { toNumber, type RuntimeInsightsResponse } from "../../lib/adapters";
 
 type Workflow = {
   workflow_id?: string;
@@ -54,6 +55,7 @@ export const RuntimePage = () => {
   /* ── Queries ──────────────────────────────────────────────── */
   const workflowsQuery = useApiQuery<WorkflowResponse>("/api/v1/workflows");
   const jobsQuery = useApiQuery<JobsResponse>("/api/v1/jobs?limit=50");
+  const runtimeInsightsQuery = useApiQuery<RuntimeInsightsResponse>("/api/v1/sessions/runtime/insights?since_days=30&limit_sessions=300");
   const workflows = useMemo(
     () => workflowsQuery.data?.workflows ?? [],
     [workflowsQuery.data],
@@ -220,9 +222,11 @@ export const RuntimePage = () => {
     },
   ];
 
-  const combinedError = workflowsQuery.error ?? jobsQuery.error;
-  const combinedLoading = workflowsQuery.loading || jobsQuery.loading;
+  const combinedError = workflowsQuery.error ?? jobsQuery.error ?? runtimeInsightsQuery.error;
+  const combinedLoading = workflowsQuery.loading || jobsQuery.loading || runtimeInsightsQuery.loading;
   const runningJobs = jobs.filter((j) => j.status === "running").length;
+  const insights = runtimeInsightsQuery.data;
+  const parallelRatio = toNumber(insights?.parallel_ratio) * 100;
 
   /* ── Workflows tab content ────────────────────────────────── */
   const workflowsTab = (
@@ -438,6 +442,29 @@ export const RuntimePage = () => {
           void jobsQuery.refetch();
         }}
       >
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div className="card py-3">
+            <p className="text-[10px] uppercase text-text-muted">Turns Scanned</p>
+            <p className="text-lg font-bold font-mono">{toNumber(insights?.turns_scanned)}</p>
+          </div>
+          <div className="card py-3">
+            <p className="text-[10px] uppercase text-text-muted">Parallel Turns</p>
+            <p className="text-lg font-bold font-mono">
+              {toNumber(insights?.parallel_turns)} ({parallelRatio.toFixed(1)}%)
+            </p>
+          </div>
+          <div className="card py-3">
+            <p className="text-[10px] uppercase text-text-muted">Avg Reflection Confidence</p>
+            <p className="text-lg font-bold font-mono">
+              {(toNumber(insights?.avg_reflection_confidence) * 100).toFixed(1)}%
+            </p>
+          </div>
+          <div className="card py-3">
+            <p className="text-[10px] uppercase text-text-muted">Tool Failures</p>
+            <p className="text-lg font-bold font-mono">{toNumber(insights?.tool_failures_total)}</p>
+          </div>
+        </div>
+
         <Tabs
           tabs={[
             {

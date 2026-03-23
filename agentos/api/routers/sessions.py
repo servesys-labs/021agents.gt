@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import time as _time
 
 from fastapi import APIRouter, HTTPException
 
@@ -10,6 +11,16 @@ from agentos.api.deps import _get_db
 from agentos.api.schemas import SessionResponse, TurnResponse
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+
+@router.get("/runtime/insights")
+async def runtime_insights(since_days: int = 30, limit_sessions: int = 200):
+    """Runtime telemetry rollup for portal observability cards."""
+    db = _get_db()
+    since_days = max(1, min(365, int(since_days)))
+    limit_sessions = max(10, min(2000, int(limit_sessions)))
+    since = _time.time() - (since_days * 86400)
+    return db.runtime_insights(since=since, limit_sessions=limit_sessions)
 
 
 @router.get("", response_model=list[SessionResponse])
@@ -91,6 +102,16 @@ async def get_turns(session_id: str):
             tool_calls = json.loads(tool_calls_raw) if isinstance(tool_calls_raw, str) else []
         except Exception:
             tool_calls = []
+        plan_raw = r.get("plan_json", "{}")
+        reflection_raw = r.get("reflection_json", "{}")
+        try:
+            plan_artifact = json.loads(plan_raw) if isinstance(plan_raw, str) else {}
+        except Exception:
+            plan_artifact = {}
+        try:
+            reflection = json.loads(reflection_raw) if isinstance(reflection_raw, str) else {}
+        except Exception:
+            reflection = {}
         turns.append(
             TurnResponse(
                 turn_number=int(r.get("turn_number", 0) or 0),
@@ -101,11 +122,24 @@ async def get_turns(session_id: str):
                 content=r.get("llm_content", "") or "",
                 cost_total_usd=float(r.get("cost_total_usd", 0) or 0),
                 tool_calls=tool_calls,
+                execution_mode=r.get("execution_mode", "sequential") or "sequential",
+                plan_artifact=plan_artifact,
+                reflection=reflection,
                 started_at=float(r.get("started_at", 0) or 0),
                 ended_at=float(r.get("ended_at", 0) or 0),
             )
         )
     return turns
+
+
+@router.get("/{session_id}/runtime")
+async def get_session_runtime(session_id: str):
+    """Get plan/reflection/execution telemetry for one session."""
+    db = _get_db()
+    row = db.conn.execute("SELECT session_id FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return db.session_runtime_profile(session_id)
 
 
 @router.get("/{session_id}/trace")

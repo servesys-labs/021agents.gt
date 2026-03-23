@@ -74,6 +74,17 @@ export type SessionMessage = {
   tool_calls?: unknown[];
 };
 
+export type RuntimeInsightsResponse = {
+  sessions_scanned?: number;
+  turns_scanned?: number;
+  parallel_turns?: number;
+  sequential_turns?: number;
+  parallel_ratio?: number;
+  avg_reflection_confidence?: number;
+  next_actions?: Record<string, number>;
+  tool_failures_total?: number;
+};
+
 /* ── Agents ──────────────────────────────────────────────────── */
 
 export type AgentGovernance = {

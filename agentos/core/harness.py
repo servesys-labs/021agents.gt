@@ -44,6 +44,9 @@ class HarnessConfig:
     enable_summarization: bool = True
     enable_skills: bool = True
     enable_async_memory: bool = False
+    enable_planner_artifact: bool = True
+    enable_reflection_stage: bool = True
+    parallel_tool_calls: bool = True
     max_context_tokens: int = 100_000
     skills_dir: str = ""
 
@@ -62,6 +65,9 @@ class TurnResult:
     cumulative_cost_usd: float = 0.0
     model_used: str = ""
     middleware_warnings: list[str] = field(default_factory=list)
+    execution_mode: str = "sequential"
+    plan_artifact: dict[str, Any] = field(default_factory=dict)
+    reflection: dict[str, Any] = field(default_factory=dict)
 
 
 class AgentHarness:
@@ -223,6 +229,12 @@ class AgentHarness:
         # Step 4: Discover available tools
         available_tools = self.tool_executor.available_tools()
         self.llm_router.set_tools(available_tools)
+        initial_plan_artifact = self._build_plan_artifact(
+            user_input=user_input,
+            complexity=complexity.value,
+            memory_context=memory_context,
+            available_tools=available_tools,
+        )
 
         # Step 3c: Load learned procedures relevant to this task
         procedures_section = ""
@@ -333,6 +345,11 @@ class AgentHarness:
             # 2. Check for tool calls
             if llm_response.tool_calls:
                 tool_results = await self._execute_tools(llm_response.tool_calls)
+                execution_mode = (
+                    "parallel"
+                    if self.config.parallel_tool_calls and len(llm_response.tool_calls) > 1
+                    else "sequential"
+                )
 
                 # Track tool results for procedural memory
                 for tr in tool_results:
@@ -359,10 +376,27 @@ class AgentHarness:
                             cumulative_cost_usd=cumulative_cost,
                             model_used=llm_response.model,
                             middleware_warnings=turn_warnings,
+                            execution_mode=execution_mode,
+                            plan_artifact=initial_plan_artifact,
+                            reflection=self._build_reflection_artifact(
+                                llm_response=llm_response,
+                                tool_results=tool_results,
+                                middleware_warnings=turn_warnings,
+                                done=True,
+                                error=(
+                                    "Tool failures exceeded retry limit "
+                                    f"({self.config.max_retries})"
+                                ),
+                            ),
                         )
                         results.append(result)
                         self._notify_turn(result)
-                        await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
+                        await self.event_bus.emit(Event(type=EventType.TURN_END, data={
+                            "turn": turn,
+                            "execution_mode": result.execution_mode,
+                            "plan_artifact": result.plan_artifact,
+                            "reflection": result.reflection,
+                        }))
                         break
                     failure_retries += 1
                     # Inject failure context so LLM can try alternative approach
@@ -395,6 +429,14 @@ class AgentHarness:
                         cumulative_cost_usd=cumulative_cost,
                         model_used=llm_response.model,
                         middleware_warnings=turn_warnings,
+                        execution_mode=execution_mode,
+                        plan_artifact=initial_plan_artifact,
+                        reflection=self._build_reflection_artifact(
+                            llm_response=llm_response,
+                            tool_results=tool_results,
+                            middleware_warnings=turn_warnings,
+                            done=False,
+                        ),
                     )
                     results.append(result)
                     self._notify_turn(result)
@@ -407,6 +449,14 @@ class AgentHarness:
                         cumulative_cost_usd=cumulative_cost,
                         model_used=llm_response.model,
                         middleware_warnings=turn_warnings,
+                        execution_mode=execution_mode,
+                        plan_artifact=initial_plan_artifact,
+                        reflection=self._build_reflection_artifact(
+                            llm_response=llm_response,
+                            tool_results=tool_results,
+                            middleware_warnings=turn_warnings,
+                            done=False,
+                        ),
                     )
                     results.append(result)
                     self._notify_turn(result)
@@ -432,6 +482,14 @@ class AgentHarness:
                     cumulative_cost_usd=cumulative_cost,
                     model_used=llm_response.model,
                     middleware_warnings=turn_warnings,
+                    execution_mode="sequential",
+                    plan_artifact=initial_plan_artifact,
+                    reflection=self._build_reflection_artifact(
+                        llm_response=llm_response,
+                        tool_results=[],
+                        middleware_warnings=turn_warnings,
+                        done=True,
+                    ),
                 )
                 results.append(result)
                 self._notify_turn(result)
@@ -453,12 +511,23 @@ class AgentHarness:
                     await self._store_procedure(user_input, tool_sequence)
                 failure_retries = 0
 
-                await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
+                await self.event_bus.emit(Event(type=EventType.TURN_END, data={
+                    "turn": turn,
+                    "execution_mode": result.execution_mode,
+                    "plan_artifact": result.plan_artifact,
+                    "reflection": result.reflection,
+                }))
                 break
 
             # --- Middleware: on_turn_end ---
             await self.middleware_chain.run_on_turn_end(mw_ctx)
-            await self.event_bus.emit(Event(type=EventType.TURN_END, data={"turn": turn}))
+            last_result = results[-1] if results else None
+            await self.event_bus.emit(Event(type=EventType.TURN_END, data={
+                "turn": turn,
+                "execution_mode": last_result.execution_mode if last_result else "sequential",
+                "plan_artifact": last_result.plan_artifact if last_result else {},
+                "reflection": last_result.reflection if last_result else {},
+            }))
 
         # --- Middleware: on_session_end ---
         await self.middleware_chain.run_on_session_end(mw_ctx)
@@ -500,15 +569,12 @@ class AgentHarness:
 
     async def _execute_tools(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Execute tool calls with governance checks and retries."""
-        results: list[dict[str, Any]] = []
-        for call in tool_calls:
+        async def _run_call(call: dict[str, Any]) -> dict[str, Any]:
             tool_name = call.get("name", "")
             if not self.governance.is_tool_allowed(tool_name):
-                results.append({"tool": tool_name, "error": "Tool blocked by governance policy"})
-                continue
+                return {"tool": tool_name, "error": "Tool blocked by governance policy"}
             if self.governance.requires_confirmation(call):
-                results.append({"tool": tool_name, "error": "Requires user confirmation"})
-                continue
+                return {"tool": tool_name, "error": "Requires user confirmation"}
 
             await self.event_bus.emit(Event(type=EventType.TOOL_CALL, data=call))
             arguments = call.get("arguments", {})
@@ -522,8 +588,64 @@ class AgentHarness:
                 }
             result = await self.tool_executor.execute(tool_name, arguments)
             await self.event_bus.emit(Event(type=EventType.TOOL_RESULT, data=result))
-            results.append(result)
-        return results
+            return result
+
+        if self.config.parallel_tool_calls and len(tool_calls) > 1:
+            import asyncio
+            return list(await asyncio.gather(*(_run_call(call) for call in tool_calls)))
+        return [await _run_call(call) for call in tool_calls]
+
+    def _build_plan_artifact(
+        self,
+        user_input: str,
+        complexity: str,
+        memory_context: str,
+        available_tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Generate a lightweight typed plan artifact for observability."""
+        if not self.config.enable_planner_artifact:
+            return {}
+        return {
+            "goal": user_input[:400],
+            "complexity": complexity,
+            "tool_candidates": [str(t.get("name", "")) for t in available_tools[:20]],
+            "memory_context_present": bool(memory_context),
+            "stages": [
+                {"type": "understand", "status": "planned"},
+                {"type": "act", "status": "planned"},
+                {"type": "verify", "status": "planned"},
+            ],
+        }
+
+    def _build_reflection_artifact(
+        self,
+        llm_response: LLMResponse,
+        tool_results: list[dict[str, Any]],
+        middleware_warnings: list[str],
+        done: bool,
+        error: str = "",
+    ) -> dict[str, Any]:
+        """Produce a per-turn reflection payload for run diagnostics."""
+        if not self.config.enable_reflection_stage:
+            return {}
+        failed_tools = [r.get("tool", "") for r in tool_results if "error" in r]
+        confidence = 1.0
+        if failed_tools:
+            confidence -= min(0.6, 0.2 * len(failed_tools))
+        if middleware_warnings:
+            confidence -= 0.2
+        if error:
+            confidence = min(confidence, 0.2)
+        confidence = max(0.0, round(confidence, 3))
+        return {
+            "done": done,
+            "confidence": confidence,
+            "tool_failures": failed_tools,
+            "warnings": middleware_warnings,
+            "response_chars": len(llm_response.content or ""),
+            "error": error,
+            "next_action": "finalize" if done and not error else ("recover" if failed_tools or error else "continue"),
+        }
 
     async def _store_procedure(
         self, task_description: str, tool_sequence: list[dict[str, Any]]

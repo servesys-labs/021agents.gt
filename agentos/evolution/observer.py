@@ -203,7 +203,11 @@ class Observer:
 
     async def _on_turn_end(self, event: Event) -> None:
         if self._current and self._current.turns:
-            self._current.turns[-1].ended_at = time.time()
+            turn = self._current.turns[-1]
+            turn.ended_at = time.time()
+            turn.execution_mode = event.data.get("execution_mode", "sequential")
+            turn.plan_artifact = event.data.get("plan_artifact", {}) or {}
+            turn.reflection = event.data.get("reflection", {}) or {}
 
     async def _on_llm_request(self, event: Event) -> None:
         if not self._current or not self._current.turns:
@@ -298,6 +302,9 @@ class Observer:
                     "ended_at": turn.ended_at or time.time(),
                     "tool_calls": turn.tool_calls,
                     "tool_results": turn.tool_results,
+                    "execution_mode": turn.execution_mode,
+                    "plan_artifact": turn.plan_artifact,
+                    "reflection": turn.reflection,
                     "errors": [
                         {"source": e.source.value, "message": e.message}
                         for e in turn.errors

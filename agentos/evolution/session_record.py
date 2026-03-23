@@ -98,6 +98,9 @@ class TurnRecord:
     llm_content: str = ""
     started_at: float = field(default_factory=time.time)
     ended_at: float = 0.0
+    execution_mode: str = "sequential"
+    plan_artifact: dict[str, Any] = field(default_factory=dict)
+    reflection: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

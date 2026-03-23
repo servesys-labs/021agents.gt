@@ -113,11 +113,28 @@ class PostgresAgentDB(AgentDB):
         # Day-1 path: create full schema from current DDL.
         self.conn.executescript(SCHEMA_SQL)
         self._ensure_runtime_tables()
+        self._ensure_runtime_columns()
         self.conn.execute(
             "INSERT INTO _meta (key, value) VALUES (?, ?)",
             ("schema_version", "4"),
         )
         self.conn.commit()
+
+    def _ensure_runtime_columns(self) -> None:
+        """Add runtime observability columns for legacy Postgres databases."""
+        checks = (
+            ("execution_mode", "TEXT NOT NULL DEFAULT 'sequential'"),
+            ("plan_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("reflection_json", "TEXT NOT NULL DEFAULT '{}'"),
+        )
+        for col, ddl in checks:
+            row = self.conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+                ("turns", col),
+            ).fetchone()
+            if row:
+                continue
+            self.conn.execute(f"ALTER TABLE turns ADD COLUMN {col} {ddl}")
 
     @contextmanager
     def tx(self) -> Generator[Any, None, None]:
