@@ -788,7 +788,9 @@ export function CanvasWorkspacePage() {
       </div>
 
       {/* ── Canvas area ─────────────────────────────────────── */}
-      <div className="flex-1 relative">
+      <div className="flex-1 flex overflow-hidden">
+        {/* React Flow canvas — shrinks when detail panel opens */}
+        <div className="flex-1 relative" style={{ transition: 'width 0.3s ease' }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -861,8 +863,9 @@ export function CanvasWorkspacePage() {
             onClose={() => setContextMenu(null)}
           />
         )}
+        </div>
 
-        {/* Railway-style Node Detail Panel */}
+        {/* Railway-style Node Detail Panel — inline, pushes canvas left */}
         {detailNode && (
           <NodeDetailPanel
             node={detailNode}
