@@ -7,6 +7,7 @@ import {
   ChevronRight, Cpu,
 } from "lucide-react";
 import type { Node } from "@xyflow/react";
+import { apiRequest } from "../../lib/api";
 import { SectionTitle, InlineInput, InlineTextarea, InlineSelect, ToggleRow, StatusPill, InfoRow, EmptyTab } from "./primitives";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -122,6 +123,7 @@ const agentSettingsSections = [
   { id: "sessions", label: "Sessions", icon: <Activity size={13} /> },
   { id: "memory", label: "Memory", icon: <Brain size={13} /> },
   { id: "chat", label: "Chat", icon: <MessageSquare size={13} /> },
+  { id: "sandbox", label: "Sandbox", icon: <Cpu size={13} /> },
   { id: "eval", label: "Eval", icon: <FlaskConical size={13} /> },
   { id: "releases", label: "Releases", icon: <Tag size={13} /> },
   { id: "governance", label: "Governance", icon: <ShieldCheck size={13} /> },
@@ -152,7 +154,7 @@ function getNodeTypeLabel(type: string) {
   }
 }
 
-function getStatusColor(status: string): string {
+function getStatusColor(status?: string): string {
   switch (status?.toLowerCase()) {
     case "online": case "live": case "connected": case "authenticated":
     case "authed": case "healthy": case "ready": case "active": case "passed":
@@ -486,6 +488,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
   const [chatMessages, setChatMessages] = useState<{ role: string; content: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatSessionId, setChatSessionId] = useState("");
   const [memoryTab, setMemoryTab] = useState<"facts" | "episodes" | "procedures">("facts");
   const [newFact, setNewFact] = useState({ key: "", value: "" });
   const [sessionFilter, setSessionFilter] = useState("all");
@@ -665,19 +668,28 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
 
     /* ── Chat ─────────────────────────────────────────────── */
     case "chat": {
-      const handleSendMessage = () => {
+      const handleSendMessage = async () => {
         if (chatInput.trim() && !chatLoading) {
           const userMsg = chatInput.trim();
           setChatMessages((prev) => [...prev, { role: "user", content: userMsg }]);
           setChatInput("");
           setChatLoading(true);
-          setTimeout(() => {
+          try {
+            const res = await apiRequest<{ response: string; session_id?: string; turns?: number; cost_usd?: number }>(
+              `/api/v1/agents/${data.name}/chat`,
+              "POST",
+              { message: userMsg, session_id: chatSessionId },
+            );
+            if (res.session_id) setChatSessionId(res.session_id);
+            setChatMessages((prev) => [...prev, { role: "assistant", content: res.response }]);
+          } catch (err) {
             setChatMessages((prev) => [...prev, {
               role: "assistant",
-              content: `I've processed your request: "${userMsg}". Based on my configuration as ${data.name || "an agent"} using ${data.model || "gpt-4.1-mini"}, here's my response. (This is a demo — connect to the API for live responses.)`
+              content: `Error: ${err instanceof Error ? err.message : "Failed to reach agent"}`,
             }]);
+          } finally {
             setChatLoading(false);
-          }, 1500);
+          }
         }
       };
       return (
@@ -731,6 +743,141 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
               </button>
             </div>
           </div>
+        </div>
+      );
+    }
+
+    /* ── Sandbox ──────────────────────────────────────────── */
+    case "sandbox": {
+      const agentName = data.name || "";
+      const isOnline = data.status === "online";
+      const [sbId, setSbId] = useState("");
+      const [sbLoading, setSbLoading] = useState(false);
+      const [sbCmd, setSbCmd] = useState("");
+      const [sbOutput, setSbOutput] = useState<Array<{ cmd: string; stdout: string; stderr: string; exit_code: number }>>([]);
+      const [sbFiles, setSbFiles] = useState<Array<{ name: string; size: number }>>([]);
+
+      const createSandbox = async () => {
+        setSbLoading(true);
+        try {
+          const resp = await apiRequest<{ sandbox_id: string }>("/api/v1/sandbox/create", "POST", {
+            agent_name: agentName, template: "default", timeout_seconds: 300,
+          });
+          setSbId(resp.sandbox_id || "");
+        } catch { /* handled by loading state */ }
+        finally { setSbLoading(false); }
+      };
+
+      const execCommand = async () => {
+        if (!sbId || !sbCmd.trim()) return;
+        setSbLoading(true);
+        try {
+          const resp = await apiRequest<{ stdout: string; stderr: string; exit_code: number }>("/api/v1/sandbox/exec", "POST", {
+            sandbox_id: sbId, command: sbCmd,
+          });
+          setSbOutput((prev) => [...prev, { cmd: sbCmd, stdout: resp.stdout || "", stderr: resp.stderr || "", exit_code: resp.exit_code ?? 0 }]);
+          setSbCmd("");
+        } catch {
+          setSbOutput((prev) => [...prev, { cmd: sbCmd, stdout: "", stderr: "Execution failed", exit_code: 1 }]);
+        } finally { setSbLoading(false); }
+      };
+
+      const killSandbox = async () => {
+        if (!sbId) return;
+        setSbLoading(true);
+        try {
+          await apiRequest("/api/v1/sandbox/kill", "POST", { sandbox_id: sbId });
+          setSbId(""); setSbOutput([]); setSbFiles([]);
+        } catch { /* ignore */ }
+        finally { setSbLoading(false); }
+      };
+
+      const listFiles = async () => {
+        if (!sbId) return;
+        try {
+          const resp = await apiRequest<{ files: Array<{ name: string; size: number }> }>(`/api/v1/sandbox/${sbId}/files`);
+          setSbFiles(resp.files || []);
+        } catch { /* ignore */ }
+      };
+
+      if (!isOnline) {
+        return (
+          <div>
+            <SectionTitle>Sandbox</SectionTitle>
+            <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5 text-center">
+              <Cpu size={24} className="mx-auto text-text-muted mb-2" />
+              <p className="text-sm text-text-muted">Deploy this agent first to use sandboxes.</p>
+            </div>
+          </div>
+        );
+      }
+
+      return (
+        <div>
+          <SectionTitle>Sandbox</SectionTitle>
+          {!sbId ? (
+            <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5 text-center">
+              <Cpu size={24} className="mx-auto text-text-muted mb-3" />
+              <p className="text-sm text-text-primary mb-1">No active sandbox</p>
+              <p className="text-xs text-text-muted mb-4">Create an isolated execution environment for {agentName}.</p>
+              <button onClick={createSandbox} disabled={sbLoading}
+                className="px-5 py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-50">
+                {sbLoading ? "Creating..." : "Create Sandbox"}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="bg-white-alpha-5 rounded-lg border border-border-default p-4 mb-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="w-2 h-2 rounded-full bg-status-live" />
+                  <span className="text-sm font-medium text-text-primary">Active</span>
+                  <code className="ml-auto text-xs font-mono text-text-muted">{sbId.slice(0, 12)}...</code>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={listFiles} className="text-xs text-accent hover:text-accent-hover transition-colors">List Files</button>
+                  <button onClick={killSandbox} className="text-xs text-status-error hover:text-status-error/80 transition-colors ml-auto">Kill Sandbox</button>
+                </div>
+              </div>
+
+              {sbFiles.length > 0 && (
+                <div className="mb-4">
+                  <p className="text-xs font-medium text-text-muted uppercase tracking-wider mb-2">Files</p>
+                  <div className="bg-white-alpha-5 rounded-lg border border-border-default divide-y divide-border-default">
+                    {sbFiles.map((f) => (
+                      <div key={f.name} className="px-3 py-2 flex items-center justify-between">
+                        <span className="text-xs font-mono text-text-primary">{f.name}</span>
+                        <span className="text-xs text-text-muted">{f.size}B</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {sbOutput.length > 0 && (
+                <div className="mb-4 bg-surface-base rounded-lg border border-border-default p-3 max-h-60 overflow-y-auto font-mono text-xs">
+                  {sbOutput.map((entry, i) => (
+                    <div key={i} className="mb-2">
+                      <div className="text-accent">$ {entry.cmd}</div>
+                      {entry.stdout && <pre className="text-text-primary whitespace-pre-wrap">{entry.stdout}</pre>}
+                      {entry.stderr && <pre className="text-status-error whitespace-pre-wrap">{entry.stderr}</pre>}
+                      {entry.exit_code !== 0 && <span className="text-status-error text-[10px]">exit {entry.exit_code}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <input value={sbCmd} onChange={(e) => setSbCmd(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") execCommand(); }}
+                  placeholder="$ type a command..."
+                  className="flex-1 px-3 py-2.5 text-sm bg-white-alpha-5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 font-mono" />
+                <button onClick={execCommand} disabled={!sbCmd.trim() || sbLoading}
+                  className="px-4 py-2.5 text-sm font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-40">
+                  {sbLoading ? "..." : "Run"}
+                </button>
+              </div>
+            </>
+          )}
         </div>
       );
     }

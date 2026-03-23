@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -15,6 +16,25 @@ from agentos.defaults import AGENT_TEMPLATES, DEFAULT_MODEL
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 logger = logging.getLogger(__name__)
+
+
+def _ensure_canvas_layout_table() -> None:
+    """Ensure project-scoped canvas persistence table exists."""
+    db = _get_db()
+    db.conn.execute(
+        """CREATE TABLE IF NOT EXISTS project_canvas_layouts (
+            project_id      TEXT PRIMARY KEY,
+            org_id          TEXT NOT NULL DEFAULT '',
+            layout_json     TEXT NOT NULL DEFAULT '{}',
+            assignments_json TEXT NOT NULL DEFAULT '[]',
+            updated_by      TEXT NOT NULL DEFAULT '',
+            updated_at      REAL NOT NULL DEFAULT 0
+        )"""
+    )
+    db.conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_canvas_layout_org ON project_canvas_layouts(org_id)"
+    )
+    db.conn.commit()
 
 
 def _project_plan_to_agent_plan(project_plan: str) -> str:
@@ -172,3 +192,90 @@ async def update_environment(project_id: str, env_name: str, plan: str = "",
     db.conn.execute(f"UPDATE environments SET {', '.join(updates)} WHERE project_id = ? AND name = ?", params)
     db.conn.commit()
     return {"updated": env_name}
+
+
+@router.get("/{project_id}/canvas-layout")
+async def get_canvas_layout(
+    project_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get persisted canvas nodes/edges and resource assignments for a project."""
+    _require_project_org(project_id, user)
+    _ensure_canvas_layout_table()
+    db = _get_db()
+    row = db.conn.execute(
+        "SELECT layout_json, assignments_json FROM project_canvas_layouts WHERE project_id = ? AND org_id = ?",
+        (project_id, user.org_id),
+    ).fetchone()
+    if not row:
+        return {"nodes": [], "edges": [], "assignments": [], "updated_at": 0}
+    d = dict(row)
+    try:
+        layout = json.loads(d.get("layout_json", "{}"))
+    except Exception:
+        layout = {}
+    try:
+        assignments = json.loads(d.get("assignments_json", "[]"))
+    except Exception:
+        assignments = []
+    return {
+        "nodes": layout.get("nodes", []),
+        "edges": layout.get("edges", []),
+        "assignments": assignments if isinstance(assignments, list) else [],
+        "updated_at": layout.get("updated_at", 0),
+    }
+
+
+@router.put("/{project_id}/canvas-layout")
+async def put_canvas_layout(
+    project_id: str,
+    nodes: list[dict[str, Any]] | None = None,
+    edges: list[dict[str, Any]] | None = None,
+    assignments: list[dict[str, Any]] | None = None,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Persist canvas topology and edge-derived resource assignments."""
+    _require_project_org(project_id, user)
+    _ensure_canvas_layout_table()
+    db = _get_db()
+    safe_nodes = nodes if isinstance(nodes, list) else []
+    safe_edges = edges if isinstance(edges, list) else []
+    now = time.time()
+    layout = {"nodes": safe_nodes, "edges": safe_edges, "updated_at": now}
+    if assignments is None:
+        derived: list[dict[str, Any]] = []
+        for edge in safe_edges:
+            if not isinstance(edge, dict):
+                continue
+            source = str(edge.get("source", ""))
+            target = str(edge.get("target", ""))
+            if not source or not target:
+                continue
+            derived.append({
+                "source_node_id": source,
+                "target_node_id": target,
+                "relationship": "attached",
+            })
+        safe_assignments = derived
+    else:
+        safe_assignments = assignments if isinstance(assignments, list) else []
+    db.conn.execute(
+        """INSERT INTO project_canvas_layouts (project_id, org_id, layout_json, assignments_json, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(project_id) DO UPDATE SET
+            layout_json = excluded.layout_json,
+            assignments_json = excluded.assignments_json,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+        """,
+        (
+            project_id,
+            user.org_id,
+            json.dumps(layout),
+            json.dumps(safe_assignments),
+            user.user_id,
+            now,
+        ),
+    )
+    db.conn.commit()
+    return {"saved": True, "project_id": project_id, "assignments": len(safe_assignments)}

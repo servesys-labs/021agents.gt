@@ -181,6 +181,44 @@ class TestAgentsRouter:
         config = resp.json()["agent"]
         assert config["name"] == "test-agent"
 
+    def test_create_from_description_draft_only_gates_persistence(self, api_client):
+        signup = api_client.post(
+            "/api/v1/auth/signup",
+            json={"email": "draft-agent@test.com", "password": "pass12345"},
+        )
+        token = signup.json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        draft = api_client.post(
+            "/api/v1/agents/create-from-description"
+            "?description=Build%20a%20support%20assistant%20agent"
+            "&name=canvas-draft-agent&draft_only=true",
+            headers=headers,
+        )
+        assert draft.status_code == 200
+        draft_data = draft.json()
+        assert draft_data["created"] is False
+        assert draft_data["name"] == "canvas-draft-agent"
+
+        list_after_draft = api_client.get("/api/v1/agents")
+        assert list_after_draft.status_code == 200
+        assert all(a["name"] != "canvas-draft-agent" for a in list_after_draft.json())
+
+        approved = api_client.post(
+            "/api/v1/agents/create-from-description"
+            "?description=Build%20a%20support%20assistant%20agent"
+            "&name=canvas-draft-agent&draft_only=false",
+            headers=headers,
+        )
+        assert approved.status_code == 200
+        approved_data = approved.json()
+        assert approved_data["created"] is True
+        assert approved_data["name"] == "canvas-draft-agent"
+
+        list_after_create = api_client.get("/api/v1/agents")
+        assert list_after_create.status_code == 200
+        assert any(a["name"] == "canvas-draft-agent" for a in list_after_create.json())
+
 
 class TestSessionsRouter:
     def test_list_empty(self, api_client):
@@ -377,6 +415,33 @@ class TestCanvasOverlayApiContracts:
         assert update.status_code == 200
         assert update.json()["updated"] == "development"
 
+    def test_projects_canvas_layout_roundtrip(self, api_client):
+        headers = self._auth_header(api_client, "canvas-layout@test.com")
+        created = api_client.post("/api/v1/projects?name=layout-proj", headers=headers)
+        assert created.status_code == 200
+        project_id = created.json()["project_id"]
+
+        empty_layout = api_client.get(f"/api/v1/projects/{project_id}/canvas-layout", headers=headers)
+        assert empty_layout.status_code == 200
+        assert empty_layout.json()["nodes"] == []
+        assert empty_layout.json()["edges"] == []
+
+        payload = {
+            "nodes": [{"id": "agent-1", "type": "agent", "position": {"x": 100, "y": 120}, "data": {"name": "Agent 1"}}],
+            "edges": [{"id": "e-1", "source": "knowledge-1", "target": "agent-1"}],
+        }
+        saved = api_client.put(f"/api/v1/projects/{project_id}/canvas-layout", json=payload, headers=headers)
+        assert saved.status_code == 200
+        assert saved.json()["saved"] is True
+        assert saved.json()["assignments"] == 1
+
+        loaded = api_client.get(f"/api/v1/projects/{project_id}/canvas-layout", headers=headers)
+        assert loaded.status_code == 200
+        data = loaded.json()
+        assert len(data["nodes"]) == 1
+        assert len(data["edges"]) == 1
+        assert len(data["assignments"]) == 1
+
     def test_releases_promote_and_canary_lifecycle(self, api_client):
         headers = self._auth_header(api_client, "canvas-releases@test.com")
         agent_name = "test-agent"
@@ -471,6 +536,9 @@ class TestCanvasOverlayApiContracts:
             headers=other_headers,
         )
         assert update.status_code == 404
+
+        layout_get = api_client.get(f"/api/v1/projects/{project_id}/canvas-layout", headers=other_headers)
+        assert layout_get.status_code == 404
 
     def test_releases_rejects_invalid_canary_weight(self, api_client):
         headers = self._auth_header(api_client, "canvas-releases-invalid@test.com")

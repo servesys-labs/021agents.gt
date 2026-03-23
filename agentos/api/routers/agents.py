@@ -13,7 +13,7 @@ from starlette.responses import StreamingResponse
 
 from agentos.api.deps import CurrentUser, get_current_user, get_optional_user, require_scope, _get_db
 from agentos.api.schemas import (
-    AgentCreateRequest, AgentResponse, AgentRunRequest, RunResponse,
+    AgentCreateRequest, AgentResponse, AgentRunRequest, ChatRequest, RunResponse,
 )
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -263,6 +263,7 @@ async def create_from_description(
     description: str,
     name: str = "",
     tools: str = "auto",
+    draft_only: bool = False,
     user: CurrentUser = Depends(get_current_user),
 ):
     """Create an agent from a natural language description (LLM-powered).
@@ -285,16 +286,34 @@ async def create_from_description(
     elif tools:
         config.tools = [t.strip() for t in tools.split(",") if t.strip()]
 
-    path = save_agent_config(config)
+    if draft_only:
+        return {
+            "created": False,
+            "name": config.name,
+            "description": config.description,
+            "model": config.model,
+            "tools": config.tools,
+            "tags": config.tags,
+            "version": config.version,
+            "draft": config.to_dict(),
+        }
 
-    return AgentResponse(
-        name=config.name, description=config.description, model=config.model,
-        tools=config.tools, tags=config.tags, version=config.version,
-    )
+    save_agent_config(config)
+    _snapshot_version(config, user.user_id)
+
+    return {
+        "created": True,
+        "name": config.name,
+        "description": config.description,
+        "model": config.model,
+        "tools": config.tools,
+        "tags": config.tags,
+        "version": config.version,
+    }
 
 
 @router.post("/{name}/chat")
-async def chat_turn(name: str, message: str, session_id: str = ""):
+async def chat_turn(name: str, request: ChatRequest):
     """Send a single turn in a multi-turn conversation."""
     from agentos.agent import Agent
 
@@ -303,7 +322,8 @@ async def chat_turn(name: str, message: str, session_id: str = ""):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    results = await agent.run(message)
+    session_id = request.session_id or str(uuid.uuid4())
+    results = await agent.run(request.message)
     output = ""
     for r in results:
         if r.llm_response and r.llm_response.content:
@@ -311,6 +331,7 @@ async def chat_turn(name: str, message: str, session_id: str = ""):
 
     return {
         "response": output,
+        "session_id": session_id,
         "turns": len(results),
         "cost_usd": sum(r.cost_usd for r in results),
     }

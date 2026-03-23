@@ -6,7 +6,8 @@ import { QueryState } from "../../components/common/QueryState";
 import { StatusBadge } from "../../components/common/StatusBadge";
 import { EmptyState } from "../../components/common/EmptyState";
 import { Tabs } from "../../components/common/Tabs";
-import { useApiQuery } from "../../lib/api";
+import { useToast } from "../../components/common/ToastProvider";
+import { useApiQuery, apiRequest } from "../../lib/api";
 
 type EvolutionEntry = {
   version: string;
@@ -18,14 +19,39 @@ type EvolutionEntry = {
   improvement_pct?: number;
 };
 
+type Proposal = {
+  id?: string;
+  title?: string;
+  priority?: string;
+  rationale?: string;
+  status?: string;
+};
+
 export const EvolutionPage = () => {
+  const { showToast } = useToast();
   const evoQuery = useApiQuery<{ entries: EvolutionEntry[] }>("/api/v1/evolution?limit=50");
+  const agentsQuery = useApiQuery<Array<{ name: string }>>("/api/v1/agents");
   const entries = useMemo(() => evoQuery.data?.entries ?? [], [evoQuery.data]);
 
   const [compareA, setCompareA] = useState("");
   const [compareB, setCompareB] = useState("");
+  const [operatorAgent, setOperatorAgent] = useState("");
+  const proposalsQuery = useApiQuery<{ proposals?: Proposal[] }>(
+    `/api/v1/evolve/${operatorAgent}/proposals`,
+    Boolean(operatorAgent),
+  );
+  const ledgerQuery = useApiQuery<{ current_version?: string; entries?: Array<Record<string, unknown>> }>(
+    `/api/v1/evolve/${operatorAgent}/ledger`,
+    Boolean(operatorAgent),
+  );
 
   const agents = [...new Set(entries.map((e) => e.agent_name))];
+  const allAgentNames = Array.from(
+    new Set([
+      ...agents,
+      ...(Array.isArray(agentsQuery.data) ? agentsQuery.data.map((a) => a.name) : []),
+    ]),
+  ).filter(Boolean);
   const entriesA = entries.filter((e) => e.agent_name === compareA);
   const entriesB = entries.filter((e) => e.agent_name === compareB);
 
@@ -130,6 +156,123 @@ export const EvolutionPage = () => {
     </div>
   );
 
+  const operatorTab = (
+    <div className="space-y-4">
+      <div className="card">
+        <div className="flex items-center gap-3">
+          <select
+            value={operatorAgent}
+            onChange={(e) => setOperatorAgent(e.target.value)}
+            className="text-sm flex-1"
+          >
+            <option value="">Select agent for evolution actions</option>
+            {allAgentNames.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+          <button
+            className="btn btn-secondary text-xs"
+            disabled={!operatorAgent}
+            onClick={async () => {
+              if (!operatorAgent) return;
+              try {
+                await apiRequest(`/api/v1/evolve/${operatorAgent}/run`, "POST", {
+                  max_cycles: 1,
+                  auto_approve: false,
+                });
+                showToast(`Evolution cycle started for ${operatorAgent}`, "success");
+                void proposalsQuery.refetch();
+                void ledgerQuery.refetch();
+              } catch {
+                showToast("Failed to start evolution cycle", "error");
+              }
+            }}
+          >
+            Run Evolution
+          </button>
+        </div>
+      </div>
+
+      <div className="card">
+        <p className="text-sm font-semibold text-text-primary mb-3">Review Queue</p>
+        {!operatorAgent ? (
+          <p className="text-xs text-text-muted">Select an agent to load proposals.</p>
+        ) : proposalsQuery.loading ? (
+          <p className="text-xs text-text-muted">Loading proposals...</p>
+        ) : proposalsQuery.error ? (
+          <p className="text-xs text-status-error">{proposalsQuery.error}</p>
+        ) : (proposalsQuery.data?.proposals ?? []).length === 0 ? (
+          <p className="text-xs text-text-muted">No pending proposals.</p>
+        ) : (
+          <div className="space-y-2">
+            {(proposalsQuery.data?.proposals ?? []).map((p, idx) => (
+              <div key={`${p.id ?? "proposal"}-${idx}`} className="border border-border-default rounded-lg p-3 bg-surface-base">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold text-text-primary">{p.title ?? p.id ?? "Untitled proposal"}</p>
+                    <p className="text-[11px] text-text-muted mt-1">{p.rationale ?? "No rationale provided."}</p>
+                    <div className="mt-2">
+                      <StatusBadge status={p.priority ?? "normal"} />
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      className="btn btn-secondary text-[11px] px-2 py-1"
+                      onClick={async () => {
+                        if (!operatorAgent || !p.id) return;
+                        try {
+                          await apiRequest(`/api/v1/evolve/${operatorAgent}/proposals/${p.id}/approve`, "POST");
+                          showToast("Proposal approved", "success");
+                          void proposalsQuery.refetch();
+                          void ledgerQuery.refetch();
+                        } catch {
+                          showToast("Approve failed", "error");
+                        }
+                      }}
+                    >
+                      Approve
+                    </button>
+                    <button
+                      className="btn btn-secondary text-[11px] px-2 py-1"
+                      onClick={async () => {
+                        if (!operatorAgent || !p.id) return;
+                        try {
+                          await apiRequest(`/api/v1/evolve/${operatorAgent}/proposals/${p.id}/reject`, "POST");
+                          showToast("Proposal rejected", "success");
+                          void proposalsQuery.refetch();
+                        } catch {
+                          showToast("Reject failed", "error");
+                        }
+                      }}
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <p className="text-sm font-semibold text-text-primary mb-2">Ledger</p>
+        {!operatorAgent ? (
+          <p className="text-xs text-text-muted">Select an agent to view version history.</p>
+        ) : ledgerQuery.loading ? (
+          <p className="text-xs text-text-muted">Loading ledger...</p>
+        ) : ledgerQuery.error ? (
+          <p className="text-xs text-status-error">{ledgerQuery.error}</p>
+        ) : (
+          <>
+            <p className="text-xs text-text-secondary mb-2">Current Version: <span className="font-mono">{ledgerQuery.data?.current_version ?? "--"}</span></p>
+            <p className="text-xs text-text-muted">
+              Entries: {Array.isArray(ledgerQuery.data?.entries) ? ledgerQuery.data?.entries?.length : 0}
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <div>
       <PageHeader title="Evolution" subtitle="Track agent performance across versions and compare improvements" onRefresh={() => void evoQuery.refetch()} />
@@ -150,6 +293,7 @@ export const EvolutionPage = () => {
       <Tabs tabs={[
         { id: "timeline", label: "Timeline", count: entries.length, content: timelineTab },
         { id: "compare", label: "Compare", content: compareTab },
+        { id: "operator", label: "Operator", content: operatorTab },
       ]} />
     </div>
   );

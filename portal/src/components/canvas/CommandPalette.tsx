@@ -21,6 +21,7 @@ import {
   Brain,
   FlaskConical,
   Command,
+  KeyRound,
 } from "lucide-react";
 
 /* ── Command definition ────────────────────────────────────────── */
@@ -28,7 +29,7 @@ export type CommandAction =
   | "add-agent" | "add-knowledge" | "add-datasource" | "add-connector" | "add-mcp"
   | "open-workflows" | "open-schedules" | "open-webhooks"
   | "open-governance" | "open-projects" | "open-releases"
-  | "open-infrastructure"
+  | "open-infrastructure" | "open-secrets"
   | "open-overview" | "open-observability" | "open-metrics"
   | "open-settings" | "open-billing";
 
@@ -57,6 +58,7 @@ const commands: CommandItem[] = [
   { id: "open-projects", label: "Projects & Environments", description: "Manage projects, env vars, and secrets", icon: <FolderKanban size={14} />, group: "Operations" },
   { id: "open-releases", label: "Release Channels", description: "Manage channels, promote, canary splits", icon: <Tag size={14} />, group: "Operations" },
   { id: "open-infrastructure", label: "Infrastructure", description: "GPU endpoints and retention policies", icon: <Cpu size={14} />, group: "Operations" },
+  { id: "open-secrets", label: "Secrets Vault", description: "Manage API keys and secret credentials", icon: <KeyRound size={14} />, group: "Operations" },
 
   // Navigate
   { id: "open-overview", label: "Overview Dashboard", description: "System-wide KPIs and activity", icon: <BarChart3 size={14} />, group: "Navigate" },

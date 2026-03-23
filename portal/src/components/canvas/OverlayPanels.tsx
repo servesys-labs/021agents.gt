@@ -4,6 +4,7 @@ import {
   Play, Pause, Trash2, Plus, RotateCcw, CheckCircle2, XCircle,
   AlertTriangle, Search, Eye, Send, Upload, Settings, Globe,
   MoreVertical, ChevronRight, Zap, Activity, Code, Lock, Unlock,
+  KeyRound, RefreshCw,
 } from "lucide-react";
 import { CanvasOverlayPanel } from "./CanvasOverlayPanel";
 import { apiRequest, useApiQuery } from "../../lib/api";
@@ -1213,6 +1214,175 @@ export function InfrastructurePanel({ open, onClose, editable = true }: { open: 
           </div>
         </div>
       )}
+    </CanvasOverlayPanel>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   SECRETS VAULT PANEL
+   ═══════════════════════════════════════════════════════════════════ */
+export function SecretsPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
+  const [showCreate, setShowCreate] = useState(false);
+  const [secretName, setSecretName] = useState("");
+  const [secretValue, setSecretValue] = useState("");
+  const [rotatingId, setRotatingId] = useState<string | null>(null);
+  const [rotateValue, setRotateValue] = useState("");
+  const [actionMessage, setActionMessage] = useState("");
+
+  const secretsQuery = useApiQuery<{ secrets?: Array<Record<string, unknown>> }>(
+    "/api/v1/secrets",
+    open,
+  );
+  const secrets = (secretsQuery.data?.secrets ?? (Array.isArray(secretsQuery.data) ? secretsQuery.data : [])).map((s: Record<string, unknown>) => ({
+    id: String(s.secret_id ?? s.id ?? ""),
+    name: String(s.name ?? ""),
+    keyPrefix: String(s.key_prefix ?? ""),
+    createdAt: Number(s.created_at ?? 0),
+    updatedAt: Number(s.updated_at ?? 0),
+  }));
+
+  return (
+    <CanvasOverlayPanel open={open} onClose={onClose} title="Secrets Vault" icon={<KeyRound size={16} className="text-accent" />}>
+      <ReadOnlyNotice editable={editable} />
+      <div className="flex items-center justify-between mb-4">
+        <p className="text-xs text-text-muted">{secrets.length} secrets stored</p>
+        <button onClick={() => setShowCreate(!showCreate)} disabled={!editable}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-accent text-text-inverse rounded-md hover:bg-accent/90 transition-colors">
+          <Plus size={12} /> New Secret
+        </button>
+      </div>
+
+      {showCreate && (
+        <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
+          <SectionTitle>Create Secret</SectionTitle>
+          <InlineInput compact label="Name" value={secretName} onChange={setSecretName} placeholder="e.g. OPENAI_API_KEY" />
+          <div className="flex items-center gap-2 py-1.5">
+            <label className="text-[11px] text-text-muted w-28 shrink-0">Value</label>
+            <input
+              type="password"
+              value={secretValue}
+              onChange={(e) => setSecretValue(e.target.value)}
+              placeholder="Enter secret value"
+              className="flex-1 px-2 py-1.5 text-xs bg-surface-base border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
+            />
+          </div>
+          <div className="flex gap-2 mt-2">
+            <button
+              className="flex-1 py-2 text-xs font-medium bg-accent text-text-inverse rounded-lg hover:bg-accent/90 transition-colors"
+              onClick={async () => {
+                if (!editable) return;
+                if (!secretName.trim() || !secretValue.trim()) return;
+                try {
+                  await apiRequest("/api/v1/secrets", "POST", {
+                    name: secretName.trim(),
+                    value: secretValue.trim(),
+                  });
+                  setSecretName("");
+                  setSecretValue("");
+                  setShowCreate(false);
+                  setActionMessage("Secret created");
+                  void secretsQuery.refetch();
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to create secret");
+                }
+              }}
+            >
+              Create
+            </button>
+            <button onClick={() => setShowCreate(false)} className="px-4 py-2 text-xs text-text-muted hover:text-text-primary transition-colors">Cancel</button>
+          </div>
+        </div>
+      )}
+      {actionMessage && <div className="mb-3 text-[10px] text-text-muted">{actionMessage}</div>}
+
+      <div className="space-y-2">
+        {secretsQuery.loading && <p className="text-xs text-text-muted">Loading secrets...</p>}
+        {secretsQuery.error && <p className="text-xs text-status-error">{secretsQuery.error}</p>}
+        {secrets.map((secret) => (
+          <div key={secret.id} className="bg-surface-base rounded-lg border border-border-default p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <KeyRound size={12} className="text-accent" />
+              <span className="text-[11px] font-medium text-text-primary flex-1 font-mono">{secret.name}</span>
+              <span className="text-[10px] font-mono text-text-muted px-1.5 py-0.5 rounded bg-surface-overlay">
+                {secret.keyPrefix ? `${secret.keyPrefix}••••••` : "••••••••"}
+              </span>
+            </div>
+            <div className="flex items-center gap-3 text-[10px] text-text-muted mb-2">
+              <span>Created: {secret.createdAt ? new Date(secret.createdAt * 1000).toLocaleDateString() : "n/a"}</span>
+              {secret.updatedAt > 0 && <span>Updated: {new Date(secret.updatedAt * 1000).toLocaleDateString()}</span>}
+            </div>
+
+            {/* Inline rotate form */}
+            {rotatingId === secret.id && (
+              <div className="bg-surface-overlay rounded-md border border-border-default p-2 mb-2">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="password"
+                    value={rotateValue}
+                    onChange={(e) => setRotateValue(e.target.value)}
+                    placeholder="New secret value"
+                    className="flex-1 px-2 py-1 text-xs bg-surface-base border border-border-default rounded text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
+                  />
+                  <button
+                    className="px-2 py-1 text-[10px] font-medium bg-accent text-text-inverse rounded hover:bg-accent/90 transition-colors"
+                    onClick={async () => {
+                      if (!editable || !rotateValue.trim()) return;
+                      try {
+                        await apiRequest(`/api/v1/secrets/${secret.id}`, "PUT", {
+                          value: rotateValue.trim(),
+                        });
+                        setRotatingId(null);
+                        setRotateValue("");
+                        setActionMessage("Secret rotated");
+                        void secretsQuery.refetch();
+                      } catch (err) {
+                        setActionMessage(err instanceof Error ? err.message : "Failed to rotate secret");
+                      }
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    className="px-2 py-1 text-[10px] text-text-muted hover:text-text-primary transition-colors"
+                    onClick={() => { setRotatingId(null); setRotateValue(""); }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors"
+                disabled={!editable}
+                onClick={() => {
+                  setRotatingId(rotatingId === secret.id ? null : secret.id);
+                  setRotateValue("");
+                }}
+              >
+                <RefreshCw size={9} /> Rotate
+              </button>
+              <button
+                className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
+                disabled={!editable}
+                onClick={async () => {
+                  if (!editable) return;
+                  try {
+                    await apiRequest(`/api/v1/secrets/${secret.id}`, "DELETE");
+                    setActionMessage("Secret deleted");
+                    void secretsQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to delete secret");
+                  }
+                }}
+              >
+                <Trash2 size={9} /> Delete
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
     </CanvasOverlayPanel>
   );
 }
