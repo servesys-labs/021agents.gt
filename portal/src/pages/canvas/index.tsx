@@ -25,10 +25,17 @@ import { CanvasContextMenu } from "../../components/canvas/CanvasContextMenu";
 import { MetaAgentAssist } from "../../components/canvas/MetaAgentAssist";
 import { AgentLog, type LogEntry } from "../../components/canvas/AgentLog";
 import { AddNodeToolbar } from "../../components/canvas/AddNodeToolbar";
-import { DeployButton } from "../../components/canvas/DeployButton";
-import { AgentConfigDrawer } from "../../components/canvas/AgentConfigDrawer";
+import { NodeDetailPanel } from "../../components/canvas/NodeDetailPanel";
 import { apiRequest } from "../../lib/api";
-import { RotateCcw } from "lucide-react";
+import {
+  RotateCcw,
+  ChevronDown,
+  Globe,
+  GitBranch,
+  Bell,
+  Sparkles,
+  Plus,
+} from "lucide-react";
 
 /* ── Node type registry ──────────────────────────────────────── */
 const nodeTypes = {
@@ -47,12 +54,7 @@ function loadLayout(): { nodes: Node[]; edges: Edge[] } | null {
     const raw = localStorage.getItem(LAYOUT_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    // Validate: must have at least 2 nodes and 1 edge to be considered valid
-    if (
-      !parsed?.nodes?.length ||
-      parsed.nodes.length < 2 ||
-      !parsed?.edges?.length
-    ) {
+    if (!parsed?.nodes?.length || parsed.nodes.length < 2 || !parsed?.edges?.length) {
       localStorage.removeItem(LAYOUT_KEY);
       return null;
     }
@@ -72,12 +74,10 @@ function saveLayout(nodes: Node[], edges: Edge[]) {
         edges,
       }),
     );
-  } catch {
-    // Silently fail
-  }
+  } catch {}
 }
 
-/* ── Edge color mapping ──────────────────────────────────────── */
+/* ── Edge helpers ────────────────────────────────────────────── */
 function getEdgeColor(sourceType?: string, targetType?: string): string {
   if (sourceType === "knowledge" || targetType === "knowledge") return "var(--color-chart-purple)";
   if (sourceType === "datasource" || targetType === "datasource") return "var(--color-chart-cyan)";
@@ -203,13 +203,15 @@ const demoEdges: Edge[] = [
   makeEdge("e-a2-mcp1", "agent-2", "mcp-1", "var(--color-chart-blue)"),
 ];
 
-/* ── Main component ──────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════
+   CANVAS WORKSPACE — Railway-style
+   ═══════════════════════════════════════════════════════════════ */
 export function CanvasWorkspacePage() {
   const saved = loadLayout();
   const [nodes, setNodes, onNodesChange] = useNodesState(saved?.nodes || demoNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(saved?.edges || demoEdges);
 
-  // Context menu state
+  // Context menu
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -217,40 +219,27 @@ export function CanvasWorkspacePage() {
     nodeId?: string;
   } | null>(null);
 
-  // Drawer state
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [editingAgent, setEditingAgent] = useState<any>(null);
+  // Node detail panel (Railway-style)
+  const [detailNode, setDetailNode] = useState<Node | null>(null);
 
-  // Meta-agent state
+  // Meta-agent
   const [metaProcessing, setMetaProcessing] = useState(false);
   const [metaResult, setMetaResult] = useState<string | undefined>();
-
-  // Deploy state
-  const [isDeploying, setIsDeploying] = useState(false);
-  const [selectedNode, setSelectedNode] = useState<{ id: string; type: string } | null>(null);
 
   // Agent log
   const [logEntries, setLogEntries] = useState<LogEntry[]>([
     { id: "init", message: "Canvas workspace initialized", status: "done", timestamp: Date.now() },
   ]);
 
-  // Available tools
-  const [availableTools] = useState<string[]>([
-    "web_search",
-    "sandbox_exec",
-    "file_read",
-    "file_write",
-    "slack_send_message",
-    "search_docs",
-    "create_ticket",
-    "query_database",
-    "send_email",
-    "http_request",
-  ]);
+  // Top bar dropdowns
+  const [projectDropdown, setProjectDropdown] = useState(false);
+  const [envDropdown, setEnvDropdown] = useState(false);
+  const [currentProject, setCurrentProject] = useState("my-agents");
+  const [currentEnv, setCurrentEnv] = useState("production");
 
   const reactFlowRef = useRef<HTMLDivElement>(null);
 
-  /* ── Log helper ────────────────────────────────────────────── */
+  /* ── Log helper ──────────────────────────────────────────── */
   const addLogEntry = useCallback((message: string, status: LogEntry["status"]) => {
     setLogEntries((prev) => [
       ...prev,
@@ -258,11 +247,9 @@ export function CanvasWorkspacePage() {
     ]);
   }, []);
 
-  const clearLog = useCallback(() => {
-    setLogEntries([]);
-  }, []);
+  const clearLog = useCallback(() => setLogEntries([]), []);
 
-  /* ── Edge connection ───────────────────────────────────────── */
+  /* ── Edge connection ─────────────────────────────────────── */
   const onConnect = useCallback(
     (connection: Connection) => {
       const sourceNode = nodes.find((n) => n.id === connection.source);
@@ -278,14 +265,14 @@ export function CanvasWorkspacePage() {
 
       setEdges((eds) => addEdge(newEdge, eds));
       addLogEntry(
-        `Connected ${sourceNode?.data?.name || "node"} \u2192 ${targetNode?.data?.name || "node"}`,
+        `Connected ${sourceNode?.data?.name || "node"} → ${targetNode?.data?.name || "node"}`,
         "done",
       );
     },
     [nodes, setEdges, addLogEntry],
   );
 
-  /* ── Context menu ──────────────────────────────────────────── */
+  /* ── Context menu ────────────────────────────────────────── */
   const onNodeContextMenu: NodeMouseHandler = useCallback((event, node) => {
     event.preventDefault();
     setContextMenu({
@@ -307,24 +294,19 @@ export function CanvasWorkspacePage() {
 
   const onPaneClick = useCallback(() => {
     setContextMenu(null);
-    setSelectedNode(null);
+    // Don't close detail panel on pane click — Railway keeps it open
   }, []);
 
-  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
-    setSelectedNode({ id: node.id, type: node.type || "agent" });
-  }, []);
-
-  const onNodeDoubleClick = useCallback(
+  /* ── Node click → open detail panel (Railway-style) ──────── */
+  const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      if (node.type === "agent") {
-        setEditingAgent(node.data);
-        setDrawerOpen(true);
-      }
+      setDetailNode(node);
+      setContextMenu(null);
     },
     [],
   );
 
-  /* ── Add node ──────────────────────────────────────────────── */
+  /* ── Add node ────────────────────────────────────────────── */
   const addNode = useCallback(
     (type: string) => {
       const id = `${type}-${Date.now()}`;
@@ -350,6 +332,7 @@ export function CanvasWorkspacePage() {
           name: "New Database",
           type: "postgres",
           status: "disconnected",
+          tableCount: 0,
         },
         connector: {
           name: "New Connector",
@@ -375,25 +358,19 @@ export function CanvasWorkspacePage() {
       setNodes((nds) => [...nds, newNode]);
       addLogEntry(`Added ${type} node`, "done");
 
-      // Open config drawer for new agents
-      if (type === "agent") {
-        setEditingAgent(defaults[type]);
-        setDrawerOpen(true);
-      }
+      // Auto-open detail panel for new node
+      setDetailNode(newNode);
     },
     [setNodes, addLogEntry],
   );
 
-  /* ── Context menu actions ──────────────────────────────────── */
+  /* ── Context menu actions ────────────────────────────────── */
   const handleContextAction = useCallback(
     (action: string, nodeId?: string) => {
       switch (action) {
         case "edit": {
           const node = nodes.find((n) => n.id === nodeId);
-          if (node?.type === "agent") {
-            setEditingAgent(node.data);
-            setDrawerOpen(true);
-          }
+          if (node) setDetailNode(node);
           break;
         }
         case "chat": {
@@ -408,6 +385,7 @@ export function CanvasWorkspacePage() {
           const node = nodes.find((n) => n.id === nodeId);
           setNodes((nds) => nds.filter((n) => n.id !== nodeId));
           setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
+          if (detailNode?.id === nodeId) setDetailNode(null);
           addLogEntry(`Deleted ${node?.data?.name || "node"}`, "done");
           break;
         }
@@ -426,37 +404,25 @@ export function CanvasWorkspacePage() {
           }
           break;
         }
-        case "add-agent":
-          addNode("agent");
-          break;
-        case "add-knowledge":
-          addNode("knowledge");
-          break;
-        case "add-datasource":
-          addNode("datasource");
-          break;
-        case "add-connector":
-          addNode("connector");
-          break;
-        case "add-mcp":
-          addNode("mcpServer");
-          break;
+        case "add-agent": addNode("agent"); break;
+        case "add-knowledge": addNode("knowledge"); break;
+        case "add-datasource": addNode("datasource"); break;
+        case "add-connector": addNode("connector"); break;
+        case "add-mcp": addNode("mcpServer"); break;
         default:
           addLogEntry(`Action: ${action}`, "done");
       }
     },
-    [nodes, setNodes, setEdges, addNode, addLogEntry],
+    [nodes, setNodes, setEdges, addNode, addLogEntry, detailNode],
   );
 
-  /* ── Deploy ────────────────────────────────────────────────── */
+  /* ── Deploy ──────────────────────────────────────────────── */
   const handleDeploy = useCallback(
     async (nodeId: string) => {
       const node = nodes.find((n) => n.id === nodeId);
       if (!node || node.type !== "agent") return;
 
-      setIsDeploying(true);
       addLogEntry(`Deploying ${node.data.name}...`, "running");
-
       try {
         await apiRequest(`/api/v1/deploy/${node.data.name}`, "POST");
         setNodes((nds) =>
@@ -467,14 +433,54 @@ export function CanvasWorkspacePage() {
         addLogEntry(`Deployed ${node.data.name} successfully`, "done");
       } catch (err) {
         addLogEntry(`Deploy failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
-      } finally {
-        setIsDeploying(false);
       }
     },
     [nodes, setNodes, addLogEntry],
   );
 
-  /* ── Meta-agent ────────────────────────────────────────────── */
+  /* ── Update node data from detail panel ──────────────────── */
+  const handleUpdateNode = useCallback(
+    (nodeId: string, data: any) => {
+      setNodes((nds) =>
+        nds.map((n) => (n.id === nodeId ? { ...n, data } : n)),
+      );
+      addLogEntry(`Updated ${data.name || "node"}`, "done");
+    },
+    [setNodes, addLogEntry],
+  );
+
+  /* ── Delete node from detail panel ───────────────────────── */
+  const handleDeleteNode = useCallback(
+    (nodeId: string) => {
+      const node = nodes.find((n) => n.id === nodeId);
+      setNodes((nds) => nds.filter((n) => n.id !== nodeId));
+      setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
+      setDetailNode(null);
+      addLogEntry(`Deleted ${node?.data?.name || "node"}`, "done");
+    },
+    [nodes, setNodes, setEdges, addLogEntry],
+  );
+
+  /* ── Clone node from detail panel ────────────────────────── */
+  const handleCloneNode = useCallback(
+    (nodeId: string) => {
+      const node = nodes.find((n) => n.id === nodeId);
+      if (node) {
+        const newId = `${node.type}-${Date.now()}`;
+        const newNode: Node = {
+          ...node,
+          id: newId,
+          position: { x: node.position.x + 40, y: node.position.y + 40 },
+          data: { ...node.data, name: `${node.data.name} (copy)` },
+        };
+        setNodes((nds) => [...nds, newNode]);
+        addLogEntry(`Cloned ${node.data.name}`, "done");
+      }
+    },
+    [nodes, setNodes, addLogEntry],
+  );
+
+  /* ── Meta-agent ──────────────────────────────────────────── */
   const handleMetaSubmit = useCallback(
     async (prompt: string) => {
       setMetaProcessing(true);
@@ -507,6 +513,7 @@ export function CanvasWorkspacePage() {
             },
           };
           setNodes((nds) => [...nds, newNode]);
+          setDetailNode(newNode);
         }
       } catch (err) {
         const errMsg = `Error: ${err instanceof Error ? err.message : "Failed to create agent"}`;
@@ -519,21 +526,7 @@ export function CanvasWorkspacePage() {
     [setNodes, addLogEntry],
   );
 
-  /* ── Save agent config ─────────────────────────────────────── */
-  const handleSaveAgent = useCallback(
-    async (config: any) => {
-      addLogEntry(`Saving agent ${config.name}...`, "running");
-      try {
-        await apiRequest("/api/v1/agents", "POST", config);
-        addLogEntry(`Agent ${config.name} saved`, "done");
-      } catch {
-        addLogEntry(`Agent ${config.name} saved locally`, "done");
-      }
-    },
-    [addLogEntry],
-  );
-
-  /* ── Save layout on drag stop ──────────────────────────────── */
+  /* ── Save layout on drag stop ────────────────────────────── */
   const onNodeDragStop = useCallback(
     (_: React.MouseEvent, __: Node, allNodes: Node[]) => {
       saveLayout(allNodes, edges);
@@ -541,31 +534,32 @@ export function CanvasWorkspacePage() {
     [edges],
   );
 
-  /* ── Keyboard shortcuts ────────────────────────────────────── */
+  /* ── Keyboard shortcuts ──────────────────────────────────── */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Don't capture when typing in inputs
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
         e.target instanceof HTMLSelectElement
-      ) {
-        return;
+      ) return;
+
+      if (e.key === "Escape") {
+        setDetailNode(null);
+        setContextMenu(null);
       }
 
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedNode) {
-          handleContextAction("delete", selectedNode.id);
-          setSelectedNode(null);
+        if (detailNode) {
+          handleDeleteNode(detailNode.id);
         }
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedNode, handleContextAction]);
+  }, [detailNode, handleDeleteNode]);
 
-  /* ── Default edge options ──────────────────────────────────── */
+  /* ── Default edge options ────────────────────────────────── */
   const defaultEdgeOptions = useMemo(
     () => ({
       animated: true,
@@ -575,112 +569,225 @@ export function CanvasWorkspacePage() {
     [],
   );
 
+  /* ═══════════════════════════════════════════════════════════
+     RENDER
+     ═══════════════════════════════════════════════════════════ */
   return (
-    <div className="relative w-full h-full" ref={reactFlowRef}>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
-        onNodeContextMenu={onNodeContextMenu}
-        onPaneContextMenu={onPaneContextMenu}
-        onPaneClick={onPaneClick}
-        onNodeClick={onNodeClick}
-        onNodeDoubleClick={onNodeDoubleClick}
-        onNodeDragStop={onNodeDragStop}
-        nodeTypes={nodeTypes}
-        defaultEdgeOptions={defaultEdgeOptions}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        proOptions={{ hideAttribution: true }}
-        className="!bg-surface-base"
-        minZoom={0.2}
-        maxZoom={2}
-        snapToGrid
-        snapGrid={[20, 20]}
-      >
-        <Background
-          variant={BackgroundVariant.Dots}
-          gap={20}
-          size={1}
-          color="var(--color-border-default)"
-        />
-        <Controls
-          position="top-left"
-          style={{ left: "60px", top: "16px" }}
-          showInteractive={false}
-        />
-        <MiniMap
-          nodeColor={(node) => {
-            switch (node.type) {
-              case "agent": return "var(--color-accent)";
-              case "knowledge": return "var(--color-chart-purple)";
-              case "datasource": return "var(--color-chart-cyan)";
-              case "connector": return "var(--color-chart-green)";
-              case "mcpServer": return "var(--color-chart-blue)";
-              default: return "var(--color-surface-hover)";
-            }
+    <div className="relative w-full h-full flex flex-col" ref={reactFlowRef}>
+      {/* ── Railway-style top bar ───────────────────────────── */}
+      <div className="relative z-20 flex items-center gap-0 h-11 px-4 bg-surface-raised border-b border-border-default flex-shrink-0">
+        {/* Project selector */}
+        <div className="relative">
+          <button
+            onClick={() => { setProjectDropdown(!projectDropdown); setEnvDropdown(false); }}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-text-primary hover:bg-surface-overlay rounded-md transition-colors"
+          >
+            <div className="w-4 h-4 rounded bg-accent/20 flex items-center justify-center">
+              <span className="text-[8px] font-bold text-accent">O</span>
+            </div>
+            {currentProject}
+            <ChevronDown size={11} className="text-text-muted" />
+          </button>
+          {projectDropdown && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setProjectDropdown(false)} />
+              <div className="absolute left-0 top-full mt-1 z-50 w-52 bg-surface-overlay border border-border-default rounded-lg shadow-xl overflow-hidden">
+                <div className="px-3 py-2 border-b border-border-default">
+                  <p className="text-[10px] text-text-muted uppercase tracking-wider font-medium">Projects</p>
+                </div>
+                {["my-agents", "production-bots", "experimental"].map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => { setCurrentProject(p); setProjectDropdown(false); }}
+                    className={`flex items-center gap-2 w-full px-3 py-2 text-xs transition-colors ${
+                      p === currentProject
+                        ? "text-accent bg-accent/5"
+                        : "text-text-secondary hover:bg-surface-hover"
+                    }`}
+                  >
+                    <div className="w-3 h-3 rounded bg-accent/20 flex items-center justify-center">
+                      <span className="text-[6px] font-bold text-accent">O</span>
+                    </div>
+                    {p}
+                    {p === currentProject && (
+                      <span className="ml-auto text-[9px] text-accent">&#10003;</span>
+                    )}
+                  </button>
+                ))}
+                <div className="border-t border-border-default">
+                  <button className="flex items-center gap-2 w-full px-3 py-2 text-xs text-text-muted hover:bg-surface-hover transition-colors">
+                    <Plus size={10} /> New Project
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        <span className="text-text-muted text-xs mx-1">/</span>
+
+        {/* Environment selector */}
+        <div className="relative">
+          <button
+            onClick={() => { setEnvDropdown(!envDropdown); setProjectDropdown(false); }}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-text-primary hover:bg-surface-overlay rounded-md transition-colors"
+          >
+            <Globe size={11} className="text-status-live" />
+            {currentEnv}
+            <ChevronDown size={11} className="text-text-muted" />
+          </button>
+          {envDropdown && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setEnvDropdown(false)} />
+              <div className="absolute left-0 top-full mt-1 z-50 w-48 bg-surface-overlay border border-border-default rounded-lg shadow-xl overflow-hidden">
+                <div className="px-3 py-2 border-b border-border-default">
+                  <p className="text-[10px] text-text-muted uppercase tracking-wider font-medium">Environments</p>
+                </div>
+                {[
+                  { name: "production", icon: <Globe size={10} className="text-status-live" /> },
+                  { name: "staging", icon: <GitBranch size={10} className="text-yellow-500" /> },
+                  { name: "development", icon: <GitBranch size={10} className="text-chart-blue" /> },
+                ].map((env) => (
+                  <button
+                    key={env.name}
+                    onClick={() => { setCurrentEnv(env.name); setEnvDropdown(false); }}
+                    className={`flex items-center gap-2 w-full px-3 py-2 text-xs transition-colors ${
+                      env.name === currentEnv
+                        ? "text-accent bg-accent/5"
+                        : "text-text-secondary hover:bg-surface-hover"
+                    }`}
+                  >
+                    {env.icon}
+                    {env.name}
+                    {env.name === currentEnv && (
+                      <span className="ml-auto text-[9px] text-accent">&#10003;</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Spacer */}
+        <div className="flex-1" />
+
+        {/* Right side actions */}
+        <button
+          onClick={() => {
+            localStorage.removeItem(LAYOUT_KEY);
+            setNodes(demoNodes);
+            setEdges(demoEdges);
+            setDetailNode(null);
+            addLogEntry("Canvas reset to default layout", "done");
           }}
-          maskColor="rgba(12,10,9,0.85)"
-          className="!bg-surface-raised !border-border-default !rounded-xl"
-          style={{ width: 140, height: 90 }}
+          className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1"
+          title="Reset canvas"
+        >
+          <RotateCcw size={10} />
+          Reset
+        </button>
+
+        <button className="flex items-center justify-center w-7 h-7 text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1">
+          <Sparkles size={13} />
+        </button>
+
+        <button className="flex items-center justify-center w-7 h-7 text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1">
+          <Bell size={13} />
+        </button>
+
+        <div className="w-6 h-6 rounded-full bg-accent/20 flex items-center justify-center ml-1">
+          <span className="text-[9px] font-bold text-accent">U</span>
+        </div>
+      </div>
+
+      {/* ── Canvas area ─────────────────────────────────────── */}
+      <div className="flex-1 relative">
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onConnect={onConnect}
+          onNodeContextMenu={onNodeContextMenu}
+          onPaneContextMenu={onPaneContextMenu}
+          onPaneClick={onPaneClick}
+          onNodeClick={onNodeClick}
+          onNodeDragStop={onNodeDragStop}
+          nodeTypes={nodeTypes}
+          defaultEdgeOptions={defaultEdgeOptions}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          proOptions={{ hideAttribution: true }}
+          className="!bg-surface-base"
+          minZoom={0.2}
+          maxZoom={2}
+          snapToGrid
+          snapGrid={[20, 20]}
+        >
+          <Background
+            variant={BackgroundVariant.Dots}
+            gap={20}
+            size={1}
+            color="var(--color-border-default)"
+          />
+          <Controls
+            position="top-left"
+            style={{ left: "16px", top: "16px" }}
+            showInteractive={false}
+          />
+          <MiniMap
+            nodeColor={(node) => {
+              switch (node.type) {
+                case "agent": return "var(--color-accent)";
+                case "knowledge": return "var(--color-chart-purple)";
+                case "datasource": return "var(--color-chart-cyan)";
+                case "connector": return "var(--color-chart-green)";
+                case "mcpServer": return "var(--color-chart-blue)";
+                default: return "var(--color-surface-hover)";
+              }
+            }}
+            maskColor="rgba(12,10,9,0.85)"
+            className="!bg-surface-raised !border-border-default !rounded-xl"
+            style={{ width: 140, height: 90 }}
+          />
+        </ReactFlow>
+
+        {/* ── Overlays ────────────────────────────────────────── */}
+        <AddNodeToolbar onAdd={addNode} />
+
+        <AgentLog entries={logEntries} onClear={clearLog} />
+
+        <MetaAgentAssist
+          onSubmit={handleMetaSubmit}
+          isProcessing={metaProcessing}
+          lastResult={metaResult}
         />
-      </ReactFlow>
 
-      {/* Overlays */}
-      <AddNodeToolbar onAdd={addNode} />
+        {/* Context menu */}
+        {contextMenu && (
+          <CanvasContextMenu
+            x={contextMenu.x}
+            y={contextMenu.y}
+            nodeType={contextMenu.nodeType}
+            nodeId={contextMenu.nodeId}
+            onAction={handleContextAction}
+            onClose={() => setContextMenu(null)}
+          />
+        )}
 
-      {/* Reset canvas button */}
-      <button
-        onClick={() => {
-          localStorage.removeItem(LAYOUT_KEY);
-          setNodes(demoNodes);
-          setEdges(demoEdges);
-          addLogEntry("Canvas reset to default layout", "done");
-        }}
-        className="absolute top-4 right-4 z-10 flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-medium text-text-muted bg-surface-raised/80 backdrop-blur border border-border-default rounded-full hover:text-text-primary hover:border-accent/40 transition-all"
-        title="Reset canvas to demo layout"
-      >
-        <RotateCcw size={10} />
-        Reset
-      </button>
-
-      <AgentLog entries={logEntries} onClear={clearLog} />
-
-      <MetaAgentAssist
-        onSubmit={handleMetaSubmit}
-        isProcessing={metaProcessing}
-        lastResult={metaResult}
-      />
-
-      <DeployButton
-        selectedNodeId={selectedNode?.id}
-        selectedNodeType={selectedNode?.type}
-        onDeploy={handleDeploy}
-        isDeploying={isDeploying}
-      />
-
-      {/* Context menu */}
-      {contextMenu && (
-        <CanvasContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          nodeType={contextMenu.nodeType}
-          nodeId={contextMenu.nodeId}
-          onAction={handleContextAction}
-          onClose={() => setContextMenu(null)}
-        />
-      )}
-
-      {/* Agent config drawer */}
-      <AgentConfigDrawer
-        isOpen={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        agentData={editingAgent}
-        onSave={handleSaveAgent}
-        availableTools={availableTools}
-      />
+        {/* Railway-style Node Detail Panel */}
+        {detailNode && (
+          <NodeDetailPanel
+            node={detailNode}
+            onClose={() => setDetailNode(null)}
+            onDelete={handleDeleteNode}
+            onClone={handleCloneNode}
+            onDeploy={handleDeploy}
+            onUpdateNode={handleUpdateNode}
+          />
+        )}
+      </div>
     </div>
   );
 }

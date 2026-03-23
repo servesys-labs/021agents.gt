@@ -12,27 +12,36 @@ import { ToastProvider } from "./components/common/ToastProvider";
 
 import "./index.css";
 
-const DashboardPage = lazy(() => import("./pages/dashboard").then((m) => ({ default: m.DashboardPage })));
-const CanvasWorkspacePage = lazy(() => import("./pages/canvas").then((m) => ({ default: m.CanvasWorkspacePage })));
-const AgentsPage = lazy(() => import("./pages/agents").then((m) => ({ default: m.AgentsPage })));
-const SessionsPage = lazy(() => import("./pages/sessions").then((m) => ({ default: m.SessionsPage })));
-const BillingPage = lazy(() => import("./pages/billing").then((m) => ({ default: m.BillingPage })));
-const SettingsPage = lazy(() => import("./pages/settings").then((m) => ({ default: m.SettingsPage })));
-const LoginPage = lazy(() => import("./pages/login").then((m) => ({ default: m.LoginPage })));
-const RuntimePage = lazy(() => import("./pages/runtime").then((m) => ({ default: m.RuntimePage })));
-const IntegrationsPage = lazy(() => import("./pages/integrations").then((m) => ({ default: m.IntegrationsPage })));
-const GovernancePage = lazy(() => import("./pages/governance").then((m) => ({ default: m.GovernancePage })));
-const AgentChatPage = lazy(() => import("./pages/agent-chat").then((m) => ({ default: m.AgentChatPage })));
-const EvalPage = lazy(() => import("./pages/eval").then((m) => ({ default: m.EvalPage })));
-const SchedulesPage = lazy(() => import("./pages/schedules").then((m) => ({ default: m.SchedulesPage })));
-const WebhooksPage = lazy(() => import("./pages/webhooks").then((m) => ({ default: m.WebhooksPage })));
-const EvolutionPage = lazy(() => import("./pages/evolution").then((m) => ({ default: m.EvolutionPage })));
-const ProjectsPage = lazy(() => import("./pages/projects").then((m) => ({ default: m.ProjectsPage })));
-const ReleasesPage = lazy(() => import("./pages/releases").then((m) => ({ default: m.ReleasesPage })));
-const MemoryPage = lazy(() => import("./pages/memory").then((m) => ({ default: m.MemoryPage })));
-const RagPage = lazy(() => import("./pages/rag").then((m) => ({ default: m.RagPage })));
-const ReliabilityPage = lazy(() => import("./pages/reliability").then((m) => ({ default: m.ReliabilityPage })));
-const InfrastructurePage = lazy(() => import("./pages/infrastructure").then((m) => ({ default: m.InfrastructurePage })));
+/* ── Lazy page imports ──────────────────────────────────────────── */
+
+// Canvas is the primary workspace (default route)
+const CanvasWorkspacePage = lazy(() =>
+  import("./pages/canvas").then((m) => ({ default: m.CanvasWorkspacePage })),
+);
+
+// Sidebar secondary pages
+const OverviewPage = lazy(() =>
+  import("./pages/dashboard").then((m) => ({ default: m.DashboardPage })),
+);
+const ObservabilityPage = lazy(() =>
+  import("./pages/sessions").then((m) => ({ default: m.SessionsPage })),
+);
+const MetricsPage = lazy(() =>
+  import("./pages/evolution").then((m) => ({ default: m.EvolutionPage })),
+);
+const SettingsPage = lazy(() =>
+  import("./pages/settings").then((m) => ({ default: m.SettingsPage })),
+);
+const BillingPage = lazy(() =>
+  import("./pages/billing").then((m) => ({ default: m.BillingPage })),
+);
+
+// Auth
+const LoginPage = lazy(() =>
+  import("./pages/login").then((m) => ({ default: m.LoginPage })),
+);
+
+/* ── App ────────────────────────────────────────────────────────── */
 
 function App() {
   return (
@@ -41,77 +50,64 @@ function App() {
         {isClerkMode() && CLERK_PUBLISHABLE_KEY ? <ClerkSessionManager /> : null}
         <Refine
           routerProvider={routerProvider}
-          dataProvider={{
-            default: agentosDataProvider,
-          }}
+          dataProvider={{ default: agentosDataProvider }}
           authProvider={authProvider}
           resources={[
-            { name: "dashboard", list: "/" },
-            { name: "canvas", list: "/canvas" },
-            { name: "agents", list: "/agents" },
-            { name: "sessions", list: "/sessions" },
-            { name: "runtime", list: "/runtime" },
-            { name: "agent-chat", list: "/agent-chat" },
-            { name: "eval", list: "/eval" },
-            { name: "schedules", list: "/schedules" },
-            { name: "webhooks", list: "/webhooks" },
-            { name: "integrations", list: "/integrations" },
-            { name: "evolution", list: "/evolution" },
-            { name: "projects", list: "/projects" },
-            { name: "releases", list: "/releases" },
-            { name: "memory", list: "/memory" },
-            { name: "rag", list: "/rag" },
-            { name: "reliability", list: "/reliability" },
-            { name: "infrastructure", list: "/infrastructure" },
-            { name: "governance", list: "/governance" },
-            { name: "billing", list: "/billing" },
+            { name: "canvas", list: "/" },
+            { name: "overview", list: "/overview" },
+            { name: "observability", list: "/observability" },
+            { name: "metrics", list: "/metrics" },
             { name: "settings", list: "/settings" },
+            { name: "billing", list: "/billing" },
             { name: "login", list: "/login" },
           ]}
           options={{ syncWithLocation: true }}
         >
-          <Suspense fallback={<div className="flex items-center justify-center min-h-screen bg-[#0d0d0d] text-gray-500 text-sm">Loading...</div>}>
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center min-h-screen bg-[#0d0d0d] text-gray-500 text-sm">
+                Loading...
+              </div>
+            }
+          >
             <Routes>
+              {/* Authenticated routes */}
               <Route
                 element={
-                  <Authenticated key="private-routes" fallback={<NavigateToResource resource="login" />}>
+                  <Authenticated
+                    key="private-routes"
+                    fallback={<NavigateToResource resource="login" />}
+                  >
                     <Sidebar>
                       <Outlet />
                     </Sidebar>
                   </Authenticated>
                 }
               >
-                <Route index element={<DashboardPage />} />
+                {/* Canvas is the default landing page */}
+                <Route index element={<CanvasWorkspacePage />} />
                 <Route path="/canvas" element={<CanvasWorkspacePage />} />
-                <Route path="/agents" element={<AgentsPage />} />
-                <Route path="/sessions" element={<SessionsPage />} />
-                <Route path="/runtime" element={<RuntimePage />} />
-                <Route path="/agent-chat" element={<AgentChatPage />} />
-                <Route path="/eval" element={<EvalPage />} />
-                <Route path="/schedules" element={<SchedulesPage />} />
-                <Route path="/webhooks" element={<WebhooksPage />} />
-                <Route path="/integrations" element={<IntegrationsPage />} />
-                <Route path="/evolution" element={<EvolutionPage />} />
-                <Route path="/projects" element={<ProjectsPage />} />
-                <Route path="/releases" element={<ReleasesPage />} />
-                <Route path="/memory" element={<MemoryPage />} />
-                <Route path="/rag" element={<RagPage />} />
-                <Route path="/reliability" element={<ReliabilityPage />} />
-                <Route path="/infrastructure" element={<InfrastructurePage />} />
-                <Route path="/governance" element={<GovernancePage />} />
-                <Route path="/billing" element={<BillingPage />} />
+
+                {/* Secondary sidebar pages */}
+                <Route path="/overview" element={<OverviewPage />} />
+                <Route path="/observability" element={<ObservabilityPage />} />
+                <Route path="/metrics" element={<MetricsPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/billing" element={<BillingPage />} />
               </Route>
 
+              {/* Login */}
               <Route
                 path="/login"
                 element={
                   <Authenticated key="public-routes" fallback={<LoginPage />}>
-                    <NavigateToResource resource="dashboard" />
+                    <NavigateToResource resource="canvas" />
                   </Authenticated>
                 }
               />
-              <Route path="*" element={<NavigateToResource resource="dashboard" />} />
+
+              {/* Catch-all → canvas */}
+              <Route path="*" element={<NavigateToResource resource="canvas" />} />
             </Routes>
           </Suspense>
         </Refine>

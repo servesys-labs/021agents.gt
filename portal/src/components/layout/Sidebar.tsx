@@ -5,34 +5,19 @@ import { Link, useLocation } from "react-router-dom";
 import { getTokenSecondsRemaining } from "../../auth/jwt";
 import { getAuthToken } from "../../auth/tokens";
 import {
+  Layers,
   LayoutDashboard,
-  Bot,
-  Play,
-  FlaskConical,
-  Clock,
-  Webhook,
-  Plug,
-  GitBranch,
-  FolderKanban,
-  Rocket,
-  Brain,
-  Database,
-  ShieldCheck,
   Activity,
-  Key,
-  Users,
-  CreditCard,
+  BarChart3,
   Settings,
+  LogOut,
+  CreditCard,
   ExternalLink,
   BookOpen,
-  Search,
-  PanelLeftClose,
-  PanelLeft,
-  ChevronDown,
-  CircleDot,
-  Layers,
-  Server,
+  Users,
 } from "lucide-react";
+
+/* ── Railway-style icon-only sidebar ────────────────────────────── */
 
 type NavItem = {
   path: string;
@@ -40,66 +25,18 @@ type NavItem = {
   icon: ReactNode;
 };
 
-type NavGroup = {
-  label: string;
-  items: NavItem[];
-};
-
-const iconSize = 16;
+const iconSize = 18;
 const iconStroke = 1.5;
 
-const navGroups: NavGroup[] = [
-  {
-    label: "",
-    items: [
-      { path: "/", label: "Dashboard", icon: <LayoutDashboard size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/canvas", label: "Canvas", icon: <Layers size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "OBSERVE",
-    items: [
-      { path: "/sessions", label: "Sessions", icon: <Play size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/runtime", label: "Workflows & Jobs", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/evolution", label: "Evolution", icon: <GitBranch size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "INTELLIGENCE",
-    items: [
-      { path: "/eval", label: "Eval Runner", icon: <FlaskConical size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/memory", label: "Memory", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/rag", label: "Knowledge", icon: <Database size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "INTEGRATION",
-    items: [
-      { path: "/integrations", label: "Connectors", icon: <Plug size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/webhooks", label: "Webhooks", icon: <Webhook size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "OPERATIONS",
-    items: [
-      { path: "/projects", label: "Projects & Envs", icon: <FolderKanban size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/releases", label: "Releases", icon: <Rocket size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/schedules", label: "Schedules", icon: <Clock size={iconSize} strokeWidth={iconStroke} /> },
-      { path: "/governance", label: "Governance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "TEAM",
-    items: [
-      { path: "/settings", label: "General", icon: <Settings size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
-  {
-    label: "BILLING",
-    items: [
-      { path: "/billing", label: "Billing & Usage", icon: <CreditCard size={iconSize} strokeWidth={iconStroke} /> },
-    ],
-  },
+const topNav: NavItem[] = [
+  { path: "/", label: "Canvas", icon: <Layers size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/overview", label: "Overview", icon: <LayoutDashboard size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/observability", label: "Observability", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/metrics", label: "Metrics", icon: <BarChart3 size={iconSize} strokeWidth={iconStroke} /> },
+];
+
+const bottomNav: NavItem[] = [
+  { path: "/settings", label: "Settings", icon: <Settings size={iconSize} strokeWidth={iconStroke} /> },
 ];
 
 export const Sidebar = ({ children }: { children: ReactNode }) => {
@@ -107,11 +44,9 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
   const { mutate: logout } = useLogout();
   const { data: identity } = useGetIdentity<{ name: string; email: string }>();
   const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null);
-  const [mobileOpen, setMobileOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
 
-  // Auto-collapse sidebar when on canvas page
-  const isCanvasPage = pathname === "/canvas";
+  const isCanvasPage = pathname === "/" || pathname === "/canvas";
 
   useEffect(() => {
     const update = () => {
@@ -119,177 +54,151 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
       setSecondsRemaining(token ? getTokenSecondsRemaining(token) : null);
     };
     update();
-    const timer = window.setInterval(update, 30_000);
-    return () => window.clearInterval(timer);
+    const interval = setInterval(update, 30_000);
+    return () => clearInterval(interval);
   }, []);
 
   const isActive = (path: string) => {
-    if (path === "/") return pathname === "/";
+    if (path === "/") return pathname === "/" || pathname === "/canvas";
     return pathname.startsWith(path);
   };
 
-  const sidebarCollapsed = collapsed || isCanvasPage;
-
   return (
-    <div className="flex h-screen bg-surface-base">
-      {/* Mobile menu button */}
-      <button
-        className="md:hidden fixed top-3 left-3 z-50 rounded-md bg-surface-raised px-3 py-2 text-xs text-text-primary border border-border-default"
-        onClick={() => setMobileOpen(!mobileOpen)}
-      >
-        <PanelLeft size={16} />
-      </button>
+    <div className="flex h-screen bg-surface-base text-text-primary overflow-hidden">
+      {/* Icon rail — always 52px, icon-only */}
+      <aside className="flex flex-col items-center w-[52px] bg-surface-raised border-r border-border-default py-3 flex-shrink-0 z-40">
+        {/* Logo */}
+        <Link
+          to="/"
+          className="mb-5 flex items-center justify-center w-8 h-8 rounded-lg bg-accent/10 hover:bg-accent/20 transition-colors"
+        >
+          <span className="text-accent font-bold text-sm">O</span>
+        </Link>
 
-      {/* Mobile overlay */}
-      {mobileOpen && (
-        <button
-          className="fixed inset-0 z-30 bg-black/60 md:hidden"
-          onClick={() => setMobileOpen(false)}
-          aria-label="Close menu overlay"
-        />
-      )}
-
-      {/* Sidebar */}
-      <aside
-        className={`fixed md:static z-40 h-full flex flex-col bg-surface-raised border-r border-border-default transition-all duration-200 ${
-          sidebarCollapsed ? "w-14" : "w-56"
-        } ${mobileOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"}`}
-      >
-        {/* Logo + Team */}
-        <div className={`border-b border-border-default ${sidebarCollapsed ? "p-2.5" : "p-3.5"}`}>
-          <div className="flex items-center justify-between">
-            <Link to="/" className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-accent flex items-center justify-center flex-shrink-0">
-                <CircleDot size={16} className="text-white" strokeWidth={2.5} />
-              </div>
-              {!sidebarCollapsed && (
-                <span className="text-sm font-semibold text-text-primary tracking-tight">
-                  oneshots<span className="text-accent">.co</span>
-                </span>
-              )}
+        {/* Top nav icons */}
+        <nav className="flex flex-col items-center gap-1 flex-1">
+          {topNav.map((item) => (
+            <Link
+              key={item.path}
+              to={item.path}
+              title={item.label}
+              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all ${
+                isActive(item.path)
+                  ? "bg-accent-muted text-accent"
+                  : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
+              }`}
+            >
+              {item.icon}
             </Link>
-            {!isCanvasPage && (
-              <button
-                onClick={() => setCollapsed(!collapsed)}
-                className="hidden md:flex items-center justify-center w-6 h-6 rounded text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors"
-              >
-                {collapsed ? <PanelLeft size={14} /> : <PanelLeftClose size={14} />}
-              </button>
-            )}
-          </div>
-
-          {/* Team selector */}
-          {!sidebarCollapsed && (
-            <button className="mt-2.5 w-full flex items-center gap-2 px-2 py-1.5 rounded-md bg-surface-base border border-border-default text-xs text-text-secondary hover:border-border-strong transition-colors">
-              <div className="w-5 h-5 rounded bg-surface-overlay flex items-center justify-center text-[10px] font-bold text-text-primary">
-                {identity?.name?.[0]?.toUpperCase() || "T"}
-              </div>
-              <span className="truncate flex-1 text-left">
-                {identity?.name || "Team"}
-              </span>
-              <ChevronDown size={12} className="text-text-muted" />
-            </button>
-          )}
-
-          {/* Search */}
-          {!sidebarCollapsed && (
-            <button className="mt-1.5 w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs text-text-muted hover:bg-surface-overlay transition-colors">
-              <Search size={13} />
-              <span>Go to</span>
-              <kbd className="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-surface-overlay border border-border-default text-text-muted">
-                ⌘K
-              </kbd>
-            </button>
-          )}
-        </div>
-
-        {/* Navigation */}
-        <nav className="flex-1 overflow-y-auto py-2 px-1.5">
-          {navGroups.map((group, gi) => (
-            <div key={gi} className={gi > 0 ? "mt-3" : ""}>
-              {group.label && !sidebarCollapsed && (
-                <div className="px-2 mb-1 text-[10px] font-semibold tracking-widest text-text-muted uppercase">
-                  {group.label}
-                </div>
-              )}
-              {group.label && sidebarCollapsed && gi > 0 && (
-                <div className="mx-1.5 mb-1.5 border-t border-border-default" />
-              )}
-              <div className="space-y-0.5">
-                {group.items.map((item) => (
-                  <Link
-                    key={item.path}
-                    to={item.path}
-                    onClick={() => setMobileOpen(false)}
-                    title={sidebarCollapsed ? item.label : undefined}
-                    className={`flex items-center gap-2 px-2 py-1.5 rounded-md text-[12px] transition-colors ${
-                      isActive(item.path)
-                        ? "bg-accent-muted text-accent"
-                        : "text-text-secondary hover:bg-surface-overlay hover:text-text-primary"
-                    } ${sidebarCollapsed ? "justify-center px-0" : ""}`}
-                  >
-                    <span className={`flex-shrink-0 ${isActive(item.path) ? "text-accent" : ""}`}>
-                      {item.icon}
-                    </span>
-                    {!sidebarCollapsed && <span>{item.label}</span>}
-                  </Link>
-                ))}
-              </div>
-            </div>
           ))}
         </nav>
 
-        {/* External links */}
-        {!sidebarCollapsed && (
-          <div className="px-1.5 py-1.5 space-y-0.5">
-            <a
-              href="https://github.com/eprasad7/one-shot"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 px-2 py-1.5 rounded-md text-[12px] text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors"
+        {/* Bottom nav icons */}
+        <div className="flex flex-col items-center gap-1 mt-auto">
+          {bottomNav.map((item) => (
+            <Link
+              key={item.path}
+              to={item.path}
+              title={item.label}
+              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all ${
+                isActive(item.path)
+                  ? "bg-accent-muted text-accent"
+                  : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
+              }`}
             >
-              <ExternalLink size={14} strokeWidth={1.5} />
-              <span>GitHub</span>
-              <ExternalLink size={10} className="ml-auto text-text-muted" />
-            </a>
-            <a
-              href="https://oneshots.co/docs"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 px-2 py-1.5 rounded-md text-[12px] text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors"
-            >
-              <BookOpen size={14} strokeWidth={1.5} />
-              <span>Documentation</span>
-              <ExternalLink size={10} className="ml-auto text-text-muted" />
-            </a>
-          </div>
-        )}
+              {item.icon}
+            </Link>
+          ))}
 
-        {/* Footer */}
-        {!sidebarCollapsed && (
-          <div className="border-t border-border-default">
-            <div className="flex items-center gap-3 px-3 py-2">
-              <button className="text-[11px] text-text-muted hover:text-text-secondary transition-colors">
-                Feedback
-              </button>
-              <button className="text-[11px] text-text-muted hover:text-text-secondary transition-colors">
-                Support
-              </button>
-              <button
-                onClick={() => logout()}
-                className="text-[11px] text-text-muted hover:text-status-error transition-colors ml-auto"
-              >
-                Logout
-              </button>
-            </div>
+          {/* User avatar / menu */}
+          <div className="relative mt-1">
+            <button
+              onClick={() => setUserMenuOpen(!userMenuOpen)}
+              className="flex items-center justify-center w-9 h-9 rounded-lg bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors"
+              title={identity?.email || "Account"}
+            >
+              {(identity?.name || identity?.email || "U").charAt(0).toUpperCase()}
+            </button>
+
+            {/* User popover */}
+            {userMenuOpen && (
+              <>
+                <div className="fixed inset-0 z-50" onClick={() => setUserMenuOpen(false)} />
+                <div className="absolute bottom-0 left-full ml-2 z-50 w-56 bg-surface-raised border border-border-default rounded-xl shadow-2xl overflow-hidden">
+                  {/* User info */}
+                  <div className="p-3 border-b border-border-default">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center text-accent text-sm font-bold">
+                        {(identity?.name || "U").charAt(0).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-xs font-medium text-text-primary truncate">
+                          {identity?.name || "User"}
+                        </p>
+                        <p className="text-[10px] text-text-muted truncate">
+                          {identity?.email || "user@oneshots.co"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Menu items */}
+                  <div className="py-1">
+                    <Link
+                      to="/settings"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                    >
+                      <Users size={12} /> Team Settings
+                    </Link>
+                    <Link
+                      to="/billing"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                    >
+                      <CreditCard size={12} /> Billing & Usage
+                    </Link>
+                    <a
+                      href="https://github.com/eprasad7/one-shot"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                    >
+                      <ExternalLink size={12} /> GitHub
+                    </a>
+                    <a
+                      href="https://oneshots.co/docs"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                    >
+                      <BookOpen size={12} /> Documentation
+                    </a>
+                  </div>
+
+                  {/* Logout */}
+                  <div className="border-t border-border-default py-1">
+                    <button
+                      onClick={() => {
+                        setUserMenuOpen(false);
+                        logout();
+                      }}
+                      className="flex items-center gap-2 px-3 py-2 text-xs text-status-error hover:bg-surface-overlay transition-colors w-full text-left"
+                    >
+                      <LogOut size={12} /> Log out
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
-        )}
+        </div>
       </aside>
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <main className="flex-1 overflow-auto">
-          <div className={isCanvasPage ? "h-full" : "p-6 pt-14 md:pt-6"}>
+          <div className={isCanvasPage ? "h-full" : "p-6"}>
             {children}
           </div>
         </main>
@@ -298,7 +207,9 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
         <div className="status-bar">
           <div className="flex items-center gap-2 font-mono">
             <span>&gt;</span>
-            <span className="uppercase">{identity?.email || "user@oneshots.co"}</span>
+            <span className="uppercase text-[10px]">
+              {identity?.email || "user@oneshots.co"}
+            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-1.5 h-1.5 rounded-full bg-status-live" />
