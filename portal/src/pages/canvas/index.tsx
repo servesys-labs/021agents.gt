@@ -26,6 +26,17 @@ import { MetaAgentAssist } from "../../components/canvas/MetaAgentAssist";
 import { AgentLog, type LogEntry } from "../../components/canvas/AgentLog";
 import { AddNodeToolbar } from "../../components/canvas/AddNodeToolbar";
 import { NodeDetailPanel } from "../../components/canvas/NodeDetailPanel";
+import { CommandPalette, type CommandAction } from "../../components/canvas/CommandPalette";
+import { CanvasOverlayPanel } from "../../components/canvas/CanvasOverlayPanel";
+import {
+  WorkflowsPanel,
+  SchedulesPanel,
+  WebhooksPanel,
+  GovernancePanel,
+  ProjectsPanel,
+  ReleasesPanel,
+  InfrastructurePanel,
+} from "../../components/canvas/OverlayPanels";
 import { apiRequest } from "../../lib/api";
 import {
   RotateCcw,
@@ -35,7 +46,10 @@ import {
   Bell,
   Sparkles,
   Plus,
+  Command,
+  Search,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 /* ── Node type registry ──────────────────────────────────────── */
 const nodeTypes = {
@@ -207,6 +221,7 @@ const demoEdges: Edge[] = [
    CANVAS WORKSPACE — Railway-style
    ═══════════════════════════════════════════════════════════════ */
 export function CanvasWorkspacePage() {
+  const navigate = useNavigate();
   const saved = loadLayout();
   const [nodes, setNodes, onNodesChange] = useNodesState(saved?.nodes || demoNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(saved?.edges || demoEdges);
@@ -221,6 +236,12 @@ export function CanvasWorkspacePage() {
 
   // Node detail panel (Railway-style)
   const [detailNode, setDetailNode] = useState<Node | null>(null);
+
+  // Command palette
+  const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
+
+  // Overlay panels
+  const [overlayPanel, setOverlayPanel] = useState<string | null>(null);
 
   // Meta-agent
   const [metaProcessing, setMetaProcessing] = useState(false);
@@ -294,7 +315,6 @@ export function CanvasWorkspacePage() {
 
   const onPaneClick = useCallback(() => {
     setContextMenu(null);
-    // Don't close detail panel on pane click — Railway keeps it open
   }, []);
 
   /* ── Node click → open detail panel (Railway-style) ──────── */
@@ -336,7 +356,7 @@ export function CanvasWorkspacePage() {
         },
         connector: {
           name: "New Connector",
-          app: "Select app...",
+          app: "—",
           status: "pending",
           toolCount: 0,
         },
@@ -357,11 +377,38 @@ export function CanvasWorkspacePage() {
 
       setNodes((nds) => [...nds, newNode]);
       addLogEntry(`Added ${type} node`, "done");
-
-      // Auto-open detail panel for new node
       setDetailNode(newNode);
     },
     [setNodes, addLogEntry],
+  );
+
+  /* ── Command palette action handler ─────────────────────── */
+  const handleCommandAction = useCallback(
+    (action: CommandAction) => {
+      // Add to canvas actions
+      if (action === "add-agent") { addNode("agent"); return; }
+      if (action === "add-knowledge") { addNode("knowledge"); return; }
+      if (action === "add-datasource") { addNode("datasource"); return; }
+      if (action === "add-connector") { addNode("connector"); return; }
+      if (action === "add-mcp") { addNode("mcpServer"); return; }
+
+      // Overlay panel actions
+      if (action === "open-workflows") { setOverlayPanel("workflows"); return; }
+      if (action === "open-schedules") { setOverlayPanel("schedules"); return; }
+      if (action === "open-webhooks") { setOverlayPanel("webhooks"); return; }
+      if (action === "open-governance") { setOverlayPanel("governance"); return; }
+      if (action === "open-projects") { setOverlayPanel("projects"); return; }
+      if (action === "open-releases") { setOverlayPanel("releases"); return; }
+      if (action === "open-infrastructure") { setOverlayPanel("infrastructure"); return; }
+
+      // Navigation actions
+      if (action === "open-overview") { navigate("/overview"); return; }
+      if (action === "open-observability") { navigate("/observability"); return; }
+      if (action === "open-metrics") { navigate("/metrics"); return; }
+      if (action === "open-settings") { navigate("/settings"); return; }
+      if (action === "open-billing") { navigate("/billing"); return; }
+    },
+    [addNode, navigate],
   );
 
   /* ── Context menu actions ────────────────────────────────── */
@@ -375,6 +422,8 @@ export function CanvasWorkspacePage() {
         }
         case "chat": {
           addLogEntry("Opening agent chat...", "running");
+          const node = nodes.find((n) => n.id === nodeId);
+          if (node) setDetailNode(node);
           break;
         }
         case "deploy": {
@@ -404,11 +453,20 @@ export function CanvasWorkspacePage() {
           }
           break;
         }
+        // Canvas-level context menu actions
         case "add-agent": addNode("agent"); break;
         case "add-knowledge": addNode("knowledge"); break;
         case "add-datasource": addNode("datasource"); break;
         case "add-connector": addNode("connector"); break;
         case "add-mcp": addNode("mcpServer"); break;
+        // Overlay panels from context menu
+        case "open-workflows": setOverlayPanel("workflows"); break;
+        case "open-schedules": setOverlayPanel("schedules"); break;
+        case "open-webhooks": setOverlayPanel("webhooks"); break;
+        case "open-governance": setOverlayPanel("governance"); break;
+        case "open-projects": setOverlayPanel("projects"); break;
+        case "open-releases": setOverlayPanel("releases"); break;
+        case "open-infrastructure": setOverlayPanel("infrastructure"); break;
         default:
           addLogEntry(`Action: ${action}`, "done");
       }
@@ -537,19 +595,32 @@ export function CanvasWorkspacePage() {
   /* ── Keyboard shortcuts ──────────────────────────────────── */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't capture when typing in inputs
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement ||
         e.target instanceof HTMLSelectElement
       ) return;
 
-      if (e.key === "Escape") {
-        setDetailNode(null);
-        setContextMenu(null);
+      // Cmd+K / Ctrl+K → Command palette
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setCmdPaletteOpen((prev) => !prev);
+        return;
       }
 
+      // Escape → close everything
+      if (e.key === "Escape") {
+        if (cmdPaletteOpen) { setCmdPaletteOpen(false); return; }
+        if (overlayPanel) { setOverlayPanel(null); return; }
+        if (detailNode) { setDetailNode(null); return; }
+        setContextMenu(null);
+        return;
+      }
+
+      // Delete/Backspace → delete selected node
       if (e.key === "Delete" || e.key === "Backspace") {
-        if (detailNode) {
+        if (detailNode && !overlayPanel && !cmdPaletteOpen) {
           handleDeleteNode(detailNode.id);
         }
       }
@@ -557,7 +628,7 @@ export function CanvasWorkspacePage() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [detailNode, handleDeleteNode]);
+  }, [detailNode, handleDeleteNode, cmdPaletteOpen, overlayPanel]);
 
   /* ── Default edge options ────────────────────────────────── */
   const defaultEdgeOptions = useMemo(
@@ -615,7 +686,10 @@ export function CanvasWorkspacePage() {
                   </button>
                 ))}
                 <div className="border-t border-border-default">
-                  <button className="flex items-center gap-2 w-full px-3 py-2 text-xs text-text-muted hover:bg-surface-hover transition-colors">
+                  <button
+                    onClick={() => { setProjectDropdown(false); setOverlayPanel("projects"); }}
+                    className="flex items-center gap-2 w-full px-3 py-2 text-xs text-text-muted hover:bg-surface-hover transition-colors"
+                  >
                     <Plus size={10} /> New Project
                   </button>
                 </div>
@@ -672,7 +746,19 @@ export function CanvasWorkspacePage() {
         {/* Spacer */}
         <div className="flex-1" />
 
-        {/* Right side actions */}
+        {/* Command palette trigger */}
+        <button
+          onClick={() => setCmdPaletteOpen(true)}
+          className="flex items-center gap-2 px-3 py-1.5 text-[11px] text-text-muted bg-surface-base border border-border-default rounded-lg hover:border-accent/30 hover:text-text-secondary transition-colors mr-2"
+        >
+          <Search size={11} />
+          <span>Search or command...</span>
+          <kbd className="text-[9px] px-1 py-0.5 rounded bg-surface-overlay border border-border-default font-mono ml-2">
+            {navigator.platform?.includes("Mac") ? "\u2318" : "Ctrl"}K
+          </kbd>
+        </button>
+
+        {/* Reset */}
         <button
           onClick={() => {
             localStorage.removeItem(LAYOUT_KEY);
@@ -753,7 +839,7 @@ export function CanvasWorkspacePage() {
           />
         </ReactFlow>
 
-        {/* ── Overlays ────────────────────────────────────────── */}
+        {/* ── Canvas overlays ────────────────────────────────── */}
         <AddNodeToolbar onAdd={addNode} />
 
         <AgentLog entries={logEntries} onClear={clearLog} />
@@ -788,6 +874,22 @@ export function CanvasWorkspacePage() {
           />
         )}
       </div>
+
+      {/* ── Command Palette (Cmd+K) ──────────────────────────── */}
+      <CommandPalette
+        open={cmdPaletteOpen}
+        onClose={() => setCmdPaletteOpen(false)}
+        onAction={handleCommandAction}
+      />
+
+      {/* ── Overlay Panels ───────────────────────────────────── */}
+      <WorkflowsPanel open={overlayPanel === "workflows"} onClose={() => setOverlayPanel(null)} />
+      <SchedulesPanel open={overlayPanel === "schedules"} onClose={() => setOverlayPanel(null)} />
+      <WebhooksPanel open={overlayPanel === "webhooks"} onClose={() => setOverlayPanel(null)} />
+      <GovernancePanel open={overlayPanel === "governance"} onClose={() => setOverlayPanel(null)} />
+      <ProjectsPanel open={overlayPanel === "projects"} onClose={() => setOverlayPanel(null)} />
+      <ReleasesPanel open={overlayPanel === "releases"} onClose={() => setOverlayPanel(null)} />
+      <InfrastructurePanel open={overlayPanel === "infrastructure"} onClose={() => setOverlayPanel(null)} />
     </div>
   );
 }

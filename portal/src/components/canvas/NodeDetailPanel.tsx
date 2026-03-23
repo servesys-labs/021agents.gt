@@ -1,4 +1,4 @@
-import { useState, useCallback, type ReactNode } from "react";
+import { useState, useRef, type ReactNode } from "react";
 import {
   X,
   Bot,
@@ -13,25 +13,33 @@ import {
   ShieldCheck,
   FileText,
   Layers,
-  Link2,
-  Cpu,
   Zap,
-  Globe,
   Key,
   BarChart3,
   Play,
   Trash2,
   Copy,
   MoreVertical,
+  MessageSquare,
+  Brain,
+  FlaskConical,
+  Tag,
+  Send,
+  Clock,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  Pause,
+  RotateCcw,
+  Upload,
+  Search,
+  ChevronRight,
+  Cpu,
 } from "lucide-react";
 import type { Node } from "@xyflow/react";
 
 /* ── Tab definition ─────────────────────────────────────────────── */
-type Tab = {
-  id: string;
-  label: string;
-  icon: ReactNode;
-};
+type Tab = { id: string; label: string; icon: ReactNode };
 
 /* ── Props ──────────────────────────────────────────────────────── */
 interface NodeDetailPanelProps {
@@ -50,6 +58,11 @@ const tabsByType: Record<string, Tab[]> = {
     { id: "deployments", label: "Deployments", icon: <Rocket size={13} /> },
     { id: "variables", label: "Variables", icon: <Code size={13} /> },
     { id: "tools", label: "Tools", icon: <Zap size={13} /> },
+    { id: "sessions", label: "Sessions", icon: <Activity size={13} /> },
+    { id: "memory", label: "Memory", icon: <Brain size={13} /> },
+    { id: "chat", label: "Chat", icon: <MessageSquare size={13} /> },
+    { id: "eval", label: "Eval", icon: <FlaskConical size={13} /> },
+    { id: "releases", label: "Releases", icon: <Tag size={13} /> },
     { id: "metrics", label: "Metrics", icon: <BarChart3 size={13} /> },
     { id: "governance", label: "Governance", icon: <ShieldCheck size={13} /> },
     { id: "settings", label: "Settings", icon: <Settings size={13} /> },
@@ -103,24 +116,14 @@ function getNodeTypeLabel(type: string) {
   }
 }
 
-/* ── Status colors ──────────────────────────────────────────────── */
 function getStatusColor(status: string): string {
   switch (status?.toLowerCase()) {
-    case "online":
-    case "live":
-    case "connected":
-    case "authenticated":
-    case "authed":
-    case "healthy":
-    case "ready":
+    case "online": case "live": case "connected": case "authenticated":
+    case "authed": case "healthy": case "ready": case "active": case "passed":
       return "bg-status-live";
-    case "draft":
-    case "pending":
-    case "sleeping":
+    case "draft": case "pending": case "sleeping": case "running": case "in_progress":
       return "bg-yellow-500";
-    case "offline":
-    case "disconnected":
-    case "error":
+    case "offline": case "disconnected": case "error": case "failed": case "terminated":
       return "bg-status-error";
     default:
       return "bg-text-muted";
@@ -131,39 +134,24 @@ function getStatusColor(status: string): string {
    MAIN COMPONENT
    ═══════════════════════════════════════════════════════════════════ */
 export function NodeDetailPanel({
-  node,
-  onClose,
-  onDelete,
-  onClone,
-  onDeploy,
-  onUpdateNode,
+  node, onClose, onDelete, onClone, onDeploy, onUpdateNode,
 }: NodeDetailPanelProps) {
   const [activeTab, setActiveTab] = useState("overview");
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const tabBarRef = useRef<HTMLDivElement>(null);
 
   const nodeType = node?.type || "agent";
   const tabs = tabsByType[nodeType] || tabsByType.agent;
   const data = node?.data || {};
 
-  // Reset tab when node changes
-  const prevNodeId = useState(node?.id)[0];
-  if (node?.id !== prevNodeId) {
-    // Will be set on next render
-  }
-
   if (!node) return null;
 
   return (
     <>
-      {/* Backdrop — click to close */}
       <div className="fixed inset-0 z-30" onClick={onClose} />
-
-      {/* Panel */}
       <div
-        className="fixed top-0 right-0 z-40 h-full w-[520px] max-w-[calc(100vw-80px)] bg-surface-raised border-l border-border-default shadow-2xl flex flex-col animate-slide-in-right"
-        style={{
-          animation: "slideInRight 0.2s ease-out",
-        }}
+        className="fixed top-0 right-0 z-40 h-full w-[560px] max-w-[calc(100vw-80px)] bg-surface-raised border-l border-border-default shadow-2xl flex flex-col"
+        style={{ animation: "slideInRight 0.2s ease-out" }}
       >
         {/* ── Header ──────────────────────────────────────────── */}
         <div className="flex items-center gap-3 px-5 py-4 border-b border-border-default">
@@ -179,18 +167,13 @@ export function NodeDetailPanel({
               <span className="text-[10px] text-text-muted uppercase tracking-wide">
                 {(data as any).status || "unknown"}
               </span>
-              <span className="text-[10px] text-text-muted">
-                {getNodeTypeLabel(nodeType)}
-              </span>
+              <span className="text-[10px] text-text-muted">{getNodeTypeLabel(nodeType)}</span>
             </div>
           </div>
 
           {/* Action menu */}
           <div className="relative">
-            <button
-              onClick={() => setActionMenuOpen(!actionMenuOpen)}
-              className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary transition-colors"
-            >
+            <button onClick={() => setActionMenuOpen(!actionMenuOpen)} className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary transition-colors">
               <MoreVertical size={14} />
             </button>
             {actionMenuOpen && (
@@ -198,26 +181,17 @@ export function NodeDetailPanel({
                 <div className="fixed inset-0 z-50" onClick={() => setActionMenuOpen(false)} />
                 <div className="absolute right-0 top-full mt-1 z-50 w-40 bg-surface-overlay border border-border-default rounded-lg shadow-xl overflow-hidden">
                   {nodeType === "agent" && onDeploy && (
-                    <button
-                      onClick={() => { onDeploy(node.id); setActionMenuOpen(false); }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-xs text-text-secondary hover:bg-surface-hover transition-colors"
-                    >
+                    <button onClick={() => { onDeploy(node.id); setActionMenuOpen(false); }} className="flex items-center gap-2 w-full px-3 py-2 text-xs text-text-secondary hover:bg-surface-hover transition-colors">
                       <Play size={11} /> Deploy
                     </button>
                   )}
                   {onClone && (
-                    <button
-                      onClick={() => { onClone(node.id); setActionMenuOpen(false); }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-xs text-text-secondary hover:bg-surface-hover transition-colors"
-                    >
+                    <button onClick={() => { onClone(node.id); setActionMenuOpen(false); }} className="flex items-center gap-2 w-full px-3 py-2 text-xs text-text-secondary hover:bg-surface-hover transition-colors">
                       <Copy size={11} /> Clone
                     </button>
                   )}
                   {onDelete && (
-                    <button
-                      onClick={() => { onDelete(node.id); setActionMenuOpen(false); }}
-                      className="flex items-center gap-2 w-full px-3 py-2 text-xs text-status-error hover:bg-surface-hover transition-colors"
-                    >
+                    <button onClick={() => { onDelete(node.id); setActionMenuOpen(false); }} className="flex items-center gap-2 w-full px-3 py-2 text-xs text-status-error hover:bg-surface-hover transition-colors">
                       <Trash2 size={11} /> Delete
                     </button>
                   )}
@@ -226,22 +200,18 @@ export function NodeDetailPanel({
             )}
           </div>
 
-          {/* Close */}
-          <button
-            onClick={onClose}
-            className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary transition-colors"
-          >
+          <button onClick={onClose} className="flex items-center justify-center w-7 h-7 rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary transition-colors">
             <X size={14} />
           </button>
         </div>
 
-        {/* ── Tab bar ─────────────────────────────────────────── */}
-        <div className="flex items-center gap-0 px-5 border-b border-border-default overflow-x-auto">
+        {/* ── Tab bar (scrollable) ────────────────────────────── */}
+        <div ref={tabBarRef} className="flex items-center gap-0 px-5 border-b border-border-default overflow-x-auto scrollbar-hide">
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex items-center gap-1.5 px-3 py-2.5 text-[11px] font-medium border-b-2 transition-colors whitespace-nowrap ${
+              className={`flex items-center gap-1.5 px-3 py-2.5 text-[11px] font-medium border-b-2 transition-colors whitespace-nowrap flex-shrink-0 ${
                 activeTab === tab.id
                   ? "border-accent text-accent"
                   : "border-transparent text-text-muted hover:text-text-secondary"
@@ -255,22 +225,17 @@ export function NodeDetailPanel({
 
         {/* ── Tab content ─────────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto p-5">
-          <TabContent
-            nodeType={nodeType}
-            tabId={activeTab}
-            data={data}
-            nodeId={node.id}
-            onUpdateNode={onUpdateNode}
-          />
+          <TabContent nodeType={nodeType} tabId={activeTab} data={data} nodeId={node.id} onUpdateNode={onUpdateNode} />
         </div>
       </div>
 
-      {/* Slide-in animation */}
       <style>{`
         @keyframes slideInRight {
           from { transform: translateX(100%); opacity: 0; }
           to { transform: translateX(0); opacity: 1; }
         }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>
     </>
   );
@@ -279,37 +244,23 @@ export function NodeDetailPanel({
 /* ═══════════════════════════════════════════════════════════════════
    TAB CONTENT ROUTER
    ═══════════════════════════════════════════════════════════════════ */
-function TabContent({
-  nodeType,
-  tabId,
-  data,
-  nodeId,
-  onUpdateNode,
-}: {
-  nodeType: string;
-  tabId: string;
-  data: any;
-  nodeId: string;
+function TabContent({ nodeType, tabId, data, nodeId, onUpdateNode }: {
+  nodeType: string; tabId: string; data: any; nodeId: string;
   onUpdateNode?: (nodeId: string, data: any) => void;
 }) {
   switch (nodeType) {
-    case "agent":
-      return <AgentTabContent tabId={tabId} data={data} nodeId={nodeId} onUpdateNode={onUpdateNode} />;
-    case "knowledge":
-      return <KnowledgeTabContent tabId={tabId} data={data} nodeId={nodeId} />;
-    case "datasource":
-      return <DataSourceTabContent tabId={tabId} data={data} nodeId={nodeId} />;
-    case "connector":
-      return <ConnectorTabContent tabId={tabId} data={data} nodeId={nodeId} />;
-    case "mcpServer":
-      return <McpServerTabContent tabId={tabId} data={data} nodeId={nodeId} />;
-    default:
-      return <EmptyTab message="Unknown node type" />;
+    case "agent": return <AgentTabContent tabId={tabId} data={data} nodeId={nodeId} onUpdateNode={onUpdateNode} />;
+    case "knowledge": return <KnowledgeTabContent tabId={tabId} data={data} nodeId={nodeId} />;
+    case "datasource": return <DataSourceTabContent tabId={tabId} data={data} nodeId={nodeId} />;
+    case "connector": return <ConnectorTabContent tabId={tabId} data={data} nodeId={nodeId} />;
+    case "mcpServer": return <McpServerTabContent tabId={tabId} data={data} nodeId={nodeId} />;
+    default: return <EmptyTab message="Unknown node type" />;
   }
 }
 
-/* ── Shared components ──────────────────────────────────────────── */
-
+/* ═══════════════════════════════════════════════════════════════════
+   SHARED COMPONENTS
+   ═══════════════════════════════════════════════════════════════════ */
 function SectionTitle({ children }: { children: ReactNode }) {
   return <h3 className="text-xs font-semibold text-text-primary mb-3 uppercase tracking-wider">{children}</h3>;
 }
@@ -318,141 +269,91 @@ function InfoRow({ label, value, mono }: { label: string; value: string | ReactN
   return (
     <div className="flex items-start justify-between py-2 border-b border-border-default last:border-0">
       <span className="text-[11px] text-text-muted">{label}</span>
-      <span className={`text-[11px] text-text-primary text-right max-w-[60%] ${mono ? "font-mono" : ""}`}>
-        {value}
-      </span>
+      <span className={`text-[11px] text-text-primary text-right max-w-[60%] ${mono ? "font-mono" : ""}`}>{value}</span>
     </div>
   );
 }
 
 function EmptyTab({ message }: { message: string }) {
+  return <div className="flex items-center justify-center h-32 text-xs text-text-muted">{message}</div>;
+}
+
+function InlineInput({ label, value, onChange, placeholder, type = "text" }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string; type?: string;
+}) {
   return (
-    <div className="flex items-center justify-center h-32 text-xs text-text-muted">
-      {message}
+    <div className="mb-3">
+      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">{label}</label>
+      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors" />
     </div>
   );
 }
 
-function InlineInput({
-  label,
-  value,
-  onChange,
-  placeholder,
-  type = "text",
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  type?: string;
+function InlineTextarea({ label, value, onChange, placeholder, rows = 4 }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string; rows?: number;
 }) {
   return (
     <div className="mb-3">
-      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">
-        {label}
-      </label>
-      <input
-        type={type}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors"
-      />
+      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">{label}</label>
+      <textarea value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} rows={rows}
+        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors font-mono resize-none" />
     </div>
   );
 }
 
-function InlineTextarea({
-  label,
-  value,
-  onChange,
-  placeholder,
-  rows = 4,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  rows?: number;
+function InlineSelect({ label, value, onChange, options }: {
+  label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[];
 }) {
   return (
     <div className="mb-3">
-      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">
-        {label}
-      </label>
-      <textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        placeholder={placeholder}
-        rows={rows}
-        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50 transition-colors font-mono resize-none"
-      />
-    </div>
-  );
-}
-
-function InlineSelect({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <div className="mb-3">
-      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">
-        {label}
-      </label>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary focus:outline-none focus:border-accent/50 transition-colors"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>{o.label}</option>
-        ))}
+      <label className="block text-[10px] font-medium text-text-muted uppercase tracking-wider mb-1">{label}</label>
+      <select value={value} onChange={(e) => onChange(e.target.value)}
+        className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary focus:outline-none focus:border-accent/50 transition-colors">
+        {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </div>
   );
 }
 
-function ToggleRow({ label, description, checked, onChange }: { label: string; description?: string; checked: boolean; onChange: (v: boolean) => void }) {
+function ToggleRow({ label, description, checked, onChange }: {
+  label: string; description?: string; checked: boolean; onChange: (v: boolean) => void;
+}) {
   return (
     <div className="flex items-start justify-between py-3 border-b border-border-default last:border-0">
       <div>
         <p className="text-xs text-text-primary">{label}</p>
         {description && <p className="text-[10px] text-text-muted mt-0.5">{description}</p>}
       </div>
-      <button
-        onClick={() => onChange(!checked)}
-        className={`relative w-8 h-4.5 rounded-full transition-colors flex-shrink-0 ${checked ? "bg-accent" : "bg-surface-overlay"}`}
-        style={{ minWidth: 32, height: 18 }}
-      >
-        <span
-          className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-white transition-transform ${checked ? "translate-x-3.5" : ""}`}
-          style={{ width: 14, height: 14 }}
-        />
+      <button onClick={() => onChange(!checked)}
+        className={`relative rounded-full transition-colors flex-shrink-0 ${checked ? "bg-accent" : "bg-surface-overlay"}`}
+        style={{ minWidth: 32, height: 18 }}>
+        <span className={`absolute top-0.5 left-0.5 rounded-full bg-white transition-transform ${checked ? "translate-x-3.5" : ""}`}
+          style={{ width: 14, height: 14 }} />
       </button>
     </div>
   );
 }
 
+function StatusPill({ status }: { status: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full ${
+      status === "active" || status === "live" || status === "passed" ? "bg-status-live/10 text-status-live" :
+      status === "running" || status === "in_progress" ? "bg-yellow-500/10 text-yellow-500" :
+      status === "failed" || status === "error" || status === "terminated" ? "bg-status-error/10 text-status-error" :
+      "bg-surface-overlay text-text-muted"
+    }`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(status)}`} />
+      {status}
+    </span>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════
-   AGENT TAB CONTENT
+   AGENT TAB CONTENT (12 tabs)
    ═══════════════════════════════════════════════════════════════════ */
-function AgentTabContent({
-  tabId,
-  data,
-  nodeId,
-  onUpdateNode,
-}: {
-  tabId: string;
-  data: any;
-  nodeId: string;
+function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
+  tabId: string; data: any; nodeId: string;
   onUpdateNode?: (nodeId: string, data: any) => void;
 }) {
   const [editName, setEditName] = useState(data.name || "");
@@ -461,12 +362,9 @@ function AgentTabContent({
   const [editTemp, setEditTemp] = useState(data.temperature?.toString() || "0.7");
   const [editMaxTokens, setEditMaxTokens] = useState(data.maxTokens?.toString() || "4096");
 
-  // Variables state
+  // Variables
   const [vars, setVars] = useState<{ key: string; value: string }[]>(
-    data.variables || [
-      { key: "OPENAI_API_KEY", value: "sk-***" },
-      { key: "LOG_LEVEL", value: "info" },
-    ],
+    data.variables || [{ key: "OPENAI_API_KEY", value: "sk-***" }, { key: "LOG_LEVEL", value: "info" }],
   );
   const [newVarKey, setNewVarKey] = useState("");
   const [newVarValue, setNewVarValue] = useState("");
@@ -476,7 +374,20 @@ function AgentTabContent({
   const [requireApproval, setRequireApproval] = useState(data.requireApproval || false);
   const [humanInLoop, setHumanInLoop] = useState(data.humanInLoop || false);
 
+  // Chat
+  const [chatMessages, setChatMessages] = useState<{ role: string; content: string }[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+
+  // Memory
+  const [memoryTab, setMemoryTab] = useState<"facts" | "episodes" | "procedures">("facts");
+  const [newFact, setNewFact] = useState({ key: "", value: "" });
+
+  // Sessions filter
+  const [sessionFilter, setSessionFilter] = useState("all");
+
   switch (tabId) {
+    /* ── Overview ──────────────────────────────────────────── */
     case "overview":
       return (
         <div>
@@ -493,7 +404,6 @@ function AgentTabContent({
             <InfoRow label="Tools" value={`${(data.tools || []).length} configured`} />
             <InfoRow label="Efficiency" value={data.efficiency ? `${data.efficiency}%` : "—"} />
           </div>
-
           <SectionTitle>Recent Activity</SectionTitle>
           <div className="bg-surface-base rounded-lg border border-border-default p-4">
             <div className="flex items-center gap-2 mb-2">
@@ -502,17 +412,14 @@ function AgentTabContent({
             </div>
             <div className="flex items-end gap-0.5 h-8">
               {(data.activity || [0,0,0,0,0,0,0,0,0,0,0,0]).map((v: number, i: number) => (
-                <div
-                  key={i}
-                  className="flex-1 bg-accent/40 rounded-sm min-h-[2px]"
-                  style={{ height: `${Math.max(8, (v / 15) * 100)}%` }}
-                />
+                <div key={i} className="flex-1 bg-accent/40 rounded-sm min-h-[2px]" style={{ height: `${Math.max(8, (v / 15) * 100)}%` }} />
               ))}
             </div>
           </div>
         </div>
       );
 
+    /* ── Deployments ───────────────────────────────────────── */
     case "deployments":
       return (
         <div>
@@ -529,15 +436,17 @@ function AgentTabContent({
                   <p className="text-xs font-medium text-text-primary font-mono">{d.version}</p>
                   <p className="text-[10px] text-text-muted">{d.env} &middot; {d.time}</p>
                 </div>
-                <span className={`text-[10px] px-2 py-0.5 rounded-full ${d.status === "active" ? "bg-status-live/10 text-status-live" : "bg-surface-overlay text-text-muted"}`}>
-                  {d.status}
-                </span>
+                <StatusPill status={d.status} />
               </div>
             ))}
           </div>
+          <button className="mt-3 w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
+            + Deploy New Version
+          </button>
         </div>
       );
 
+    /* ── Variables ─────────────────────────────────────────── */
     case "variables":
       return (
         <div>
@@ -548,44 +457,24 @@ function AgentTabContent({
                 <code className="text-[11px] text-accent font-mono flex-shrink-0">{v.key}</code>
                 <span className="text-[10px] text-text-muted">=</span>
                 <code className="text-[11px] text-text-secondary font-mono truncate flex-1">{v.value}</code>
-                <button
-                  onClick={() => setVars(vars.filter((_, idx) => idx !== i))}
-                  className="text-text-muted hover:text-status-error transition-colors flex-shrink-0"
-                >
+                <button onClick={() => setVars(vars.filter((_, idx) => idx !== i))} className="text-text-muted hover:text-status-error transition-colors flex-shrink-0">
                   <Trash2 size={10} />
                 </button>
               </div>
             ))}
           </div>
           <div className="flex gap-2">
-            <input
-              value={newVarKey}
-              onChange={(e) => setNewVarKey(e.target.value)}
-              placeholder="KEY"
-              className="flex-1 px-2 py-1.5 text-[11px] font-mono bg-surface-base border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
-            />
-            <input
-              value={newVarValue}
-              onChange={(e) => setNewVarValue(e.target.value)}
-              placeholder="value"
-              className="flex-1 px-2 py-1.5 text-[11px] font-mono bg-surface-base border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
-            />
-            <button
-              onClick={() => {
-                if (newVarKey.trim()) {
-                  setVars([...vars, { key: newVarKey.trim(), value: newVarValue }]);
-                  setNewVarKey("");
-                  setNewVarValue("");
-                }
-              }}
-              className="px-3 py-1.5 text-[10px] font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors"
-            >
-              Add
-            </button>
+            <input value={newVarKey} onChange={(e) => setNewVarKey(e.target.value)} placeholder="KEY"
+              className="flex-1 px-2 py-1.5 text-[11px] font-mono bg-surface-base border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+            <input value={newVarValue} onChange={(e) => setNewVarValue(e.target.value)} placeholder="value"
+              className="flex-1 px-2 py-1.5 text-[11px] font-mono bg-surface-base border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+            <button onClick={() => { if (newVarKey.trim()) { setVars([...vars, { key: newVarKey.trim(), value: newVarValue }]); setNewVarKey(""); setNewVarValue(""); } }}
+              className="px-3 py-1.5 text-[10px] font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">Add</button>
           </div>
         </div>
       );
 
+    /* ── Tools ─────────────────────────────────────────────── */
     case "tools":
       return (
         <div>
@@ -594,14 +483,12 @@ function AgentTabContent({
             {(data.tools || []).map((tool: string, i: number) => (
               <div key={i} className="flex items-center gap-2 px-3 py-2 bg-surface-base rounded-lg border border-border-default">
                 <Zap size={11} className="text-accent flex-shrink-0" />
-                <code className="text-[11px] font-mono text-text-primary">{tool}</code>
+                <code className="text-[11px] font-mono text-text-primary flex-1">{tool}</code>
+                <button className="text-text-muted hover:text-status-error transition-colors"><Trash2 size={10} /></button>
               </div>
             ))}
-            {(!data.tools || data.tools.length === 0) && (
-              <EmptyTab message="No tools configured" />
-            )}
+            {(!data.tools || data.tools.length === 0) && <EmptyTab message="No tools configured" />}
           </div>
-
           <SectionTitle>Available Tools</SectionTitle>
           <div className="space-y-1 max-h-48 overflow-y-auto">
             {["web_search", "sandbox_exec", "file_read", "file_write", "send_email", "http_request", "create_chart", "query_database"].map((tool) => (
@@ -615,6 +502,324 @@ function AgentTabContent({
         </div>
       );
 
+    /* ── Sessions (NEW) ───────────────────────────────────── */
+    case "sessions":
+      return (
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <SectionTitle>Agent Sessions</SectionTitle>
+            <div className="flex gap-1">
+              {["all", "active", "completed", "failed"].map((f) => (
+                <button key={f} onClick={() => setSessionFilter(f)}
+                  className={`px-2 py-1 text-[10px] rounded-md transition-colors ${sessionFilter === f ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-surface-overlay"}`}>
+                  {f}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="space-y-2">
+            {[
+              { id: "sess_a1b2", status: "active", turns: 12, started: "5 min ago", tokens: "3.2K", task: "Analyzing Q4 revenue data" },
+              { id: "sess_c3d4", status: "completed", turns: 8, started: "1 hour ago", tokens: "2.1K", task: "Draft weekly report" },
+              { id: "sess_e5f6", status: "completed", turns: 24, started: "3 hours ago", tokens: "8.7K", task: "Customer support ticket #4521" },
+              { id: "sess_g7h8", status: "failed", turns: 3, started: "5 hours ago", tokens: "0.4K", task: "API integration test" },
+              { id: "sess_i9j0", status: "completed", turns: 15, started: "1 day ago", tokens: "5.3K", task: "Code review PR #287" },
+            ].filter((s) => sessionFilter === "all" || s.status === sessionFilter).map((s) => (
+              <div key={s.id} className="bg-surface-base rounded-lg border border-border-default p-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <code className="text-[10px] font-mono text-accent">{s.id}</code>
+                  <StatusPill status={s.status} />
+                  {s.status === "active" && (
+                    <button className="ml-auto text-[9px] text-status-error hover:underline flex items-center gap-1">
+                      <Pause size={9} /> Terminate
+                    </button>
+                  )}
+                </div>
+                <p className="text-[11px] text-text-primary mb-1">{s.task}</p>
+                <div className="flex items-center gap-3 text-[10px] text-text-muted">
+                  <span className="flex items-center gap-1"><MessageSquare size={9} /> {s.turns} turns</span>
+                  <span className="flex items-center gap-1"><Zap size={9} /> {s.tokens} tokens</span>
+                  <span className="flex items-center gap-1"><Clock size={9} /> {s.started}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+
+    /* ── Memory (NEW) ─────────────────────────────────────── */
+    case "memory":
+      return (
+        <div>
+          <div className="flex items-center gap-1 mb-3">
+            {(["facts", "episodes", "procedures"] as const).map((t) => (
+              <button key={t} onClick={() => setMemoryTab(t)}
+                className={`px-3 py-1.5 text-[10px] font-medium rounded-md transition-colors ${memoryTab === t ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-surface-overlay"}`}>
+                {t.charAt(0).toUpperCase() + t.slice(1)}
+              </button>
+            ))}
+          </div>
+
+          {memoryTab === "facts" && (
+            <div>
+              <div className="space-y-1.5 mb-3">
+                {[
+                  { key: "user_preference", value: "Prefers concise responses with bullet points" },
+                  { key: "timezone", value: "America/Chicago (CDT)" },
+                  { key: "role", value: "Senior Product Manager at TechCorp" },
+                  { key: "communication_style", value: "Direct and data-driven" },
+                  { key: "project_context", value: "Working on Q1 2026 product roadmap" },
+                ].map((f) => (
+                  <div key={f.key} className="bg-surface-base rounded-lg border border-border-default p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <code className="text-[10px] font-mono text-accent">{f.key}</code>
+                      <button className="ml-auto text-text-muted hover:text-status-error"><Trash2 size={9} /></button>
+                    </div>
+                    <p className="text-[11px] text-text-secondary">{f.value}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2">
+                <input value={newFact.key} onChange={(e) => setNewFact({ ...newFact, key: e.target.value })} placeholder="key"
+                  className="flex-1 px-2 py-1.5 text-[11px] font-mono bg-surface-base border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+                <input value={newFact.value} onChange={(e) => setNewFact({ ...newFact, value: e.target.value })} placeholder="value"
+                  className="flex-[2] px-2 py-1.5 text-[11px] bg-surface-base border border-border-default rounded-md text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+                <button onClick={() => { if (newFact.key.trim()) setNewFact({ key: "", value: "" }); }}
+                  className="px-3 py-1.5 text-[10px] font-medium bg-accent text-white rounded-md hover:bg-accent/90 transition-colors">Add</button>
+              </div>
+            </div>
+          )}
+
+          {memoryTab === "episodes" && (
+            <div className="space-y-2">
+              {[
+                { id: "ep_1", summary: "Helped user draft product requirements document", turns: 15, time: "2 hours ago" },
+                { id: "ep_2", summary: "Analyzed competitor pricing data from CSV upload", turns: 8, time: "5 hours ago" },
+                { id: "ep_3", summary: "Debugged API integration with Stripe webhooks", turns: 22, time: "1 day ago" },
+              ].map((ep) => (
+                <div key={ep.id} className="bg-surface-base rounded-lg border border-border-default p-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <code className="text-[10px] font-mono text-accent">{ep.id}</code>
+                    <span className="text-[10px] text-text-muted">{ep.time}</span>
+                    <button className="ml-auto text-text-muted hover:text-status-error"><Trash2 size={9} /></button>
+                  </div>
+                  <p className="text-[11px] text-text-primary">{ep.summary}</p>
+                  <span className="text-[10px] text-text-muted">{ep.turns} turns</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {memoryTab === "procedures" && (
+            <div className="space-y-2">
+              {[
+                { name: "weekly_report", description: "Generate weekly status report from Jira + Slack data", successRate: 95 },
+                { name: "code_review", description: "Review PR against team coding standards", successRate: 88 },
+                { name: "customer_response", description: "Draft customer support response using knowledge base", successRate: 92 },
+              ].map((p) => (
+                <div key={p.name} className="bg-surface-base rounded-lg border border-border-default p-3">
+                  <div className="flex items-center gap-2 mb-1">
+                    <code className="text-[10px] font-mono text-accent">{p.name}</code>
+                    <span className="ml-auto text-[10px] text-status-live">{p.successRate}%</span>
+                  </div>
+                  <p className="text-[11px] text-text-secondary">{p.description}</p>
+                  <div className="mt-1.5 h-1 bg-surface-overlay rounded-full overflow-hidden">
+                    <div className="h-full bg-status-live rounded-full" style={{ width: `${p.successRate}%` }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+
+    /* ── Chat (NEW) ───────────────────────────────────────── */
+    case "chat":
+      return (
+        <div className="flex flex-col h-full -m-5">
+          {/* Chat messages */}
+          <div className="flex-1 overflow-y-auto p-5 space-y-3">
+            {chatMessages.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full text-center">
+                <MessageSquare size={24} className="text-text-muted mb-2" />
+                <p className="text-xs text-text-muted mb-1">Chat with {data.name || "this agent"}</p>
+                <p className="text-[10px] text-text-muted">Send a message to start a conversation</p>
+              </div>
+            )}
+            {chatMessages.map((msg, i) => (
+              <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                <div className={`max-w-[85%] rounded-lg px-3 py-2 text-[11px] ${
+                  msg.role === "user"
+                    ? "bg-accent/20 text-text-primary"
+                    : "bg-surface-base border border-border-default text-text-primary"
+                }`}>
+                  {msg.content}
+                </div>
+              </div>
+            ))}
+            {chatLoading && (
+              <div className="flex justify-start">
+                <div className="bg-surface-base border border-border-default rounded-lg px-3 py-2">
+                  <div className="flex gap-1">
+                    <span className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                    <span className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                    <span className="w-1.5 h-1.5 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Chat input */}
+          <div className="border-t border-border-default p-3">
+            <div className="flex gap-2">
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && chatInput.trim() && !chatLoading) {
+                    const userMsg = chatInput.trim();
+                    setChatMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+                    setChatInput("");
+                    setChatLoading(true);
+                    setTimeout(() => {
+                      setChatMessages((prev) => [...prev, {
+                        role: "assistant",
+                        content: `I've processed your request: "${userMsg}". Based on my configuration as ${data.name || "an agent"} using ${data.model || "gpt-4.1-mini"}, here's my response. (This is a demo — connect to the API for live responses.)`
+                      }]);
+                      setChatLoading(false);
+                    }, 1500);
+                  }
+                }}
+                placeholder={`Message ${data.name || "agent"}...`}
+                className="flex-1 px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50"
+              />
+              <button
+                onClick={() => {
+                  if (chatInput.trim() && !chatLoading) {
+                    const userMsg = chatInput.trim();
+                    setChatMessages((prev) => [...prev, { role: "user", content: userMsg }]);
+                    setChatInput("");
+                    setChatLoading(true);
+                    setTimeout(() => {
+                      setChatMessages((prev) => [...prev, {
+                        role: "assistant",
+                        content: `I've processed your request: "${userMsg}". Based on my configuration as ${data.name || "an agent"} using ${data.model || "gpt-4.1-mini"}, here's my response. (This is a demo — connect to the API for live responses.)`
+                      }]);
+                      setChatLoading(false);
+                    }, 1500);
+                  }
+                }}
+                disabled={!chatInput.trim() || chatLoading}
+                className="flex items-center justify-center w-9 h-9 bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors disabled:opacity-40"
+              >
+                <Send size={14} />
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+
+    /* ── Eval (NEW) ───────────────────────────────────────── */
+    case "eval":
+      return (
+        <div>
+          <SectionTitle>Evaluation Runs</SectionTitle>
+          <div className="space-y-2 mb-4">
+            {[
+              { id: "eval_001", taskFile: "support-tasks.jsonl", status: "passed", score: 94, tasks: 50, time: "2 hours ago", latency: "1.2s", cost: "$0.85" },
+              { id: "eval_002", taskFile: "coding-tasks.jsonl", status: "passed", score: 87, tasks: 30, time: "1 day ago", latency: "2.4s", cost: "$1.20" },
+              { id: "eval_003", taskFile: "reasoning-tasks.jsonl", status: "failed", score: 62, tasks: 25, time: "3 days ago", latency: "3.1s", cost: "$0.95" },
+            ].map((ev) => (
+              <div key={ev.id} className="bg-surface-base rounded-lg border border-border-default p-3">
+                <div className="flex items-center gap-2 mb-2">
+                  <code className="text-[10px] font-mono text-accent">{ev.id}</code>
+                  <StatusPill status={ev.status} />
+                  <span className="ml-auto text-[10px] text-text-muted">{ev.time}</span>
+                </div>
+                <p className="text-[11px] text-text-primary mb-2">{ev.taskFile}</p>
+                <div className="grid grid-cols-4 gap-2">
+                  {[
+                    { label: "Score", value: `${ev.score}%` },
+                    { label: "Tasks", value: `${ev.tasks}` },
+                    { label: "Latency", value: ev.latency },
+                    { label: "Cost", value: ev.cost },
+                  ].map((m) => (
+                    <div key={m.label} className="text-center">
+                      <p className="text-[9px] text-text-muted">{m.label}</p>
+                      <p className="text-xs font-semibold text-text-primary">{m.value}</p>
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-2 h-1 bg-surface-overlay rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${ev.score >= 80 ? "bg-status-live" : ev.score >= 60 ? "bg-yellow-500" : "bg-status-error"}`}
+                    style={{ width: `${ev.score}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <SectionTitle>Run New Evaluation</SectionTitle>
+          <div className="bg-surface-base rounded-lg border border-border-default p-4">
+            <InlineSelect label="Task File" value="support-tasks.jsonl" onChange={() => {}}
+              options={[
+                { value: "support-tasks.jsonl", label: "support-tasks.jsonl (50 tasks)" },
+                { value: "coding-tasks.jsonl", label: "coding-tasks.jsonl (30 tasks)" },
+                { value: "reasoning-tasks.jsonl", label: "reasoning-tasks.jsonl (25 tasks)" },
+              ]} />
+            <button className="w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors flex items-center justify-center gap-2">
+              <Play size={12} /> Start Eval Run
+            </button>
+          </div>
+          <button className="mt-3 w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors flex items-center justify-center gap-2">
+            <Upload size={12} /> Upload Task File
+          </button>
+        </div>
+      );
+
+    /* ── Releases (NEW) ───────────────────────────────────── */
+    case "releases":
+      return (
+        <div>
+          <SectionTitle>Release Channels</SectionTitle>
+          <div className="space-y-2 mb-4">
+            {[
+              { name: "production", version: "v1.3.2", traffic: 100, status: "active" },
+              { name: "staging", version: "v1.4.0-rc1", traffic: 100, status: "active" },
+              { name: "canary", version: "v1.4.0-beta", traffic: 5, status: "active" },
+            ].map((ch) => (
+              <div key={ch.name} className="bg-surface-base rounded-lg border border-border-default p-3">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Tag size={11} className="text-accent" />
+                  <span className="text-[11px] font-medium text-text-primary">{ch.name}</span>
+                  <StatusPill status={ch.status} />
+                  <span className="ml-auto text-[10px] font-mono text-text-muted">{ch.version}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
+                    <div className="h-full bg-accent rounded-full" style={{ width: `${ch.traffic}%` }} />
+                  </div>
+                  <span className="text-[10px] text-text-muted">{ch.traffic}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <SectionTitle>Promote</SectionTitle>
+          <div className="bg-surface-base rounded-lg border border-border-default p-4">
+            <InlineSelect label="From" value="staging" onChange={() => {}}
+              options={[{ value: "staging", label: "staging (v1.4.0-rc1)" }, { value: "canary", label: "canary (v1.4.0-beta)" }]} />
+            <InlineSelect label="To" value="production" onChange={() => {}}
+              options={[{ value: "production", label: "production" }, { value: "staging", label: "staging" }]} />
+            <InlineInput label="Traffic %" value="100" onChange={() => {}} type="number" />
+            <button className="w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors flex items-center justify-center gap-2">
+              <Rocket size={12} /> Promote Release
+            </button>
+          </div>
+        </div>
+      );
+
+    /* ── Metrics ──────────────────────────────────────────── */
     case "metrics":
       return (
         <div>
@@ -629,96 +834,52 @@ function AgentTabContent({
               <div key={m.label} className="bg-surface-base rounded-lg border border-border-default p-3">
                 <p className="text-[10px] text-text-muted">{m.label}</p>
                 <p className="text-lg font-semibold text-text-primary mt-0.5">{m.value}</p>
-                <p className={`text-[10px] mt-0.5 ${m.trend.startsWith("-") ? "text-status-live" : "text-yellow-500"}`}>
-                  {m.trend}
-                </p>
+                <p className={`text-[10px] mt-0.5 ${m.trend.startsWith("-") ? "text-status-live" : "text-yellow-500"}`}>{m.trend}</p>
               </div>
             ))}
           </div>
         </div>
       );
 
+    /* ── Governance ────────────────────────────────────────── */
     case "governance":
       return (
         <div>
           <SectionTitle>Governance Rules</SectionTitle>
           <div className="bg-surface-base rounded-lg border border-border-default p-4 space-y-0">
-            <ToggleRow
-              label="Require approval for deployment"
-              description="All deployments must be approved by a team admin"
-              checked={requireApproval}
-              onChange={setRequireApproval}
-            />
-            <ToggleRow
-              label="Human-in-the-loop"
-              description="Agent must get human confirmation for sensitive actions"
-              checked={humanInLoop}
-              onChange={setHumanInLoop}
-            />
+            <ToggleRow label="Require approval for deployment" description="All deployments must be approved by a team admin" checked={requireApproval} onChange={setRequireApproval} />
+            <ToggleRow label="Human-in-the-loop" description="Agent must get human confirmation for sensitive actions" checked={humanInLoop} onChange={setHumanInLoop} />
           </div>
-
           <div className="mt-4">
             <SectionTitle>Budget Limits</SectionTitle>
-            <InlineInput
-              label="Monthly budget ($)"
-              value={budgetLimit}
-              onChange={setBudgetLimit}
-              type="number"
-              placeholder="50"
-            />
+            <InlineInput label="Monthly budget ($)" value={budgetLimit} onChange={setBudgetLimit} type="number" placeholder="50" />
           </div>
         </div>
       );
 
+    /* ── Settings ─────────────────────────────────────────── */
     case "settings":
       return (
         <div>
           <SectionTitle>Agent Settings</SectionTitle>
           <InlineInput label="Name" value={editName} onChange={setEditName} placeholder="Agent name" />
-          <InlineSelect
-            label="Model"
-            value={editModel}
-            onChange={setEditModel}
+          <InlineSelect label="Model" value={editModel} onChange={setEditModel}
             options={[
               { value: "gpt-4.1-mini", label: "gpt-4.1-mini" },
               { value: "gpt-4.1-nano", label: "gpt-4.1-nano" },
               { value: "gpt-4o", label: "gpt-4o" },
               { value: "gemini-2.5-flash", label: "gemini-2.5-flash" },
               { value: "claude-sonnet-4", label: "claude-sonnet-4" },
-            ]}
-          />
-          <InlineTextarea
-            label="System Prompt"
-            value={editSystemPrompt}
-            onChange={setEditSystemPrompt}
-            placeholder="You are a helpful AI assistant..."
-            rows={6}
-          />
+            ]} />
+          <InlineTextarea label="System Prompt" value={editSystemPrompt} onChange={setEditSystemPrompt} placeholder="You are a helpful AI assistant..." rows={6} />
           <InlineInput label="Temperature" value={editTemp} onChange={setEditTemp} type="number" placeholder="0.7" />
           <InlineInput label="Max Tokens" value={editMaxTokens} onChange={setEditMaxTokens} type="number" placeholder="4096" />
-
-          <button
-            onClick={() => {
-              onUpdateNode?.(nodeId, {
-                ...data,
-                name: editName,
-                model: editModel,
-                systemPrompt: editSystemPrompt,
-                temperature: parseFloat(editTemp),
-                maxTokens: parseInt(editMaxTokens),
-              });
-            }}
-            className="mt-4 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors"
-          >
-            Save Changes
-          </button>
-
+          <button onClick={() => { onUpdateNode?.(nodeId, { ...data, name: editName, model: editModel, systemPrompt: editSystemPrompt, temperature: parseFloat(editTemp), maxTokens: parseInt(editMaxTokens) }); }}
+            className="mt-4 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
           <div className="mt-6 pt-4 border-t border-border-default">
             <SectionTitle>Danger Zone</SectionTitle>
             <p className="text-[10px] text-text-muted mb-2">Permanently delete this agent and all associated data.</p>
-            <button className="px-4 py-1.5 text-[10px] font-medium text-status-error border border-status-error/30 rounded-md hover:bg-status-error/10 transition-colors">
-              Delete Agent
-            </button>
+            <button className="px-4 py-1.5 text-[10px] font-medium text-status-error border border-status-error/30 rounded-md hover:bg-status-error/10 transition-colors">Delete Agent</button>
           </div>
         </div>
       );
@@ -742,16 +903,10 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any
             <InfoRow label="Documents" value={`${data.docCount || 0}`} />
             <InfoRow label="Total Size" value={data.totalSize || "—"} />
             <InfoRow label="Chunks" value={`${data.chunkCount || 0}`} />
-            <InfoRow label="Status" value={
-              <span className="flex items-center gap-1.5">
-                <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />
-                {(data.status || "unknown").toUpperCase()}
-              </span>
-            } />
+            <InfoRow label="Status" value={<span className="flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "unknown").toUpperCase()}</span>} />
           </div>
         </div>
       );
-
     case "documents":
       return (
         <div>
@@ -768,25 +923,29 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any
                 <span className="text-[11px] text-text-primary flex-1 truncate font-mono">{doc.name}</span>
                 <span className="text-[10px] text-text-muted">{doc.size}</span>
                 <span className="text-[10px] text-text-muted">{doc.chunks} chunks</span>
+                <button className="text-text-muted hover:text-status-error"><Trash2 size={9} /></button>
               </div>
             ))}
           </div>
-          <button className="w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
-            + Upload Document
+          <button className="w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors flex items-center justify-center gap-2">
+            <Upload size={12} /> Upload Document
           </button>
         </div>
       );
-
     case "chunks":
       return (
         <div>
           <SectionTitle>Chunk Browser</SectionTitle>
+          <div className="mb-3">
+            <input placeholder="Search chunks..." className="w-full px-3 py-2 text-xs bg-surface-base border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
+          </div>
           <div className="space-y-2">
             {[1, 2, 3, 4, 5].map((i) => (
               <div key={i} className="bg-surface-base rounded-lg border border-border-default p-3">
                 <div className="flex items-center gap-2 mb-1.5">
                   <span className="text-[9px] font-mono text-accent bg-accent/10 px-1.5 py-0.5 rounded">chunk-{i}</span>
                   <span className="text-[9px] text-text-muted">score: 0.{90 + i}</span>
+                  <span className="text-[9px] text-text-muted ml-auto">from: api-reference.md</span>
                 </div>
                 <p className="text-[10px] text-text-secondary leading-relaxed line-clamp-3">
                   Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua...
@@ -796,26 +955,22 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           </div>
         </div>
       );
-
     case "settings":
       return (
         <div>
           <SectionTitle>Knowledge Base Settings</SectionTitle>
           <InlineInput label="Name" value={data.name || ""} onChange={() => {}} placeholder="Knowledge base name" />
-          <InlineSelect
-            label="Embedding Model"
-            value="text-embedding-3-small"
-            onChange={() => {}}
-            options={[
-              { value: "text-embedding-3-small", label: "text-embedding-3-small" },
-              { value: "text-embedding-3-large", label: "text-embedding-3-large" },
-            ]}
-          />
+          <InlineSelect label="Embedding Model" value="text-embedding-3-small" onChange={() => {}}
+            options={[{ value: "text-embedding-3-small", label: "text-embedding-3-small" }, { value: "text-embedding-3-large", label: "text-embedding-3-large" }]} />
           <InlineInput label="Chunk Size" value="512" onChange={() => {}} type="number" />
           <InlineInput label="Chunk Overlap" value="50" onChange={() => {}} type="number" />
+          <button className="mt-2 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
+          <div className="mt-6 pt-4 border-t border-border-default">
+            <SectionTitle>Danger Zone</SectionTitle>
+            <button className="px-4 py-1.5 text-[10px] font-medium text-status-error border border-status-error/30 rounded-md hover:bg-status-error/10 transition-colors">Delete Knowledge Base</button>
+          </div>
         </div>
       );
-
     default:
       return <EmptyTab message={`Tab "${tabId}" not implemented`} />;
   }
@@ -833,17 +988,11 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: an
           <div className="bg-surface-base rounded-lg border border-border-default p-4">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="Type" value={(data.type || "postgres").toUpperCase()} mono />
-            <InfoRow label="Status" value={
-              <span className="flex items-center gap-1.5">
-                <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />
-                {(data.status || "unknown").toUpperCase()}
-              </span>
-            } />
+            <InfoRow label="Status" value={<span className="flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "unknown").toUpperCase()}</span>} />
             <InfoRow label="Tables" value={`${data.tableCount || 0}`} />
           </div>
         </div>
       );
-
     case "tables":
       return (
         <div>
@@ -859,23 +1008,16 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: an
           </div>
         </div>
       );
-
     case "queries":
       return (
         <div>
           <SectionTitle>Query Console</SectionTitle>
-          <InlineTextarea
-            label="SQL Query"
-            value="SELECT * FROM users LIMIT 10;"
-            onChange={() => {}}
-            rows={4}
-          />
-          <button className="w-full py-2 text-xs font-medium bg-chart-cyan/20 text-chart-cyan rounded-lg hover:bg-chart-cyan/30 transition-colors">
-            Run Query
+          <InlineTextarea label="SQL Query" value="SELECT * FROM users LIMIT 10;" onChange={() => {}} rows={4} />
+          <button className="w-full py-2 text-xs font-medium bg-chart-cyan/20 text-chart-cyan rounded-lg hover:bg-chart-cyan/30 transition-colors flex items-center justify-center gap-2">
+            <Play size={12} /> Run Query
           </button>
         </div>
       );
-
     case "settings":
       return (
         <div>
@@ -885,12 +1027,13 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: an
           <InlineInput label="Database" value="analytics" onChange={() => {}} />
           <InlineInput label="Username" value="readonly_user" onChange={() => {}} />
           <InlineInput label="Password" value="••••••••" onChange={() => {}} type="password" />
-          <button className="mt-2 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">
-            Test Connection
-          </button>
+          <button className="mt-2 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Test Connection</button>
+          <div className="mt-6 pt-4 border-t border-border-default">
+            <SectionTitle>Danger Zone</SectionTitle>
+            <button className="px-4 py-1.5 text-[10px] font-medium text-status-error border border-status-error/30 rounded-md hover:bg-status-error/10 transition-colors">Delete Data Source</button>
+          </div>
         </div>
       );
-
     default:
       return <EmptyTab message={`Tab "${tabId}" not implemented`} />;
   }
@@ -908,17 +1051,11 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <div className="bg-surface-base rounded-lg border border-border-default p-4">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="App" value={data.app || "—"} />
-            <InfoRow label="Status" value={
-              <span className="flex items-center gap-1.5">
-                <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />
-                {(data.status || "unknown").toUpperCase()}
-              </span>
-            } />
+            <InfoRow label="Status" value={<span className="flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "unknown").toUpperCase()}</span>} />
             <InfoRow label="Tools" value={`${data.toolCount || 0} available`} />
           </div>
         </div>
       );
-
     case "tools":
       return (
         <div>
@@ -933,29 +1070,20 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           </div>
         </div>
       );
-
     case "oauth":
       return (
         <div>
           <SectionTitle>OAuth Configuration</SectionTitle>
           <div className="bg-surface-base rounded-lg border border-border-default p-4 mb-4">
-            <InfoRow label="OAuth Status" value={
-              <span className="flex items-center gap-1.5">
-                <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />
-                {(data.status || "pending").toUpperCase()}
-              </span>
-            } />
+            <InfoRow label="OAuth Status" value={<span className="flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "pending").toUpperCase()}</span>} />
             <InfoRow label="Scopes" value="read, write, admin" />
             <InfoRow label="Token Expires" value="30 days" />
           </div>
           {data.status !== "authenticated" && data.status !== "authed" && (
-            <button className="w-full py-2 text-xs font-medium bg-chart-green/20 text-chart-green rounded-lg hover:bg-chart-green/30 transition-colors">
-              Connect OAuth
-            </button>
+            <button className="w-full py-2 text-xs font-medium bg-chart-green/20 text-chart-green rounded-lg hover:bg-chart-green/30 transition-colors">Connect OAuth</button>
           )}
         </div>
       );
-
     case "settings":
       return (
         <div>
@@ -964,9 +1092,13 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <InlineInput label="Client ID" value="xoxb-***" onChange={() => {}} />
           <InlineInput label="Client Secret" value="••••••••" onChange={() => {}} type="password" />
           <InlineInput label="Redirect URI" value="https://oneshots.co/oauth/callback" onChange={() => {}} />
+          <button className="mt-2 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save Changes</button>
+          <div className="mt-6 pt-4 border-t border-border-default">
+            <SectionTitle>Danger Zone</SectionTitle>
+            <button className="px-4 py-1.5 text-[10px] font-medium text-status-error border border-status-error/30 rounded-md hover:bg-status-error/10 transition-colors">Delete Connector</button>
+          </div>
         </div>
       );
-
     default:
       return <EmptyTab message={`Tab "${tabId}" not implemented`} />;
   }
@@ -984,17 +1116,11 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <div className="bg-surface-base rounded-lg border border-border-default p-4">
             <InfoRow label="Name" value={data.name || "—"} />
             <InfoRow label="URL" value={data.url || "—"} mono />
-            <InfoRow label="Status" value={
-              <span className="flex items-center gap-1.5">
-                <span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />
-                {(data.status || "unknown").toUpperCase()}
-              </span>
-            } />
+            <InfoRow label="Status" value={<span className="flex items-center gap-1.5"><span className={`w-1.5 h-1.5 rounded-full ${getStatusColor(data.status)}`} />{(data.status || "unknown").toUpperCase()}</span>} />
             <InfoRow label="Tools" value={`${data.toolCount || 0} synced`} />
           </div>
         </div>
       );
-
     case "tools":
       return (
         <div>
@@ -1007,12 +1133,11 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any
               </div>
             ))}
           </div>
-          <button className="mt-3 w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-chart-blue/40 hover:text-chart-blue transition-colors">
-            Sync Tools
+          <button className="mt-3 w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-chart-blue/40 hover:text-chart-blue transition-colors flex items-center justify-center gap-2">
+            <RotateCcw size={12} /> Sync Tools
           </button>
         </div>
       );
-
     case "health":
       return (
         <div>
@@ -1030,9 +1155,11 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any
               </div>
             ))}
           </div>
+          <button className="w-full py-2 text-xs font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-chart-blue/40 hover:text-chart-blue transition-colors flex items-center justify-center gap-2">
+            <Activity size={12} /> Run Health Check
+          </button>
         </div>
       );
-
     case "settings":
       return (
         <div>
@@ -1040,22 +1167,15 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: any
           <InlineInput label="Name" value={data.name || ""} onChange={() => {}} />
           <InlineInput label="Server URL" value={data.url || ""} onChange={() => {}} />
           <InlineInput label="API Key" value="••••••••" onChange={() => {}} type="password" />
-          <InlineSelect
-            label="Transport"
-            value="sse"
-            onChange={() => {}}
-            options={[
-              { value: "sse", label: "SSE (Server-Sent Events)" },
-              { value: "stdio", label: "stdio" },
-              { value: "websocket", label: "WebSocket" },
-            ]}
-          />
-          <button className="mt-2 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">
-            Save & Reconnect
-          </button>
+          <InlineSelect label="Transport" value="sse" onChange={() => {}}
+            options={[{ value: "sse", label: "SSE (Server-Sent Events)" }, { value: "stdio", label: "stdio" }, { value: "websocket", label: "WebSocket" }]} />
+          <button className="mt-2 w-full py-2 text-xs font-medium bg-accent text-white rounded-lg hover:bg-accent/90 transition-colors">Save & Reconnect</button>
+          <div className="mt-6 pt-4 border-t border-border-default">
+            <SectionTitle>Danger Zone</SectionTitle>
+            <button className="px-4 py-1.5 text-[10px] font-medium text-status-error border border-status-error/30 rounded-md hover:bg-status-error/10 transition-colors">Delete MCP Server</button>
+          </div>
         </div>
       );
-
     default:
       return <EmptyTab message={`Tab "${tabId}" not implemented`} />;
   }
