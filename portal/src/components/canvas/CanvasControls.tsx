@@ -10,19 +10,23 @@ import {
   Grid3x3,
   Network,
   GitFork,
+  Bot,
+  LayoutGrid,
 } from "lucide-react";
 
 /* ── Railway-style vertical canvas controls ───────────────────
-   Three grouped clusters stacked vertically on the left side:
+   Four grouped clusters stacked vertically on the left side:
    1. Grid toggle
    2. Zoom in / Zoom out / Fit view
    3. Undo / Redo
-   4. Layers (with flyout)
+   4. Layers (with flyout including Agents Only toggle)
    ──────────────────────────────────────────────────────────── */
 
 interface CanvasControlsProps {
   showGrid: boolean;
   onToggleGrid: () => void;
+  agentsOnly: boolean;
+  onToggleAgentsOnly: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -32,6 +36,8 @@ interface CanvasControlsProps {
 export function CanvasControls({
   showGrid,
   onToggleGrid,
+  agentsOnly,
+  onToggleAgentsOnly,
   onUndo,
   onRedo,
   canUndo = false,
@@ -113,8 +119,17 @@ export function CanvasControls({
           <>
             <div className="fixed inset-0 z-20" onClick={() => setLayersOpen(false)} />
             <div
-              className="absolute left-full bottom-0 ml-2 z-30 w-56 glass-dropdown rounded-xl border border-border-default overflow-hidden shadow-lg animate-[fadeIn_0.1s_ease-out]"
+              className="absolute left-full bottom-0 ml-2 z-30 w-60 glass-dropdown rounded-xl border border-border-default overflow-hidden shadow-lg animate-[fadeIn_0.1s_ease-out]"
             >
+              {/* Agents Only toggle */}
+              <LayerToggleItem
+                icon={agentsOnly ? <LayoutGrid size={16} /> : <Bot size={16} />}
+                label={agentsOnly ? "Show All Nodes" : "Agents Only"}
+                description={agentsOnly ? "Restore all nodes and connections" : "Hide everything except agents"}
+                active={agentsOnly}
+                onClick={onToggleAgentsOnly}
+              />
+              <div className="h-px bg-border-default" />
               <LayerItem
                 icon={<Network size={16} />}
                 label="Network Traffic"
@@ -192,6 +207,39 @@ function LayerItem({
         <p className="text-[12px] font-medium text-text-primary">{label}</p>
         <p className="text-[10px] text-text-muted">{description}</p>
       </div>
+    </button>
+  );
+}
+
+/* ── Layer toggle item (with active state indicator) ──────── */
+function LayerToggleItem({
+  icon,
+  label,
+  description,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  description: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-3 w-full px-3.5 py-3 text-left transition-colors ${
+        active ? "bg-accent/10" : "hover:bg-surface-overlay/40"
+      }`}
+    >
+      <span className={`flex-shrink-0 ${active ? "text-accent" : "text-text-muted"}`}>{icon}</span>
+      <div className="min-w-0 flex-1">
+        <p className={`text-[12px] font-medium ${active ? "text-accent" : "text-text-primary"}`}>{label}</p>
+        <p className="text-[10px] text-text-muted">{description}</p>
+      </div>
+      {active && (
+        <span className="w-1.5 h-1.5 rounded-full bg-accent flex-shrink-0" />
+      )}
     </button>
   );
 }

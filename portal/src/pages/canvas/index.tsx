@@ -2,7 +2,6 @@ import { useCallback, useMemo, useState, useRef, useEffect } from "react";
 import {
   ReactFlow,
   ReactFlowProvider,
-  Background,
   addEdge,
   useNodesState,
   useEdgesState,
@@ -11,7 +10,6 @@ import {
   type Edge,
   type Node,
   type NodeMouseHandler,
-  BackgroundVariant,
   MarkerType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -26,6 +24,8 @@ import { MetaAgentAssist } from "../../components/canvas/MetaAgentAssist";
 import { AgentLog, type LogEntry } from "../../components/canvas/AgentLog";
 import { AddNodeToolbar } from "../../components/canvas/AddNodeToolbar";
 import { CanvasControls } from "../../components/canvas/CanvasControls";
+import { CanvasGlow } from "../../components/canvas/CanvasGlow"; // mouse glow effect
+import { AlignmentGuides } from "../../components/canvas/AlignmentGuides";
 import { NodeDetailPanel } from "../../components/canvas/NodeDetailPanel";
 import { CommandPalette, type CommandAction } from "../../components/canvas/CommandPalette";
 import { CanvasOverlayPanel } from "../../components/canvas/CanvasOverlayPanel";
@@ -39,6 +39,7 @@ import {
   InfrastructurePanel,
 } from "../../components/canvas/OverlayPanels";
 import { apiRequest } from "../../lib/api";
+import { useUndoRedo } from "../../hooks/useUndoRedo";
 import {
   RotateCcw,
   ChevronDown,
@@ -61,6 +62,11 @@ const nodeTypes = {
   connector: ConnectorNode,
   mcpServer: McpServerNode,
 };
+
+/* ── Static ReactFlow options (defined outside component to avoid re-renders) ── */
+const FIT_VIEW_OPTIONS = { padding: 0.2 };
+const PRO_OPTIONS = { hideAttribution: true };
+const SNAP_GRID: [number, number] = [20, 20];
 
 /* ── Layout persistence ──────────────────────────────────────── */
 const LAYOUT_KEY = "oneshots-canvas-layout";
@@ -276,6 +282,30 @@ function CanvasWorkspaceInner() {
 
   // Grid visibility
   const [showGrid, setShowGrid] = useState(true);
+  const [agentsOnly, setAgentsOnly] = useState(false);
+
+  // Undo/redo for node positions
+  const { takeSnapshot, undo, redo, canUndo, canRedo } = useUndoRedo();
+
+  /* ── Derived display nodes/edges using `hidden` property (best practice) ── */
+  const displayNodes = useMemo(
+    () =>
+      agentsOnly
+        ? nodes.map((n) =>
+            n.type === 'agent'
+              ? { ...n, hidden: false, data: { ...n.data, hideHandles: true } }
+              : { ...n, hidden: true }
+          )
+        : nodes.map((n) =>
+            n.data?.hideHandles ? { ...n, data: { ...n.data, hideHandles: false } } : n
+          ),
+    [nodes, agentsOnly],
+  );
+
+  const displayEdges = useMemo(
+    () => (agentsOnly ? edges.map((e) => ({ ...e, hidden: true })) : edges),
+    [edges, agentsOnly],
+  );
 
   /* ── Log helper ──────────────────────────────────────────── */
   const addLogEntry = useCallback((message: string, status: LogEntry["status"]) => {
@@ -625,6 +655,14 @@ function CanvasWorkspaceInner() {
     [setNodes, addLogEntry],
   );
 
+  /* ── Snapshot before drag starts (for undo) ─────────────── */
+  const onNodeDragStart = useCallback(
+    () => {
+      takeSnapshot(nodes);
+    },
+    [nodes, takeSnapshot],
+  );
+
   /* ── Save layout on drag stop ────────────────────────────── */
   const onNodeDragStop = useCallback(
     (_: React.MouseEvent, __: Node, allNodes: Node[]) => {
@@ -632,6 +670,15 @@ function CanvasWorkspaceInner() {
     },
     [edges],
   );
+
+  /* ── Undo / Redo handlers ───────────────────────────────── */
+  const handleUndo = useCallback(() => {
+    undo(nodes, setNodes);
+  }, [nodes, setNodes, undo]);
+
+  const handleRedo = useCallback(() => {
+    redo(nodes, setNodes);
+  }, [nodes, setNodes, redo]);
 
   /* ── Keyboard shortcuts ──────────────────────────────────── */
   useEffect(() => {
@@ -647,6 +694,20 @@ function CanvasWorkspaceInner() {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
         setCmdPaletteOpen((prev) => !prev);
+        return;
+      }
+
+      // Cmd+Z / Ctrl+Z → Undo
+      if ((e.metaKey || e.ctrlKey) && e.key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        handleUndo();
+        return;
+      }
+
+      // Cmd+Shift+Z / Ctrl+Shift+Z or Ctrl+Y → Redo
+      if ((e.metaKey || e.ctrlKey) && (e.key === "Z" || e.key === "y")) {
+        e.preventDefault();
+        handleRedo();
         return;
       }
 
@@ -669,7 +730,7 @@ function CanvasWorkspaceInner() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [detailNode, handleDeleteNode, cmdPaletteOpen, overlayPanel]);
+  }, [detailNode, handleDeleteNode, cmdPaletteOpen, overlayPanel, handleUndo, handleRedo]);
 
   /* ── Default edge options ────────────────────────────────── */
   const defaultEdgeOptions = useMemo(
@@ -840,10 +901,10 @@ function CanvasWorkspaceInner() {
       {/* ── Canvas area ─────────────────────────────────────── */}
       <div className="flex-1 flex overflow-hidden min-h-0 relative">
         {/* React Flow canvas — shrinks when detail panel opens */}
-        <div className="flex-1 relative" style={{ transition: 'width 0.3s ease' }}>
+        <div className="flex-1 relative bg-surface-base" style={{ transition: 'width 0.3s ease' }}>
         <ReactFlow
-          nodes={nodes}
-          edges={edges}
+          nodes={displayNodes}
+          edges={displayEdges}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
@@ -851,33 +912,37 @@ function CanvasWorkspaceInner() {
           onPaneContextMenu={onPaneContextMenu}
           onPaneClick={onPaneClick}
           onNodeClick={onNodeClick}
+          onNodeDragStart={onNodeDragStart}
           onNodeDragStop={onNodeDragStop}
           nodeTypes={nodeTypes}
           defaultEdgeOptions={defaultEdgeOptions}
           fitView
-          fitViewOptions={{ padding: 0.2 }}
-          proOptions={{ hideAttribution: true }}
-          className="!bg-surface-base"
+          fitViewOptions={FIT_VIEW_OPTIONS}
+          proOptions={PRO_OPTIONS}
+          className=""
           minZoom={0.2}
           maxZoom={2}
           snapToGrid
-          snapGrid={[20, 20]}
+          snapGrid={SNAP_GRID}
         >
-          {showGrid && (
-            <Background
-              variant={BackgroundVariant.Dots}
-              gap={14}
-              size={1.5}
-              color="rgba(168, 162, 158, 0.35)"
-            />
-          )}
+          {/* Alignment guide lines shown during node drag */}
+          <AlignmentGuides />
 
         </ReactFlow>
 
-        {/* ── Canvas overlays ────────────────────────────────── */}
+        {/* Mouse cursor glow effect on dots */}
+        <CanvasGlow visible={showGrid} />
+
+        {/* ── Canvas overlays ────────────────────────────────────────────────── */}
         <CanvasControls
           showGrid={showGrid}
           onToggleGrid={() => setShowGrid(!showGrid)}
+          agentsOnly={agentsOnly}
+          onToggleAgentsOnly={() => setAgentsOnly(!agentsOnly)}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
+          canUndo={canUndo}
+          canRedo={canRedo}
         />
 
         <AddNodeToolbar onAdd={addNode} />
@@ -899,7 +964,7 @@ function CanvasWorkspaceInner() {
 
         {/* Railway-style Node Detail Panel — absolute overlay for glassmorphic refraction */}
         {detailNode && (
-          <div className="absolute top-0 right-0 h-full z-40" style={{ width: '50%', minWidth: 420, maxWidth: 720 }}>
+          <div className="absolute top-0 h-full z-40" style={{ right: agentRailOpen ? 380 : 0, width: '50%', minWidth: 420, maxWidth: 720, transition: 'right 0.3s ease' }}>
             <NodeDetailPanel
               node={detailNode}
               onClose={() => {
@@ -915,13 +980,15 @@ function CanvasWorkspaceInner() {
           </div>
         )}
 
-        {/* Railway-style Agent rail — inline right panel */}
+        {/* Railway-style Agent rail — absolute right overlay, always on top */}
         {agentRailOpen && (
-          <MetaAgentAssist
-            onSubmit={handleMetaSubmit}
-            isProcessing={metaProcessing}
-            lastResult={metaResult}
-          />
+          <div className="absolute top-0 right-0 h-full z-50" style={{ width: 380 }}>
+            <MetaAgentAssist
+              onSubmit={handleMetaSubmit}
+              isProcessing={metaProcessing}
+              lastResult={metaResult}
+            />
+          </div>
         )}
       </div>
 

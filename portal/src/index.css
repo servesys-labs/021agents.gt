@@ -312,19 +312,26 @@ textarea::placeholder {
    React Flow Canvas Overrides
    ============================================ */
 
-/* Canvas background */
+/* Canvas background — transparent so CanvasGlow dots show through */
 .react-flow {
-  background-color: var(--color-surface-base) !important;
+  background-color: transparent !important;
 }
 
 /* Dot grid pattern */
 .react-flow__background {
-  background-color: var(--color-surface-base) !important;
+  background-color: transparent !important;
 }
 
-.react-flow__background-pattern {
-  fill: var(--color-surface-overlay) !important;
+/* Interactive dot grid canvas — behind ReactFlow nodes */
+.canvas-dot-grid {
+  z-index: 0 !important;
+  position: absolute !important;
+  inset: 0 !important;
+  pointer-events: none !important;
 }
+
+/* Let inline Background component colors take effect */
+/* .react-flow__background-pattern { fill controlled by component props } */
 
 /* Edges */
 .react-flow__edge-path {
