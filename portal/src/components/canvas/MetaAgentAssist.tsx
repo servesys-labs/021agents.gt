@@ -33,14 +33,14 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
   // Add result to history
   useEffect(() => {
     if (lastResult) {
-      setHistory((prev) => [...prev, { role: "assistant", text: lastResult }]);
+      setHistory((prev) => [...prev, { role: "assistant", text: lastResult }].slice(-100));
     }
   }, [lastResult]);
 
   const handleSubmit = (text?: string) => {
     const trimmed = (text || input).trim();
     if (!trimmed || isProcessing) return;
-    setHistory((prev) => [...prev, { role: "user", text: trimmed }]);
+    setHistory((prev) => [...prev, { role: "user", text: trimmed }].slice(-100));
     onSubmit(trimmed);
     setInput("");
   };

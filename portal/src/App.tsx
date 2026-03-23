@@ -65,7 +65,7 @@ function App() {
         >
           <Suspense
             fallback={
-              <div className="flex items-center justify-center min-h-screen bg-[#0d0d0d] text-gray-500 text-sm">
+              <div className="flex items-center justify-center min-h-screen bg-surface-base text-text-muted text-sm">
                 Loading...
               </div>
             }

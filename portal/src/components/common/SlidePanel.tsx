@@ -21,18 +21,27 @@ export function SlidePanel({
   footer,
 }: SlidePanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    if (!isOpen) return;
+
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    if (isOpen) {
-      document.addEventListener("keydown", handleEsc);
-      document.body.style.overflow = "hidden";
-    }
+
+    document.addEventListener("keydown", handleEsc);
+
+    // Save previous overflow and restore on cleanup (handles nesting)
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    // Focus the close button on open
+    closeRef.current?.focus();
+
     return () => {
       document.removeEventListener("keydown", handleEsc);
-      document.body.style.overflow = "";
+      document.body.style.overflow = prevOverflow;
     };
   }, [isOpen, onClose]);
 
@@ -44,6 +53,7 @@ export function SlidePanel({
       <div
         className="fixed inset-0 z-40 glass-backdrop"
         onClick={onClose}
+        aria-hidden="true"
       />
 
       {/* Panel */}
@@ -55,6 +65,9 @@ export function SlidePanel({
           maxWidth: "90vw",
           animation: "slide-in-right 0.2s ease-out",
         }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
       >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border-default">
@@ -65,8 +78,10 @@ export function SlidePanel({
             )}
           </div>
           <button
+            ref={closeRef}
             onClick={onClose}
-            className="p-1.5 rounded-md text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors"
+            className="p-2 min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-md text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors flex items-center justify-center"
+            aria-label="Close panel"
           >
             <X size={16} />
           </button>

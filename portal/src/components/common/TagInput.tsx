@@ -1,4 +1,4 @@
-import { useState, useRef, type KeyboardEvent } from "react";
+import { useState, useRef, useId, type KeyboardEvent } from "react";
 import { X } from "lucide-react";
 
 interface TagInputProps {
@@ -21,7 +21,9 @@ export function TagInput({
   const currentTags = value ?? tags ?? [];
   const [input, setInput] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listboxId = useId();
 
   const addTag = (tag: string) => {
     const trimmed = tag.trim().toLowerCase();
@@ -30,25 +32,41 @@ export function TagInput({
     onChange([...currentTags, trimmed]);
     setInput("");
     setShowSuggestions(false);
+    setActiveSuggestion(-1);
   };
 
   const removeTag = (tag: string) => {
     onChange(currentTags.filter((t) => t !== tag));
   };
 
-  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" || e.key === ",") {
-      e.preventDefault();
-      addTag(input);
-    } else if (e.key === "Backspace" && !input && currentTags.length > 0) {
-      removeTag(currentTags[currentTags.length - 1]);
-    }
-  };
-
   const filtered = suggestions.filter(
     (s) =>
       s.toLowerCase().includes(input.toLowerCase()) && !currentTags.includes(s),
-  );
+  ).slice(0, 10);
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" || e.key === ",") {
+      e.preventDefault();
+      if (activeSuggestion >= 0 && filtered[activeSuggestion]) {
+        addTag(filtered[activeSuggestion]);
+      } else {
+        addTag(input);
+      }
+    } else if (e.key === "Backspace" && !input && currentTags.length > 0) {
+      removeTag(currentTags[currentTags.length - 1]);
+    } else if (e.key === "ArrowDown" && showSuggestions && filtered.length > 0) {
+      e.preventDefault();
+      setActiveSuggestion((prev) => (prev + 1) % filtered.length);
+    } else if (e.key === "ArrowUp" && showSuggestions && filtered.length > 0) {
+      e.preventDefault();
+      setActiveSuggestion((prev) => (prev - 1 + filtered.length) % filtered.length);
+    } else if (e.key === "Escape") {
+      setShowSuggestions(false);
+      setActiveSuggestion(-1);
+    }
+  };
+
+  const isExpanded = showSuggestions && input.length > 0 && filtered.length > 0;
 
   return (
     <div className="relative">
@@ -67,7 +85,8 @@ export function TagInput({
                 e.stopPropagation();
                 removeTag(tag);
               }}
-              className="text-text-muted hover:text-text-primary transition-colors"
+              className="p-1 min-w-[24px] min-h-[24px] flex items-center justify-center text-text-muted hover:text-text-primary transition-colors"
+              aria-label={`Remove tag ${tag}`}
             >
               <X size={10} />
             </button>
@@ -79,23 +98,40 @@ export function TagInput({
           onChange={(e) => {
             setInput(e.target.value);
             setShowSuggestions(true);
+            setActiveSuggestion(-1);
           }}
           onKeyDown={handleKeyDown}
           onFocus={() => setShowSuggestions(true)}
-          onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+          onBlur={() => setTimeout(() => { setShowSuggestions(false); setActiveSuggestion(-1); }, 200)}
           placeholder={currentTags.length === 0 ? placeholder : ""}
           className="flex-1 min-w-[80px] bg-transparent border-none outline-none text-sm text-text-primary placeholder:text-text-muted p-0"
           style={{ boxShadow: "none" }}
+          role="combobox"
+          aria-expanded={isExpanded}
+          aria-controls={isExpanded ? listboxId : undefined}
+          aria-activedescendant={activeSuggestion >= 0 ? `${listboxId}-${activeSuggestion}` : undefined}
+          aria-autocomplete="list"
         />
       </div>
 
       {/* Suggestions dropdown */}
-      {showSuggestions && input && filtered.length > 0 && (
-        <div className="absolute z-10 mt-1 w-full max-h-40 overflow-y-auto glass-dropdown border border-border-default rounded-md">
-          {filtered.slice(0, 10).map((suggestion) => (
+      {isExpanded && (
+        <div
+          id={listboxId}
+          role="listbox"
+          className="absolute z-10 mt-1 w-full max-h-40 overflow-y-auto glass-dropdown border border-border-default rounded-md"
+        >
+          {filtered.map((suggestion, i) => (
             <button
               key={suggestion}
-              className="w-full text-left px-3 py-1.5 text-xs text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors"
+              id={`${listboxId}-${i}`}
+              role="option"
+              aria-selected={i === activeSuggestion}
+              className={`w-full text-left px-3 py-2 min-h-[var(--touch-target-min)] text-xs transition-colors ${
+                i === activeSuggestion
+                  ? "bg-surface-overlay text-text-primary"
+                  : "text-text-secondary hover:bg-surface-overlay hover:text-text-primary"
+              }`}
               onMouseDown={(e) => {
                 e.preventDefault();
                 addTag(suggestion);

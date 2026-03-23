@@ -48,7 +48,7 @@ async def test_workflow_run_with_no_steps_returns_input(monkeypatch):
 
     monkeypatch.setattr(workflows, "_get_db", lambda: _DB())
     user = CurrentUser(user_id="u1", email="u1@example.com", org_id="o1")
-    out = await workflows.run_workflow("wf-empty", input_text="hello", user=user)
+    out = await workflows.run_workflow("wf-empty", request=workflows.RunWorkflowRequest(input_text="hello"), user=user)
     assert out["status"] == "completed"
     assert out["final_output"] == "hello"
     assert out["run_metadata"]["execution_mode"] == "sequential"
@@ -126,7 +126,7 @@ async def test_secrets_are_not_stored_in_plaintext(monkeypatch):
     await secrets.create_secret(name="API_KEY", value="plain-text", user=user)
     assert db.conn.inserted_value
     assert db.conn.inserted_value != "plain-text"
-    assert db.conn.inserted_value.startswith("fernet:v1:") or db.conn.inserted_value != "plain-text"
+    assert db.conn.inserted_value.startswith("fernet:v1:")
 
 
 def test_secret_codec_round_trip_current_format(monkeypatch):

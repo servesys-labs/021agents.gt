@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Any
 from typing import Literal
 from pydantic import HttpUrl
@@ -25,13 +25,13 @@ class PaginatedResponse(BaseModel):
 # ── Auth ────────────────────────────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
 
 
 class SignupRequest(BaseModel):
-    email: str
-    password: str
+    email: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=8, max_length=128)
     name: str = ""
 
 
@@ -100,7 +100,7 @@ class ApiKeyCreatedResponse(ApiKeyResponse):
 # ── Agents ──────────────────────────────────────────────────────────────
 
 class AgentRunRequest(BaseModel):
-    task: str = Field(..., description="Task to execute")
+    task: str = Field(..., description="Task to execute", max_length=50000)
     plan: str = Field("", description="LLM plan override")
     stream: bool = Field(False, description="Stream response via SSE")
     model: str = Field("", description="Model override for this run")
@@ -116,8 +116,8 @@ class AgentCreateRequest(BaseModel):
     system_prompt: str = "You are a helpful AI assistant."
     model: str = ""
     tools: list[str] = []
-    max_turns: int = 50
-    budget_limit_usd: float = 10.0
+    max_turns: int = Field(50, le=1000)
+    budget_limit_usd: float = Field(10.0, le=10000)
     tags: list[str] = []
 
 
@@ -192,7 +192,7 @@ class WebhookResponse(BaseModel):
 
 class CreateScheduleRequest(BaseModel):
     agent_name: str
-    cron: str
+    cron: str = Field(..., min_length=9)  # shortest valid cron e.g. "* * * * *"
     task: str
 
 
@@ -226,8 +226,15 @@ class UsageResponse(BaseModel):
 
 class RunEvalRequest(BaseModel):
     agent_name: str
-    eval_file: str
+    eval_file: str = Field(..., description="Eval file path (no path traversal allowed)")
     trials: int = 3
+
+    @field_validator("eval_file")
+    @classmethod
+    def _no_path_traversal(cls, v: str) -> str:
+        if ".." in v:
+            raise ValueError("eval_file must not contain '..' (path traversal)")
+        return v
 
 
 class EvalRunResponse(BaseModel):

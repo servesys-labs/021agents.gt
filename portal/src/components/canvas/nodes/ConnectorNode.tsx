@@ -1,6 +1,7 @@
 import { memo } from "react";
-import { Handle, Position, useNodeConnections, type NodeProps } from "@xyflow/react";
+import { type NodeProps } from "@xyflow/react";
 import { Plug, Zap, Shield } from "lucide-react";
+import { BaseNode } from "./BaseNode";
 
 export type ConnectorNodeData = {
   name: string;
@@ -20,58 +21,31 @@ export const ConnectorNode = memo(({ data, selected }: NodeProps & { data: Conne
   const status = nodeData.status || "pending";
   const cfg = statusConfig[status] || statusConfig.pending;
 
-  const sourceConns = useNodeConnections({ handleType: "source" });
-  const targetConns = useNodeConnections({ handleType: "target" });
-  const hasSource = sourceConns.length > 0;
-  const hasTarget = targetConns.length > 0;
-
   return (
-    <div
-      className={`
-        relative min-w-[190px] max-w-[220px] rounded-xl border transition-all duration-200
-        ${selected
-          ? "border-chart-green shadow-[0_0_20px_rgba(34,197,94,0.2)]"
-          : "border-border-default hover:border-border-strong"
-        }
-      `}
-      style={{ background: 'rgba(28, 25, 23, 0.45)', backdropFilter: 'blur(40px) saturate(1.8)', WebkitBackdropFilter: 'blur(40px) saturate(1.8)' }}
+    <BaseNode
+      accentColor="chart-green"
+      selectedShadow="shadow-[var(--shadow-node)]"
+      stripColor="bg-chart-green"
+      selected={selected}
     >
-      <Handle
-        type="target"
-        position={Position.Left}
-        className={`!w-2.5 !h-2.5 !border-2 !border-chart-green !-left-[5px] transition-all ${
-          hasTarget ? "!bg-surface-overlay hover:!bg-chart-green !opacity-100" : "!opacity-0 !pointer-events-none"
-        }`}
-      />
-      <Handle
-        type="source"
-        position={Position.Right}
-        className={`!w-2.5 !h-2.5 !border-2 !border-chart-green !-right-[5px] transition-all ${
-          hasSource ? "!bg-surface-overlay hover:!bg-chart-green !opacity-100" : "!opacity-0 !pointer-events-none"
-        }`}
-      />
-
-      {/* Green accent strip */}
-      <div className="absolute top-0 left-4 right-4 h-[2px] rounded-b bg-chart-green opacity-60" />
-
       <div className="px-3.5 py-3 flex items-start gap-2.5">
-        <div className="w-8 h-8 rounded-lg bg-[rgba(34,197,94,0.1)] flex items-center justify-center flex-shrink-0">
+        <div className="w-8 h-8 rounded-lg bg-node-glow-green-strong flex items-center justify-center flex-shrink-0">
           <Plug size={15} className="text-chart-green" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-text-primary leading-tight truncate">
+          <div className="text-[length:var(--text-base)] font-semibold text-text-primary leading-tight truncate">
             {nodeData.name}
           </div>
-          <div className="text-[10px] text-text-muted mt-0.5">{nodeData.app}</div>
+          <div className="text-[length:var(--text-2xs)] text-text-muted mt-0.5">{nodeData.app}</div>
           <div className="flex items-center gap-2 mt-1.5">
             <div className="flex items-center gap-1">
               <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
-              <span className="text-[10px] text-text-muted">{cfg.label}</span>
+              <span className="text-[length:var(--text-2xs)] text-text-muted">{cfg.label}</span>
             </div>
             {nodeData.toolCount > 0 && (
               <div className="flex items-center gap-1">
                 <Zap size={9} className="text-text-muted" />
-                <span className="text-[10px] text-text-muted">{nodeData.toolCount} tools</span>
+                <span className="text-[length:var(--text-2xs)] text-text-muted">{nodeData.toolCount} tools</span>
               </div>
             )}
           </div>
@@ -82,7 +56,10 @@ export const ConnectorNode = memo(({ data, selected }: NodeProps & { data: Conne
       {status === "pending" && (
         <div className="px-3.5 pb-2.5">
           <button
-            className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-[rgba(34,197,94,0.08)] border border-[rgba(34,197,94,0.2)] text-[10px] text-chart-green hover:bg-[rgba(34,197,94,0.15)] transition-colors"
+            className="flex items-center gap-1.5 px-2 py-1 min-h-[var(--touch-target-min)] rounded-md bg-node-glow-green border border-node-glow-green-border text-[length:var(--text-2xs)] text-chart-green transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            disabled
+            title="Coming soon"
+            aria-label="Connect OAuth — coming soon"
             onClick={(e) => e.stopPropagation()}
           >
             <Shield size={10} />
@@ -90,7 +67,7 @@ export const ConnectorNode = memo(({ data, selected }: NodeProps & { data: Conne
           </button>
         </div>
       )}
-    </div>
+    </BaseNode>
   );
 });
 

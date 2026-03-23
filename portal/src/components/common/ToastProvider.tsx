@@ -6,7 +6,7 @@ import { CheckCircle2, AlertCircle, Info, X } from "lucide-react";
 type ToastTone = "success" | "error" | "info";
 
 type ToastItem = {
-  id: number;
+  id: string;
   message: string;
   tone: ToastTone;
 };
@@ -27,14 +27,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
 
   const showToast = useCallback((message: string, tone: ToastTone = "info") => {
-    const id = Date.now() + Math.floor(Math.random() * 1000);
+    const id = crypto.randomUUID();
     setItems((prev) => [...prev, { id, message, tone }]);
     window.setTimeout(() => {
       setItems((prev) => prev.filter((item) => item.id !== id));
     }, 3200);
   }, []);
 
-  const dismiss = useCallback((id: number) => {
+  const dismiss = useCallback((id: string) => {
     setItems((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
@@ -43,7 +43,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div className="fixed bottom-10 right-4 z-[60] flex max-w-sm flex-col gap-2">
+      <div
+        className="fixed bottom-10 right-4 z-[60] flex max-w-sm flex-col gap-2"
+        role="status"
+        aria-live="polite"
+        aria-label="Notifications"
+      >
         {items.map((item) => {
           const cfg = toneConfig[item.tone];
           const Icon = cfg.icon;
@@ -52,11 +57,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
               key={item.id}
               className={`flex items-start gap-2.5 rounded-lg ${cfg.bg} border ${cfg.border} px-3 py-2.5 backdrop-blur-xl backdrop-saturate-150 animate-[slideIn_0.2s_ease-out]`}
             >
-              <Icon size={16} className={`${cfg.color} mt-0.5 flex-shrink-0`} />
+              <Icon size={16} className={`${cfg.color} mt-0.5 flex-shrink-0`} aria-hidden="true" />
               <p className="text-sm text-text-primary flex-1">{item.message}</p>
               <button
                 onClick={() => dismiss(item.id)}
-                className="text-text-muted hover:text-text-secondary transition-colors flex-shrink-0"
+                className="text-text-muted hover:text-text-secondary transition-colors flex-shrink-0 p-1 min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
+                aria-label="Dismiss notification"
               >
                 <X size={14} />
               </button>

@@ -16,3 +16,26 @@ export function clearAuthSession(): void {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(USER_KEY);
 }
+
+type StoredUser = {
+  role?: string;
+  org_role?: string;
+  is_admin?: boolean;
+};
+
+export function getStoredUser(): StoredUser | null {
+  const raw = localStorage.getItem(USER_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as StoredUser;
+  } catch {
+    return null;
+  }
+}
+
+export function getStoredUserRole(): string {
+  const user = getStoredUser();
+  if (!user) return "member";
+  if (user.is_admin) return "admin";
+  return (user.org_role ?? user.role ?? "member").toString().toLowerCase();
+}

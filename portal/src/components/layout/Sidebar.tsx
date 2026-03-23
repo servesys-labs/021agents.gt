@@ -76,13 +76,14 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
         </Link>
 
         {/* Top nav icons */}
-        <nav className="flex flex-col items-center gap-1 flex-1">
+        <nav className="flex flex-col items-center gap-1 flex-1" aria-label="Main navigation">
           {topNav.map((item) => (
             <Link
               key={item.path}
               to={item.path}
-              title={item.label}
-              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all ${
+              aria-label={item.label}
+              aria-current={isActive(item.path) ? "page" : undefined}
+              className={`flex items-center justify-center min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-lg transition-all ${
                 isActive(item.path)
                   ? "bg-accent-muted text-accent"
                   : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
@@ -99,8 +100,9 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
             <Link
               key={item.path}
               to={item.path}
-              title={item.label}
-              className={`flex items-center justify-center w-9 h-9 rounded-lg transition-all ${
+              aria-label={item.label}
+              aria-current={isActive(item.path) ? "page" : undefined}
+              className={`flex items-center justify-center min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-lg transition-all ${
                 isActive(item.path)
                   ? "bg-accent-muted text-accent"
                   : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
@@ -114,8 +116,10 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
           <div className="relative mt-1">
             <button
               onClick={() => setUserMenuOpen(!userMenuOpen)}
-              className="flex items-center justify-center w-9 h-9 rounded-lg bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors"
-              title={identity?.email || "Account"}
+              className="flex items-center justify-center min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-lg bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors"
+              aria-label={`Account menu for ${identity?.email || "user"}`}
+              aria-haspopup="menu"
+              aria-expanded={userMenuOpen}
             >
               {(identity?.name || identity?.email || "U").charAt(0).toUpperCase()}
             </button>
@@ -123,8 +127,8 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
             {/* User popover */}
             {userMenuOpen && (
               <>
-                <div className="fixed inset-0 z-50" onClick={() => setUserMenuOpen(false)} />
-                <div className="absolute bottom-0 left-full ml-2 z-50 w-56 rounded-xl shadow-2xl overflow-hidden glass-dropdown border border-border-default">
+                <div className="fixed inset-0 z-50" onClick={() => setUserMenuOpen(false)} aria-hidden="true" />
+                <div className="absolute bottom-0 left-full ml-2 z-50 w-56 rounded-xl shadow-2xl overflow-hidden glass-dropdown border border-border-default" role="menu" aria-label="User menu">
                   {/* User info */}
                   <div className="p-3 border-b border-border-default">
                     <div className="flex items-center gap-2">
@@ -147,14 +151,14 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                     <Link
                       to="/settings"
                       onClick={() => setUserMenuOpen(false)}
-                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                      className="flex items-center gap-2 px-3 py-2 min-h-[var(--touch-target-min)] text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
                     >
                       <Users size={12} /> Team Settings
                     </Link>
                     <Link
                       to="/billing"
                       onClick={() => setUserMenuOpen(false)}
-                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                      className="flex items-center gap-2 px-3 py-2 min-h-[var(--touch-target-min)] text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
                     >
                       <CreditCard size={12} /> Billing & Usage
                     </Link>
@@ -162,7 +166,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                       href="https://github.com/eprasad7/one-shot"
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                      className="flex items-center gap-2 px-3 py-2 min-h-[var(--touch-target-min)] text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
                     >
                       <ExternalLink size={12} /> GitHub
                     </a>
@@ -170,7 +174,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                       href="https://oneshots.co/docs"
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
+                      className="flex items-center gap-2 px-3 py-2 min-h-[var(--touch-target-min)] text-xs text-text-secondary hover:bg-surface-overlay transition-colors"
                     >
                       <BookOpen size={12} /> Documentation
                     </a>
@@ -183,7 +187,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                         setUserMenuOpen(false);
                         logout();
                       }}
-                      className="flex items-center gap-2 px-3 py-2 text-xs text-status-error hover:bg-surface-overlay transition-colors w-full text-left"
+                      className="flex items-center gap-2 px-3 py-2 min-h-[var(--touch-target-min)] text-xs text-status-error hover:bg-surface-overlay transition-colors w-full text-left"
                     >
                       <LogOut size={12} /> Log out
                     </button>

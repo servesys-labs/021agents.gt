@@ -180,13 +180,16 @@ class AgentHarness:
 
     async def _run_inner(self, user_input: str) -> list[TurnResult]:
         """Inner run loop — separated so timeout can wrap it."""
+        # Reset per-run state to avoid stale values leaking between runs
+        self._turn = 0
+        self.trace_id = ""
+
         results: list[TurnResult] = []
         cumulative_cost = 0.0
         self.governance.reset_for_session()
         # Generate trace_id and session_id for this run
         import uuid as _uuid
-        if not self.trace_id:
-            self.trace_id = _uuid.uuid4().hex[:16]
+        self.trace_id = _uuid.uuid4().hex[:16]
         self._current_session_id = _uuid.uuid4().hex[:16]
 
         # Initialize middleware context for this session
@@ -604,8 +607,8 @@ class AgentHarness:
         if self.on_turn_complete is not None:
             try:
                 self.on_turn_complete(result)
-            except Exception:
-                pass  # Don't let callback errors break the run
+            except Exception as exc:
+                logger.error("on_turn_complete callback failed: %s", exc)
 
     async def _call_llm(self, messages: list[dict[str, str]]) -> LLMResponse | None:
         """Route to the appropriate LLM and return the response."""
@@ -657,7 +660,18 @@ class AgentHarness:
 
         if self.config.parallel_tool_calls and len(tool_calls) > 1:
             import asyncio
-            return list(await asyncio.gather(*(_run_call(call) for call in tool_calls)))
+            raw_results = await asyncio.gather(
+                *(_run_call(call) for call in tool_calls),
+                return_exceptions=True,
+            )
+            results: list[dict[str, Any]] = []
+            for call, result in zip(tool_calls, raw_results):
+                if isinstance(result, BaseException):
+                    logger.error("Parallel tool call %s failed: %s", call.get("name", "?"), result)
+                    results.append({"tool": call.get("name", "?"), "error": str(result)})
+                else:
+                    results.append(result)
+            return results
         return [await _run_call(call) for call in tool_calls]
 
     def _build_turn_plan_artifact(

@@ -63,9 +63,10 @@ class Observer:
         self.storage_path = storage_path
         self._db = db  # AgentDB instance (optional, preferred over JSONL)
         self._records: list[SessionRecord] = []
-        self._current: SessionRecord | None = None
-        self._session_start_time: float = 0.0
-        self._first_action_time: float | None = None
+        self._sessions: dict[str, SessionRecord] = {}
+        self._session_start_times: dict[str, float] = {}
+        self._first_action_times: dict[str, float | None] = {}
+        self._current_session_id: str | None = None
         self._attached = False
 
     @property
@@ -104,15 +105,19 @@ class Observer:
 
     async def _on_session_start(self, event: Event) -> None:
         """Begin tracking a new session."""
-        self._session_start_time = time.time()
-        self._first_action_time = None
+        if not self._attached:
+            return
+        session_id = event.data.get("session_id") or uuid.uuid4().hex[:16]
+        self._current_session_id = session_id
+        self._session_start_times[session_id] = time.time()
+        self._first_action_times[session_id] = None
 
         config = self._agent_config
         system_prompt = config.get("system_prompt", "")
         prompt_hash = hashlib.sha256(system_prompt.encode()).hexdigest()[:12]
 
-        self._current = SessionRecord(
-            session_id=event.data.get("session_id") or uuid.uuid4().hex[:16],
+        self._sessions[session_id] = SessionRecord(
+            session_id=session_id,
             agent_name=self._agent_name,
             input_text=event.data.get("input", ""),
             trace_id=event.data.get("trace_id", ""),
@@ -132,11 +137,15 @@ class Observer:
 
     async def _on_session_end(self, event: Event) -> None:
         """Finalize and store the session record."""
-        if not self._current:
+        if not self._attached:
+            return
+        sid = self._current_session_id
+        if not sid or sid not in self._sessions:
             return
 
-        rec = self._current
-        rec.wall_clock_seconds = time.time() - self._session_start_time
+        rec = self._sessions[sid]
+        start_time = self._session_start_times.get(sid, time.time())
+        rec.wall_clock_seconds = time.time() - start_time
         rec.step_count = len(rec.turns)
         rec.is_finished = True
 
@@ -170,9 +179,10 @@ class Observer:
         rec.action_count = sum(len(t.tool_calls) for t in rec.turns)
 
         # Time to first action
-        if self._first_action_time:
+        first_action = self._first_action_times.get(sid)
+        if first_action:
             rec.time_to_first_action_ms = (
-                self._first_action_time - self._session_start_time
+                first_action - start_time
             ) * 1000
 
         self._records.append(rec)
@@ -191,33 +201,49 @@ class Observer:
             rec.step_count,
             rec.cost.total_usd,
         )
-        self._current = None
+        # Clean up session-specific state
+        self._sessions.pop(sid, None)
+        self._session_start_times.pop(sid, None)
+        self._first_action_times.pop(sid, None)
+        self._current_session_id = None
 
     async def _on_turn_start(self, event: Event) -> None:
-        if not self._current:
+        if not self._attached:
             return
-        turn_num = event.data.get("turn", len(self._current.turns) + 1)
-        self._current.turns.append(TurnRecord(
+        rec = self._sessions.get(self._current_session_id or "")
+        if not rec:
+            return
+        turn_num = event.data.get("turn", len(rec.turns) + 1)
+        rec.turns.append(TurnRecord(
             turn_number=turn_num,
         ))
 
     async def _on_turn_end(self, event: Event) -> None:
-        if self._current and self._current.turns:
-            turn = self._current.turns[-1]
+        if not self._attached:
+            return
+        rec = self._sessions.get(self._current_session_id or "")
+        if rec and rec.turns:
+            turn = rec.turns[-1]
             turn.ended_at = time.time()
             turn.execution_mode = event.data.get("execution_mode", "sequential")
             turn.plan_artifact = event.data.get("plan_artifact", {}) or {}
             turn.reflection = event.data.get("reflection", {}) or {}
 
     async def _on_llm_request(self, event: Event) -> None:
-        if not self._current or not self._current.turns:
+        if not self._attached:
             return
-        self._current.turns[-1].latency_ms = time.time() * 1000  # Will compute delta on response
+        rec = self._sessions.get(self._current_session_id or "")
+        if not rec or not rec.turns:
+            return
+        rec.turns[-1].latency_ms = time.time() * 1000  # Will compute delta on response
 
     async def _on_llm_response(self, event: Event) -> None:
-        if not self._current or not self._current.turns:
+        if not self._attached:
             return
-        turn = self._current.turns[-1]
+        rec = self._sessions.get(self._current_session_id or "")
+        if not rec or not rec.turns:
+            return
+        turn = rec.turns[-1]
         if turn.latency_ms > 0:
             turn.latency_ms = (time.time() * 1000) - turn.latency_ms
         turn.model_used = event.data.get("model", "")
@@ -242,16 +268,23 @@ class Observer:
                     pass
 
     async def _on_tool_call(self, event: Event) -> None:
-        if not self._current or not self._current.turns:
+        if not self._attached:
             return
-        if self._first_action_time is None:
-            self._first_action_time = time.time()
-        self._current.turns[-1].tool_calls.append(event.data)
+        sid = self._current_session_id or ""
+        rec = self._sessions.get(sid)
+        if not rec or not rec.turns:
+            return
+        if self._first_action_times.get(sid) is None:
+            self._first_action_times[sid] = time.time()
+        rec.turns[-1].tool_calls.append(event.data)
 
     async def _on_tool_result(self, event: Event) -> None:
-        if not self._current or not self._current.turns:
+        if not self._attached:
             return
-        turn = self._current.turns[-1]
+        rec = self._sessions.get(self._current_session_id or "")
+        if not rec or not rec.turns:
+            return
+        turn = rec.turns[-1]
         turn.tool_results.append(event.data)
         if "error" in event.data:
             turn.errors.append(ErrorRecord(
@@ -260,17 +293,24 @@ class Observer:
                 tool_name=event.data.get("tool", ""),
                 turn=turn.turn_number,
             ))
-            self._current.errors.append(turn.errors[-1])
+            rec.errors.append(turn.errors[-1])
 
     async def _on_error(self, event: Event) -> None:
-        if not self._current:
+        if not self._attached:
             return
+        rec = self._sessions.get(self._current_session_id or "")
+        if not rec:
+            return
+        try:
+            source = ErrorSource(event.data.get("source", "unknown"))
+        except ValueError:
+            source = ErrorSource.UNKNOWN
         err = ErrorRecord(
-            source=ErrorSource(event.data.get("source", "unknown")),
+            source=source,
             message=event.data.get("message", str(event.data)),
-            turn=len(self._current.turns),
+            turn=len(rec.turns),
         )
-        self._current.errors.append(err)
+        rec.errors.append(err)
 
     def _append_to_storage(self, record: SessionRecord) -> None:
         """Append a record to JSONL storage."""
