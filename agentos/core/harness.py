@@ -46,6 +46,10 @@ class HarnessConfig:
     enable_async_memory: bool = False
     enable_planner_artifact: bool = True
     enable_reflection_stage: bool = True
+    enable_typed_runtime_dag: bool = True
+    reflection_gate_on_finalize: bool = True
+    reflection_min_confidence: float = 0.6
+    max_reflection_attempts: int = 1
     parallel_tool_calls: bool = True
     max_context_tokens: int = 100_000
     skills_dir: str = ""
@@ -229,13 +233,6 @@ class AgentHarness:
         # Step 4: Discover available tools
         available_tools = self.tool_executor.available_tools()
         self.llm_router.set_tools(available_tools)
-        initial_plan_artifact = self._build_plan_artifact(
-            user_input=user_input,
-            complexity=complexity.value,
-            memory_context=memory_context,
-            available_tools=available_tools,
-        )
-
         # Step 3c: Load learned procedures relevant to this task
         procedures_section = ""
         best_procs = self.memory_manager.procedural.find_best(user_input, limit=3)
@@ -272,6 +269,7 @@ class AgentHarness:
         # Track successful tool sequences for procedural memory
         tool_sequence: list[dict[str, Any]] = []
         failure_retries = 0
+        reflection_retries = 0
 
         for turn in range(1, self.config.max_turns + 1):
             self._turn = turn
@@ -350,6 +348,15 @@ class AgentHarness:
                     if self.config.parallel_tool_calls and len(llm_response.tool_calls) > 1
                     else "sequential"
                 )
+                plan_artifact = self._build_turn_plan_artifact(
+                    user_input=user_input,
+                    complexity=complexity.value,
+                    available_tools=available_tools,
+                    turn_number=turn,
+                    execution_mode=execution_mode,
+                    has_tool_calls=True,
+                    done=False,
+                )
 
                 # Track tool results for procedural memory
                 for tr in tool_results:
@@ -377,7 +384,7 @@ class AgentHarness:
                             model_used=llm_response.model,
                             middleware_warnings=turn_warnings,
                             execution_mode=execution_mode,
-                            plan_artifact=initial_plan_artifact,
+                            plan_artifact=plan_artifact,
                             reflection=self._build_reflection_artifact(
                                 llm_response=llm_response,
                                 tool_results=tool_results,
@@ -430,7 +437,7 @@ class AgentHarness:
                         model_used=llm_response.model,
                         middleware_warnings=turn_warnings,
                         execution_mode=execution_mode,
-                        plan_artifact=initial_plan_artifact,
+                        plan_artifact=plan_artifact,
                         reflection=self._build_reflection_artifact(
                             llm_response=llm_response,
                             tool_results=tool_results,
@@ -450,7 +457,7 @@ class AgentHarness:
                         model_used=llm_response.model,
                         middleware_warnings=turn_warnings,
                         execution_mode=execution_mode,
-                        plan_artifact=initial_plan_artifact,
+                        plan_artifact=plan_artifact,
                         reflection=self._build_reflection_artifact(
                             llm_response=llm_response,
                             tool_results=tool_results,
@@ -461,6 +468,7 @@ class AgentHarness:
                     results.append(result)
                     self._notify_turn(result)
                     failure_retries = 0
+                    reflection_retries = 0
                     messages.append({
                         "role": "assistant",
                         "content": llm_response.content,
@@ -474,7 +482,57 @@ class AgentHarness:
                             "content": json.dumps(tr),
                         })
             else:
-                # No tool calls — agent is done
+                # No tool calls — finalize, with optional reflection gate.
+                plan_artifact = self._build_turn_plan_artifact(
+                    user_input=user_input,
+                    complexity=complexity.value,
+                    available_tools=available_tools,
+                    turn_number=turn,
+                    execution_mode="sequential",
+                    has_tool_calls=False,
+                    done=True,
+                )
+                reflection = self._build_reflection_artifact(
+                    llm_response=llm_response,
+                    tool_results=[],
+                    middleware_warnings=turn_warnings,
+                    done=True,
+                )
+                if self._should_retry_for_reflection(
+                    reflection=reflection,
+                    reflection_retries=reflection_retries,
+                    turn=turn,
+                ):
+                    reflection_retries += 1
+                    result = TurnResult(
+                        turn_number=turn, llm_response=llm_response, done=False,
+                        stop_reason="reflection_retry",
+                        cost_usd=llm_response.cost_usd,
+                        cumulative_cost_usd=cumulative_cost,
+                        model_used=llm_response.model,
+                        middleware_warnings=turn_warnings,
+                        execution_mode="sequential",
+                        plan_artifact=plan_artifact,
+                        reflection=reflection,
+                    )
+                    results.append(result)
+                    self._notify_turn(result)
+                    messages.append({"role": "assistant", "content": llm_response.content})
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Reflection gate triggered: confidence is below threshold. "
+                            "Revise your answer with clearer reasoning and verification."
+                        ),
+                    })
+                    await self.event_bus.emit(Event(type=EventType.TURN_END, data={
+                        "turn": turn,
+                        "execution_mode": result.execution_mode,
+                        "plan_artifact": result.plan_artifact,
+                        "reflection": result.reflection,
+                    }))
+                    continue
+
                 result = TurnResult(
                     turn_number=turn, llm_response=llm_response, done=True,
                     stop_reason="completed",
@@ -483,13 +541,8 @@ class AgentHarness:
                     model_used=llm_response.model,
                     middleware_warnings=turn_warnings,
                     execution_mode="sequential",
-                    plan_artifact=initial_plan_artifact,
-                    reflection=self._build_reflection_artifact(
-                        llm_response=llm_response,
-                        tool_results=[],
-                        middleware_warnings=turn_warnings,
-                        done=True,
-                    ),
+                    plan_artifact=plan_artifact,
+                    reflection=reflection,
                 )
                 results.append(result)
                 self._notify_turn(result)
@@ -510,6 +563,7 @@ class AgentHarness:
                 if tool_sequence:
                     await self._store_procedure(user_input, tool_sequence)
                 failure_retries = 0
+                reflection_retries = 0
 
                 await self.event_bus.emit(Event(type=EventType.TURN_END, data={
                     "turn": turn,
@@ -595,26 +649,46 @@ class AgentHarness:
             return list(await asyncio.gather(*(_run_call(call) for call in tool_calls)))
         return [await _run_call(call) for call in tool_calls]
 
-    def _build_plan_artifact(
+    def _build_turn_plan_artifact(
         self,
         user_input: str,
         complexity: str,
-        memory_context: str,
         available_tools: list[dict[str, Any]],
+        turn_number: int,
+        execution_mode: str,
+        has_tool_calls: bool,
+        done: bool,
     ) -> dict[str, Any]:
-        """Generate a lightweight typed plan artifact for observability."""
+        """Generate a typed DAG-like plan artifact for each runtime turn."""
         if not self.config.enable_planner_artifact:
             return {}
+        nodes = [
+            {"id": "plan", "type": "plan", "status": "completed"},
+            {"id": "llm", "type": "llm", "status": "completed"},
+        ]
+        edges = [{"from": "plan", "to": "llm"}]
+        if has_tool_calls:
+            nodes.append({
+                "id": "tools",
+                "type": "tool_fanout" if execution_mode == "parallel" else "tool",
+                "status": "completed",
+            })
+            edges.append({"from": "llm", "to": "tools"})
+            nodes.append({"id": "reflect", "type": "reflect", "status": "completed"})
+            edges.append({"from": "tools", "to": "reflect"})
+        else:
+            nodes.append({"id": "reflect", "type": "reflect", "status": "completed"})
+            edges.append({"from": "llm", "to": "reflect"})
+        nodes.append({"id": "finalize", "type": "finalize", "status": "completed" if done else "in_progress"})
+        edges.append({"from": "reflect", "to": "finalize"})
         return {
+            "version": 1,
+            "turn_number": turn_number,
             "goal": user_input[:400],
             "complexity": complexity,
             "tool_candidates": [str(t.get("name", "")) for t in available_tools[:20]],
-            "memory_context_present": bool(memory_context),
-            "stages": [
-                {"type": "understand", "status": "planned"},
-                {"type": "act", "status": "planned"},
-                {"type": "verify", "status": "planned"},
-            ],
+            "execution_mode": execution_mode,
+            "dag": {"nodes": nodes, "edges": edges},
         }
 
     def _build_reflection_artifact(
@@ -646,6 +720,26 @@ class AgentHarness:
             "error": error,
             "next_action": "finalize" if done and not error else ("recover" if failed_tools or error else "continue"),
         }
+
+    def _should_retry_for_reflection(
+        self,
+        reflection: dict[str, Any],
+        reflection_retries: int,
+        turn: int,
+    ) -> bool:
+        """Gate finalization on reflection confidence when configured."""
+        if not self.config.enable_reflection_stage:
+            return False
+        if not self.config.reflection_gate_on_finalize:
+            return False
+        if reflection_retries >= self.config.max_reflection_attempts:
+            return False
+        if turn >= self.config.max_turns:
+            return False
+        confidence = reflection.get("confidence")
+        if not isinstance(confidence, (int, float)):
+            return False
+        return float(confidence) < float(self.config.reflection_min_confidence)
 
     async def _store_procedure(
         self, task_description: str, tool_sequence: list[dict[str, Any]]
