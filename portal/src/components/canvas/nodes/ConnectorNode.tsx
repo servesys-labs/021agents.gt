@@ -28,8 +28,8 @@ export const ConnectorNode = memo(({ data, selected }: NodeProps & { data: Conne
           ? "border-chart-green shadow-[0_0_20px_rgba(34,197,94,0.2)]"
           : "border-border-default hover:border-border-strong"
         }
-        bg-surface-raised
       `}
+      style={{ background: 'rgba(28, 25, 23, 0.82)', backdropFilter: 'blur(20px) saturate(1.5)', WebkitBackdropFilter: 'blur(20px) saturate(1.5)' }}
     >
       <Handle
         type="target"

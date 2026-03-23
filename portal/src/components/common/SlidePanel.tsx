@@ -42,14 +42,14 @@ export function SlidePanel({
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm"
+        className="fixed inset-0 z-40 glass-backdrop"
         onClick={onClose}
       />
 
       {/* Panel */}
       <div
         ref={panelRef}
-        className="fixed top-0 right-0 z-50 flex flex-col h-full bg-surface-raised border-l border-border-default shadow-2xl"
+        className="fixed top-0 right-0 z-50 flex flex-col h-full glass-medium border-l border-border-default shadow-2xl relative"
         style={{
           width,
           maxWidth: "90vw",

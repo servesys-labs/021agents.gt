@@ -66,7 +66,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
   return (
     <div className="flex h-screen bg-surface-base text-text-primary overflow-hidden">
       {/* Icon rail — always 52px, icon-only */}
-      <aside className="flex flex-col items-center w-[52px] bg-surface-raised border-r border-border-default py-3 flex-shrink-0 z-40">
+      <aside className="flex flex-col items-center w-[52px] border-r py-3 flex-shrink-0 z-40 glass-heavy relative">
         {/* Logo */}
         <Link
           to="/"
@@ -124,7 +124,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
             {userMenuOpen && (
               <>
                 <div className="fixed inset-0 z-50" onClick={() => setUserMenuOpen(false)} />
-                <div className="absolute bottom-0 left-full ml-2 z-50 w-56 bg-surface-raised border border-border-default rounded-xl shadow-2xl overflow-hidden">
+                <div className="absolute bottom-0 left-full ml-2 z-50 w-56 rounded-xl shadow-2xl overflow-hidden glass-dropdown border border-border-default">
                   {/* User info */}
                   <div className="p-3 border-b border-border-default">
                     <div className="flex items-center gap-2">

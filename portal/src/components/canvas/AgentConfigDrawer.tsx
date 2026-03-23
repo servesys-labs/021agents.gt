@@ -96,7 +96,7 @@ export function AgentConfigDrawer({ isOpen, onClose, agentData, onSave, availabl
     <>
       {/* Backdrop */}
       <div
-        className="fixed inset-0 bg-black/40 z-40 animate-[fadeIn_0.15s_ease-out]"
+        className="fixed inset-0 glass-backdrop z-40 animate-[fadeIn_0.15s_ease-out]"
         onClick={onClose}
       />
 

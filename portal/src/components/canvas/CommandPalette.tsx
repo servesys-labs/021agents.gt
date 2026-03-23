@@ -147,10 +147,10 @@ export function CommandPalette({ open, onClose, onAction }: CommandPaletteProps)
   return (
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 glass-backdrop" onClick={onClose} />
 
       {/* Palette */}
-      <div className="fixed top-[15%] left-1/2 -translate-x-1/2 z-50 w-[560px] max-w-[calc(100vw-40px)] bg-surface-raised border border-border-default rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.5)] overflow-hidden"
+      <div className="fixed top-[15%] left-1/2 -translate-x-1/2 z-50 w-[560px] max-w-[calc(100vw-40px)] glass-medium border border-border-default rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.5)] overflow-hidden relative"
         style={{ animation: "cmdPaletteIn 0.15s ease-out" }}>
 
         {/* Search input */}

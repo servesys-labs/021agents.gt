@@ -680,7 +680,7 @@ function CanvasWorkspaceInner() {
   return (
     <div className="relative w-full h-full flex flex-col" ref={reactFlowRef}>
       {/* ── Railway-style top bar ───────────────────────────── */}
-      <div className="relative z-20 flex items-center gap-0 h-11 px-4 bg-surface-raised border-b border-border-default flex-shrink-0">
+      <div className="relative z-20 flex items-center gap-0 h-11 px-4 border-b flex-shrink-0 glass-heavy">
         {/* Project selector */}
         <div className="relative">
           <button
@@ -696,7 +696,7 @@ function CanvasWorkspaceInner() {
           {projectDropdown && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setProjectDropdown(false)} />
-              <div className="absolute left-0 top-full mt-1 z-50 w-52 bg-surface-overlay border border-border-default rounded-lg shadow-xl overflow-hidden">
+              <div className="absolute left-0 top-full mt-1 z-50 w-52 rounded-lg shadow-xl overflow-hidden glass-dropdown border border-border-default">
                 <div className="px-3 py-2 border-b border-border-default">
                   <p className="text-[10px] text-text-muted uppercase tracking-wider font-medium">Projects</p>
                 </div>
@@ -747,7 +747,7 @@ function CanvasWorkspaceInner() {
           {envDropdown && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setEnvDropdown(false)} />
-              <div className="absolute left-0 top-full mt-1 z-50 w-48 bg-surface-overlay border border-border-default rounded-lg shadow-xl overflow-hidden">
+              <div className="absolute left-0 top-full mt-1 z-50 w-48 rounded-lg shadow-xl overflow-hidden glass-dropdown border border-border-default">
                 <div className="px-3 py-2 border-b border-border-default">
                   <p className="text-[10px] text-text-muted uppercase tracking-wider font-medium">Environments</p>
                 </div>

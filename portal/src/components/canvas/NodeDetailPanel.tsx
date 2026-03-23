@@ -135,7 +135,7 @@ export function NodeDetailPanel({
   return (
       <div
         ref={panelRef}
-        className="h-full bg-surface-raised border-l border-border-default flex flex-col overflow-hidden flex-shrink-0"
+        className="h-full border-l flex flex-col overflow-hidden flex-shrink-0 glass-heavy relative"
         style={{ width: "50%", minWidth: 420, maxWidth: 720 }}
       >
         {/* ── Header ──────────────────────────────────────────── */}

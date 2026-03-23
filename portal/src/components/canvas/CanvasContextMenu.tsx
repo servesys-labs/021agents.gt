@@ -142,7 +142,7 @@ export function CanvasContextMenu({ x, y, nodeType, nodeId, onAction, onClose }:
   return (
     <div
       ref={menuRef}
-      className="fixed z-50 min-w-[220px] py-1 rounded-xl border border-border-default bg-surface-raised shadow-[0_8px_40px_rgba(0,0,0,0.5)] backdrop-blur-sm animate-[fadeIn_0.1s_ease-out]"
+      className="fixed z-50 min-w-[220px] py-1 rounded-xl border border-border-default glass-dropdown animate-[fadeIn_0.1s_ease-out]"
       style={{ left: adjustedX, top: adjustedY, maxHeight: "80vh", overflowY: "auto" }}
     >
       {/* Header label */}

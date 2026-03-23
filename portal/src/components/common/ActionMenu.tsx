@@ -38,7 +38,7 @@ export function ActionMenu({ items }: ActionMenuProps) {
 
       {open && (
         <div
-          className="absolute right-0 top-full mt-1 z-20 min-w-[160px] bg-surface-raised border border-border-default rounded-lg shadow-lg py-1"
+          className="absolute right-0 top-full mt-1 z-20 min-w-[160px] glass-dropdown border border-border-default rounded-lg py-1"
           style={{ animation: "fadeIn 0.15s ease-out" }}
         >
           {items.map((item, i) => (

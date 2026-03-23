@@ -16,11 +16,11 @@ export function CanvasOverlayPanel({ open, onClose, title, icon, children, width
   return (
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-40 glass-backdrop" onClick={onClose} />
 
       {/* Panel — centered modal */}
       <div
-        className="fixed top-[5%] left-1/2 z-50 flex flex-col bg-surface-raised border border-border-default rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.5)] overflow-hidden"
+        className="fixed top-[5%] left-1/2 z-50 flex flex-col glass-medium border border-border-default rounded-xl shadow-[0_20px_60px_rgba(0,0,0,0.5)] overflow-hidden relative"
         style={{
           width,
           maxWidth: "calc(100vw - 80px)",

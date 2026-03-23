@@ -101,7 +101,7 @@ export function AgentLog({ entries, onClear }: Props) {
       {/* Toggle bar */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-border-default bg-surface-raised shadow-lg hover:bg-surface-overlay transition-colors"
+        className="flex items-center gap-2 px-3 py-1.5 rounded-xl border border-border-default glass-dropdown hover:brightness-110 transition-all"
       >
         <Terminal size={12} className="text-accent" />
         <span className="text-[11px] text-text-secondary font-medium">Log</span>

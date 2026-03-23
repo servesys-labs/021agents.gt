@@ -24,8 +24,8 @@ export function ConfirmDialog({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
-      <div className="card w-full max-w-md">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 glass-backdrop">
+      <div className="card w-full max-w-md glass-medium relative border border-border-default">
         <h3 className="text-base font-semibold text-text-primary">{title}</h3>
         <p className="mt-2 text-sm text-text-secondary">{description}</p>
         <div className="mt-5 flex justify-end gap-2">

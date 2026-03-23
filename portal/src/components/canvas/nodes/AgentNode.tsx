@@ -88,8 +88,9 @@ export const AgentNode = memo(({ data, selected }: NodeProps & { data: AgentNode
           ? "border-accent shadow-[0_0_24px_rgba(249,115,22,0.2)]"
           : "border-border-default hover:border-border-strong"
         }
-        bg-surface-raised
+        bg-glass-heavy backdrop-blur-[20px] backdrop-saturate-[1.5]
       `}
+      style={{ background: 'rgba(28, 25, 23, 0.82)', backdropFilter: 'blur(20px) saturate(1.5)', WebkitBackdropFilter: 'blur(20px) saturate(1.5)' }}
     >
       {/* Connection handles */}
       <Handle

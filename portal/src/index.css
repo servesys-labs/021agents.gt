@@ -7,6 +7,15 @@
   --color-surface-overlay: #292524;
   --color-surface-hover: #44403C;
 
+  /* Glassmorphic surface colors (semi-transparent for backdrop-blur) */
+  --color-glass-heavy: rgba(28, 25, 23, 0.82);
+  --color-glass-medium: rgba(28, 25, 23, 0.68);
+  --color-glass-light: rgba(28, 25, 23, 0.52);
+  --color-glass-overlay: rgba(41, 37, 36, 0.72);
+  --color-glass-border: rgba(255, 255, 255, 0.06);
+  --color-glass-border-strong: rgba(255, 255, 255, 0.10);
+  --color-glass-highlight: rgba(255, 255, 255, 0.03);
+
   /* Border colors */
   --color-border-default: #292524;
   --color-border-subtle: #1C1917;
@@ -48,6 +57,64 @@ body {
   color: var(--color-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============================================
+   Glassmorphic Utility Classes
+   ============================================ */
+
+/* Heavy glass — sidebars, top bars, persistent panels */
+.glass-heavy {
+  background: var(--color-glass-heavy) !important;
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border-color: var(--color-glass-border) !important;
+}
+
+/* Medium glass — modals, drawers, command palette */
+.glass-medium {
+  background: var(--color-glass-medium) !important;
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border-color: var(--color-glass-border) !important;
+}
+
+/* Light glass — dropdowns, context menus, tooltips */
+.glass-light {
+  background: var(--color-glass-light) !important;
+  backdrop-filter: blur(16px) saturate(1.4);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  border-color: var(--color-glass-border-strong) !important;
+}
+
+/* Glass overlay for dropdown panels */
+.glass-dropdown {
+  background: var(--color-glass-overlay) !important;
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border-color: var(--color-glass-border-strong) !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--color-glass-highlight);
+}
+
+/* Inner highlight for glass surfaces (top edge glow) */
+.glass-heavy::before,
+.glass-medium::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-glass-border-strong), transparent);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Backdrop overlay for modals (frosted dark) */
+.glass-backdrop {
+  background: rgba(12, 10, 9, 0.55) !important;
+  backdrop-filter: blur(8px) saturate(1.2);
+  -webkit-backdrop-filter: blur(8px) saturate(1.2);
 }
 
 /* Scrollbar styling */
@@ -227,7 +294,7 @@ textarea::placeholder {
   font-family: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code", monospace;
 }
 
-/* Status bar at bottom */
+/* Status bar at bottom — glassmorphic */
 .status-bar {
   display: flex;
   align-items: center;
@@ -235,8 +302,10 @@ textarea::placeholder {
   padding: 0.375rem 1rem;
   font-size: 0.6875rem;
   color: var(--color-text-muted);
-  background-color: var(--color-surface-raised);
-  border-top: 1px solid var(--color-border-default);
+  background: var(--color-glass-heavy);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border-top: 1px solid var(--color-glass-border);
 }
 
 /* ============================================
@@ -346,15 +415,18 @@ textarea::placeholder {
   box-shadow: none !important;
 }
 
-/* Canvas node cards */
+/* Canvas node cards — glassmorphic */
 .canvas-node {
-  background-color: var(--color-surface-raised);
-  border: 1px solid var(--color-border-default);
+  background: var(--color-glass-heavy);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--color-glass-border-strong);
   border-radius: 0.75rem;
   padding: 1rem;
   min-width: 200px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   cursor: grab;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25), inset 0 1px 0 var(--color-glass-highlight);
 }
 
 .canvas-node:hover {
@@ -367,14 +439,16 @@ textarea::placeholder {
   box-shadow: 0 0 0 1px var(--color-accent), 0 0 20px rgba(249, 115, 22, 0.1);
 }
 
-/* Canvas context menu */
+/* Canvas context menu — glassmorphic */
 .canvas-context-menu {
-  background-color: var(--color-surface-raised);
-  border: 1px solid var(--color-border-default);
+  background: var(--color-glass-overlay);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--color-glass-border-strong);
   border-radius: 0.5rem;
   padding: 0.25rem;
   min-width: 180px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--color-glass-highlight);
   z-index: 100;
 }
 
@@ -395,7 +469,7 @@ textarea::placeholder {
 }
 
 .canvas-context-menu-item:hover {
-  background-color: var(--color-surface-overlay);
+  background-color: rgba(255, 255, 255, 0.06);
   color: var(--color-text-primary);
 }
 
@@ -409,11 +483,11 @@ textarea::placeholder {
 
 .canvas-context-menu-separator {
   height: 1px;
-  background-color: var(--color-border-default);
+  background-color: var(--color-glass-border);
   margin: 0.25rem 0;
 }
 
-/* Agent config drawer */
+/* Agent config drawer — glassmorphic */
 .config-drawer {
   position: fixed;
   top: 0;
@@ -423,10 +497,12 @@ textarea::placeholder {
   height: 100vh;
   display: flex;
   flex-direction: column;
-  background-color: var(--color-surface-raised);
-  border-left: 1px solid var(--color-border-default);
+  background: var(--color-glass-medium);
+  backdrop-filter: blur(24px) saturate(1.6);
+  -webkit-backdrop-filter: blur(24px) saturate(1.6);
+  border-left: 1px solid var(--color-glass-border);
   z-index: 50;
-  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.3);
+  box-shadow: -8px 0 40px rgba(0, 0, 0, 0.4), inset 1px 0 0 var(--color-glass-highlight);
   animation: slide-in-right 0.2s ease-out;
 }
 
@@ -441,12 +517,14 @@ textarea::placeholder {
   }
 }
 
-/* Meta-agent assist bar */
+/* Meta-agent assist bar — glassmorphic */
 .meta-agent-bar {
-  background-color: var(--color-surface-raised);
-  border: 1px solid var(--color-border-default);
+  background: var(--color-glass-heavy);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--color-glass-border-strong);
   border-radius: 0.75rem;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), inset 0 1px 0 var(--color-glass-highlight);
 }
 
 .meta-agent-bar:focus-within {
@@ -454,12 +532,14 @@ textarea::placeholder {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--color-accent);
 }
 
-/* Agent log panel */
+/* Agent log panel — glassmorphic */
 .agent-log-panel {
-  background-color: var(--color-surface-raised);
-  border: 1px solid var(--color-border-default);
+  background: var(--color-glass-heavy);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid var(--color-glass-border-strong);
   border-radius: 0.75rem;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), inset 0 1px 0 var(--color-glass-highlight);
 }
 
 /* Fade-in animation for context menus and dropdowns */
@@ -477,22 +557,24 @@ textarea::placeholder {
   display: flex !important;
   flex-direction: row !important;
   border-radius: 0.75rem !important;
-  border: 1px solid var(--color-border-default) !important;
-  background: var(--color-surface-raised) !important;
+  border: 1px solid var(--color-glass-border-strong) !important;
+  background: var(--color-glass-heavy) !important;
+  backdrop-filter: blur(20px) saturate(1.5) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(1.5) !important;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3) !important;
 }
 
 .react-flow__controls-button {
   background: transparent !important;
   border-bottom: none !important;
-  border-right: 1px solid var(--color-border-default) !important;
+  border-right: 1px solid var(--color-glass-border) !important;
   fill: var(--color-text-muted) !important;
   width: 28px !important;
   height: 28px !important;
 }
 
 .react-flow__controls-button:hover {
-  background: var(--color-surface-overlay) !important;
+  background: rgba(255, 255, 255, 0.06) !important;
   fill: var(--color-text-primary) !important;
 }
 

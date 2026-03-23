@@ -53,7 +53,7 @@ export function MetaAgentAssist({ onSubmit, isProcessing, lastResult }: Props) {
   };
 
   return (
-    <div className="flex flex-col bg-surface-raised border-l border-border-default flex-shrink-0 min-h-0 overflow-hidden"
+    <div className="flex flex-col border-l flex-shrink-0 min-h-0 overflow-hidden glass-heavy relative"
       style={{ width: 380 }}>
 
       {/* ── Header ──────────────────────────────────────────── */}

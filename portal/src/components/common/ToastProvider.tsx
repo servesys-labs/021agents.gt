@@ -50,7 +50,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           return (
             <div
               key={item.id}
-              className={`flex items-start gap-2.5 rounded-lg ${cfg.bg} border ${cfg.border} px-3 py-2.5 backdrop-blur-sm animate-[slideIn_0.2s_ease-out]`}
+              className={`flex items-start gap-2.5 rounded-lg ${cfg.bg} border ${cfg.border} px-3 py-2.5 backdrop-blur-xl backdrop-saturate-150 animate-[slideIn_0.2s_ease-out]`}
             >
               <Icon size={16} className={`${cfg.color} mt-0.5 flex-shrink-0`} />
               <p className="text-sm text-text-primary flex-1">{item.message}</p>

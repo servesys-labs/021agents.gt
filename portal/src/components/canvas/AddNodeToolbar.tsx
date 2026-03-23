@@ -75,7 +75,7 @@ export function AddNodeToolbar({ onAdd }: Props) {
     <div ref={menuRef} className="absolute top-4 left-1/2 -translate-x-1/2 z-40">
       {/* Expanded palette */}
       {open && (
-        <div className="mb-2 flex items-center gap-1.5 px-2 py-1.5 rounded-xl border border-border-default bg-surface-raised shadow-[0_8px_40px_rgba(0,0,0,0.4)] animate-[fadeIn_0.15s_ease-out]">
+        <div className="mb-2 flex items-center gap-1.5 px-2 py-1.5 rounded-xl border border-border-default glass-dropdown animate-[fadeIn_0.15s_ease-out]">
           {nodeTypes.map((nt) => (
             <button
               key={nt.type}
@@ -105,7 +105,7 @@ export function AddNodeToolbar({ onAdd }: Props) {
       {!open && (
         <button
           onClick={() => setOpen(true)}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-border-default bg-surface-raised text-[12px] text-text-secondary hover:bg-surface-overlay hover:text-text-primary hover:border-border-strong transition-all shadow-lg"
+          className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-border-default glass-dropdown text-[12px] text-text-secondary hover:text-text-primary hover:border-border-strong transition-all"
         >
           <Plus size={14} className="text-accent" />
           <span className="font-medium">Add Node</span>
