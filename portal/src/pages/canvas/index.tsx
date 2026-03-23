@@ -234,7 +234,7 @@ export function CanvasWorkspacePage() {
 /* ── Inner component with access to useReactFlow ──────────── */
 function CanvasWorkspaceInner() {
   const navigate = useNavigate();
-  const { setCenter, getZoom } = useReactFlow();
+  const { setCenter, getZoom, fitView } = useReactFlow();
   const saved = loadLayout();
   const [nodes, setNodes, onNodesChange] = useNodesState(saved?.nodes || demoNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(saved?.edges || demoEdges);
@@ -471,7 +471,10 @@ function CanvasWorkspaceInner() {
           const node = nodes.find((n) => n.id === nodeId);
           setNodes((nds) => nds.filter((n) => n.id !== nodeId));
           setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
-          if (detailNode?.id === nodeId) setDetailNode(null);
+          if (detailNode?.id === nodeId) {
+            setDetailNode(null);
+            setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 50);
+          }
           addLogEntry(`Deleted ${node?.data?.name || "node"}`, "done");
           break;
         }
@@ -551,9 +554,10 @@ function CanvasWorkspaceInner() {
       setNodes((nds) => nds.filter((n) => n.id !== nodeId));
       setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
       setDetailNode(null);
+      setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 50);
       addLogEntry(`Deleted ${node?.data?.name || "node"}`, "done");
     },
-    [nodes, setNodes, setEdges, addLogEntry],
+    [nodes, setNodes, setEdges, addLogEntry, fitView],
   );
 
   /* ── Clone node from detail panel ────────────────────────── */
@@ -650,7 +654,7 @@ function CanvasWorkspaceInner() {
       if (e.key === "Escape") {
         if (cmdPaletteOpen) { setCmdPaletteOpen(false); return; }
         if (overlayPanel) { setOverlayPanel(null); return; }
-        if (detailNode) { setDetailNode(null); return; }
+        if (detailNode) { setDetailNode(null); setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 50); return; }
         setContextMenu(null);
         return;
       }
@@ -802,6 +806,7 @@ function CanvasWorkspaceInner() {
             setNodes(demoNodes);
             setEdges(demoEdges);
             setDetailNode(null);
+            setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 100);
             addLogEntry("Canvas reset to default layout", "done");
           }}
           className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1"
@@ -833,7 +838,7 @@ function CanvasWorkspaceInner() {
       </div>
 
       {/* ── Canvas area ─────────────────────────────────────── */}
-      <div className="flex-1 flex overflow-hidden min-h-0">
+      <div className="flex-1 flex overflow-hidden min-h-0 relative">
         {/* React Flow canvas — shrinks when detail panel opens */}
         <div className="flex-1 relative" style={{ transition: 'width 0.3s ease' }}>
         <ReactFlow
@@ -892,16 +897,22 @@ function CanvasWorkspaceInner() {
         )}
         </div>
 
-        {/* Railway-style Node Detail Panel — inline, pushes canvas left */}
+        {/* Railway-style Node Detail Panel — absolute overlay for glassmorphic refraction */}
         {detailNode && (
-          <NodeDetailPanel
-            node={detailNode}
-            onClose={() => setDetailNode(null)}
-            onDelete={handleDeleteNode}
-            onClone={handleCloneNode}
-            onDeploy={handleDeploy}
-            onUpdateNode={handleUpdateNode}
-          />
+          <div className="absolute top-0 right-0 h-full z-40" style={{ width: '50%', minWidth: 420, maxWidth: 720 }}>
+            <NodeDetailPanel
+              node={detailNode}
+              onClose={() => {
+                setDetailNode(null);
+                // Re-center canvas to use full available space
+                setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 50);
+              }}
+              onDelete={handleDeleteNode}
+              onClone={handleCloneNode}
+              onDeploy={handleDeploy}
+              onUpdateNode={handleUpdateNode}
+            />
+          </div>
         )}
 
         {/* Railway-style Agent rail — inline right panel */}

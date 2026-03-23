@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, Position, useNodeConnections, type NodeProps } from "@xyflow/react";
 import { Plug, Zap, Shield } from "lucide-react";
 
 export type ConnectorNodeData = {
@@ -20,6 +20,11 @@ export const ConnectorNode = memo(({ data, selected }: NodeProps & { data: Conne
   const status = nodeData.status || "pending";
   const cfg = statusConfig[status] || statusConfig.pending;
 
+  const sourceConns = useNodeConnections({ handleType: "source" });
+  const targetConns = useNodeConnections({ handleType: "target" });
+  const hasSource = sourceConns.length > 0;
+  const hasTarget = targetConns.length > 0;
+
   return (
     <div
       className={`
@@ -34,12 +39,16 @@ export const ConnectorNode = memo(({ data, selected }: NodeProps & { data: Conne
       <Handle
         type="target"
         position={Position.Left}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-chart-green !-left-[5px] hover:!bg-chart-green transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-chart-green !-left-[5px] transition-all ${
+          hasTarget ? "!bg-surface-overlay hover:!bg-chart-green !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
       <Handle
         type="source"
         position={Position.Right}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-chart-green !-right-[5px] hover:!bg-chart-green transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-chart-green !-right-[5px] transition-all ${
+          hasSource ? "!bg-surface-overlay hover:!bg-chart-green !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
 
       {/* Green accent strip */}

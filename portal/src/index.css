@@ -8,10 +8,10 @@
   --color-surface-hover: #44403C;
 
   /* Glassmorphic surface colors — low opacity for strong refraction */
-  --color-glass-heavy: rgba(28, 25, 23, 0.50);
-  --color-glass-medium: rgba(28, 25, 23, 0.40);
-  --color-glass-light: rgba(28, 25, 23, 0.30);
-  --color-glass-overlay: rgba(41, 37, 36, 0.42);
+  --color-glass-heavy: rgba(28, 25, 23, 0.35);
+  --color-glass-medium: rgba(28, 25, 23, 0.30);
+  --color-glass-light: rgba(28, 25, 23, 0.22);
+  --color-glass-overlay: rgba(41, 37, 36, 0.32);
   --color-glass-border: rgba(255, 255, 255, 0.10);
   --color-glass-border-strong: rgba(255, 255, 255, 0.15);
   --color-glass-highlight: rgba(255, 255, 255, 0.06);

@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, Position, useNodeConnections, type NodeProps } from "@xyflow/react";
 import { Server, Zap, RefreshCw } from "lucide-react";
 
 export type McpServerNodeData = {
@@ -21,6 +21,11 @@ export const McpServerNode = memo(({ data, selected }: NodeProps & { data: McpSe
   const status = nodeData.status || "offline";
   const cfg = statusConfig[status] || statusConfig.offline;
 
+  const sourceConns = useNodeConnections({ handleType: "source" });
+  const targetConns = useNodeConnections({ handleType: "target" });
+  const hasSource = sourceConns.length > 0;
+  const hasTarget = targetConns.length > 0;
+
   return (
     <div
       className={`
@@ -35,12 +40,16 @@ export const McpServerNode = memo(({ data, selected }: NodeProps & { data: McpSe
       <Handle
         type="target"
         position={Position.Left}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-chart-blue !-left-[5px] hover:!bg-chart-blue transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-chart-blue !-left-[5px] transition-all ${
+          hasTarget ? "!bg-surface-overlay hover:!bg-chart-blue !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
       <Handle
         type="source"
         position={Position.Right}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-chart-blue !-right-[5px] hover:!bg-chart-blue transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-chart-blue !-right-[5px] transition-all ${
+          hasSource ? "!bg-surface-overlay hover:!bg-chart-blue !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
 
       {/* Blue accent strip */}

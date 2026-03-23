@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, Position, useNodeConnections, type NodeProps } from "@xyflow/react";
 import { Bot, Zap, Play, ChevronRight } from "lucide-react";
 
 export type AgentNodeData = {
@@ -80,6 +80,11 @@ export const AgentNode = memo(({ data, selected }: NodeProps & { data: AgentNode
   const activity = nodeData.activity || [3, 5, 8, 4, 7, 12, 9, 6, 11, 8];
   const cfg = statusConfig[status] || statusConfig.draft;
 
+  const sourceConns = useNodeConnections({ handleType: "source" });
+  const targetConns = useNodeConnections({ handleType: "target" });
+  const hasSource = sourceConns.length > 0;
+  const hasTarget = targetConns.length > 0;
+
   return (
     <div
       className={`
@@ -92,16 +97,20 @@ export const AgentNode = memo(({ data, selected }: NodeProps & { data: AgentNode
       `}
       style={{ background: 'rgba(28, 25, 23, 0.45)', backdropFilter: 'blur(40px) saturate(1.8)', WebkitBackdropFilter: 'blur(40px) saturate(1.8)' }}
     >
-      {/* Connection handles */}
+      {/* Connection handles — only visible when connected */}
       <Handle
         type="target"
         position={Position.Left}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-accent !-left-[5px] hover:!bg-accent transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-accent !-left-[5px] transition-all ${
+          hasTarget ? "!bg-surface-overlay hover:!bg-accent !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
       <Handle
         type="source"
         position={Position.Right}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-accent !-right-[5px] hover:!bg-accent transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-accent !-right-[5px] transition-all ${
+          hasSource ? "!bg-surface-overlay hover:!bg-accent !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
 
       {/* Status indicator strip */}

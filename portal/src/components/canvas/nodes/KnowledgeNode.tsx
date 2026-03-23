@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Handle, Position, type NodeProps } from "@xyflow/react";
+import { Handle, Position, useNodeConnections, type NodeProps } from "@xyflow/react";
 import { FileText, Upload } from "lucide-react";
 
 export type KnowledgeNodeData = {
@@ -22,6 +22,11 @@ export const KnowledgeNode = memo(({ data, selected }: NodeProps & { data: Knowl
   const status = nodeData.status || "empty";
   const cfg = statusConfig[status] || statusConfig.empty;
 
+  const sourceConns = useNodeConnections({ handleType: "source" });
+  const targetConns = useNodeConnections({ handleType: "target" });
+  const hasSource = sourceConns.length > 0;
+  const hasTarget = targetConns.length > 0;
+
   return (
     <div
       className={`
@@ -36,12 +41,16 @@ export const KnowledgeNode = memo(({ data, selected }: NodeProps & { data: Knowl
       <Handle
         type="target"
         position={Position.Left}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-chart-purple !-left-[5px] hover:!bg-chart-purple transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-chart-purple !-left-[5px] transition-all ${
+          hasTarget ? "!bg-surface-overlay hover:!bg-chart-purple !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
       <Handle
         type="source"
         position={Position.Right}
-        className="!w-2.5 !h-2.5 !bg-surface-overlay !border-2 !border-chart-purple !-right-[5px] hover:!bg-chart-purple transition-colors"
+        className={`!w-2.5 !h-2.5 !border-2 !border-chart-purple !-right-[5px] transition-all ${
+          hasSource ? "!bg-surface-overlay hover:!bg-chart-purple !opacity-100" : "!opacity-0 !pointer-events-none"
+        }`}
       />
 
       {/* Purple accent strip */}
