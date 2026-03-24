@@ -36,6 +36,10 @@ export const SettingsPage = () => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<{ title: string; desc: string; action: () => Promise<void> } | null>(null);
 
+  /* ── Password change state ────────────────────────────────── */
+  const [passwordForm, setPasswordForm] = useState({ current_password: "", new_password: "", confirm_password: "" });
+  const [passwordLoading, setPasswordLoading] = useState(false);
+
   const handleInvite = async () => {
     if (!inviteForm.email.trim()) return;
     try {
@@ -77,6 +81,46 @@ export const SettingsPage = () => {
     setConfirmOpen(true);
   };
 
+  const handleRotateKey = (k: ApiKey) => {
+    setConfirmAction({ title: "Rotate API Key", desc: `Rotate "${k.name}" (${k.prefix}...)? The old key will stop working immediately.`, action: async () => {
+      const result = await apiRequest<{ key?: string }>(`/api/v1/api-keys/${k.key_id}/rotate`, "POST");
+      const newKey = result.key ?? "sk-...";
+      setNewKeyValue(newKey);
+      setKeyPanelOpen(true);
+      showToast("Key rotated — copy the new key now", "success");
+      void keysQuery.refetch();
+    }});
+    setConfirmOpen(true);
+  };
+
+  const handleChangePassword = async () => {
+    if (!passwordForm.current_password || !passwordForm.new_password) {
+      showToast("Please fill in both current and new password", "error");
+      return;
+    }
+    if (passwordForm.new_password !== passwordForm.confirm_password) {
+      showToast("New passwords do not match", "error");
+      return;
+    }
+    if (passwordForm.new_password.length < 8) {
+      showToast("New password must be at least 8 characters", "error");
+      return;
+    }
+    setPasswordLoading(true);
+    try {
+      await apiRequest("/api/v1/auth/password", "POST", {
+        current_password: passwordForm.current_password,
+        new_password: passwordForm.new_password,
+      });
+      showToast("Password changed successfully", "success");
+      setPasswordForm({ current_password: "", new_password: "", confirm_password: "" });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to change password", "error");
+    } finally {
+      setPasswordLoading(false);
+    }
+  };
+
   const copyToClipboard = (text: string) => {
     void navigator.clipboard.writeText(text);
     showToast("Copied to clipboard", "success");
@@ -88,6 +132,7 @@ export const SettingsPage = () => {
 
   const getKeyActions = (k: ApiKey): ActionMenuItem[] => [
     { label: "Copy Prefix", icon: <Copy size={12} />, onClick: () => copyToClipboard(k.prefix) },
+    { label: "Rotate", icon: <RefreshCw size={12} />, onClick: () => handleRotateKey(k) },
     { label: "Revoke", icon: <Trash2 size={12} />, onClick: () => handleRevokeKey(k), danger: true },
   ];
 
@@ -176,6 +221,47 @@ export const SettingsPage = () => {
         </FormField>
         <div className="flex justify-end mt-4">
           <button className="btn btn-primary text-xs" onClick={() => showToast("Profile saved", "success")}>Save Changes</button>
+        </div>
+      </div>
+
+      {/* Password change */}
+      <div className="card mt-4">
+        <h3 className="text-sm font-semibold text-text-primary mb-4">Change Password</h3>
+        <FormField label="Current Password" required>
+          <input
+            type="password"
+            value={passwordForm.current_password}
+            onChange={(e) => setPasswordForm({ ...passwordForm, current_password: e.target.value })}
+            placeholder="Enter current password"
+            className="text-sm"
+          />
+        </FormField>
+        <FormField label="New Password" required>
+          <input
+            type="password"
+            value={passwordForm.new_password}
+            onChange={(e) => setPasswordForm({ ...passwordForm, new_password: e.target.value })}
+            placeholder="Enter new password"
+            className="text-sm"
+          />
+        </FormField>
+        <FormField label="Confirm New Password" required>
+          <input
+            type="password"
+            value={passwordForm.confirm_password}
+            onChange={(e) => setPasswordForm({ ...passwordForm, confirm_password: e.target.value })}
+            placeholder="Confirm new password"
+            className="text-sm"
+          />
+        </FormField>
+        <div className="flex justify-end mt-4">
+          <button
+            className="btn btn-primary text-xs"
+            disabled={passwordLoading}
+            onClick={() => void handleChangePassword()}
+          >
+            {passwordLoading ? "Changing..." : "Change Password"}
+          </button>
         </div>
       </div>
     </div>

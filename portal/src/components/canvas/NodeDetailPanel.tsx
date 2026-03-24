@@ -7,7 +7,7 @@ import {
   ChevronRight, Cpu,
 } from "lucide-react";
 import type { Node } from "@xyflow/react";
-import { apiRequest } from "../../lib/api";
+import { apiRequest, useApiQuery } from "../../lib/api";
 import { SectionTitle, InlineInput, InlineTextarea, InlineSelect, ToggleRow, StatusPill, InfoRow, EmptyTab } from "./primitives";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -345,6 +345,69 @@ function TabContent({ nodeType, tabId, data, nodeId, onUpdateNode }: {
 /* ═══════════════════════════════════════════════════════════════════
    AGENT TAB CONTENT (top-level tabs: Overview, Deployments, Variables, Metrics)
    ═══════════════════════════════════════════════════════════════════ */
+/* ── Deploy Status inline component ────────────────────────────── */
+function DeployStatusSection({ agentName }: { agentName: string }) {
+  const deployQuery = useApiQuery<{
+    status?: string;
+    version?: string;
+    last_deployed_at?: string;
+    replicas?: number;
+    url?: string;
+  }>(
+    `/api/v1/deploy/${encodeURIComponent(agentName)}/status`,
+    Boolean(agentName),
+  );
+
+  if (!agentName) return null;
+
+  return (
+    <>
+      <SectionTitle>Deployment</SectionTitle>
+      <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5 mb-6">
+        {deployQuery.loading && (
+          <p className="text-xs text-text-muted">Loading deploy status...</p>
+        )}
+        {deployQuery.error && (
+          <p className="text-xs text-text-muted">No deployment info available</p>
+        )}
+        {!deployQuery.loading && !deployQuery.error && deployQuery.data && (
+          <>
+            <InfoRow label="Deploy Status" value={
+              <span className="flex items-center gap-1.5">
+                <span className={`w-2 h-2 rounded-full ${
+                  deployQuery.data.status === "running" || deployQuery.data.status === "active" || deployQuery.data.status === "healthy"
+                    ? "bg-status-live"
+                    : deployQuery.data.status === "deploying" || deployQuery.data.status === "pending"
+                    ? "bg-status-warning"
+                    : deployQuery.data.status === "failed" || deployQuery.data.status === "error"
+                    ? "bg-status-error"
+                    : "bg-text-muted"
+                }`} />
+                {(deployQuery.data.status || "unknown").toUpperCase()}
+              </span>
+            } />
+            {deployQuery.data.version && (
+              <InfoRow label="Version" value={deployQuery.data.version} mono />
+            )}
+            {deployQuery.data.last_deployed_at && (
+              <InfoRow
+                label="Last Deployed"
+                value={new Date(deployQuery.data.last_deployed_at).toLocaleString()}
+              />
+            )}
+            {deployQuery.data.replicas !== undefined && (
+              <InfoRow label="Replicas" value={String(deployQuery.data.replicas)} mono />
+            )}
+            {deployQuery.data.url && (
+              <InfoRow label="URL" value={deployQuery.data.url} mono />
+            )}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
 function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
   tabId: string; data: AgentNodeData; nodeId: string;
   onUpdateNode?: (nodeId: string, data: NodeData) => void;
@@ -373,6 +436,7 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
             <InfoRow label="Tools" value={`${(data.tools || []).length} configured`} />
             <InfoRow label="Efficiency" value={data.efficiency ? `${data.efficiency}%` : "—"} />
           </div>
+          <DeployStatusSection agentName={data.name || ""} />
           <SectionTitle>Recent Activity</SectionTitle>
           <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
             <div className="flex items-center gap-2 mb-3">
@@ -492,6 +556,12 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
   const [memoryTab, setMemoryTab] = useState<"facts" | "episodes" | "procedures">("facts");
   const [newFact, setNewFact] = useState({ key: "", value: "" });
   const [sessionFilter, setSessionFilter] = useState("all");
+  // Sandbox state must stay at top-level to preserve hook order across sections.
+  const [sbId, setSbId] = useState("");
+  const [sbLoading, setSbLoading] = useState(false);
+  const [sbCmd, setSbCmd] = useState("");
+  const [sbOutput, setSbOutput] = useState<Array<{ cmd: string; stdout: string; stderr: string; exit_code: number }>>([]);
+  const [sbFiles, setSbFiles] = useState<Array<{ name: string; size: number }>>([]);
 
   /* Sync local state when data props change */
   useEffect(() => {
@@ -751,11 +821,6 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
     case "sandbox": {
       const agentName = data.name || "";
       const isOnline = data.status === "online";
-      const [sbId, setSbId] = useState("");
-      const [sbLoading, setSbLoading] = useState(false);
-      const [sbCmd, setSbCmd] = useState("");
-      const [sbOutput, setSbOutput] = useState<Array<{ cmd: string; stdout: string; stderr: string; exit_code: number }>>([]);
-      const [sbFiles, setSbFiles] = useState<Array<{ name: string; size: number }>>([]);
 
       const createSandbox = async () => {
         setSbLoading(true);

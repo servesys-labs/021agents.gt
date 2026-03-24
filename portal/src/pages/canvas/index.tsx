@@ -781,32 +781,70 @@ function CanvasWorkspaceInner() {
 
   /* ── Delete node ─────────────────────────────────────────── */
   const handleDeleteNode = useCallback(
-    (nodeId: string) => {
+    async (nodeId: string) => {
       const node = nodes.find((n) => n.id === nodeId);
+      const agentName = String(node?.data?.name || "");
+
+      // If it's an agent node, call the backend DELETE endpoint first
+      if (node?.type === "agent" && agentName) {
+        try {
+          await apiRequest(`/api/v1/agents/${encodeURIComponent(agentName)}`, "DELETE");
+          addLogEntry(`Deleted agent "${agentName}" from backend`, "done");
+        } catch (err) {
+          addLogEntry(`Backend delete failed: ${err instanceof Error ? err.message : "Unknown error"} — removing from canvas`, "error");
+        }
+      }
+
       setNodes((nds) => nds.filter((n) => n.id !== nodeId));
       setEdges((eds) => eds.filter((e) => e.source !== nodeId && e.target !== nodeId));
       setDetailNode(null);
       setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 50);
-      addLogEntry(`Deleted ${node?.data?.name || "node"}`, "done");
+      addLogEntry(`Deleted ${agentName || "node"}`, "done");
     },
     [nodes, setNodes, setEdges, addLogEntry, fitView],
   );
 
   /* ── Clone node ──────────────────────────────────────────── */
   const handleCloneNode = useCallback(
-    (nodeId: string) => {
+    async (nodeId: string) => {
       const node = nodes.find((n) => n.id === nodeId);
-      if (node) {
-        const newId = `${node.type}-${crypto.randomUUID().slice(0, 8)}`;
-        const newNode: Node = {
-          ...node,
-          id: newId,
-          position: { x: node.position.x + 40, y: node.position.y + 40 },
-          data: { ...node.data, name: `${node.data.name} (copy)` },
-        };
-        setNodes((nds) => [...nds, newNode]);
-        addLogEntry(`Cloned ${node.data.name}`, "done");
+      if (!node) return;
+      const agentName = String(node.data?.name || "");
+
+      const nodeData = (node.data ?? {}) as Record<string, unknown>;
+      let clonedName = `${agentName} (copy)`;
+      let clonedData: Record<string, unknown> = { ...nodeData, name: clonedName };
+
+      // If it's an agent node, call the backend clone endpoint
+      if (node.type === "agent" && agentName) {
+        try {
+          const result = await apiRequest<{ name?: string; model?: string; tools?: string[] }>(
+            `/api/v1/agents/${encodeURIComponent(agentName)}/clone`,
+            "POST",
+          );
+          clonedName = String(result.name || clonedName);
+          clonedData = {
+            ...nodeData,
+            name: clonedName,
+            model: result.model || nodeData.model,
+            tools: Array.isArray(result.tools) ? result.tools : (nodeData.tools || []),
+            status: "draft",
+          };
+          addLogEntry(`Cloned agent "${agentName}" to "${clonedName}" on backend`, "done");
+        } catch (err) {
+          addLogEntry(`Backend clone failed: ${err instanceof Error ? err.message : "Unknown error"} — cloning locally`, "error");
+        }
       }
+
+      const newId = `${node.type}-${crypto.randomUUID().slice(0, 8)}`;
+      const newNode: Node = {
+        ...node,
+        id: newId,
+        position: { x: node.position.x + 40, y: node.position.y + 40 },
+        data: clonedData,
+      };
+      setNodes((nds) => [...nds, newNode]);
+      addLogEntry(`Cloned ${agentName || "node"}`, "done");
     },
     [nodes, setNodes, addLogEntry],
   );
@@ -815,7 +853,7 @@ function CanvasWorkspaceInner() {
   const handleContextAction = useCallback(
     (action: string, nodeId?: string) => {
       const mutatingActions = new Set([
-        "edit", "deploy", "delete", "clone", "add-agent", "add-knowledge",
+        "edit", "deploy", "delete", "clone", "export", "add-agent", "add-knowledge",
         "add-datasource", "add-connector", "add-mcp",
       ]);
       if (!editMode && mutatingActions.has(action)) {
@@ -847,11 +885,37 @@ function CanvasWorkspaceInner() {
           break;
         }
         case "delete": {
-          if (nodeId) handleDeleteNode(nodeId);
+          if (nodeId) void handleDeleteNode(nodeId);
           break;
         }
         case "clone": {
-          if (nodeId) handleCloneNode(nodeId);
+          if (nodeId) void handleCloneNode(nodeId);
+          break;
+        }
+        case "export": {
+          const exportNode = nodes.find((n) => n.id === nodeId);
+          if (exportNode?.type === "agent") {
+            const agentName = String(exportNode.data?.name || "");
+            if (agentName) {
+              addLogEntry(`Exporting ${agentName}...`, "running");
+              apiRequest<Record<string, unknown>>(`/api/v1/agents/${encodeURIComponent(agentName)}/export`, "GET")
+                .then((data) => {
+                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `${agentName}-export.json`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                  addLogEntry(`Exported ${agentName}`, "done");
+                })
+                .catch((err) => {
+                  addLogEntry(`Export failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
+                });
+            }
+          }
           break;
         }
         // Canvas-level context menu actions
@@ -873,7 +937,7 @@ function CanvasWorkspaceInner() {
           addLogEntry(`Action: ${action}`, "done");
       }
     },
-    [nodes, addNode, addLogEntry, editMode, handleDeploy, handleDeleteNode, handleCloneNode],
+    [nodes, addNode, addLogEntry, editMode, handleDeploy, handleDeleteNode, handleCloneNode, setNodes],
   );
 
   /* ── Meta-agent ──────────────────────────────────────────── */

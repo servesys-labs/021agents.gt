@@ -10,6 +10,7 @@ import {
   ToggleLeft,
   ToggleRight,
   KeyRound,
+  RotateCcw,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -158,6 +159,20 @@ export const WebhooksPage = () => {
       },
     });
     setConfirmOpen(true);
+  };
+
+  /* ── Retry delivery ──────────────────────────────────────── */
+  const handleRetryDelivery = async (webhookId: string, deliveryId: string) => {
+    try {
+      await apiRequest(
+        `/api/v1/webhooks/${webhookId}/deliveries/${deliveryId}/replay`,
+        "POST",
+      );
+      showToast("Delivery replayed", "success");
+      void deliveriesQuery.refetch();
+    } catch {
+      showToast("Retry failed", "error");
+    }
   };
 
   /* ── Delete ───────────────────────────────────────────────── */
@@ -457,35 +472,47 @@ export const WebhooksPage = () => {
           emptyMessage="No deliveries yet"
         >
           <div className="space-y-2">
-            {(deliveriesQuery.data?.deliveries ?? []).map((d, i) => (
-              <div
-                key={d.id ?? i}
-                className="flex items-center justify-between px-3 py-2 bg-surface-base border border-border-default rounded-lg"
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-2 h-2 rounded-full ${
-                      d.success !== false &&
-                      (d.response_status ?? 0) >= 200 &&
-                      (d.response_status ?? 0) < 300
-                        ? "bg-status-live"
-                        : "bg-status-error"
-                    }`}
-                  />
-                  <span className="text-xs text-text-secondary">
-                    {d.event_type ?? "unknown"}
-                  </span>
+            {(deliveriesQuery.data?.deliveries ?? []).map((d, i) => {
+              const isFailed =
+                d.success === false ||
+                (d.response_status ?? 0) < 200 ||
+                (d.response_status ?? 0) >= 300;
+              return (
+                <div
+                  key={d.id ?? i}
+                  className="flex items-center justify-between px-3 py-2 bg-surface-base border border-border-default rounded-lg"
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-2 h-2 rounded-full ${
+                        isFailed ? "bg-status-error" : "bg-status-live"
+                      }`}
+                    />
+                    <span className="text-xs text-text-secondary">
+                      {d.event_type ?? "unknown"}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className="text-[10px] text-text-muted font-mono">
+                      {d.response_status ?? 0}
+                    </span>
+                    <span className="text-[10px] text-text-muted font-mono">
+                      {(d.duration_ms ?? 0).toFixed(0)}ms
+                    </span>
+                    {isFailed && selectedWebhookId && d.id && (
+                      <button
+                        className="flex items-center gap-1 px-2 py-1 text-[10px] text-accent hover:bg-accent/10 rounded transition-colors"
+                        onClick={() =>
+                          void handleRetryDelivery(selectedWebhookId, d.id!)
+                        }
+                      >
+                        <RotateCcw size={9} /> Retry
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-4">
-                  <span className="text-[10px] text-text-muted font-mono">
-                    {d.response_status ?? 0}
-                  </span>
-                  <span className="text-[10px] text-text-muted font-mono">
-                    {(d.duration_ms ?? 0).toFixed(0)}ms
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </QueryState>
       </SlidePanel>

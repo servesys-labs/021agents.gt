@@ -4,7 +4,7 @@ import {
   Play, Pause, Trash2, Plus, RotateCcw, CheckCircle2, XCircle,
   AlertTriangle, Search, Eye, Send, Upload, Settings, Globe,
   MoreVertical, ChevronRight, Zap, Activity, Code, Lock, Unlock,
-  KeyRound, RefreshCw,
+  KeyRound, RefreshCw, Download,
 } from "lucide-react";
 import { CanvasOverlayPanel } from "./CanvasOverlayPanel";
 import { apiRequest, useApiQuery } from "../../lib/api";
@@ -14,7 +14,7 @@ import { StatusPill, SectionTitle, InlineInput, InlineSelect, InlineTextarea, To
    WORKFLOWS & JOBS PANEL
    ═══════════════════════════════════════════════════════════════════ */
 export function WorkflowsPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
-  const [tab, setTab] = useState<"workflows" | "jobs">("workflows");
+  const [tab, setTab] = useState<"workflows" | "jobs" | "dlq">("workflows");
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [wfName, setWfName] = useState("");
@@ -28,6 +28,10 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
   const jobsQuery = useApiQuery<{ jobs?: Array<Record<string, unknown>> }>(
     "/api/v1/jobs?limit=50",
     open,
+  );
+  const dlqQuery = useApiQuery<{ entries?: Array<Record<string, unknown>> }>(
+    "/api/v1/jobs/dlq",
+    open && tab === "dlq",
   );
   const workflows = (workflowsQuery.data?.workflows ?? []).map((wf) => ({
     id: String(wf.workflow_id ?? ""),
@@ -51,10 +55,10 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
       <ReadOnlyNotice editable={editable} />
       {/* Tabs */}
       <div className="flex items-center gap-1 mb-4">
-        {(["workflows", "jobs"] as const).map((t) => (
+        {(["workflows", "jobs", "dlq"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${tab === t ? "bg-accent/20 text-accent" : "text-text-muted hover:bg-surface-overlay"}`}>
-            {t === "workflows" ? `Workflows (${workflows.length})` : `Jobs (${jobs.length})`}
+            {t === "workflows" ? `Workflows (${workflows.length})` : t === "jobs" ? `Jobs (${jobs.length})` : "Dead Letter Queue"}
           </button>
         ))}
         <div className="flex-1" />
@@ -168,6 +172,32 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
         </div>
       )}
 
+      {/* DLQ list */}
+      {tab === "dlq" && (
+        <div className="space-y-2">
+          {dlqQuery.loading && <p className="text-xs text-text-muted">Loading dead letter queue...</p>}
+          {dlqQuery.error && <p className="text-xs text-status-error">{dlqQuery.error}</p>}
+          {(dlqQuery.data?.entries ?? []).length === 0 && !dlqQuery.loading && (
+            <p className="text-xs text-text-muted">Dead letter queue is empty</p>
+          )}
+          {(dlqQuery.data?.entries ?? []).map((entry, idx) => (
+            <div key={String(entry.job_id ?? idx)} className="bg-surface-base rounded-lg border border-border-default p-3">
+              <div className="flex items-center gap-2 mb-1.5">
+                <AlertTriangle size={12} className="text-status-error" />
+                <code className="text-[10px] font-mono text-text-primary">{String(entry.job_id ?? "").slice(0, 12)}</code>
+                <StatusPill status="failed" />
+              </div>
+              <p className="text-[11px] text-text-primary mb-1">{String(entry.agent_name ?? "n/a")}</p>
+              <p className="text-[10px] text-status-error mb-1 truncate">{String(entry.error ?? "Unknown error")}</p>
+              <div className="flex items-center gap-3 text-[10px] text-text-muted">
+                <span>Retries: {Number(entry.retries ?? 0)}</span>
+                <span>Failed: {entry.failed_at ? new Date(String(entry.failed_at)).toLocaleString() : "n/a"}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Jobs list */}
       {tab === "jobs" && (
         <div className="space-y-2">
@@ -192,6 +222,40 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
               <div className="flex gap-2">
                 {job.status === "running" && (
                   <button
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-warning hover:bg-status-warning/10 rounded transition-colors"
+                    onClick={async () => {
+                      if (!editable) return;
+                      try {
+                        await apiRequest(`/api/v1/jobs/${job.id}/pause`, "POST");
+                        setActionMessage("Job paused");
+                        void jobsQuery.refetch();
+                      } catch (err) {
+                        setActionMessage(err instanceof Error ? err.message : "Failed to pause job");
+                      }
+                    }}
+                  >
+                    <Pause size={9} /> Pause
+                  </button>
+                )}
+                {job.status === "paused" && (
+                  <button
+                    className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-live hover:bg-status-live/10 rounded transition-colors"
+                    onClick={async () => {
+                      if (!editable) return;
+                      try {
+                        await apiRequest(`/api/v1/jobs/${job.id}/resume`, "POST");
+                        setActionMessage("Job resumed");
+                        void jobsQuery.refetch();
+                      } catch (err) {
+                        setActionMessage(err instanceof Error ? err.message : "Failed to resume job");
+                      }
+                    }}
+                  >
+                    <Play size={9} /> Resume
+                  </button>
+                )}
+                {job.status === "running" && (
+                  <button
                     className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors"
                     onClick={async () => {
                       if (!editable) return;
@@ -204,7 +268,7 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
                       }
                     }}
                   >
-                    <Pause size={9} /> Cancel
+                    <XCircle size={9} /> Cancel
                   </button>
                 )}
                 {job.status === "failed" && (
@@ -236,6 +300,52 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
         </div>
       )}
     </CanvasOverlayPanel>
+  );
+}
+
+/* ── Schedule History inline component ─────────────────────────── */
+function ScheduleHistoryInline({ scheduleId }: { scheduleId: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const historyQuery = useApiQuery<{ history?: Array<Record<string, unknown>> }>(
+    `/api/v1/schedules/${scheduleId}/history`,
+    expanded,
+  );
+  const executions = (historyQuery.data?.history ?? []).slice(0, 10);
+
+  return (
+    <div className="mt-2">
+      <button
+        className="flex items-center gap-1 text-[10px] text-accent hover:underline"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <ChevronRight size={9} className={`transition-transform ${expanded ? "rotate-90" : ""}`} />
+        <Activity size={9} /> History ({expanded ? executions.length : "..."})
+      </button>
+      {expanded && (
+        <div className="mt-1.5 space-y-1">
+          {historyQuery.loading && <p className="text-[9px] text-text-muted">Loading...</p>}
+          {historyQuery.error && <p className="text-[9px] text-status-error">{historyQuery.error}</p>}
+          {!historyQuery.loading && executions.length === 0 && (
+            <p className="text-[9px] text-text-muted">No execution history</p>
+          )}
+          {executions.map((exec, i) => {
+            const status = String(exec.status ?? "unknown");
+            const startedAt = exec.started_at ? new Date(String(exec.started_at)).toLocaleString() : "--";
+            return (
+              <div key={String(exec.execution_id ?? i)} className="flex items-center gap-2 text-[9px] px-2 py-1 bg-surface-overlay rounded">
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                  status === "completed" || status === "success" ? "bg-status-live" :
+                  status === "failed" || status === "error" ? "bg-status-error" :
+                  status === "running" ? "bg-status-warning" : "bg-text-muted"
+                }`} />
+                <span className="text-text-secondary">{status}</span>
+                <span className="text-text-muted flex-1">{startedAt}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -371,6 +481,7 @@ export function SchedulesPanel({ open, onClose, editable = true }: { open: boole
                 <Trash2 size={9} /> Delete
               </button>
             </div>
+            <ScheduleHistoryInline scheduleId={sch.id} />
           </div>
         ))}
       </div>
@@ -381,6 +492,68 @@ export function SchedulesPanel({ open, onClose, editable = true }: { open: boole
 /* ═══════════════════════════════════════════════════════════════════
    WEBHOOKS PANEL
    ═══════════════════════════════════════════════════════════════════ */
+/* ── Webhook Deliveries inline component ───────────────────────── */
+function WebhookDeliveriesInline({ webhookId, editable }: { webhookId: string; editable: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const deliveriesQuery = useApiQuery<{ deliveries?: Array<Record<string, unknown>> }>(
+    `/api/v1/webhooks/${webhookId}/deliveries`,
+    expanded,
+  );
+  const deliveries = (deliveriesQuery.data?.deliveries ?? []).slice(0, 10);
+
+  const handleReplay = async (deliveryId: string) => {
+    if (!editable) return;
+    try {
+      await apiRequest(`/api/v1/webhooks/${webhookId}/deliveries/${deliveryId}/replay`, "POST");
+    } catch {
+      /* silently handled */
+    }
+    void deliveriesQuery.refetch();
+  };
+
+  return (
+    <div className="mt-2">
+      <button
+        className="flex items-center gap-1 text-[10px] text-accent hover:underline"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <ChevronRight size={9} className={`transition-transform ${expanded ? "rotate-90" : ""}`} />
+        <Eye size={9} /> Deliveries
+      </button>
+      {expanded && (
+        <div className="mt-1.5 space-y-1">
+          {deliveriesQuery.loading && <p className="text-[9px] text-text-muted">Loading...</p>}
+          {deliveriesQuery.error && <p className="text-[9px] text-status-error">{deliveriesQuery.error}</p>}
+          {!deliveriesQuery.loading && deliveries.length === 0 && (
+            <p className="text-[9px] text-text-muted">No deliveries</p>
+          )}
+          {deliveries.map((d, i) => {
+            const status = Number(d.response_status ?? 0);
+            const isFailed = d.success === false || status < 200 || status >= 300;
+            const deliveryId = String(d.id ?? "");
+            return (
+              <div key={deliveryId || i} className="flex items-center gap-2 text-[9px] px-2 py-1 bg-surface-overlay rounded">
+                <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${isFailed ? "bg-status-error" : "bg-status-live"}`} />
+                <span className="text-text-secondary">{String(d.event_type ?? "event")}</span>
+                <span className="text-text-muted font-mono">{status}</span>
+                <span className="text-text-muted flex-1">{Number(d.duration_ms ?? 0).toFixed(0)}ms</span>
+                {isFailed && deliveryId && (
+                  <button
+                    className="text-accent hover:underline"
+                    onClick={() => void handleReplay(deliveryId)}
+                  >
+                    <RefreshCw size={8} /> retry
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function WebhooksPanel({ open, onClose, editable = true }: { open: boolean; onClose: () => void; editable?: boolean }) {
   const [showCreate, setShowCreate] = useState(false);
   const [url, setUrl] = useState("");
@@ -488,9 +661,6 @@ export function WebhooksPanel({ open, onClose, editable = true }: { open: boolea
               >
                 <Send size={9} /> Test
               </button>
-              <button className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors">
-                <Eye size={9} /> Deliveries
-              </button>
               <button
                 className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors"
                 onClick={async () => {
@@ -511,6 +681,21 @@ export function WebhooksPanel({ open, onClose, editable = true }: { open: boolea
                 <Settings size={9} /> {wh.status === "active" ? "Disable" : "Enable"}
               </button>
               <button
+                className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:bg-surface-overlay rounded transition-colors"
+                onClick={async () => {
+                  if (!editable) return;
+                  try {
+                    await apiRequest(`/api/v1/webhooks/${wh.id}/rotate-secret`, "POST");
+                    setActionMessage("Secret rotated");
+                    void webhooksQuery.refetch();
+                  } catch (err) {
+                    setActionMessage(err instanceof Error ? err.message : "Failed to rotate secret");
+                  }
+                }}
+              >
+                <KeyRound size={9} /> Rotate Secret
+              </button>
+              <button
                 className="flex items-center gap-1 px-2 py-1 text-[10px] text-status-error hover:bg-status-error/10 rounded transition-colors ml-auto"
                 onClick={async () => {
                 if (!editable) return;
@@ -526,6 +711,7 @@ export function WebhooksPanel({ open, onClose, editable = true }: { open: boolea
                 <Trash2 size={9} /> Delete
               </button>
             </div>
+            <WebhookDeliveriesInline webhookId={wh.id} editable={editable} />
           </div>
         ))}
       </div>
@@ -683,25 +869,54 @@ export function GovernancePanel({ open, onClose, editable = true }: { open: bool
       )}
 
       {tab === "approvals" && (
-        <div className="space-y-2">
-          {auditQuery.loading && <p className="text-xs text-text-muted">Loading recent governance events...</p>}
-          {auditQuery.error && <p className="text-xs text-status-error">{auditQuery.error}</p>}
-          {(auditQuery.data?.entries ?? []).slice(0, 20).map((entry, idx) => (
-            <div key={`${entry.id ?? entry.created_at ?? idx}`} className="bg-surface-base rounded-lg border border-border-default p-3">
-              <div className="flex items-center gap-2 mb-1">
-                <ShieldCheck size={12} className="text-accent" />
-                <span className="text-[11px] font-medium text-text-primary flex-1">
-                  {String(entry.action ?? "event")}
-                </span>
-                <span className="text-[10px] text-text-muted">
-                  {entry.created_at ? new Date(Number(entry.created_at) * 1000).toLocaleString() : ""}
-                </span>
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs text-text-muted">
+              {(auditQuery.data?.entries ?? []).length} recent events
+            </p>
+            <button
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-surface-overlay text-text-primary rounded-md hover:bg-surface-base transition-colors border border-border-default"
+              onClick={async () => {
+                try {
+                  const data = await apiRequest<Record<string, unknown>>("/api/v1/audit/export", "GET");
+                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `audit-log-export-${new Date().toISOString().slice(0, 10)}.json`;
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                  setActionMessage("Audit log exported");
+                } catch (err) {
+                  setActionMessage(err instanceof Error ? err.message : "Failed to export audit log");
+                }
+              }}
+            >
+              <Download size={12} /> Export Audit Log
+            </button>
+          </div>
+          <div className="space-y-2">
+            {auditQuery.loading && <p className="text-xs text-text-muted">Loading recent governance events...</p>}
+            {auditQuery.error && <p className="text-xs text-status-error">{auditQuery.error}</p>}
+            {(auditQuery.data?.entries ?? []).slice(0, 20).map((entry, idx) => (
+              <div key={`${entry.id ?? entry.created_at ?? idx}`} className="bg-surface-base rounded-lg border border-border-default p-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <ShieldCheck size={12} className="text-accent" />
+                  <span className="text-[11px] font-medium text-text-primary flex-1">
+                    {String(entry.action ?? "event")}
+                  </span>
+                  <span className="text-[10px] text-text-muted">
+                    {entry.created_at ? new Date(Number(entry.created_at) * 1000).toLocaleString() : ""}
+                  </span>
+                </div>
+                <div className="text-[10px] text-text-muted">
+                  user: {String(entry.user_id ?? "system")} · resource: {String(entry.resource_type ?? "n/a")}
+                </div>
               </div>
-              <div className="text-[10px] text-text-muted">
-                user: {String(entry.user_id ?? "system")} · resource: {String(entry.resource_type ?? "n/a")}
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
     </CanvasOverlayPanel>
