@@ -140,6 +140,12 @@ def main() -> None:
     # --- list ---
     sub.add_parser("list", help="List available agents")
 
+    # --- delete ---
+    delete_p = sub.add_parser("delete", help="Delete an agent and clean up all associated data")
+    delete_p.add_argument("name", help="Agent name to delete")
+    delete_p.add_argument("--hard", action="store_true", help="Permanently delete all data (irreversible)")
+    delete_p.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompt")
+
     # --- tools ---
     sub.add_parser("tools", help="List available tool plugins")
 
@@ -375,6 +381,8 @@ def main() -> None:
             asyncio.run(cmd_run(args))
         elif args.command == "list":
             cmd_list(args)
+        elif args.command == "delete":
+            cmd_delete(args)
         elif args.command == "tools":
             cmd_tools(args)
         elif args.command == "chat":
@@ -1213,6 +1221,48 @@ async def cmd_run(args: argparse.Namespace) -> None:
 
     if failed:
         sys.exit(1)
+
+
+def cmd_delete(args: argparse.Namespace) -> None:
+    """Delete an agent and cascade-clean all associated data."""
+    from agentos.core.db_config import get_db, initialize_db
+    from agentos.agent import _resolve_agents_dir
+
+    name = args.name
+    hard = args.hard
+
+    if not args.yes:
+        mode = "PERMANENTLY DELETE" if hard else "soft-delete"
+        answer = input(f"This will {mode} agent '{name}' and all associated data. Continue? [y/N] ")
+        if answer.lower() not in ("y", "yes"):
+            print("Cancelled.")
+            return
+
+    initialize_db()
+    db = get_db()
+    result = db.teardown_agent(name, hard_delete=hard)
+
+    # Remove filesystem config
+    agents_dir = _resolve_agents_dir()
+    for ext in (".json", ".yaml", ".yml"):
+        p = agents_dir / f"{name}{ext}"
+        if p.exists():
+            p.unlink()
+
+    counts = result.get("counts", {})
+    total = result.get("total_records", 0)
+    mode = "Hard deleted" if hard else "Soft-deleted"
+
+    if counts.get("agent", 0) == 0 and total == 0:
+        print(f"Agent '{name}' not found.")
+        return
+
+    print(f"{mode} agent '{name}'.")
+    if total > 0:
+        print(f"  Records affected: {total}")
+        for table, count in sorted(counts.items()):
+            if count > 0:
+                print(f"    {table}: {count}")
 
 
 def cmd_list(args: argparse.Namespace) -> None:

@@ -460,18 +460,36 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const base = this._ingestBase();
     const started = Date.now();
 
-    const resp = await this._safeFetch(`${base}/api/v1/runtime-proxy/agent/run`, {
-      method: "POST",
-      headers: this._ingestHeaders(),
-      body: JSON.stringify({
-        agent_name: config.agentName || "agentos",
-        task: input,
-        org_id: config.orgId || "",
-        project_id: config.projectId || "",
-        channel: "worker",
-        channel_user_id: this.name || "",
-      }),
-    });
+    // Timeout: budget-aware (5 min default, up to 10 min for large budgets)
+    const timeoutMs = Math.min((config.maxTurns || 50) * 15_000, 600_000);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+    let resp: Response;
+    try {
+      resp = await this._safeFetch(`${base}/api/v1/runtime-proxy/agent/run`, {
+        method: "POST",
+        headers: this._ingestHeaders(),
+        signal: controller.signal,
+        body: JSON.stringify({
+          agent_name: config.agentName || "agentos",
+          task: input,
+          org_id: config.orgId || "",
+          project_id: config.projectId || "",
+          channel: "worker",
+          channel_user_id: this.name || "",
+        }),
+      });
+    } catch (err: any) {
+      clearTimeout(timer);
+      const isTimeout = err.name === "AbortError";
+      return [{
+        turn: 1, content: "", toolResults: [], done: true,
+        error: isTimeout ? `Backend timeout after ${timeoutMs}ms` : `Backend fetch error: ${err.message}`,
+        costUsd: 0, model: config.model,
+      }];
+    }
+    clearTimeout(timer);
 
     const data = await resp.json() as any;
     const elapsed = Date.now() - started;
@@ -4079,7 +4097,7 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
 
         if (language === "javascript" || language === "python") {
           try {
-            const workerCode = `export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:"",exit_code:0})}catch(e){return Response.json({stdout:"",stderr:e.message,exit_code:1})}}}`;
+            const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
             const loaded = await env.LOADER.load(workerCode);
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeout);
