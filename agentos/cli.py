@@ -245,6 +245,67 @@ def main() -> None:
     codemap_p.add_argument("--svg-out", type=str, default="docs/codemap.svg", help="SVG output path")
     codemap_p.add_argument("--no-portal", action="store_true", help="Skip portal TypeScript route/dependency analysis")
 
+    # --- intel ---
+    intel_p = sub.add_parser("intel", help="Conversation intelligence — score, analyze, and trend agent conversations")
+    intel_sub = intel_p.add_subparsers(dest="intel_command")
+    intel_summary = intel_sub.add_parser("summary", help="Show conversation intelligence summary")
+    intel_summary.add_argument("--agent", type=str, default="", help="Filter by agent name")
+    intel_summary.add_argument("--since-days", type=int, default=30, help="Look back N days (default: 30)")
+    intel_score = intel_sub.add_parser("score", help="Score a specific session")
+    intel_score.add_argument("session_id", help="Session ID to score")
+    intel_trends = intel_sub.add_parser("trends", help="Show quality and sentiment trends")
+    intel_trends.add_argument("--agent", type=str, default="", help="Filter by agent name")
+    intel_trends.add_argument("--since-days", type=int, default=30, help="Look back N days (default: 30)")
+
+    # --- voice ---
+    voice_p = sub.add_parser("voice", help="Voice platform integrations (Vapi)")
+    voice_sub = voice_p.add_subparsers(dest="voice_command")
+    voice_sub.add_parser("calls", help="List Vapi calls")
+    voice_sub.add_parser("summary", help="Show call summary stats")
+    voice_call = voice_sub.add_parser("call-events", help="Show events for a call")
+    voice_call.add_argument("call_id", help="Call ID")
+
+    # --- security ---
+    sec_p = sub.add_parser("security", help="Security red-teaming and AIVSS risk scoring")
+    sec_sub = sec_p.add_subparsers(dest="security_command")
+    sec_scan = sec_sub.add_parser("scan", help="Run security scan on an agent")
+    sec_scan.add_argument("agent_name", help="Agent name to scan")
+    sec_sub.add_parser("probes", help="List available OWASP probes")
+    sec_risk = sec_sub.add_parser("risk", help="Show agent risk profile")
+    sec_risk.add_argument("agent_name", help="Agent name")
+    sec_scans = sec_sub.add_parser("scans", help="List security scan history")
+    sec_scans.add_argument("--agent", type=str, default="", help="Filter by agent")
+
+    # --- issues ---
+    issues_p = sub.add_parser("issues", help="Issue tracking — list, detect, triage, resolve")
+    issues_sub = issues_p.add_subparsers(dest="issues_command")
+    issues_list = issues_sub.add_parser("list", help="List open issues")
+    issues_list.add_argument("--agent", type=str, default="", help="Filter by agent name")
+    issues_list.add_argument("--status", type=str, default="", help="Filter by status")
+    issues_list.add_argument("--category", type=str, default="", help="Filter by category")
+    issues_detect = issues_sub.add_parser("detect", help="Detect issues from a session")
+    issues_detect.add_argument("session_id", help="Session ID to analyze")
+    issues_resolve = issues_sub.add_parser("resolve", help="Resolve an issue")
+    issues_resolve.add_argument("issue_id", help="Issue ID to resolve")
+    issues_sub.add_parser("summary", help="Show issue summary stats")
+
+    # --- gold-image ---
+    gold_p = sub.add_parser("gold-image", help="Gold image configuration management")
+    gold_sub = gold_p.add_subparsers(dest="gold_command")
+    gold_sub.add_parser("list", help="List all gold images")
+    gold_create = gold_sub.add_parser("create", help="Create gold image from an agent")
+    gold_create.add_argument("agent_name", help="Agent name to snapshot")
+    gold_create.add_argument("--name", type=str, default="", help="Gold image name (default: agent-name-gold)")
+    gold_diff = gold_sub.add_parser("diff", help="Show drift between agent and gold image")
+    gold_diff.add_argument("agent_name", help="Agent name to check")
+    gold_diff.add_argument("image_id", help="Gold image ID to compare against")
+    gold_check = gold_sub.add_parser("check", help="Check agent compliance against gold images")
+    gold_check.add_argument("agent_name", help="Agent name to check")
+    gold_check.add_argument("--image-id", type=str, default="", help="Specific gold image ID (default: best match)")
+    gold_audit = gold_sub.add_parser("audit", help="Show config change audit trail")
+    gold_audit.add_argument("--agent", type=str, default="", help="Filter by agent name")
+    gold_audit.add_argument("--limit", type=int, default=20, help="Number of entries to show")
+
     parser.add_argument("--version", "-V", action="store_true", help="Show version")
 
     args = parser.parse_args()
@@ -299,6 +360,16 @@ def main() -> None:
             cmd_mcp_serve(args)
         elif args.command == "codemap":
             cmd_codemap(args)
+        elif args.command == "intel":
+            cmd_intel(args)
+        elif args.command == "gold-image":
+            cmd_gold_image(args)
+        elif args.command == "issues":
+            cmd_issues(args)
+        elif args.command == "voice":
+            cmd_voice(args)
+        elif args.command == "security":
+            cmd_security(args)
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1131,6 +1202,538 @@ def cmd_tools(args: argparse.Namespace) -> None:
         desc = (t.description[:47] + "...") if len(t.description) > 50 else t.description
         source = t.source_path.name if t.source_path else "programmatic"
         print(f"{t.name:<25} {desc:<50} {source:<20}")
+
+
+def cmd_voice(args: argparse.Namespace) -> None:
+    """Voice platform integrations (Vapi)."""
+    from agentos.core.database import AgentDB
+
+    db_path = Path("data/agent.db")
+    if not db_path.exists():
+        print("No database found.", file=sys.stderr)
+        sys.exit(1)
+
+    db = AgentDB(db_path)
+    db.initialize()
+
+    sub = getattr(args, "voice_command", None)
+
+    if sub == "calls":
+        calls = db.list_vapi_calls()
+        if not calls:
+            print("No Vapi calls found.")
+        else:
+            print(f"\n  {'Call ID':18s}  {'Direction':10s}  {'Status':10s}  {'Duration':10s}  {'Cost':8s}  {'Phone'}")
+            print(f"  {'─' * 80}")
+            for c in calls:
+                dur = f"{c.get('duration_seconds', 0):.1f}s"
+                cost = f"${c.get('cost_usd', 0):.4f}"
+                print(f"  {c['call_id']:18s}  {c.get('direction', ''):10s}  {c.get('status', ''):10s}  {dur:10s}  {cost:8s}  {c.get('phone_number', '')}")
+        print()
+
+    elif sub == "summary":
+        summary = db.vapi_call_summary()
+        print(f"\n  Vapi Call Summary")
+        print(f"  {'─' * 40}")
+        print(f"  Total calls:    {summary['total_calls']}")
+        print(f"  Total cost:     ${summary['total_cost_usd']:.4f}")
+        print(f"  Total duration: {summary['total_duration_seconds']:.1f}s")
+        if summary.get("by_status"):
+            print(f"\n  By status:")
+            for s, c in summary["by_status"].items():
+                print(f"    {s:12s}  {c}")
+        print()
+
+    elif sub == "call-events":
+        call_id = args.call_id
+        events = db.list_vapi_events(call_id)
+        if not events:
+            print(f"No events for call {call_id}")
+        else:
+            print(f"\n  Events for call {call_id}:")
+            for e in events:
+                print(f"    [{e.get('event_type', ''):20s}]")
+        print()
+
+    else:
+        print("Usage: agentos voice {calls|summary|call-events}")
+        print("  calls        — list Vapi calls")
+        print("  summary      — call summary stats")
+        print("  call-events  — show events for a call")
+
+    db.close()
+
+
+def cmd_security(args: argparse.Namespace) -> None:
+    """Security red-teaming and AIVSS risk scoring."""
+    from agentos.core.database import AgentDB
+
+    db_path = Path("data/agent.db")
+    if not db_path.exists():
+        print("No database found. Run an agent first.", file=sys.stderr)
+        sys.exit(1)
+
+    db = AgentDB(db_path)
+    db.initialize()
+
+    sub = getattr(args, "security_command", None)
+
+    if sub == "scan":
+        import json as _json
+        agent_name = args.agent_name
+        agent_path = Path("agents") / f"{agent_name}.json"
+        if not agent_path.exists():
+            print(f"Agent '{agent_name}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        config = _json.loads(agent_path.read_text())
+        from agentos.security.redteam import RedTeamRunner
+        runner = RedTeamRunner(db=db)
+        result = runner.scan_config(agent_name=agent_name, agent_config=config)
+
+        risk_score = result.get("risk_score", 0)
+        risk_level = result.get("risk_level", "unknown")
+        print(f"\n  Security Scan: {agent_name}")
+        print(f"  {'─' * 50}")
+        print(f"  Scan ID:      {result['scan_id']}")
+        print(f"  Risk Score:   {risk_score}/10.0 ({risk_level.upper()})")
+        print(f"  Probes:       {result['total_probes']} total, {result['passed']} passed, {result['failed']} failed")
+
+        findings = result.get("findings", [])
+        if findings:
+            print(f"\n  Findings ({len(findings)}):")
+            for f in findings:
+                score = f.get("aivss_score", 0)
+                print(f"    [{f.get('severity', ''):8s}] {f.get('category', ''):8s}  {f.get('probe_name', ''):35s}  AIVSS:{score:.1f}")
+
+        layers = result.get("maestro_layers", [])
+        if layers:
+            assessed = [l for l in layers if l["total_probes"] > 0]
+            if assessed:
+                print(f"\n  MAESTRO Layers:")
+                for l in assessed:
+                    print(f"    {l['layer']:25s}  {l['risk_level']:10s}  {l['passed']}/{l['total_probes']} passed")
+        print()
+
+    elif sub == "probes":
+        from agentos.security.owasp_probes import OwaspProbeLibrary
+        lib = OwaspProbeLibrary()
+        probes = lib.get_all()
+        print(f"\n  OWASP LLM Top 10 Probes ({len(probes)} total):")
+        print(f"  {'─' * 80}")
+        print(f"  {'ID':12s}  {'Category':8s}  {'Severity':10s}  {'Name'}")
+        print(f"  {'─' * 80}")
+        for p in probes:
+            print(f"  {p.id:12s}  {p.category:8s}  {p.severity:10s}  {p.name}")
+        print()
+
+    elif sub == "risk":
+        profile = db.get_risk_profile(args.agent_name)
+        if not profile:
+            print(f"No risk profile for '{args.agent_name}'. Run: agentos security scan {args.agent_name}")
+        else:
+            print(f"\n  Risk Profile: {args.agent_name}")
+            print(f"  {'─' * 40}")
+            print(f"  Score:      {profile['risk_score']}/10.0")
+            print(f"  Level:      {profile['risk_level'].upper()}")
+            print(f"  Last Scan:  {profile['last_scan_id']}")
+            summary = profile.get("findings_summary", {})
+            if summary.get("by_severity"):
+                print(f"\n  Findings by severity:")
+                for s, c in summary["by_severity"].items():
+                    print(f"    {s:12s}  {c}")
+        print()
+
+    elif sub == "scans":
+        scans = db.list_security_scans(agent_name=getattr(args, "agent", ""))
+        if not scans:
+            print("No security scans found.")
+        else:
+            print(f"\n  {'Scan ID':18s}  {'Agent':20s}  {'Risk':6s}  {'Level':10s}  {'P/F':8s}")
+            print(f"  {'─' * 70}")
+            for s in scans:
+                print(f"  {s['scan_id']:18s}  {s['agent_name']:20s}  {s['risk_score']:5.1f}  {s['risk_level']:10s}  {s['passed']}/{s['failed']}")
+        print()
+
+    else:
+        print("Usage: agentos security {scan|probes|risk|scans}")
+        print("  scan <agent>  — run OWASP + MAESTRO security scan")
+        print("  probes        — list available security probes")
+        print("  risk <agent>  — show agent risk profile")
+        print("  scans         — list scan history")
+
+    db.close()
+
+
+def cmd_issues(args: argparse.Namespace) -> None:
+    """Issue tracking — list, detect, triage, resolve."""
+    from agentos.core.database import AgentDB
+
+    db_path = Path("data/agent.db")
+    if not db_path.exists():
+        print("No database found. Run an agent first.", file=sys.stderr)
+        sys.exit(1)
+
+    db = AgentDB(db_path)
+    db.initialize()
+
+    sub = getattr(args, "issues_command", None)
+
+    if sub == "list":
+        issues = db.list_issues(
+            agent_name=getattr(args, "agent", ""),
+            status=getattr(args, "status", ""),
+            category=getattr(args, "category", ""),
+        )
+        if not issues:
+            print("No issues found.")
+        else:
+            print(f"\n  {'ID':18s}  {'Status':10s}  {'Severity':10s}  {'Category':15s}  {'Agent':15s}  {'Title'}")
+            print(f"  {'─' * 100}")
+            for i in issues:
+                print(f"  {i['issue_id']:18s}  {i['status']:10s}  {i['severity']:10s}  {i['category']:15s}  {i.get('agent_name', ''):15s}  {i['title'][:40]}")
+        print()
+
+    elif sub == "detect":
+        session_id = args.session_id
+        session_row = db.conn.execute(
+            "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not session_row:
+            print(f"Session '{session_id}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        session_data = dict(session_row)
+        scores = db.query_conversation_scores(session_id=session_id)
+
+        from agentos.issues.detector import IssueDetector
+        from agentos.issues.remediation import RemediationEngine
+        detector = IssueDetector(db=db)
+        issues = detector.detect_from_session(
+            session_id=session_id,
+            agent_name=session_data.get("agent_name", ""),
+            session_data=session_data,
+            scores=scores,
+        )
+
+        engine = RemediationEngine()
+        for issue in issues:
+            fix = engine.suggest_fix(issue)
+            db.update_issue(issue["issue_id"], suggested_fix=fix)
+
+        if not issues:
+            print(f"No issues detected for session {session_id}")
+        else:
+            print(f"\n  Detected {len(issues)} issue(s) for session {session_id[:16]}:")
+            for i in issues:
+                print(f"    [{i['severity'].upper():8s}] {i['category']:15s}  {i['title']}")
+        print()
+
+    elif sub == "resolve":
+        import time as _time
+        issue_id = args.issue_id
+        existing = db.get_issue(issue_id)
+        if not existing:
+            print(f"Issue '{issue_id}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        db.update_issue(issue_id, status="resolved", resolved_at=_time.time())
+        print(f"  Issue {issue_id} resolved.")
+
+    elif sub == "summary":
+        summary = db.issue_summary()
+        print(f"\n  Issue Summary")
+        print(f"  {'─' * 40}")
+        print(f"  Total issues:  {summary['total']}")
+        if summary.get("by_status"):
+            print(f"\n  By status:")
+            for s, c in summary["by_status"].items():
+                print(f"    {s:15s}  {c}")
+        if summary.get("by_category"):
+            print(f"\n  By category:")
+            for s, c in summary["by_category"].items():
+                print(f"    {s:15s}  {c}")
+        if summary.get("by_severity"):
+            print(f"\n  By severity:")
+            for s, c in summary["by_severity"].items():
+                print(f"    {s:15s}  {c}")
+        print()
+
+    else:
+        print("Usage: agentos issues {list|detect|resolve|summary}")
+        print("  list     — list issues (--agent, --status, --category)")
+        print("  detect   — detect issues from a session")
+        print("  resolve  — resolve an issue by ID")
+        print("  summary  — aggregate issue stats")
+
+    db.close()
+
+
+def cmd_gold_image(args: argparse.Namespace) -> None:
+    """Gold image configuration management."""
+    from agentos.core.database import AgentDB
+
+    db_path = Path("data/agent.db")
+    if not db_path.exists():
+        print("No database found. Run an agent first.", file=sys.stderr)
+        sys.exit(1)
+
+    db = AgentDB(db_path)
+    db.initialize()
+
+    sub = getattr(args, "gold_command", None)
+
+    if sub == "list":
+        images = db.list_gold_images()
+        if not images:
+            print("No gold images found. Create one with: agentos gold-image create <agent_name>")
+        else:
+            print(f"\n  {'ID':18s}  {'Name':25s}  {'Version':10s}  {'Category':12s}  {'Approved':10s}")
+            print(f"  {'─' * 80}")
+            for img in images:
+                approved = "Yes" if img.get("approved_by") else "No"
+                print(f"  {img['image_id']:18s}  {img['name']:25s}  {img.get('version', ''):10s}  {img.get('category', ''):12s}  {approved:10s}")
+        print()
+
+    elif sub == "create":
+        import json as _json
+        agent_name = args.agent_name
+        agent_path = Path("agents") / f"{agent_name}.json"
+        if not agent_path.exists():
+            print(f"Agent '{agent_name}' not found at {agent_path}", file=sys.stderr)
+            sys.exit(1)
+
+        config = _json.loads(agent_path.read_text())
+        from agentos.config.gold_image import GoldImageManager
+        manager = GoldImageManager(db)
+        result = manager.create_from_agent(
+            agent_config=config,
+            name=args.name or f"{agent_name}-gold",
+        )
+        print(f"\n  Gold image created:")
+        print(f"    ID:      {result['image_id']}")
+        print(f"    Name:    {result['name']}")
+        print(f"    Version: {result['version']}")
+        print(f"    Hash:    {result['config_hash']}")
+        print()
+
+    elif sub == "diff":
+        import json as _json
+        agent_name = args.agent_name
+        image_id = args.image_id
+
+        agent_path = Path("agents") / f"{agent_name}.json"
+        if not agent_path.exists():
+            print(f"Agent '{agent_name}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        agent_config = _json.loads(agent_path.read_text())
+        gold = db.get_gold_image(image_id)
+        if not gold:
+            print(f"Gold image '{image_id}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        from agentos.config.drift import DriftDetector
+        detector = DriftDetector()
+        report = detector.detect(
+            agent_config=agent_config,
+            gold_config=gold.get("config", {}),
+            agent_name=agent_name,
+            image_id=image_id,
+            image_name=gold.get("name", ""),
+        )
+
+        print(f"\n  Drift Report: {agent_name} vs {gold.get('name', image_id)}")
+        print(f"  Status: {report.status.upper()}")
+        print(f"  Total drifts: {report.total_drifts}")
+        if report.drifted_fields:
+            print(f"\n  {'Field':35s}  {'Severity':10s}  {'Gold':25s}  {'Agent':25s}")
+            print(f"  {'─' * 100}")
+            for d in report.drifted_fields:
+                gold_str = str(d.gold_value)[:25]
+                agent_str = str(d.agent_value)[:25]
+                print(f"  {d.field:35s}  {d.severity:10s}  {gold_str:25s}  {agent_str:25s}")
+        print()
+
+    elif sub == "check":
+        import json as _json
+        agent_name = args.agent_name
+        agent_path = Path("agents") / f"{agent_name}.json"
+        if not agent_path.exists():
+            print(f"Agent '{agent_name}' not found", file=sys.stderr)
+            sys.exit(1)
+
+        agent_config = _json.loads(agent_path.read_text())
+        from agentos.config.compliance import ComplianceChecker
+        checker = ComplianceChecker(db)
+        report = checker.check_agent(
+            agent_name=agent_name,
+            agent_config=agent_config,
+            image_id=args.image_id,
+        )
+
+        print(f"\n  Compliance: {agent_name}")
+        print(f"  Gold Image: {report.image_name}")
+        print(f"  Status: {report.status.upper()}")
+        print(f"  Drifts: {report.total_drifts}")
+        if report.drifted_fields:
+            for d in report.drifted_fields:
+                marker = "!!" if d.severity == "critical" else "!" if d.severity == "warning" else " "
+                print(f"    {marker} {d.field}: {d.gold_value} → {d.agent_value}")
+        print()
+
+    elif sub == "audit":
+        entries = db.list_config_audit(agent_name=args.agent, limit=args.limit)
+        if not entries:
+            print("No config audit entries found.")
+        else:
+            print(f"\n  {'Action':25s}  {'Agent':20s}  {'Field':20s}  {'Changed By':15s}")
+            print(f"  {'─' * 85}")
+            for e in entries:
+                print(f"  {e.get('action', ''):25s}  {e.get('agent_name', ''):20s}  {e.get('field_changed', ''):20s}  {e.get('changed_by', ''):15s}")
+        print()
+
+    else:
+        print("Usage: agentos gold-image {list|create|diff|check|audit}")
+        print("  list     — list all gold images")
+        print("  create   — create gold image from agent")
+        print("  diff     — show drift between agent and gold image")
+        print("  check    — check agent compliance")
+        print("  audit    — show config change audit trail")
+
+    db.close()
+
+
+def cmd_intel(args: argparse.Namespace) -> None:
+    """Conversation intelligence — score, analyze, and trend agent conversations."""
+    from agentos.core.database import AgentDB
+
+    db_path = Path("data/agent.db")
+    if not db_path.exists():
+        print("No database found. Run an agent first to generate data.", file=sys.stderr)
+        sys.exit(1)
+
+    db = AgentDB(db_path)
+    db.initialize()
+
+    sub = getattr(args, "intel_command", None)
+
+    if sub == "summary":
+        import time as _time
+        since = _time.time() - (args.since_days * 86400)
+        summary = db.conversation_intel_summary(agent_name=args.agent, since=since)
+
+        print(f"\n  Conversation Intelligence Summary (last {args.since_days} days)")
+        if args.agent:
+            print(f"  Agent: {args.agent}")
+        print(f"  {'─' * 50}")
+        print(f"  Scored turns:          {summary['total_scored_turns']}")
+        print(f"  Avg sentiment:         {summary['avg_sentiment_score']:+.3f}")
+        print(f"  Avg quality:           {summary['avg_quality_score']:.3f}")
+        print(f"    Relevance:           {summary['avg_relevance']:.3f}")
+        print(f"    Coherence:           {summary['avg_coherence']:.3f}")
+        print(f"    Helpfulness:         {summary['avg_helpfulness']:.3f}")
+        print(f"    Safety:              {summary['avg_safety']:.3f}")
+        print(f"  Tool failures:         {summary['tool_failure_count']}")
+        print(f"  Hallucination risks:   {summary['hallucination_risk_count']}")
+        if summary.get("sentiment_breakdown"):
+            print(f"\n  Sentiment breakdown:")
+            for label, count in summary["sentiment_breakdown"].items():
+                print(f"    {label:12s}  {count}")
+        if summary.get("top_topics"):
+            print(f"\n  Top topics:")
+            for item in summary["top_topics"][:5]:
+                print(f"    {item['topic']:20s}  {item['count']}")
+        print()
+
+    elif sub == "score":
+        session_id = args.session_id
+        # Load turns
+        turn_rows = db.conn.execute(
+            "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_number",
+            (session_id,),
+        ).fetchall()
+        turns = [dict(r) for r in turn_rows]
+        if not turns:
+            print(f"No turns found for session {session_id}", file=sys.stderr)
+            sys.exit(1)
+
+        session_row = db.conn.execute(
+            "SELECT agent_name, input_text FROM sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        agent_name = session_row["agent_name"] if session_row else ""
+        input_text = session_row["input_text"] if session_row else ""
+
+        from agentos.observability.analytics import ConversationAnalytics
+        analytics = ConversationAnalytics()
+        result = analytics.score_session(
+            session_id=session_id,
+            turns=turns,
+            input_text=input_text,
+            agent_name=agent_name,
+            db=db,
+        )
+
+        print(f"\n  Session: {session_id}")
+        print(f"  Agent: {agent_name}")
+        print(f"  {'─' * 50}")
+        print(f"  Turns scored:       {result['total_turns']}")
+        print(f"  Avg quality:        {result['avg_quality']:.3f}")
+        print(f"  Avg sentiment:      {result['avg_sentiment_score']:+.3f}")
+        print(f"  Dominant sentiment: {result['dominant_sentiment']}")
+        print(f"  Sentiment trend:    {result['sentiment_trend']}")
+        print(f"  Topics:             {', '.join(result['topics']) or 'none'}")
+        print(f"  Tool failures:      {result['tool_failure_count']}")
+        print()
+        for ts in result["turn_scores"]:
+            q = ts["quality"]
+            s = ts["sentiment"]
+            print(f"    Turn {ts['turn_number']:>2d}  quality={q['overall']:.2f}  sentiment={s['score']:+.2f} ({s['sentiment']})  topic={q['topic']}  intent={q['intent']}")
+        print()
+
+    elif sub == "trends":
+        import time as _time
+        since = _time.time() - (args.since_days * 86400)
+
+        where_parts = ["created_at >= ?"]
+        params = [since]
+        if args.agent:
+            where_parts.append("agent_name = ?")
+            params.append(args.agent)
+        where = " AND ".join(where_parts)
+
+        daily = db.conn.execute(
+            f"""SELECT
+                DATE(created_at, 'unixepoch') as day,
+                AVG(quality_overall) as avg_q,
+                AVG(sentiment_score) as avg_s,
+                COUNT(*) as cnt
+            FROM conversation_scores WHERE {where}
+            GROUP BY day ORDER BY day""",
+            params,
+        ).fetchall()
+
+        if not daily:
+            print("No scored data found. Score sessions first with: agentos intel score <session_id>")
+            sys.exit(0)
+
+        print(f"\n  Quality & Sentiment Trends (last {args.since_days} days)")
+        print(f"  {'─' * 60}")
+        print(f"  {'Date':12s}  {'Quality':>8s}  {'Sentiment':>10s}  {'Turns':>6s}")
+        print(f"  {'─' * 60}")
+        for row in daily:
+            d = dict(row)
+            print(f"  {d['day']:12s}  {d['avg_q']:8.3f}  {d['avg_s']:+10.3f}  {d['cnt']:6d}")
+        print()
+
+    else:
+        print("Usage: agentos intel {summary|score|trends}")
+        print("  summary  — aggregate intelligence metrics")
+        print("  score    — score a specific session")
+        print("  trends   — quality/sentiment over time")
+
+    db.close()
 
 
 def cmd_codemap(args: argparse.Namespace) -> None:

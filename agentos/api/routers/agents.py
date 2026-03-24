@@ -88,6 +88,34 @@ def _snapshot_version(config: Any, created_by: str = "") -> None:
         pass  # Non-critical
 
 
+def _extract_project_scope(agent: Any) -> str:
+    """Read project scope from agent tags: project:<project_id>."""
+    tags = getattr(getattr(agent, "config", None), "tags", []) or []
+    for tag in tags:
+        if isinstance(tag, str) and tag.startswith("project:"):
+            return tag.split("project:", 1)[1].strip()
+    return ""
+
+
+def _enforce_project_scope_access(scoped_project_id: str, user: CurrentUser) -> None:
+    """Ensure caller can execute a project-scoped agent."""
+    if not scoped_project_id:
+        return
+
+    # API keys can be pinned to one project. Enforce exact project match.
+    if user.project_id and user.project_id != scoped_project_id:
+        raise HTTPException(status_code=403, detail="API key is scoped to a different project")
+
+    # Org must still own the scoped project.
+    db = _get_db()
+    row = db.conn.execute(
+        "SELECT 1 FROM projects WHERE project_id = ? AND org_id = ?",
+        (scoped_project_id, user.org_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=403, detail="Agent is scoped to another project/org")
+
+
 @router.put("/{name}", response_model=AgentResponse)
 async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser = Depends(require_scope("agents:write"))):
     """Update an existing agent."""
@@ -138,7 +166,11 @@ async def delete_agent(name: str, user: CurrentUser = Depends(require_scope("age
 
 
 @router.post("/{name}/run", response_model=RunResponse)
-async def run_agent(name: str, request: AgentRunRequest):
+async def run_agent(
+    name: str,
+    request: AgentRunRequest,
+    user: CurrentUser = Depends(require_scope("agents:run")),
+):
     """Run an agent on a task."""
     from agentos.agent import Agent
 
@@ -146,6 +178,15 @@ async def run_agent(name: str, request: AgentRunRequest):
         agent = Agent.from_name(name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    scoped_project_id = _extract_project_scope(agent)
+    _enforce_project_scope_access(scoped_project_id, user)
+    if hasattr(agent, "set_runtime_context"):
+        agent.set_runtime_context(
+            org_id=user.org_id,
+            project_id=scoped_project_id,
+            user_id=user.user_id,
+        )
 
     start = time.monotonic()
     results = await agent.run(request.task)
@@ -181,7 +222,11 @@ async def run_agent(name: str, request: AgentRunRequest):
 
 
 @router.post("/{name}/run/stream")
-async def run_agent_stream(name: str, request: AgentRunRequest):
+async def run_agent_stream(
+    name: str,
+    request: AgentRunRequest,
+    user: CurrentUser = Depends(require_scope("agents:run")),
+):
     """Run an agent with SSE streaming."""
     from agentos.agent import Agent
 
@@ -189,6 +234,15 @@ async def run_agent_stream(name: str, request: AgentRunRequest):
         agent = Agent.from_name(name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    scoped_project_id = _extract_project_scope(agent)
+    _enforce_project_scope_access(scoped_project_id, user)
+    if hasattr(agent, "set_runtime_context"):
+        agent.set_runtime_context(
+            org_id=user.org_id,
+            project_id=scoped_project_id,
+            user_id=user.user_id,
+        )
 
     turn_queue: asyncio.Queue = asyncio.Queue()
 

@@ -68,10 +68,11 @@ async def create_key(request: CreateApiKeyRequest, user: CurrentUser = Depends(g
         expires_at = time.time() + (request.expires_in_days * 86400)
 
     db.conn.execute(
-        """INSERT INTO api_keys (key_id, org_id, user_id, name, key_prefix, key_hash, scopes, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO api_keys (
+            key_id, org_id, user_id, name, key_prefix, key_hash, scopes, project_id, env, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (key_id, user.org_id, user.user_id, request.name, prefix,
-         key_hash, json.dumps(request.scopes), expires_at),
+         key_hash, json.dumps(request.scopes), request.project_id, request.env, expires_at),
     )
     db.conn.commit()
 
@@ -124,9 +125,20 @@ async def rotate_key(key_id: str, user: CurrentUser = Depends(get_current_user))
     scopes = json.loads(old["scopes"])
 
     db.conn.execute(
-        """INSERT INTO api_keys (key_id, org_id, user_id, name, key_prefix, key_hash, scopes)
-        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (new_key_id, user.org_id, user.user_id, old["name"], prefix, key_hash, json.dumps(scopes)),
+        """INSERT INTO api_keys (
+            key_id, org_id, user_id, name, key_prefix, key_hash, scopes, project_id, env
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            new_key_id,
+            user.org_id,
+            user.user_id,
+            old["name"],
+            prefix,
+            key_hash,
+            json.dumps(scopes),
+            old.get("project_id", ""),
+            old.get("env", ""),
+        ),
     )
     db.conn.commit()
 
