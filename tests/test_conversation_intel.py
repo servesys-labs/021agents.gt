@@ -607,3 +607,121 @@ class TestConversationIntelAPIExtended:
             data = resp.json()
             if data.get("scored"):
                 assert data["total_turns"] >= 1
+
+
+# ── Production-Readiness: Edge Cases + Integration ──────────────────
+
+
+class TestSentimentEdgeCases:
+    def setup_method(self):
+        from agentos.observability.sentiment import SentimentAnalyzer
+        self.analyzer = SentimentAnalyzer()
+
+    def test_whitespace_only(self):
+        result = self.analyzer.analyze("   ")
+        assert result.sentiment == "neutral"
+
+    def test_unicode_emojis(self):
+        result = self.analyzer.analyze("Great work! 🚀🎉 This is amazing")
+        assert result.sentiment == "positive"
+
+    def test_very_long_text(self):
+        result = self.analyzer.analyze("good " * 5000)
+        assert result.sentiment == "positive"
+        assert result.confidence > 0
+
+    def test_double_negation(self):
+        # "not not good" — shouldn't crash, behavior is best-effort
+        result = self.analyzer.analyze("not not good")
+        assert result.sentiment in ("positive", "negative", "neutral", "mixed")
+
+    def test_negation_scope_limited(self):
+        # "not good but excellent" — excellent should not be negated
+        result = self.analyzer.analyze("not good but excellent and wonderful")
+        # Should have mixed or positive signal
+        assert result.score > -1.0
+
+
+class TestQualityScorerEdgeCases:
+    def setup_method(self):
+        from agentos.observability.quality import QualityScorer
+        self.scorer = QualityScorer()
+
+    def test_empty_tool_calls_list(self):
+        result = self.scorer.score_turn("test", "test output", tool_calls=[])
+        assert result.overall >= 0
+
+    def test_malformed_tool_results(self):
+        # Non-dict items in tool_results shouldn't crash
+        result = self.scorer.score_turn("test", "output", tool_results=[{"error": "fail"}, {}])
+        assert result.has_tool_failure is True
+
+    def test_very_long_output(self):
+        result = self.scorer.score_turn("test", "word " * 10000)
+        assert 0 <= result.overall <= 1.0
+
+    def test_code_heavy_output(self):
+        output = "Here is the fix:\n```python\ndef hello():\n    return 'world'\n```\nThis should work."
+        result = self.scorer.score_turn("fix the bug", output)
+        assert result.coherence > 0.5
+        assert result.helpfulness > 0.4
+
+
+class TestAnalyticsTrendEdgeCases:
+    def setup_method(self):
+        from agentos.observability.analytics import ConversationAnalytics
+        self.analytics = ConversationAnalytics()
+
+    def test_volatile_trend(self):
+        assert self.analytics._compute_trend([0.1, 0.9, 0.1, 0.9, 0.1]) == "volatile"
+
+    def test_stable_trend(self):
+        assert self.analytics._compute_trend([0.5, 0.5, 0.5, 0.5]) == "stable"
+
+    def test_two_values(self):
+        result = self.analytics._compute_trend([0.2, 0.8])
+        assert result in ("improving", "stable", "volatile")
+
+
+class TestConversationIntelIntegration:
+    """Full pipeline: score → persist → query."""
+
+    def test_full_pipeline(self, tmp_path):
+        from agentos.core.database import AgentDB
+        from agentos.observability.analytics import ConversationAnalytics
+
+        db = AgentDB(tmp_path / "pipeline.db")
+        db.initialize()
+
+        analytics = ConversationAnalytics()
+        turns = [
+            {"turn_number": 1, "content": "Thank you, great help with the database query!", "tool_calls_json": "[]", "tool_results_json": "[]"},
+            {"turn_number": 2, "content": "I fixed the error in your SQL join clause.", "tool_calls_json": '[{"name":"search"}]', "tool_results_json": "[]"},
+        ]
+        result = analytics.score_session(
+            session_id="pipe-001", turns=turns,
+            input_text="fix my database query",
+            org_id="org1", agent_name="pipe-agent", db=db,
+        )
+
+        # Verify per-turn scores persisted
+        scores = db.query_conversation_scores(session_id="pipe-001")
+        assert len(scores) == 2
+        assert all(s["quality_overall"] > 0 for s in scores)
+
+        # Verify session analytics persisted
+        analytics_rows = db.query_conversation_analytics(org_id="org1")
+        assert len(analytics_rows) == 1
+        assert analytics_rows[0]["session_id"] == "pipe-001"
+        assert analytics_rows[0]["avg_quality"] > 0
+
+        # Verify filtering works
+        positive_scores = db.query_conversation_scores(sentiment="positive")
+        assert all(s["sentiment"] == "positive" for s in positive_scores)
+
+        # Verify summary aggregation
+        summary = db.conversation_intel_summary(org_id="org1")
+        assert summary["total_scored_turns"] == 2
+        assert summary["avg_quality_score"] > 0
+
+        db.close()

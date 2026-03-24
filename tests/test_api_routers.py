@@ -860,6 +860,76 @@ class TestEdgeIngestBridge:
         assert int(gold_row["cnt"]) >= 1
         assert int(comp_row["cnt"]) >= 1
 
+    def test_ingest_episode_and_vapi_domains(self, api_client, monkeypatch):
+        monkeypatch.setenv("EDGE_INGEST_TOKEN", "test-edge-token")
+        headers = {"Authorization": "Bearer test-edge-token"}
+        episode_id = "edge-episode-1"
+        call_id = "edge-call-1"
+
+        episode = api_client.post(
+            "/api/v1/edge-ingest/episode",
+            json={
+                "id": episode_id,
+                "input": "hello",
+                "output": "world",
+                "outcome": "completed",
+                "metadata": {"source": "edge-smoke"},
+            },
+            headers=headers,
+        )
+        assert episode.status_code == 200
+
+        call = api_client.post(
+            "/api/v1/edge-ingest/vapi/call",
+            json={
+                "call_id": call_id,
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "phone_number": "+15551234567",
+                "direction": "outbound",
+                "status": "completed",
+                "duration_seconds": 12,
+                "transcript": "hello",
+                "cost_usd": 0.02,
+                "vapi_assistant_id": "assistant-1",
+                "metadata": {"provider": "vapi"},
+            },
+            headers=headers,
+        )
+        assert call.status_code == 200
+
+        event = api_client.post(
+            "/api/v1/edge-ingest/vapi/event",
+            json={
+                "call_id": call_id,
+                "org_id": "org-test",
+                "event_type": "call.completed",
+                "payload_json": "{\"ok\":true}",
+            },
+            headers=headers,
+        )
+        assert event.status_code == 200
+
+        from agentos.core.db_config import initialize_db, get_db
+
+        initialize_db()
+        db = get_db()
+        ep_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM episodes WHERE id = ?",
+            (episode_id,),
+        ).fetchone()
+        call_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM vapi_calls WHERE call_id = ?",
+            (call_id,),
+        ).fetchone()
+        evt_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM vapi_events WHERE call_id = ?",
+            (call_id,),
+        ).fetchone()
+        assert int(ep_row["cnt"]) >= 1
+        assert int(call_row["cnt"]) >= 1
+        assert int(evt_row["cnt"]) >= 1
+
     def test_releases_rejects_invalid_canary_weight(self, api_client):
         headers = self._auth_header(api_client, "canvas-releases-invalid@test.com")
         resp = api_client.post(
