@@ -245,14 +245,11 @@ class AsyncMemoryUpdater:
                     self._total_facts_extracted += 1
                     # Persist fact to database
                     try:
-                        from pathlib import Path as _Path
-                        from agentos.core.database import AgentDB
-                        db_path = _Path.cwd() / "data" / "agent.db"
-                        if db_path.exists():
-                            db = AgentDB(db_path)
-                            db.initialize()
+                        from agentos.core.db_config import get_db, initialize_db
+                        initialize_db()
+                        db = get_db()
+                        if db:
                             db.insert_memory_fact(fact.to_dict())
-                            db.conn.close()
                     except Exception as exc:
                         logger.debug("Could not persist fact to DB: %s", exc)
                 else:

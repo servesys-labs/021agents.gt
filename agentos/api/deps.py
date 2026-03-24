@@ -57,6 +57,7 @@ ALL_SCOPES = {
     "releases:read", "releases:write",
     "jobs:read", "jobs:write",
     "workflows:read", "workflows:write",
+    "intelligence:read", "intelligence:write",
     "admin",
 }
 
@@ -97,8 +98,8 @@ class CurrentUser:
 
 
 def _get_db():
-    """Get the project's AgentDB instance."""
-    from agentos.core.db_config import get_db, is_sqlite
+    """Get the project's AgentDB singleton (already initialized at startup)."""
+    from agentos.core.db_config import get_db, initialize_db, is_sqlite
     from pathlib import Path
 
     if is_sqlite():
@@ -106,9 +107,9 @@ def _get_db():
         if not db_path.exists():
             raise HTTPException(status_code=503, detail="Database not initialized. Run 'agentos init' first.")
 
-    db = get_db()
-    db.initialize()
-    return db
+    # Ensure init has run (no-op after first call thanks to _db_initialized flag)
+    initialize_db()
+    return get_db()
 
 
 def _get_db_safe():

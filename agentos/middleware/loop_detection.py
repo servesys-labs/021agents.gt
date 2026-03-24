@@ -158,19 +158,15 @@ class LoopDetectionMiddleware(Middleware):
     def _persist_event(self, session_id: str, action: str, repeats: int, tool_hash: str) -> None:
         """Persist middleware event to database."""
         try:
-            from pathlib import Path as _Path
-            from agentos.core.database import AgentDB
-            db_path = _Path.cwd() / "data" / "agent.db"
-            if db_path.exists():
-                db = AgentDB(db_path)
-                db.initialize()
-                db.insert_middleware_event(
-                    session_id=session_id,
-                    middleware_name="loop_detection",
-                    event_type=action,
-                    details=json.dumps({"consecutive_repeats": repeats, "tool_call_hash": tool_hash}),
-                )
-                db.conn.close()
+            from agentos.core.db_config import get_db, initialize_db
+            initialize_db()
+            db = get_db()
+            db.insert_middleware_event(
+                session_id=session_id,
+                middleware_name="loop_detection",
+                event_type=action,
+                details=json.dumps({"consecutive_repeats": repeats, "tool_call_hash": tool_hash}),
+            )
         except Exception as exc:
             logger.debug("Could not persist middleware event: %s", exc)
 
