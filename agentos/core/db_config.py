@@ -17,11 +17,19 @@ Migration guide:
     3. All data automatically uses Postgres
 """
 
+import logging
 import os
+import threading
 from pathlib import Path
 
 from agentos.core.database import AgentDB
 from agentos.core.postgres_database import PostgresAgentDB
+
+logger = logging.getLogger(__name__)
+
+_db_instance: AgentDB | None = None
+_db_lock = threading.RLock()  # reentrant — initialize_db() calls get_db() under the same lock
+_db_initialized = False
 
 
 def get_database_url() -> str:
@@ -42,9 +50,31 @@ def is_sqlite() -> bool:
     return not is_postgres()
 
 
-def get_db():
-    """Create a DB handle for the configured backend."""
-    if is_postgres():
-        return PostgresAgentDB(get_database_url())
-    db_path = Path.cwd() / "data" / "agent.db"
-    return AgentDB(db_path)
+def get_db() -> AgentDB:
+    """Return the process-wide DB singleton (lazy-created, never re-initialized)."""
+    global _db_instance
+    if _db_instance is not None:
+        return _db_instance
+    with _db_lock:
+        if _db_instance is not None:
+            return _db_instance
+        if is_postgres():
+            _db_instance = PostgresAgentDB(get_database_url())
+        else:
+            db_path = Path.cwd() / "data" / "agent.db"
+            _db_instance = AgentDB(db_path)
+        return _db_instance
+
+
+def initialize_db() -> None:
+    """Run schema creation / migrations exactly once per process."""
+    global _db_initialized
+    if _db_initialized:
+        return
+    with _db_lock:
+        if _db_initialized:
+            return
+        db = get_db()
+        db.initialize()
+        _db_initialized = True
+        logger.info("Database initialized (one-time)")

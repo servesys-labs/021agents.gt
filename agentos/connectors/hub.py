@@ -325,12 +325,10 @@ class ConnectorHub:
         # Track billing at the hub level — ensures ALL connector calls are billed
         # regardless of whether they come from API, CLI, or agent tool
         try:
-            from pathlib import Path
-            from agentos.core.database import AgentDB
-            db_path = Path.cwd() / "data" / "agent.db"
-            if db_path.exists():
-                db = AgentDB(db_path)
-                db.initialize()
+            from agentos.core.db_config import get_db, initialize_db
+            initialize_db()
+            db = get_db()
+            if db:
                 db.record_billing(
                     cost_type="connector",
                     total_cost_usd=0.001,
@@ -340,7 +338,6 @@ class ConnectorHub:
                     model=tool_name,
                     provider=self._provider.name,
                 )
-                db.conn.close()
         except Exception:
             pass  # Don't block tool call on billing failure
 
