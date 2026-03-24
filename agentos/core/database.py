@@ -5392,22 +5392,22 @@ class AgentDB:
         try:
             if hard_delete:
                 if org_id:
-                    self.conn.execute("DELETE FROM agents WHERE name = ? AND org_id = ?", (name, org_id))
+                    cur = self.conn.execute("DELETE FROM agents WHERE name = ? AND org_id = ?", (name, org_id))
                 else:
-                    self.conn.execute("DELETE FROM agents WHERE name = ?", (name,))
+                    cur = self.conn.execute("DELETE FROM agents WHERE name = ?", (name,))
             else:
                 if org_id:
-                    self.conn.execute(
+                    cur = self.conn.execute(
                         "UPDATE agents SET is_active = 0, updated_at = ? WHERE name = ? AND org_id = ?",
                         (now, name, org_id),
                     )
                 else:
-                    self.conn.execute(
+                    cur = self.conn.execute(
                         "UPDATE agents SET is_active = 0, updated_at = ? WHERE name = ?",
                         (now, name),
                     )
             self.conn.commit()
-            counts["agent"] = 1
+            counts["agent"] = min(1, cur.rowcount or 0)
         except Exception:
             try:
                 self.conn.rollback()
