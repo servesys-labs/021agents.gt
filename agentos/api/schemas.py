@@ -318,3 +318,63 @@ class PathMappingResponse(BaseModel):
     outputs: str
     skills: str
     virtual_prefix: str = "/mnt/user-data"
+
+
+# ── Conversation Intelligence ─────────────────────────────────────
+
+class ConversationScoreResponse(BaseModel):
+    id: int = 0
+    session_id: str = ""
+    turn_number: int = 0
+    org_id: str = ""
+    agent_name: str = ""
+    sentiment: str = "neutral"
+    sentiment_score: float = 0.0
+    sentiment_confidence: float = 0.0
+    relevance_score: float = 0.0
+    coherence_score: float = 0.0
+    helpfulness_score: float = 0.0
+    safety_score: float = 1.0
+    quality_overall: float = 0.0
+    topic: str = ""
+    intent: str = ""
+    has_tool_failure: int = 0
+    has_hallucination_risk: int = 0
+    scorer_model: str = ""
+    created_at: float = 0.0
+
+
+class ConversationAnalyticsResponse(BaseModel):
+    id: int = 0
+    session_id: str = ""
+    org_id: str = ""
+    agent_name: str = ""
+    avg_sentiment_score: float = 0.0
+    dominant_sentiment: str = "neutral"
+    sentiment_trend: str = "stable"
+    avg_quality: float = 0.0
+    min_quality: float = 0.0
+    max_quality: float = 0.0
+    topics_json: list[str] = []
+    intents_json: list[str] = []
+    failure_patterns_json: list[str] = []
+    total_turns: int = 0
+    tool_failure_count: int = 0
+    hallucination_risk_count: int = 0
+    task_completed: int = 0
+    created_at: float = 0.0
+
+
+class ConversationIntelSummaryResponse(BaseModel):
+    total_scored_turns: int = 0
+    avg_sentiment_score: float = 0.0
+    avg_quality_score: float = 0.0
+    avg_relevance: float = 0.0
+    avg_coherence: float = 0.0
+    avg_helpfulness: float = 0.0
+    avg_safety: float = 0.0
+    tool_failure_count: int = 0
+    hallucination_risk_count: int = 0
+    sentiment_breakdown: dict[str, int] = {}
+    top_topics: list[dict[str, Any]] = []
+    quality_trend: list[dict[str, Any]] = []

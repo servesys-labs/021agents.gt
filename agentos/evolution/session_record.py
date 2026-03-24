@@ -139,6 +139,8 @@ class SessionRecord:
 
     # Identity
     session_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
+    org_id: str = ""
+    project_id: str = ""
     agent_name: str = ""
     timestamp: float = field(default_factory=time.time)
 
@@ -185,6 +187,8 @@ class SessionRecord:
         """Serialize to a flat dict for JSON export."""
         return {
             "session_id": self.session_id,
+            "org_id": self.org_id,
+            "project_id": self.project_id,
             "agent_name": self.agent_name,
             "timestamp": self.timestamp,
             "composition": {

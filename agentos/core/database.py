@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 11
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS _meta (
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id          TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL DEFAULT '',
+    project_id          TEXT NOT NULL DEFAULT '',
     agent_id            TEXT NOT NULL DEFAULT '',
     agent_name          TEXT NOT NULL DEFAULT '',
     agent_version       TEXT NOT NULL DEFAULT '',
@@ -96,6 +98,8 @@ CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_agent_name ON sessions(agent_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_trace_id ON sessions(trace_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_org ON sessions(org_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- TURNS — per-turn detail within a session
@@ -384,6 +388,30 @@ CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
 CREATE INDEX IF NOT EXISTS idx_spans_session ON spans(session_id);
 CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
 
+-- OTel-like event stream from edge/runtime workers
+CREATE TABLE IF NOT EXISTS otel_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL DEFAULT '',
+    turn            INTEGER NOT NULL DEFAULT 0,
+    event_type      TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL DEFAULT '',
+    plan            TEXT NOT NULL DEFAULT '',
+    tier            TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    tool_name       TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT '',
+    latency_ms      REAL NOT NULL DEFAULT 0.0,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    details_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_otel_session ON otel_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_otel_event_type ON otel_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_otel_created ON otel_events(created_at);
+
 -- ═══════════════════════════════════════════════════════════════════════════
 -- SKILLS — loaded skill definitions and their enabled state
 -- ═══════════════════════════════════════════════════════════════════════════
@@ -453,6 +481,256 @@ CREATE TABLE IF NOT EXISTS feedback (
 
 CREATE INDEX IF NOT EXISTS idx_feedback_session ON feedback(session_id);
 CREATE INDEX IF NOT EXISTS idx_feedback_rating ON feedback(rating);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- CONVERSATION INTELLIGENCE — sentiment, quality, analytics
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS conversation_scores (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL DEFAULT '',
+    turn_number     INTEGER NOT NULL DEFAULT 0,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    sentiment       TEXT NOT NULL DEFAULT 'neutral',
+    sentiment_score REAL NOT NULL DEFAULT 0.0,
+    sentiment_confidence REAL NOT NULL DEFAULT 0.0,
+    relevance_score REAL NOT NULL DEFAULT 0.0,
+    coherence_score REAL NOT NULL DEFAULT 0.0,
+    helpfulness_score REAL NOT NULL DEFAULT 0.0,
+    safety_score    REAL NOT NULL DEFAULT 1.0,
+    quality_overall REAL NOT NULL DEFAULT 0.0,
+    topic           TEXT NOT NULL DEFAULT '',
+    intent          TEXT NOT NULL DEFAULT '',
+    has_tool_failure INTEGER NOT NULL DEFAULT 0,
+    has_hallucination_risk INTEGER NOT NULL DEFAULT 0,
+    scorer_model    TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_session ON conversation_scores(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_org ON conversation_scores(org_id);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_agent ON conversation_scores(agent_name);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_sentiment ON conversation_scores(sentiment);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_created ON conversation_scores(created_at);
+
+CREATE TABLE IF NOT EXISTS conversation_analytics (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL UNIQUE,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    avg_sentiment_score REAL NOT NULL DEFAULT 0.0,
+    dominant_sentiment TEXT NOT NULL DEFAULT 'neutral',
+    sentiment_trend TEXT NOT NULL DEFAULT 'stable',
+    avg_quality     REAL NOT NULL DEFAULT 0.0,
+    min_quality     REAL NOT NULL DEFAULT 0.0,
+    max_quality     REAL NOT NULL DEFAULT 0.0,
+    topics_json     TEXT NOT NULL DEFAULT '[]',
+    intents_json    TEXT NOT NULL DEFAULT '[]',
+    failure_patterns_json TEXT NOT NULL DEFAULT '[]',
+    total_turns     INTEGER NOT NULL DEFAULT 0,
+    tool_failure_count INTEGER NOT NULL DEFAULT 0,
+    hallucination_risk_count INTEGER NOT NULL DEFAULT 0,
+    task_completed  INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_session ON conversation_analytics(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_org ON conversation_analytics(org_id);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_agent ON conversation_analytics(agent_name);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_created ON conversation_analytics(created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- GOLD IMAGES — blessed/approved base agent configurations
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS gold_images (
+    image_id        TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    config_hash     TEXT NOT NULL DEFAULT '',
+    version         TEXT NOT NULL DEFAULT '1.0.0',
+    category        TEXT NOT NULL DEFAULT 'general',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT NOT NULL DEFAULT '',
+    approved_by     TEXT NOT NULL DEFAULT '',
+    approved_at     REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_gold_org ON gold_images(org_id);
+CREATE INDEX IF NOT EXISTS idx_gold_name ON gold_images(name);
+CREATE INDEX IF NOT EXISTS idx_gold_active ON gold_images(is_active);
+CREATE INDEX IF NOT EXISTS idx_gold_hash ON gold_images(config_hash);
+
+-- COMPLIANCE CHECKS — records of agent vs gold image comparison
+CREATE TABLE IF NOT EXISTS compliance_checks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL,
+    image_id        TEXT NOT NULL DEFAULT '',
+    image_name      TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'unchecked',
+    drift_count     INTEGER NOT NULL DEFAULT 0,
+    drift_fields    TEXT NOT NULL DEFAULT '[]',
+    drift_details_json TEXT NOT NULL DEFAULT '{}',
+    checked_by      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_compliance_org ON compliance_checks(org_id);
+CREATE INDEX IF NOT EXISTS idx_compliance_agent ON compliance_checks(agent_name);
+CREATE INDEX IF NOT EXISTS idx_compliance_status ON compliance_checks(status);
+CREATE INDEX IF NOT EXISTS idx_compliance_image ON compliance_checks(image_id);
+
+-- CONFIG AUDIT LOG — every config change with who/when/what/why
+CREATE TABLE IF NOT EXISTS config_audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL DEFAULT '',
+    field_changed   TEXT NOT NULL DEFAULT '',
+    old_value       TEXT NOT NULL DEFAULT '',
+    new_value       TEXT NOT NULL DEFAULT '',
+    change_reason   TEXT NOT NULL DEFAULT '',
+    changed_by      TEXT NOT NULL DEFAULT '',
+    image_id        TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_config_audit_org ON config_audit_log(org_id);
+CREATE INDEX IF NOT EXISTS idx_config_audit_agent ON config_audit_log(agent_name);
+CREATE INDEX IF NOT EXISTS idx_config_audit_created ON config_audit_log(created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ISSUES — automated issue tracking and remediation
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS issues (
+    issue_id        TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT 'unknown',
+    severity        TEXT NOT NULL DEFAULT 'low',
+    status          TEXT NOT NULL DEFAULT 'open',
+    source          TEXT NOT NULL DEFAULT 'auto',
+    source_session_id TEXT NOT NULL DEFAULT '',
+    source_turn     INTEGER NOT NULL DEFAULT 0,
+    suggested_fix   TEXT NOT NULL DEFAULT '',
+    fix_applied     INTEGER NOT NULL DEFAULT 0,
+    assigned_to     TEXT NOT NULL DEFAULT '',
+    resolved_by     TEXT NOT NULL DEFAULT '',
+    resolved_at     REAL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_issues_org ON issues(org_id);
+CREATE INDEX IF NOT EXISTS idx_issues_agent ON issues(agent_name);
+CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_category ON issues(category);
+CREATE INDEX IF NOT EXISTS idx_issues_severity ON issues(severity);
+CREATE INDEX IF NOT EXISTS idx_issues_created ON issues(created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SECURITY — red-team scans, vulnerability findings, AIVSS risk scores
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS security_scans (
+    scan_id         TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    scan_type       TEXT NOT NULL DEFAULT 'full',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    total_probes    INTEGER NOT NULL DEFAULT 0,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    errors          INTEGER NOT NULL DEFAULT 0,
+    risk_score      REAL NOT NULL DEFAULT 0.0,
+    risk_level      TEXT NOT NULL DEFAULT 'unknown',
+    started_at      REAL,
+    completed_at    REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_scans_org ON security_scans(org_id);
+CREATE INDEX IF NOT EXISTS idx_scans_agent ON security_scans(agent_name);
+CREATE INDEX IF NOT EXISTS idx_scans_status ON security_scans(status);
+
+CREATE TABLE IF NOT EXISTS security_findings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id         TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    probe_id        TEXT NOT NULL DEFAULT '',
+    probe_name      TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT '',
+    layer           TEXT NOT NULL DEFAULT '',
+    severity        TEXT NOT NULL DEFAULT 'info',
+    status          TEXT NOT NULL DEFAULT 'open',
+    title           TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    evidence        TEXT NOT NULL DEFAULT '',
+    remediation     TEXT NOT NULL DEFAULT '',
+    aivss_vector    TEXT NOT NULL DEFAULT '',
+    aivss_score     REAL NOT NULL DEFAULT 0.0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_findings_scan ON security_findings(scan_id);
+CREATE INDEX IF NOT EXISTS idx_findings_agent ON security_findings(agent_name);
+CREATE INDEX IF NOT EXISTS idx_findings_severity ON security_findings(severity);
+CREATE INDEX IF NOT EXISTS idx_findings_category ON security_findings(category);
+
+CREATE TABLE IF NOT EXISTS agent_risk_profiles (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL UNIQUE,
+    risk_score      REAL NOT NULL DEFAULT 0.0,
+    risk_level      TEXT NOT NULL DEFAULT 'unknown',
+    aivss_vector_json TEXT NOT NULL DEFAULT '{}',
+    last_scan_id    TEXT NOT NULL DEFAULT '',
+    findings_summary_json TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_risk_org ON agent_risk_profiles(org_id);
+CREATE INDEX IF NOT EXISTS idx_risk_agent ON agent_risk_profiles(agent_name);
+CREATE INDEX IF NOT EXISTS idx_risk_level ON agent_risk_profiles(risk_level);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- VAPI — voice platform integration (calls, events)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS vapi_calls (
+    call_id         TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    phone_number    TEXT NOT NULL DEFAULT '',
+    direction       TEXT NOT NULL DEFAULT 'outbound',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    transcript      TEXT NOT NULL DEFAULT '',
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    vapi_assistant_id TEXT NOT NULL DEFAULT '',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    started_at      REAL,
+    ended_at        REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_org ON vapi_calls(org_id);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_agent ON vapi_calls(agent_name);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_status ON vapi_calls(status);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_created ON vapi_calls(created_at);
+
+CREATE TABLE IF NOT EXISTS vapi_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id         TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    event_type      TEXT NOT NULL DEFAULT '',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vapi_events_call ON vapi_events(call_id);
+CREATE INDEX IF NOT EXISTS idx_vapi_events_type ON vapi_events(event_type);
 """
 
 # ── Migration from v1 → v2 ─────────────────────────────────────────────────
@@ -548,6 +826,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
     key_prefix      TEXT NOT NULL DEFAULT '',
     key_hash        TEXT NOT NULL,
     scopes          TEXT NOT NULL DEFAULT '["*"]',
+    project_id      TEXT NOT NULL DEFAULT '',
+    env             TEXT NOT NULL DEFAULT '',
     last_used_at    REAL,
     expires_at      REAL,
     is_active       INTEGER NOT NULL DEFAULT 1,
@@ -860,6 +1140,265 @@ ALTER TABLE sessions ADD COLUMN skills_active_json TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE sessions ADD COLUMN middleware_chain_json TEXT NOT NULL DEFAULT '[]';
 """;
 
+# ── Migration from v5 → v6 (conversation intelligence) ────────────────────
+
+MIGRATION_V5_TO_V6 = """\
+-- CONVERSATION SCORES — per-turn sentiment & quality analysis
+CREATE TABLE IF NOT EXISTS conversation_scores (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL DEFAULT '',
+    turn_number     INTEGER NOT NULL DEFAULT 0,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    sentiment       TEXT NOT NULL DEFAULT 'neutral',
+    sentiment_score REAL NOT NULL DEFAULT 0.0,
+    sentiment_confidence REAL NOT NULL DEFAULT 0.0,
+    relevance_score REAL NOT NULL DEFAULT 0.0,
+    coherence_score REAL NOT NULL DEFAULT 0.0,
+    helpfulness_score REAL NOT NULL DEFAULT 0.0,
+    safety_score    REAL NOT NULL DEFAULT 1.0,
+    quality_overall REAL NOT NULL DEFAULT 0.0,
+    topic           TEXT NOT NULL DEFAULT '',
+    intent          TEXT NOT NULL DEFAULT '',
+    has_tool_failure INTEGER NOT NULL DEFAULT 0,
+    has_hallucination_risk INTEGER NOT NULL DEFAULT 0,
+    scorer_model    TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_session ON conversation_scores(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_org ON conversation_scores(org_id);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_agent ON conversation_scores(agent_name);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_sentiment ON conversation_scores(sentiment);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_created ON conversation_scores(created_at);
+
+-- CONVERSATION ANALYTICS — per-session aggregate intelligence
+CREATE TABLE IF NOT EXISTS conversation_analytics (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL UNIQUE,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    avg_sentiment_score REAL NOT NULL DEFAULT 0.0,
+    dominant_sentiment TEXT NOT NULL DEFAULT 'neutral',
+    sentiment_trend TEXT NOT NULL DEFAULT 'stable',
+    avg_quality     REAL NOT NULL DEFAULT 0.0,
+    min_quality     REAL NOT NULL DEFAULT 0.0,
+    max_quality     REAL NOT NULL DEFAULT 0.0,
+    topics_json     TEXT NOT NULL DEFAULT '[]',
+    intents_json    TEXT NOT NULL DEFAULT '[]',
+    failure_patterns_json TEXT NOT NULL DEFAULT '[]',
+    total_turns     INTEGER NOT NULL DEFAULT 0,
+    tool_failure_count INTEGER NOT NULL DEFAULT 0,
+    hallucination_risk_count INTEGER NOT NULL DEFAULT 0,
+    task_completed  INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_session ON conversation_analytics(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_org ON conversation_analytics(org_id);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_agent ON conversation_analytics(agent_name);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_created ON conversation_analytics(created_at);
+""";
+
+# ── Migration from v6 → v7 (gold images, config compliance) ──────────────
+
+MIGRATION_V6_TO_V7 = """\
+CREATE TABLE IF NOT EXISTS gold_images (
+    image_id        TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    config_hash     TEXT NOT NULL DEFAULT '',
+    version         TEXT NOT NULL DEFAULT '1.0.0',
+    category        TEXT NOT NULL DEFAULT 'general',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT NOT NULL DEFAULT '',
+    approved_by     TEXT NOT NULL DEFAULT '',
+    approved_at     REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_gold_org ON gold_images(org_id);
+CREATE INDEX IF NOT EXISTS idx_gold_name ON gold_images(name);
+CREATE INDEX IF NOT EXISTS idx_gold_active ON gold_images(is_active);
+CREATE INDEX IF NOT EXISTS idx_gold_hash ON gold_images(config_hash);
+
+CREATE TABLE IF NOT EXISTS compliance_checks (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL,
+    image_id        TEXT NOT NULL DEFAULT '',
+    image_name      TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'unchecked',
+    drift_count     INTEGER NOT NULL DEFAULT 0,
+    drift_fields    TEXT NOT NULL DEFAULT '[]',
+    drift_details_json TEXT NOT NULL DEFAULT '{}',
+    checked_by      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_compliance_org ON compliance_checks(org_id);
+CREATE INDEX IF NOT EXISTS idx_compliance_agent ON compliance_checks(agent_name);
+CREATE INDEX IF NOT EXISTS idx_compliance_status ON compliance_checks(status);
+CREATE INDEX IF NOT EXISTS idx_compliance_image ON compliance_checks(image_id);
+
+CREATE TABLE IF NOT EXISTS config_audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL DEFAULT '',
+    field_changed   TEXT NOT NULL DEFAULT '',
+    old_value       TEXT NOT NULL DEFAULT '',
+    new_value       TEXT NOT NULL DEFAULT '',
+    change_reason   TEXT NOT NULL DEFAULT '',
+    changed_by      TEXT NOT NULL DEFAULT '',
+    image_id        TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_config_audit_org ON config_audit_log(org_id);
+CREATE INDEX IF NOT EXISTS idx_config_audit_agent ON config_audit_log(agent_name);
+CREATE INDEX IF NOT EXISTS idx_config_audit_created ON config_audit_log(created_at);
+""";
+
+# ── Migration from v7 → v8 (session tenancy columns) ──────────────────────
+
+MIGRATION_V7_TO_V8 = """\
+ALTER TABLE sessions ADD COLUMN org_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_sessions_org ON sessions(org_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+""";
+
+# ── Migration from v8 → v9 (issue tracking) ──────────────────────────────
+
+MIGRATION_V8_TO_V9 = """\
+CREATE TABLE IF NOT EXISTS issues (
+    issue_id        TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT 'unknown',
+    severity        TEXT NOT NULL DEFAULT 'low',
+    status          TEXT NOT NULL DEFAULT 'open',
+    source          TEXT NOT NULL DEFAULT 'auto',
+    source_session_id TEXT NOT NULL DEFAULT '',
+    source_turn     INTEGER NOT NULL DEFAULT 0,
+    suggested_fix   TEXT NOT NULL DEFAULT '',
+    fix_applied     INTEGER NOT NULL DEFAULT 0,
+    assigned_to     TEXT NOT NULL DEFAULT '',
+    resolved_by     TEXT NOT NULL DEFAULT '',
+    resolved_at     REAL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_issues_org ON issues(org_id);
+CREATE INDEX IF NOT EXISTS idx_issues_agent ON issues(agent_name);
+CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_category ON issues(category);
+CREATE INDEX IF NOT EXISTS idx_issues_severity ON issues(severity);
+CREATE INDEX IF NOT EXISTS idx_issues_created ON issues(created_at);
+""";
+
+# ── Migration from v9 → v10 (security red-teaming, AIVSS) ────────────────
+
+MIGRATION_V9_TO_V10 = """\
+CREATE TABLE IF NOT EXISTS security_scans (
+    scan_id         TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    scan_type       TEXT NOT NULL DEFAULT 'full',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    total_probes    INTEGER NOT NULL DEFAULT 0,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    errors          INTEGER NOT NULL DEFAULT 0,
+    risk_score      REAL NOT NULL DEFAULT 0.0,
+    risk_level      TEXT NOT NULL DEFAULT 'unknown',
+    started_at      REAL,
+    completed_at    REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_scans_org ON security_scans(org_id);
+CREATE INDEX IF NOT EXISTS idx_scans_agent ON security_scans(agent_name);
+CREATE INDEX IF NOT EXISTS idx_scans_status ON security_scans(status);
+
+CREATE TABLE IF NOT EXISTS security_findings (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id         TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    probe_id        TEXT NOT NULL DEFAULT '',
+    probe_name      TEXT NOT NULL DEFAULT '',
+    category        TEXT NOT NULL DEFAULT '',
+    layer           TEXT NOT NULL DEFAULT '',
+    severity        TEXT NOT NULL DEFAULT 'info',
+    status          TEXT NOT NULL DEFAULT 'open',
+    title           TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    evidence        TEXT NOT NULL DEFAULT '',
+    remediation     TEXT NOT NULL DEFAULT '',
+    aivss_vector    TEXT NOT NULL DEFAULT '',
+    aivss_score     REAL NOT NULL DEFAULT 0.0,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_findings_scan ON security_findings(scan_id);
+CREATE INDEX IF NOT EXISTS idx_findings_agent ON security_findings(agent_name);
+CREATE INDEX IF NOT EXISTS idx_findings_severity ON security_findings(severity);
+CREATE INDEX IF NOT EXISTS idx_findings_category ON security_findings(category);
+
+CREATE TABLE IF NOT EXISTS agent_risk_profiles (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL UNIQUE,
+    risk_score      REAL NOT NULL DEFAULT 0.0,
+    risk_level      TEXT NOT NULL DEFAULT 'unknown',
+    aivss_vector_json TEXT NOT NULL DEFAULT '{}',
+    last_scan_id    TEXT NOT NULL DEFAULT '',
+    findings_summary_json TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_risk_org ON agent_risk_profiles(org_id);
+CREATE INDEX IF NOT EXISTS idx_risk_agent ON agent_risk_profiles(agent_name);
+CREATE INDEX IF NOT EXISTS idx_risk_level ON agent_risk_profiles(risk_level);
+""";
+
+# ── Migration from v10 → v11 (Vapi voice integration) ────────────────────
+
+MIGRATION_V10_TO_V11 = """\
+CREATE TABLE IF NOT EXISTS vapi_calls (
+    call_id         TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    phone_number    TEXT NOT NULL DEFAULT '',
+    direction       TEXT NOT NULL DEFAULT 'outbound',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    transcript      TEXT NOT NULL DEFAULT '',
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    vapi_assistant_id TEXT NOT NULL DEFAULT '',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    started_at      REAL,
+    ended_at        REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_org ON vapi_calls(org_id);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_agent ON vapi_calls(agent_name);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_status ON vapi_calls(status);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_created ON vapi_calls(created_at);
+
+CREATE TABLE IF NOT EXISTS vapi_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id         TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    event_type      TEXT NOT NULL DEFAULT '',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_vapi_events_call ON vapi_events(call_id);
+CREATE INDEX IF NOT EXISTS idx_vapi_events_type ON vapi_events(event_type);
+""";
+
 RUNTIME_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS billing_records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -887,6 +1426,202 @@ CREATE INDEX IF NOT EXISTS idx_billing_org ON billing_records(org_id);
 CREATE INDEX IF NOT EXISTS idx_billing_customer ON billing_records(customer_id);
 CREATE INDEX IF NOT EXISTS idx_billing_created ON billing_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_billing_type ON billing_records(cost_type);
+
+CREATE TABLE IF NOT EXISTS otel_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL DEFAULT '',
+    turn            INTEGER NOT NULL DEFAULT 0,
+    event_type      TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL DEFAULT '',
+    plan            TEXT NOT NULL DEFAULT '',
+    tier            TEXT NOT NULL DEFAULT '',
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    tool_name       TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT '',
+    latency_ms      REAL NOT NULL DEFAULT 0.0,
+    input_tokens    INTEGER NOT NULL DEFAULT 0,
+    output_tokens   INTEGER NOT NULL DEFAULT 0,
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    details_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_otel_session ON otel_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_otel_event_type ON otel_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_otel_created ON otel_events(created_at);
+
+CREATE TABLE IF NOT EXISTS conversation_scores (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id        TEXT NOT NULL,
+    turn_number       INTEGER NOT NULL DEFAULT 1,
+    org_id            TEXT NOT NULL DEFAULT '',
+    agent_name        TEXT NOT NULL DEFAULT '',
+    sentiment         TEXT NOT NULL DEFAULT 'neutral',
+    sentiment_score   REAL NOT NULL DEFAULT 0.0,
+    relevance_score   REAL NOT NULL DEFAULT 0.0,
+    coherence_score   REAL NOT NULL DEFAULT 0.0,
+    helpfulness_score REAL NOT NULL DEFAULT 0.0,
+    quality_overall   REAL NOT NULL DEFAULT 0.0,
+    topic             TEXT NOT NULL DEFAULT '',
+    intent            TEXT NOT NULL DEFAULT '',
+    has_tool_failure  INTEGER NOT NULL DEFAULT 0,
+    created_at        REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_session ON conversation_scores(session_id);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_org ON conversation_scores(org_id);
+CREATE INDEX IF NOT EXISTS idx_conv_scores_agent ON conversation_scores(agent_name);
+
+CREATE TABLE IF NOT EXISTS conversation_analytics (
+    session_id          TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL DEFAULT '',
+    agent_name          TEXT NOT NULL DEFAULT '',
+    avg_sentiment_score REAL NOT NULL DEFAULT 0.0,
+    dominant_sentiment  TEXT NOT NULL DEFAULT 'neutral',
+    sentiment_trend     TEXT NOT NULL DEFAULT 'stable',
+    avg_quality         REAL NOT NULL DEFAULT 0.0,
+    topics_json         TEXT NOT NULL DEFAULT '[]',
+    total_turns         INTEGER NOT NULL DEFAULT 0,
+    tool_failure_count  INTEGER NOT NULL DEFAULT 0,
+    created_at          REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_org ON conversation_analytics(org_id);
+CREATE INDEX IF NOT EXISTS idx_conv_analytics_agent ON conversation_analytics(agent_name);
+
+CREATE TABLE IF NOT EXISTS config_audit_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    action          TEXT NOT NULL DEFAULT '',
+    field_changed   TEXT NOT NULL DEFAULT '',
+    old_value       TEXT NOT NULL DEFAULT '',
+    new_value       TEXT NOT NULL DEFAULT '',
+    change_reason   TEXT NOT NULL DEFAULT '',
+    changed_by      TEXT NOT NULL DEFAULT '',
+    image_id        TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_config_audit_org ON config_audit_log(org_id);
+CREATE INDEX IF NOT EXISTS idx_config_audit_agent ON config_audit_log(agent_name);
+CREATE INDEX IF NOT EXISTS idx_config_audit_created ON config_audit_log(created_at);
+
+CREATE TABLE IF NOT EXISTS gold_images (
+    image_id         TEXT PRIMARY KEY,
+    org_id           TEXT NOT NULL DEFAULT '',
+    name             TEXT NOT NULL,
+    description      TEXT NOT NULL DEFAULT '',
+    config_json      TEXT NOT NULL DEFAULT '{}',
+    config_hash      TEXT NOT NULL DEFAULT '',
+    version          TEXT NOT NULL DEFAULT '1.0.0',
+    category         TEXT NOT NULL DEFAULT 'general',
+    is_active        INTEGER NOT NULL DEFAULT 1,
+    created_by       TEXT NOT NULL DEFAULT '',
+    approved_by      TEXT NOT NULL DEFAULT '',
+    approved_at      REAL,
+    created_at       REAL NOT NULL DEFAULT 0,
+    updated_at       REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_gold_org ON gold_images(org_id);
+CREATE INDEX IF NOT EXISTS idx_gold_active ON gold_images(is_active);
+
+CREATE TABLE IF NOT EXISTS compliance_checks (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id            TEXT NOT NULL DEFAULT '',
+    agent_name        TEXT NOT NULL DEFAULT '',
+    image_id          TEXT NOT NULL DEFAULT '',
+    image_name        TEXT NOT NULL DEFAULT '',
+    status            TEXT NOT NULL DEFAULT 'unchecked',
+    drift_count       INTEGER NOT NULL DEFAULT 0,
+    drift_fields      TEXT NOT NULL DEFAULT '[]',
+    drift_details_json TEXT NOT NULL DEFAULT '{}',
+    checked_by        TEXT NOT NULL DEFAULT '',
+    created_at        REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_compliance_org ON compliance_checks(org_id);
+CREATE INDEX IF NOT EXISTS idx_compliance_agent ON compliance_checks(agent_name);
+CREATE INDEX IF NOT EXISTS idx_compliance_image ON compliance_checks(image_id);
+
+CREATE TABLE IF NOT EXISTS issues (
+    issue_id         TEXT PRIMARY KEY,
+    org_id           TEXT NOT NULL DEFAULT '',
+    agent_name       TEXT NOT NULL DEFAULT '',
+    title            TEXT NOT NULL DEFAULT '',
+    description      TEXT NOT NULL DEFAULT '',
+    category         TEXT NOT NULL DEFAULT 'unknown',
+    severity         TEXT NOT NULL DEFAULT 'low',
+    status           TEXT NOT NULL DEFAULT 'open',
+    source           TEXT NOT NULL DEFAULT 'auto',
+    source_session_id TEXT NOT NULL DEFAULT '',
+    source_turn      INTEGER NOT NULL DEFAULT 0,
+    suggested_fix    TEXT NOT NULL DEFAULT '',
+    metadata_json    TEXT NOT NULL DEFAULT '{}',
+    created_at       REAL NOT NULL DEFAULT 0,
+    updated_at       REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_issues_org ON issues(org_id);
+CREATE INDEX IF NOT EXISTS idx_issues_agent ON issues(agent_name);
+CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
+CREATE INDEX IF NOT EXISTS idx_issues_severity ON issues(severity);
+CREATE INDEX IF NOT EXISTS idx_issues_created ON issues(created_at);
+
+CREATE TABLE IF NOT EXISTS security_scans (
+    scan_id          TEXT PRIMARY KEY,
+    org_id           TEXT NOT NULL DEFAULT '',
+    agent_name       TEXT NOT NULL DEFAULT '',
+    scan_type        TEXT NOT NULL DEFAULT 'full',
+    status           TEXT NOT NULL DEFAULT 'pending',
+    total_probes     INTEGER NOT NULL DEFAULT 0,
+    passed           INTEGER NOT NULL DEFAULT 0,
+    failed           INTEGER NOT NULL DEFAULT 0,
+    errors           INTEGER NOT NULL DEFAULT 0,
+    risk_score       REAL NOT NULL DEFAULT 0.0,
+    risk_level       TEXT NOT NULL DEFAULT 'unknown',
+    started_at       REAL,
+    completed_at     REAL,
+    created_at       REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_scans_org ON security_scans(org_id);
+CREATE INDEX IF NOT EXISTS idx_scans_agent ON security_scans(agent_name);
+CREATE INDEX IF NOT EXISTS idx_scans_status ON security_scans(status);
+CREATE INDEX IF NOT EXISTS idx_scans_created ON security_scans(created_at);
+
+CREATE TABLE IF NOT EXISTS security_findings (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id          TEXT NOT NULL DEFAULT '',
+    org_id           TEXT NOT NULL DEFAULT '',
+    agent_name       TEXT NOT NULL DEFAULT '',
+    probe_id         TEXT NOT NULL DEFAULT '',
+    probe_name       TEXT NOT NULL DEFAULT '',
+    category         TEXT NOT NULL DEFAULT '',
+    layer            TEXT NOT NULL DEFAULT '',
+    severity         TEXT NOT NULL DEFAULT 'info',
+    status           TEXT NOT NULL DEFAULT 'open',
+    title            TEXT NOT NULL DEFAULT '',
+    description      TEXT NOT NULL DEFAULT '',
+    evidence         TEXT NOT NULL DEFAULT '',
+    remediation      TEXT NOT NULL DEFAULT '',
+    aivss_vector     TEXT NOT NULL DEFAULT '',
+    aivss_score      REAL NOT NULL DEFAULT 0.0,
+    created_at       REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_findings_scan ON security_findings(scan_id);
+CREATE INDEX IF NOT EXISTS idx_findings_org ON security_findings(org_id);
+CREATE INDEX IF NOT EXISTS idx_findings_agent ON security_findings(agent_name);
+CREATE INDEX IF NOT EXISTS idx_findings_severity ON security_findings(severity);
+
+CREATE TABLE IF NOT EXISTS agent_risk_profiles (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id              TEXT NOT NULL DEFAULT '',
+    agent_name          TEXT NOT NULL DEFAULT '',
+    risk_score          REAL NOT NULL DEFAULT 0.0,
+    risk_level          TEXT NOT NULL DEFAULT 'unknown',
+    aivss_vector_json   TEXT NOT NULL DEFAULT '{}',
+    last_scan_id        TEXT NOT NULL DEFAULT '',
+    findings_summary_json TEXT NOT NULL DEFAULT '{}',
+    created_at          REAL NOT NULL DEFAULT 0,
+    updated_at          REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_risk_org ON agent_risk_profiles(org_id);
+CREATE INDEX IF NOT EXISTS idx_risk_agent ON agent_risk_profiles(agent_name);
 
 CREATE TABLE IF NOT EXISTS projects (
     project_id      TEXT PRIMARY KEY,
@@ -1168,8 +1903,17 @@ class AgentDB:
         """Add runtime observability columns for legacy SQLite databases."""
         try:
             turn_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(turns)").fetchall()}
+            session_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()}
         except Exception:
             return
+        try:
+            api_key_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+        except Exception:
+            api_key_cols = set()  # table may not exist yet (created in migration v2→v3)
+        try:
+            issue_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(issues)").fetchall()}
+        except Exception:
+            issue_cols = set()
         if "execution_mode" not in turn_cols:
             self.conn.execute(
                 "ALTER TABLE turns ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'sequential'"
@@ -1182,6 +1926,40 @@ class AgentDB:
             self.conn.execute(
                 "ALTER TABLE turns ADD COLUMN reflection_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "org_id" not in session_cols:
+            self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN org_id TEXT NOT NULL DEFAULT ''"
+            )
+        if "project_id" not in session_cols:
+            self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN project_id TEXT NOT NULL DEFAULT ''"
+            )
+        if api_key_cols:
+            if "project_id" not in api_key_cols:
+                self.conn.execute(
+                    "ALTER TABLE api_keys ADD COLUMN project_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "env" not in api_key_cols:
+                self.conn.execute(
+                    "ALTER TABLE api_keys ADD COLUMN env TEXT NOT NULL DEFAULT ''"
+                )
+        if issue_cols:
+            if "fix_applied" not in issue_cols:
+                self.conn.execute(
+                    "ALTER TABLE issues ADD COLUMN fix_applied INTEGER NOT NULL DEFAULT 0"
+                )
+            if "assigned_to" not in issue_cols:
+                self.conn.execute(
+                    "ALTER TABLE issues ADD COLUMN assigned_to TEXT NOT NULL DEFAULT ''"
+                )
+            if "resolved_by" not in issue_cols:
+                self.conn.execute(
+                    "ALTER TABLE issues ADD COLUMN resolved_by TEXT NOT NULL DEFAULT ''"
+                )
+            if "resolved_at" not in issue_cols:
+                self.conn.execute("ALTER TABLE issues ADD COLUMN resolved_at REAL")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_org ON sessions(org_id)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
         try:
             wfr_cols = {
                 row[1] for row in self.conn.execute("PRAGMA table_info(workflow_runs)").fetchall()
@@ -1259,6 +2037,138 @@ class AgentDB:
                         logger.debug("v5 migration stmt skipped: %s", exc)
             self._seed_middleware_event_types()
             self.conn.commit()
+        if from_version < 6:
+            logger.info("Migrating database from v%d to v6 (conversation intelligence)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V5_TO_V6)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v6 migration partial: %s", exc)
+            self._seed_conversation_intel_event_types()
+            self.conn.commit()
+        if from_version < 7:
+            logger.info("Migrating database from v%d to v7 (gold images, config compliance)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V6_TO_V7)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v7 migration partial: %s", exc)
+            self._seed_gold_image_event_types()
+            self.conn.commit()
+        if from_version < 8:
+            logger.info("Migrating database from v%d to v8 (session tenancy columns)", from_version)
+            existing_session_cols = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            for stmt in MIGRATION_V7_TO_V8.split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                if "ALTER TABLE" in stmt and "ADD COLUMN" in stmt:
+                    col_name = stmt.split("ADD COLUMN")[1].strip().split()[0]
+                    if col_name in existing_session_cols:
+                        continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                        logger.debug("v8 migration stmt skipped: %s", exc)
+            self.conn.commit()
+        if from_version < 9:
+            logger.info("Migrating database from v%d to v9 (issue tracking)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V8_TO_V9)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v9 migration partial: %s", exc)
+            self._seed_issue_event_types()
+            self.conn.commit()
+        if from_version < 10:
+            logger.info("Migrating database from v%d to v10 (security red-teaming, AIVSS)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V9_TO_V10)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v10 migration partial: %s", exc)
+            self._seed_security_event_types()
+            self.conn.commit()
+        if from_version < 11:
+            logger.info("Migrating database from v%d to v11 (Vapi voice integration)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V10_TO_V11)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v11 migration partial: %s", exc)
+            self.conn.commit()
+
+    def _seed_security_event_types(self) -> None:
+        """Seed security event types."""
+        try:
+            self.conn.execute("SELECT 1 FROM event_types LIMIT 1")
+        except sqlite3.OperationalError:
+            return
+        events = [
+            ("security.scan_started", "security", "Security scan started"),
+            ("security.scan_completed", "security", "Security scan completed"),
+            ("security.finding_detected", "security", "Security vulnerability found"),
+            ("security.risk_updated", "security", "Agent risk profile updated"),
+        ]
+        for event_type, category, description in events:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO event_types (event_type, category, description) VALUES (?, ?, ?)",
+                (event_type, category, description),
+            )
+
+    def _seed_issue_event_types(self) -> None:
+        """Seed issue tracking event types."""
+        try:
+            self.conn.execute("SELECT 1 FROM event_types LIMIT 1")
+        except sqlite3.OperationalError:
+            return
+        events = [
+            ("issue.created", "issues", "Issue auto-created from failure"),
+            ("issue.triaged", "issues", "Issue triaged and categorized"),
+            ("issue.resolved", "issues", "Issue resolved"),
+            ("issue.fix_suggested", "issues", "Remediation fix suggested"),
+        ]
+        for event_type, category, description in events:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO event_types (event_type, category, description) VALUES (?, ?, ?)",
+                (event_type, category, description),
+            )
+
+    def _seed_gold_image_event_types(self) -> None:
+        """Seed gold image event types."""
+        try:
+            self.conn.execute("SELECT 1 FROM event_types LIMIT 1")
+        except sqlite3.OperationalError:
+            return
+        events = [
+            ("gold_image.created", "config", "Gold image created"),
+            ("gold_image.updated", "config", "Gold image updated"),
+            ("gold_image.approved", "config", "Gold image approved"),
+            ("compliance.checked", "config", "Agent compliance checked against gold image"),
+            ("compliance.drift_detected", "config", "Config drift detected from gold image"),
+            ("config.changed", "config", "Agent configuration changed"),
+        ]
+        for event_type, category, description in events:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO event_types (event_type, category, description) VALUES (?, ?, ?)",
+                (event_type, category, description),
+            )
+
+    def _seed_conversation_intel_event_types(self) -> None:
+        """Seed conversation intelligence event types."""
+        try:
+            self.conn.execute("SELECT 1 FROM event_types LIMIT 1")
+        except sqlite3.OperationalError:
+            return
+        events = [
+            ("intel.scored", "intelligence", "Turn scored for sentiment and quality"),
+            ("intel.session_analyzed", "intelligence", "Session conversation analytics computed"),
+            ("intel.quality_alert", "intelligence", "Quality score dropped below threshold"),
+            ("intel.sentiment_alert", "intelligence", "Negative sentiment detected"),
+        ]
+        for event_type, category, description in events:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO event_types (event_type, category, description) VALUES (?, ?, ?)",
+                (event_type, category, description),
+            )
 
     def _seed_middleware_event_types(self) -> None:
         """Seed middleware-related event types."""
@@ -1515,10 +2425,51 @@ class AgentDB:
         cost = record.get("cost", {})
         bench_cost = record.get("benchmark_cost", {})
         finish_accepted = record.get("finish_accepted")
+        eval_passed = record.get("eval_passed")
+        session_values = [
+            record["session_id"],
+            record.get("org_id", ""),
+            record.get("project_id", ""),
+            comp.get("agent_id", ""),
+            comp.get("agent_name", record.get("agent_name", "")),
+            comp.get("agent_version", ""),
+            comp.get("model", ""),
+            record.get("status", "unknown"),
+            record.get("stop_reason", "completed"),
+            1 if record.get("is_finished") else 0,
+            record.get("error_attribution"),
+            record.get("step_count", 0),
+            record.get("action_count", 0),
+            record.get("time_to_first_action_ms", 0.0),
+            record.get("wall_clock_seconds", 0.0),
+            record.get("input_text", ""),
+            record.get("output_text", ""),
+            cost.get("llm_input_cost_usd", 0.0),
+            cost.get("llm_output_cost_usd", 0.0),
+            cost.get("tool_cost_usd", 0.0),
+            cost.get("total_usd", 0.0),
+            bench_cost.get("llm_input_cost_usd", 0.0),
+            bench_cost.get("llm_output_cost_usd", 0.0),
+            bench_cost.get("tool_cost_usd", 0.0),
+            bench_cost.get("total_usd", 0.0),
+            json.dumps(comp),
+            1 if finish_accepted else (0 if finish_accepted is not None else None),
+            record.get("stop_initiated_by", ""),
+            record.get("eval_score"),
+            1 if eval_passed else (0 if eval_passed is not None else None),
+            record.get("eval_task_name", ""),
+            json.dumps(record.get("eval_conditions", {})) if record.get("eval_conditions") else "{}",
+            record.get("trace_id", ""),
+            record.get("parent_session_id", ""),
+            record.get("depth", 0),
+            record.get("timestamp", time.time()),
+            record.get("ended_at"),
+        ]
+        placeholders = ", ".join(["?"] * len(session_values))
         with self.tx() as cur:
             cur.execute(
                 """INSERT INTO sessions (
-                    session_id, agent_id, agent_name, agent_version, model,
+                    session_id, org_id, project_id, agent_id, agent_name, agent_version, model,
                     status, stop_reason, is_finished, error_attribution,
                     step_count, action_count, time_to_first_action_ms,
                     wall_clock_seconds, input_text, output_text,
@@ -1533,58 +2484,10 @@ class AgentDB:
                     trace_id, parent_session_id, depth,
                     created_at, ended_at
                 ) VALUES (
-                    ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?, ?,
-                    ?, ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?, ?,
-                    ?,
-                    ?, ?,
-                    ?, ?, ?,
-                    ?,
-                    ?, ?, ?,
-                    ?, ?
-                )""",
-                (
-                    record["session_id"],
-                    comp.get("agent_id", ""),
-                    comp.get("agent_name", record.get("agent_name", "")),
-                    comp.get("agent_version", ""),
-                    comp.get("model", ""),
-                    record.get("status", "unknown"),
-                    record.get("stop_reason", "completed"),
-                    1 if record.get("is_finished") else 0,
-                    record.get("error_attribution"),
-                    record.get("step_count", 0),
-                    record.get("action_count", 0),
-                    record.get("time_to_first_action_ms", 0.0),
-                    record.get("wall_clock_seconds", 0.0),
-                    record.get("input_text", ""),
-                    record.get("output_text", ""),
-                    cost.get("llm_input_cost_usd", 0.0),
-                    cost.get("llm_output_cost_usd", 0.0),
-                    cost.get("tool_cost_usd", 0.0),
-                    cost.get("total_usd", 0.0),
-                    bench_cost.get("llm_input_cost_usd", 0.0),
-                    bench_cost.get("llm_output_cost_usd", 0.0),
-                    bench_cost.get("tool_cost_usd", 0.0),
-                    bench_cost.get("total_usd", 0.0),
-                    json.dumps(comp),
-                    1 if finish_accepted else (0 if finish_accepted is not None else None),
-                    record.get("stop_initiated_by", ""),
-                    record.get("eval_score"),
-                    1 if record.get("eval_passed") else (0 if record.get("eval_passed") is not None else None),
-                    record.get("eval_task_name", ""),
-                    json.dumps(record.get("eval_conditions", {})) if record.get("eval_conditions") else "{}",
-                    record.get("trace_id", ""),
-                    record.get("parent_session_id", ""),
-                    record.get("depth", 0),
-                    record.get("timestamp", time.time()),
-                    record.get("ended_at"),
-                ),
+                    """
+                + placeholders
+                + """)""",
+                tuple(session_values),
             )
 
     def insert_turns(self, session_id: str, turns: list[dict[str, Any]]) -> None:
@@ -1808,6 +2711,14 @@ class AgentDB:
             "next_actions": next_actions,
             "tool_failures_total": tool_failures_total,
         }
+
+    def get_turns(self, session_id: str) -> list[dict[str, Any]]:
+        """Return all turns for a session, ordered by turn number."""
+        rows = self.conn.execute(
+            "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_number",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     def session_runtime_profile(self, session_id: str) -> dict[str, Any]:
         """Return runtime profile for a session from turn-level artifacts."""
@@ -2297,7 +3208,693 @@ class AgentDB:
             "approval_rate": by_rating.get(1, 0) / total if total else 0.0,
         }
 
+    # ── Conversation Intelligence ──────────────────────────────────
+
+    def insert_conversation_score(
+        self,
+        session_id: str,
+        turn_number: int,
+        org_id: str = "",
+        agent_name: str = "",
+        sentiment: str = "neutral",
+        sentiment_score: float = 0.0,
+        sentiment_confidence: float = 0.0,
+        relevance_score: float = 0.0,
+        coherence_score: float = 0.0,
+        helpfulness_score: float = 0.0,
+        safety_score: float = 1.0,
+        quality_overall: float = 0.0,
+        topic: str = "",
+        intent: str = "",
+        has_tool_failure: bool = False,
+        has_hallucination_risk: bool = False,
+        scorer_model: str = "",
+    ) -> int:
+        """Record a per-turn conversation score."""
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO conversation_scores (
+                    session_id, turn_number, org_id, agent_name,
+                    sentiment, sentiment_score, sentiment_confidence,
+                    relevance_score, coherence_score, helpfulness_score,
+                    safety_score, quality_overall,
+                    topic, intent, has_tool_failure, has_hallucination_risk,
+                    scorer_model
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id, turn_number, org_id, agent_name,
+                    sentiment, sentiment_score, sentiment_confidence,
+                    relevance_score, coherence_score, helpfulness_score,
+                    safety_score, quality_overall,
+                    topic, intent, int(has_tool_failure), int(has_hallucination_risk),
+                    scorer_model,
+                ),
+            )
+            return cur.lastrowid
+
+    def upsert_conversation_analytics(
+        self,
+        session_id: str,
+        org_id: str = "",
+        agent_name: str = "",
+        avg_sentiment_score: float = 0.0,
+        dominant_sentiment: str = "neutral",
+        sentiment_trend: str = "stable",
+        avg_quality: float = 0.0,
+        min_quality: float = 0.0,
+        max_quality: float = 0.0,
+        topics: list[str] | None = None,
+        intents: list[str] | None = None,
+        failure_patterns: list[str] | None = None,
+        total_turns: int = 0,
+        tool_failure_count: int = 0,
+        hallucination_risk_count: int = 0,
+        task_completed: int = 0,
+    ) -> None:
+        """Insert or update session-level analytics."""
+        self.conn.execute(
+            """INSERT INTO conversation_analytics (
+                session_id, org_id, agent_name,
+                avg_sentiment_score, dominant_sentiment, sentiment_trend,
+                avg_quality, min_quality, max_quality,
+                topics_json, intents_json, failure_patterns_json,
+                total_turns, tool_failure_count, hallucination_risk_count,
+                task_completed
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                avg_sentiment_score = excluded.avg_sentiment_score,
+                dominant_sentiment = excluded.dominant_sentiment,
+                sentiment_trend = excluded.sentiment_trend,
+                avg_quality = excluded.avg_quality,
+                min_quality = excluded.min_quality,
+                max_quality = excluded.max_quality,
+                topics_json = excluded.topics_json,
+                intents_json = excluded.intents_json,
+                failure_patterns_json = excluded.failure_patterns_json,
+                total_turns = excluded.total_turns,
+                tool_failure_count = excluded.tool_failure_count,
+                hallucination_risk_count = excluded.hallucination_risk_count,
+                task_completed = excluded.task_completed
+            """,
+            (
+                session_id, org_id, agent_name,
+                avg_sentiment_score, dominant_sentiment, sentiment_trend,
+                avg_quality, min_quality, max_quality,
+                json.dumps(topics or []), json.dumps(intents or []),
+                json.dumps(failure_patterns or []),
+                total_turns, tool_failure_count, hallucination_risk_count,
+                task_completed,
+            ),
+        )
+        self.conn.commit()
+
+    def query_conversation_scores(
+        self,
+        session_id: str | None = None,
+        org_id: str = "",
+        agent_name: str = "",
+        sentiment: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Query per-turn conversation scores."""
+        sql = "SELECT * FROM conversation_scores WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        if sentiment:
+            sql += " AND sentiment = ?"
+            params.append(sentiment)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def query_conversation_analytics(
+        self,
+        org_id: str = "",
+        agent_name: str = "",
+        since: float = 0,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Query session-level conversation analytics."""
+        sql = "SELECT * FROM conversation_analytics WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        if since > 0:
+            sql += " AND created_at >= ?"
+            params.append(since)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            for key in ("topics_json", "intents_json", "failure_patterns_json"):
+                d[key] = json.loads(d.get(key, "[]"))
+            result.append(d)
+        return result
+
+    def conversation_intel_summary(
+        self,
+        org_id: str = "",
+        agent_name: str = "",
+        since: float = 0,
+    ) -> dict[str, Any]:
+        """Aggregate conversation intelligence summary."""
+        where_parts = ["1=1"]
+        params: list[Any] = []
+        if org_id:
+            where_parts.append("org_id = ?")
+            params.append(org_id)
+        if agent_name:
+            where_parts.append("agent_name = ?")
+            params.append(agent_name)
+        if since > 0:
+            where_parts.append("created_at >= ?")
+            params.append(since)
+        where = " AND ".join(where_parts)
+
+        # Aggregate from conversation_scores
+        score_row = self.conn.execute(
+            f"""SELECT
+                COUNT(*) as total_scores,
+                AVG(sentiment_score) as avg_sentiment,
+                AVG(quality_overall) as avg_quality,
+                AVG(relevance_score) as avg_relevance,
+                AVG(coherence_score) as avg_coherence,
+                AVG(helpfulness_score) as avg_helpfulness,
+                AVG(safety_score) as avg_safety,
+                SUM(has_tool_failure) as tool_failures,
+                SUM(has_hallucination_risk) as hallucination_risks
+            FROM conversation_scores WHERE {where}""",
+            params,
+        ).fetchone()
+        sr = dict(score_row) if score_row else {}
+
+        # Sentiment breakdown
+        sentiment_rows = self.conn.execute(
+            f"SELECT sentiment, COUNT(*) as cnt FROM conversation_scores WHERE {where} GROUP BY sentiment",
+            params,
+        ).fetchall()
+        sentiment_breakdown = {r["sentiment"]: r["cnt"] for r in sentiment_rows}
+
+        # Topic breakdown (from analytics)
+        analytics_rows = self.conn.execute(
+            f"SELECT topics_json FROM conversation_analytics WHERE {where}",
+            params,
+        ).fetchall()
+        topic_counts: dict[str, int] = {}
+        for row in analytics_rows:
+            for topic in json.loads(row["topics_json"] or "[]"):
+                topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        top_topics = sorted(topic_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        # Quality trend (last 7 data points by day)
+        quality_trend = self.conn.execute(
+            f"""SELECT
+                DATE(created_at, 'unixepoch') as day,
+                AVG(quality_overall) as avg_q,
+                AVG(sentiment_score) as avg_s,
+                COUNT(*) as cnt
+            FROM conversation_scores WHERE {where}
+            GROUP BY day ORDER BY day DESC LIMIT 30""",
+            params,
+        ).fetchall()
+
+        return {
+            "total_scored_turns": sr.get("total_scores", 0) or 0,
+            "avg_sentiment_score": round(sr.get("avg_sentiment", 0) or 0, 3),
+            "avg_quality_score": round(sr.get("avg_quality", 0) or 0, 3),
+            "avg_relevance": round(sr.get("avg_relevance", 0) or 0, 3),
+            "avg_coherence": round(sr.get("avg_coherence", 0) or 0, 3),
+            "avg_helpfulness": round(sr.get("avg_helpfulness", 0) or 0, 3),
+            "avg_safety": round(sr.get("avg_safety", 0) or 0, 3),
+            "tool_failure_count": int(sr.get("tool_failures", 0) or 0),
+            "hallucination_risk_count": int(sr.get("hallucination_risks", 0) or 0),
+            "sentiment_breakdown": sentiment_breakdown,
+            "top_topics": [{"topic": t, "count": c} for t, c in top_topics],
+            "quality_trend": [dict(r) for r in quality_trend],
+        }
+
+    # ── Gold Images & Config Compliance ─────────────────────────
+
+    def insert_gold_image(
+        self,
+        image_id: str,
+        name: str,
+        config_json: str,
+        config_hash: str,
+        org_id: str = "",
+        description: str = "",
+        version: str = "1.0.0",
+        category: str = "general",
+        created_by: str = "",
+    ) -> None:
+        """Create a new gold image."""
+        self.conn.execute(
+            """INSERT INTO gold_images (image_id, org_id, name, description, config_json,
+               config_hash, version, category, created_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (image_id, org_id, name, description, config_json, config_hash,
+             version, category, created_by),
+        )
+        self.conn.commit()
+
+    def get_gold_image(self, image_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM gold_images WHERE image_id = ?", (image_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["config"] = json.loads(d.get("config_json", "{}"))
+        return d
+
+    def list_gold_images(self, org_id: str = "", active_only: bool = True, limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM gold_images WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if active_only:
+            sql += " AND is_active = 1"
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["config"] = json.loads(d.get("config_json", "{}"))
+            result.append(d)
+        return result
+
+    def update_gold_image(self, image_id: str, **kwargs: Any) -> None:
+        """Update gold image fields."""
+        allowed = {"name", "description", "config_json", "config_hash", "version",
+                   "category", "is_active", "approved_by", "approved_at"}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return
+        updates["updated_at"] = time.time()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [image_id]
+        self.conn.execute(f"UPDATE gold_images SET {set_clause} WHERE image_id = ?", values)
+        self.conn.commit()
+
+    def delete_gold_image(self, image_id: str) -> None:
+        self.conn.execute("DELETE FROM gold_images WHERE image_id = ?", (image_id,))
+        self.conn.commit()
+
+    def insert_compliance_check(
+        self,
+        org_id: str,
+        agent_name: str,
+        image_id: str,
+        image_name: str,
+        status: str,
+        drift_count: int,
+        drift_fields: list[str],
+        drift_details: dict[str, Any],
+        checked_by: str = "",
+    ) -> int:
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO compliance_checks (org_id, agent_name, image_id, image_name,
+                   status, drift_count, drift_fields, drift_details_json, checked_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (org_id, agent_name, image_id, image_name, status, drift_count,
+                 json.dumps(drift_fields), json.dumps(drift_details), checked_by),
+            )
+            return cur.lastrowid
+
+    def list_compliance_checks(
+        self, org_id: str = "", agent_name: str = "", limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM compliance_checks WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["drift_fields"] = json.loads(d.get("drift_fields", "[]"))
+            d["drift_details"] = json.loads(d.get("drift_details_json", "{}"))
+            result.append(d)
+        return result
+
+    def insert_config_audit(
+        self, org_id: str = "", agent_name: str = "", action: str = "",
+        field_changed: str = "", old_value: str = "", new_value: str = "",
+        change_reason: str = "", changed_by: str = "", image_id: str = "",
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO config_audit_log (org_id, agent_name, action, field_changed,
+               old_value, new_value, change_reason, changed_by, image_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (org_id, agent_name, action, field_changed, old_value, new_value,
+             change_reason, changed_by, image_id),
+        )
+        self.conn.commit()
+
+    def list_config_audit(
+        self, org_id: str = "", agent_name: str = "", limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM config_audit_log WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    # ── Issue Tracking ─────────────────────────────────────────────
+
+    def insert_issue(
+        self, issue_id: str, org_id: str = "", agent_name: str = "",
+        title: str = "", description: str = "", category: str = "unknown",
+        severity: str = "low", source: str = "auto", source_session_id: str = "",
+        source_turn: int = 0, suggested_fix: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO issues (issue_id, org_id, agent_name, title, description,
+               category, severity, source, source_session_id, source_turn,
+               suggested_fix, metadata_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (issue_id, org_id, agent_name, title, description, category, severity,
+             source, source_session_id, source_turn, suggested_fix,
+             json.dumps(metadata or {})),
+        )
+        self.conn.commit()
+
+    def get_issue(self, issue_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM issues WHERE issue_id = ?", (issue_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+        return d
+
+    def list_issues(
+        self, org_id: str = "", agent_name: str = "", status: str = "",
+        category: str = "", severity: str = "", limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM issues WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if category:
+            sql += " AND category = ?"
+            params.append(category)
+        if severity:
+            sql += " AND severity = ?"
+            params.append(severity)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+            result.append(d)
+        return result
+
+    def update_issue(self, issue_id: str, **kwargs: Any) -> None:
+        allowed = {"title", "description", "category", "severity", "status",
+                   "suggested_fix", "fix_applied", "assigned_to", "resolved_by",
+                   "resolved_at"}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return
+        updates["updated_at"] = time.time()
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [issue_id]
+        self.conn.execute(f"UPDATE issues SET {set_clause} WHERE issue_id = ?", values)
+        self.conn.commit()
+
+    def issue_summary(self, org_id: str = "", agent_name: str = "") -> dict[str, Any]:
+        where_parts = ["1=1"]
+        params: list[Any] = []
+        if org_id:
+            where_parts.append("org_id = ?")
+            params.append(org_id)
+        if agent_name:
+            where_parts.append("agent_name = ?")
+            params.append(agent_name)
+        where = " AND ".join(where_parts)
+        total = self.conn.execute(f"SELECT COUNT(*) as cnt FROM issues WHERE {where}", params).fetchone()
+        by_status = self.conn.execute(
+            f"SELECT status, COUNT(*) as cnt FROM issues WHERE {where} GROUP BY status", params
+        ).fetchall()
+        by_category = self.conn.execute(
+            f"SELECT category, COUNT(*) as cnt FROM issues WHERE {where} GROUP BY category", params
+        ).fetchall()
+        by_severity = self.conn.execute(
+            f"SELECT severity, COUNT(*) as cnt FROM issues WHERE {where} GROUP BY severity", params
+        ).fetchall()
+        return {
+            "total": total["cnt"] if total else 0,
+            "by_status": {r["status"]: r["cnt"] for r in by_status},
+            "by_category": {r["category"]: r["cnt"] for r in by_category},
+            "by_severity": {r["severity"]: r["cnt"] for r in by_severity},
+        }
+
     # ── Programmatic Trace Query API (Phase 3 — agent consumes its own telemetry) ──
+
+    # ── Security Scans & Risk Profiles ──────────────────────────────
+
+    def insert_security_scan(self, scan_id: str, org_id: str = "", agent_name: str = "",
+                             scan_type: str = "full", **kwargs: Any) -> None:
+        self.conn.execute(
+            """INSERT INTO security_scans (scan_id, org_id, agent_name, scan_type,
+               status, total_probes, passed, failed, errors, risk_score, risk_level, started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (scan_id, org_id, agent_name, scan_type,
+             kwargs.get("status", "running"), kwargs.get("total_probes", 0),
+             kwargs.get("passed", 0), kwargs.get("failed", 0), kwargs.get("errors", 0),
+             kwargs.get("risk_score", 0.0), kwargs.get("risk_level", "unknown"),
+             kwargs.get("started_at", time.time())),
+        )
+        self.conn.commit()
+
+    def complete_security_scan(self, scan_id: str, **kwargs: Any) -> None:
+        sets = ", ".join(f"{k} = ?" for k in kwargs)
+        if "completed_at" not in kwargs:
+            sets += ", completed_at = ?"
+            kwargs["completed_at"] = time.time()
+        if "status" not in kwargs:
+            sets += ", status = ?"
+            kwargs["status"] = "completed"
+        vals = list(kwargs.values()) + [scan_id]
+        self.conn.execute(f"UPDATE security_scans SET {sets} WHERE scan_id = ?", vals)
+        self.conn.commit()
+
+    def get_security_scan(self, scan_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM security_scans WHERE scan_id = ?", (scan_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_security_scans(self, org_id: str = "", agent_name: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM security_scans WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def insert_security_finding(self, scan_id: str, **kwargs: Any) -> int:
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO security_findings (scan_id, org_id, agent_name, probe_id,
+                   probe_name, category, layer, severity, title, description, evidence,
+                   remediation, aivss_vector, aivss_score)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (scan_id, kwargs.get("org_id", ""), kwargs.get("agent_name", ""),
+                 kwargs.get("probe_id", ""), kwargs.get("probe_name", ""),
+                 kwargs.get("category", ""), kwargs.get("layer", ""),
+                 kwargs.get("severity", "info"), kwargs.get("title", ""),
+                 kwargs.get("description", ""), kwargs.get("evidence", ""),
+                 kwargs.get("remediation", ""), kwargs.get("aivss_vector", ""),
+                 kwargs.get("aivss_score", 0.0)),
+            )
+            return cur.lastrowid
+
+    def list_security_findings(self, scan_id: str = "", agent_name: str = "",
+                               severity: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM security_findings WHERE 1=1"
+        params: list[Any] = []
+        if scan_id:
+            sql += " AND scan_id = ?"
+            params.append(scan_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        if severity:
+            sql += " AND severity = ?"
+            params.append(severity)
+        sql += " ORDER BY aivss_score DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def upsert_risk_profile(self, agent_name: str, org_id: str = "", risk_score: float = 0.0,
+                            risk_level: str = "unknown", aivss_vector: dict | None = None,
+                            last_scan_id: str = "", findings_summary: dict | None = None) -> None:
+        self.conn.execute(
+            """INSERT INTO agent_risk_profiles (org_id, agent_name, risk_score, risk_level,
+               aivss_vector_json, last_scan_id, findings_summary_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(agent_name) DO UPDATE SET
+                   risk_score = excluded.risk_score,
+                   risk_level = excluded.risk_level,
+                   aivss_vector_json = excluded.aivss_vector_json,
+                   last_scan_id = excluded.last_scan_id,
+                   findings_summary_json = excluded.findings_summary_json,
+                   updated_at = excluded.updated_at""",
+            (org_id, agent_name, risk_score, risk_level,
+             json.dumps(aivss_vector or {}), last_scan_id,
+             json.dumps(findings_summary or {}), time.time()),
+        )
+        self.conn.commit()
+
+    def get_risk_profile(self, agent_name: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM agent_risk_profiles WHERE agent_name = ?", (agent_name,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["aivss_vector"] = json.loads(d.get("aivss_vector_json", "{}"))
+        d["findings_summary"] = json.loads(d.get("findings_summary_json", "{}"))
+        return d
+
+    def list_risk_profiles(self, org_id: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM agent_risk_profiles WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        sql += " ORDER BY risk_score DESC LIMIT ?"
+        params.append(limit)
+        rows = self.conn.execute(sql, params).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["aivss_vector"] = json.loads(d.get("aivss_vector_json", "{}"))
+            d["findings_summary"] = json.loads(d.get("findings_summary_json", "{}"))
+            result.append(d)
+        return result
+
+    # ── Vapi Voice Integration ───────────────────────────────────────
+
+    def insert_vapi_call(self, call_id: str, **kwargs: Any) -> None:
+        self.conn.execute(
+            """INSERT OR IGNORE INTO vapi_calls (call_id, org_id, agent_name, phone_number,
+               direction, status, vapi_assistant_id, metadata_json, started_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (call_id, kwargs.get("org_id", ""), kwargs.get("agent_name", ""),
+             kwargs.get("phone_number", ""), kwargs.get("direction", "outbound"),
+             kwargs.get("status", "pending"), kwargs.get("vapi_assistant_id", ""),
+             json.dumps(kwargs.get("metadata", {})),
+             kwargs.get("started_at", time.time())),
+        )
+        self.conn.commit()
+
+    def update_vapi_call(self, call_id: str, **kwargs: Any) -> None:
+        allowed = {"status", "duration_seconds", "transcript", "cost_usd", "ended_at", "agent_name"}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [call_id]
+        self.conn.execute(f"UPDATE vapi_calls SET {set_clause} WHERE call_id = ?", values)
+        self.conn.commit()
+
+    def get_vapi_call(self, call_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM vapi_calls WHERE call_id = ?", (call_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+        return d
+
+    def list_vapi_calls(self, org_id: str = "", agent_name: str = "",
+                        status: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM vapi_calls WHERE 1=1"
+        params: list[Any] = []
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def insert_vapi_event(self, call_id: str, event_type: str,
+                          payload_json: str = "{}", org_id: str = "") -> None:
+        self.conn.execute(
+            "INSERT INTO vapi_events (call_id, org_id, event_type, payload_json) VALUES (?, ?, ?, ?)",
+            (call_id, org_id, event_type, payload_json),
+        )
+        self.conn.commit()
+
+    def list_vapi_events(self, call_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM vapi_events WHERE call_id = ? ORDER BY created_at DESC LIMIT ?",
+            (call_id, limit),
+        ).fetchall()]
+
+    def vapi_call_summary(self, org_id: str = "") -> dict[str, Any]:
+        where = "org_id = ?" if org_id else "1=1"
+        params = [org_id] if org_id else []
+        total = self.conn.execute(f"SELECT COUNT(*) as cnt FROM vapi_calls WHERE {where}", params).fetchone()
+        by_status = self.conn.execute(
+            f"SELECT status, COUNT(*) as cnt FROM vapi_calls WHERE {where} GROUP BY status", params
+        ).fetchall()
+        cost = self.conn.execute(
+            f"SELECT COALESCE(SUM(cost_usd), 0) as total, COALESCE(SUM(duration_seconds), 0) as dur FROM vapi_calls WHERE {where}", params
+        ).fetchone()
+        return {
+            "total_calls": total["cnt"] if total else 0,
+            "by_status": {r["status"]: r["cnt"] for r in by_status},
+            "total_cost_usd": round(cost["total"], 4) if cost else 0,
+            "total_duration_seconds": round(cost["dur"], 1) if cost else 0,
+        }
+
+    # ── Programmatic Trace Query API ─────────────────────────────────
 
     def trace_summary(self, session_id: str) -> dict[str, Any]:
         """Build a summary an agent can consume to understand its own performance.

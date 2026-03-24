@@ -79,11 +79,13 @@ class Observer:
         agent_config: dict[str, Any] | None = None,
     ) -> None:
         """Attach to the event bus and start observing."""
-        if self._attached:
-            return
-
+        # Always refresh in-memory identity/scope config so callers can update
+        # runtime tenancy context between runs without re-subscribing listeners.
         self._agent_name = agent_name
         self._agent_config = agent_config or {}
+
+        if self._attached:
+            return
 
         # Subscribe to all events
         self.event_bus.on(EventType.SESSION_START, self._on_session_start)
@@ -118,6 +120,8 @@ class Observer:
 
         self._sessions[session_id] = SessionRecord(
             session_id=session_id,
+            org_id=self._agent_config.get("_org_id", ""),
+            project_id=self._agent_config.get("_project_id", ""),
             agent_name=self._agent_name,
             input_text=event.data.get("input", ""),
             trace_id=event.data.get("trace_id", ""),
@@ -360,6 +364,9 @@ class Observer:
         try:
             data = record.to_dict()
             data["ended_at"] = time.time()  # Session end timestamp
+            # Attach request scope for multi-tenant backends (SQLite/Postgres/Supabase).
+            data["org_id"] = self._agent_config.get("_org_id", "")
+            data["project_id"] = self._agent_config.get("_project_id", "")
             self._db.insert_session(data)
             if data.get("errors"):
                 self._db.insert_session_errors(data["session_id"], data["errors"])
@@ -380,6 +387,7 @@ class Observer:
             # Record billing entry for customer charging
             try:
                 self._db.record_billing(
+                    org_id=self._agent_config.get("_org_id", ""),
                     cost_type="inference",
                     total_cost_usd=record.cost.total_usd,
                     agent_name=comp.get("agent_name", ""),
