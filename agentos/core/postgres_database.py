@@ -34,6 +34,7 @@ from agentos.core.database import (
     MIGRATION_V10_TO_V11,
     MIGRATION_V11_TO_V12,
     MIGRATION_V12_TO_V13,
+    MIGRATION_V14_TO_V15,
 )
 
 _log = logging.getLogger(__name__)
@@ -179,15 +180,20 @@ class PostgresAgentDB(AgentDB):
         return self._pool
 
     def _connect(self):
-        """Get a connection from the pool, wrapped in _ConnAdapter.
+        """Get a long-lived primary connection for the AgentDB.conn property.
 
-        This is called by the parent AgentDB.conn property which caches
-        the result in self._conn. For pooled usage, prefer checkout() instead.
+        This connection is cached by the parent class and used for all
+        self.conn.execute() calls across the application (44 routers,
+        migrations, etc.).  It is NOT returned to the pool during normal
+        operation — it lives for the lifetime of the process and is
+        released by shutdown_db() or process exit.
+
+        For request-scoped work that should not hold a connection between
+        requests, use checkout() instead.
         """
         pool = self._get_pool()
         raw_conn = pool.getconn()
-        # Store ref so we can return it to pool on close
-        adapter = _PooledConnAdapter(raw_conn, pool)
+        adapter = _ConnAdapter(raw_conn)
         return adapter
 
     @contextmanager
@@ -260,6 +266,8 @@ class PostgresAgentDB(AgentDB):
             self._executescript_safe(MIGRATION_V11_TO_V12)
         if current < 13:
             self._executescript_safe(MIGRATION_V12_TO_V13)
+        if current < 15:
+            self._executescript_safe(MIGRATION_V14_TO_V15)
         self._ensure_runtime_tables()
         self._ensure_runtime_columns()
         self.conn.execute(
@@ -393,13 +401,26 @@ class PostgresAgentDB(AgentDB):
 
 
 class _PooledConnAdapter(_ConnAdapter):
-    """Connection adapter that returns itself to the pool on close()."""
+    """Connection adapter that returns itself to the pool on close().
+
+    After close(), any further operations raise RuntimeError to prevent
+    use-after-return bugs.
+    """
 
     def __init__(self, conn, pool) -> None:
         super().__init__(conn)
         self._pool = pool
+        self._closed = False
+
+    def execute(self, sql: str, params: Any = None):
+        if self._closed:
+            raise RuntimeError("Cannot use a closed pooled connection")
+        return super().execute(sql, params)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self._pool and self._conn:
             self._pool.putconn(self._conn)
             self._conn = None

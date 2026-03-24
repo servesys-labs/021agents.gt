@@ -63,7 +63,7 @@ async def create_agent(request: AgentCreateRequest, user: CurrentUser = Depends(
         tags=request.tags,
     )
     config.governance["budget_limit_usd"] = request.budget_limit_usd
-    save_agent_config(config)
+    save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
 
     # Snapshot version in agent_versions table
     _snapshot_version(config, user.user_id)
@@ -165,7 +165,7 @@ async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser
         config.tags = request.tags
     config.max_turns = request.max_turns
     config.governance["budget_limit_usd"] = request.budget_limit_usd
-    save_agent_config(config)
+    save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
 
     # Snapshot updated version
     _snapshot_version(config, user.user_id)
@@ -178,17 +178,27 @@ async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser
 
 @router.delete("/{name}")
 async def delete_agent(name: str, user: CurrentUser = Depends(require_scope("agents:write"))):
-    """Delete an agent."""
+    """Delete an agent (DB soft-delete + filesystem removal)."""
     from pathlib import Path
-    from agentos.agent import _resolve_agents_dir
+    from agentos.agent import _resolve_agents_dir, delete_agent_from_db
 
+    deleted_any = False
+
+    # Soft-delete from DB
+    if delete_agent_from_db(name):
+        deleted_any = True
+
+    # Remove from filesystem
     agents_dir = _resolve_agents_dir()
     for ext in (".json", ".yaml", ".yml"):
         p = agents_dir / f"{name}{ext}"
         if p.exists():
             p.unlink()
-            return {"deleted": name}
-    raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+            deleted_any = True
+
+    if not deleted_any:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    return {"deleted": name}
 
 
 @router.post("/{name}/run", response_model=RunResponse)
@@ -380,7 +390,7 @@ async def create_from_description(
             "draft": config.to_dict(),
         }
 
-    save_agent_config(config)
+    save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
     _snapshot_version(config, user.user_id)
 
     return {

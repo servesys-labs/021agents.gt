@@ -276,6 +276,12 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         asyncio.create_task(_run_job_worker())
         logger.info("Background job worker started")
 
+    @app.on_event("shutdown")
+    async def _shutdown_db_pool() -> None:
+        from agentos.core.db_config import shutdown_db
+        shutdown_db()
+        logger.info("Database shutdown complete")
+
     # Serve local dashboard (same SPA as CF deploy)
     import importlib.resources
     dashboard_dir = Path(__file__).parent.parent / "dashboard"
