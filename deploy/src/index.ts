@@ -47,6 +47,7 @@ export interface Env {
   BACKEND_PROXY_ONLY?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
+  TELEGRAM_BOT_TOKEN?: string;
   DEFAULT_PLAN?: string;
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
@@ -3795,6 +3796,72 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
           scope: m.scope,
         })),
       });
+    }
+
+    // ── Telegram Webhook (edge-native chat) ──
+    if (url.pathname === "/chat/telegram/webhook" && request.method === "POST") {
+      const botToken = env.TELEGRAM_BOT_TOKEN;
+      if (!botToken) return Response.json({ error: "TELEGRAM_BOT_TOKEN not set" }, { status: 503 });
+
+      const payload = await request.json() as any;
+      const msg = payload.message || payload.edited_message;
+      if (!msg?.text) return Response.json({ ok: true });
+
+      const chatId = msg.chat?.id;
+      const text = msg.text || "";
+      const messageId = msg.message_id;
+      const tgApi = `https://api.telegram.org/bot${botToken}`;
+
+      // Handle /start command
+      if (text.startsWith("/start")) {
+        await fetch(`${tgApi}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: "👋 Hi! Send me a message and I'll help." }),
+        });
+        return Response.json({ ok: true });
+      }
+
+      // Send typing indicator
+      await fetch(`${tgApi}/sendChatAction`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+      });
+
+      // Route to agent — each Telegram chat gets its own agent instance
+      const agentId = env.AGENTOS_AGENT.idFromName(`telegram-${chatId}`);
+      const agent = env.AGENTOS_AGENT.get(agentId);
+      try {
+        const agentResp = await agent.fetch(new Request("http://internal/run", {
+          method: "POST",
+          body: JSON.stringify({ input: text.startsWith("/ask ") ? text.slice(5) : text }),
+        }));
+        const data = await agentResp.json() as any;
+        const output = data.output || data.turnResults?.[data.turnResults?.length - 1]?.content || "I processed your message but have no response.";
+
+        // Send reply (split if > 4096 chars)
+        for (let i = 0; i < output.length; i += 4000) {
+          await fetch(`${tgApi}/sendMessage`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: chatId,
+              text: output.slice(i, i + 4000),
+              reply_to_message_id: i === 0 ? messageId : undefined,
+              parse_mode: "Markdown",
+            }),
+          });
+        }
+      } catch (err: any) {
+        await fetch(`${tgApi}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: `Sorry, error: ${err.message?.slice(0, 200)}` }),
+        });
+      }
+
+      return Response.json({ ok: true });
     }
 
     // ── Shell execution (Sandbox SDK container — bash/python/node) ──
