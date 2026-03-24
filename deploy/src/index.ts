@@ -2493,11 +2493,12 @@ MODIFICATION_JSON: <valid JSON with fields to change, e.g. {"systemPrompt": "new
         return `Search results for: ${args.query} (implement with actual search API)`;
 
       case "vectorize_query":
-      case "knowledge-search": {
-        const embedding = await this.env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [args.query] }) as any;
-        const results = await this.env.VECTORIZE.query(embedding.data[0], { topK: args.top_k || 5 });
-        return JSON.stringify(results.matches);
-      }
+      case "knowledge-search":
+        return this._ragQuery(args.query || "", args.top_k || 5);
+
+      case "store-knowledge":
+      case "store_knowledge":
+        return this._ragIngest(args.content || args.text || "", args.source || "agent-tool");
 
       default:
         return `Unknown tool: ${name}`;
@@ -2526,6 +2527,137 @@ MODIFICATION_JSON: <valid JSON with fields to change, e.g. {"systemPrompt": "new
     if (pyScore >= jsScore && pyScore >= bashScore && pyScore > 0) return "python";
     if (jsScore >= bashScore && jsScore > 0) return "javascript";
     return "bash";
+  }
+
+  // ── RAG Pipeline (used by knowledge-search and store-knowledge tools) ──
+
+  private async _ragQuery(query: string, topK: number = 5): Promise<string> {
+    // Query expansion — synonym injection
+    const synonymMap: Record<string, string[]> = {
+      error: ["exception", "failure", "bug", "issue"],
+      fix: ["resolve", "repair", "patch", "correct"],
+      deploy: ["release", "ship", "publish", "launch"],
+      config: ["configuration", "settings", "setup"],
+      auth: ["authentication", "authorization", "login"],
+      api: ["endpoint", "interface", "service"],
+      create: ["add", "insert", "generate", "make"],
+      update: ["modify", "change", "edit"],
+      search: ["find", "query", "lookup", "retrieve"],
+      delete: ["remove", "drop", "destroy"],
+    };
+    const words = query.toLowerCase().split(/\s+/);
+    const expansions: string[] = [];
+    for (const w of words) {
+      const clean = w.replace(/[^\w]/g, "");
+      if (synonymMap[clean]) expansions.push(...synonymMap[clean]);
+    }
+    const expandedQuery = expansions.length > 0
+      ? `${query} ${[...new Set(expansions)].join(" ")}`
+      : query;
+
+    // Embed
+    const embedResult = await this.env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [expandedQuery] }) as any;
+    const vec = embedResult.data?.[0];
+    if (!vec) return "Embedding failed — cannot search knowledge base.";
+
+    const fetchK = Math.min(topK * 3, 20);
+    const orgId = this.state.config.orgId || "";
+    const agentName = this.state.config.agentName || "";
+    const allMatches: any[] = [];
+
+    // Agent-scoped search
+    if (agentName && orgId) {
+      try {
+        const r = await this.env.VECTORIZE.query(vec, {
+          topK: fetchK, returnMetadata: "all",
+          filter: { org_id: orgId, agent_name: agentName },
+        });
+        for (const m of r.matches || []) allMatches.push({ ...m, scope: "agent" });
+      } catch { /* filter not ready */ }
+    }
+
+    // Org-wide shared search
+    if (orgId) {
+      try {
+        const r = await this.env.VECTORIZE.query(vec, {
+          topK: fetchK, returnMetadata: "all",
+          filter: { org_id: orgId, agent_name: "shared" },
+        });
+        for (const m of r.matches || []) allMatches.push({ ...m, scope: "shared" });
+      } catch { /* filter not ready */ }
+    }
+
+    // Global fallback
+    if (allMatches.length === 0) {
+      const r = await this.env.VECTORIZE.query(vec, { topK: fetchK, returnMetadata: "all" });
+      for (const m of r.matches || []) allMatches.push({ ...m, scope: "global" });
+    }
+
+    // Rerank: 60% vector + 40% term-overlap
+    const queryTerms = new Set(query.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+    for (const m of allMatches) {
+      const docTerms = new Set((m.metadata?.text || "").toLowerCase().split(/\s+/).filter((w: string) => w.length > 2));
+      let overlap = 0;
+      for (const qt of queryTerms) { if (docTerms.has(qt)) overlap++; }
+      m.rerankScore = 0.6 * (m.score || 0) + 0.4 * (queryTerms.size > 0 ? overlap / queryTerms.size : 0);
+    }
+
+    // Dedupe + sort + take topK
+    const seen = new Set<string>();
+    const results = allMatches
+      .filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true; })
+      .sort((a, b) => (b.rerankScore || 0) - (a.rerankScore || 0))
+      .slice(0, topK);
+
+    if (results.length === 0) return "No relevant knowledge found.";
+
+    return results.map((m: any) =>
+      `[${m.scope}|score:${(m.rerankScore || 0).toFixed(2)}] ${m.metadata?.text || ""}`
+    ).join("\n\n");
+  }
+
+  private async _ragIngest(text: string, source: string = "agent-tool"): Promise<string> {
+    if (!text.trim()) return "No content to store.";
+
+    const orgId = this.state.config.orgId || "default";
+    const projectId = this.state.config.projectId || "default";
+    const agentName = this.state.config.agentName || "shared";
+
+    // Chunk
+    const words = text.split(/\s+/);
+    const chunks: string[] = [];
+    for (let i = 0; i < words.length; i += 400) {
+      const chunk = words.slice(i, i + 512).join(" ");
+      if (chunk.trim().length > 50) chunks.push(chunk.trim());
+    }
+
+    // Embed + store in Vectorize
+    for (let i = 0; i < chunks.length; i += 10) {
+      const batch = chunks.slice(i, i + 10);
+      const result = await this.env.AI.run("@cf/baai/bge-base-en-v1.5", { text: batch }) as any;
+      const vectors = (result.data || []).map((emb: number[], idx: number) => ({
+        id: `${orgId}-${agentName}-${Date.now()}-${i + idx}`,
+        values: emb,
+        metadata: {
+          org_id: orgId, project_id: projectId, agent_name: agentName,
+          source, chunk_index: i + idx,
+          text: batch[idx]?.slice(0, 500) || "",
+        },
+      }));
+      if (vectors.length > 0) await this.env.VECTORIZE.insert(vectors);
+    }
+
+    // Store original in R2
+    if (this.env.STORAGE) {
+      const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await this.env.STORAGE.put(
+        `${orgId}/${projectId}/knowledge/${agentName}/${docId}/source.txt`,
+        text,
+        { customMetadata: { org_id: orgId, project_id: projectId, agent_name: agentName, source, chunks: String(chunks.length) } },
+      );
+    }
+
+    return `Stored ${chunks.length} chunk(s) from "${source}" in ${agentName}'s knowledge base.`;
   }
 
   private async _execDynamicWorker(
