@@ -56,6 +56,14 @@
     }
   ],
 
+  // R2 — object storage for RAG docs, generated files, agent artifacts
+  "r2_buckets": [
+    {
+      "binding": "STORAGE",
+      "bucket_name": "agentos-storage"
+    }
+  ],
+
   // Browser Rendering — headless Puppeteer on Cloudflare edge
   "browser": {
     "binding": "BROWSER"
