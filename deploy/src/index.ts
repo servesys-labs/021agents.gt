@@ -4210,29 +4210,79 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
         });
       }
 
-      // /cf/browse/crawl — crawl URL via Cloudflare
+      // /cf/browse/crawl — async crawl via CF Browser Rendering /crawl endpoint
       if (url.pathname === "/cf/browse/crawl" && request.method === "POST") {
-        const body = await request.json() as { url: string; waitMs?: number };
+        const body = await request.json() as {
+          url: string; limit?: number; depth?: number; formats?: string[];
+        };
+        const brBase = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/browser-rendering`;
+        const brAuth = { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" };
         try {
-          const crawlResp = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/urlscanner/v2/crawl`, {
+          // Start crawl job
+          const startResp = await fetch(`${brBase}/crawl`, {
             method: "POST",
-            headers: { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ url: body.url }),
+            headers: brAuth,
+            body: JSON.stringify({
+              url: body.url,
+              limit: body.limit || 10,
+              depth: body.depth || 2,
+              formats: body.formats || ["markdown"],
+              render: true,
+            }),
           });
-          const crawlData = await crawlResp.json() as any;
-          return Response.json(crawlData);
+          const startData = await startResp.json() as any;
+          if (!startResp.ok) return Response.json(startData, { status: startResp.status });
+
+          // Poll for results (up to 60s)
+          const jobId = startData.result;
+          if (!jobId) return Response.json(startData);
+
+          for (let i = 0; i < 12; i++) {
+            await new Promise(r => setTimeout(r, 5000));
+            const pollResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
+            const pollData = await pollResp.json() as any;
+            const status = pollData.result?.status;
+            if (status === "completed" || status === "errored" || status?.startsWith("cancelled")) {
+              return Response.json(pollData);
+            }
+          }
+          // Timeout — return partial results
+          const finalResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
+          return Response.json(await finalResp.json());
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
         }
       }
 
-      // /cf/browse/render — render URL via Puppeteer
+      // /cf/browse/render — single-page render via CF Browser Rendering REST API
       if (url.pathname === "/cf/browse/render" && request.method === "POST") {
-        const body = await request.json() as { url: string; selector?: string };
+        const body = await request.json() as {
+          url: string; action?: string; waitForSelector?: string; timeout?: number;
+        };
+        const brBase = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/browser-rendering`;
+        const brAuth = { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" };
+        // Map action to CF endpoint
+        const actionMap: Record<string, string> = {
+          markdown: "markdown", text: "markdown", html: "content",
+          links: "links", screenshot: "screenshot", scrape: "scrape",
+        };
+        const endpoint = actionMap[body.action || "markdown"] || "markdown";
+        const payload: Record<string, any> = { url: body.url };
+        if (body.waitForSelector) payload.waitForSelector = body.waitForSelector;
+        if (body.timeout) payload.gotoOptions = { timeout: body.timeout };
         try {
-          const browserResp = await env.BROWSER.fetch(`https://internal/render?url=${encodeURIComponent(body.url)}`);
-          const html = await browserResp.text();
-          return Response.json({ html: html.slice(0, 50000), url: body.url });
+          const resp = await fetch(`${brBase}/${endpoint}`, {
+            method: "POST", headers: brAuth,
+            body: JSON.stringify(payload),
+          });
+          if (endpoint === "screenshot") {
+            // Binary response — base64 encode for JSON transport
+            const buf = await resp.arrayBuffer();
+            const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+            return Response.json({ screenshot_base64: b64, url: body.url });
+          }
+          const data = await resp.json() as any;
+          return Response.json(data);
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
         }

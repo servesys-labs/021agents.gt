@@ -116,31 +116,24 @@ async def telegram_webhook(request: Request):
     if msg.has_document or msg.has_photo or msg.has_voice:
         file_data = await adapter.download_file(msg.file_id)
         if file_data:
-            # Store in knowledge base via worker
-            worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
-            if worker_url:
-                import httpx
+            from agentos.infra.cloudflare_client import get_cf_client
+            cf = get_cf_client()
+            if cf:
                 try:
-                    async with httpx.AsyncClient(timeout=30) as client:
-                        # Upload to R2
-                        ext = "txt" if msg.has_document else ("jpg" if msg.has_photo else "ogg")
-                        filename = f"telegram-{msg.chat_id}-{int(time.time())}.{ext}"
-                        await client.post(
-                            f"{worker_url}/storage/upload?org_id=telegram-{msg.chat_id}&category=knowledge&filename={filename}",
-                            content=file_data,
+                    # Upload to R2
+                    ext = "txt" if msg.has_document else ("jpg" if msg.has_photo else "ogg")
+                    filename = f"telegram-{msg.chat_id}-{int(time.time())}.{ext}"
+                    key = f"telegram-{msg.chat_id}/knowledge/{filename}"
+                    await cf.storage_put(key, file_data, content_type="application/octet-stream")
+                    # If it's a text document, ingest into RAG
+                    if msg.has_document:
+                        text = file_data.decode("utf-8", errors="replace")
+                        await cf.rag_ingest(
+                            text=text[:50000],
+                            source=filename,
+                            org_id=f"telegram-{msg.chat_id}",
+                            agent_name="telegram-bot",
                         )
-                        # If it's a text document, try to ingest into RAG
-                        if msg.has_document:
-                            text = file_data.decode("utf-8", errors="replace")
-                            await client.post(
-                                f"{worker_url}/rag/ingest",
-                                json={
-                                    "text": text[:50000],
-                                    "org_id": f"telegram-{msg.chat_id}",
-                                    "agent_name": "telegram-bot",
-                                    "source": filename,
-                                },
-                            )
                 except Exception as exc:
                     logger.debug("File upload/ingest failed: %s", exc)
 
@@ -151,39 +144,25 @@ async def telegram_webhook(request: Request):
                 await adapter.send_message(msg.chat_id, reply, reply_to=msg.message_id)
                 return {"ok": True}
 
-    # Run agent
+    # Run agent — always via backend runtime (same harness for all channels)
     try:
         agent_name = os.environ.get("TELEGRAM_AGENT_NAME", "")
-        worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
-
-        if worker_url:
-            # Route through Cloudflare worker → agent DO
-            import httpx
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(
-                    f"{worker_url}/agents/agent-os-agent/telegram-{msg.chat_id}/run",
-                    json={"input": msg.text},
-                    headers={"Content-Type": "application/json"},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    output = data.get("output", "") or data.get("content", "")
-                    if not output and data.get("turnResults"):
-                        last = data["turnResults"][-1]
-                        output = last.get("content", "")
-                else:
-                    output = f"Agent error ({resp.status_code})"
-        elif agent_name:
-            # Run locally via Python agent
+        if agent_name:
             from agentos.agent import Agent
             agent = Agent.from_name(agent_name)
+            if hasattr(agent, "set_runtime_context"):
+                agent.set_runtime_context(
+                    org_id=f"telegram-{msg.chat_id}",
+                    project_id="",
+                    user_id=f"channel:telegram:{msg.chat_id}",
+                )
             results = await agent.run(msg.text)
             output = ""
             for r in results:
                 if hasattr(r, "llm_response") and r.llm_response and r.llm_response.content:
                     output = r.llm_response.content
         else:
-            output = "No agent configured. Set TELEGRAM_AGENT_NAME or AGENTOS_WORKER_URL."
+            output = "No agent configured. Set TELEGRAM_AGENT_NAME."
     except Exception as exc:
         logger.error("Agent run failed: %s", exc)
         output = f"Sorry, I encountered an error: {str(exc)[:200]}"
