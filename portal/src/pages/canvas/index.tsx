@@ -333,7 +333,7 @@ function CanvasWorkspaceInner() {
   const [activeProjectId, setActiveProjectId] = useState("");
   const userRole = getStoredUserRole();
   const roleCanEdit = useMemo(
-    () => ["admin", "owner", "editor", "developer"].includes(userRole),
+    () => ["admin", "owner", "editor", "developer", "member"].includes(userRole),
     [userRole],
   );
   const [editMode, setEditMode] = useState(roleCanEdit);
@@ -438,9 +438,19 @@ function CanvasWorkspaceInner() {
           const preferred = mapped.find((p) => p.slug === currentProject || p.name === currentProject) ?? mapped[0];
           setCurrentProject(preferred.slug || preferred.name);
           setActiveProjectId(preferred.project_id);
+        } else {
+          // No projects yet — show demo canvas so the UI isn't empty
+          const local = loadLayout();
+          setNodes(local?.nodes || demoNodes);
+          setEdges(local?.edges || demoEdges);
+          setCanvasReady(true);
         }
       } catch {
-        // Keep local defaults if API is unavailable.
+        // API unavailable — show demo canvas
+        const local = loadLayout();
+        setNodes(local?.nodes || demoNodes);
+        setEdges(local?.edges || demoEdges);
+        setCanvasReady(true);
       }
     };
     void loadProjects();

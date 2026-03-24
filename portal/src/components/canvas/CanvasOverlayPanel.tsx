@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 
 interface CanvasOverlayPanelProps {
@@ -30,19 +31,22 @@ export function CanvasOverlayPanel({ open, onClose, title, icon, children, width
 
   if (!open) return null;
 
-  return (
+  // Portal to document.body so the overlay escapes any overflow:hidden containers
+  return createPortal(
     <>
       {/* Backdrop */}
-      <div className="fixed inset-0 z-40 glass-backdrop" onClick={onClose} aria-hidden="true" />
+      <div className="fixed inset-0 z-[60] glass-backdrop" onClick={onClose} aria-hidden="true" />
 
       {/* Panel — centered modal */}
       <div
-        className="fixed top-[5%] left-1/2 z-50 flex flex-col glass-medium border border-border-default rounded-xl overflow-hidden relative"
+        className="fixed z-[70] flex flex-col glass-medium border border-border-default rounded-xl overflow-hidden"
         style={{
+          top: "50%",
+          left: "50%",
+          transform: "translate(-50%, -50%)",
           width,
           maxWidth: "calc(100vw - 80px)",
-          maxHeight: "90vh",
-          transform: "translateX(-50%)",
+          maxHeight: "85vh",
           animation: "overlayIn 0.2s ease-out",
           boxShadow: "var(--shadow-panel)",
         }}
@@ -76,10 +80,11 @@ export function CanvasOverlayPanel({ open, onClose, title, icon, children, width
 
       <style>{`
         @keyframes overlayIn {
-          from { transform: translateX(-50%) translateY(-10px); opacity: 0; }
-          to { transform: translateX(-50%) translateY(0); opacity: 1; }
+          from { transform: translate(-50%, -50%) scale(0.96); opacity: 0; }
+          to { transform: translate(-50%, -50%) scale(1); opacity: 1; }
         }
       `}</style>
-    </>
+    </>,
+    document.body,
   );
 }
