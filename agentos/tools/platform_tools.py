@@ -1166,6 +1166,15 @@ PLATFORM_HANDLERS: dict[str, Any] = {
     "compare-agents": compare_agents,
     "manage-rag": manage_rag,
     "manage-policies": manage_policies,
+    "manage-retention": manage_retention,
+    "manage-voice": manage_voice,
+    "manage-gpu": manage_gpu,
+    "manage-workflows": manage_workflows,
+    "manage-projects": manage_projects,
+    "manage-mcp": manage_mcp,
+    "sandbox_file_write": sandbox_file_write,
+    "sandbox_file_read": sandbox_file_read,
+    "list-templates": list_templates,
 }
 
 PLATFORM_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -1329,5 +1338,95 @@ PLATFORM_SCHEMAS: dict[str, dict[str, Any]] = {
                 "max_turns": {"type": "integer", "default": 50},
             },
         },
+    },
+    "manage-retention": {
+        "description": "Retention policies — configure data lifecycle per table (sessions, turns, billing, etc.)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "set"], "default": "list"},
+                "table_name": {"type": "string", "description": "Table name (for set)"},
+                "retention_days": {"type": "integer", "default": 90},
+            },
+        },
+    },
+    "manage-voice": {
+        "description": "Voice platform management — view calls, events, quality for Vapi and multi-platform voice agents",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "description": "Agent name"},
+                "action": {"type": "string", "enum": ["calls", "events", "summary"], "default": "calls"},
+                "call_id": {"type": "string", "description": "Call ID (for events)"},
+            },
+        },
+    },
+    "manage-gpu": {
+        "description": "GPU endpoint management — list, provision, or terminate dedicated GPU endpoints via GMI Cloud",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "provision", "terminate"], "default": "list"},
+                "model_id": {"type": "string", "description": "Model to serve (for provision)"},
+                "gpu_type": {"type": "string", "enum": ["h100", "h200"], "default": "h100"},
+                "endpoint_id": {"type": "string", "description": "Endpoint ID (for terminate)"},
+            },
+        },
+    },
+    "manage-workflows": {
+        "description": "Workflow and job queue management — list workflows, view async job status",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "jobs"], "default": "list"},
+                "agent_name": {"type": "string", "description": "Filter jobs by agent"},
+            },
+        },
+    },
+    "manage-projects": {
+        "description": "Project and environment management — list projects, view environments",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "envs"], "default": "list"},
+                "project_id": {"type": "string", "description": "Project ID (for envs)"},
+            },
+        },
+    },
+    "manage-mcp": {
+        "description": "MCP server management — list registered MCP servers for tool exposure",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list"], "default": "list"},
+            },
+        },
+    },
+    "sandbox_file_write": {
+        "description": "Write a file inside the E2B sandbox filesystem",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path inside sandbox"},
+                "content": {"type": "string", "description": "File contents"},
+                "sandbox_id": {"type": "string", "description": "Sandbox ID (optional)"},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    "sandbox_file_read": {
+        "description": "Read a file from the E2B sandbox filesystem",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path inside sandbox"},
+                "sandbox_id": {"type": "string", "description": "Sandbox ID (optional)"},
+            },
+            "required": ["path"],
+        },
+    },
+    "list-templates": {
+        "description": "List available agent templates for quick scaffolding (orchestrator, research, support, code-review, etc.)",
+        "input_schema": {"type": "object", "properties": {}},
     },
 }

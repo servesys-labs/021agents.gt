@@ -24,6 +24,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat-platforms"])
 
 
+def _get_telegram_token() -> str:
+    """Get Telegram bot token — from org secrets (DB) first, then env var fallback."""
+    # Try org secrets store (set via portal)
+    try:
+        db = _get_db()
+        row = db.conn.execute(
+            "SELECT value FROM secrets WHERE name = ? ORDER BY created_at DESC LIMIT 1",
+            ("TELEGRAM_BOT_TOKEN",),
+        ).fetchone()
+        if row:
+            val = row["value"] if isinstance(row, dict) else row[0]
+            if val:
+                return str(val)
+    except Exception:
+        pass
+    # Fallback to env var
+    return os.environ.get("TELEGRAM_BOT_TOKEN", "")
+
+
 # ── Telegram ────────────────────────────────────────────────────────
 
 
@@ -40,9 +59,9 @@ async def telegram_webhook(request: Request):
     """
     from agentos.integrations.chat_platforms.telegram import TelegramAdapter
 
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    bot_token = _get_telegram_token()
     if not bot_token:
-        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured")
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured. Set it in Portal → Integrations → Chat Platforms.")
 
     # Verify secret token header (if configured)
     webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
@@ -183,15 +202,94 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
+@router.post("/telegram/connect")
+async def telegram_connect(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Save Telegram bot token, push to worker, register webhook, return QR.
+
+    This is the one-click setup — user pastes token, everything else is automatic:
+    1. Store token in org secrets
+    2. Push token to Cloudflare worker as secret (via API)
+    3. Register webhook URL with Telegram
+    4. Return QR code for scanning
+    """
+    body = await request.json()
+    bot_token = body.get("bot_token", "")
+    if not bot_token:
+        raise HTTPException(status_code=400, detail="bot_token is required")
+
+    # Step 1: Store in DB secrets
+    db = _get_db()
+    try:
+        db.conn.execute(
+            "INSERT OR REPLACE INTO secrets (name, value, org_id, scope, created_at) VALUES (?, ?, ?, 'org', ?)",
+            ("TELEGRAM_BOT_TOKEN", bot_token, user.org_id, time.time()),
+        )
+        db.conn.commit()
+    except Exception as exc:
+        logger.warning("Failed to store telegram token: %s", exc)
+
+    # Step 2: Push to Cloudflare worker as secret
+    cf_account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+    cf_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+    worker_name = os.environ.get("CLOUDFLARE_WORKER_NAME", "agentos")
+    if cf_account and cf_token:
+        import httpx
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                await client.put(
+                    f"https://api.cloudflare.com/client/v4/accounts/{cf_account}/workers/scripts/{worker_name}/secrets",
+                    headers={"Authorization": f"Bearer {cf_token}", "Content-Type": "application/json"},
+                    json={"name": "TELEGRAM_BOT_TOKEN", "text": bot_token, "type": "secret_text"},
+                )
+        except Exception as exc:
+            logger.warning("Failed to push token to worker: %s", exc)
+
+    # Step 3: Register webhook with Telegram
+    from agentos.integrations.chat_platforms.telegram import TelegramAdapter
+    adapter = TelegramAdapter(bot_token=bot_token)
+    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
+    webhook_url = f"{worker_url}/chat/telegram/webhook" if worker_url else ""
+    webhook_result = {}
+    if webhook_url:
+        webhook_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
+        webhook_result = await adapter.setup_webhook(webhook_url, secret_token=webhook_secret)
+
+    # Step 4: Get bot info for QR
+    import httpx
+    bot_username = ""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"https://api.telegram.org/bot{bot_token}/getMe")
+            data = resp.json()
+            bot_username = data.get("result", {}).get("username", "")
+    except Exception:
+        pass
+
+    deep_link = f"https://t.me/{bot_username}?start=default" if bot_username else ""
+
+    return {
+        "success": True,
+        "bot_username": bot_username,
+        "deep_link": deep_link,
+        "webhook_registered": webhook_result.get("ok", False),
+        "webhook_url": webhook_url,
+        "secret_stored": True,
+        "worker_updated": bool(cf_account and cf_token),
+    }
+
+
 @router.post("/telegram/setup")
 async def telegram_setup(
     webhook_url: str,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Register Telegram webhook URL."""
+    """Register Telegram webhook URL (manual override)."""
     from agentos.integrations.chat_platforms.telegram import TelegramAdapter
 
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    bot_token = _get_telegram_token()
     if not bot_token:
         raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured")
 

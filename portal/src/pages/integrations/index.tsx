@@ -720,7 +720,36 @@ function ChatPlatformsTab() {
     instructions?: string;
   } | null>(null);
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [botToken, setBotToken] = useState("");
+
+  const handleSaveToken = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      // One API call: saves token, pushes to worker, registers webhook, returns QR
+      const data = await apiRequest<any>("/api/v1/chat/telegram/connect", "POST", {
+        bot_token: botToken,
+      });
+      if (data.success) {
+        setTelegramQR({
+          deep_link: data.deep_link,
+          bot_username: data.bot_username,
+          qr_svg: "", // Will be generated on fetchQR
+          instructions: `Bot @${data.bot_username} connected! ${data.webhook_registered ? "Webhook active." : "Set webhook URL manually."}`,
+        });
+        // Fetch full QR
+        await fetchQR();
+      } else {
+        setError("Connection failed");
+      }
+    } catch (err: any) {
+      setError(err?.message || "Failed to connect bot");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const fetchQR = async () => {
     setLoading(true);
@@ -752,15 +781,41 @@ function ChatPlatformsTab() {
         </div>
 
         {!telegramQR ? (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <p className="text-xs text-text-secondary">
               Connect a Telegram bot so users can chat with your agent directly from Telegram.
-              You'll need a bot token from <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-accent hover:underline">@BotFather</a>.
             </p>
-            <button onClick={fetchQR} disabled={loading} className="btn btn-primary text-xs">
-              {loading ? "Generating..." : "Generate QR Code"}
-            </button>
-            {error && <p className="text-xs text-status-error">{error}</p>}
+
+            {/* Step 1: Create bot */}
+            <div className="p-3 bg-surface-overlay/30 rounded-lg border border-border-default/50">
+              <p className="text-xs font-medium text-text-primary mb-1">Step 1: Create a Telegram Bot</p>
+              <p className="text-[10px] text-text-muted">
+                Open <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-accent hover:underline">@BotFather</a> on Telegram,
+                send <code className="bg-surface-base px-1 rounded">/newbot</code>, follow the prompts, and copy the token.
+              </p>
+            </div>
+
+            {/* Step 2: Paste token */}
+            <div className="p-3 bg-surface-overlay/30 rounded-lg border border-border-default/50">
+              <p className="text-xs font-medium text-text-primary mb-2">Step 2: Paste your bot token</p>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  placeholder="123456789:ABCdefGHI..."
+                  value={botToken}
+                  onChange={(e) => setBotToken(e.target.value)}
+                  className="flex-1 px-2 py-1.5 text-xs rounded-lg bg-surface-raised border border-border-default text-text-primary font-mono"
+                />
+                <button
+                  onClick={handleSaveToken}
+                  disabled={!botToken.trim() || saving}
+                  className="btn btn-primary text-xs whitespace-nowrap"
+                >
+                  {saving ? "Saving..." : "Connect"}
+                </button>
+              </div>
+              {error && <p className="text-[10px] text-status-error mt-1">{error}</p>}
+            </div>
           </div>
         ) : (
           <div className="space-y-4">
@@ -794,13 +849,21 @@ function ChatPlatformsTab() {
                 </p>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => navigator.clipboard.writeText(telegramQR.deep_link || "")}
+                    onClick={() => {
+                      navigator.clipboard.writeText(telegramQR.deep_link || "");
+                    }}
                     className="btn btn-secondary text-xs"
                   >
                     Copy Link
                   </button>
                   <button onClick={fetchQR} className="btn btn-secondary text-xs">
                     Refresh
+                  </button>
+                  <button
+                    onClick={() => setTelegramQR(null)}
+                    className="btn btn-secondary text-xs text-status-error"
+                  >
+                    Disconnect
                   </button>
                 </div>
               </div>

@@ -137,6 +137,18 @@ Actions: list, set, delete.
 - `manage-rag` — RAG knowledge base status and document listing.
 - `manage-policies` — Governance policy templates. Reusable guardrails. \
 Actions: list, create.
+- `manage-retention` — Data retention policies per table. Actions: list, set.
+- `manage-voice` — Voice platform management. View Vapi/voice calls, events, quality. \
+Actions: calls, events, summary.
+- `manage-gpu` — GPU endpoint management. List, provision, terminate dedicated GPUs. \
+Actions: list, provision, terminate.
+- `manage-workflows` — Workflow and job queue. List workflows, view async jobs. \
+Actions: list, jobs.
+- `manage-projects` — Project and environment management. Actions: list, envs.
+- `manage-mcp` — MCP server management. List registered servers. Actions: list.
+- `sandbox_file_write` — Write a file inside the E2B sandbox.
+- `sandbox_file_read` — Read a file from the E2B sandbox.
+- `list-templates` — List available agent templates (orchestrator, research, support, etc.)
 
 ### Planning
 - `todo` — Manage a task list. Use this to plan multi-step work before executing.
@@ -361,6 +373,15 @@ ORCHESTRATOR_TOOLS = [
     "compare-agents",
     "manage-rag",
     "manage-policies",
+    "manage-retention",
+    "manage-voice",
+    "manage-gpu",
+    "manage-workflows",
+    "manage-projects",
+    "manage-mcp",
+    "sandbox_file_write",
+    "sandbox_file_read",
+    "list-templates",
     # Planning
     "todo",
 ]
