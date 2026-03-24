@@ -3404,18 +3404,46 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
 
       if (!body.query) return Response.json({ error: "query is required" }, { status: 400 });
 
-      // Embed the query
-      const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [body.query] }) as any;
+      // ── Query Expansion (synonym injection) ──
+      const synonymMap: Record<string, string[]> = {
+        error: ["exception", "failure", "bug", "issue"],
+        fix: ["resolve", "repair", "patch", "correct"],
+        deploy: ["release", "ship", "publish", "launch"],
+        config: ["configuration", "settings", "setup"],
+        auth: ["authentication", "authorization", "login"],
+        api: ["endpoint", "interface", "service"],
+        test: ["spec", "assertion", "verification"],
+        create: ["add", "insert", "generate", "make"],
+        update: ["modify", "change", "edit"],
+        search: ["find", "query", "lookup", "retrieve"],
+        delete: ["remove", "drop", "destroy"],
+        slow: ["latency", "bottleneck", "performance"],
+        fast: ["quick", "efficient", "performant"],
+      };
+      const queryWords = body.query.toLowerCase().split(/\s+/);
+      const expansions: string[] = [];
+      for (const w of queryWords) {
+        const clean = w.replace(/[^\w]/g, "");
+        if (synonymMap[clean]) expansions.push(...synonymMap[clean]);
+      }
+      const expandedQuery = expansions.length > 0
+        ? `${body.query} ${[...new Set(expansions)].join(" ")}`
+        : body.query;
+
+      // Embed the expanded query
+      const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [expandedQuery] }) as any;
       const queryVector = embedResult.data?.[0];
       if (!queryVector) return Response.json({ error: "Embedding failed" }, { status: 500 });
 
       const topK = body.top_k || 5;
+      // Fetch more than needed for reranking
+      const fetchK = Math.min(topK * 3, 20);
       const allMatches: any[] = [];
 
       // Search 1: Agent-scoped docs (highest priority)
       if (body.agent_name && body.org_id) {
         const agentResults = await env.VECTORIZE.query(queryVector, {
-          topK,
+          topK: fetchK,
           returnMetadata: "all",
           filter: { org_id: body.org_id, agent_name: body.agent_name },
         });
@@ -3427,7 +3455,7 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       // Search 2: Org-wide shared docs
       if (body.org_id) {
         const sharedResults = await env.VECTORIZE.query(queryVector, {
-          topK,
+          topK: fetchK,
           returnMetadata: "all",
           filter: { org_id: body.org_id, agent_name: "shared" },
         });
@@ -3439,7 +3467,7 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       // If no scoped search was done, search everything
       if (allMatches.length === 0) {
         const globalResults = await env.VECTORIZE.query(queryVector, {
-          topK,
+          topK: fetchK,
           returnMetadata: "all",
         });
         for (const m of globalResults.matches || []) {
@@ -3447,17 +3475,32 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
         }
       }
 
-      // Dedupe by vector ID, sort by score descending, take top_k
+      // ── Reranking: 60% vector score + 40% term-overlap boost ──
+      const queryTerms = new Set(body.query.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+      for (const m of allMatches) {
+        const docText = (m.metadata?.text || "").toLowerCase();
+        const docTerms = new Set(docText.split(/\s+/).filter((w: string) => w.length > 2));
+        let overlap = 0;
+        for (const qt of queryTerms) {
+          if (docTerms.has(qt)) overlap++;
+        }
+        const termBoost = queryTerms.size > 0 ? overlap / queryTerms.size : 0;
+        m.rerankScore = 0.6 * (m.score || 0) + 0.4 * termBoost;
+      }
+
+      // Dedupe by vector ID, sort by rerank score, take top_k
       const seen = new Set<string>();
       const deduped = allMatches.filter(m => {
         if (seen.has(m.id)) return false;
         seen.add(m.id);
         return true;
-      }).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, topK);
+      }).sort((a, b) => (b.rerankScore || 0) - (a.rerankScore || 0)).slice(0, topK);
 
       return Response.json({
+        query_expanded: expandedQuery !== body.query,
         matches: deduped.map((m: any) => ({
-          score: m.score,
+          score: m.rerankScore,
+          vector_score: m.score,
           text: m.metadata?.text || "",
           source: m.metadata?.source || "",
           agent_name: m.metadata?.agent_name || "",
