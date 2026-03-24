@@ -35,6 +35,7 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   LOADER: any; // Dynamic Worker Loader — V8 isolate sandbox (JS/TS)
   SANDBOX: DurableObjectNamespace; // Sandbox SDK — full Linux container
+  STORAGE: R2Bucket; // R2 — org/project-scoped file storage
   BROWSER: Fetcher; // Browser Rendering — headless Puppeteer on edge
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
@@ -3212,6 +3213,211 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
           error: `Browser render failed: ${err.message}`,
         }, { status: 500 });
       }
+    }
+
+    // ── R2 Storage (org/project-scoped file storage) ──
+    if (url.pathname === "/storage/upload" && request.method === "POST") {
+      if (!env.STORAGE) return Response.json({ error: "STORAGE binding not available" }, { status: 503 });
+      const orgId = url.searchParams.get("org_id") || "default";
+      const projectId = url.searchParams.get("project_id") || "default";
+      const category = url.searchParams.get("category") || "knowledge"; // knowledge, artifacts, audio, images
+      const filename = url.searchParams.get("filename") || `${Date.now()}.bin`;
+      const key = `${orgId}/${projectId}/${category}/${filename}`;
+
+      const body = await request.arrayBuffer();
+      await env.STORAGE.put(key, body, {
+        customMetadata: {
+          org_id: orgId,
+          project_id: projectId,
+          category,
+          filename,
+          uploaded_at: new Date().toISOString(),
+          size_bytes: String(body.byteLength),
+        },
+      });
+      return Response.json({ success: true, key, size_bytes: body.byteLength });
+    }
+
+    if (url.pathname === "/storage/download" && request.method === "GET") {
+      if (!env.STORAGE) return Response.json({ error: "STORAGE binding not available" }, { status: 503 });
+      const key = url.searchParams.get("key") || "";
+      if (!key) return Response.json({ error: "key is required" }, { status: 400 });
+      const obj = await env.STORAGE.get(key);
+      if (!obj) return Response.json({ error: "not found" }, { status: 404 });
+      return new Response(obj.body, {
+        headers: {
+          "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream",
+          "Content-Length": String(obj.size),
+        },
+      });
+    }
+
+    if (url.pathname === "/storage/list" && request.method === "GET") {
+      if (!env.STORAGE) return Response.json({ error: "STORAGE binding not available" }, { status: 503 });
+      const prefix = url.searchParams.get("prefix") || "";
+      const limit = parseInt(url.searchParams.get("limit") || "100");
+      const listed = await env.STORAGE.list({ prefix, limit });
+      return Response.json({
+        files: listed.objects.map(o => ({
+          key: o.key,
+          size: o.size,
+          uploaded: o.uploaded?.toISOString(),
+          metadata: o.customMetadata,
+        })),
+        truncated: listed.truncated,
+      });
+    }
+
+    if (url.pathname === "/storage/delete" && request.method === "POST") {
+      if (!env.STORAGE) return Response.json({ error: "STORAGE binding not available" }, { status: 503 });
+      const body = await request.json() as { key: string };
+      await env.STORAGE.delete(body.key);
+      return Response.json({ deleted: true, key: body.key });
+    }
+
+    // ── RAG Ingestion Pipeline (crawl → chunk → embed → Vectorize) ──
+    if (url.pathname === "/rag/ingest" && request.method === "POST") {
+      const body = await request.json() as {
+        url?: string;
+        text?: string;
+        org_id?: string;
+        project_id?: string;
+        source?: string;
+        chunk_size?: number;
+      };
+
+      if (!body.url && !body.text) {
+        return Response.json({ error: "Provide either url or text to ingest" }, { status: 400 });
+      }
+
+      const orgId = body.org_id || "default";
+      const projectId = body.project_id || "default";
+      const source = body.source || body.url || "manual";
+      const chunkSize = body.chunk_size || 512;
+
+      let text = body.text || "";
+
+      // Step 1: Fetch content if URL provided
+      if (body.url && !text) {
+        try {
+          // Use browser render for clean text extraction
+          if (env.BROWSER) {
+            const puppeteer = await import("@cloudflare/puppeteer");
+            const browser = await puppeteer.default.launch(env.BROWSER);
+            const page = await browser.newPage();
+            await page.goto(body.url, { waitUntil: "networkidle0", timeout: 15000 });
+            text = await page.$eval("body", (el: any) => el.innerText);
+            await browser.close();
+          } else {
+            const resp = await fetch(body.url, { headers: { "User-Agent": "AgentOS/0.1.0" } });
+            const html = await resp.text();
+            text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+          }
+        } catch (err: any) {
+          return Response.json({ error: `Failed to fetch URL: ${err.message}` }, { status: 500 });
+        }
+      }
+
+      if (!text.trim()) {
+        return Response.json({ error: "No content to ingest" }, { status: 400 });
+      }
+
+      // Step 2: Chunk text
+      const chunks: string[] = [];
+      const words = text.split(/\s+/);
+      for (let i = 0; i < words.length; i += Math.floor(chunkSize * 0.8)) {
+        const chunk = words.slice(i, i + chunkSize).join(" ");
+        if (chunk.trim().length > 50) chunks.push(chunk.trim());
+      }
+
+      // Step 3: Generate embeddings via Workers AI
+      const embedResults: any[] = [];
+      for (let i = 0; i < chunks.length; i += 10) {
+        const batch = chunks.slice(i, i + 10);
+        const result = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: batch }) as any;
+        embedResults.push(...(result.data || []));
+      }
+
+      // Step 4: Store in Vectorize
+      if (env.VECTORIZE && embedResults.length > 0) {
+        const vectors = embedResults.map((embedding: number[], idx: number) => ({
+          id: `${orgId}-${projectId}-${Date.now()}-${idx}`,
+          values: embedding,
+          metadata: {
+            org_id: orgId,
+            project_id: projectId,
+            source,
+            chunk_index: idx,
+            text: chunks[idx]?.slice(0, 500) || "",
+          },
+        }));
+
+        // Vectorize insert in batches of 100
+        for (let i = 0; i < vectors.length; i += 100) {
+          await env.VECTORIZE.insert(vectors.slice(i, i + 100));
+        }
+      }
+
+      // Step 5: Store original doc in R2
+      if (env.STORAGE) {
+        const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const key = `${orgId}/${projectId}/knowledge/${docId}/source.txt`;
+        await env.STORAGE.put(key, text, {
+          customMetadata: {
+            org_id: orgId,
+            project_id: projectId,
+            source,
+            chunks: String(chunks.length),
+            ingested_at: new Date().toISOString(),
+          },
+        });
+      }
+
+      return Response.json({
+        success: true,
+        source,
+        chunks_created: chunks.length,
+        vectors_stored: embedResults.length,
+        text_length: text.length,
+      });
+    }
+
+    // ── RAG Query (embed → Vectorize search → return context) ──
+    if (url.pathname === "/rag/query" && request.method === "POST") {
+      const body = await request.json() as {
+        query: string;
+        org_id?: string;
+        project_id?: string;
+        top_k?: number;
+      };
+
+      if (!body.query) return Response.json({ error: "query is required" }, { status: 400 });
+
+      // Embed the query
+      const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [body.query] }) as any;
+      const queryVector = embedResult.data?.[0];
+      if (!queryVector) return Response.json({ error: "Embedding failed" }, { status: 500 });
+
+      // Search Vectorize with metadata filter
+      const filter: any = {};
+      if (body.org_id) filter.org_id = body.org_id;
+      if (body.project_id) filter.project_id = body.project_id;
+
+      const results = await env.VECTORIZE.query(queryVector, {
+        topK: body.top_k || 5,
+        returnMetadata: "all",
+        filter: Object.keys(filter).length > 0 ? filter : undefined,
+      });
+
+      return Response.json({
+        matches: results.matches?.map((m: any) => ({
+          score: m.score,
+          text: m.metadata?.text || "",
+          source: m.metadata?.source || "",
+          org_id: m.metadata?.org_id || "",
+          project_id: m.metadata?.project_id || "",
+        })) || [],
+      });
     }
 
     // ── Shell execution (Sandbox SDK container — bash/python/node) ──
