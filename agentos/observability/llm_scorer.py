@@ -41,7 +41,7 @@ Score these dimensions (0.0 = terrible, 1.0 = perfect):
 9. has_hallucination_risk: true/false — does the agent present uncertain info as fact?
 
 Respond ONLY with valid JSON, no markdown:
-{"relevance": 0.0, "coherence": 0.0, "helpfulness": 0.0, "safety": 0.0, "sentiment": "", "sentiment_score": 0.0, "topic": "", "intent": "", "has_hallucination_risk": false}"""
+{{"relevance": 0.0, "coherence": 0.0, "helpfulness": 0.0, "safety": 0.0, "sentiment": "", "sentiment_score": 0.0, "topic": "", "intent": "", "has_hallucination_risk": false}}"""
 
 
 class LLMQualityScorer:
