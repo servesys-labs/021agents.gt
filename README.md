@@ -7,14 +7,15 @@ Build, test, govern, deploy, and observe AI agents. The Vercel for agents.
 | Metric | Count |
 |--------|-------|
 | API endpoints | 240+ across 40 routers |
-| Builtin tools | 21 + 3,000+ via Pipedream |
+| Builtin tools | 24 + 3,000+ via Pipedream |
 | Portal pages | 28 (Refine + React Flow) |
 | LLM plans | 6 (basic/standard/premium/code/dedicated/private) |
 | Agent templates | 9 pre-built |
 | Database tables | 52 (SQLite WAL) |
 | Test suite | 870+ tests |
 | Security probes | 14 OWASP LLM Top 10 |
-| Voice platforms | 5 (Vapi, ElevenLabs, Retell, Bland, Tavus) |
+| Voice platforms | 2 native (Vapi, Tavus) + GMI multimodal (ElevenLabs TTS, Whisper STT) |
+| Multimodal models | Image gen + Vision + TTS + STT per plan via GMI |
 
 ## Quick Start
 
@@ -69,13 +70,14 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 │  Issue Detection · Drift Detection · Compliance · Remediation   │
 ├─────────────────────────────────────────────────────────────────┤
 │                   Integrations Layer                             │
-│  Vapi · ElevenLabs · Retell · Bland · Tavus · Pipedream (3K+)  │
+│  Vapi (phone) · Tavus (video) · Pipedream MCP (3K+ apps)       │
 ├─────────────────────────────────────────────────────────────────┤
-│                    LLM Providers                                │
-│  GMI Cloud (primary) · Anthropic · OpenAI · Cloudflare · Local  │
+│                 Multimodal Providers (GMI Cloud)                │
+│  LLM (100+) · Image Gen (25+) · TTS (15+) · STT · Vision      │
+│  + Anthropic · OpenAI · Cloudflare Workers AI · Local           │
 ├─────────────────────────────────────────────────────────────────┤
 │                     Storage                                     │
-│  SQLite (WAL) · 52 tables · Migrations v1-v11 · Postgres       │
+│  SQLite (WAL) · 52 tables · Migrations v1-v12 · Postgres       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -91,10 +93,10 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 | **Governance** | `agentos.core.governance` | Budget enforcement, policy checks, cost tracking |
 | **Identity** | `agentos.core.identity` | Cryptographic agent IDs + optional signing keypairs |
 | **Tracing** | `agentos.core.tracing` | Span-based observability (session → turn → tool → sub-agent) |
-| **Database** | `agentos.core.database` | SQLite WAL (39 tables, migrations v1-v5) + Postgres backend |
+| **Database** | `agentos.core.database` | SQLite WAL (52 tables, migrations v1-v12) + Postgres backend |
 | **Events** | `agentos.core.events` | Event bus for lifecycle hooks and observability |
-| **LLM Routing** | `agentos.llm` | Multi-provider routing by complexity (simple/moderate/complex/tool_call) |
-| **Tools** | `agentos.tools` | 21 builtins + MCP client + plugin registry |
+| **LLM Routing** | `agentos.llm` | Multi-provider routing by complexity + multimodal tiers (image_gen/vision/tts/stt) |
+| **Tools** | `agentos.tools` | 24 builtins (incl. image-generate, text-to-speech, speech-to-text) + MCP client + plugin registry |
 | **Connectors** | `agentos.connectors` | 3,000+ app integrations via Pipedream MCP |
 | **Memory** | `agentos.memory` | Working, episodic, semantic, procedural, vector store + async updater |
 | **Middleware** | `agentos.middleware` | Loop detection, context summarization, composable chain |
@@ -110,7 +112,7 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 | **Config Mgmt** | `agentos.config` | Gold images, drift detection, compliance enforcement, config audit |
 | **Issues** | `agentos.issues` | Auto-detection, classification, remediation suggestions, issue lifecycle |
 | **Security** | `agentos.security` | OWASP LLM Top 10 probes, MAESTRO 7-layer assessment, AIVSS risk scoring |
-| **Voice Platforms** | `agentos.integrations` | Vapi, ElevenLabs, Retell, Bland, Tavus — webhook + call management |
+| **Voice Platforms** | `agentos.integrations` | Vapi (phone) + Tavus (video) — webhook + call management |
 | **Auth** | `agentos.auth` | JWT + Clerk + OAuth, RBAC (owner/admin/member/viewer) |
 | **Analysis** | `agentos.analysis` | Codebase graph maps (JSON + DOT + SVG) via `agentos codemap` |
 | **Deploy** | `deploy/` | Cloudflare Workers with Agents SDK |
@@ -147,9 +149,11 @@ An agent is a JSON/YAML file in `agents/`:
 }
 ```
 
-## LLM Plans
+## LLM Plans (Multimodal)
 
-Each plan maps 4 complexity tiers (simple/moderate/complex/tool_call) to specific models. All plans route through GMI Cloud for unified billing and 41+ model access.
+Each plan maps **8 tiers** to specific models — 4 text complexity tiers + 4 multimodal tiers. All plans route through GMI Cloud for unified billing and 100+ model access.
+
+**Text tiers** (simple / moderate / complex / tool_call):
 
 | Plan | Use Case | Simple | Complex |
 |------|----------|--------|---------|
@@ -160,15 +164,28 @@ Each plan maps 4 complexity tiers (simple/moderate/complex/tool_call) to specifi
 | **dedicated** | Isolated GPU (H200) | DeepSeek-V3.2 | Qwen3.5-397B |
 | **private** | Data sovereignty | DeepSeek-V3.2 | Qwen3.5-397B |
 
+**Multimodal tiers** (image_gen / vision / tts / stt):
+
+| Plan | Image Gen | Vision | TTS | STT |
+|------|-----------|--------|-----|-----|
+| **basic** | GLM-Image ($0.01) | Qwen3.5-122B | Inworld Mini ($0.005) | Whisper v3 ($0.003) |
+| **standard** | Seedream 5.0 ($0.035) | Claude Sonnet 4.6 | MiniMax Turbo ($0.06) | Whisper v3 |
+| **premium** | Nano Banana 2 ($0.134) | Claude Opus 4.6 | ElevenLabs v3 ($0.10) | Whisper v3 |
+| **code** | Seedream 5.0 ($0.035) | Claude Sonnet 4.6 | MiniMax Turbo ($0.06) | Whisper v3 |
+| **dedicated** | Seedream 5.0 ($0.035) | Qwen3.5-122B | MiniMax Voice Clone HD ($0.10) | Whisper v3 |
+| **private** | GLM-Image ($0.01) | Qwen3.5-122B | MiniMax Turbo ($0.06) | Whisper v3 |
+
+All multimodal models served via GMI Cloud — one API key, one billing account.
+
 ```bash
-# List plans
+# List plans (shows multimodal tiers)
 agentos plans list
 
 # Create a custom plan
 agentos plans create
 ```
 
-## Builtin Tools (21)
+## Builtin Tools (24)
 
 | Category | Tools |
 |----------|-------|
@@ -177,8 +194,11 @@ agentos plans create
 | **Execution** | `bash`, `python-exec` |
 | **Knowledge** | `store-knowledge`, `knowledge-search` |
 | **Agent Ops** | `create-agent`, `run-agent`, `list-agents`, `list-tools`, `eval-agent`, `evolve-agent` |
+| **Multimodal** | `image-generate`, `text-to-speech`, `speech-to-text` |
 | **Protocol** | `a2a-send`, `connector` |
 | **Planning** | `todo` |
+
+**Multimodal tools** call GMI Cloud directly — agents can generate images (Nano Banana 2, Seedream, FLUX), synthesize speech (ElevenLabs, MiniMax TTS), and transcribe audio (Whisper) as native tool calls.
 
 Plus **3,000+ app integrations** (Slack, GitHub, Jira, Gmail, Stripe, ...) via the Pipedream MCP connector with managed OAuth.
 
@@ -246,7 +266,7 @@ uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8340
 | Security | `/api/v1/security` | OWASP scans, AIVSS scoring, risk profiles |
 | Issues | `/api/v1/issues` | Auto-detection, classification, remediation, lifecycle |
 | Gold Images | `/api/v1/gold-images` | CRUD, drift, compliance, config audit |
-| Voice | `/api/v1/voice` | Vapi + 4 platforms: webhooks, calls, events |
+| Voice | `/api/v1/voice` | Vapi + Tavus: webhooks, calls, events, cross-platform summary |
 | A2A | `/.well-known/agent.json`, `/a2a` | Agent discovery + JSON-RPC |
 
 ### RBAC & API Keys
@@ -285,7 +305,7 @@ API keys use `ak_` prefix and are scoped to org/project/environment.
 | Compliance | Gold images, drift detection, config audit |
 | Issues | Auto-detected issues, classification, remediation |
 | Security | OWASP scans, MAESTRO layers, AIVSS risk scores |
-| Voice | Vapi + ElevenLabs + Retell + Bland + Tavus call management |
+| Voice | Vapi + Tavus call management, platform selector, transcript viewer |
 | Billing | Usage tracking, cost breakdown |
 | API Explorer | OpenAPI-backed endpoint browser |
 | Settings | API keys, org config |
@@ -398,8 +418,8 @@ agentos intel trends --agent my-agent
 
 | Component | Description |
 |-----------|-------------|
-| **Sentiment Analysis** | Rule-based analyzer (positive/negative/neutral/mixed) with negation handling |
-| **Quality Scoring** | Relevance, coherence, helpfulness, safety (0-1 scale) with weighted composite |
+| **Sentiment Analysis** | Rule-based + optional LLM-enhanced (positive/negative/neutral/mixed) with negation handling |
+| **Quality Scoring** | Relevance, coherence, helpfulness, safety (0-1 scale) — heuristic or LLM-scored (auto-selects when `ANTHROPIC_API_KEY` is set) |
 | **Topic Detection** | 10 domain categories (coding, deployment, database, API, security, ...) |
 | **Intent Classification** | question, command, feedback, complaint, chitchat |
 | **Auto-scoring** | Sessions auto-scored on completion via `SESSION_END` event |
@@ -489,12 +509,13 @@ agentos gold-image audit
 | **Compliance Checking** | Auto-match against best gold image, or check against specific image |
 | **Config Audit Trail** | Every config change tracked with who/when/what/why |
 | **Startup Compliance** | Agents log warnings on startup if they've drifted from their gold image |
+| **Run Enforcement** | Agents with **critical** drift are blocked from executing (HTTP 403) until drift is fixed or gold image updated |
 
 **Portal**: `/compliance` page with Gold Images, Compliance Checks, and Audit Log tabs.
 
-## Voice Platform Integrations
+## Voice & Video Platform Integrations
 
-Five voice AI platforms with webhook ingestion, call management, and transcript capture.
+Two native platform adapters (Vapi for phone, Tavus for video) + multimodal inference via GMI Cloud.
 
 ```bash
 # List Vapi calls
@@ -504,21 +525,20 @@ agentos voice calls
 agentos voice summary
 ```
 
-| Platform | Features |
-|----------|----------|
-| **Vapi** | Full adapter: webhook events (call.started/ended, transcript, function-call, hang), outbound calls, signature verification |
-| **ElevenLabs** | Conversational AI: webhook events, conversation creation |
-| **Retell** | Real-time voice agents: webhook events, call creation |
-| **Bland** | Phone call AI: webhook events, call creation with task/voice config |
-| **Tavus** | Video AI agents: webhook events, persona-based conversations |
+| Platform | Type | Features |
+|----------|------|----------|
+| **Vapi** | Phone (native adapter) | Full lifecycle: webhook events (call.started/ended, transcript, function-call, hang), outbound calls, signature verification, DB persistence |
+| **Tavus** | Video (native adapter) | Video conversations: webhook events, persona-based conversations, transcript capture |
+| **ElevenLabs** | TTS (via GMI) | Premium voice synthesis — available as `text-to-speech` tool or plan TTS tier ($0.10/req) |
+| **MiniMax** | TTS (via GMI) | Fast TTS + voice cloning — plan TTS tier ($0.06/req) |
+| **Whisper** | STT (via GMI) | Audio transcription — available as `speech-to-text` tool or plan STT tier ($0.003/req) |
+| **Others** | Via Pipedream | Retell, Bland, and 3,000+ other apps available through Pipedream MCP connectors |
 
-All platforms share a common adapter interface with `verify_webhook()`, `process_webhook()`, `create_call()`, and `end_call()`. Webhooks are unauthenticated (signature-verified); call management endpoints require auth.
-
-**Portal**: `/voice` page with platform selector (Vapi/ElevenLabs/Retell/Bland/Tavus), call tables, event logs, transcript viewer.
+**Portal**: `/voice` page with platform selector (Vapi/Tavus), call tables, event logs, transcript viewer.
 
 ## Database
 
-SQLite with WAL mode by default. 52 tables across 11 migration versions. Postgres available for production.
+SQLite with WAL mode by default. 52 tables across 12 migration versions. Postgres available for production.
 
 ```bash
 # SQLite (default)
@@ -566,7 +586,7 @@ agentos/
     schemas.py      # Pydantic request/response models
   core/
     harness.py      # Agent execution engine, middleware chain, turn lifecycle
-    database.py     # SQLite WAL, 52 tables, migrations v1-v11
+    database.py     # SQLite WAL, 52 tables, migrations v1-v12
     db_config.py    # Database backend switching (SQLite / Postgres)
     postgres_database.py  # Postgres backend adapter
     governance.py   # Budget enforcement, policy checks, cost recording
@@ -574,11 +594,11 @@ agentos/
     identity.py     # Cryptographic agent IDs + optional signing keypairs
     tracing.py      # Span-based observability (session → turn → tool → sub-agent)
   llm/
-    router.py       # Complexity-based multi-provider routing
+    router.py       # Complexity-based multi-provider routing + multimodal tiers
     provider.py     # HTTP provider (OpenAI-compatible)
     tokens.py       # Cost estimation for 50+ models across all providers
   tools/
-    builtins.py     # 21 builtin tools with handlers + schemas
+    builtins.py     # 24 builtin tools with handlers + schemas (incl. multimodal)
     executor.py     # Tool execution engine
     registry.py     # Plugin discovery (JSON/Python)
     mcp.py          # MCP client
@@ -633,6 +653,7 @@ agentos/
   observability/
     sentiment.py    # Rule-based sentiment analysis (positive/negative/neutral/mixed)
     quality.py      # Heuristic quality scoring (relevance, coherence, helpfulness, safety)
+    llm_scorer.py   # LLM-enhanced scoring (Claude Haiku) with heuristic fallback
     analytics.py    # Session-level aggregation, trend detection
   security/
     owasp_probes.py # 14 OWASP LLM Top 10 probes (config + runtime)
@@ -651,9 +672,6 @@ agentos/
   integrations/
     voice_platforms/
       vapi.py       # Vapi adapter (webhooks, calls, transcripts)
-      elevenlabs.py # ElevenLabs conversational AI adapter
-      retell.py     # Retell real-time voice agent adapter
-      bland.py      # Bland phone call AI adapter
       tavus.py      # Tavus video AI agent adapter
   analysis/
     codemap.py      # Codebase graph generator (JSON + DOT + SVG)
@@ -695,13 +713,12 @@ PIPEDREAM_API_KEY=pd_...         # 3,000+ app integrations
 PIPEDREAM_PROJECT_ID=proj_...
 PIPEDREAM_CONNECT_TOKEN=...
 
-# Voice Platforms
-VAPI_API_KEY=...                 # Vapi voice AI
+# Voice Platforms (native adapters)
+VAPI_API_KEY=...                 # Vapi phone agent
 VAPI_WEBHOOK_SECRET=...
-ELEVENLABS_API_KEY=...           # ElevenLabs TTS/Conversational AI
-RETELL_API_KEY=...               # Retell real-time voice
-BLAND_API_KEY=...                # Bland phone call AI
-TAVUS_API_KEY=...                # Tavus video AI
+TAVUS_API_KEY=...                # Tavus video agent
+TAVUS_WEBHOOK_SECRET=...
+# Note: ElevenLabs TTS, MiniMax TTS, Whisper STT all served via GMI_API_KEY
 
 # Auth
 AGENTOS_AUTH_PROVIDER=local      # local or clerk

@@ -45,6 +45,12 @@ def _convert_query(sql: str) -> str:
     query = query.replace("INSERT OR IGNORE INTO", "INSERT INTO")
     query = query.replace("INSERT OR REPLACE INTO _meta", "INSERT INTO _meta")
     query = query.replace("INSERT OR REPLACE INTO", "INSERT INTO")
+    # SQLite DATE(col, 'unixepoch') → Postgres TO_TIMESTAMP(col)::DATE
+    query = re.sub(
+        r"DATE\((\w+),\s*'unixepoch'\)",
+        r"TO_TIMESTAMP(\1)::DATE",
+        query,
+    )
     # sqlite uses ? placeholders; psycopg expects %s
     # Only replace ? outside of quoted strings to avoid corrupting string literals
     query = re.sub(r"\?(?=([^']*'[^']*')*[^']*$)", "%s", query)
@@ -87,8 +93,16 @@ class _ConnAdapter:
         self._conn = conn
 
     def execute(self, sql: str, params: Any = None):
-        cur = self._conn.cursor()
-        return _CursorAdapter(cur).execute(sql, params)
+        try:
+            cur = self._conn.cursor()
+            return _CursorAdapter(cur).execute(sql, params)
+        except Exception as exc:
+            # Auto-recover from InFailedSqlTransaction by rolling back
+            if "InFailedSqlTransaction" in type(exc).__name__ or "aborted" in str(exc).lower():
+                self._conn.rollback()
+                cur = self._conn.cursor()
+                return _CursorAdapter(cur).execute(sql, params)
+            raise
 
     def executescript(self, script: str) -> None:
         cur = self._conn.cursor()
@@ -173,89 +187,65 @@ class PostgresAgentDB(AgentDB):
         self.conn.commit()
         _log.info("Postgres schema upgraded to v%d", SCHEMA_VERSION)
 
+    def _safe_add_column(self, table: str, col: str, ddl: str) -> None:
+        """Add a column if it doesn't exist. Rolls back on error."""
+        try:
+            row = self.conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+                (table, col),
+            ).fetchone()
+            if row:
+                return
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+
     def _ensure_runtime_columns(self) -> None:
         """Add runtime observability columns for legacy Postgres databases."""
-        checks = (
+        for col, ddl in (
             ("execution_mode", "TEXT NOT NULL DEFAULT 'sequential'"),
             ("plan_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("reflection_json", "TEXT NOT NULL DEFAULT '{}'"),
-        )
-        for col, ddl in checks:
-            row = self.conn.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
-                ("turns", col),
-            ).fetchone()
-            if row:
-                continue
-            self.conn.execute(f"ALTER TABLE turns ADD COLUMN {col} {ddl}")
-        workflow_checks = (
+        ):
+            self._safe_add_column("turns", col, ddl)
+        for col, ddl in (
             ("dag_json", "TEXT NOT NULL DEFAULT '{}'"),
             ("reflection_json", "TEXT NOT NULL DEFAULT '{}'"),
-        )
-        for col, ddl in workflow_checks:
-            row = self.conn.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
-                ("workflow_runs", col),
-            ).fetchone()
-            if row:
-                continue
-            self.conn.execute(f"ALTER TABLE workflow_runs ADD COLUMN {col} {ddl}")
-        session_checks = (
+        ):
+            self._safe_add_column("workflow_runs", col, ddl)
+        for col, ddl in (
             ("org_id", "TEXT NOT NULL DEFAULT ''"),
             ("project_id", "TEXT NOT NULL DEFAULT ''"),
-        )
-        for col, ddl in session_checks:
-            row = self.conn.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
-                ("sessions", col),
-            ).fetchone()
-            if row:
-                continue
-            self.conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {ddl}")
-        api_key_checks = (
+        ):
+            self._safe_add_column("sessions", col, ddl)
+        for col, ddl in (
             ("project_id", "TEXT NOT NULL DEFAULT ''"),
             ("env", "TEXT NOT NULL DEFAULT ''"),
-        )
-        for col, ddl in api_key_checks:
-            row = self.conn.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
-                ("api_keys", col),
-            ).fetchone()
-            if row:
-                continue
-            self.conn.execute(f"ALTER TABLE api_keys ADD COLUMN {col} {ddl}")
-        issue_checks = (
+        ):
+            self._safe_add_column("api_keys", col, ddl)
+        for col, ddl in (
             ("fix_applied", "INTEGER NOT NULL DEFAULT 0"),
             ("assigned_to", "TEXT NOT NULL DEFAULT ''"),
             ("resolved_by", "TEXT NOT NULL DEFAULT ''"),
             ("resolved_at", "DOUBLE PRECISION"),
-        )
-        for col, ddl in issue_checks:
-            row = self.conn.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
-                ("issues", col),
-            ).fetchone()
-            if row:
-                continue
-            self.conn.execute(f"ALTER TABLE issues ADD COLUMN {col} {ddl}")
-        billing_checks = (
+        ):
+            self._safe_add_column("issues", col, ddl)
+        for col, ddl in (
             ("pricing_source", "TEXT NOT NULL DEFAULT 'fallback_env'"),
             ("pricing_key", "TEXT NOT NULL DEFAULT ''"),
             ("unit", "TEXT NOT NULL DEFAULT ''"),
             ("unit_price_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0.0"),
             ("quantity", "DOUBLE PRECISION NOT NULL DEFAULT 0.0"),
             ("pricing_version", "TEXT NOT NULL DEFAULT ''"),
-        )
-        for col, ddl in billing_checks:
-            row = self.conn.execute(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
-                ("billing_records", col),
-            ).fetchone()
-            if row:
-                continue
-            self.conn.execute(f"ALTER TABLE billing_records ADD COLUMN {col} {ddl}")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_org ON sessions(org_id)")
-        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
+        ):
+            self._safe_add_column("billing_records", col, ddl)
+        try:
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_org ON sessions(org_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
 
     def _executescript_safe(self, script: str) -> None:
         """Execute SQL script while tolerating idempotent already-exists errors."""
@@ -316,4 +306,5 @@ class PostgresAgentDB(AgentDB):
             ).fetchone()
             return int(row["value"]) if row else 0
         except Exception:
+            self.conn.rollback()
             return 0
