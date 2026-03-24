@@ -13,7 +13,7 @@
     "@cloudflare/ai-chat": "^0.1.0",
     "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/sandbox": "^0.7.0",
-    "pg": "^8.16",
+    "postgres": "^3.4.5",
     "agents": "^0.7.9"
   },
   "devDependencies": {

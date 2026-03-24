@@ -3962,94 +3962,79 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
   },
 
   // ── Queue Consumer — writes telemetry to Supabase via Hyperdrive ──
-  // Messages flow: Agent DO → TELEMETRY_QUEUE → this consumer → Supabase Postgres
+  // Messages flow: Agent DO → TELEMETRY_QUEUE → this consumer → Supabase
   // Guaranteed delivery, batched writes, automatic retries.
   async queue(batch: MessageBatch<{ type: string; payload: Record<string, unknown> }>, env: Env): Promise<void> {
     if (!env.HYPERDRIVE) {
-      // Can't write to DB — retry later
       batch.retryAll();
       return;
     }
 
-    // Connect to Supabase via Hyperdrive (connection pooling + caching at edge)
-    const pg = await import("pg");
-    const client = new pg.default.Client({ connectionString: env.HYPERDRIVE.connectionString });
-    await client.connect();
+    // Connect via Postgres.js + Hyperdrive (Worker-compatible driver)
+    const postgres = (await import("postgres")).default;
+    const sql = postgres(env.HYPERDRIVE.connectionString, {
+      max: 5,
+      fetch_types: false,
+      prepare: true,
+    });
 
     try {
       for (const msg of batch.messages) {
-        const { type, payload } = msg.body;
-
+        const { type, payload: p } = msg.body;
         try {
           if (type === "session") {
-            await client.query(
-              `INSERT INTO sessions (
-                session_id, org_id, project_id, agent_name, status,
-                input_text, output_text, model, trace_id, parent_session_id,
-                depth, step_count, action_count, wall_clock_seconds,
-                cost_total_usd, created_at
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,to_timestamp($16))
-              ON CONFLICT (session_id) DO UPDATE SET
-                status=EXCLUDED.status, output_text=EXCLUDED.output_text,
-                cost_total_usd=EXCLUDED.cost_total_usd, step_count=EXCLUDED.step_count`,
-              [
-                payload.session_id, payload.org_id || "", payload.project_id || "",
-                payload.agent_name || "agentos", payload.status || "success",
-                payload.input_text || "", payload.output_text || "",
-                payload.model || "", payload.trace_id || "", payload.parent_session_id || "",
-                payload.depth || 0, payload.step_count || 0, payload.action_count || 0,
-                payload.wall_clock_seconds || 0, payload.cost_total_usd || 0,
-                payload.created_at || Date.now() / 1000,
-              ],
-            );
+            await sql`INSERT INTO sessions (
+              session_id, org_id, project_id, agent_name, status,
+              input_text, output_text, model, trace_id, parent_session_id,
+              depth, step_count, action_count, wall_clock_seconds,
+              cost_total_usd, created_at
+            ) VALUES (
+              ${p.session_id}, ${p.org_id || ""}, ${p.project_id || ""},
+              ${p.agent_name || "agentos"}, ${p.status || "success"},
+              ${p.input_text || ""}, ${p.output_text || ""},
+              ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
+              ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
+              ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
+              to_timestamp(${Number(p.created_at) || Date.now() / 1000})
+            ) ON CONFLICT (session_id) DO UPDATE SET
+              status = EXCLUDED.status, output_text = EXCLUDED.output_text,
+              cost_total_usd = EXCLUDED.cost_total_usd, step_count = EXCLUDED.step_count`;
           } else if (type === "turn") {
-            await client.query(
-              `INSERT INTO turns (
-                session_id, turn_number, model_used, input_tokens, output_tokens,
-                latency_ms, llm_content, cost_total_usd,
-                tool_calls_json, tool_results_json, errors_json,
-                execution_mode, plan_json, reflection_json,
-                started_at, ended_at
-              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,to_timestamp($15),to_timestamp($16))
-              ON CONFLICT DO NOTHING`,
-              [
-                payload.session_id, payload.turn_number || 0, payload.model_used || "",
-                payload.input_tokens || 0, payload.output_tokens || 0,
-                payload.latency_ms || 0, payload.llm_content || "", payload.cost_total_usd || 0,
-                payload.tool_calls_json || "[]", payload.tool_results_json || "[]",
-                payload.errors_json || "[]", payload.execution_mode || "sequential",
-                payload.plan_json || "{}", payload.reflection_json || "{}",
-                payload.started_at || Date.now() / 1000, payload.ended_at || Date.now() / 1000,
-              ],
-            );
+            await sql`INSERT INTO turns (
+              session_id, turn_number, model_used, input_tokens, output_tokens,
+              latency_ms, llm_content, cost_total_usd,
+              tool_calls_json, tool_results_json, errors_json,
+              execution_mode, plan_json, reflection_json
+            ) VALUES (
+              ${p.session_id}, ${p.turn_number || 0}, ${p.model_used || ""},
+              ${p.input_tokens || 0}, ${p.output_tokens || 0},
+              ${p.latency_ms || 0}, ${p.llm_content || ""}, ${p.cost_total_usd || 0},
+              ${p.tool_calls_json || "[]"}, ${p.tool_results_json || "[]"},
+              ${p.errors_json || "[]"}, ${p.execution_mode || "sequential"},
+              ${p.plan_json || "{}"}, ${p.reflection_json || "{}"}
+            )`;
           } else if (type === "episode") {
-            await client.query(
-              `INSERT INTO episodes (session_id, input, output, created_at)
-               VALUES ($1,$2,$3,to_timestamp($4)) ON CONFLICT DO NOTHING`,
-              [payload.session_id, payload.input, payload.output, payload.created_at || Date.now() / 1000],
-            );
+            await sql`INSERT INTO episodes (session_id, input, output)
+              VALUES (${p.session_id}, ${p.input}, ${p.output})`;
           } else if (type === "event") {
-            await client.query(
-              `INSERT INTO otel_events (session_id, turn_number, event_type, action, plan, tier, provider, model, tool_name, status, latency_ms, details_json, created_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,to_timestamp($13)) ON CONFLICT DO NOTHING`,
-              [
-                payload.session_id, payload.turn || 0, payload.event_type || "",
-                payload.action || "", payload.plan || "", payload.tier || "",
-                payload.provider || "", payload.model || "", payload.tool_name || "",
-                payload.status || "", payload.latency_ms || 0,
-                JSON.stringify(payload.details || {}), payload.created_at || Date.now() / 1000,
-              ],
-            );
+            await sql`INSERT INTO otel_events (
+              session_id, turn_number, event_type, action, plan, tier,
+              provider, model, tool_name, status, latency_ms, details_json
+            ) VALUES (
+              ${p.session_id}, ${p.turn || 0}, ${p.event_type || ""},
+              ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
+              ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
+              ${p.status || ""}, ${p.latency_ms || 0},
+              ${JSON.stringify(p.details || {})}
+            )`;
           }
-          // Message processed successfully
           msg.ack();
         } catch (err) {
-          // Individual message failed — retry it
           msg.retry();
         }
       }
     } finally {
-      await client.end();
+      await sql.end();
     }
   },
 } satisfies ExportedHandler<Env>;
