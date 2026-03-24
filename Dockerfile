@@ -8,23 +8,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[dev]" && pip install pyyaml python-multipart
+RUN pip install --no-cache-dir -e ".[dev,postgres]" && pip install pyyaml python-multipart
 
 # Copy source
 COPY . .
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[postgres]"
 
 # Initialize default project
 RUN mkdir -p data agents tools eval sessions && \
     python -c "from agentos.core.database import create_database; create_database('data/agent.db').close()"
 
 # Expose API port
-EXPOSE 8340
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD curl -f http://localhost:8340/health || exit 1
+    CMD sh -c 'curl -f "http://localhost:${PORT:-8080}/health" || exit 1'
 
 # Run the API server
-CMD ["python", "-m", "uvicorn", "agentos.api.app:create_app", \
-     "--host", "0.0.0.0", "--port", "8340", "--factory"]
+CMD ["sh", "-c", "python -m uvicorn agentos.api.app:create_app --host 0.0.0.0 --port ${PORT:-8080} --factory"]

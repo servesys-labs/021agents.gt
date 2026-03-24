@@ -9,23 +9,23 @@
     "default_model": "claude-sonnet-4-6-20250627",
     "routing": {
       "simple": {
-        "provider": "anthropic",
-        "model": "claude-haiku-4-5-20251001",
+        "provider": "gmi",
+        "model": "deepseek-ai/DeepSeek-V3.2",
         "max_tokens": 1024
       },
       "moderate": {
-        "provider": "anthropic",
-        "model": "claude-sonnet-4-6-20250627",
+        "provider": "gmi",
+        "model": "anthropic/claude-haiku-4.5",
         "max_tokens": 4096
       },
       "complex": {
-        "provider": "anthropic",
-        "model": "claude-sonnet-4-6-20250627",
+        "provider": "gmi",
+        "model": "anthropic/claude-sonnet-4.6",
         "max_tokens": 8192
       },
       "tool_call": {
-        "provider": "anthropic",
-        "model": "claude-sonnet-4-6-20250627",
+        "provider": "gmi",
+        "model": "anthropic/claude-haiku-4.5",
         "max_tokens": 4096
       }
     },
@@ -36,29 +36,45 @@
         "simple":    { "provider": "gmi", "model": "deepseek-ai/DeepSeek-V3.2",      "max_tokens": 1024 },
         "moderate":  { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 2048 },
         "complex":   { "provider": "gmi", "model": "Qwen/Qwen3.5-397B-A17B",         "max_tokens": 4096 },
-        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 2048 }
+        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 2048 },
+        "image_gen": { "provider": "gmi", "model": "GLM-Image",                       "per_request": 0.01 },
+        "vision":    { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 2048 },
+        "tts":       { "provider": "gmi", "model": "inworld-tts-1.5-mini",            "per_request": 0.005 },
+        "stt":       { "provider": "gmi", "model": "whisper-large-v3",                "per_request": 0.003 }
       },
       "standard": {
-        "_description": "Balanced quality/cost — mix of open-source and frontier models",
+        "_description": "Balanced quality/cost — mix of open-source and frontier models, full multimodal",
         "simple":    { "provider": "gmi", "model": "deepseek-ai/DeepSeek-V3.2",      "max_tokens": 1024 },
         "moderate":  { "provider": "gmi", "model": "anthropic/claude-haiku-4.5",      "max_tokens": 4096 },
         "complex":   { "provider": "gmi", "model": "anthropic/claude-sonnet-4.6",     "max_tokens": 8192 },
-        "tool_call": { "provider": "gmi", "model": "anthropic/claude-haiku-4.5",      "max_tokens": 4096 }
+        "tool_call": { "provider": "gmi", "model": "anthropic/claude-haiku-4.5",      "max_tokens": 4096 },
+        "image_gen": { "provider": "gmi", "model": "Seedream-5.0-lite",               "per_request": 0.035 },
+        "vision":    { "provider": "gmi", "model": "anthropic/claude-sonnet-4.6",     "max_tokens": 4096 },
+        "tts":       { "provider": "gmi", "model": "minimax-tts-speech-2.6-turbo",    "per_request": 0.06 },
+        "stt":       { "provider": "gmi", "model": "whisper-large-v3",                "per_request": 0.003 }
       },
       "premium": {
-        "_description": "Maximum quality — frontier models for all tiers",
+        "_description": "Maximum quality — frontier models, Nano Banana 2 image gen, ElevenLabs TTS",
         "simple":    { "provider": "gmi", "model": "anthropic/claude-haiku-4.5",      "max_tokens": 2048 },
         "moderate":  { "provider": "gmi", "model": "anthropic/claude-sonnet-4.6",     "max_tokens": 4096 },
         "complex":   { "provider": "gmi", "model": "anthropic/claude-opus-4.6",       "max_tokens": 8192 },
-        "tool_call": { "provider": "gmi", "model": "anthropic/claude-sonnet-4.6",     "max_tokens": 4096 }
+        "tool_call": { "provider": "gmi", "model": "anthropic/claude-sonnet-4.6",     "max_tokens": 4096 },
+        "image_gen": { "provider": "gmi", "model": "gemini-3-pro-image-preview",      "per_request": 0.134, "_note": "Nano Banana 2 (Google) via GMI" },
+        "vision":    { "provider": "gmi", "model": "anthropic/claude-opus-4.6",       "max_tokens": 8192 },
+        "tts":       { "provider": "gmi", "model": "elevenlabs-tts-v3",               "per_request": 0.10 },
+        "stt":       { "provider": "gmi", "model": "whisper-large-v3",                "per_request": 0.003 }
       },
       "code": {
-        "_description": "Optimized for coding tasks — coding-specialized models",
+        "_description": "Optimized for coding tasks — coding-specialized models + diagram/mockup generation",
         "_benchmarks": "Qwen3-Coder-480B: LiveCodeBench top-tier | DeepSeek-V3.2: SWE-bench 70.0",
         "simple":    { "provider": "gmi", "model": "deepseek-ai/DeepSeek-V3.2",                   "max_tokens": 2048 },
         "moderate":  { "provider": "gmi", "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",     "max_tokens": 8192 },
         "complex":   { "provider": "gmi", "model": "anthropic/claude-sonnet-4.6",                  "max_tokens": 8192 },
-        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",                      "max_tokens": 4096 }
+        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",                      "max_tokens": 4096 },
+        "image_gen": { "provider": "gmi", "model": "Seedream-5.0-lite",               "per_request": 0.035 },
+        "vision":    { "provider": "gmi", "model": "anthropic/claude-sonnet-4.6",     "max_tokens": 4096 },
+        "tts":       { "provider": "gmi", "model": "minimax-tts-speech-2.6-turbo",    "per_request": 0.06 },
+        "stt":       { "provider": "gmi", "model": "whisper-large-v3",                "per_request": 0.003 }
       },
       "dedicated": {
         "_description": "Dedicated GPU — isolated H200 endpoints via GMI Cloud, max data sovereignty + performance",
@@ -66,7 +82,11 @@
         "simple":    { "provider": "gmi", "model": "deepseek-ai/DeepSeek-V3.2",      "max_tokens": 1024, "dedicated": true },
         "moderate":  { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 4096, "dedicated": true },
         "complex":   { "provider": "gmi", "model": "Qwen/Qwen3.5-397B-A17B",         "max_tokens": 8192, "dedicated": true },
-        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 4096, "dedicated": true }
+        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 4096, "dedicated": true },
+        "image_gen": { "provider": "gmi", "model": "Seedream-5.0-lite",               "per_request": 0.035, "dedicated": true },
+        "vision":    { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 4096, "dedicated": true },
+        "tts":       { "provider": "gmi", "model": "minimax-audio-voice-clone-speech-2.6-hd", "per_request": 0.10, "dedicated": true },
+        "stt":       { "provider": "gmi", "model": "whisper-large-v3",                "per_request": 0.003, "dedicated": true }
       },
       "private": {
         "_description": "Data sovereignty — only open-source models, no data to Anthropic/OpenAI/Google",
@@ -74,7 +94,11 @@
         "simple":    { "provider": "gmi", "model": "deepseek-ai/DeepSeek-V3.2",                   "max_tokens": 1024 },
         "moderate":  { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",                      "max_tokens": 4096 },
         "complex":   { "provider": "gmi", "model": "Qwen/Qwen3.5-397B-A17B",                      "max_tokens": 8192 },
-        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",                      "max_tokens": 4096 }
+        "tool_call": { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",                      "max_tokens": 4096 },
+        "image_gen": { "provider": "gmi", "model": "GLM-Image",                       "per_request": 0.01 },
+        "vision":    { "provider": "gmi", "model": "Qwen/Qwen3.5-122B-A10B",         "max_tokens": 4096 },
+        "tts":       { "provider": "gmi", "model": "minimax-tts-speech-2.6-turbo",    "per_request": 0.06 },
+        "stt":       { "provider": "gmi", "model": "whisper-large-v3",                "per_request": 0.003 }
       }
     },
     "providers": {

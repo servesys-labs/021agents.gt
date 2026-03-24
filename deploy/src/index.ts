@@ -36,6 +36,7 @@ export interface Env {
   AUTH_JWT_SECRET?: string;
   BACKEND_INGEST_URL?: string;
   BACKEND_INGEST_TOKEN?: string;
+  BACKEND_PROXY_ONLY?: string;
   DEFAULT_PLAN?: string;
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
@@ -1612,6 +1613,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const start = Date.now();
 
     try {
+      if (this._isBackendProxyOnly()) {
+        if (provider === "workers-ai") {
+          throw new Error("workers_ai_disabled_in_backend_proxy_only_mode");
+        }
+        return await this._callLLMViaBackendProxy(messages, sessionId, turn, {
+          provider,
+          model,
+          tier,
+          maxTokens,
+        });
+      }
+
       if (provider === "workers-ai") {
         const result = await this.env.AI.run(model as any, { messages }) as any;
         const latency = Date.now() - start;
@@ -1636,6 +1649,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           inputTokens: 0, outputTokens: 0,
           costUsd: 0, // Workers AI pricing handled by Cloudflare
         };
+      }
+
+      // Centralized backend proxy: provider keys live only on backend.
+      if (this._ingestBase() && this.env.BACKEND_INGEST_TOKEN) {
+        return await this._callLLMViaBackendProxy(messages, sessionId, turn, {
+          provider,
+          model,
+          tier,
+          maxTokens,
+        });
       }
 
       // GMI / OpenAI-compatible
@@ -1671,7 +1694,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           };
         }
 
-        const resp = await fetch(`${apiBase}/chat/completions`, {
+        const resp = await this._safeFetch(`${apiBase}/chat/completions`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -1713,7 +1736,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       if (provider === "anthropic") {
         const systemMsg = messages.find((m: any) => m.role === "system")?.content || "";
         const chatMsgs = messages.filter((m: any) => m.role !== "system");
-        const resp = await fetch("https://api.anthropic.com/v1/messages", {
+        const resp = await this._safeFetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -1782,6 +1805,73 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
   }
 
+  private async _callLLMViaBackendProxy(
+    messages: any[],
+    sessionId: string,
+    turn: number,
+    route: { provider: string; model: string; tier: ComplexityTier; maxTokens: number },
+  ): Promise<{
+    content: string; model: string; toolCalls: any[];
+    provider: string; tier: ComplexityTier;
+    inputTokens: number; outputTokens: number; costUsd: number;
+  }> {
+    const config = this.state.config;
+    const started = Date.now();
+    const base = this._ingestBase();
+    const resp = await this._safeFetch(`${base}/api/v1/runtime-proxy/llm/infer`, {
+      method: "POST",
+      headers: this._ingestHeaders(),
+      body: JSON.stringify({
+        messages,
+        provider: route.provider,
+        model: route.model,
+        max_tokens: route.maxTokens,
+        temperature: 0.0,
+        plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+        tier: route.tier,
+        session_id: sessionId,
+        turn,
+        org_id: this.state.config.orgId || "",
+        project_id: this.state.config.projectId || "",
+        agent_name: this.state.config.agentName || "agentos",
+      }),
+    });
+    const data = await resp.json() as any;
+    const latency = Date.now() - started;
+
+    this._recordEvent({
+      sessionId,
+      turn,
+      eventType: "llm.call",
+      action: "inference",
+      plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+      tier: route.tier,
+      provider: String(data.provider || route.provider),
+      model: String(data.model || route.model),
+      status: resp.ok ? "ok" : "error",
+      latencyMs: Number(data.latency_ms || latency),
+      inputTokens: Number(data.input_tokens || 0),
+      outputTokens: Number(data.output_tokens || 0),
+      costUsd: Number(data.cost_usd || 0),
+      details: resp.ok ? { source: "backend_proxy" } : { source: "backend_proxy", message: String(data.detail || "proxy error"), httpStatus: resp.status },
+    });
+
+    if (!resp.ok) {
+      throw new Error(`backend_proxy_http_${resp.status}:${String(data.detail || "proxy error")}`);
+    }
+
+    return {
+      content: String(data.content || ""),
+      model: String(data.model || route.model),
+      provider: String(data.provider || route.provider),
+      tier: route.tier,
+      toolCalls: Array.isArray(data.tool_calls) ? data.tool_calls : [],
+      inputTokens: Number(data.input_tokens || 0),
+      outputTokens: Number(data.output_tokens || 0),
+      costUsd: Number(data.cost_usd || 0),
+    };
+  }
+
   private _resolveRoute(messages: any[]): (PlanRoute & { tier: ComplexityTier }) {
     const planName = normalizePlan(this.state.config.plan || this.env.DEFAULT_PLAN);
     if (planName === "manual" && this.state.config.provider && this.state.config.model) {
@@ -1841,7 +1931,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const start = Date.now();
 
       try {
-        const result = await this._runTool(name, parsedArgs);
+        const result = await this._runTool(name, parsedArgs, sessionId, turn);
         const latency = Date.now() - start;
         this._recordEvent({
           sessionId,
@@ -1952,12 +2042,39 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     return (this.env.BACKEND_INGEST_URL || "").trim().replace(/\/+$/, "");
   }
 
+  private _isBackendProxyOnly(): boolean {
+    const raw = String(this.env.BACKEND_PROXY_ONLY ?? "true").trim().toLowerCase();
+    return !(raw === "false" || raw === "0" || raw === "off" || raw === "no");
+  }
+
+  private _assertEgressAllowed(targetUrl: string): void {
+    if (!this._isBackendProxyOnly()) return;
+
+    const backend = this._ingestBase();
+    if (!backend) {
+      throw new Error("backend_proxy_only_enabled_but_backend_ingest_url_missing");
+    }
+
+    const target = new URL(targetUrl);
+    const backendUrl = new URL(backend);
+    const isBackend = target.origin === backendUrl.origin;
+    const isInternal = target.hostname === "internal" || target.hostname === "localhost" || target.hostname === "127.0.0.1";
+    if (!isBackend && !isInternal) {
+      throw new Error(`direct_egress_blocked:${target.origin}`);
+    }
+  }
+
+  private async _safeFetch(input: string, init?: RequestInit): Promise<Response> {
+    this._assertEgressAllowed(input);
+    return fetch(input, init);
+  }
+
   private async _postIngest(endpoint: string, payload: Record<string, unknown>): Promise<void> {
     const base = this._ingestBase();
     if (!base || !this.env.BACKEND_INGEST_TOKEN) {
       throw new Error("backend_ingest_not_configured");
     }
-    const resp = await fetch(`${base}${endpoint}`, {
+    const resp = await this._safeFetch(`${base}${endpoint}`, {
       method: "POST",
       headers: this._ingestHeaders(),
       body: JSON.stringify(payload),
@@ -2062,7 +2179,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     });
   }
 
-  private async _runTool(name: string, args: any): Promise<string> {
+  private async _runTool(name: string, args: any, sessionId: string, turn: number): Promise<string> {
+    if (this._ingestBase() && this.env.BACKEND_INGEST_TOKEN) {
+      return this._callToolViaBackendProxy(name, args, sessionId, turn);
+    }
+
     switch (name) {
       case "web_search":
       case "web-search":
@@ -2078,6 +2199,28 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       default:
         return `Unknown tool: ${name}`;
     }
+  }
+
+  private async _callToolViaBackendProxy(name: string, args: any, sessionId: string, turn: number): Promise<string> {
+    const base = this._ingestBase();
+    const resp = await this._safeFetch(`${base}/api/v1/runtime-proxy/tool/call`, {
+      method: "POST",
+      headers: this._ingestHeaders(),
+      body: JSON.stringify({
+        tool: name,
+        args: args || {},
+        session_id: sessionId,
+        turn,
+        org_id: this.state.config.orgId || "",
+        project_id: this.state.config.projectId || "",
+        agent_name: this.state.config.agentName || "agentos",
+      }),
+    });
+    const data = await resp.json() as any;
+    if (!resp.ok) {
+      throw new Error(String(data.detail || `tool_proxy_http_${resp.status}`));
+    }
+    return String(data.output || "");
   }
 }
 
