@@ -34,6 +34,9 @@ export interface Env {
   GMI_API_KEY?: string;
   E2B_API_KEY?: string;
   AUTH_JWT_SECRET?: string;
+  BACKEND_INGEST_URL?: string;
+  BACKEND_INGEST_TOKEN?: string;
+  DEFAULT_PLAN?: string;
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
 }
@@ -51,8 +54,11 @@ interface AgentState {
 }
 
 interface AgentConfig {
+  plan: string;
   provider: string;
   model: string;
+  orgId?: string;
+  projectId?: string;
   maxTurns: number;
   budgetLimitUsd: number;
   blockedTools: string[];
@@ -71,6 +77,83 @@ interface TurnResult {
   model: string;
 }
 
+interface ObservabilityEvent {
+  id: number;
+  session_id: string;
+  turn: number;
+  event_type: string;
+  action: string;
+  plan: string;
+  tier: string;
+  provider: string;
+  model: string;
+  tool_name: string;
+  status: string;
+  latency_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  details_json: string;
+  created_at: string;
+}
+
+type ComplexityTier = "simple" | "moderate" | "complex" | "tool_call";
+
+type PlanRoute = {
+  provider: string;
+  model: string;
+  maxTokens: number;
+};
+
+type PlanRouting = Record<ComplexityTier, PlanRoute>;
+
+const PLAN_ROUTES: Record<string, PlanRouting> = {
+  basic: {
+    simple: { provider: "gmi", model: "deepseek-ai/DeepSeek-V3.2", maxTokens: 1024 },
+    moderate: { provider: "gmi", model: "Qwen/Qwen3.5-122B-A10B", maxTokens: 2048 },
+    complex: { provider: "gmi", model: "Qwen/Qwen3.5-397B-A17B", maxTokens: 4096 },
+    tool_call: { provider: "gmi", model: "Qwen/Qwen3.5-122B-A10B", maxTokens: 2048 },
+  },
+  standard: {
+    simple: { provider: "gmi", model: "deepseek-ai/DeepSeek-V3.2", maxTokens: 1024 },
+    moderate: { provider: "gmi", model: "anthropic/claude-haiku-4.5", maxTokens: 4096 },
+    complex: { provider: "gmi", model: "anthropic/claude-sonnet-4.6", maxTokens: 8192 },
+    tool_call: { provider: "gmi", model: "anthropic/claude-haiku-4.5", maxTokens: 4096 },
+  },
+  premium: {
+    simple: { provider: "gmi", model: "anthropic/claude-haiku-4.5", maxTokens: 2048 },
+    moderate: { provider: "gmi", model: "anthropic/claude-sonnet-4.6", maxTokens: 4096 },
+    complex: { provider: "gmi", model: "anthropic/claude-opus-4.6", maxTokens: 8192 },
+    tool_call: { provider: "gmi", model: "anthropic/claude-sonnet-4.6", maxTokens: 4096 },
+  },
+  code: {
+    simple: { provider: "gmi", model: "deepseek-ai/DeepSeek-V3.2", maxTokens: 2048 },
+    moderate: { provider: "gmi", model: "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8", maxTokens: 8192 },
+    complex: { provider: "gmi", model: "anthropic/claude-sonnet-4.6", maxTokens: 8192 },
+    tool_call: { provider: "gmi", model: "Qwen/Qwen3.5-122B-A10B", maxTokens: 4096 },
+  },
+  dedicated: {
+    simple: { provider: "gmi", model: "deepseek-ai/DeepSeek-V3.2", maxTokens: 1024 },
+    moderate: { provider: "gmi", model: "Qwen/Qwen3.5-122B-A10B", maxTokens: 4096 },
+    complex: { provider: "gmi", model: "Qwen/Qwen3.5-397B-A17B", maxTokens: 8192 },
+    tool_call: { provider: "gmi", model: "Qwen/Qwen3.5-122B-A10B", maxTokens: 4096 },
+  },
+  private: {
+    simple: { provider: "gmi", model: "deepseek-ai/DeepSeek-V3.2", maxTokens: 1024 },
+    moderate: { provider: "gmi", model: "Qwen/Qwen3.5-122B-A10B", maxTokens: 4096 },
+    complex: { provider: "gmi", model: "Qwen/Qwen3.5-397B-A17B", maxTokens: 8192 },
+    tool_call: { provider: "gmi", model: "Qwen/Qwen3.5-122B-A10B", maxTokens: 4096 },
+  },
+};
+
+function normalizePlan(value?: string): string {
+  const raw = (value || "").trim().toLowerCase();
+  if (!raw) return "standard";
+  if (raw === "balanced") return "standard";
+  if (raw === "manual") return "manual";
+  return PLAN_ROUTES[raw] ? raw : "standard";
+}
+
 // ---------------------------------------------------------------------------
 // AgentOS Agent — main agent with @callable methods
 // ---------------------------------------------------------------------------
@@ -78,8 +161,11 @@ interface TurnResult {
 export class AgentOSAgent extends Agent<Env, AgentState> {
   initialState: AgentState = {
     config: {
-      provider: "workers-ai",
-      model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      plan: "standard",
+      provider: "gmi",
+      model: "deepseek-ai/DeepSeek-V3.2",
+      orgId: "",
+      projectId: "",
       maxTurns: 50,
       budgetLimitUsd: 10.0,
       blockedTools: [],
@@ -137,6 +223,176 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       status TEXT DEFAULT 'queued',
       created_at TEXT DEFAULT (datetime('now'))
     )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS otel_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      turn INTEGER DEFAULT 0,
+      event_type TEXT NOT NULL,
+      action TEXT DEFAULT '',
+      plan TEXT DEFAULT '',
+      tier TEXT DEFAULT '',
+      provider TEXT DEFAULT '',
+      model TEXT DEFAULT '',
+      tool_name TEXT DEFAULT '',
+      status TEXT DEFAULT '',
+      latency_ms INTEGER DEFAULT 0,
+      input_tokens INTEGER DEFAULT 0,
+      output_tokens INTEGER DEFAULT 0,
+      cost_usd REAL DEFAULT 0,
+      details_json TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS ingest_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      endpoint TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      attempts INTEGER DEFAULT 0,
+      next_retry_at REAL DEFAULT 0,
+      last_error TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS config_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_name TEXT DEFAULT '',
+      action TEXT DEFAULT '',
+      field_changed TEXT DEFAULT '',
+      old_value TEXT DEFAULT '',
+      new_value TEXT DEFAULT '',
+      changed_by TEXT DEFAULT '',
+      image_id TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    // Issues table
+    this.sql`CREATE TABLE IF NOT EXISTS issues (
+      issue_id TEXT PRIMARY KEY,
+      agent_name TEXT DEFAULT '',
+      title TEXT DEFAULT '',
+      description TEXT DEFAULT '',
+      category TEXT DEFAULT 'unknown',
+      severity TEXT DEFAULT 'low',
+      status TEXT DEFAULT 'open',
+      source TEXT DEFAULT 'auto',
+      source_session_id TEXT DEFAULT '',
+      suggested_fix TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    // Security tables
+    this.sql`CREATE TABLE IF NOT EXISTS security_scans (
+      scan_id TEXT PRIMARY KEY,
+      agent_name TEXT DEFAULT '',
+      scan_type TEXT DEFAULT 'config',
+      status TEXT DEFAULT 'pending',
+      total_probes INTEGER DEFAULT 0,
+      passed INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0,
+      risk_score REAL DEFAULT 0,
+      risk_level TEXT DEFAULT 'unknown',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS security_findings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scan_id TEXT DEFAULT '',
+      agent_name TEXT DEFAULT '',
+      probe_name TEXT DEFAULT '',
+      category TEXT DEFAULT '',
+      severity TEXT DEFAULT 'info',
+      title TEXT DEFAULT '',
+      evidence TEXT DEFAULT '',
+      aivss_score REAL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS agent_risk_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_name TEXT NOT NULL,
+      risk_score REAL DEFAULT 0,
+      risk_level TEXT DEFAULT 'unknown',
+      aivss_vector_json TEXT DEFAULT '{}',
+      last_scan_id TEXT DEFAULT '',
+      findings_summary_json TEXT DEFAULT '{}',
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    // Vapi tables
+    this.sql`CREATE TABLE IF NOT EXISTS vapi_calls (
+      call_id TEXT PRIMARY KEY,
+      agent_name TEXT DEFAULT '',
+      phone_number TEXT DEFAULT '',
+      direction TEXT DEFAULT 'outbound',
+      status TEXT DEFAULT 'pending',
+      duration_seconds REAL DEFAULT 0,
+      transcript TEXT DEFAULT '',
+      cost_usd REAL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS vapi_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id TEXT DEFAULT '',
+      event_type TEXT DEFAULT '',
+      payload_json TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    // Conversation intelligence tables
+    this.sql`CREATE TABLE IF NOT EXISTS conversation_scores (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      turn_number INTEGER DEFAULT 0,
+      sentiment TEXT DEFAULT 'neutral',
+      sentiment_score REAL DEFAULT 0,
+      quality_overall REAL DEFAULT 0,
+      relevance_score REAL DEFAULT 0,
+      coherence_score REAL DEFAULT 0,
+      helpfulness_score REAL DEFAULT 0,
+      safety_score REAL DEFAULT 1.0,
+      topic TEXT DEFAULT '',
+      intent TEXT DEFAULT '',
+      has_tool_failure INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    // Gold images table
+    this.sql`CREATE TABLE IF NOT EXISTS gold_images (
+      image_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      config_json TEXT DEFAULT '{}',
+      config_hash TEXT DEFAULT '',
+      version TEXT DEFAULT '1.0.0',
+      category TEXT DEFAULT 'general',
+      is_active INTEGER DEFAULT 1,
+      approved_by TEXT DEFAULT '',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS compliance_checks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_name TEXT NOT NULL,
+      image_id TEXT DEFAULT '',
+      status TEXT DEFAULT 'unchecked',
+      drift_count INTEGER DEFAULT 0,
+      drift_fields TEXT DEFAULT '[]',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS conversation_analytics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL UNIQUE,
+      avg_sentiment_score REAL DEFAULT 0,
+      dominant_sentiment TEXT DEFAULT 'neutral',
+      sentiment_trend TEXT DEFAULT 'stable',
+      avg_quality REAL DEFAULT 0,
+      total_turns INTEGER DEFAULT 0,
+      topics_json TEXT DEFAULT '[]',
+      tool_failure_count INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
   }
 
   // ── Callable Methods (RPC from client) ──────────────────────────
@@ -145,10 +401,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   async run(input: string): Promise<TurnResult[]> {
     const results: TurnResult[] = [];
     const config = this.state.config;
+    const sessionId = crypto.randomUUID().slice(0, 16);
+    await this._flushIngestOutbox(100);
     const messages: any[] = [
       { role: "system", content: config.systemPrompt },
       { role: "user", content: input },
     ];
+
+    this._recordEvent({
+      sessionId,
+      turn: 0,
+      eventType: "session.start",
+      action: "run",
+      plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+      details: { inputPreview: input.slice(0, 240), maxTurns: config.maxTurns },
+      status: "ok",
+    });
 
     // Load episodic memory context
     const episodes = this.sql<{ input: string; output: string }>`
@@ -167,13 +435,30 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         break;
       }
 
-      const response = await this._callLLM(messages);
+      const response = await this._callLLM(messages, sessionId, turn);
 
       this.setState({ ...this.state, turnCount: turn, totalCostUsd: this.state.totalCostUsd + response.costUsd });
 
       if (response.toolCalls.length > 0) {
-        const toolResults = await this._executeTools(response.toolCalls);
+        const toolResults = await this._executeTools(response.toolCalls, sessionId, turn);
         results.push({ turn, content: response.content, toolResults, done: false, costUsd: response.costUsd, model: response.model });
+        await this._mirrorTurnToBackend(sessionId, {
+          turn_number: turn,
+          model_used: response.model,
+          input_tokens: response.inputTokens,
+          output_tokens: response.outputTokens,
+          latency_ms: 0,
+          llm_content: response.content,
+          cost_total_usd: response.costUsd,
+          tool_calls_json: JSON.stringify(response.toolCalls || []),
+          tool_results_json: JSON.stringify(toolResults || []),
+          errors_json: "[]",
+          execution_mode: "parallel",
+          plan_json: JSON.stringify({ plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN), tier: response.tier }),
+          reflection_json: "{}",
+          started_at: Date.now() / 1000,
+          ended_at: Date.now() / 1000,
+        });
 
         // Add tool results to conversation
         messages.push({ role: "assistant", content: response.content });
@@ -182,16 +467,51 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         }
       } else {
         results.push({ turn, content: response.content, toolResults: [], done: true, costUsd: response.costUsd, model: response.model });
+        await this._mirrorTurnToBackend(sessionId, {
+          turn_number: turn,
+          model_used: response.model,
+          input_tokens: response.inputTokens,
+          output_tokens: response.outputTokens,
+          latency_ms: 0,
+          llm_content: response.content,
+          cost_total_usd: response.costUsd,
+          tool_calls_json: "[]",
+          tool_results_json: "[]",
+          errors_json: "[]",
+          execution_mode: "sequential",
+          plan_json: JSON.stringify({ plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN), tier: response.tier }),
+          reflection_json: "{}",
+          started_at: Date.now() / 1000,
+          ended_at: Date.now() / 1000,
+        });
 
         // Store in episodic memory
-        const sessionId = crypto.randomUUID().slice(0, 16);
         this.sql`INSERT INTO episodes (id, input, output) VALUES (${sessionId}, ${input}, ${response.content})`;
         this.sql`INSERT INTO sessions (id, input, output, turns, cost_usd, model) VALUES (${sessionId}, ${input}, ${response.content}, ${turn}, ${this.state.totalCostUsd}, ${response.model})`;
+        this._recordEvent({
+          sessionId,
+          turn,
+          eventType: "session.complete",
+          action: "run",
+          plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+          provider: response.provider,
+          model: response.model,
+          tier: response.tier,
+          status: "ok",
+          details: { turns: turn },
+          costUsd: this.state.totalCostUsd,
+        });
         break;
       }
     }
 
     this.setState({ ...this.state, sessionActive: false });
+
+    // Auto-score session for conversation intelligence
+    try { this.scoreSession(sessionId); } catch { /* non-fatal */ }
+    await this._mirrorSessionToBackend(sessionId, input, results);
+    await this._flushIngestOutbox(100);
+
     return results;
   }
 
@@ -202,8 +522,40 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   @callable()
   setConfig(config: Partial<AgentConfig>): AgentConfig {
-    const updated = { ...this.state.config, ...config };
+    const before = this.state.config;
+    const plan = normalizePlan(config.plan ?? before.plan ?? this.env.DEFAULT_PLAN);
+    const updated = { ...before, ...config, plan };
     this.setState({ ...this.state, config: updated });
+    const changedKeys = Object.keys(config || {}).filter((k) => {
+      const key = k as keyof AgentConfig;
+      return JSON.stringify(before[key]) !== JSON.stringify(updated[key]);
+    });
+    for (const key of changedKeys) {
+      const oldValue = JSON.stringify((before as Record<string, unknown>)[key] ?? "");
+      const newValue = JSON.stringify((updated as Record<string, unknown>)[key] ?? "");
+      this.sql`INSERT INTO config_audit_log (
+        agent_name, action, field_changed, old_value, new_value, changed_by, created_at
+      ) VALUES (
+        ${updated.agentName || "agentos"},
+        ${"config.update"},
+        ${key},
+        ${oldValue},
+        ${newValue},
+        ${"worker"},
+        ${Date.now() / 1000}
+      )`;
+      void this._sendIngest("/api/v1/edge-ingest/config/audit", {
+        org_id: updated.orgId || "",
+        agent_name: updated.agentName || "agentos",
+        action: "config.update",
+        field_changed: key,
+        old_value: oldValue,
+        new_value: newValue,
+        change_reason: "worker_config_update",
+        changed_by: "worker",
+        created_at: Date.now() / 1000,
+      });
+    }
     return updated;
   }
 
@@ -238,6 +590,195 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       turnCount: this.state.turnCount,
       sessionActive: this.state.sessionActive,
       config: this.state.config,
+    };
+  }
+
+  // ── Gold Images ──────────────────────────────────────────────
+
+  @callable()
+  createGoldImage(name: string, config: any): any {
+    const imageId = crypto.randomUUID().slice(0, 16);
+    const configJson = JSON.stringify(config);
+    const hash = imageId.slice(0, 8); // simplified hash for edge
+    this.sql`INSERT INTO gold_images (image_id, name, config_json, config_hash) VALUES (${imageId}, ${name}, ${configJson}, ${hash})`;
+    void this._sendIngest("/api/v1/edge-ingest/gold-image", {
+      image_id: imageId,
+      org_id: this.state.config.orgId || "",
+      name,
+      description: "",
+      config_json: configJson,
+      config_hash: hash,
+      version: "1.0.0",
+      category: "general",
+      is_active: 1,
+      created_by: "worker",
+      approved_by: "",
+      created_at: Date.now() / 1000,
+      updated_at: Date.now() / 1000,
+    });
+    return { imageId, name, hash };
+  }
+
+  @callable()
+  listGoldImages(): any[] {
+    return this.sql`SELECT image_id, name, version, category, is_active, approved_by, created_at FROM gold_images WHERE is_active = 1 ORDER BY created_at DESC LIMIT 50`;
+  }
+
+  @callable()
+  getGoldImage(imageId: string): any {
+    const rows = this.sql`SELECT * FROM gold_images WHERE image_id = ${imageId}`;
+    return rows[0] ?? null;
+  }
+
+  @callable()
+  listComplianceChecks(): any[] {
+    return this.sql`SELECT * FROM compliance_checks ORDER BY created_at DESC LIMIT 50`;
+  }
+
+  // ── Security ────────────────────────────────────────────────
+
+  @callable()
+  listSecurityScans(limit: number = 20): any[] {
+    return this.sql`SELECT * FROM security_scans ORDER BY created_at DESC LIMIT ${limit}`;
+  }
+
+  @callable()
+  listSecurityFindings(scanId: string = ""): any[] {
+    if (scanId) return this.sql`SELECT * FROM security_findings WHERE scan_id = ${scanId} ORDER BY aivss_score DESC`;
+    return this.sql`SELECT * FROM security_findings ORDER BY aivss_score DESC LIMIT 100`;
+  }
+
+  // ── Issues ──────────────────────────────────────────────────
+
+  @callable()
+  listIssues(status: string = "", limit: number = 50): any[] {
+    if (status) {
+      return this.sql`SELECT * FROM issues WHERE status = ${status} ORDER BY created_at DESC LIMIT ${limit}`;
+    }
+    return this.sql`SELECT * FROM issues ORDER BY created_at DESC LIMIT ${limit}`;
+  }
+
+  @callable()
+  createIssue(title: string, description: string, category: string = "unknown", severity: string = "low"): any {
+    const issueId = crypto.randomUUID().slice(0, 16);
+    this.sql`INSERT INTO issues (issue_id, title, description, category, severity, source) VALUES (${issueId}, ${title}, ${description}, ${category}, ${severity}, 'manual')`;
+    void this._sendIngest("/api/v1/edge-ingest/issues", {
+      issue_id: issueId,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      title,
+      description,
+      category,
+      severity,
+      status: "open",
+      source: "manual",
+      metadata_json: "{}",
+      created_at: Date.now() / 1000,
+      updated_at: Date.now() / 1000,
+    });
+    return { issueId, title, category, severity };
+  }
+
+  @callable()
+  resolveIssue(issueId: string): any {
+    this.sql`UPDATE issues SET status = 'resolved' WHERE issue_id = ${issueId}`;
+    return { resolved: true, issueId };
+  }
+
+  @callable()
+  issueSummary(): any {
+    const total = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM issues`;
+    const byStatus = this.sql<{ status: string; cnt: number }>`SELECT status, COUNT(*) as cnt FROM issues GROUP BY status`;
+    const byCategory = this.sql<{ category: string; cnt: number }>`SELECT category, COUNT(*) as cnt FROM issues GROUP BY category`;
+    return {
+      total: total[0]?.cnt ?? 0,
+      byStatus: Object.fromEntries(byStatus.map(r => [r.status, r.cnt])),
+      byCategory: Object.fromEntries(byCategory.map(r => [r.category, r.cnt])),
+    };
+  }
+
+  // ── Conversation Intelligence ─────────────────────────────────
+
+  @callable()
+  scoreSession(sessionId: string): any {
+    const sessions = this.sql<{ input: string; output: string }>`SELECT input, output FROM sessions WHERE id = ${sessionId}`;
+    if (!sessions.length) return { error: "Session not found" };
+    const session = sessions[0];
+
+    // Simple heuristic scoring (edge-compatible, no LLM needed)
+    const output = session.output || "";
+    const input = session.input || "";
+    const words = output.split(/\s+/).length;
+
+    // Quality heuristics
+    const coherence = Math.min(1, 0.4 + (words > 5 ? 0.2 : 0) + (output.includes(".") ? 0.1 : 0) + (output.includes("\n") ? 0.1 : 0) + (output.includes("```") ? 0.1 : 0));
+    const inputWords = new Set(input.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+    const outputWords = new Set(output.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+    const overlap = [...inputWords].filter(w => outputWords.has(w)).length;
+    const relevance = inputWords.size > 0 ? Math.min(1, 0.3 + (overlap / inputWords.size) * 1.2) : 0.5;
+    const helpfulness = Math.min(1, 0.4 + (words > 20 ? 0.15 : 0) + (output.includes("```") ? 0.15 : 0));
+    const quality = relevance * 0.3 + coherence * 0.2 + helpfulness * 0.35 + 0.15;
+
+    // Sentiment heuristics
+    const posWords = ["thank", "great", "good", "perfect", "helpful", "works", "solved", "excellent"];
+    const negWords = ["wrong", "error", "fail", "bad", "broken", "bug", "issue", "problem"];
+    const lower = output.toLowerCase();
+    const posCount = posWords.filter(w => lower.includes(w)).length;
+    const negCount = negWords.filter(w => lower.includes(w)).length;
+    const sentimentScore = (posCount - negCount) / Math.max(posCount + negCount, 1);
+    const sentiment = posCount > negCount ? "positive" : negCount > posCount ? "negative" : "neutral";
+
+    // Persist
+    this.sql`INSERT INTO conversation_scores (session_id, turn_number, sentiment, sentiment_score, quality_overall, relevance_score, coherence_score, helpfulness_score) VALUES (${sessionId}, ${1}, ${sentiment}, ${sentimentScore}, ${quality}, ${relevance}, ${coherence}, ${helpfulness})`;
+    this.sql`INSERT OR REPLACE INTO conversation_analytics (session_id, avg_sentiment_score, dominant_sentiment, avg_quality, total_turns) VALUES (${sessionId}, ${sentimentScore}, ${sentiment}, ${quality}, ${1})`;
+    void this._sendIngest("/api/v1/edge-ingest/conversation/score", {
+      session_id: sessionId,
+      turn_number: 1,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      sentiment,
+      sentiment_score: sentimentScore,
+      relevance_score: relevance,
+      coherence_score: coherence,
+      helpfulness_score: helpfulness,
+      quality_overall: quality,
+      topic: "",
+      intent: "",
+      has_tool_failure: 0,
+      created_at: Date.now() / 1000,
+    });
+    void this._sendIngest("/api/v1/edge-ingest/conversation/analytics", {
+      session_id: sessionId,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      avg_sentiment_score: sentimentScore,
+      dominant_sentiment: sentiment,
+      sentiment_trend: "stable",
+      avg_quality: quality,
+      topics_json: "[]",
+      total_turns: 1,
+      tool_failure_count: 0,
+      created_at: Date.now() / 1000,
+    });
+
+    return { sessionId, quality: Math.round(quality * 1000) / 1000, sentiment, sentimentScore: Math.round(sentimentScore * 1000) / 1000 };
+  }
+
+  @callable()
+  getIntelligence(limit: number = 20): any {
+    const scores = this.sql`SELECT * FROM conversation_scores ORDER BY created_at DESC LIMIT ${limit}`;
+    const analytics = this.sql`SELECT * FROM conversation_analytics ORDER BY created_at DESC LIMIT ${limit}`;
+    const summary = this.sql<{ avg_q: number; avg_s: number; cnt: number }>`SELECT AVG(quality_overall) as avg_q, AVG(sentiment_score) as avg_s, COUNT(*) as cnt FROM conversation_scores`;
+    const sentDist = this.sql<{ sentiment: string; cnt: number }>`SELECT sentiment, COUNT(*) as cnt FROM conversation_scores GROUP BY sentiment`;
+    return {
+      scores,
+      analytics,
+      summary: {
+        avgQuality: summary[0]?.avg_q ?? 0,
+        avgSentiment: summary[0]?.avg_s ?? 0,
+        totalScored: summary[0]?.cnt ?? 0,
+      },
+      sentimentDistribution: Object.fromEntries(sentDist.map(r => [r.sentiment, r.cnt])),
     };
   }
 
@@ -337,6 +878,102 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       return Response.json(this.getSessions());
     }
 
+    if (path === "observability") {
+      const summary = this.sql<{
+        event_type: string;
+        action: string;
+        plan: string;
+        tier: string;
+        provider: string;
+        model: string;
+        count: number;
+      }>`
+        SELECT
+          event_type,
+          action,
+          plan,
+          tier,
+          provider,
+          model,
+          COUNT(*) as count
+        FROM otel_events
+        GROUP BY event_type, action, plan, tier, provider, model
+        ORDER BY count DESC, event_type ASC
+        LIMIT 200
+      `;
+      return Response.json({
+        totalEvents: this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM otel_events`[0]?.cnt ?? 0,
+        summary,
+      });
+    }
+
+    if (path === "events") {
+      const limit = Number(url.searchParams.get("limit") || "100");
+      const sessionId = url.searchParams.get("session_id") || "";
+      const bounded = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 1000)) : 100;
+      if (sessionId) {
+        const events = this.sql<ObservabilityEvent>`
+          SELECT * FROM otel_events
+          WHERE session_id = ${sessionId}
+          ORDER BY id DESC
+          LIMIT ${bounded}
+        `;
+        return Response.json(events);
+      }
+      const events = this.sql<ObservabilityEvent>`
+        SELECT * FROM otel_events
+        ORDER BY id DESC
+        LIMIT ${bounded}
+      `;
+      return Response.json(events);
+    }
+
+    // Security
+    if (path === "security-scans") {
+      return Response.json({ scans: this.listSecurityScans() });
+    }
+    if (path === "security-findings") {
+      const scanId = url.searchParams.get("scan_id") || "";
+      return Response.json({ findings: this.listSecurityFindings(scanId) });
+    }
+
+    // Issues
+    if (path === "issues") {
+      if (request.method === "POST") {
+        const body = await request.json() as { title?: string; description?: string; category?: string; severity?: string };
+        if (!body.title) return Response.json({ error: "title required" }, { status: 400 });
+        return Response.json(this.createIssue(body.title, body.description ?? "", body.category, body.severity));
+      }
+      const status = url.searchParams.get("status") || "";
+      return Response.json({ issues: this.listIssues(status) });
+    }
+    if (path === "issues-summary") {
+      return Response.json(this.issueSummary());
+    }
+
+    // Gold Images
+    if (path === "gold-images") {
+      if (request.method === "POST") {
+        const body = await request.json() as { name?: string; config?: any };
+        if (!body.name || !body.config) return Response.json({ error: "name and config required" }, { status: 400 });
+        return Response.json(this.createGoldImage(body.name, body.config));
+      }
+      return Response.json({ images: this.listGoldImages() });
+    }
+    if (path === "compliance") {
+      return Response.json({ checks: this.listComplianceChecks() });
+    }
+
+    // Conversation Intelligence
+    if (path === "intel" || path === "intelligence") {
+      return Response.json(this.getIntelligence());
+    }
+    if (path === "intel-score" && request.method === "POST") {
+      const body = await request.json() as { sessionId?: string };
+      if (!body.sessionId) return Response.json({ error: "sessionId required" }, { status: 400 });
+      return Response.json(this.scoreSession(body.sessionId));
+    }
+
     // Memory
     if (path === "memory") {
       return Response.json({
@@ -378,21 +1015,40 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   // ── LLM Routing (Workers AI / GMI / Anthropic / OpenAI) ────────
 
-  private async _callLLM(messages: any[]): Promise<{
+  private async _callLLM(messages: any[], sessionId: string, turn: number): Promise<{
     content: string; model: string; toolCalls: any[];
+    provider: string; tier: ComplexityTier;
     inputTokens: number; outputTokens: number; costUsd: number;
   }> {
     const config = this.state.config;
-    const provider = config.provider || this.env.DEFAULT_PROVIDER;
-    const model = config.model || this.env.DEFAULT_MODEL;
+    const resolved = this._resolveRoute(messages);
+    const provider = resolved.provider;
+    const model = resolved.model;
+    const tier = resolved.tier;
+    const maxTokens = resolved.maxTokens;
     const start = Date.now();
 
     try {
       if (provider === "workers-ai") {
         const result = await this.env.AI.run(model as any, { messages }) as any;
+        const latency = Date.now() - start;
+        this._recordEvent({
+          sessionId,
+          turn,
+          eventType: "llm.call",
+          action: "inference",
+          plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+          tier,
+          provider,
+          model,
+          status: "ok",
+          latencyMs: latency,
+        });
         return {
           content: result.response || "",
           model,
+          provider,
+          tier,
           toolCalls: [],
           inputTokens: 0, outputTokens: 0,
           costUsd: 0, // Workers AI pricing handled by Cloudflare
@@ -408,9 +1064,23 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           ? this.env.GMI_API_KEY
           : this.env.OPENAI_API_KEY;
         if (!apiKey) {
+          this._recordEvent({
+            sessionId,
+            turn,
+            eventType: "llm.call",
+            action: "inference",
+            plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+            tier,
+            provider,
+            model,
+            status: "error",
+            details: { message: `${provider.toUpperCase()} API key not configured` },
+          });
           return {
             content: `${provider.toUpperCase()} API key not configured`,
             model,
+            provider,
+            tier,
             toolCalls: [],
             inputTokens: 0,
             outputTokens: 0,
@@ -424,13 +1094,31 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${apiKey}`,
           },
-          body: JSON.stringify({ model, messages, max_tokens: 4096 }),
+          body: JSON.stringify({ model, messages, max_tokens: maxTokens }),
         });
         const data = await resp.json() as any;
         const choice = data.choices?.[0] || {};
+        const latency = Date.now() - start;
+        this._recordEvent({
+          sessionId,
+          turn,
+          eventType: "llm.call",
+          action: "inference",
+          plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+          tier,
+          provider,
+          model: data.model || model,
+          status: resp.ok ? "ok" : "error",
+          latencyMs: latency,
+          inputTokens: data.usage?.prompt_tokens || 0,
+          outputTokens: data.usage?.completion_tokens || 0,
+          details: { httpStatus: resp.status },
+        });
         return {
           content: choice.message?.content || "",
           model: data.model || model,
+          provider,
+          tier,
           toolCalls: choice.message?.tool_calls || [],
           inputTokens: data.usage?.prompt_tokens || 0,
           outputTokens: data.usage?.completion_tokens || 0,
@@ -449,13 +1137,31 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             "x-api-key": this.env.ANTHROPIC_API_KEY!,
             "anthropic-version": "2023-06-01",
           },
-          body: JSON.stringify({ model, messages: chatMsgs, system: systemMsg, max_tokens: 4096 }),
+          body: JSON.stringify({ model, messages: chatMsgs, system: systemMsg, max_tokens: maxTokens }),
         });
         const data = await resp.json() as any;
         const content = data.content?.map((b: any) => b.text).join("") || "";
+        const latency = Date.now() - start;
+        this._recordEvent({
+          sessionId,
+          turn,
+          eventType: "llm.call",
+          action: "inference",
+          plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+          tier,
+          provider,
+          model: data.model || model,
+          status: resp.ok ? "ok" : "error",
+          latencyMs: latency,
+          inputTokens: data.usage?.input_tokens || 0,
+          outputTokens: data.usage?.output_tokens || 0,
+          details: { httpStatus: resp.status },
+        });
         return {
           content,
           model: data.model || model,
+          provider,
+          tier,
           toolCalls: data.content?.filter((b: any) => b.type === "tool_use") || [],
           inputTokens: data.usage?.input_tokens || 0,
           outputTokens: data.usage?.output_tokens || 0,
@@ -463,29 +1169,302 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         };
       }
 
-      return { content: "Unknown provider", model, toolCalls: [], inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      this._recordEvent({
+        sessionId,
+        turn,
+        eventType: "llm.call",
+        action: "inference",
+        plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+        tier,
+        provider,
+        model,
+        status: "error",
+        details: { message: "Unknown provider" },
+      });
+      return { content: "Unknown provider", model, provider, tier, toolCalls: [], inputTokens: 0, outputTokens: 0, costUsd: 0 };
     } catch (err: any) {
-      return { content: `Error: ${err.message}`, model, toolCalls: [], inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      this._recordEvent({
+        sessionId,
+        turn,
+        eventType: "llm.call",
+        action: "inference",
+        plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+        tier,
+        provider,
+        model,
+        status: "error",
+        details: { message: String(err?.message || err) },
+      });
+      return { content: `Error: ${err.message}`, model, provider, tier, toolCalls: [], inputTokens: 0, outputTokens: 0, costUsd: 0 };
     }
+  }
+
+  private _resolveRoute(messages: any[]): (PlanRoute & { tier: ComplexityTier }) {
+    const planName = normalizePlan(this.state.config.plan || this.env.DEFAULT_PLAN);
+    if (planName === "manual" && this.state.config.provider && this.state.config.model) {
+      return {
+        provider: this.state.config.provider,
+        model: this.state.config.model,
+        tier: "moderate",
+        maxTokens: 4096,
+      };
+    }
+
+    const plan = PLAN_ROUTES[planName] || PLAN_ROUTES.standard;
+    const tier = this._classifyComplexity(messages);
+    const route = plan[tier] || plan.moderate;
+    if (route.provider && route.model) return { ...route, tier };
+    return {
+      provider: this.env.DEFAULT_PROVIDER || "gmi",
+      model: this.env.DEFAULT_MODEL || "deepseek-ai/DeepSeek-V3.2",
+      tier,
+      maxTokens: route.maxTokens || 4096,
+    };
+  }
+
+  private _classifyComplexity(messages: any[]): ComplexityTier {
+    const nonSystem = messages.filter((m: any) => m?.role !== "system");
+    const last = nonSystem[nonSystem.length - 1];
+    const recentToolMessage = nonSystem.slice(-4).some((m: any) => m?.role === "tool");
+    if (recentToolMessage) return "tool_call";
+
+    const text = String(last?.content || "").toLowerCase();
+    const len = text.length;
+    const hardSignals = [
+      "architecture", "design", "compare", "trade-off", "migration",
+      "optimize", "debug", "root cause", "multi-step", "refactor",
+      "compliance", "security", "evaluate", "benchmark", "plan",
+    ];
+    const mediumSignals = [
+      "summarize", "explain", "implement", "write", "analyze", "test",
+    ];
+
+    const hardHits = hardSignals.filter((s) => text.includes(s)).length;
+    const mediumHits = mediumSignals.filter((s) => text.includes(s)).length;
+
+    if (len > 900 || hardHits >= 2) return "complex";
+    if (len > 240 || hardHits >= 1 || mediumHits >= 2) return "moderate";
+    return "simple";
   }
 
   // ── Tool Execution ──────────────────────────────────────────────
 
-  private async _executeTools(toolCalls: any[]): Promise<any[]> {
+  private async _executeTools(toolCalls: any[], sessionId: string, turn: number): Promise<any[]> {
     const results: any[] = [];
     for (const tc of toolCalls) {
       const name = tc.name || tc.function?.name || "";
       const args = tc.arguments || tc.input || tc.function?.arguments || {};
       const parsedArgs = typeof args === "string" ? JSON.parse(args) : args;
+      const start = Date.now();
 
       try {
         const result = await this._runTool(name, parsedArgs);
+        const latency = Date.now() - start;
+        this._recordEvent({
+          sessionId,
+          turn,
+          eventType: "tool.call",
+          action: "execution",
+          plan: normalizePlan(this.state.config.plan || this.env.DEFAULT_PLAN),
+          toolName: name,
+          status: "ok",
+          latencyMs: latency,
+          details: { args: parsedArgs },
+        });
         results.push({ tool: name, result });
       } catch (err: any) {
+        const latency = Date.now() - start;
+        this._recordEvent({
+          sessionId,
+          turn,
+          eventType: "tool.call",
+          action: "execution",
+          plan: normalizePlan(this.state.config.plan || this.env.DEFAULT_PLAN),
+          toolName: name,
+          status: "error",
+          latencyMs: latency,
+          details: { args: parsedArgs, error: String(err?.message || err) },
+        });
         results.push({ tool: name, error: err.message });
       }
     }
     return results;
+  }
+
+  private _recordEvent(input: {
+    sessionId: string;
+    turn?: number;
+    eventType: string;
+    action?: string;
+    plan?: string;
+    tier?: string;
+    provider?: string;
+    model?: string;
+    toolName?: string;
+    status?: string;
+    latencyMs?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    costUsd?: number;
+    details?: Record<string, unknown>;
+  }): void {
+    const turn = input.turn ?? 0;
+    const action = input.action || "";
+    const plan = input.plan || "";
+    const tier = input.tier || "";
+    const provider = input.provider || "";
+    const model = input.model || "";
+    const toolName = input.toolName || "";
+    const status = input.status || "";
+    const latencyMs = input.latencyMs || 0;
+    const inputTokens = input.inputTokens || 0;
+    const outputTokens = input.outputTokens || 0;
+    const costUsd = input.costUsd || 0;
+    const detailsJson = JSON.stringify(input.details || {});
+    this.sql`INSERT INTO otel_events (
+      session_id, turn, event_type, action, plan, tier, provider, model, tool_name, status, latency_ms,
+      input_tokens, output_tokens, cost_usd, details_json
+    ) VALUES (
+      ${input.sessionId}, ${turn}, ${input.eventType}, ${action}, ${plan}, ${tier}, ${provider}, ${model}, ${toolName}, ${status}, ${latencyMs},
+      ${inputTokens}, ${outputTokens}, ${costUsd}, ${detailsJson}
+    )`;
+
+    // Best-effort mirror of event telemetry to backend control plane.
+    void this._sendIngest(
+      "/api/v1/edge-ingest/events",
+      {
+        events: [{
+          session_id: input.sessionId,
+          turn,
+          event_type: input.eventType,
+          action,
+          plan,
+          tier,
+          provider,
+          model,
+          tool_name: toolName,
+          status,
+          latency_ms: latencyMs,
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+          cost_usd: costUsd,
+          details_json: detailsJson,
+          created_at: Date.now() / 1000,
+        }],
+      },
+    );
+  }
+
+  private _ingestHeaders(): Record<string, string> {
+    const token = this.env.BACKEND_INGEST_TOKEN || "";
+    if (!token) return { "Content-Type": "application/json" };
+    return {
+      "Content-Type": "application/json",
+      "X-Edge-Token": token,
+      "Authorization": `Bearer ${token}`,
+    };
+  }
+
+  private _ingestBase(): string {
+    return (this.env.BACKEND_INGEST_URL || "").trim().replace(/\/+$/, "");
+  }
+
+  private async _postIngest(endpoint: string, payload: Record<string, unknown>): Promise<void> {
+    const base = this._ingestBase();
+    if (!base || !this.env.BACKEND_INGEST_TOKEN) {
+      throw new Error("backend_ingest_not_configured");
+    }
+    const resp = await fetch(`${base}${endpoint}`, {
+      method: "POST",
+      headers: this._ingestHeaders(),
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      throw new Error(`backend_ingest_http_${resp.status}`);
+    }
+  }
+
+  private async _enqueueIngest(endpoint: string, payload: Record<string, unknown>, error: string): Promise<void> {
+    this.sql`INSERT INTO ingest_outbox (endpoint, payload_json, attempts, next_retry_at, last_error, updated_at)
+      VALUES (${endpoint}, ${JSON.stringify(payload)}, ${1}, ${Date.now() / 1000 + 5}, ${error.slice(0, 500)}, ${Date.now() / 1000})`;
+  }
+
+  private async _sendIngest(endpoint: string, payload: Record<string, unknown>): Promise<void> {
+    const base = this._ingestBase();
+    if (!base || !this.env.BACKEND_INGEST_TOKEN) return;
+    try {
+      await this._postIngest(endpoint, payload);
+    } catch (err: any) {
+      await this._enqueueIngest(endpoint, payload, String(err?.message || err));
+    }
+  }
+
+  private async _flushIngestOutbox(limit: number = 50): Promise<void> {
+    const base = this._ingestBase();
+    if (!base || !this.env.BACKEND_INGEST_TOKEN) return;
+    const now = Date.now() / 1000;
+    const rows = this.sql<{ id: number; endpoint: string; payload_json: string; attempts: number }>`
+      SELECT id, endpoint, payload_json, attempts
+      FROM ingest_outbox
+      WHERE next_retry_at <= ${now}
+      ORDER BY id ASC
+      LIMIT ${Math.max(1, Math.min(limit, 500))}
+    `;
+    for (const row of rows) {
+      let payload: Record<string, unknown> = {};
+      try {
+        payload = JSON.parse(row.payload_json || "{}");
+      } catch {
+        this.sql`DELETE FROM ingest_outbox WHERE id = ${row.id}`;
+        continue;
+      }
+      try {
+        await this._postIngest(row.endpoint, payload);
+        this.sql`DELETE FROM ingest_outbox WHERE id = ${row.id}`;
+      } catch (err: any) {
+        const attempts = Math.max(1, Number(row.attempts || 0) + 1);
+        const backoffSec = Math.min(300, 2 ** Math.min(attempts, 8));
+        this.sql`UPDATE ingest_outbox
+          SET attempts = ${attempts},
+              next_retry_at = ${now + backoffSec},
+              last_error = ${String(err?.message || err).slice(0, 500)},
+              updated_at = ${now}
+          WHERE id = ${row.id}`;
+      }
+    }
+  }
+
+  private async _mirrorTurnToBackend(sessionId: string, turnPayload: Record<string, unknown>): Promise<void> {
+    await this._sendIngest("/api/v1/edge-ingest/turn", {
+      session_id: sessionId,
+      ...turnPayload,
+    });
+  }
+
+  private async _mirrorSessionToBackend(sessionId: string, input: string, results: TurnResult[]): Promise<void> {
+    const last = results[results.length - 1];
+    const output = last?.content || "";
+    const status = last?.error ? "error" : "success";
+    const totalCost = results.reduce((acc, r) => acc + (r.costUsd || 0), 0);
+    const model = last?.model || this.state.config.model || "";
+    await this._sendIngest("/api/v1/edge-ingest/session", {
+      session_id: sessionId,
+      org_id: this.state.config.orgId || "",
+      project_id: this.state.config.projectId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      status,
+      input_text: input,
+      output_text: output,
+      model,
+      trace_id: sessionId,
+      parent_session_id: "",
+      depth: 0,
+      step_count: results.length,
+      action_count: results.reduce((acc, r) => acc + ((r.toolResults || []).length), 0),
+      wall_clock_seconds: 0,
+      cost_total_usd: totalCost,
+      created_at: Date.now() / 1000,
+    });
   }
 
   private async _runTool(name: string, args: any): Promise<string> {
@@ -506,6 +1485,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
   }
 }
+
+// Backward-compatibility export for previously deployed Durable Object class name.
+// Some existing Cloudflare deployments reference AgentOSWorker in prior migrations.
+export class AgentOSWorker extends AgentOSAgent {}
 
 function base64UrlToBytes(input: string): Uint8Array {
   const normalized = input.replace(/-/g, "+").replace(/_/g, "/");

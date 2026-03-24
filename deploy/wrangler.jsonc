@@ -35,6 +35,14 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["AgentOSAgent", "AgentOSMcpServer"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["AgentOSAgent"]
+    },
+    {
+      "tag": "v3",
+      "new_sqlite_classes": ["AgentOSMcpServer"]
     }
   ],
 
@@ -53,7 +61,9 @@
 
   // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
-    "DEFAULT_PROVIDER": "workers-ai",
-    "DEFAULT_MODEL": "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    "DEFAULT_PLAN": "standard",
+    "DEFAULT_PROVIDER": "gmi",
+    "DEFAULT_MODEL": "deepseek-ai/DeepSeek-V3.2",
+    "BACKEND_INGEST_URL": ""
   }
 }
