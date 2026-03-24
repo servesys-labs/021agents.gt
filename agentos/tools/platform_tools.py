@@ -882,6 +882,274 @@ async def manage_policies(
     return f"Unknown action: {action}. Use: list, create"
 
 
+# ── Retention Policies ────────────────────────────────────────────────────────
+
+
+async def manage_retention(
+    action: str = "list",
+    table_name: str = "",
+    retention_days: int = 90,
+) -> str:
+    """Retention policies — configure data lifecycle per table."""
+    db = _get_db()
+    if action == "list":
+        try:
+            rows = db.conn.execute("SELECT * FROM retention_policies ORDER BY table_name").fetchall()
+            if not rows:
+                return "No retention policies set. Defaults apply."
+            lines = ["Retention policies:"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('table_name', '?')}: {r.get('retention_days', '?')} days")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    if action == "set":
+        if not table_name:
+            return "Error: table_name required."
+        try:
+            db.conn.execute(
+                "INSERT OR REPLACE INTO retention_policies (table_name, retention_days) VALUES (?,?)",
+                (table_name, retention_days),
+            )
+            db.conn.commit()
+            return f"Retention set: {table_name} = {retention_days} days"
+        except Exception as exc:
+            return f"Error: {exc}"
+    return f"Unknown action: {action}. Use: list, set"
+
+
+# ── Voice Platforms ──────────────────────────────────────────────────────────
+
+
+async def manage_voice(
+    agent_name: str = "",
+    action: str = "calls",
+    call_id: str = "",
+) -> str:
+    """Voice platform management — view calls, events, quality for Vapi/voice agents."""
+    db = _get_db()
+    if action == "calls":
+        try:
+            sql = "SELECT * FROM vapi_calls WHERE 1=1"
+            params: list[Any] = []
+            if agent_name:
+                sql += " AND agent_name = ?"
+                params.append(agent_name)
+            sql += " ORDER BY created_at DESC LIMIT 20"
+            rows = db.conn.execute(sql, params).fetchall()
+            if not rows:
+                return f"No voice calls for '{agent_name or 'any agent'}'."
+            lines = [f"Voice calls ({len(rows)}):"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('call_id', '?')[:8]} | {r.get('status', '?')} | {r.get('duration_seconds', 0):.0f}s")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    if action == "events":
+        if not call_id:
+            return "Error: call_id required for events."
+        try:
+            rows = db.conn.execute(
+                "SELECT * FROM vapi_events WHERE call_id = ? ORDER BY created_at", (call_id,)
+            ).fetchall()
+            if not rows:
+                return f"No events for call {call_id[:8]}."
+            lines = [f"Events for call {call_id[:8]} ({len(rows)}):"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('event_type', '?')}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    if action == "summary":
+        try:
+            row = db.conn.execute("SELECT COUNT(*) as cnt, AVG(duration_seconds) as avg_dur FROM vapi_calls").fetchone()
+            r = dict(row) if row else {}
+            return f"Voice summary: {r.get('cnt', 0)} calls, avg {r.get('avg_dur', 0) or 0:.0f}s"
+        except Exception as exc:
+            return f"Error: {exc}"
+    return f"Unknown action: {action}. Use: calls, events, summary"
+
+
+# ── GPU Endpoints ────────────────────────────────────────────────────────────
+
+
+async def manage_gpu(
+    action: str = "list",
+    model_id: str = "",
+    gpu_type: str = "h100",
+    endpoint_id: str = "",
+) -> str:
+    """GPU endpoint management — provision, list, terminate dedicated GPUs."""
+    db = _get_db()
+    if action == "list":
+        try:
+            rows = db.conn.execute("SELECT * FROM gpu_endpoints ORDER BY created_at DESC LIMIT 20").fetchall()
+            if not rows:
+                return "No GPU endpoints."
+            lines = ["GPU endpoints:"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('endpoint_id', '?')[:8]} | {r.get('gpu_type', '?')} | {r.get('status', '?')} | ${r.get('hourly_rate_usd', 0):.2f}/hr")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    if action == "provision":
+        return f"To provision a GPU: POST /api/v1/gpu/endpoints with model_id={model_id}, gpu_type={gpu_type}"
+    if action == "terminate":
+        if not endpoint_id:
+            return "Error: endpoint_id required."
+        return f"To terminate: DELETE /api/v1/gpu/endpoints/{endpoint_id}"
+    return f"Unknown action: {action}. Use: list, provision, terminate"
+
+
+# ── Workflows & Jobs ─────────────────────────────────────────────────────────
+
+
+async def manage_workflows(
+    action: str = "list",
+    agent_name: str = "",
+) -> str:
+    """Workflow and job queue management — list workflows, check job status."""
+    db = _get_db()
+    if action == "list":
+        try:
+            rows = db.conn.execute("SELECT * FROM workflows ORDER BY created_at DESC LIMIT 20").fetchall()
+            if not rows:
+                return "No workflows defined."
+            lines = ["Workflows:"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('workflow_id', '?')[:8]} | {r.get('name', '?')} | {r.get('status', '?')}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    if action == "jobs":
+        try:
+            sql = "SELECT * FROM job_queue WHERE 1=1"
+            params: list[Any] = []
+            if agent_name:
+                sql += " AND agent_name = ?"
+                params.append(agent_name)
+            sql += " ORDER BY created_at DESC LIMIT 20"
+            rows = db.conn.execute(sql, params).fetchall()
+            if not rows:
+                return "No jobs in queue."
+            lines = ["Job queue:"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('job_id', '?')[:8]} | {r.get('agent_name', '?')} | {r.get('status', '?')} | retries={r.get('retries', 0)}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    return f"Unknown action: {action}. Use: list, jobs"
+
+
+# ── Projects / Environments ──────────────────────────────────────────────────
+
+
+async def manage_projects(
+    action: str = "list",
+    project_id: str = "",
+) -> str:
+    """Project and environment management — list projects, view environments."""
+    db = _get_db()
+    if action == "list":
+        try:
+            rows = db.conn.execute("SELECT * FROM projects ORDER BY created_at DESC LIMIT 20").fetchall()
+            if not rows:
+                return "No projects."
+            lines = ["Projects:"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('project_id', '?')[:8]} | {r.get('name', '?')} | plan={r.get('plan', '?')}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    if action == "envs":
+        if not project_id:
+            return "Error: project_id required."
+        try:
+            rows = db.conn.execute(
+                "SELECT * FROM environments WHERE project_id = ?", (project_id,)
+            ).fetchall()
+            if not rows:
+                return f"No environments for project {project_id[:8]}."
+            lines = [f"Environments for {project_id[:8]}:"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('env_name', '?')} | plan={r.get('plan', '?')}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    return f"Unknown action: {action}. Use: list, envs"
+
+
+# ── MCP Control ──────────────────────────────────────────────────────────────
+
+
+async def manage_mcp(
+    action: str = "list",
+) -> str:
+    """MCP server management — list registered MCP servers."""
+    db = _get_db()
+    if action == "list":
+        try:
+            rows = db.conn.execute("SELECT * FROM mcp_servers ORDER BY created_at DESC LIMIT 20").fetchall()
+            if not rows:
+                return "No MCP servers registered."
+            lines = ["MCP servers:"]
+            for r in rows:
+                r = dict(r)
+                lines.append(f"  {r.get('name', '?')} | {r.get('url', '?')} | {r.get('status', '?')}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+    return f"Unknown action: {action}. Use: list"
+
+
+# ── Sandbox File Ops ─────────────────────────────────────────────────────────
+
+
+async def sandbox_file_write(path: str, content: str, sandbox_id: str = "") -> str:
+    """Write a file inside the sandbox filesystem."""
+    from agentos.sandbox.manager import SandboxManager
+    mgr = SandboxManager()
+    result = await mgr.file_write(path=path, content=content, sandbox_id=sandbox_id or None)
+    if hasattr(result, "success") and result.success:
+        return f"Written: {path}"
+    err = result.error if hasattr(result, "error") else "unknown"
+    return f"Error writing {path}: {err}"
+
+
+async def sandbox_file_read(path: str, sandbox_id: str = "") -> str:
+    """Read a file from the sandbox filesystem."""
+    from agentos.sandbox.manager import SandboxManager
+    mgr = SandboxManager()
+    result = await mgr.file_read(path=path, sandbox_id=sandbox_id or None)
+    if hasattr(result, "success") and result.success:
+        return result.content or ""
+    err = result.error if hasattr(result, "error") else "unknown"
+    return f"Error reading {path}: {err}"
+
+
+# ── Agent Templates ──────────────────────────────────────────────────────────
+
+
+async def list_templates() -> str:
+    """List available agent templates for quick scaffolding."""
+    from agentos.defaults import AGENT_TEMPLATES
+    lines = ["Available agent templates:"]
+    for name, tpl in AGENT_TEMPLATES.items():
+        desc = tpl.get("description", "")[:60]
+        tools_count = len(tpl.get("tools", []))
+        lines.append(f"  {name}: {desc} ({tools_count} tools)")
+    lines.append("\nUse: agentos init --template <name>")
+    return "\n".join(lines)
+
+
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 PLATFORM_HANDLERS: dict[str, Any] = {

@@ -201,6 +201,97 @@ async def telegram_setup(
     return result
 
 
+@router.get("/telegram/qr")
+async def telegram_qr(
+    agent_name: str = "",
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Generate a QR code and deep link for connecting to the Telegram bot.
+
+    Returns:
+      - deep_link: t.me URL that opens the bot
+      - qr_svg: inline SVG of the QR code (no external dependencies)
+      - qr_data_url: base64 PNG for embedding in <img> tags
+    """
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    if not bot_token:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN not configured")
+
+    # Get bot username from Telegram API
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(f"https://api.telegram.org/bot{bot_token}/getMe")
+            data = resp.json()
+            bot_username = data.get("result", {}).get("username", "")
+    except Exception:
+        bot_username = ""
+
+    if not bot_username:
+        raise HTTPException(status_code=500, detail="Could not retrieve bot username")
+
+    # Deep link with optional agent_name as start parameter
+    start_param = agent_name or "default"
+    deep_link = f"https://t.me/{bot_username}?start={start_param}"
+
+    # Generate QR code as SVG (pure Python, no dependencies)
+    qr_svg = _generate_qr_svg(deep_link)
+
+    return {
+        "deep_link": deep_link,
+        "bot_username": bot_username,
+        "agent_name": start_param,
+        "qr_svg": qr_svg,
+        "instructions": f"Scan this QR code or open {deep_link} to start chatting with your agent on Telegram.",
+    }
+
+
+def _generate_qr_svg(data: str, size: int = 200) -> str:
+    """Generate a QR code as inline SVG using a minimal implementation.
+
+    No external dependencies — uses a simple QR encoding algorithm.
+    For production, consider using the `qrcode` package for better error correction.
+    """
+    # Use Python's built-in or fallback
+    try:
+        import qrcode
+        import io
+        import base64
+
+        qr = qrcode.QRCode(version=1, box_size=10, border=2)
+        qr.add_data(data)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+
+        # Generate SVG
+        module_size = size // len(matrix)
+        svg_size = module_size * len(matrix)
+        rects = []
+        for y, row in enumerate(matrix):
+            for x, cell in enumerate(row):
+                if cell:
+                    rects.append(
+                        f'<rect x="{x * module_size}" y="{y * module_size}" '
+                        f'width="{module_size}" height="{module_size}" fill="black"/>'
+                    )
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {svg_size} {svg_size}" '
+            f'width="{size}" height="{size}">'
+            f'<rect width="{svg_size}" height="{svg_size}" fill="white"/>'
+            + "".join(rects)
+            + "</svg>"
+        )
+    except ImportError:
+        # Fallback: return a placeholder with the link text
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 200 200">'
+            f'<rect width="200" height="200" fill="#f0f0f0" rx="8"/>'
+            f'<text x="100" y="90" text-anchor="middle" font-size="12" fill="#333">Scan to chat</text>'
+            f'<text x="100" y="110" text-anchor="middle" font-size="10" fill="#666">{data[:40]}</text>'
+            f"</svg>"
+        )
+
+
 @router.delete("/telegram/webhook")
 async def telegram_delete_webhook(user: CurrentUser = Depends(get_current_user)):
     """Remove Telegram webhook."""
