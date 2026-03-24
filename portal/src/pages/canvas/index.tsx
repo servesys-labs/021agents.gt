@@ -728,6 +728,42 @@ function CanvasWorkspaceInner() {
     [setNodes, addLogEntry],
   );
 
+  /* ── Import agent handler ──────────────────────────────── */
+  const handleImportAgent = useCallback(
+    async (agentData: Record<string, unknown>) => {
+      addLogEntry("Importing agent...", "running");
+      try {
+        const result = await apiRequest<{ name?: string; agent_name?: string; model?: string; tools?: string[] }>(
+          "/api/v1/agents/import",
+          "POST",
+          agentData,
+        );
+        const agentName = result.name || result.agent_name || (agentData.name as string) || "Imported Agent";
+        const id = `agent-${crypto.randomUUID().slice(0, 8)}`;
+        const centerX = 350 + Math.random() * 300;
+        const centerY = 200 + Math.random() * 200;
+        const newNode: Node = {
+          id,
+          type: "agent",
+          position: { x: centerX, y: centerY },
+          data: {
+            name: agentName,
+            model: result.model || (agentData.model as string) || "gpt-4.1-mini",
+            status: "draft",
+            tools: result.tools || (agentData.tools as string[]) || [],
+            activity: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+          },
+        };
+        setNodes((nds) => [...nds, newNode]);
+        addLogEntry(`Imported agent: ${agentName}`, "done");
+        setDetailNode(newNode);
+      } catch (err) {
+        addLogEntry(`Import failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
+      }
+    },
+    [setNodes, addLogEntry],
+  );
+
   /* ── Command palette action handler ─────────────────────── */
   const handleCommandAction = useCallback(
     (action: CommandAction) => {
@@ -1427,7 +1463,7 @@ function CanvasWorkspaceInner() {
           onToggleLayer={handleToggleLayer}
         />
 
-        <AddNodeToolbar onAdd={addNode} />
+        <AddNodeToolbar onAdd={addNode} onImportAgent={(data) => void handleImportAgent(data)} />
 
         <AgentLog entries={logEntries} onClear={clearLog} />
 

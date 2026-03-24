@@ -151,24 +151,90 @@ export const DashboardPage = () => {
         </div>
       </div>
 
-      {/* System Health */}
-      <div className="card mt-4">
-        <h3 className="text-sm font-semibold text-text-primary mb-3">System Health</h3>
-        <div className="grid grid-cols-4 gap-4">
-          {[
-            { label: "API", status: "healthy" },
-            { label: "Database", status: "healthy" },
-            { label: "Workers", status: "healthy" },
-            { label: "MCP Servers", status: "degraded" },
-          ].map((s) => (
-            <div key={s.label} className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${s.status === "healthy" ? "bg-status-live" : s.status === "degraded" ? "bg-status-warning" : "bg-status-error"}`} />
-              <span className="text-xs text-text-secondary">{s.label}</span>
-              <StatusBadge status={s.status} />
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* System Health — live from middleware + health endpoints */}
+      <SystemHealthCard />
+
+      {/* Cost Overview */}
+      <CostOverviewCard />
     </div>
   );
 };
+
+/* ── System Health Card ── */
+type MiddlewareEntry = { name: string; order: number; type: string; stats?: Record<string, unknown> };
+type HealthResponse = { status?: string; db?: string; uptime_seconds?: number };
+
+function SystemHealthCard() {
+  const healthQuery = useApiQuery<HealthResponse>("/api/v1/health");
+  const mwQuery = useApiQuery<{ middlewares: MiddlewareEntry[] }>("/api/v1/middleware/status");
+  const health = healthQuery.data ?? {};
+  const middlewares = mwQuery.data?.middlewares ?? [];
+
+  const services = [
+    { label: "API", status: health.status === "ok" ? "healthy" : "unknown" },
+    { label: "Database", status: health.db === "ok" ? "healthy" : health.db ? "degraded" : "unknown" },
+    ...(middlewares.length > 0
+      ? middlewares.slice(0, 4).map((m) => ({ label: m.name, status: "healthy" as string }))
+      : [{ label: "Middleware", status: "unknown" }]),
+  ];
+
+  return (
+    <div className="card mt-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-text-primary">System Health</h3>
+        {health.uptime_seconds != null && (
+          <span className="text-[10px] text-text-muted font-mono">
+            uptime: {Math.floor(health.uptime_seconds / 3600)}h {Math.floor((health.uptime_seconds % 3600) / 60)}m
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {services.map((s) => (
+          <div key={s.label} className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${s.status === "healthy" ? "bg-status-live" : s.status === "degraded" ? "bg-status-warning" : "bg-text-muted"}`} />
+            <span className="text-xs text-text-secondary">{s.label}</span>
+            <StatusBadge status={s.status} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Cost Overview Card ── */
+type CostLedger = { entries?: Array<{ agent_name: string; model: string; cost_usd: number; input_tokens: number; output_tokens: number }> };
+
+function CostOverviewCard() {
+  const costQuery = useApiQuery<CostLedger>("/api/v1/observability/cost-ledger");
+  const entries = costQuery.data?.entries ?? [];
+
+  if (entries.length === 0) return null;
+
+  const totalCost = entries.reduce((acc, e) => acc + (e.cost_usd || 0), 0);
+  const byAgent: Record<string, number> = {};
+  for (const e of entries) {
+    const name = e.agent_name || "unknown";
+    byAgent[name] = (byAgent[name] || 0) + (e.cost_usd || 0);
+  }
+  const topAgents = Object.entries(byAgent).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+  return (
+    <div className="card mt-4">
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="text-sm font-semibold text-text-primary">Cost Overview</h3>
+        <span className="text-xs font-mono text-accent">${totalCost.toFixed(4)}</span>
+      </div>
+      <div className="space-y-2">
+        {topAgents.map(([name, cost]) => (
+          <div key={name} className="flex items-center gap-3">
+            <span className="text-xs text-text-secondary flex-1 truncate">{name}</span>
+            <div className="flex-1 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
+              <div className="h-full bg-accent rounded-full" style={{ width: `${Math.min(100, (cost / totalCost) * 100)}%` }} />
+            </div>
+            <span className="text-xs font-mono text-text-muted w-16 text-right">${cost.toFixed(4)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

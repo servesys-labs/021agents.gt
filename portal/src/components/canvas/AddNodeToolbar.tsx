@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Plus, Bot, FileText, Database, Plug, Server, X } from "lucide-react";
+import { Plus, Bot, FileText, Database, Plug, Server, X, Import } from "lucide-react";
 
 type NodeTypeOption = {
   type: string;
@@ -55,11 +55,13 @@ const nodeTypes: NodeTypeOption[] = [
 
 type Props = {
   onAdd: (type: string) => void;
+  onImportAgent?: (agentData: Record<string, unknown>) => void;
 };
 
-export function AddNodeToolbar({ onAdd }: Props) {
+export function AddNodeToolbar({ onAdd, onImportAgent }: Props) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -92,6 +94,42 @@ export function AddNodeToolbar({ onAdd }: Props) {
               <span className="text-[11px] font-medium whitespace-nowrap">{nt.label}</span>
             </button>
           ))}
+          {onImportAgent && (
+            <>
+              <div className="w-px h-6 bg-border-default mx-1" />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-text-secondary hover:bg-surface-overlay hover:text-text-primary transition-colors group"
+                title="Import agent from JSON file"
+              >
+                <span className="text-accent bg-[rgba(249,115,22,0.1)] w-6 h-6 rounded-md flex items-center justify-center">
+                  <Import size={14} />
+                </span>
+                <span className="text-[11px] font-medium whitespace-nowrap">Import Agent</span>
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    try {
+                      const data = JSON.parse(reader.result as string) as Record<string, unknown>;
+                      onImportAgent(data);
+                    } catch {
+                      // invalid JSON — ignore
+                    }
+                  };
+                  reader.readAsText(file);
+                  e.target.value = "";
+                }}
+              />
+            </>
+          )}
           <button
             onClick={() => setOpen(false)}
             className="ml-1 p-1.5 rounded-md text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors"

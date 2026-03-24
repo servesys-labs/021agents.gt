@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Plus, Settings, Users, Key, Trash2, Copy, Eye, EyeOff, RefreshCw, UserPlus } from "lucide-react";
+import { Plus, Settings, Users, Key, Trash2, Copy, Eye, EyeOff, RefreshCw, UserPlus, Building2, Puzzle, ToggleLeft, ToggleRight, Pencil, Check, X } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
@@ -15,13 +15,20 @@ import { apiRequest, useApiQuery } from "../../lib/api";
 
 type TeamMember = { user_id: string; name: string; email: string; role: string; joined_at?: string };
 type ApiKey = { key_id: string; name: string; prefix: string; created_at?: string; last_used?: string; scopes?: string[] };
+type OrgMember = { user_id: string; name: string; email: string; role: string };
+type Org = { org_id: string; name: string; slug: string; plan: string; member_count: number; members?: OrgMember[] };
+type Skill = { name: string; description: string; version: string; category: string; enabled: boolean };
 
 export const SettingsPage = () => {
   const { showToast } = useToast();
   const teamQuery = useApiQuery<{ members: TeamMember[] }>("/api/v1/team/members");
   const keysQuery = useApiQuery<{ keys: ApiKey[] }>("/api/v1/api-keys");
+  const orgsQuery = useApiQuery<{ orgs: Org[] }>("/api/v1/orgs");
+  const skillsQuery = useApiQuery<{ skills: Skill[] }>("/api/v1/skills");
   const members = useMemo(() => teamQuery.data?.members ?? [], [teamQuery.data]);
   const keys = useMemo(() => keysQuery.data?.keys ?? [], [keysQuery.data]);
+  const orgs = useMemo(() => orgsQuery.data?.orgs ?? [], [orgsQuery.data]);
+  const skills = useMemo(() => skillsQuery.data?.skills ?? [], [skillsQuery.data]);
 
   /* ── Invite member panel ──────────────────────────────────── */
   const [invitePanelOpen, setInvitePanelOpen] = useState(false);
@@ -39,6 +46,14 @@ export const SettingsPage = () => {
   /* ── Password change state ────────────────────────────────── */
   const [passwordForm, setPasswordForm] = useState({ current_password: "", new_password: "", confirm_password: "" });
   const [passwordLoading, setPasswordLoading] = useState(false);
+
+  /* ── Org edit state ─────────────────────────────────────────── */
+  const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
+  const [editingOrgName, setEditingOrgName] = useState("");
+  const [orgLoading, setOrgLoading] = useState(false);
+
+  /* ── Skills state ───────────────────────────────────────────── */
+  const [skillsReloading, setSkillsReloading] = useState(false);
 
   const handleInvite = async () => {
     if (!inviteForm.email.trim()) return;
@@ -119,6 +134,46 @@ export const SettingsPage = () => {
     } finally {
       setPasswordLoading(false);
     }
+  };
+
+  /* ── Org handlers ────────────────────────────────────────────── */
+  const handleUpdateOrgName = async (orgId: string) => {
+    if (!editingOrgName.trim()) return;
+    setOrgLoading(true);
+    try {
+      await apiRequest(`/api/v1/orgs/${orgId}`, "PUT", { name: editingOrgName });
+      showToast("Organization updated", "success");
+      setEditingOrgId(null);
+      void orgsQuery.refetch();
+    } catch { showToast("Failed to update organization", "error"); }
+    finally { setOrgLoading(false); }
+  };
+
+  const handleMemberRoleChange = async (orgId: string, userId: string, newRole: string) => {
+    try {
+      await apiRequest(`/api/v1/orgs/${orgId}/members/${userId}`, "PUT", { role: newRole });
+      showToast("Member role updated", "success");
+      void orgsQuery.refetch();
+    } catch { showToast("Failed to update member role", "error"); }
+  };
+
+  /* ── Skills handlers ────────────────────────────────────────── */
+  const handleToggleSkill = async (skillName: string, enabled: boolean) => {
+    try {
+      await apiRequest(`/api/v1/skills/${encodeURIComponent(skillName)}`, "PUT", { enabled });
+      showToast(`Skill ${enabled ? "enabled" : "disabled"}`, "success");
+      void skillsQuery.refetch();
+    } catch { showToast("Failed to update skill", "error"); }
+  };
+
+  const handleReloadSkills = async () => {
+    setSkillsReloading(true);
+    try {
+      await apiRequest("/api/v1/skills/reload", "POST");
+      showToast("Skills reloaded", "success");
+      void skillsQuery.refetch();
+    } catch { showToast("Failed to reload skills", "error"); }
+    finally { setSkillsReloading(false); }
   };
 
   const copyToClipboard = (text: string) => {
@@ -267,13 +322,136 @@ export const SettingsPage = () => {
     </div>
   );
 
+  /* ── Orgs tab ───────────────────────────────────────────────── */
+  const orgsTab = (
+    <div>
+      <QueryState loading={orgsQuery.loading} error={orgsQuery.error} isEmpty={orgs.length === 0} emptyMessage="">
+        {orgs.length === 0 ? (
+          <EmptyState icon={<Building2 size={40} />} title="No organizations" description="You are not a member of any organization yet" />
+        ) : (
+          <div className="space-y-4">
+            {orgs.map((org) => (
+              <div key={org.org_id} className="card">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    {editingOrgId === org.org_id ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={editingOrgName}
+                          onChange={(e) => setEditingOrgName(e.target.value)}
+                          className="text-sm px-2 py-1 bg-surface-base border border-border-default rounded"
+                          autoFocus
+                        />
+                        <button disabled={orgLoading} className="p-1 text-status-live hover:text-status-live/80" onClick={() => void handleUpdateOrgName(org.org_id)}>
+                          <Check size={14} />
+                        </button>
+                        <button className="p-1 text-text-muted hover:text-text-primary" onClick={() => setEditingOrgId(null)}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <span className="text-sm font-semibold text-text-primary">{org.name}</span>
+                        <button className="p-1 text-text-muted hover:text-text-primary" onClick={() => { setEditingOrgId(org.org_id); setEditingOrgName(org.name); }}>
+                          <Pencil size={12} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <StatusBadge status={org.plan} />
+                    <span className="text-xs text-text-muted">{org.member_count} member{org.member_count !== 1 ? "s" : ""}</span>
+                  </div>
+                </div>
+                <div className="text-xs text-text-muted mb-3">Slug: <code className="font-mono">{org.slug}</code></div>
+
+                {org.members && org.members.length > 0 && (
+                  <div className="border border-border-default rounded-lg overflow-hidden">
+                    <table>
+                      <thead><tr><th>Name</th><th>Email</th><th>Role</th></tr></thead>
+                      <tbody>
+                        {org.members.map((m) => (
+                          <tr key={m.user_id}>
+                            <td><span className="text-text-primary text-sm">{m.name}</span></td>
+                            <td><span className="text-text-muted text-xs">{m.email}</span></td>
+                            <td>
+                              <select
+                                value={m.role}
+                                onChange={(e) => void handleMemberRoleChange(org.org_id, m.user_id, e.target.value)}
+                                className="text-xs bg-surface-base border border-border-default rounded px-2 py-1"
+                              >
+                                <option value="owner">Owner</option>
+                                <option value="admin">Admin</option>
+                                <option value="member">Member</option>
+                                <option value="viewer">Viewer</option>
+                              </select>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </QueryState>
+    </div>
+  );
+
+  /* ── Skills tab ──────────────────────────────────────────────── */
+  const skillsTab = (
+    <div>
+      <div className="flex items-center justify-end mb-4">
+        <button className="btn btn-primary text-xs" disabled={skillsReloading} onClick={() => void handleReloadSkills()}>
+          <RefreshCw size={12} className={skillsReloading ? "animate-spin" : ""} /> {skillsReloading ? "Reloading..." : "Reload Skills"}
+        </button>
+      </div>
+      <QueryState loading={skillsQuery.loading} error={skillsQuery.error} isEmpty={skills.length === 0} emptyMessage="">
+        {skills.length === 0 ? (
+          <EmptyState icon={<Puzzle size={40} />} title="No skills found" description="No skills are currently available" />
+        ) : (
+          <div className="card p-0"><div className="overflow-x-auto">
+            <table>
+              <thead><tr><th>Name</th><th>Description</th><th>Version</th><th>Category</th><th>Status</th><th style={{ width: "64px" }}>Toggle</th></tr></thead>
+              <tbody>
+                {skills.map((skill) => (
+                  <tr key={skill.name}>
+                    <td><span className="text-text-primary text-sm font-medium">{skill.name}</span></td>
+                    <td><span className="text-text-muted text-xs">{skill.description}</span></td>
+                    <td><span className="font-mono text-xs text-text-muted">{skill.version}</span></td>
+                    <td><StatusBadge status={skill.category} /></td>
+                    <td><StatusBadge status={skill.enabled ? "enabled" : "disabled"} /></td>
+                    <td>
+                      <button
+                        onClick={() => void handleToggleSkill(skill.name, !skill.enabled)}
+                        className={`p-1 transition-colors ${skill.enabled ? "text-status-live hover:text-status-live/80" : "text-text-muted hover:text-text-primary"}`}
+                        title={skill.enabled ? "Disable skill" : "Enable skill"}
+                      >
+                        {skill.enabled ? <ToggleRight size={20} /> : <ToggleLeft size={20} />}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div></div>
+        )}
+      </QueryState>
+    </div>
+  );
+
   return (
     <div>
-      <PageHeader title="Settings" subtitle="Team management, API keys, and profile configuration" onRefresh={() => { void teamQuery.refetch(); void keysQuery.refetch(); }} />
+      <PageHeader title="Settings" subtitle="Team management, API keys, and profile configuration" onRefresh={() => { void teamQuery.refetch(); void keysQuery.refetch(); void orgsQuery.refetch(); void skillsQuery.refetch(); }} />
 
       <Tabs tabs={[
         { id: "team", label: "Team", count: members.length, content: teamTab },
         { id: "keys", label: "API Keys", count: keys.length, content: keysTab },
+        { id: "orgs", label: "Organizations", count: orgs.length, content: orgsTab },
+        { id: "skills", label: "Skills", count: skills.length, content: skillsTab },
         { id: "profile", label: "Profile", content: profileTab },
       ]} />
 
