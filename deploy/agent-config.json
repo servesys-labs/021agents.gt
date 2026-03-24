@@ -1,12 +1,12 @@
 {
-  "agentName": "test-agent",
-  "agentDescription": "test-agent \u2014 customize me!",
-  "systemPrompt": "You are a helpful AI assistant. Be concise and accurate.",
+  "agentName": "e2e-demo-213848",
+  "agentDescription": "Create a concise assistant that summarizes input in one short paragraph.",
+  "systemPrompt": "You are an AI assistant specialized in: Create a concise assistant that summarizes input in one short paragraph.. Be helpful, accurate, and concise.\n\nYou have these tools available: bash, browse, edit-file, glob, grep, http-request, read-file, todo, web-search, write-file.\nUse 'todo' to plan multi-step work. Use the right tool for each step.",
   "maxTurns": 50,
   "budgetLimitUsd": 10.0,
   "blockedTools": [],
   "requireConfirmationForDestructive": true,
-  "provider": "",
-  "model": "claude-sonnet-4-20250514",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6-20250627",
   "spentUsd": 0
 }

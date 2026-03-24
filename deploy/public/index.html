@@ -192,16 +192,20 @@
           <input id="deploy-name" value="my-agent" placeholder="my-agent" />
         </div>
         <div>
-          <label>LLM Provider</label>
-          <select id="deploy-provider">
-            <option value="workers-ai">Workers AI (Free tier)</option>
-            <option value="openai">OpenAI</option>
-            <option value="anthropic">Anthropic</option>
+          <label>AI Plan</label>
+          <select id="deploy-plan">
+            <option value="standard" selected>Balanced (Standard)</option>
+            <option value="basic">Basic</option>
+            <option value="premium">Premium</option>
+            <option value="code">Code</option>
+            <option value="private">Private</option>
+            <option value="dedicated">Dedicated GPU</option>
+            <option value="manual">Manual Override</option>
           </select>
         </div>
         <div>
-          <label>Model</label>
-          <input id="deploy-model" value="@cf/meta/llama-3.1-70b-instruct" />
+          <label>Routing Mode</label>
+          <input id="deploy-routing" value="Auto by complexity (simple/moderate/complex/tool_call)" readonly />
         </div>
         <div>
           <label>Budget Limit (USD)</label>
@@ -209,8 +213,8 @@
         </div>
       </div>
 
-      <label>API Key (for OpenAI / Anthropic)</label>
-      <input id="deploy-apikey" type="password" placeholder="sk-... or leave blank for Workers AI" />
+      <label>API Key (for provider backends)</label>
+      <input id="deploy-apikey" type="password" placeholder="Optional per-request token; worker secrets are preferred" />
 
       <div style="margin:1.5rem 0;">
         <button class="deploy-btn" onclick="deploy()">Deploy Agent to Edge</button>
@@ -245,20 +249,41 @@
       <h2>Agent Configuration</h2>
       <div class="grid">
         <div>
-          <label>Provider</label>
+          <label>AI Plan</label>
+          <select id="cfg-plan">
+            <option value="standard">Balanced (Standard)</option>
+            <option value="basic">Basic</option>
+            <option value="premium">Premium</option>
+            <option value="code">Code</option>
+            <option value="private">Private</option>
+            <option value="dedicated">Dedicated GPU</option>
+            <option value="manual">Manual Override</option>
+          </select>
+        </div>
+        <div>
+          <label>Provider (manual only)</label>
           <select id="cfg-provider">
+            <option value="gmi">GMI Cloud</option>
             <option value="workers-ai">Workers AI</option>
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
           </select>
         </div>
         <div>
-          <label>Model</label>
+          <label>Model (manual only)</label>
           <input id="cfg-model" />
         </div>
         <div>
           <label>Max Turns</label>
           <input id="cfg-max-turns" type="number" value="50" />
+        </div>
+        <div>
+          <label>Org ID (for backend telemetry)</label>
+          <input id="cfg-org-id" placeholder="org_..." />
+        </div>
+        <div>
+          <label>Project ID (for backend telemetry)</label>
+          <input id="cfg-project-id" placeholder="project_..." />
         </div>
         <div>
           <label>Budget Limit (USD)</label>
@@ -396,8 +421,7 @@
 
     const config = {
       name: agentName(),
-      provider: document.getElementById('deploy-provider').value,
-      model: document.getElementById('deploy-model').value,
+      plan: document.getElementById('deploy-plan').value || 'standard',
       budget: document.getElementById('deploy-budget').value,
       apiKey: document.getElementById('deploy-apikey').value,
     };
@@ -414,7 +438,7 @@
       document.getElementById('step-' + i).classList.remove('active');
       document.getElementById('step-' + i).classList.add('done');
 
-      if (i === 1) log('Configuration validated: ' + config.provider + ' / ' + config.model);
+      if (i === 1) log('Configuration validated: plan=' + config.plan + ', complexity-aware routing enabled');
       if (i === 2) log('Durable Object namespace created for agent: ' + config.name);
       if (i === 3) log('Vectorize index provisioned (768 dimensions, cosine metric)');
       if (i === 4) log('Worker deployed to 300+ edge locations globally');
@@ -446,8 +470,7 @@
         method: 'PUT',
         headers: authHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
-          provider: config.provider,
-          model: config.model,
+          plan: config.plan,
           budgetLimitUsd: parseFloat(config.budget),
         }),
       });
@@ -511,9 +534,12 @@
     try {
       const resp = await fetch(getAgentUrl('/config'), { headers: authHeaders() });
       const cfg = await resp.json();
-      document.getElementById('cfg-provider').value = cfg.provider || 'workers-ai';
+      document.getElementById('cfg-plan').value = cfg.plan || 'standard';
+      document.getElementById('cfg-provider').value = cfg.provider || 'gmi';
       document.getElementById('cfg-model').value = cfg.model || '';
       document.getElementById('cfg-max-turns').value = cfg.maxTurns || 50;
+      document.getElementById('cfg-org-id').value = cfg.orgId || '';
+      document.getElementById('cfg-project-id').value = cfg.projectId || '';
       document.getElementById('cfg-budget').value = cfg.budgetLimitUsd || 10;
       document.getElementById('cfg-blocked').value = (cfg.blockedTools || []).join(', ');
       document.getElementById('cfg-confirm-destructive').checked = cfg.requireConfirmationForDestructive !== false;
@@ -526,8 +552,11 @@
       method: 'PUT',
       headers: authHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({
+        plan: document.getElementById('cfg-plan').value || 'standard',
         provider: document.getElementById('cfg-provider').value,
         model: document.getElementById('cfg-model').value,
+        orgId: document.getElementById('cfg-org-id').value,
+        projectId: document.getElementById('cfg-project-id').value,
         maxTurns: parseInt(document.getElementById('cfg-max-turns').value),
         budgetLimitUsd: parseFloat(document.getElementById('cfg-budget').value),
         blockedTools: blocked,
@@ -825,14 +854,10 @@
 
   updateAuthUI();
 
-  // Auto-update model field when provider changes
-  document.getElementById('deploy-provider').addEventListener('change', function() {
-    const models = {
-      'workers-ai': '@cf/meta/llama-3.1-70b-instruct',
-      'openai': 'gpt-4o',
-      'anthropic': 'claude-sonnet-4-20250514',
-    };
-    document.getElementById('deploy-model').value = models[this.value] || '';
+  // Keep plan and config selects in sync for convenience.
+  document.getElementById('deploy-plan').addEventListener('change', function() {
+    const cfgPlan = document.getElementById('cfg-plan');
+    if (cfgPlan) cfgPlan.value = this.value;
   });
 </script>
 </body>
