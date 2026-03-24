@@ -6,13 +6,15 @@ Build, test, govern, deploy, and observe AI agents. The Vercel for agents.
 
 | Metric | Count |
 |--------|-------|
-| API endpoints | 195 across 35 routers |
+| API endpoints | 240+ across 40 routers |
 | Builtin tools | 21 + 3,000+ via Pipedream |
-| Portal pages | 22 (Refine + Tremor) |
+| Portal pages | 28 (Refine + React Flow) |
 | LLM plans | 6 (basic/standard/premium/code/dedicated/private) |
 | Agent templates | 9 pre-built |
-| Database tables | 39 (SQLite WAL) |
-| Test suite | 597 tests |
+| Database tables | 52 (SQLite WAL) |
+| Test suite | 870+ tests |
+| Security probes | 14 OWASP LLM Top 10 |
+| Voice platforms | 5 (Vapi, ElevenLabs, Retell, Bland, Tavus) |
 
 ## Quick Start
 
@@ -37,7 +39,7 @@ agentos run research-assistant "What are the latest advances in RLHF?"
 # Interactive chat
 agentos chat research-assistant
 
-# Start the API server (195 endpoints)
+# Start the API server (240+ endpoints)
 agentos serve
 
 # Generate codebase dependency graph
@@ -52,21 +54,28 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Portal (React)                           │
-│  Dashboard · Agents · Sessions · Eval · Sandbox · Governance    │
-│  Memory · RAG · Billing · Integrations · API Explorer · ...     │
+│  Dashboard · Canvas · Sessions · Intelligence · Compliance      │
+│  Issues · Security · Voice · Eval · Billing · Governance · ...  │
 ├─────────────────────────────────────────────────────────────────┤
 │                     API Layer (FastAPI)                          │
-│  35 routers · 195 endpoints · RBAC · Rate limiting · A2A/MCP    │
+│  40 routers · 240+ endpoints · RBAC · Rate limiting · A2A/MCP   │
 ├─────────────────────────────────────────────────────────────────┤
 │                      Core Engine                                │
 │  Harness · LLM Router · Middleware · Memory · Tools · Skills    │
 │  Identity · Tracing · Governance · Events · Evolution           │
 ├─────────────────────────────────────────────────────────────────┤
+│               Intelligence & Security Layer                     │
+│  Sentiment · Quality · OWASP Probes · MAESTRO · AIVSS Scoring  │
+│  Issue Detection · Drift Detection · Compliance · Remediation   │
+├─────────────────────────────────────────────────────────────────┤
+│                   Integrations Layer                             │
+│  Vapi · ElevenLabs · Retell · Bland · Tavus · Pipedream (3K+)  │
+├─────────────────────────────────────────────────────────────────┤
 │                    LLM Providers                                │
 │  GMI Cloud (primary) · Anthropic · OpenAI · Cloudflare · Local  │
 ├─────────────────────────────────────────────────────────────────┤
 │                     Storage                                     │
-│  SQLite (WAL) · 39 tables · Migrations v1-v5                   │
+│  SQLite (WAL) · 52 tables · Migrations v1-v11 · Postgres       │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,8 +85,8 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 |-----------|--------|-------------|
 | **Agent** | `agentos.agent` | Agent definition, loading, execution, plan-based routing |
 | **Builder** | `agentos.builder` | Meta-agent that builds agents via LLM conversation |
-| **CLI** | `agentos.cli` | 16 commands + 9 subcommands |
-| **API** | `agentos.api` | 35 routers, 195 endpoints, RBAC + scoped API keys |
+| **CLI** | `agentos.cli` | 22 commands (intel, security, issues, gold-image, voice, ...) |
+| **API** | `agentos.api` | 40 routers, 240+ endpoints, RBAC + scoped API keys |
 | **Harness** | `agentos.core.harness` | Orchestration engine, middleware chain, turn lifecycle |
 | **Governance** | `agentos.core.governance` | Budget enforcement, policy checks, cost tracking |
 | **Identity** | `agentos.core.identity` | Cryptographic agent IDs + optional signing keypairs |
@@ -97,6 +106,11 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 | **Evolution** | `agentos.evolution` | Continuous improvement: analyzer, proposals, ledger, session recording |
 | **Sandbox** | `agentos.sandbox` | E2B cloud sandboxes with local fallback + virtual path isolation |
 | **Voice** | `agentos.voice` | Real-time STT/TTS with barge-in support |
+| **Observability** | `agentos.observability` | Conversation intelligence: sentiment analysis, quality scoring, trend analytics |
+| **Config Mgmt** | `agentos.config` | Gold images, drift detection, compliance enforcement, config audit |
+| **Issues** | `agentos.issues` | Auto-detection, classification, remediation suggestions, issue lifecycle |
+| **Security** | `agentos.security` | OWASP LLM Top 10 probes, MAESTRO 7-layer assessment, AIVSS risk scoring |
+| **Voice Platforms** | `agentos.integrations` | Vapi, ElevenLabs, Retell, Bland, Tavus — webhook + call management |
 | **Auth** | `agentos.auth` | JWT + Clerk + OAuth, RBAC (owner/admin/member/viewer) |
 | **Analysis** | `agentos.analysis` | Codebase graph maps (JSON + DOT + SVG) via `agentos codemap` |
 | **Deploy** | `deploy/` | Cloudflare Workers with Agents SDK |
@@ -192,7 +206,7 @@ agentos serve --port 8340
 uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8340
 ```
 
-### Key Endpoint Groups (35 routers, 195 endpoints)
+### Key Endpoint Groups (40 routers, 240+ endpoints)
 
 | Group | Prefix | Endpoints |
 |-------|--------|-----------|
@@ -228,6 +242,11 @@ uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8340
 | Compare | `/api/v1/compare` | A/B version comparison |
 | GPU | `/api/v1/gpu` | Dedicated GPU endpoint provisioning |
 | Retention | `/api/v1/retention` | Data lifecycle policies |
+| Intelligence | `/api/v1/intelligence` | Sentiment, quality, trends, session scoring |
+| Security | `/api/v1/security` | OWASP scans, AIVSS scoring, risk profiles |
+| Issues | `/api/v1/issues` | Auto-detection, classification, remediation, lifecycle |
+| Gold Images | `/api/v1/gold-images` | CRUD, drift, compliance, config audit |
+| Voice | `/api/v1/voice` | Vapi + 4 platforms: webhooks, calls, events |
 | A2A | `/.well-known/agent.json`, `/a2a` | Agent discovery + JSON-RPC |
 
 ### RBAC & API Keys
@@ -238,9 +257,9 @@ Role hierarchy: `owner > admin > member > viewer`
 
 API keys use `ak_` prefix and are scoped to org/project/environment.
 
-## Portal (Refine + Tremor)
+## Portal (React + Refine)
 
-22-page operator UI at `portal/`.
+28-page operator UI at `portal/`.
 
 | Page | Description |
 |------|-------------|
@@ -262,6 +281,11 @@ API keys use `ak_` prefix and are scoped to org/project/environment.
 | Reliability | SLO management, A/B comparison |
 | Infrastructure | GPU endpoints, retention policies |
 | Governance | Policies, secrets, audit trail |
+| Intelligence | Conversation quality, sentiment, topic trends |
+| Compliance | Gold images, drift detection, config audit |
+| Issues | Auto-detected issues, classification, remediation |
+| Security | OWASP scans, MAESTRO layers, AIVSS risk scores |
+| Voice | Vapi + ElevenLabs + Retell + Bland + Tavus call management |
 | Billing | Usage tracking, cost breakdown |
 | API Explorer | OpenAPI-backed endpoint browser |
 | Settings | API keys, org config |
@@ -357,9 +381,144 @@ session (trace_id)
 
 Traces are persisted to the `spans` table and queryable via `/api/v1/observability/traces`.
 
+## Conversation Intelligence
+
+Auto-scores every session for sentiment and quality, enabling data-driven agent improvement.
+
+```bash
+# Score a specific session
+agentos intel score <session_id>
+
+# View aggregate quality/sentiment stats
+agentos intel summary --since-days 30
+
+# View daily quality trends
+agentos intel trends --agent my-agent
+```
+
+| Component | Description |
+|-----------|-------------|
+| **Sentiment Analysis** | Rule-based analyzer (positive/negative/neutral/mixed) with negation handling |
+| **Quality Scoring** | Relevance, coherence, helpfulness, safety (0-1 scale) with weighted composite |
+| **Topic Detection** | 10 domain categories (coding, deployment, database, API, security, ...) |
+| **Intent Classification** | question, command, feedback, complaint, chitchat |
+| **Auto-scoring** | Sessions auto-scored on completion via `SESSION_END` event |
+| **Trend Analytics** | Daily quality/sentiment aggregation, failure rate tracking |
+
+**Portal**: `/intelligence` page with 4 tabs (Overview, Trends, Sessions, Scores).
+**Dashboard**: Avg Quality and Sentiment KPI cards.
+**Sessions page**: Quality bar + sentiment badge on every session row.
+
+## Security Red-Teaming & AIVSS Risk Scoring
+
+Automated security scanning using OWASP LLM Top 10 probes and the MAESTRO 7-layer threat model. Every finding is scored with AIVSS (AI Vulnerability Scoring System, 0-10 scale like CVSS).
+
+```bash
+# Run security scan on an agent
+agentos security scan my-agent
+
+# List available OWASP probes
+agentos security probes
+
+# View agent risk profile
+agentos security risk my-agent
+```
+
+| Framework | Description |
+|-----------|-------------|
+| **OWASP LLM Top 10** | 14 probes: prompt injection (LLM01), insecure output (LLM02), DoS (LLM04), supply chain (LLM05), sensitive info (LLM06), insecure plugins (LLM07), excessive agency (LLM08), overreliance (LLM09), model theft (LLM10) |
+| **MAESTRO** | 7-layer assessment: Foundation Model, Access Control, System Prompt, Tool Use, RAG Pipeline, Agent Orchestration, Deployment |
+| **AIVSS** | CVSS-like vector scoring: AV/AC/PR/S/CI/II/AI components, 0-10 scale, risk levels (none/low/medium/high/critical) |
+| **Runtime Probes** | Execute adversarial inputs against live agents and evaluate responses |
+| **Risk Profiles** | Per-agent risk profile updated on each scan, stored in DB |
+
+**Portal**: `/security` page with Scans, Risk Profiles, and Findings tabs. AIVSS score gauges.
+**API**: `POST /api/v1/security/scan/{agent_name}`, `POST /api/v1/security/aivss/calculate`, `GET /api/v1/security/risk-trends/{agent_name}`
+
+## Issue Tracking & Auto-Remediation
+
+Issues are auto-created from session failures, classified by category, and paired with fix suggestions.
+
+```bash
+# Detect issues from a session
+agentos issues detect <session_id>
+
+# List open issues
+agentos issues list --status open
+
+# View issue stats
+agentos issues summary
+```
+
+**Auto-detection triggers** (wired to `SESSION_END`):
+- Session errors/timeouts
+- Low quality scores (< 0.4)
+- Negative sentiment (< -0.5)
+- Tool failures (2+ per session)
+- Hallucination risks (2+ turns)
+- Budget overruns (> 80% of limit)
+
+**Categories**: security, tool_failure, hallucination, knowledge_gap, performance, config_drift
+
+**Remediation**: Each issue gets auto-generated fix suggestions. `POST /api/v1/issues/{id}/auto-fix` applies config changes to the agent JSON and logs to the config audit trail.
+
+**Portal**: `/issues` page with KPI cards, filterable table, detail drawer with fix suggestions.
+
+## Configuration Management (Gold Images)
+
+Gold images are locked, approved base configurations that agents must derive from. Drift detection compares running agents against their gold image.
+
+```bash
+# Create gold image from an agent
+agentos gold-image create my-agent
+
+# Check agent compliance
+agentos gold-image check my-agent
+
+# Show config drift
+agentos gold-image diff my-agent <image_id>
+
+# View config audit trail
+agentos gold-image audit
+```
+
+| Feature | Description |
+|---------|-------------|
+| **Gold Image CRUD** | Create, update, approve, delete blessed configs |
+| **Drift Detection** | Recursive config diff with severity levels (critical for governance, warning for model/tools, info for cosmetic) |
+| **Compliance Checking** | Auto-match against best gold image, or check against specific image |
+| **Config Audit Trail** | Every config change tracked with who/when/what/why |
+| **Startup Compliance** | Agents log warnings on startup if they've drifted from their gold image |
+
+**Portal**: `/compliance` page with Gold Images, Compliance Checks, and Audit Log tabs.
+
+## Voice Platform Integrations
+
+Five voice AI platforms with webhook ingestion, call management, and transcript capture.
+
+```bash
+# List Vapi calls
+agentos voice calls
+
+# View call summary
+agentos voice summary
+```
+
+| Platform | Features |
+|----------|----------|
+| **Vapi** | Full adapter: webhook events (call.started/ended, transcript, function-call, hang), outbound calls, signature verification |
+| **ElevenLabs** | Conversational AI: webhook events, conversation creation |
+| **Retell** | Real-time voice agents: webhook events, call creation |
+| **Bland** | Phone call AI: webhook events, call creation with task/voice config |
+| **Tavus** | Video AI agents: webhook events, persona-based conversations |
+
+All platforms share a common adapter interface with `verify_webhook()`, `process_webhook()`, `create_call()`, and `end_call()`. Webhooks are unauthenticated (signature-verified); call management endpoints require auth.
+
+**Portal**: `/voice` page with platform selector (Vapi/ElevenLabs/Retell/Bland/Tavus), call tables, event logs, transcript viewer.
+
 ## Database
 
-SQLite with WAL mode by default. 39 tables across 5 migration versions. Postgres available for production.
+SQLite with WAL mode by default. 52 tables across 11 migration versions. Postgres available for production.
 
 ```bash
 # SQLite (default)
@@ -395,19 +554,19 @@ data/               # SQLite DB (agent.db) + RAG documents + codemap.json
 agentos/
   agent.py          # Agent class, AgentConfig, plan-based routing
   builder.py        # Meta-agent that builds agents
-  cli.py            # 16 commands + 9 subcommands
+  cli.py            # 22 commands (intel, security, issues, gold-image, voice, ...)
   defaults.py       # Orchestrator prompt, templates, tool list
   scheduler.py      # Cron scheduling (auto-started in API server)
   env.py            # .env loader
   api/
-    app.py          # FastAPI app, 35 routers, background scheduler + job worker
+    app.py          # FastAPI app, 40 routers, background scheduler + job worker
     deps.py         # Auth, RBAC, scoped API keys (25+ scopes)
     ratelimit.py    # Sliding window rate limiter (120 RPM, 20 burst)
-    routers/        # 35 router files (195 endpoints total)
+    routers/        # 40 router files (240+ endpoints total)
     schemas.py      # Pydantic request/response models
   core/
     harness.py      # Agent execution engine, middleware chain, turn lifecycle
-    database.py     # SQLite WAL, 39 tables, migrations v1-v5
+    database.py     # SQLite WAL, 52 tables, migrations v1-v11
     db_config.py    # Database backend switching (SQLite / Postgres)
     postgres_database.py  # Postgres backend adapter
     governance.py   # Budget enforcement, policy checks, cost recording
@@ -471,6 +630,31 @@ agentos/
     ledger.py       # Version history + impact tracking
     observer.py     # Session recording for analysis
     session_record.py # Structured session data
+  observability/
+    sentiment.py    # Rule-based sentiment analysis (positive/negative/neutral/mixed)
+    quality.py      # Heuristic quality scoring (relevance, coherence, helpfulness, safety)
+    analytics.py    # Session-level aggregation, trend detection
+  security/
+    owasp_probes.py # 14 OWASP LLM Top 10 probes (config + runtime)
+    maestro.py      # 7-layer MAESTRO threat model assessment
+    aivss.py        # CVSS-like scoring (0-10 scale, vector components)
+    redteam.py      # Red-team runner (config + runtime scanning)
+    report.py       # Structured vulnerability report generation
+  config/
+    gold_image.py   # Gold image CRUD + approval workflow
+    drift.py        # Recursive config diff with severity classification
+    compliance.py   # Agent vs gold image compliance checking
+  issues/
+    detector.py     # Auto-detect issues from sessions (6 trigger types)
+    classifier.py   # Category + severity classification (6 categories)
+    remediation.py  # Fix suggestions + auto-remediate config changes
+  integrations/
+    voice_platforms/
+      vapi.py       # Vapi adapter (webhooks, calls, transcripts)
+      elevenlabs.py # ElevenLabs conversational AI adapter
+      retell.py     # Retell real-time voice agent adapter
+      bland.py      # Bland phone call AI adapter
+      tavus.py      # Tavus video AI agent adapter
   analysis/
     codemap.py      # Codebase graph generator (JSON + DOT + SVG)
   voice/
@@ -479,15 +663,15 @@ agentos/
     tts.py          # Text-to-speech (streaming)
 portal/             # React portal (Refine + Tremor)
   src/
-    App.tsx         # Routes (22 pages) + providers
+    App.tsx         # Routes (28 pages) + providers
     providers/      # authProvider.ts, dataProvider.ts
-    pages/          # 22 page components
+    pages/          # 28 page components
     components/     # Sidebar, PageHeader, QueryState, ConfirmDialog, Toast, ErrorBoundary
     auth/           # ClerkSessionManager, jwt, tokens, config
     lib/            # api.ts, auth.ts, adapters.ts, validation.ts (with tests)
 deploy/             # Cloudflare Workers (Agents SDK v0.5+)
   src/index.ts      # AgentOSAgent (@callable), AgentOSMcpServer, schedule/queue
-tests/              # 597 tests
+tests/              # 870+ tests (270 for new features)
 .github/workflows/  # CI (Python 3.12 + 3.13)
 Dockerfile          # Self-hosted deployment
 docker-compose.yml
@@ -510,6 +694,14 @@ E2B_API_KEY=e2b_...              # E2B cloud sandboxes
 PIPEDREAM_API_KEY=pd_...         # 3,000+ app integrations
 PIPEDREAM_PROJECT_ID=proj_...
 PIPEDREAM_CONNECT_TOKEN=...
+
+# Voice Platforms
+VAPI_API_KEY=...                 # Vapi voice AI
+VAPI_WEBHOOK_SECRET=...
+ELEVENLABS_API_KEY=...           # ElevenLabs TTS/Conversational AI
+RETELL_API_KEY=...               # Retell real-time voice
+BLAND_API_KEY=...                # Bland phone call AI
+TAVUS_API_KEY=...                # Tavus video AI
 
 # Auth
 AGENTOS_AUTH_PROVIDER=local      # local or clerk

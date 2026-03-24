@@ -650,3 +650,257 @@ class TestGoldImagesAPIExtended:
         )
         assert resp.status_code == 200
         assert "drifted_fields" in resp.json()
+
+
+# ── Production-Readiness: Integration + Edge Cases ──────────────────
+
+
+class TestDriftEdgeCases:
+    def setup_method(self):
+        from agentos.config.drift import DriftDetector
+        self.detector = DriftDetector()
+
+    def test_unicode_field_names(self):
+        gold = {"système_prompt": "bonjour", "model": "claude"}
+        agent = {"système_prompt": "bonjour", "model": "claude"}
+        report = self.detector.detect(agent, gold, agent_name="a1")
+        assert report.total_drifts == 0
+
+    def test_deeply_nested_drift(self):
+        gold = {"a": {"b": {"c": {"d": 1}}}}
+        agent = {"a": {"b": {"c": {"d": 2}}}}
+        report = self.detector.detect(agent, gold, agent_name="a1")
+        assert report.total_drifts == 1
+        assert report.drifted_fields[0].field == "a.b.c.d"
+
+    def test_extra_fields_in_agent(self):
+        gold = {"model": "claude"}
+        agent = {"model": "claude", "extra_field": "value"}
+        report = self.detector.detect(agent, gold, agent_name="a1")
+        assert report.total_drifts == 1  # extra field counts as drift
+
+    def test_missing_fields_in_agent(self):
+        gold = {"model": "claude", "max_turns": 10}
+        agent = {"model": "claude"}
+        report = self.detector.detect(agent, gold, agent_name="a1")
+        assert report.total_drifts == 1  # missing field counts as drift
+
+    def test_empty_configs(self):
+        report = self.detector.detect({}, {}, agent_name="a1")
+        assert report.total_drifts == 0
+        assert report.status == "compliant"
+
+
+class TestComplianceIntegration:
+    """Full pipeline: create gold image → check agent → persist check."""
+
+    def test_full_compliance_pipeline(self, tmp_path):
+        from agentos.core.database import AgentDB
+        from agentos.config.gold_image import GoldImageManager
+        from agentos.config.compliance import ComplianceChecker
+
+        db = AgentDB(tmp_path / "compliance_int.db")
+        db.initialize()
+
+        # Create gold image
+        mgr = GoldImageManager(db)
+        gold = mgr.create(
+            name="prod-gold", org_id="org1",
+            config={"model": "claude", "max_turns": 10, "governance": {"budget_limit_usd": 5.0}},
+        )
+
+        # Check compliant agent
+        checker = ComplianceChecker(db)
+        report = checker.check_agent(
+            agent_name="good-agent",
+            agent_config={"model": "claude", "max_turns": 10, "governance": {"budget_limit_usd": 5.0}},
+            image_id=gold["image_id"], org_id="org1",
+        )
+        assert report.status == "compliant"
+
+        # Check drifted agent
+        report2 = checker.check_agent(
+            agent_name="bad-agent",
+            agent_config={"model": "gpt-4", "max_turns": 100, "governance": {"budget_limit_usd": 500.0}},
+            image_id=gold["image_id"], org_id="org1",
+        )
+        assert report2.status in ("drifted", "critical")
+        assert report2.total_drifts >= 2
+
+        # Verify persisted checks
+        checks = db.list_compliance_checks(org_id="org1")
+        assert len(checks) == 2
+
+        # Verify audit trail
+        audit = db.list_config_audit(org_id="org1")
+        assert len(audit) >= 1  # gold image creation logged
+
+        # Summary
+        summary = checker.compliance_summary(org_id="org1")
+        assert summary["total_checks"] == 2
+        assert summary["compliant"] == 1
+
+        db.close()
+
+
+class TestGoldImageAuthEnforcement:
+    """Verify all endpoints require auth."""
+
+    @pytest.fixture
+    def api_client(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "agents").mkdir()
+        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
+        db = create_database(tmp_path / "data" / "agent.db")
+        for m in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
+            for s in m.split(";"):
+                s = s.strip()
+                if s and not s.startswith("--"):
+                    try: db.conn.execute(s)
+                    except: pass
+        db.conn.commit(); db.close()
+        from agentos.api.app import create_app
+        from agentos.core.harness import AgentHarness
+        return TestClient(create_app(AgentHarness()))
+
+    def test_list_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/gold-images").status_code == 401
+
+    def test_create_requires_auth(self, api_client):
+        assert api_client.post("/api/v1/gold-images", json={"name": "x", "config": {}}).status_code == 401
+
+    def test_compliance_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/gold-images/compliance/summary").status_code == 401
+
+    def test_audit_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/gold-images/audit").status_code == 401
+
+
+# ── Compliance Enforcement (pre-run gate) ──────────────────────────
+
+
+class TestComplianceEnforcement:
+    """Tests for _enforce_compliance() blocking agent execution."""
+
+    def _make_agent(self, name="test-agent", config_dict=None):
+        """Build a mock agent with a config that has .name and .to_dict()."""
+        from unittest.mock import MagicMock
+        agent = MagicMock()
+        agent.config.name = name
+        agent.config.to_dict.return_value = config_dict or {"model": "claude"}
+        return agent
+
+    def _make_user(self, org_id="org1", user_id="u1"):
+        from unittest.mock import MagicMock
+        user = MagicMock()
+        user.org_id = org_id
+        user.user_id = user_id
+        return user
+
+    def test_no_gold_images_allows_run(self):
+        """When no gold images exist, agent runs fine (status != critical)."""
+        from unittest.mock import patch, MagicMock
+        from agentos.api.routers.agents import _enforce_compliance
+
+        mock_report = MagicMock()
+        mock_report.status = "no_gold_images"
+
+        mock_checker_instance = MagicMock()
+        mock_checker_instance.check_agent.return_value = mock_report
+
+        with patch("agentos.api.routers.agents._get_db"), \
+             patch("agentos.config.compliance.ComplianceChecker", return_value=mock_checker_instance):
+            # Should not raise
+            _enforce_compliance(self._make_agent(), self._make_user())
+
+    def test_compliant_agent_allows_run(self):
+        """Agent matches gold image — no block."""
+        from unittest.mock import patch, MagicMock
+        from agentos.api.routers.agents import _enforce_compliance
+
+        mock_report = MagicMock()
+        mock_report.status = "compliant"
+
+        mock_checker_instance = MagicMock()
+        mock_checker_instance.check_agent.return_value = mock_report
+
+        with patch("agentos.api.routers.agents._get_db"), \
+             patch("agentos.config.compliance.ComplianceChecker", return_value=mock_checker_instance):
+            _enforce_compliance(self._make_agent(), self._make_user())
+
+    def test_critical_drift_blocks_run(self):
+        """Agent has critical drift — raises HTTPException 403."""
+        from unittest.mock import patch, MagicMock
+        from fastapi import HTTPException
+        from agentos.api.routers.agents import _enforce_compliance
+
+        mock_drift = MagicMock()
+        mock_drift.field = "governance.budget_limit_usd"
+
+        mock_report = MagicMock()
+        mock_report.status = "critical"
+        mock_report.image_name = "prod-gold"
+        mock_report.drifted_fields = [mock_drift]
+
+        mock_checker_instance = MagicMock()
+        mock_checker_instance.check_agent.return_value = mock_report
+
+        with patch("agentos.api.routers.agents._get_db"), \
+             patch("agentos.config.compliance.ComplianceChecker", return_value=mock_checker_instance):
+            with pytest.raises(HTTPException) as exc_info:
+                _enforce_compliance(self._make_agent(name="bad-agent"), self._make_user())
+            assert exc_info.value.status_code == 403
+
+    def test_drifted_agent_allows_run(self):
+        """Non-critical drift — allowed to proceed."""
+        from unittest.mock import patch, MagicMock
+        from agentos.api.routers.agents import _enforce_compliance
+
+        mock_report = MagicMock()
+        mock_report.status = "drifted"
+
+        mock_checker_instance = MagicMock()
+        mock_checker_instance.check_agent.return_value = mock_report
+
+        with patch("agentos.api.routers.agents._get_db"), \
+             patch("agentos.config.compliance.ComplianceChecker", return_value=mock_checker_instance):
+            _enforce_compliance(self._make_agent(), self._make_user())
+
+    def test_db_error_allows_run(self):
+        """If DB fails, don't block (best-effort)."""
+        from unittest.mock import patch
+        from agentos.api.routers.agents import _enforce_compliance
+
+        with patch("agentos.api.routers.agents._get_db", side_effect=RuntimeError("DB unavailable")):
+            # Should not raise — best-effort compliance
+            _enforce_compliance(self._make_agent(), self._make_user())
+
+    def test_error_message_includes_agent_name(self):
+        """Verify the 403 message includes agent name and drift fields."""
+        from unittest.mock import patch, MagicMock
+        from fastapi import HTTPException
+        from agentos.api.routers.agents import _enforce_compliance
+
+        mock_drift_1 = MagicMock()
+        mock_drift_1.field = "governance.budget_limit_usd"
+        mock_drift_2 = MagicMock()
+        mock_drift_2.field = "model"
+
+        mock_report = MagicMock()
+        mock_report.status = "critical"
+        mock_report.image_name = "prod-gold"
+        mock_report.drifted_fields = [mock_drift_1, mock_drift_2]
+
+        mock_checker_instance = MagicMock()
+        mock_checker_instance.check_agent.return_value = mock_report
+
+        with patch("agentos.api.routers.agents._get_db"), \
+             patch("agentos.config.compliance.ComplianceChecker", return_value=mock_checker_instance):
+            with pytest.raises(HTTPException) as exc_info:
+                _enforce_compliance(self._make_agent(name="rogue-agent"), self._make_user())
+            detail = exc_info.value.detail
+            assert "rogue-agent" in detail
+            assert "governance.budget_limit_usd" in detail
+            assert "model" in detail
+            assert "prod-gold" in detail

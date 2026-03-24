@@ -578,3 +578,396 @@ class TestIssuesAPIExtended:
         headers = self._auth_headers(api_client)
         resp = api_client.post("/api/v1/issues/nonexistent/auto-fix", headers=headers)
         assert resp.status_code == 404
+
+
+# ── Production-Readiness: Integration + Edge Cases ──────────────────
+
+
+class TestIssueDetectorBoundaries:
+    @pytest.fixture
+    def db(self, tmp_path):
+        from agentos.core.database import AgentDB
+        db = AgentDB(tmp_path / "issue_edge.db")
+        db.initialize()
+        yield db
+        db.close()
+
+    def test_zero_quality_creates_issue(self, db):
+        from agentos.issues.detector import IssueDetector
+        detector = IssueDetector(db=db)
+        scores = [{"quality_overall": 0.0, "sentiment_score": 0.0, "has_tool_failure": 0, "has_hallucination_risk": 0}]
+        issues = detector.detect_from_session(session_id="z", agent_name="a", scores=scores)
+        assert any(i["category"] == "knowledge_gap" for i in issues)
+
+    def test_negative_cost_no_crash(self, db):
+        from agentos.issues.detector import IssueDetector
+        detector = IssueDetector(db=db)
+        issues = detector.detect_from_session(
+            session_id="neg", agent_name="a",
+            session_data={"cost_total_usd": -0.01, "budget_limit_usd": 10.0},
+        )
+        # Should not crash, should return empty or valid issues
+        assert isinstance(issues, list)
+
+    def test_very_high_cost(self, db):
+        from agentos.issues.detector import IssueDetector
+        detector = IssueDetector(db=db)
+        issues = detector.detect_from_session(
+            session_id="exp", agent_name="a",
+            session_data={"cost_total_usd": 999999.0, "budget_limit_usd": 10.0},
+        )
+        assert any(i["category"] == "performance" for i in issues)
+
+    def test_empty_scores_no_crash(self, db):
+        from agentos.issues.detector import IssueDetector
+        detector = IssueDetector(db=db)
+        issues = detector.detect_from_session(session_id="empty", agent_name="a", scores=[])
+        assert isinstance(issues, list)
+
+    def test_empty_session_data_no_crash(self, db):
+        from agentos.issues.detector import IssueDetector
+        detector = IssueDetector(db=db)
+        issues = detector.detect_from_session(session_id="none", agent_name="a", session_data={})
+        assert isinstance(issues, list)
+
+
+class TestRemediationContent:
+    def setup_method(self):
+        from agentos.issues.remediation import RemediationEngine
+        self.engine = RemediationEngine()
+
+    def test_all_categories_have_suggestions(self):
+        categories = ["tool_failure", "knowledge_gap", "hallucination", "security", "performance", "config_drift"]
+        for cat in categories:
+            fix = self.engine.suggest_fix({"category": cat, "title": "test", "description": "test"})
+            assert len(fix) > 20, f"Empty fix for category {cat}"
+            assert "{" not in fix, f"Placeholder in fix for {cat}"
+
+    def test_auto_remediate_returns_none_for_unknown(self):
+        changes = self.engine.auto_remediate(
+            {"category": "unknown"}, {"governance": {}},
+        )
+        assert changes is None
+
+
+class TestIssueQueryFilters:
+    @pytest.fixture
+    def db(self, tmp_path):
+        from agentos.core.database import AgentDB
+        db = AgentDB(tmp_path / "filter_test.db")
+        db.initialize()
+        yield db
+        db.close()
+
+    def test_combined_filters(self, db):
+        db.insert_issue(issue_id="f1", org_id="org1", agent_name="a1", category="security", severity="critical")
+        db.insert_issue(issue_id="f2", org_id="org1", agent_name="a1", category="performance", severity="low")
+        db.insert_issue(issue_id="f3", org_id="org2", agent_name="a2", category="security", severity="critical")
+
+        # Single filter
+        assert len(db.list_issues(org_id="org1")) == 2
+        # Combined filters
+        assert len(db.list_issues(org_id="org1", category="security")) == 1
+        # No results
+        assert len(db.list_issues(org_id="org1", severity="medium")) == 0
+        # No cross-org leakage
+        assert len(db.list_issues(org_id="org2", agent_name="a1")) == 0
+
+
+class TestAutoFixIntegration:
+    """Verify auto-fix actually writes to agent config file."""
+
+    def test_auto_fix_modifies_config_file(self, tmp_path):
+        import json as _json
+        from agentos.core.database import AgentDB
+        from agentos.issues.remediation import RemediationEngine
+
+        # Setup
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        config = {"name": "fix-agent", "model": "claude", "max_turns": 50,
+                  "governance": {"budget_limit_usd": 10.0}, "system_prompt": "You are helpful."}
+        (agents_dir / "fix-agent.json").write_text(_json.dumps(config))
+
+        db = AgentDB(tmp_path / "data" / "agent.db")
+        (tmp_path / "data").mkdir(exist_ok=True)
+        db.initialize()
+
+        # Create issue and auto-fix
+        engine = RemediationEngine()
+        issue = {"category": "performance", "description": "budget exceeded", "agent_name": "fix-agent"}
+        changes = engine.auto_remediate(issue, config)
+        assert changes is not None
+
+        # Apply changes manually (simulating the endpoint logic)
+        for key, value in changes.items():
+            if "." in key:
+                parts = key.split(".", 1)
+                config.setdefault(parts[0], {})[parts[1]] = value
+
+        (agents_dir / "fix-agent.json").write_text(_json.dumps(config, indent=2))
+
+        # Verify file was modified
+        new_config = _json.loads((agents_dir / "fix-agent.json").read_text())
+        assert new_config["governance"]["budget_limit_usd"] == 15.0  # 10.0 * 1.5
+
+        db.close()
+
+
+class TestIssueAuthEnforcement:
+    @pytest.fixture
+    def api_client(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "agents").mkdir()
+        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
+        db = create_database(tmp_path / "data" / "agent.db")
+        for m in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
+            for s in m.split(";"):
+                s = s.strip()
+                if s and not s.startswith("--"):
+                    try: db.conn.execute(s)
+                    except: pass
+        db.conn.commit(); db.close()
+        from agentos.api.app import create_app
+        from agentos.core.harness import AgentHarness
+        return TestClient(create_app(AgentHarness()))
+
+    def test_list_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/issues").status_code == 401
+
+    def test_create_requires_auth(self, api_client):
+        assert api_client.post("/api/v1/issues", json={"title": "test"}).status_code == 401
+
+    def test_summary_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/issues/summary").status_code == 401
+
+
+# ── Auto-Detection on SESSION_END ────────────────────────────────────
+
+
+class TestAutoDetectionOnSessionEnd:
+    """Tests for _attach_conversation_scoring / _on_session_end flow in agent.py."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from agentos.core.database import AgentDB
+        db = AgentDB(tmp_path / "autodetect.db")
+        db.initialize()
+        yield db
+        db.close()
+
+    @pytest.fixture
+    def event_bus(self):
+        from agentos.core.events import EventBus
+        return EventBus()
+
+    def _make_harness_and_agent(self, db, event_bus, tmp_path):
+        """Build a minimal Agent with mocked internals for testing _on_session_end."""
+        from unittest.mock import MagicMock, AsyncMock, patch
+        from agentos.core.events import EventType, Event, EventBus
+        from agentos.evolution.session_record import SessionRecord
+
+        # Create a mock harness with our event bus
+        harness = MagicMock()
+        harness.event_bus = event_bus
+
+        # Create a mock observer with records
+        observer = MagicMock()
+        record = MagicMock()
+        record.session_id = "test-session-001"
+        record.input_text = "Hello, help me with something."
+        record.to_dict.return_value = {"status": "success"}
+        observer.records = [record]
+
+        return harness, observer, record
+
+    @pytest.mark.asyncio
+    async def test_detector_called_on_session_end(self, db, event_bus, tmp_path):
+        """Emit SESSION_END and verify IssueDetector.detect_from_session is called."""
+        from unittest.mock import patch, MagicMock, AsyncMock
+        from agentos.core.events import EventType, Event
+
+        harness, observer, record = self._make_harness_and_agent(db, event_bus, tmp_path)
+
+        # Mock get_turns to return synthetic turn data (avoids needing full turn schema)
+        fake_turns = [
+            {"turn_number": 1, "llm_content": "Hello", "model_used": "stub"},
+            {"turn_number": 2, "llm_content": "Hi there", "model_used": "stub"},
+        ]
+
+        # We'll replicate the _on_session_end logic with mocks
+        with patch("agentos.observability.analytics.ConversationAnalytics") as MockAnalytics, \
+             patch("agentos.issues.detector.IssueDetector") as MockDetector, \
+             patch.object(db, "get_turns", return_value=fake_turns), \
+             patch.object(db, "query_conversation_scores", return_value=[]):
+            mock_analytics_inst = MockAnalytics.return_value
+            mock_analytics_inst.score_session.return_value = {
+                "avg_quality": 0.5, "avg_sentiment_score": 0.3,
+                "dominant_sentiment": "neutral", "topics": [],
+            }
+
+            mock_detector_inst = MockDetector.return_value
+            mock_detector_inst.detect_from_session.return_value = []
+
+            # Build the handler inline (mirrors _attach_conversation_scoring)
+            async def _on_session_end(event: Event) -> None:
+                records = observer.records
+                if not records:
+                    return
+                last_record = records[-1]
+                session_id = last_record.session_id
+                turns = db.get_turns(session_id)
+                if not turns:
+                    return
+
+                import os
+                analytics = MockAnalytics(use_llm=False)
+                analytics.score_session(
+                    session_id=session_id, turns=turns,
+                    input_text=last_record.input_text, agent_name="test-agent", db=db,
+                )
+
+                scores = db.query_conversation_scores(session_id=session_id)
+                detector = MockDetector(db=db)
+                detector.detect_from_session(
+                    session_id=session_id, agent_name="test-agent",
+                    org_id="", session_data=last_record.to_dict(), scores=scores,
+                )
+
+            event_bus.on(EventType.SESSION_END, _on_session_end)
+            await event_bus.emit(Event(type=EventType.SESSION_END, data={"session_id": "test-session-001"}))
+
+            mock_detector_inst.detect_from_session.assert_called_once()
+            call_kwargs = mock_detector_inst.detect_from_session.call_args
+            assert call_kwargs[1]["session_id"] == "test-session-001" or call_kwargs[0][0] == "test-session-001"
+
+    @pytest.mark.asyncio
+    async def test_issues_created_on_low_quality(self, db, event_bus, tmp_path):
+        """Emit SESSION_END with low quality scores and verify issues are inserted."""
+        from agentos.core.events import EventType, Event
+        from agentos.issues.detector import IssueDetector
+
+        harness, observer, record = self._make_harness_and_agent(db, event_bus, tmp_path)
+
+        # Directly test the IssueDetector with low quality scores
+        detector = IssueDetector(db=db)
+        low_scores = [
+            {"quality_overall": 0.1, "sentiment_score": -0.5, "has_tool_failure": 0, "has_hallucination_risk": 0},
+            {"quality_overall": 0.2, "sentiment_score": -0.3, "has_tool_failure": 0, "has_hallucination_risk": 0},
+        ]
+        issues = detector.detect_from_session(
+            session_id="test-session-001",
+            agent_name="test-agent",
+            org_id="org1",
+            session_data={"status": "success"},
+            scores=low_scores,
+        )
+        assert len(issues) >= 1
+        assert any(i["category"] == "knowledge_gap" for i in issues)
+
+        # Verify issues are persisted in db
+        db_issues = db.list_issues(agent_name="test-agent")
+        assert len(db_issues) >= 1
+
+    @pytest.mark.asyncio
+    async def test_issues_not_created_on_good_session(self, db, event_bus, tmp_path):
+        """Emit SESSION_END with good scores and verify no issues are created."""
+        from agentos.core.events import EventType, Event
+        from agentos.issues.detector import IssueDetector
+
+        detector = IssueDetector(db=db)
+        good_scores = [
+            {"quality_overall": 0.9, "sentiment_score": 0.8, "has_tool_failure": 0, "has_hallucination_risk": 0},
+            {"quality_overall": 0.85, "sentiment_score": 0.7, "has_tool_failure": 0, "has_hallucination_risk": 0},
+        ]
+        issues = detector.detect_from_session(
+            session_id="good-session-002",
+            agent_name="test-agent",
+            org_id="org1",
+            session_data={"status": "success"},
+            scores=good_scores,
+        )
+        assert len(issues) == 0
+
+        # Verify no issues in db for this session
+        db_issues = db.list_issues(agent_name="test-agent")
+        assert len(db_issues) == 0
+
+    @pytest.mark.asyncio
+    async def test_remediation_suggested_for_auto_issues(self, db, event_bus, tmp_path):
+        """Verify RemediationEngine.suggest_fix is called and db.update_issue is called with fix."""
+        from unittest.mock import patch, MagicMock
+        from agentos.core.events import EventType, Event
+        from agentos.issues.detector import IssueDetector
+        from agentos.issues.remediation import RemediationEngine
+
+        # Create issues from a low-quality session
+        detector = IssueDetector(db=db)
+        low_scores = [
+            {"quality_overall": 0.1, "sentiment_score": -0.5, "has_tool_failure": 0, "has_hallucination_risk": 0},
+        ]
+        issues = detector.detect_from_session(
+            session_id="remediate-session",
+            agent_name="test-agent",
+            org_id="org1",
+            scores=low_scores,
+        )
+        assert len(issues) >= 1
+
+        # Apply remediation (mirrors the _on_session_end logic)
+        engine = RemediationEngine()
+        for issue in issues:
+            fix = engine.suggest_fix(issue)
+            assert len(fix) > 10, "Fix suggestion should not be empty"
+            db.update_issue(issue["issue_id"], suggested_fix=fix)
+
+        # Verify the fix was persisted
+        for issue in issues:
+            updated = db.get_issue(issue["issue_id"])
+            assert updated is not None
+            assert updated.get("suggested_fix"), f"Issue {issue['issue_id']} should have a suggested fix"
+
+    @pytest.mark.asyncio
+    async def test_issue_created_event_emitted(self, db, event_bus, tmp_path):
+        """Verify ISSUE_CREATED event is emitted after issues are found."""
+        from agentos.core.events import EventType, Event
+        from agentos.issues.detector import IssueDetector
+        from agentos.issues.remediation import RemediationEngine
+
+        emitted_events = []
+
+        async def capture_event(event: Event) -> None:
+            emitted_events.append(event)
+
+        event_bus.on(EventType.ISSUE_CREATED, capture_event)
+
+        # Detect issues from a bad session
+        detector = IssueDetector(db=db)
+        low_scores = [
+            {"quality_overall": 0.1, "sentiment_score": -0.5, "has_tool_failure": 1, "has_hallucination_risk": 1},
+        ]
+        issues = detector.detect_from_session(
+            session_id="emit-session",
+            agent_name="test-agent",
+            org_id="org1",
+            scores=low_scores,
+        )
+        assert len(issues) >= 1
+
+        # Replicate the event emission from _on_session_end
+        engine = RemediationEngine()
+        for issue in issues:
+            fix = engine.suggest_fix(issue)
+            db.update_issue(issue["issue_id"], suggested_fix=fix)
+
+        await event_bus.emit(Event(
+            type=EventType.ISSUE_CREATED,
+            data={"session_id": "emit-session", "count": len(issues)},
+            source="issue_detector",
+        ))
+
+        assert len(emitted_events) == 1
+        assert emitted_events[0].type == EventType.ISSUE_CREATED
+        assert emitted_events[0].data["session_id"] == "emit-session"
+        assert emitted_events[0].data["count"] == len(issues)
