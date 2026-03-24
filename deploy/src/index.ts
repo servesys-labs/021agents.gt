@@ -3098,31 +3098,58 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
         return Response.json({ error: "url is required" }, { status: 400 });
       }
 
+      const acctId = env.CLOUDFLARE_ACCOUNT_ID;
+      const apiToken = env.CLOUDFLARE_API_TOKEN;
+      if (!acctId || !apiToken) {
+        return Response.json({ error: "CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN secrets required for crawl" }, { status: 503 });
+      }
+
       try {
-        // Use Cloudflare's Browser Rendering /crawl endpoint
-        const crawlResp = await fetch(
-          `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID || ""}/browser-rendering/crawl`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${env.CLOUDFLARE_API_TOKEN || ""}`,
-            },
-            body: JSON.stringify({
-              url: body.url,
-              scrapeOptions: { formats: [body.format || "markdown"] },
-              limit: body.maxPages || 5,
-              maxDepth: body.maxDepth || 1,
-              includePaths: body.includePatterns,
-              excludePaths: body.excludePatterns,
-            }),
-          },
-        );
-        const result = await crawlResp.json() as any;
+        const base = `https://api.cloudflare.com/client/v4/accounts/${acctId}/browser-rendering/crawl`;
+        const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${apiToken}` };
+
+        // Step 1: Start async crawl job
+        const startResp = await fetch(base, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ url: body.url }),
+        });
+        const startData = await startResp.json() as any;
+        if (!startData.success) {
+          return Response.json({ success: false, error: startData.errors?.[0]?.message || "Crawl start failed" });
+        }
+        const jobId = startData.result;
+
+        // Step 2: Poll for results (up to 30s)
+        let result: any = null;
+        for (let i = 0; i < 15; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const pollResp = await fetch(`${base}/${jobId}`, { headers: { "Authorization": `Bearer ${apiToken}` } });
+          const pollData = await pollResp.json() as any;
+          if (pollData.result?.status === "completed") {
+            result = pollData.result;
+            break;
+          }
+          if (pollData.result?.status === "failed") {
+            return Response.json({ success: false, error: "Crawl job failed" });
+          }
+        }
+
+        if (!result) {
+          return Response.json({ success: true, jobId, status: "pending", message: "Crawl still running" });
+        }
+
+        // Return records with HTML content
         return Response.json({
-          success: crawlResp.ok,
-          pages: result.result?.data || result.data || [],
-          metadata: result.result?.metadata || {},
+          success: true,
+          total: result.total || 0,
+          pages: (result.records || []).filter((r: any) => r.status === "completed").map((r: any) => ({
+            url: r.url,
+            title: r.metadata?.title || "",
+            html: r.html || "",
+            lastModified: r.metadata?.lastModified || "",
+          })),
+          browserSeconds: result.browserSecondsUsed || 0,
         });
       } catch (err: any) {
         return Response.json({ error: `Crawl failed: ${err.message}` }, { status: 500 });
