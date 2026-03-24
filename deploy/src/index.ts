@@ -3282,6 +3282,8 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
         text?: string;
         org_id?: string;
         project_id?: string;
+        agent_name?: string;
+        shared?: boolean;       // true = org-wide, false = agent-scoped (default)
         source?: string;
         chunk_size?: number;
       };
@@ -3292,6 +3294,8 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
 
       const orgId = body.org_id || "default";
       const projectId = body.project_id || "default";
+      const agentName = body.agent_name || "shared";
+      const isShared = body.shared ?? false;
       const source = body.source || body.url || "manual";
       const chunkSize = body.chunk_size || 512;
 
@@ -3340,12 +3344,14 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
 
       // Step 4: Store in Vectorize
       if (env.VECTORIZE && embedResults.length > 0) {
+        const scope = isShared ? "shared" : agentName;
         const vectors = embedResults.map((embedding: number[], idx: number) => ({
-          id: `${orgId}-${projectId}-${Date.now()}-${idx}`,
+          id: `${orgId}-${projectId}-${scope}-${Date.now()}-${idx}`,
           values: embedding,
           metadata: {
             org_id: orgId,
             project_id: projectId,
+            agent_name: scope,  // "shared" for org-wide, agent name for agent-scoped
             source,
             chunk_index: idx,
             text: chunks[idx]?.slice(0, 500) || "",
@@ -3361,11 +3367,13 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       // Step 5: Store original doc in R2
       if (env.STORAGE) {
         const docId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        const key = `${orgId}/${projectId}/knowledge/${docId}/source.txt`;
+        const scope = isShared ? "shared" : agentName;
+        const key = `${orgId}/${projectId}/knowledge/${scope}/${docId}/source.txt`;
         await env.STORAGE.put(key, text, {
           customMetadata: {
             org_id: orgId,
             project_id: projectId,
+            agent_name: scope,
             source,
             chunks: String(chunks.length),
             ingested_at: new Date().toISOString(),
@@ -3376,6 +3384,8 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       return Response.json({
         success: true,
         source,
+        agent_name: isShared ? "shared" : agentName,
+        shared: isShared,
         chunks_created: chunks.length,
         vectors_stored: embedResults.length,
         text_length: text.length,
@@ -3388,6 +3398,7 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
         query: string;
         org_id?: string;
         project_id?: string;
+        agent_name?: string;
         top_k?: number;
       };
 
@@ -3398,25 +3409,62 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       const queryVector = embedResult.data?.[0];
       if (!queryVector) return Response.json({ error: "Embedding failed" }, { status: 500 });
 
-      // Search Vectorize with metadata filter
-      const filter: any = {};
-      if (body.org_id) filter.org_id = body.org_id;
-      if (body.project_id) filter.project_id = body.project_id;
+      const topK = body.top_k || 5;
+      const allMatches: any[] = [];
 
-      const results = await env.VECTORIZE.query(queryVector, {
-        topK: body.top_k || 5,
-        returnMetadata: "all",
-        filter: Object.keys(filter).length > 0 ? filter : undefined,
-      });
+      // Search 1: Agent-scoped docs (highest priority)
+      if (body.agent_name && body.org_id) {
+        const agentResults = await env.VECTORIZE.query(queryVector, {
+          topK,
+          returnMetadata: "all",
+          filter: { org_id: body.org_id, agent_name: body.agent_name },
+        });
+        for (const m of agentResults.matches || []) {
+          allMatches.push({ ...m, scope: "agent" });
+        }
+      }
+
+      // Search 2: Org-wide shared docs
+      if (body.org_id) {
+        const sharedResults = await env.VECTORIZE.query(queryVector, {
+          topK,
+          returnMetadata: "all",
+          filter: { org_id: body.org_id, agent_name: "shared" },
+        });
+        for (const m of sharedResults.matches || []) {
+          allMatches.push({ ...m, scope: "shared" });
+        }
+      }
+
+      // If no scoped search was done, search everything
+      if (allMatches.length === 0) {
+        const globalResults = await env.VECTORIZE.query(queryVector, {
+          topK,
+          returnMetadata: "all",
+        });
+        for (const m of globalResults.matches || []) {
+          allMatches.push({ ...m, scope: "global" });
+        }
+      }
+
+      // Dedupe by vector ID, sort by score descending, take top_k
+      const seen = new Set<string>();
+      const deduped = allMatches.filter(m => {
+        if (seen.has(m.id)) return false;
+        seen.add(m.id);
+        return true;
+      }).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, topK);
 
       return Response.json({
-        matches: results.matches?.map((m: any) => ({
+        matches: deduped.map((m: any) => ({
           score: m.score,
           text: m.metadata?.text || "",
           source: m.metadata?.source || "",
+          agent_name: m.metadata?.agent_name || "",
           org_id: m.metadata?.org_id || "",
           project_id: m.metadata?.project_id || "",
-        })) || [],
+          scope: m.scope,
+        })),
       });
     }
 
