@@ -1496,6 +1496,13 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "autoresearch": autoresearch,
 }
 
+# ── Platform tools (security, observability, compliance, etc.) ───────────────
+try:
+    from agentos.tools.platform_tools import PLATFORM_HANDLERS, PLATFORM_SCHEMAS
+    BUILTIN_HANDLERS.update(PLATFORM_HANDLERS)
+except ImportError:
+    PLATFORM_SCHEMAS = {}
+
 # Schemas for built-in tools so the registry can expose them without JSON files
 BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
     "web-search": {
@@ -1891,3 +1898,6 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+# Merge platform tool schemas
+BUILTIN_SCHEMAS.update(PLATFORM_SCHEMAS)

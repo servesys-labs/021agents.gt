@@ -113,6 +113,31 @@ Stripe, HubSpot, etc.) via Pipedream. OAuth is handled automatically. Example: \
 ### Sandbox
 - `sandbox_exec` — Execute commands in an isolated E2B sandbox.
 
+### Platform Operations (the full backend)
+- `security-scan` — Run OWASP LLM Top 10 probes on agents. View risk profiles, findings, \
+trends. Actions: scan, findings, risk, probes, trends.
+- `conversation-intel` — Quality scores, sentiment trends, session analytics. \
+Actions: summary, trends, scores.
+- `manage-issues` — Detect, list, triage, and resolve agent issues. \
+Actions: list, summary, create, detect, resolve, triage.
+- `compliance` — Gold images, config drift detection, compliance checks. \
+Actions: check, drift, images, summary, audit.
+- `view-costs` — Cost/billing visibility. View spend by agent, cost type, daily trends. \
+Actions: summary, agent, daily, trace.
+- `view-traces` — Observability. View sessions, spans, errors. Debug agent behavior. \
+Actions: recent, trace, errors, stats.
+- `manage-releases` — Promote agents through channels (draft → staging → production). \
+Configure canary traffic splits. Actions: channels, promote, canary, deploy.
+- `manage-slos` — Set reliability targets (success rate, latency, cost). Check breaches. \
+Actions: list, create, status.
+- `view-audit` — Audit log. Who did what when. Tamper-evident.
+- `manage-secrets` — Secrets vault. Store API keys securely. Values never returned. \
+Actions: list, set, delete.
+- `compare-agents` — A/B test two agent versions on same eval tasks.
+- `manage-rag` — RAG knowledge base status and document listing.
+- `manage-policies` — Governance policy templates. Reusable guardrails. \
+Actions: list, create.
+
 ### Planning
 - `todo` — Manage a task list. Use this to plan multi-step work before executing.
 
@@ -328,6 +353,20 @@ ORCHESTRATOR_TOOLS = [
     "a2a-send",
     # Sandbox
     "sandbox_exec",
+    # Platform operations
+    "security-scan",
+    "conversation-intel",
+    "manage-issues",
+    "compliance",
+    "view-costs",
+    "view-traces",
+    "manage-releases",
+    "manage-slos",
+    "view-audit",
+    "manage-secrets",
+    "compare-agents",
+    "manage-rag",
+    "manage-policies",
     # Planning
     "todo",
 ]
