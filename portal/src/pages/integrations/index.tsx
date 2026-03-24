@@ -471,6 +471,11 @@ export const IntegrationsPage = () => {
             count: mcpServers.length,
             content: mcpTab,
           },
+          {
+            id: "chat",
+            label: "Chat Platforms",
+            content: <ChatPlatformsTab />,
+          },
         ]}
       />
 
@@ -704,3 +709,150 @@ export const IntegrationsPage = () => {
     </div>
   );
 };
+
+/* ── Chat Platforms Tab (Telegram QR, Discord, Slack) ──────────── */
+
+function ChatPlatformsTab() {
+  const [telegramQR, setTelegramQR] = useState<{
+    deep_link?: string;
+    bot_username?: string;
+    qr_svg?: string;
+    instructions?: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const fetchQR = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const data = await apiRequest<any>("/api/v1/chat/telegram/qr");
+      setTelegramQR(data);
+    } catch (err: any) {
+      setError(err?.message || "Failed to generate QR code. Is TELEGRAM_BOT_TOKEN configured?");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 mt-4">
+      {/* Telegram */}
+      <div className="card">
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-10 h-10 rounded-lg bg-chart-blue/10 flex items-center justify-center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-chart-blue">
+              <path d="M22 2L11 13" /><path d="M22 2L15 22L11 13L2 9L22 2Z" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-text-primary">Telegram</h3>
+            <p className="text-[10px] text-text-muted">Chat with your agent from Telegram</p>
+          </div>
+        </div>
+
+        {!telegramQR ? (
+          <div className="space-y-3">
+            <p className="text-xs text-text-secondary">
+              Connect a Telegram bot so users can chat with your agent directly from Telegram.
+              You'll need a bot token from <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-accent hover:underline">@BotFather</a>.
+            </p>
+            <button onClick={fetchQR} disabled={loading} className="btn btn-primary text-xs">
+              {loading ? "Generating..." : "Generate QR Code"}
+            </button>
+            {error && <p className="text-xs text-status-error">{error}</p>}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-start gap-6">
+              {/* QR Code */}
+              <div className="flex-shrink-0 p-3 bg-white rounded-xl border border-border-default">
+                <div
+                  dangerouslySetInnerHTML={{ __html: telegramQR.qr_svg || "" }}
+                  className="w-[180px] h-[180px]"
+                />
+              </div>
+              {/* Instructions */}
+              <div className="space-y-3">
+                <div>
+                  <p className="text-xs text-text-muted mb-1">Bot</p>
+                  <p className="text-sm font-medium text-text-primary">@{telegramQR.bot_username}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-text-muted mb-1">Deep Link</p>
+                  <a
+                    href={telegramQR.deep_link}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-accent hover:underline font-mono"
+                  >
+                    {telegramQR.deep_link}
+                  </a>
+                </div>
+                <p className="text-xs text-text-secondary">
+                  {telegramQR.instructions}
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => navigator.clipboard.writeText(telegramQR.deep_link || "")}
+                    className="btn btn-secondary text-xs"
+                  >
+                    Copy Link
+                  </button>
+                  <button onClick={fetchQR} className="btn btn-secondary text-xs">
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Discord — coming soon */}
+      <div className="card opacity-60">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-chart-purple/10 flex items-center justify-center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-chart-purple">
+              <circle cx="12" cy="12" r="10" /><path d="M8 14s1.5 2 4 2 4-2 4-2" /><line x1="9" y1="9" x2="9.01" y2="9" /><line x1="15" y1="9" x2="15.01" y2="9" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-text-primary">Discord</h3>
+            <p className="text-[10px] text-text-muted">Coming soon</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Slack — coming soon */}
+      <div className="card opacity-60">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-chart-orange/10 flex items-center justify-center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-chart-orange">
+              <rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-text-primary">Slack</h3>
+            <p className="text-[10px] text-text-muted">Coming soon</p>
+          </div>
+        </div>
+      </div>
+
+      {/* WhatsApp — coming soon */}
+      <div className="card opacity-60">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-chart-green/10 flex items-center justify-center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-chart-green">
+              <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+            </svg>
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-text-primary">WhatsApp</h3>
+            <p className="text-[10px] text-text-muted">Coming soon (via Vapi)</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
