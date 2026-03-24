@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import time
 from typing import Any
 
@@ -218,9 +219,9 @@ async def ingest_conversation_score(
     db.conn.execute(
         """INSERT INTO conversation_scores (
             session_id, turn_number, org_id, agent_name, sentiment, sentiment_score,
-            relevance_score, coherence_score, helpfulness_score, quality_overall, topic, intent,
-            has_tool_failure, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            sentiment_confidence, relevance_score, coherence_score, helpfulness_score, safety_score,
+            quality_overall, topic, intent, has_tool_failure, has_hallucination_risk, scorer_model, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             session_id,
             int(payload.get("turn_number", 1) or 1),
@@ -228,13 +229,17 @@ async def ingest_conversation_score(
             _payload_text(payload, "agent_name", "", 128),
             _payload_text(payload, "sentiment", "neutral", 32),
             float(payload.get("sentiment_score", 0) or 0),
+            float(payload.get("sentiment_confidence", 0) or 0),
             float(payload.get("relevance_score", 0) or 0),
             float(payload.get("coherence_score", 0) or 0),
             float(payload.get("helpfulness_score", 0) or 0),
+            float(payload.get("safety_score", 1) or 1),
             float(payload.get("quality_overall", 0) or 0),
             _payload_text(payload, "topic", "", 256),
             _payload_text(payload, "intent", "", 256),
             int(payload.get("has_tool_failure", 0) or 0),
+            int(payload.get("has_hallucination_risk", 0) or 0),
+            _payload_text(payload, "scorer_model", "", 128),
             float(payload.get("created_at", 0) or time.time()),
         ),
     )
@@ -257,8 +262,8 @@ async def ingest_conversation_analytics(
     db.conn.execute(
         """INSERT INTO conversation_analytics (
             session_id, org_id, agent_name, avg_sentiment_score, dominant_sentiment,
-            sentiment_trend, avg_quality, topics_json, total_turns, tool_failure_count, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            sentiment_trend, avg_quality, topics_json, total_turns, tool_failure_count, hallucination_risk_count, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(session_id) DO UPDATE SET
             org_id = excluded.org_id,
             agent_name = excluded.agent_name,
@@ -269,6 +274,7 @@ async def ingest_conversation_analytics(
             topics_json = excluded.topics_json,
             total_turns = excluded.total_turns,
             tool_failure_count = excluded.tool_failure_count,
+            hallucination_risk_count = excluded.hallucination_risk_count,
             created_at = excluded.created_at
         """,
         (
@@ -282,6 +288,7 @@ async def ingest_conversation_analytics(
             _payload_text(payload, "topics_json", "[]", 20000),
             int(payload.get("total_turns", 0) or 0),
             int(payload.get("tool_failure_count", 0) or 0),
+            int(payload.get("hallucination_risk_count", 0) or 0),
             float(payload.get("created_at", 0) or time.time()),
         ),
     )
@@ -609,16 +616,28 @@ async def ingest_episode(
     episode_id = _payload_text(payload, "id", "", 64)
     if not episode_id:
         raise HTTPException(status_code=400, detail="id required")
-    db.insert_episode(
-        {
-            "id": episode_id,
-            "input": _payload_text(payload, "input", "", 5000),
-            "output": _payload_text(payload, "output", "", 10000),
-            "outcome": _payload_text(payload, "outcome", "", 128),
-            "metadata": payload.get("metadata", {}),
-            "timestamp": float(payload.get("created_at", 0) or time.time()),
-        }
+    db.conn.execute(
+        """INSERT INTO episodes (id, input, output, outcome, metadata_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            input = excluded.input,
+            output = excluded.output,
+            outcome = excluded.outcome,
+            metadata_json = excluded.metadata_json,
+            created_at = excluded.created_at
+        """,
+        (
+            episode_id,
+            _payload_text(payload, "input", "", 5000),
+            _payload_text(payload, "output", "", 10000),
+            _payload_text(payload, "outcome", "", 128),
+            _payload_text(payload, "metadata_json", "{}", 20000)
+            if "metadata_json" in payload
+            else json.dumps(payload.get("metadata", {})),
+            float(payload.get("created_at", 0) or time.time()),
+        ),
     )
+    db.conn.commit()
     return {"ingested": True, "id": episode_id}
 
 
@@ -680,3 +699,70 @@ async def ingest_vapi_event(
         org_id=_payload_text(payload, "org_id", "", 64),
     )
     return {"ingested": True, "call_id": call_id, "event_type": event_type}
+
+
+@router.post("/voice/call")
+async def ingest_voice_call(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+):
+    """Upsert one generic (non-Vapi) voice call row from edge worker."""
+    _require_ingest_token(authorization=authorization, x_edge_token=x_edge_token)
+    db = _get_db()
+    call_id = _payload_text(payload, "call_id", "", 64)
+    platform = _payload_text(payload, "platform", "", 32)
+    if not call_id:
+        raise HTTPException(status_code=400, detail="call_id required")
+    if not platform:
+        raise HTTPException(status_code=400, detail="platform required")
+    db.insert_voice_call(
+        call_id=call_id,
+        platform=platform,
+        org_id=_payload_text(payload, "org_id", "", 64),
+        agent_name=_payload_text(payload, "agent_name", "", 128),
+        phone_number=_payload_text(payload, "phone_number", "", 64),
+        direction=_payload_text(payload, "direction", "outbound", 32),
+        status=_payload_text(payload, "status", "pending", 32),
+        platform_agent_id=_payload_text(payload, "platform_agent_id", "", 128),
+        metadata=payload.get("metadata", {}),
+        started_at=float(payload.get("started_at", 0) or time.time()),
+    )
+    db.update_voice_call(
+        call_id,
+        status=_payload_text(payload, "status", "pending", 32),
+        duration_seconds=float(payload.get("duration_seconds", 0) or 0),
+        transcript=_payload_text(payload, "transcript", "", 20000),
+        cost_usd=float(payload.get("cost_usd", 0) or 0),
+        ended_at=float(payload.get("ended_at", 0) or 0),
+        agent_name=_payload_text(payload, "agent_name", "", 128),
+    )
+    return {"ingested": True, "call_id": call_id, "platform": platform}
+
+
+@router.post("/voice/event")
+async def ingest_voice_event(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+):
+    """Persist one generic (non-Vapi) voice event row from edge worker."""
+    _require_ingest_token(authorization=authorization, x_edge_token=x_edge_token)
+    db = _get_db()
+    call_id = _payload_text(payload, "call_id", "", 64)
+    platform = _payload_text(payload, "platform", "", 32)
+    event_type = _payload_text(payload, "event_type", "", 64)
+    if not call_id:
+        raise HTTPException(status_code=400, detail="call_id required")
+    if not platform:
+        raise HTTPException(status_code=400, detail="platform required")
+    if not event_type:
+        raise HTTPException(status_code=400, detail="event_type required")
+    db.insert_voice_event(
+        call_id=call_id,
+        platform=platform,
+        event_type=event_type,
+        payload_json=_payload_text(payload, "payload_json", "{}", 50000),
+        org_id=_payload_text(payload, "org_id", "", 64),
+    )
+    return {"ingested": True, "call_id": call_id, "platform": platform, "event_type": event_type}

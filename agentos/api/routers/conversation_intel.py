@@ -98,19 +98,17 @@ async def score_session(
     input_text = session_row["input_text"] or ""
 
     # Load turns
-    turn_rows = db.conn.execute(
-        "SELECT * FROM turns WHERE session_id = ? ORDER BY turn_number",
-        (session_id,),
-    ).fetchall()
-    turns = [dict(r) for r in turn_rows]
+    turns = db.get_turns(session_id)
 
     if not turns:
         return {"session_id": session_id, "scored": False, "message": "No turns to score"}
 
-    # Run scoring
+    # Run scoring — use LLM if API key available
+    import os
     from agentos.observability.analytics import ConversationAnalytics
 
-    analytics = ConversationAnalytics()
+    use_llm = bool(os.environ.get("ANTHROPIC_API_KEY", ""))
+    analytics = ConversationAnalytics(use_llm=use_llm)
     result = analytics.score_session(
         session_id=session_id,
         turns=turns,

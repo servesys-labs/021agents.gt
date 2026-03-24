@@ -23,9 +23,19 @@ class ConversationAnalytics:
         self,
         sentiment_analyzer: SentimentAnalyzer | None = None,
         quality_scorer: QualityScorer | None = None,
+        use_llm: bool = False,
     ):
         self.sentiment = sentiment_analyzer or SentimentAnalyzer()
         self.quality = quality_scorer or QualityScorer()
+        self._llm_scorer = None
+        if use_llm:
+            try:
+                from agentos.observability.llm_scorer import LLMQualityScorer
+                self._llm_scorer = LLMQualityScorer()
+                if not self._llm_scorer.api_key:
+                    self._llm_scorer = None
+            except Exception:
+                pass
 
     def score_session(
         self,
@@ -72,17 +82,25 @@ class ConversationAnalytics:
             except (json.JSONDecodeError, TypeError):
                 tool_results = []
 
-            # Sentiment
-            sent = self.sentiment.analyze(content)
-            sentiment_values.append(sent.score)
+            # Score with LLM if available, else heuristic
+            scorer_model = "heuristic"
+            if self._llm_scorer:
+                qual, sent, scorer_model = self._llm_scorer.score_turn(
+                    input_text=turn_input,
+                    output_text=content,
+                    tool_calls=tool_calls,
+                    tool_results=tool_results,
+                )
+            else:
+                sent = self.sentiment.analyze(content)
+                qual = self.quality.score_turn(
+                    input_text=turn_input,
+                    output_text=content,
+                    tool_calls=tool_calls,
+                    tool_results=tool_results,
+                )
 
-            # Quality
-            qual = self.quality.score_turn(
-                input_text=turn_input,
-                output_text=content,
-                tool_calls=tool_calls,
-                tool_results=tool_results,
-            )
+            sentiment_values.append(sent.score)
             quality_values.append(qual.overall)
 
             if qual.topic and qual.topic != "general":
@@ -119,6 +137,7 @@ class ConversationAnalytics:
                         intent=qual.intent,
                         has_tool_failure=qual.has_tool_failure,
                         has_hallucination_risk=qual.has_hallucination_risk,
+                        scorer_model=scorer_model,
                     )
                 except Exception as exc:
                     logger.debug("Failed to persist turn score: %s", exc)
