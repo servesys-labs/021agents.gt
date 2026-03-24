@@ -16,6 +16,10 @@ class Complexity(str, Enum):
     MODERATE = "moderate"
     COMPLEX = "complex"
     TOOL_CALL = "tool_call"  # Dedicated tier for tool-calling turns
+    IMAGE_GEN = "image_gen"  # Image generation (FLUX, DALL-E, etc.)
+    VISION = "vision"  # Vision/image understanding (multimodal input)
+    TTS = "tts"  # Text-to-speech
+    STT = "stt"  # Speech-to-text
 
 
 @dataclass
@@ -41,6 +45,10 @@ class LLMRouter:
             Complexity.MODERATE: RouteConfig(provider=stub, max_tokens=4096),
             Complexity.COMPLEX: RouteConfig(provider=stub, max_tokens=8192),
             Complexity.TOOL_CALL: RouteConfig(provider=stub, max_tokens=4096),
+            Complexity.IMAGE_GEN: RouteConfig(provider=stub, max_tokens=1),
+            Complexity.VISION: RouteConfig(provider=stub, max_tokens=4096),
+            Complexity.TTS: RouteConfig(provider=stub, max_tokens=1),
+            Complexity.STT: RouteConfig(provider=stub, max_tokens=1),
         }
         self._tools: list[dict[str, Any]] = []
 
@@ -104,3 +112,29 @@ class LLMRouter:
             )
 
         return response
+
+    def get_multimodal_config(self, modality: Complexity) -> RouteConfig | None:
+        """Get the route config for a multimodal tier (image_gen, vision, tts, stt).
+
+        Returns None if the tier has no real provider registered (still stub).
+        """
+        config = self._routes.get(modality)
+        if config and not isinstance(config.provider, StubProvider):
+            return config
+        return None
+
+    @property
+    def has_image_gen(self) -> bool:
+        return self.get_multimodal_config(Complexity.IMAGE_GEN) is not None
+
+    @property
+    def has_vision(self) -> bool:
+        return self.get_multimodal_config(Complexity.VISION) is not None
+
+    @property
+    def has_tts(self) -> bool:
+        return self.get_multimodal_config(Complexity.TTS) is not None
+
+    @property
+    def has_stt(self) -> bool:
+        return self.get_multimodal_config(Complexity.STT) is not None

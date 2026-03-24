@@ -1032,6 +1032,151 @@ async def todo(action: str, text: str = "", item_id: int = 0, status: str = "") 
     return f"Unknown action: {action}. Use 'add', 'list', 'update', 'complete', or 'clear'."
 
 
+# ---------------------------------------------------------------------------
+# Multimodal tools — image gen, TTS, STT via GMI Cloud
+# ---------------------------------------------------------------------------
+
+async def image_generate(prompt: str, model: str = "", size: str = "1024x1024",
+                         num_images: int = 1) -> str:
+    """Generate images via GMI Cloud (Nano Banana 2, Seedream, GLM-Image, FLUX, etc.).
+
+    Returns a JSON array of image URLs or base64 data.
+    """
+    import httpx
+    import os
+
+    api_key = os.environ.get("GMI_API_KEY", "")
+    if not api_key:
+        return "Error: GMI_API_KEY not configured. Set it to use image generation."
+
+    api_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
+    model = model or os.environ.get("DEFAULT_IMAGE_MODEL", "Seedream-5.0-lite")
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{api_base}/images/generations",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "prompt": prompt,
+                    "n": min(num_images, 4),
+                    "size": size,
+                },
+            )
+            if resp.status_code != 200:
+                return f"Image generation failed ({resp.status_code}): {resp.text[:300]}"
+
+            data = resp.json()
+            images = data.get("data", [])
+            results = []
+            for img in images:
+                url = img.get("url", "")
+                if url:
+                    results.append(url)
+                elif img.get("b64_json"):
+                    results.append(f"[base64 image, {len(img['b64_json'])} chars]")
+            return json.dumps({"images": results, "model": model, "count": len(results)})
+    except Exception as exc:
+        return f"Image generation error: {exc}"
+
+
+async def text_to_speech(text: str, model: str = "", voice: str = "default") -> str:
+    """Convert text to speech via GMI Cloud (ElevenLabs, MiniMax TTS, Inworld, etc.).
+
+    Returns path to the generated audio file or base64 audio data.
+    """
+    import httpx
+    import os
+
+    api_key = os.environ.get("GMI_API_KEY", "")
+    if not api_key:
+        return "Error: GMI_API_KEY not configured. Set it to use text-to-speech."
+
+    api_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
+    model = model or os.environ.get("DEFAULT_TTS_MODEL", "minimax-tts-speech-2.6-turbo")
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{api_base}/audio/speech",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "input": text[:5000],
+                    "voice": voice,
+                },
+            )
+            if resp.status_code != 200:
+                return f"TTS failed ({resp.status_code}): {resp.text[:300]}"
+
+            # Save audio to file
+            audio_path = Path.cwd() / "data" / f"tts_{int(time.time())}.mp3"
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            audio_path.write_bytes(resp.content)
+            return json.dumps({
+                "audio_file": str(audio_path),
+                "model": model,
+                "voice": voice,
+                "size_bytes": len(resp.content),
+                "text_length": len(text),
+            })
+    except Exception as exc:
+        return f"TTS error: {exc}"
+
+
+async def speech_to_text(audio_path: str, model: str = "", language: str = "") -> str:
+    """Transcribe audio to text via GMI Cloud (Whisper, etc.).
+
+    Accepts a path to an audio file (mp3, wav, m4a, webm, etc.).
+    """
+    import httpx
+    import os
+
+    api_key = os.environ.get("GMI_API_KEY", "")
+    if not api_key:
+        return "Error: GMI_API_KEY not configured. Set it to use speech-to-text."
+
+    api_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
+    model = model or os.environ.get("DEFAULT_STT_MODEL", "whisper-large-v3")
+
+    audio_file = Path(audio_path)
+    if not audio_file.exists():
+        return f"Error: Audio file not found: {audio_path}"
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            files = {"file": (audio_file.name, audio_file.read_bytes())}
+            data_fields: dict[str, str] = {"model": model}
+            if language:
+                data_fields["language"] = language
+
+            resp = await client.post(
+                f"{api_base}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files=files,
+                data=data_fields,
+            )
+            if resp.status_code != 200:
+                return f"STT failed ({resp.status_code}): {resp.text[:300]}"
+
+            result = resp.json()
+            return json.dumps({
+                "text": result.get("text", ""),
+                "model": model,
+                "language": result.get("language", language),
+                "duration": result.get("duration", 0),
+            })
+    except Exception as exc:
+        return f"STT error: {exc}"
+
+
 # Registry of built-in handlers keyed by tool name
 BUILTIN_HANDLERS: dict[str, Any] = {
     "web-search": web_search,
@@ -1059,6 +1204,9 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "sandbox_file_write": sandbox_file_write,
     "sandbox_file_read": sandbox_file_read,
     "sandbox_kill": sandbox_kill,
+    "image-generate": image_generate,
+    "text-to-speech": text_to_speech,
+    "speech-to-text": speech_to_text,
 }
 
 # Schemas for built-in tools so the registry can expose them without JSON files
@@ -1342,6 +1490,43 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 "sandbox_id": {"type": "string", "description": "Sandbox ID to terminate"},
             },
             "required": ["sandbox_id"],
+        },
+    },
+    "image-generate": {
+        "description": "Generate images from a text prompt via GMI Cloud (Nano Banana 2, Seedream, GLM-Image, FLUX)",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Text description of the image to generate"},
+                "model": {"type": "string", "description": "Model ID (e.g., 'Seedream-5.0-lite', 'gemini-3-pro-image-preview', 'GLM-Image'). Defaults to plan's image_gen model."},
+                "size": {"type": "string", "description": "Image size (e.g., '1024x1024', '512x512')", "default": "1024x1024"},
+                "num_images": {"type": "integer", "description": "Number of images to generate (1-4)", "default": 1},
+            },
+            "required": ["prompt"],
+        },
+    },
+    "text-to-speech": {
+        "description": "Convert text to speech via GMI Cloud (ElevenLabs, MiniMax TTS, Inworld). Returns audio file path.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to convert to speech"},
+                "model": {"type": "string", "description": "TTS model (e.g., 'elevenlabs-tts-v3', 'minimax-tts-speech-2.6-turbo'). Defaults to plan's TTS model."},
+                "voice": {"type": "string", "description": "Voice ID or name", "default": "default"},
+            },
+            "required": ["text"],
+        },
+    },
+    "speech-to-text": {
+        "description": "Transcribe audio to text via GMI Cloud (Whisper). Accepts mp3, wav, m4a, webm files.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "audio_path": {"type": "string", "description": "Path to the audio file to transcribe"},
+                "model": {"type": "string", "description": "STT model (e.g., 'whisper-large-v3'). Defaults to plan's STT model."},
+                "language": {"type": "string", "description": "Language code (e.g., 'en', 'es'). Auto-detected if omitted."},
+            },
+            "required": ["audio_path"],
         },
     },
 }
