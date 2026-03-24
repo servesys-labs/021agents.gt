@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -147,37 +148,42 @@ class PostgresAgentDB(AgentDB):
         self.path = Path("postgres")
         self._conn = None
         self._pool = None
+        self._pool_lock = threading.Lock()
 
     def _get_pool(self):
-        """Lazy-initialize the connection pool."""
+        """Lazy-initialize the connection pool (thread-safe)."""
         if self._pool is not None:
             return self._pool
-        try:
-            from psycopg_pool import ConnectionPool
-            from psycopg.rows import dict_row
-        except ImportError as exc:
-            raise RuntimeError(
-                "Postgres backend requires psycopg + psycopg_pool. "
-                "Install with: pip install 'psycopg[binary]' psycopg_pool"
-            ) from exc
+        with self._pool_lock:
+            # Double-check after acquiring lock
+            if self._pool is not None:
+                return self._pool
+            try:
+                from psycopg_pool import ConnectionPool
+                from psycopg.rows import dict_row
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Postgres backend requires psycopg + psycopg_pool. "
+                    "Install with: pip install 'psycopg[binary]' psycopg_pool"
+                ) from exc
 
-        min_size = int(os.environ.get("POSTGRES_POOL_MIN", "2"))
-        max_size = int(os.environ.get("POSTGRES_POOL_MAX", "20"))
-        _log.info("Creating Postgres connection pool (min=%d, max=%d)", min_size, max_size)
+            min_size = int(os.environ.get("POSTGRES_POOL_MIN", "2"))
+            max_size = int(os.environ.get("POSTGRES_POOL_MAX", "20"))
+            _log.info("Creating Postgres connection pool (min=%d, max=%d)", min_size, max_size)
 
-        self._pool = ConnectionPool(
-            conninfo=self.database_url,
-            min_size=min_size,
-            max_size=max_size,
-            kwargs={"row_factory": dict_row},
-            # Wait up to 30s for a connection from pool
-            timeout=30.0,
-            # Recycle connections after 30 minutes to avoid stale state
-            max_lifetime=1800.0,
-            # Check connection health before handing it out
-            check=ConnectionPool.check_connection,
-        )
-        return self._pool
+            self._pool = ConnectionPool(
+                conninfo=self.database_url,
+                min_size=min_size,
+                max_size=max_size,
+                kwargs={"row_factory": dict_row},
+                # Wait up to 30s for a connection from pool
+                timeout=30.0,
+                # Recycle connections after 30 minutes to avoid stale state
+                max_lifetime=1800.0,
+                # Check connection health before handing it out
+                check=ConnectionPool.check_connection,
+            )
+            return self._pool
 
     def _connect(self):
         """Get a long-lived primary connection for the AgentDB.conn property.
@@ -221,14 +227,16 @@ class PostgresAgentDB(AgentDB):
     def pool_stats(self) -> dict[str, Any]:
         """Return pool health stats for monitoring endpoints."""
         pool = self._get_pool()
-        stats = pool.get_stats()
+        raw = pool.get_stats()
+        # psycopg_pool returns a dict in 3.2+; convert defensively
+        stats = dict(raw) if not isinstance(raw, dict) else raw
         return {
-            "pool_min": stats.get("pool_min", 0),
-            "pool_max": stats.get("pool_max", 0),
             "pool_size": stats.get("pool_size", 0),
             "pool_available": stats.get("pool_available", 0),
             "requests_waiting": stats.get("requests_waiting", 0),
             "requests_num": stats.get("requests_num", 0),
+            "requests_errors": stats.get("requests_errors", 0),
+            "connections_lost": stats.get("connections_lost", 0),
         }
 
     def initialize(self) -> None:

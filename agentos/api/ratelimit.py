@@ -9,6 +9,7 @@ For multi-pod production, swap to Redis-backed limiter.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections import defaultdict
 from typing import Any
@@ -29,10 +30,13 @@ class RateLimiter:
         self.rpm = requests_per_minute
         self.burst = burst
         self._windows: dict[str, list[float]] = defaultdict(list)
-        self._call_count = 0  # Track calls for periodic eviction
+        self._call_count = 0
+        self._lock = threading.Lock()
 
     def _maybe_evict(self) -> None:
-        """Evict stale keys when over capacity. Runs every 500 calls."""
+        """Evict stale keys when over capacity. Runs every 500 calls.
+        Caller must hold self._lock.
+        """
         self._call_count += 1
         if self._call_count < 500:
             return
@@ -53,31 +57,33 @@ class RateLimiter:
 
     def check(self, key: str) -> bool:
         """Returns True if request is allowed, False if rate limited."""
-        self._maybe_evict()
+        with self._lock:
+            self._maybe_evict()
 
-        now = time.time()
-        window = self._windows[key]
+            now = time.time()
+            window = self._windows[key]
 
-        # Remove requests older than 60 seconds
-        window[:] = [t for t in window if now - t < WINDOW_SECONDS]
+            # Remove requests older than 60 seconds
+            window[:] = [t for t in window if now - t < WINDOW_SECONDS]
 
-        # Check burst (per-second)
-        recent = sum(1 for t in window if now - t < 1)
-        if recent >= self.burst:
-            return False
+            # Check burst (per-second)
+            recent = sum(1 for t in window if now - t < 1)
+            if recent >= self.burst:
+                return False
 
-        # Check RPM
-        if len(window) >= self.rpm:
-            return False
+            # Check RPM
+            if len(window) >= self.rpm:
+                return False
 
-        window.append(now)
-        return True
+            window.append(now)
+            return True
 
     def remaining(self, key: str) -> int:
-        now = time.time()
-        window = self._windows[key]
-        window[:] = [t for t in window if now - t < WINDOW_SECONDS]
-        return max(0, self.rpm - len(window))
+        with self._lock:
+            now = time.time()
+            window = self._windows[key]
+            window[:] = [t for t in window if now - t < WINDOW_SECONDS]
+            return max(0, self.rpm - len(window))
 
     def stats(self) -> dict[str, Any]:
         """Return limiter stats for monitoring."""
