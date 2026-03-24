@@ -5267,16 +5267,15 @@ class AgentDB:
         counts: dict[str, int] = {}
 
         # Tables with agent_name column to cascade.
-        # NOTE: sessions is handled separately (after turns/errors which FK to it).
+        # NOTE: sessions handled separately (turns/errors/feedback/memory FK to it).
+        # NOTE: billing_records intentionally excluded (audit trail preserved).
         agent_name_tables = [
-            "eval_runs", "evolution_entries", "proposals",
-            "cost_ledger", "slo_definitions",
+            "eval_runs", "cost_ledger", "slo_definitions",
             "autoresearch_runs", "autoresearch_experiments",
-            "security_scans", "security_findings", "risk_profiles",
-            "gold_images", "compliance_checks", "issues",
+            "security_scans", "security_findings",
+            "compliance_checks", "issues",
             "vapi_calls", "voice_calls", "conversation_scores",
-            "conversation_analytics", "feedback", "memory_facts",
-            "middleware_events",
+            "conversation_analytics",
         ]
 
         for table in agent_name_tables:
@@ -5296,28 +5295,21 @@ class AgentDB:
             except Exception:
                 counts[table] = 0
 
-        # Turns + errors are linked via session_id → must be deleted BEFORE sessions
+        # Tables linked via session_id (not agent_name) → delete BEFORE sessions
+        session_linked_tables = ["turns", "errors", "feedback", "memory_facts", "middleware_events"]
         if hard_delete:
-            try:
-                cur = self.conn.execute(
-                    "DELETE FROM turns WHERE session_id IN "
-                    "(SELECT session_id FROM sessions WHERE agent_name = ?)",
-                    (name,),
-                )
-                counts["turns"] = cur.rowcount or 0
-            except Exception:
-                counts["turns"] = 0
+            for table in session_linked_tables:
+                try:
+                    cur = self.conn.execute(
+                        f"DELETE FROM {table} WHERE session_id IN "
+                        "(SELECT session_id FROM sessions WHERE agent_name = ?)",
+                        (name,),
+                    )
+                    counts[table] = cur.rowcount or 0
+                except Exception:
+                    counts[table] = 0
 
-            try:
-                cur = self.conn.execute(
-                    "DELETE FROM errors WHERE session_id IN "
-                    "(SELECT session_id FROM sessions WHERE agent_name = ?)",
-                    (name,),
-                )
-                counts["errors"] = cur.rowcount or 0
-            except Exception:
-                counts["errors"] = 0
-
+            # Now delete sessions themselves
             try:
                 cur = self.conn.execute(
                     "DELETE FROM sessions WHERE agent_name = ?", (name,),
@@ -5332,6 +5324,17 @@ class AgentDB:
             except Exception:
                 pass
         else:
+            # Soft-delete: just count what would be affected
+            for table in session_linked_tables:
+                try:
+                    row = self.conn.execute(
+                        f"SELECT COUNT(*) as cnt FROM {table} WHERE session_id IN "
+                        "(SELECT session_id FROM sessions WHERE agent_name = ?)",
+                        (name,),
+                    ).fetchone()
+                    counts[table] = int(row["cnt"] if isinstance(row, dict) else (row[0] if row else 0))
+                except Exception:
+                    counts[table] = 0
             try:
                 row = self.conn.execute(
                     "SELECT COUNT(*) as cnt FROM sessions WHERE agent_name = ?", (name,)
