@@ -540,6 +540,203 @@ class TestCanvasOverlayApiContracts:
         layout_get = api_client.get(f"/api/v1/projects/{project_id}/canvas-layout", headers=other_headers)
         assert layout_get.status_code == 404
 
+    def test_project_scoped_agent_run_denied_for_other_org(self, api_client):
+        owner_headers = self._auth_header(api_client, "canvas-scope-owner@test.com")
+        other_headers = self._auth_header(api_client, "canvas-scope-other@test.com")
+
+        created = api_client.post("/api/v1/projects?name=scope-proj", headers=owner_headers)
+        assert created.status_code == 200
+        project_id = created.json()["project_id"]
+
+        scoped_agent = {
+            "name": "project-scoped-agent",
+            "description": "Scoped test agent",
+            "version": "0.1.0",
+            "system_prompt": "You are helpful.",
+            "model": "stub-model",
+            "tools": [],
+            "governance": {"budget_limit_usd": 10.0, "require_confirmation_for_destructive": True, "blocked_tools": []},
+            "memory": {
+                "working": {"max_items": 50},
+                "episodic": {"max_episodes": 100, "ttl_days": 30},
+                "procedural": {"max_procedures": 50},
+            },
+            "max_turns": 3,
+            "tags": [f"project:{project_id}"],
+        }
+        Path("agents/project-scoped-agent.json").write_text(json.dumps(scoped_agent, indent=2))
+
+        denied = api_client.post(
+            "/api/v1/agents/project-scoped-agent/run",
+            json={"task": "test run"},
+            headers=other_headers,
+        )
+        assert denied.status_code == 403
+        assert "scoped" in denied.json()["detail"]
+
+    def test_project_scoped_api_key_enforced_for_agent_run(self, api_client):
+        owner_headers = self._auth_header(api_client, "canvas-scope-key@test.com")
+
+        project_a = api_client.post("/api/v1/projects?name=scope-a", headers=owner_headers)
+        project_b = api_client.post("/api/v1/projects?name=scope-b", headers=owner_headers)
+        assert project_a.status_code == 200 and project_b.status_code == 200
+        project_a_id = project_a.json()["project_id"]
+        project_b_id = project_b.json()["project_id"]
+
+        scoped_agent = {
+            "name": "project-key-scoped-agent",
+            "description": "Scoped key test agent",
+            "version": "0.1.0",
+            "system_prompt": "You are helpful.",
+            "model": "stub-model",
+            "tools": [],
+            "governance": {"budget_limit_usd": 10.0, "require_confirmation_for_destructive": True, "blocked_tools": []},
+            "memory": {
+                "working": {"max_items": 50},
+                "episodic": {"max_episodes": 100, "ttl_days": 30},
+                "procedural": {"max_procedures": 50},
+            },
+            "max_turns": 3,
+            "tags": [f"project:{project_a_id}"],
+        }
+        Path("agents/project-key-scoped-agent.json").write_text(json.dumps(scoped_agent, indent=2))
+
+        key_resp = api_client.post(
+            "/api/v1/api-keys",
+            json={
+                "name": "proj-b-only",
+                "scopes": ["agents:run"],
+                "project_id": project_b_id,
+            },
+            headers=owner_headers,
+        )
+        assert key_resp.status_code == 200
+        api_key = key_resp.json()["key"]
+
+        denied = api_client.post(
+            "/api/v1/agents/project-key-scoped-agent/run",
+            json={"task": "test run"},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert denied.status_code == 403
+        assert "different project" in denied.json()["detail"]
+
+
+class TestEdgeIngestBridge:
+    def _auth_header(self, api_client, email: str = "edge-ingest@test.com"):
+        password = "pass12345"
+        signup_resp = api_client.post("/api/v1/auth/signup", json={"email": email, "password": password})
+        signup = signup_resp.json()
+        token = signup.get("token")
+        if not token:
+            login_resp = api_client.post("/api/v1/auth/login", json={"email": email, "password": password})
+            login = login_resp.json()
+            token = login.get("token")
+        assert token, f"Unable to authenticate test user: signup={signup}"
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_ingest_events_issue_and_conversation_rows(self, api_client, monkeypatch):
+        monkeypatch.setenv("EDGE_INGEST_TOKEN", "test-edge-token")
+        headers = {"Authorization": "Bearer test-edge-token"}
+
+        events = api_client.post(
+            "/api/v1/edge-ingest/events",
+            json={
+                "events": [
+                    {
+                        "session_id": "edge-session-1",
+                        "turn": 1,
+                        "event_type": "llm.call",
+                        "action": "inference",
+                        "plan": "standard",
+                        "tier": "moderate",
+                        "provider": "gmi",
+                        "model": "deepseek",
+                        "status": "ok",
+                        "latency_ms": 123,
+                        "input_tokens": 12,
+                        "output_tokens": 34,
+                        "cost_usd": 0.001,
+                        "details_json": "{\"httpStatus\":200}",
+                    }
+                ]
+            },
+            headers=headers,
+        )
+        assert events.status_code == 200
+        assert events.json()["events"] == 1
+
+        issue = api_client.post(
+            "/api/v1/edge-ingest/issues",
+            json={
+                "issue_id": "edge-issue-1",
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "title": "Edge issue",
+                "description": "desc",
+                "category": "runtime",
+                "severity": "medium",
+                "status": "open",
+            },
+            headers=headers,
+        )
+        assert issue.status_code == 200
+
+        score = api_client.post(
+            "/api/v1/edge-ingest/conversation/score",
+            json={
+                "session_id": "edge-session-1",
+                "turn_number": 1,
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "sentiment": "positive",
+                "sentiment_score": 0.8,
+                "quality_overall": 0.75,
+            },
+            headers=headers,
+        )
+        assert score.status_code == 200
+
+        analytics = api_client.post(
+            "/api/v1/edge-ingest/conversation/analytics",
+            json={
+                "session_id": "edge-session-1",
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "avg_sentiment_score": 0.8,
+                "dominant_sentiment": "positive",
+                "avg_quality": 0.75,
+                "total_turns": 1,
+            },
+            headers=headers,
+        )
+        assert analytics.status_code == 200
+
+        from agentos.core.db_config import initialize_db, get_db
+
+        initialize_db()
+        db = get_db()
+        event_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM otel_events WHERE session_id = ?",
+            ("edge-session-1",),
+        ).fetchone()
+        issue_row = db.conn.execute(
+            "SELECT issue_id FROM issues WHERE issue_id = ?",
+            ("edge-issue-1",),
+        ).fetchone()
+        conv_row = db.conn.execute(
+            "SELECT session_id FROM conversation_analytics WHERE session_id = ?",
+            ("edge-session-1",),
+        ).fetchone()
+        assert int(event_row["cnt"]) == 1
+        assert issue_row is not None
+        assert conv_row is not None
+
+    def test_ingest_events_requires_token(self, api_client, monkeypatch):
+        monkeypatch.setenv("EDGE_INGEST_TOKEN", "test-edge-token")
+        denied = api_client.post("/api/v1/edge-ingest/events", json={"events": []})
+        assert denied.status_code == 401
+
     def test_releases_rejects_invalid_canary_weight(self, api_client):
         headers = self._auth_header(api_client, "canvas-releases-invalid@test.com")
         resp = api_client.post(

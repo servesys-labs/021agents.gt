@@ -1,0 +1,4 @@
+AgentOS demo note:
+- objective: demonstrate tool usage and lifecycle
+- audience: teammate
+- status: in-progress
