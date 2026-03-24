@@ -35,6 +35,7 @@ sandbox = [
 ]
 postgres = [
     "psycopg[binary]>=3.2",
+    "psycopg_pool>=3.2",
 ]
 
 [project.scripts]

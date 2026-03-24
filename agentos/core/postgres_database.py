@@ -3,10 +3,16 @@
 This is a day-1, Postgres-first backend for control-plane scalability.
 It provides an AgentDB-like surface so existing routers can run with
 minimal changes.
+
+Connection pooling: uses psycopg_pool.ConnectionPool for bounded,
+reusable connections (min=2, max=20 by default, configurable via
+POSTGRES_POOL_MIN / POSTGRES_POOL_MAX env vars).
 """
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 import time
 from contextlib import contextmanager
@@ -29,6 +35,8 @@ from agentos.core.database import (
     MIGRATION_V11_TO_V12,
     MIGRATION_V12_TO_V13,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _normalize_sql(sql: str) -> str:
@@ -89,6 +97,8 @@ class _CursorAdapter:
 
 
 class _ConnAdapter:
+    """Wraps a raw psycopg connection with query translation and auto-recovery."""
+
     def __init__(self, conn) -> None:
         self._conn = conn
 
@@ -124,26 +134,98 @@ class _ConnAdapter:
 
 
 class PostgresAgentDB(AgentDB):
+    """Postgres-backed AgentDB with connection pooling.
+
+    Pool size is configurable via environment variables:
+      POSTGRES_POOL_MIN (default: 2)
+      POSTGRES_POOL_MAX (default: 20)
+    """
+
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
         self.path = Path("postgres")
         self._conn = None
+        self._pool = None
 
-    def _connect(self):
+    def _get_pool(self):
+        """Lazy-initialize the connection pool."""
+        if self._pool is not None:
+            return self._pool
         try:
-            import psycopg
+            from psycopg_pool import ConnectionPool
             from psycopg.rows import dict_row
         except ImportError as exc:
             raise RuntimeError(
-                "Postgres backend requires psycopg. Install with: pip install psycopg[binary]"
+                "Postgres backend requires psycopg + psycopg_pool. "
+                "Install with: pip install 'psycopg[binary]' psycopg_pool"
             ) from exc
-        raw_conn = psycopg.connect(self.database_url, row_factory=dict_row)
-        return _ConnAdapter(raw_conn)
+
+        min_size = int(os.environ.get("POSTGRES_POOL_MIN", "2"))
+        max_size = int(os.environ.get("POSTGRES_POOL_MAX", "20"))
+        _log.info("Creating Postgres connection pool (min=%d, max=%d)", min_size, max_size)
+
+        self._pool = ConnectionPool(
+            conninfo=self.database_url,
+            min_size=min_size,
+            max_size=max_size,
+            kwargs={"row_factory": dict_row},
+            # Wait up to 30s for a connection from pool
+            timeout=30.0,
+            # Recycle connections after 30 minutes to avoid stale state
+            max_lifetime=1800.0,
+            # Check connection health before handing it out
+            check=ConnectionPool.check_connection,
+        )
+        return self._pool
+
+    def _connect(self):
+        """Get a connection from the pool, wrapped in _ConnAdapter.
+
+        This is called by the parent AgentDB.conn property which caches
+        the result in self._conn. For pooled usage, prefer checkout() instead.
+        """
+        pool = self._get_pool()
+        raw_conn = pool.getconn()
+        # Store ref so we can return it to pool on close
+        adapter = _PooledConnAdapter(raw_conn, pool)
+        return adapter
+
+    @contextmanager
+    def checkout(self) -> Generator[_ConnAdapter, None, None]:
+        """Check out a pooled connection for a block of work.
+
+        Usage:
+            with db.checkout() as conn:
+                conn.execute("SELECT ...")
+                conn.commit()
+
+        The connection is automatically returned to the pool.
+        """
+        pool = self._get_pool()
+        raw_conn = pool.getconn()
+        adapter = _ConnAdapter(raw_conn)
+        try:
+            yield adapter
+        except Exception:
+            raw_conn.rollback()
+            raise
+        finally:
+            pool.putconn(raw_conn)
+
+    def pool_stats(self) -> dict[str, Any]:
+        """Return pool health stats for monitoring endpoints."""
+        pool = self._get_pool()
+        stats = pool.get_stats()
+        return {
+            "pool_min": stats.get("pool_min", 0),
+            "pool_max": stats.get("pool_max", 0),
+            "pool_size": stats.get("pool_size", 0),
+            "pool_available": stats.get("pool_available", 0),
+            "requests_waiting": stats.get("requests_waiting", 0),
+            "requests_num": stats.get("requests_num", 0),
+        }
 
     def initialize(self) -> None:
-        import logging
-        _log = logging.getLogger(__name__)
-
         current = self.schema_version()
         if current >= SCHEMA_VERSION:
             # Keep runtime tables/columns in sync even when schema is already current.
@@ -308,3 +390,16 @@ class PostgresAgentDB(AgentDB):
         except Exception:
             self.conn.rollback()
             return 0
+
+
+class _PooledConnAdapter(_ConnAdapter):
+    """Connection adapter that returns itself to the pool on close()."""
+
+    def __init__(self, conn, pool) -> None:
+        super().__init__(conn)
+        self._pool = pool
+
+    def close(self) -> None:
+        if self._pool and self._conn:
+            self._pool.putconn(self._conn)
+            self._conn = None

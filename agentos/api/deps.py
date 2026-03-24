@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -31,6 +32,41 @@ from typing import Any
 from fastapi import Depends, HTTPException, Request
 
 logger = logging.getLogger(__name__)
+
+# ── Bounded TTL cache for auth resolution ────────────────────────────
+# Eliminates repeated DB queries for the same token/key within a window.
+# Thread-safe, bounded to prevent OOM under many unique tokens.
+
+_AUTH_CACHE_MAX = 2048       # Max entries
+_AUTH_CACHE_TTL = 300.0      # 5 minutes
+_auth_cache: dict[str, tuple[float, Any]] = {}  # value is (timestamp, CurrentUser)
+_auth_cache_lock = threading.Lock()
+
+
+def _cache_get(key: str):
+    """Get a cached auth result, or None if missing/expired."""
+    entry = _auth_cache.get(key)
+    if entry is None:
+        return None
+    ts, user = entry
+    if time.time() - ts > _AUTH_CACHE_TTL:
+        # Expired — remove lazily
+        with _auth_cache_lock:
+            _auth_cache.pop(key, None)
+        return None
+    return user
+
+
+def _cache_put(key: str, user) -> None:
+    """Store an auth result. Evicts oldest entries if over capacity."""
+    with _auth_cache_lock:
+        _auth_cache[key] = (time.time(), user)
+        if len(_auth_cache) > _AUTH_CACHE_MAX:
+            # Evict oldest 25% to amortize eviction cost
+            items = sorted(_auth_cache.items(), key=lambda x: x[1][0])
+            to_remove = len(items) // 4
+            for k, _ in items[:to_remove]:
+                _auth_cache.pop(k, None)
 
 # ── Role hierarchy ────────────────────────────────────────────────────────
 
@@ -184,7 +220,12 @@ def require_admin():
 # ── Token resolution ──────────────────────────────────────────────────
 
 def _resolve_jwt(token: str) -> CurrentUser:
-    """Resolve a JWT token to a CurrentUser."""
+    """Resolve a JWT token to a CurrentUser (cached with TTL)."""
+    cache_key = f"jwt:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     from agentos.auth.jwt import verify_token
     from agentos.auth.clerk import clerk_enabled, verify_clerk_token
     from agentos.auth.provisioning import provision_clerk_identity
@@ -204,7 +245,7 @@ def _resolve_jwt(token: str) -> CurrentUser:
                 clerk_role=clerk_claims.org_role,
             )
 
-            return CurrentUser(
+            user = CurrentUser(
                 user_id=provisioned.user_id,
                 email=provisioned.email,
                 name=provisioned.name,
@@ -213,6 +254,8 @@ def _resolve_jwt(token: str) -> CurrentUser:
                 scopes=["*"],
                 auth_method="jwt",
             )
+            _cache_put(cache_key, user)
+            return user
 
     if claims is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -247,7 +290,7 @@ def _resolve_jwt(token: str) -> CurrentUser:
     except Exception:
         pass
 
-    return CurrentUser(
+    user = CurrentUser(
         user_id=user_id,
         email=claims.email,
         name=getattr(claims, "name", ""),
@@ -256,10 +299,17 @@ def _resolve_jwt(token: str) -> CurrentUser:
         scopes=["*"],  # JWT users get full scopes, controlled by role
         auth_method="jwt",
     )
+    _cache_put(cache_key, user)
+    return user
 
 
 def _resolve_api_key(key: str) -> CurrentUser:
-    """Resolve an API key to a CurrentUser with scoped permissions."""
+    """Resolve an API key to a CurrentUser with scoped permissions (cached with TTL)."""
+    cache_key = f"ak:{hashlib.sha256(key.encode()).hexdigest()[:16]}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     try:
         db = _get_db()
         key_hash = hashlib.sha256(key.encode()).hexdigest()
@@ -292,7 +342,7 @@ def _resolve_api_key(key: str) -> CurrentUser:
         # Parse scopes
         scopes = json.loads(row.get("scopes", '["*"]'))
 
-        return CurrentUser(
+        user = CurrentUser(
             user_id=row["user_id"],
             email=dict(user_row)["email"] if user_row else "",
             org_id=row["org_id"],
@@ -302,6 +352,8 @@ def _resolve_api_key(key: str) -> CurrentUser:
             scopes=scopes,
             auth_method="api_key",
         )
+        _cache_put(cache_key, user)
+        return user
     except HTTPException:
         raise
     except Exception:

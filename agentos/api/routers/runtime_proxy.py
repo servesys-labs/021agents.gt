@@ -79,6 +79,88 @@ def _resolve_catalog_rate(
     }
 
 
+class AgentRunProxyRequest(BaseModel):
+    """Edge-token-authenticated agent run — same harness as /agents/{name}/run."""
+    agent_name: str
+    task: str
+    org_id: str = ""
+    project_id: str = ""
+    channel: str = ""          # e.g. "telegram", "discord", "portal"
+    channel_user_id: str = ""  # e.g. Telegram chat_id
+
+
+@router.post("/agent/run")
+async def agent_run_proxy(
+    payload: AgentRunProxyRequest,
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Run an agent via edge token auth — same code path as /agents/{name}/run.
+
+    This is the single entry point for ALL channels (Telegram, Discord, portal
+    WebSocket, CLI) that route through the Cloudflare worker.  The worker
+    authenticates with the shared edge token; the backend runs the full agent
+    harness (tools, memory, governance, compliance, observability).
+    """
+    _require_edge_token(authorization=authorization, x_edge_token=x_edge_token)
+
+    from agentos.agent import Agent
+
+    name = (payload.agent_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="agent_name is required")
+
+    try:
+        agent = Agent.from_name(name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    # Set runtime context (org/project) so billing, telemetry, and scoping work
+    if hasattr(agent, "set_runtime_context"):
+        agent.set_runtime_context(
+            org_id=payload.org_id or "",
+            project_id=payload.project_id or "",
+            user_id=f"channel:{payload.channel}:{payload.channel_user_id}" if payload.channel else "",
+        )
+
+    started = time.time()
+    try:
+        results = await agent.run(payload.task)
+    except Exception as exc:
+        logger.exception("agent run proxy error for %s", name)
+        raise HTTPException(status_code=502, detail=f"agent run failed: {exc}") from exc
+
+    elapsed_ms = int((time.time() - started) * 1000)
+
+    output = ""
+    total_cost = 0.0
+    total_tools = 0
+    session_id = ""
+    trace_id = ""
+
+    for r in results:
+        if r.llm_response and r.llm_response.content:
+            output = r.llm_response.content
+        total_cost += r.cost_usd
+        total_tools += len(r.tool_results)
+
+    if hasattr(agent, "_observer") and agent._observer and agent._observer.records:
+        last_rec = agent._observer.records[-1]
+        session_id = last_rec.session_id
+        trace_id = last_rec.trace_id
+
+    return {
+        "success": not any(r.error for r in results),
+        "output": output,
+        "turns": len(results),
+        "tool_calls": total_tools,
+        "cost_usd": round(total_cost, 6),
+        "latency_ms": elapsed_ms,
+        "session_id": session_id,
+        "trace_id": trace_id,
+    }
+
+
 class LLMInferRequest(BaseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     provider: str = "gmi"
