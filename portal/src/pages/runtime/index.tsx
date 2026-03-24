@@ -10,6 +10,9 @@ import {
   Trash2,
   Pencil,
   Eye,
+  Pause,
+  PlayCircle,
+  AlertOctagon,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -46,8 +49,18 @@ type Job = {
   error?: string;
 };
 
+type DLQEntry = {
+  job_id?: string;
+  agent_name?: string;
+  task?: string;
+  error?: string;
+  failed_at?: string;
+  retries?: number;
+};
+
 type WorkflowResponse = { workflows?: Workflow[] };
 type JobsResponse = { jobs?: Job[] };
+type DLQResponse = { entries?: DLQEntry[] };
 type WorkflowRun = {
   run_id?: string;
   workflow_id?: string;
@@ -83,6 +96,7 @@ export const RuntimePage = () => {
   /* ── Queries ──────────────────────────────────────────────── */
   const workflowsQuery = useApiQuery<WorkflowResponse>("/api/v1/workflows");
   const jobsQuery = useApiQuery<JobsResponse>("/api/v1/jobs?limit=50");
+  const dlqQuery = useApiQuery<DLQResponse>("/api/v1/jobs/dlq");
   const runtimeInsightsQuery = useApiQuery<RuntimeInsightsResponse>("/api/v1/sessions/runtime/insights?since_days=30&limit_sessions=300");
   const [selectedWorkflowForRuns, setSelectedWorkflowForRuns] = useState<string | null>(null);
   const workflowRunsQuery = useApiQuery<WorkflowRunsResponse>(
@@ -98,6 +112,7 @@ export const RuntimePage = () => {
     [workflowsQuery.data],
   );
   const jobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data]);
+  const dlqEntries = useMemo(() => dlqQuery.data?.entries ?? [], [dlqQuery.data]);
 
   /* ── Search ───────────────────────────────────────────────── */
   const [wfSearch, setWfSearch] = useState("");
@@ -208,6 +223,26 @@ export const RuntimePage = () => {
     setConfirmOpen(true);
   };
 
+  const handlePauseJob = async (jobId: string) => {
+    try {
+      await apiRequest(`/api/v1/jobs/${jobId}/pause`, "POST");
+      showToast("Job paused", "success");
+      void jobsQuery.refetch();
+    } catch {
+      showToast("Pause failed", "error");
+    }
+  };
+
+  const handleResumeJob = async (jobId: string) => {
+    try {
+      await apiRequest(`/api/v1/jobs/${jobId}/resume`, "POST");
+      showToast("Job resumed", "success");
+      void jobsQuery.refetch();
+    } catch {
+      showToast("Resume failed", "error");
+    }
+  };
+
   /* ── Row actions ──────────────────────────────────────────── */
   const getWfActions = (wf: Workflow): ActionMenuItem[] => [
     {
@@ -259,6 +294,18 @@ export const RuntimePage = () => {
       },
     },
     {
+      label: "Pause",
+      icon: <Pause size={12} />,
+      onClick: () => void handlePauseJob(job.job_id ?? ""),
+      disabled: job.status !== "running",
+    },
+    {
+      label: "Resume",
+      icon: <PlayCircle size={12} />,
+      onClick: () => void handleResumeJob(job.job_id ?? ""),
+      disabled: job.status !== "paused",
+    },
+    {
       label: "Retry",
       icon: <RotateCcw size={12} />,
       onClick: () => void handleRetryJob(job.job_id ?? ""),
@@ -273,7 +320,7 @@ export const RuntimePage = () => {
     },
   ];
 
-  const combinedError = workflowsQuery.error ?? jobsQuery.error ?? runtimeInsightsQuery.error;
+  const combinedError = workflowsQuery.error ?? jobsQuery.error ?? runtimeInsightsQuery.error ?? dlqQuery.error;
   const combinedLoading = workflowsQuery.loading || jobsQuery.loading || runtimeInsightsQuery.loading;
   const runningJobs = jobs.filter((j) => j.status === "running").length;
   const insights = runtimeInsightsQuery.data;
@@ -358,6 +405,76 @@ export const RuntimePage = () => {
                     </td>
                     <td>
                       <ActionMenu items={getWfActions(wf)} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  /* ── DLQ tab content ──────────────────────────────────────── */
+  const dlqTab = (
+    <div>
+      {dlqQuery.loading ? (
+        <p className="text-sm text-text-muted">Loading dead letter queue...</p>
+      ) : dlqEntries.length === 0 ? (
+        <EmptyState
+          icon={<AlertOctagon size={40} />}
+          title="Dead letter queue empty"
+          description="Failed jobs that exceeded retry limits appear here"
+        />
+      ) : (
+        <div className="card p-0">
+          <div className="overflow-x-auto">
+            <table>
+              <thead>
+                <tr>
+                  <th>Job ID</th>
+                  <th>Agent</th>
+                  <th>Task</th>
+                  <th>Error</th>
+                  <th>Retries</th>
+                  <th>Failed At</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dlqEntries.map((entry) => (
+                  <tr key={entry.job_id}>
+                    <td>
+                      <span className="font-mono text-xs text-text-primary">
+                        {entry.job_id?.slice(0, 12)}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-text-secondary text-sm">
+                        {entry.agent_name ?? "n/a"}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-text-muted text-xs truncate max-w-[200px] block">
+                        {entry.task ?? "--"}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-status-error text-xs truncate max-w-[200px] block">
+                        {entry.error ?? "Unknown error"}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-text-muted text-xs font-mono">
+                        {entry.retries ?? 0}
+                      </span>
+                    </td>
+                    <td>
+                      <span className="text-[10px] text-text-muted">
+                        {entry.failed_at
+                          ? new Date(entry.failed_at).toLocaleString()
+                          : "--"}
+                      </span>
                     </td>
                   </tr>
                 ))}
@@ -468,6 +585,7 @@ export const RuntimePage = () => {
         onRefresh={() => {
           void workflowsQuery.refetch();
           void jobsQuery.refetch();
+          void dlqQuery.refetch();
         }}
         actions={
           <button
@@ -547,6 +665,12 @@ export const RuntimePage = () => {
               label: "Jobs",
               count: jobs.length,
               content: jobsTab,
+            },
+            {
+              id: "dlq",
+              label: "Dead Letter Queue",
+              count: dlqEntries.length,
+              content: dlqTab,
             },
           ]}
         />

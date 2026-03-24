@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Plus, Clock, Trash2, Pencil, Search, ToggleLeft, ToggleRight, Play, Eye } from "lucide-react";
+import React, { useMemo, useState } from "react";
+import { Plus, Clock, Trash2, Pencil, Search, ToggleLeft, ToggleRight, Play, Eye, ChevronDown, ChevronRight, History } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
@@ -22,6 +22,64 @@ type Schedule = {
   last_run?: string;
   next_run?: string;
 };
+
+type ScheduleExecution = {
+  execution_id?: string;
+  status?: string;
+  started_at?: string;
+  completed_at?: string;
+  error?: string;
+};
+
+function ScheduleHistoryRow({ scheduleId }: { scheduleId: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const historyQuery = useApiQuery<{ history?: ScheduleExecution[] }>(
+    `/api/v1/schedules/${scheduleId}/history`,
+    expanded,
+  );
+  const executions = (historyQuery.data?.history ?? []).slice(0, 10);
+
+  return (
+    <div className="mt-2">
+      <button
+        className="flex items-center gap-1.5 text-[10px] text-accent hover:underline"
+        onClick={() => setExpanded(!expanded)}
+      >
+        {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        <History size={10} />
+        History
+      </button>
+      {expanded && (
+        <div className="mt-2 space-y-1">
+          {historyQuery.loading && <p className="text-[10px] text-text-muted">Loading history...</p>}
+          {historyQuery.error && <p className="text-[10px] text-status-error">{historyQuery.error}</p>}
+          {!historyQuery.loading && executions.length === 0 && (
+            <p className="text-[10px] text-text-muted">No execution history</p>
+          )}
+          {executions.map((exec, i) => (
+            <div
+              key={exec.execution_id ?? i}
+              className="flex items-center gap-3 px-3 py-1.5 bg-surface-base border border-border-default rounded text-[10px]"
+            >
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                exec.status === "completed" || exec.status === "success" ? "bg-status-live" :
+                exec.status === "failed" || exec.status === "error" ? "bg-status-error" :
+                exec.status === "running" ? "bg-status-warning" : "bg-text-muted"
+              }`} />
+              <span className="text-text-secondary font-medium">{exec.status ?? "unknown"}</span>
+              <span className="text-text-muted flex-1">
+                {exec.started_at ? new Date(exec.started_at).toLocaleString() : "--"}
+              </span>
+              {exec.error && (
+                <span className="text-status-error truncate max-w-[150px]">{exec.error}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export const SchedulesPage = () => {
   const { showToast } = useToast();
@@ -125,7 +183,8 @@ export const SchedulesPage = () => {
           <div className="card p-0"><div className="overflow-x-auto">
             <table><thead><tr><th>Name</th><th>Agent</th><th>Cron</th><th>Status</th><th>Last Run</th><th>Next Run</th><th style={{ width: "48px" }}></th></tr></thead>
               <tbody>{filtered.map((s) => (
-                <tr key={s.schedule_id}>
+                <React.Fragment key={s.schedule_id}>
+                <tr>
                   <td><span className="text-text-primary text-sm font-medium">{s.name ?? s.schedule_id.slice(0, 12)}</span></td>
                   <td><span className="text-text-secondary text-sm">{s.agent_name ?? "n/a"}</span></td>
                   <td><span className="font-mono text-xs text-text-muted bg-surface-overlay px-1.5 py-0.5 rounded">{s.cron ?? "--"}</span></td>
@@ -134,6 +193,12 @@ export const SchedulesPage = () => {
                   <td><span className="text-[10px] text-text-muted">{s.next_run ? new Date(s.next_run).toLocaleString() : "--"}</span></td>
                   <td><ActionMenu items={getActions(s)} /></td>
                 </tr>
+                <tr>
+                  <td colSpan={7} className="py-0 px-3">
+                    <ScheduleHistoryRow scheduleId={s.schedule_id} />
+                  </td>
+                </tr>
+                </React.Fragment>
               ))}</tbody>
             </table>
           </div></div>
