@@ -50,6 +50,9 @@ const SettingsPage = lazy(() =>
 const BillingPage = lazy(() =>
   import("./pages/billing").then((m) => ({ default: m.BillingPage })),
 );
+const AutoResearchPage = lazy(() =>
+  import("./pages/autoresearch").then((m) => ({ default: m.AutoResearchPage })),
+);
 
 // Auth
 const LoginPage = lazy(() =>
@@ -78,6 +81,7 @@ function App() {
             { name: "security", list: "/security" },
             { name: "voice", list: "/voice" },
             { name: "settings", list: "/settings" },
+            { name: "autoresearch", list: "/autoresearch" },
             { name: "billing", list: "/billing" },
             { name: "login", list: "/login" },
           ]}
@@ -118,6 +122,7 @@ function App() {
                 <Route path="/security" element={<SecurityPage />} />
                 <Route path="/voice" element={<VoicePage />} />
                 <Route path="/settings" element={<SettingsPage />} />
+                <Route path="/autoresearch" element={<AutoResearchPage />} />
                 <Route path="/billing" element={<BillingPage />} />
               </Route>
 

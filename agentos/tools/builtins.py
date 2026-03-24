@@ -1177,6 +1177,287 @@ async def speech_to_text(audio_path: str, model: str = "", language: str = "") -
         return f"STT error: {exc}"
 
 
+async def autoresearch(
+    agent_name: str,
+    action: str = "run",
+    eval_file: str | None = None,
+    max_iterations: int = 10,
+    metric: str = "pass_rate",
+    apply_best: bool = False,
+) -> str:
+    """Autonomous agent self-improvement via the autoresearch loop.
+
+    The agent can call this tool to improve itself (or another agent) by
+    running the autoresearch loop: an LLM proposes modifications to the
+    agent config, evaluates them on eval tasks, and keeps improvements.
+
+    Actions:
+      run     — Run the autoresearch loop (requires eval_file)
+      status  — Show current autoresearch results for the agent
+      results — Show experiment history
+    """
+    from agentos.agent import Agent, load_agent_config
+    from agentos.autoresearch.results import ResultsLog
+
+    # Resolve agent
+    agents_dir = _agents_dir()
+    agent_path = None
+    for ext in (".json", ".yaml", ".yml"):
+        p = agents_dir / f"{agent_name}{ext}"
+        if p.exists():
+            agent_path = p
+            break
+
+    if not agent_path:
+        return f"Agent '{agent_name}' not found in {agents_dir}"
+
+    if action == "status":
+        results_path = Path("data") / "autoresearch" / agent_name / "results.tsv"
+        if not results_path.exists():
+            return f"No autoresearch results found for '{agent_name}'. Run with action='run' first."
+        log = ResultsLog(results_path)
+        return log.summary()
+
+    elif action == "results":
+        results_path = Path("data") / "autoresearch" / agent_name / "results.tsv"
+        if not results_path.exists():
+            return f"No autoresearch results found for '{agent_name}'."
+        log = ResultsLog(results_path)
+        records = log.records()
+        if not records:
+            return "No experiments recorded."
+        lines = [f"{'commit':<10} {'score':>8} {'status':<9} description"]
+        lines.append("-" * 60)
+        for r in records[-20:]:
+            score_str = f"{r.val_bpb:.3f}" if r.val_bpb > 0 else "  ---"
+            lines.append(f"{r.commit:<10} {score_str:>8} {r.status.value:<9} {r.description}")
+        return "\n".join(lines)
+
+    elif action == "run":
+        # Load eval tasks
+        if not eval_file:
+            # Try default locations
+            for candidate in [
+                Path.cwd() / "eval" / "smoke-test.json",
+                Path.cwd() / "eval" / f"{agent_name}.json",
+                Path.cwd() / "eval_tasks.json",
+            ]:
+                if candidate.exists():
+                    eval_file = str(candidate)
+                    break
+
+        if not eval_file:
+            return (
+                "No eval_file provided and no default eval tasks found. "
+                "Create an eval file (e.g., eval/smoke-test.json) with format: "
+                '[{"name": "task1", "input": "question", "expected": "answer", "grader": "contains"}]'
+            )
+
+        eval_path = Path(eval_file)
+        if not eval_path.exists():
+            return f"Eval file not found: {eval_path}"
+
+        eval_tasks = json.loads(eval_path.read_text())
+        if not eval_tasks:
+            return f"No eval tasks found in {eval_path}"
+
+        # Build and run the autoresearch loop
+        from agentos.autoresearch.agent_research import AgentResearchLoop
+
+        config = load_agent_config(agent_path)
+        agent = Agent(config)
+
+        loop = AgentResearchLoop(
+            agent=agent,
+            eval_tasks=eval_tasks,
+            primary_metric=metric,
+            max_iterations=max_iterations,
+        )
+
+        summary = await loop.run()
+
+        # Format results
+        lines = [
+            f"Autoresearch Report: {agent_name}",
+            f"{'=' * 50}",
+            f"  Iterations:    {summary['iterations']}",
+            f"  Baseline:      {summary['baseline_score']:.3f}",
+            f"  Best {metric}: {summary['best_score']:.3f}",
+            f"  Kept:          {summary['improvements_kept']}",
+            f"  Discarded:     {summary['experiments_discarded']}",
+        ]
+
+        if summary.get("history"):
+            lines.append(f"\nExperiment history:")
+            for exp in summary["history"]:
+                icon = "+" if exp["status"] == "keep" else "-"
+                lines.append(
+                    f"  [{icon}] #{exp['iteration']}: {exp['description']} "
+                    f"({metric}={exp['score']:.3f}, delta={exp['improvement']:+.3f})"
+                )
+
+        if apply_best and summary["improvements_kept"] > 0:
+            best_config = loop.apply_best()
+            lines.append(f"\nApplied best config → agents/{best_config.name}.json v{best_config.version}")
+        elif summary["improvements_kept"] > 0:
+            lines.append(f"\nTip: Call with apply_best=true to save the best config.")
+
+        return "\n".join(lines)
+
+    else:
+        return f"Unknown action: {action}. Use 'run', 'status', or 'results'."
+
+
+async def dynamic_exec(code: str, language: str = "javascript", timeout_ms: int = 10000) -> str:
+    """Execute JavaScript/TypeScript code in a secure Cloudflare Dynamic Worker sandbox.
+
+    Runs in an isolated V8 isolate with sub-10ms cold start. Use console.log() for output.
+    This is the preferred code execution tool — faster, cheaper, and more secure than
+    bash or python-exec. Write JS/TS for computation, data transforms, API calls, and logic.
+
+    Falls back to local Node.js subprocess if AGENTOS_WORKER_URL is not set.
+    """
+    import httpx
+    import os
+
+    # Auto-detect language if not specified
+    if not language:
+        py_signals = ["def ", "import ", "print(", "class ", "from ", "if __name__"]
+        language = "python" if any(s in code for s in py_signals) else "javascript"
+
+    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
+    if worker_url:
+        # Route to Cloudflare Worker which has the LOADER binding
+        try:
+            async with httpx.AsyncClient(timeout=max(timeout_ms / 1000 + 5, 15.0)) as client:
+                resp = await client.post(
+                    f"{worker_url}/agents/agentos/default/exec-code",
+                    headers={"Content-Type": "application/json"},
+                    json={"code": code, "language": language, "timeoutMs": timeout_ms},
+                )
+                if resp.status_code == 200:
+                    return resp.text
+                return json.dumps({"error": f"Worker returned {resp.status_code}: {resp.text[:300]}"})
+        except Exception as exc:
+            return json.dumps({"error": f"Worker request failed: {exc}"})
+
+    # Local fallback: run via subprocess
+    import asyncio
+    import tempfile
+
+    runtime = "python3" if language == "python" else "node"
+    suffix = ".py" if language == "python" else ".mjs"
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False) as f:
+            f.write(code)
+            f.flush()
+            proc = await asyncio.create_subprocess_exec(
+                runtime, f.name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_ms / 1000)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return json.dumps({"stdout": "", "stderr": "Timed out", "exit_code": -1})
+
+            return json.dumps({
+                "sandbox_type": f"local_{runtime}",
+                "language": language,
+                "stdout": stdout.decode(errors="replace"),
+                "stderr": stderr.decode(errors="replace"),
+                "exit_code": proc.returncode or 0,
+            })
+    except FileNotFoundError:
+        return json.dumps({"error": f"{runtime} not found. Install it or set AGENTOS_WORKER_URL."})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+async def web_crawl(url: str, max_pages: int = 5, max_depth: int = 1,
+                     format: str = "markdown") -> str:
+    """Crawl a website and return content as markdown (or HTML/JSON).
+
+    Uses Cloudflare's Browser Rendering /crawl API — fast, respects robots.txt,
+    returns clean markdown perfect for RAG ingestion. No browser needed.
+
+    Falls back to basic HTTP fetch if worker URL not configured.
+    """
+    import httpx
+    import os
+
+    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
+    if worker_url:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{worker_url}/browse/crawl",
+                    json={"url": url, "maxPages": max_pages, "maxDepth": max_depth, "format": format},
+                )
+                return resp.text
+        except Exception as exc:
+            return json.dumps({"error": f"Crawl request failed: {exc}"})
+
+    # Fallback: basic HTTP fetch with HTML-to-text
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "AgentOS/0.1.0"})
+            import re
+            text = re.sub(r"<[^>]+>", "", resp.text)
+            text = re.sub(r"\s+", " ", text).strip()
+            return json.dumps({"pages": [{"url": url, "markdown": text[:10000]}]})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
+async def browser_render(url: str, action: str = "text", wait_for: str = "",
+                          timeout: int = 30000) -> str:
+    """Render a page with a full headless browser (Puppeteer on Cloudflare edge).
+
+    Use when the /crawl API is blocked or the site requires JavaScript rendering,
+    authentication, or anti-bot bypass. Supports: text extraction, screenshots,
+    HTML capture, and link discovery.
+
+    Falls back to basic HTTP fetch if worker URL not configured.
+    """
+    import httpx
+    import os
+
+    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
+    if worker_url:
+        try:
+            async with httpx.AsyncClient(timeout=max(timeout / 1000 + 10, 45)) as client:
+                resp = await client.post(
+                    f"{worker_url}/browse/render",
+                    json={"url": url, "action": action, "waitFor": wait_for, "timeout": timeout},
+                )
+                return resp.text
+        except Exception as exc:
+            return json.dumps({"error": f"Browser render failed: {exc}"})
+
+    # Fallback: basic HTTP fetch
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "AgentOS/0.1.0"})
+            if action == "html":
+                return json.dumps({"html": resp.text[:20000]})
+            elif action == "links":
+                import re
+                links = re.findall(r'href="(https?://[^"]+)"', resp.text)
+                return json.dumps({"links": [{"href": l} for l in links[:100]]})
+            else:
+                import re
+                text = re.sub(r"<[^>]+>", "", resp.text)
+                text = re.sub(r"\s+", " ", text).strip()
+                return json.dumps({"text": text[:10000]})
+    except Exception as exc:
+        return json.dumps({"error": str(exc)})
+
+
 # Registry of built-in handlers keyed by tool name
 BUILTIN_HANDLERS: dict[str, Any] = {
     "web-search": web_search,
@@ -1207,6 +1488,10 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "image-generate": image_generate,
     "text-to-speech": text_to_speech,
     "speech-to-text": speech_to_text,
+    "dynamic-exec": dynamic_exec,
+    "web-crawl": web_crawl,
+    "browser-render": browser_render,
+    "autoresearch": autoresearch,
 }
 
 # Schemas for built-in tools so the registry can expose them without JSON files
@@ -1254,7 +1539,7 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 "name": {"type": "string", "description": "Optional name for the agent"},
                 "tools": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Optional list of tools to assign. Available: bash, python-exec, read-file, write-file, edit-file, grep, glob, web-search, http-request, store-knowledge, knowledge-search, todo, create-agent, eval-agent, evolve-agent, list-agents, list-tools. If omitted, tools are auto-detected from description.",
+                    "description": "Optional list of tools to assign. Available: bash, python-exec, read-file, write-file, edit-file, grep, glob, web-search, http-request, store-knowledge, knowledge-search, todo, create-agent, eval-agent, evolve-agent, autoresearch, list-agents, list-tools. If omitted, tools are auto-detected from description.",
                 },
             },
             "required": ["description"],
@@ -1527,6 +1812,80 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 "language": {"type": "string", "description": "Language code (e.g., 'en', 'es'). Auto-detected if omitted."},
             },
             "required": ["audio_path"],
+        },
+    },
+    "autoresearch": {
+        "description": "Autonomous agent self-improvement via the autoresearch loop. Proposes config modifications (system prompt, temperature, tools, model), evaluates them on tasks, and keeps improvements. Can improve this agent or any named agent.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "description": "Name of the agent to improve"},
+                "action": {
+                    "type": "string",
+                    "enum": ["run", "status", "results"],
+                    "default": "run",
+                    "description": "Action: 'run' starts the loop, 'status' shows summary, 'results' shows experiment history",
+                },
+                "eval_file": {
+                    "type": "string",
+                    "description": "Path to eval tasks JSON file (required for 'run'). Format: [{name, input, expected, grader}]",
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "description": "Maximum number of experiments to run",
+                    "default": 10,
+                },
+                "metric": {
+                    "type": "string",
+                    "description": "Primary metric to optimize (pass_rate, avg_score, etc.)",
+                    "default": "pass_rate",
+                },
+                "apply_best": {
+                    "type": "boolean",
+                    "description": "If true, persist the best-found config to disk after the loop",
+                    "default": False,
+                },
+            },
+            "required": ["agent_name"],
+        },
+    },
+    "web-crawl": {
+        "description": "Crawl a website and return content as clean markdown. Uses Cloudflare's /crawl API — fast, respects robots.txt, perfect for RAG ingestion. No browser needed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to crawl"},
+                "max_pages": {"type": "integer", "description": "Maximum pages to crawl", "default": 5},
+                "max_depth": {"type": "integer", "description": "Maximum crawl depth from start URL", "default": 1},
+                "format": {"type": "string", "enum": ["markdown", "html", "json"], "description": "Output format", "default": "markdown"},
+            },
+            "required": ["url"],
+        },
+    },
+    "browser-render": {
+        "description": "Render a page with a full headless browser (Puppeteer). Use when web-crawl is blocked or site requires JS rendering/auth/anti-bot. Supports: text, screenshot, html, links.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to render"},
+                "action": {"type": "string", "enum": ["text", "screenshot", "html", "links"], "description": "What to extract", "default": "text"},
+                "wait_for": {"type": "string", "description": "CSS selector to wait for before extracting"},
+                "timeout": {"type": "integer", "description": "Timeout in ms", "default": 30000},
+            },
+            "required": ["url"],
+        },
+    },
+    "dynamic-exec": {
+        "description": "Execute JavaScript/TypeScript in a secure Cloudflare Dynamic Worker (V8 isolate, <10ms). "
+                       "PREFERRED over bash/python-exec for computation, data transforms, API calls, JSON parsing, and logic. "
+                       "Use console.log() for output. Write JS — it is faster, cheaper, and more secure.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "JavaScript or TypeScript code to execute. Use console.log() for output."},
+                "timeout_ms": {"type": "integer", "description": "Execution timeout in milliseconds", "default": 10000},
+            },
+            "required": ["code"],
         },
     },
 }

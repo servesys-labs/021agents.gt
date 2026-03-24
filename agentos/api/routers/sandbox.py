@@ -5,43 +5,53 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from pydantic import BaseModel, Field
 
 from agentos.api.deps import CurrentUser, get_current_user
 
 router = APIRouter(prefix="/sandbox", tags=["sandbox"])
 
 
+class CreateSandboxRequest(BaseModel):
+    template: str = "base"
+    timeout_sec: int = 300
+
+
+class ExecRequest(BaseModel):
+    command: str
+    sandbox_id: str = ""
+    timeout_ms: int = 30000
+
+
 @router.post("/create")
 async def create_sandbox(
-    template: str = "base",
-    timeout_sec: int = 300,
+    request: CreateSandboxRequest,
     user: CurrentUser = Depends(get_current_user),
 ):
     """Create a new E2B sandbox."""
     from agentos.sandbox import SandboxManager
     mgr = SandboxManager()
-    if not mgr.has_api_key:
-        raise HTTPException(status_code=503, detail="E2B_API_KEY not configured")
-    session = await mgr.create(template=template, timeout_sec=timeout_sec)
+    if not mgr.has_api_key and not mgr.allow_local_fallback:
+        raise HTTPException(status_code=503, detail="E2B_API_KEY not configured and local fallback disabled")
+    session = await mgr.create(template=request.template, timeout_sec=request.timeout_sec)
     return {"sandbox_id": session.sandbox_id, "template": session.template, "status": session.status}
 
 
 @router.post("/exec")
 async def exec_command(
-    command: str,
-    sandbox_id: str = "",
-    timeout_ms: int = 30000,
+    request: ExecRequest,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Execute a command in a sandbox."""
+    """Execute a command in a sandbox. Uses E2B if API key is set, local fallback otherwise."""
     from agentos.sandbox import SandboxManager
     mgr = SandboxManager()
-    if not mgr.has_api_key:
-        raise HTTPException(status_code=503, detail="E2B_API_KEY not configured")
-    result = await mgr.exec(command=command, sandbox_id=sandbox_id or None, timeout_ms=timeout_ms)
+    if not mgr.has_api_key and not mgr.allow_local_fallback:
+        raise HTTPException(status_code=503, detail="E2B_API_KEY not configured and local fallback disabled")
+    result = await mgr.exec(command=request.command, sandbox_id=request.sandbox_id or None, timeout_ms=request.timeout_ms)
     return {
         "sandbox_id": result.sandbox_id, "stdout": result.stdout,
         "stderr": result.stderr, "exit_code": result.exit_code,
+        "duration_ms": result.duration_ms,
     }
 
 

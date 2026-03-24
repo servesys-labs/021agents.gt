@@ -25,6 +25,11 @@ Usage:
     agentos deploy <name>           — Deploy an agent (Cloudflare Workers)
     agentos chat <name>             — Interactive chat session with an agent
     agentos codemap                 — Generate visual + JSON code graph maps
+    agentos autoresearch init       — Initialize training research workspace
+    agentos autoresearch run        — Start autonomous LLM-training research loop
+    agentos autoresearch agent      — Autonomous agent self-improvement via autoresearch
+    agentos autoresearch status     — Show autoresearch summary
+    agentos autoresearch results    — Show experiment results table
 """
 
 from __future__ import annotations
@@ -306,6 +311,47 @@ def main() -> None:
     gold_audit.add_argument("--agent", type=str, default="", help="Filter by agent name")
     gold_audit.add_argument("--limit", type=int, default=20, help="Number of entries to show")
 
+    # --- autoresearch ---
+    ar_p = sub.add_parser("autoresearch", help="Autonomous LLM-training research loop (karpathy/autoresearch)")
+    ar_sub = ar_p.add_subparsers(dest="ar_command")
+
+    ar_init = ar_sub.add_parser("init", help="Initialize an autoresearch workspace")
+    ar_init.add_argument("directory", nargs="?", default=".", help="Workspace directory (default: .)")
+    ar_init.add_argument("--time-budget", type=int, default=300, help="Training time budget in seconds (default: 300)")
+    ar_init.add_argument("--force", action="store_true", help="Overwrite existing files")
+
+    ar_run = ar_sub.add_parser("run", help="Start the autonomous research loop")
+    ar_run.add_argument("--workspace", type=str, default=".", help="Workspace directory")
+    ar_run.add_argument("--max-iterations", type=int, default=0, help="Max experiments (0=unlimited)")
+    ar_run.add_argument("--model", type=str, default="claude-sonnet-4-6-20250627", help="LLM model for hypothesis generation")
+    ar_run.add_argument("--provider", type=str, default="anthropic", help="LLM provider")
+    ar_run.add_argument("--temperature", type=float, default=0.7, help="LLM temperature (default: 0.7)")
+    ar_run.add_argument("--train-command", type=str, default="", help="Custom training command (default: uv run train.py)")
+    ar_run.add_argument("--time-budget", type=int, default=300, help="Training time budget in seconds")
+    ar_run.add_argument("--branch", type=str, default="", help="Git branch for experiments")
+    ar_run.add_argument("--no-git", action="store_true", help="Disable git commit/reset")
+    ar_run.add_argument("--backend", type=str, default="in-process",
+                        choices=["in-process", "e2b", "gpu", "gpu-h100", "gpu-h200"],
+                        help="Execution backend (default: in-process)")
+
+    ar_status = ar_sub.add_parser("status", help="Show autoresearch status and results")
+    ar_status.add_argument("--workspace", type=str, default=".", help="Workspace directory")
+
+    ar_results = ar_sub.add_parser("results", help="Show experiment results table")
+    ar_results.add_argument("--workspace", type=str, default=".", help="Workspace directory")
+    ar_results.add_argument("--last", type=int, default=0, help="Show last N experiments (0=all)")
+
+    ar_agent = ar_sub.add_parser("agent", help="Autonomous agent self-improvement via autoresearch")
+    ar_agent.add_argument("name", help="Agent name or path")
+    ar_agent.add_argument("tasks_file", help="JSON file with eval tasks")
+    ar_agent.add_argument("--max-iterations", type=int, default=20, help="Max experiments (default: 20)")
+    ar_agent.add_argument("--model", type=str, default="claude-sonnet-4-6-20250627", help="LLM model for hypothesis generation")
+    ar_agent.add_argument("--provider", type=str, default="anthropic", help="LLM provider")
+    ar_agent.add_argument("--temperature", type=float, default=0.7, help="LLM temperature")
+    ar_agent.add_argument("--trials", type=int, default=3, help="Trials per eval task (default: 3)")
+    ar_agent.add_argument("--metric", type=str, default="pass_rate", help="Primary metric to optimize (default: pass_rate)")
+    ar_agent.add_argument("--apply", action="store_true", help="Apply best config to agent after loop completes")
+
     parser.add_argument("--version", "-V", action="store_true", help="Show version")
 
     args = parser.parse_args()
@@ -370,6 +416,8 @@ def main() -> None:
             cmd_voice(args)
         elif args.command == "security":
             cmd_security(args)
+        elif args.command == "autoresearch":
+            asyncio.run(cmd_autoresearch(args))
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -3318,6 +3366,341 @@ def _get_builder_provider(args: argparse.Namespace):
     print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real LLM-powered creation.")
     print()
     return StubProvider()
+
+
+async def cmd_autoresearch(args: argparse.Namespace) -> None:
+    """Autonomous LLM-training research loop."""
+    from pathlib import Path
+
+    ar_cmd = getattr(args, "ar_command", None)
+
+    if ar_cmd == "init":
+        _autoresearch_init(args)
+    elif ar_cmd == "run":
+        await _autoresearch_run(args)
+    elif ar_cmd == "status":
+        _autoresearch_status(args)
+    elif ar_cmd == "results":
+        _autoresearch_results(args)
+    elif ar_cmd == "agent":
+        await _autoresearch_agent(args)
+    else:
+        print("Usage: agentos autoresearch {init,run,status,results,agent}")
+        print("  init     — Initialize an autoresearch workspace (train.py + val_bpb)")
+        print("  run      — Start the autonomous training research loop")
+        print("  agent    — Autonomous agent self-improvement (config + EvalGym)")
+        print("  status   — Show autoresearch status and results summary")
+        print("  results  — Show experiment results table")
+
+
+def _autoresearch_init(args: argparse.Namespace) -> None:
+    """Initialize an autoresearch workspace with prepare.py, train.py, program.md."""
+    import shutil
+
+    workspace = Path(args.directory).resolve()
+    workspace.mkdir(parents=True, exist_ok=True)
+    force = getattr(args, "force", False)
+    time_budget = getattr(args, "time_budget", 300)
+
+    defaults_dir = Path(__file__).parent / "autoresearch" / "defaults"
+
+    files_to_copy = [
+        ("prepare.py", "prepare.py"),
+        ("train.py", "train.py"),
+    ]
+
+    created = []
+    for src_name, dst_name in files_to_copy:
+        src = defaults_dir / src_name
+        dst = workspace / dst_name
+        if dst.exists() and not force:
+            print(f"  Skip (exists): {dst_name}")
+            continue
+        shutil.copy2(src, dst)
+        created.append(dst_name)
+        print(f"  Created: {dst_name}")
+
+    # Generate program.md
+    from agentos.autoresearch.program import write_program
+
+    program_path = workspace / "program.md"
+    if not program_path.exists() or force:
+        write_program(
+            program_path,
+            time_budget=time_budget,
+        )
+        created.append("program.md")
+        print(f"  Created: program.md")
+    else:
+        print(f"  Skip (exists): program.md")
+
+    # Create .gitignore for results.tsv and run.log
+    gitignore = workspace / ".gitignore"
+    ignore_entries = {"results.tsv", "run.log", "__pycache__/"}
+    if gitignore.exists():
+        existing = set(gitignore.read_text().splitlines())
+        new_entries = ignore_entries - existing
+        if new_entries:
+            with gitignore.open("a") as f:
+                for entry in sorted(new_entries):
+                    f.write(f"\n{entry}")
+            print(f"  Updated: .gitignore")
+    else:
+        gitignore.write_text("\n".join(sorted(ignore_entries)) + "\n")
+        created.append(".gitignore")
+        print(f"  Created: .gitignore")
+
+    print(f"\nAutoresearch workspace initialized in {workspace}")
+    print(f"\nNext steps:")
+    print(f"  1. python prepare.py          # prepare data + tokenizer")
+    print(f"  2. agentos autoresearch run    # start autonomous research")
+
+
+async def _autoresearch_run(args: argparse.Namespace) -> None:
+    """Start the autonomous research loop."""
+    from agentos.autoresearch.driver import (
+        AutoResearchDriver,
+        DriverConfig,
+        LLMProposer,
+    )
+
+    workspace = Path(args.workspace).resolve()
+    train_path = workspace / "train.py"
+    if not train_path.exists():
+        print(f"Error: {train_path} not found. Run 'agentos autoresearch init' first.", file=sys.stderr)
+        sys.exit(1)
+
+    # Load program.md if available
+    program_path = workspace / "program.md"
+    program_md = program_path.read_text() if program_path.exists() else ""
+
+    config = DriverConfig(
+        workspace=workspace,
+        run_command=args.train_command or "uv run train.py",
+        time_budget=args.time_budget,
+        max_iterations=args.max_iterations,
+        git_branch=args.branch,
+        git_auto_commit=not args.no_git,
+        git_auto_reset=not args.no_git,
+        train_timeout=args.time_budget * 2 + 60,
+    )
+
+    proposer = LLMProposer(
+        model=args.model,
+        provider=args.provider,
+        program_md=program_md,
+        temperature=args.temperature,
+    )
+
+    def on_experiment(record):
+        status_icon = {"keep": "+", "discard": "-", "crash": "!"}
+        icon = status_icon.get(record.status.value, "?")
+        bpb_str = f"{record.val_bpb:.6f}" if record.val_bpb > 0 else "CRASHED"
+        print(f"  [{icon}] {record.commit} | {bpb_str} | {record.description}")
+
+    # Set up execution backend
+    backend_name = getattr(args, "backend", "in-process")
+    backend = None
+    if backend_name != "in-process":
+        from agentos.autoresearch.backends import get_backend
+        backend = get_backend(backend_name)
+
+    driver = AutoResearchDriver(config, proposer, on_experiment=on_experiment, backend=backend)
+
+    max_str = str(config.max_iterations) if config.max_iterations > 0 else "unlimited"
+    print(f"Autoresearch starting")
+    print(f"  Workspace:    {workspace}")
+    print(f"  Time budget:  {config.time_budget}s per experiment")
+    print(f"  Max iters:    {max_str}")
+    print(f"  Model:        {args.model}")
+    print(f"  Backend:      {backend_name}"
+          + (f" ({backend.cost_estimate(config.time_budget)})" if backend else ""))
+    print(f"  Git:          {'enabled' if config.git_auto_commit else 'disabled'}")
+    print(f"  Train cmd:    {config.run_command}")
+    print("=" * 60)
+    print("  [+] = kept  [-] = discarded  [!] = crashed")
+    print()
+
+    try:
+        summary = await driver.run()
+    except KeyboardInterrupt:
+        driver.stop()
+        print("\nStopping after current experiment...")
+        summary = {
+            "iterations": driver._iteration,
+            "best_bpb": driver.results.best_bpb,
+            "summary": driver.results.summary(),
+        }
+
+    print("\n" + "=" * 60)
+    print("Autoresearch complete")
+    print(f"  Iterations:  {summary.get('iterations', 0)}")
+    if summary.get("elapsed_seconds"):
+        elapsed = summary["elapsed_seconds"]
+        rate = summary.get("experiments_per_hour", 0)
+        print(f"  Elapsed:     {elapsed:.0f}s ({rate:.1f} experiments/hour)")
+    if summary.get("best_bpb") is not None:
+        print(f"  Best bpb:    {summary['best_bpb']:.6f}")
+    print(f"\n{summary.get('summary', '')}")
+
+
+def _autoresearch_status(args: argparse.Namespace) -> None:
+    """Show autoresearch status — reads from DB if available, falls back to TSV."""
+    # Try database first
+    db_path = Path("data") / "agent.db"
+    if db_path.exists():
+        try:
+            from agentos.core.database import AgentDB
+            db = AgentDB(db_path)
+            db.initialize()
+            runs = db.query_autoresearch_runs(limit=10)
+            if runs:
+                print(f"Autoresearch runs (from database):")
+                print(f"{'=' * 70}")
+                for r in runs:
+                    status_icon = {"completed": "+", "running": "~", "error": "!"}
+                    icon = status_icon.get(r["status"], "?")
+                    applied = " [applied]" if r.get("applied") else ""
+                    print(
+                        f"  [{icon}] {r['agent_name']:<20} "
+                        f"baseline={r['baseline_score']:.3f} → best={r['best_score']:.3f} "
+                        f"({r['improvements_kept']} kept, {r['experiments_discarded']} discarded) "
+                        f"${r['total_cost_usd']:.3f} "
+                        f"{r['status']}{applied}"
+                    )
+                return
+        except Exception:
+            pass  # fall through to TSV
+
+    # Fallback to TSV
+    from agentos.autoresearch.results import ResultsLog
+
+    workspace = Path(args.workspace).resolve()
+    results_path = workspace / "results.tsv"
+
+    if not results_path.exists():
+        print("No autoresearch results found.")
+        print(f"Run 'agentos autoresearch init' to set up a workspace.")
+        return
+
+    log = ResultsLog(results_path)
+    print(log.summary())
+
+
+async def _autoresearch_agent(args: argparse.Namespace) -> None:
+    """Run autonomous agent self-improvement via autoresearch."""
+    from agentos.autoresearch.agent_research import AgentResearchLoop, AgentExperiment
+
+    agent = _load_agent(args.name)
+    tasks_path = Path(args.tasks_file)
+    if not tasks_path.exists():
+        print(f"Error: {tasks_path} not found", file=sys.stderr)
+        sys.exit(1)
+
+    eval_tasks = json.loads(tasks_path.read_text())
+
+    metric = getattr(args, "metric", "pass_rate")
+    max_iters = getattr(args, "max_iterations", 20)
+
+    def on_experiment(exp: AgentExperiment):
+        icon = "+" if exp.status.value == "keep" else "-"
+        score = exp.metrics_after.get(metric, 0)
+        print(f"  [{icon}] #{exp.iteration}: {exp.description} "
+              f"({metric}={score:.3f}, delta={exp.primary_improvement:+.3f})")
+
+    # Try to get DB for observability
+    db = None
+    try:
+        db_path = Path("data") / "agent.db"
+        if db_path.exists():
+            from agentos.core.database import AgentDB
+            db = AgentDB(db_path)
+            db.initialize()
+    except Exception:
+        pass
+
+    loop = AgentResearchLoop(
+        agent=agent,
+        eval_tasks=eval_tasks,
+        primary_metric=metric,
+        max_iterations=max_iters,
+        trials_per_task=getattr(args, "trials", 3),
+        model=getattr(args, "model", "claude-sonnet-4-6-20250627"),
+        provider=getattr(args, "provider", "anthropic"),
+        temperature=getattr(args, "temperature", 0.7),
+        on_experiment=on_experiment,
+        db=db,
+    )
+
+    print(f"Agent autoresearch: '{agent.config.name}' v{agent.config.version}")
+    print(f"  Eval tasks:   {len(eval_tasks)}")
+    print(f"  Metric:       {metric}")
+    print(f"  Max iters:    {max_iters}")
+    print(f"  Model:        {args.model}")
+    print(f"  Trials/task:  {args.trials}")
+    print("=" * 60)
+    print("  [+] = kept  [-] = discarded")
+    print()
+
+    try:
+        summary = await loop.run()
+    except KeyboardInterrupt:
+        loop.stop()
+        print("\nStopping...")
+        summary = {
+            "iterations": loop._iteration,
+            "best_score": loop._best_score,
+            "baseline_score": None,
+            "improvements_kept": sum(1 for e in loop._history if e.status.value == "keep"),
+            "experiments_discarded": sum(1 for e in loop._history if e.status.value == "discard"),
+        }
+
+    print("\n" + "=" * 60)
+    print("Agent autoresearch complete")
+    print(f"  Iterations:    {summary.get('iterations', 0)}")
+    print(f"  Baseline:      {summary.get('baseline_score', '?')}")
+    print(f"  Best {metric}: {summary.get('best_score', '?')}")
+    print(f"  Kept:          {summary.get('improvements_kept', 0)}")
+    print(f"  Discarded:     {summary.get('experiments_discarded', 0)}")
+
+    # Apply best config if requested
+    if getattr(args, "apply", False) and summary.get("best_score") is not None:
+        best_config = loop.apply_best()
+        print(f"\nApplied best config → agents/{best_config.name}.json v{best_config.version}")
+    elif summary.get("improvements_kept", 0) > 0:
+        print(f"\nTip: Re-run with --apply to save the best config to disk.")
+
+
+def _autoresearch_results(args: argparse.Namespace) -> None:
+    """Show experiment results as a table."""
+    from agentos.autoresearch.results import ResultsLog
+
+    workspace = Path(args.workspace).resolve()
+    results_path = workspace / "results.tsv"
+
+    if not results_path.exists():
+        print("No results file found.")
+        return
+
+    log = ResultsLog(results_path)
+    records = log.records()
+
+    if not records:
+        print("No experiments recorded yet.")
+        return
+
+    last = getattr(args, "last", 0)
+    if last > 0:
+        records = records[-last:]
+
+    # Header
+    print(f"{'commit':<10} {'val_bpb':>10} {'mem_gb':>7} {'status':<9} description")
+    print("-" * 70)
+
+    for r in records:
+        bpb_str = f"{r.val_bpb:.6f}" if r.val_bpb > 0 else "  ------"
+        mem_str = f"{r.memory_gb:.1f}" if r.memory_gb > 0 else "   ---"
+        print(f"{r.commit:<10} {bpb_str:>10} {mem_str:>7} {r.status.value:<9} {r.description}")
 
 
 if __name__ == "__main__":

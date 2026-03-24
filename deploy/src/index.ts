@@ -18,6 +18,10 @@ import {
   type StreamingResponse,
 } from "agents";
 import { McpAgent } from "agents/mcp";
+import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+
+// Re-export Sandbox so Cloudflare can discover the Durable Object class
+export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
 
 // ---------------------------------------------------------------------------
 // Environment bindings
@@ -29,6 +33,9 @@ export interface Env {
   AI: Ai;
   ASSETS: Fetcher;
   VECTORIZE: VectorizeIndex;
+  LOADER: any; // Dynamic Worker Loader — V8 isolate sandbox (JS/TS)
+  SANDBOX: DurableObjectNamespace; // Sandbox SDK — full Linux container
+  BROWSER: Fetcher; // Browser Rendering — headless Puppeteer on edge
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
   GMI_API_KEY?: string;
@@ -37,6 +44,8 @@ export interface Env {
   BACKEND_INGEST_URL?: string;
   BACKEND_INGEST_TOKEN?: string;
   BACKEND_PROXY_ONLY?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_API_TOKEN?: string;
   DEFAULT_PLAN?: string;
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
@@ -1110,6 +1119,226 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     };
   }
 
+  // ── Autoresearch (Agent Self-Improvement) ─────────────────────
+
+  /**
+   * Start an autonomous agent improvement loop on the edge.
+   *
+   * Agent autoresearch is pure LLM API calls — no GPU needed.
+   * It proposes config changes, evaluates them on tasks, and
+   * keeps improvements. Runs entirely on the edge worker.
+   *
+   * For GPU training (Karpathy-style), use the backend API instead.
+   */
+  @callable()
+  async autoresearch(input: {
+    evalTasks: Array<{ name: string; input: string; expected: string; grader?: string }>;
+    maxIterations?: number;
+    metric?: string;
+    applyBest?: boolean;
+  }): Promise<any> {
+    const config = this.state.config;
+    const agentName = config.agentName || "agentos";
+    const maxIterations = input.maxIterations || 10;
+    const metric = input.metric || "pass_rate";
+    const applyBest = input.applyBest ?? false;
+
+    if (!input.evalTasks || input.evalTasks.length === 0) {
+      return { error: "evalTasks required — provide at least one {name, input, expected} task" };
+    }
+
+    // Create autoresearch experiments table if not exists
+    this.sql`CREATE TABLE IF NOT EXISTS autoresearch_experiments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      iteration INTEGER,
+      description TEXT,
+      hypothesis TEXT,
+      modification TEXT,
+      score REAL,
+      baseline_score REAL,
+      status TEXT,
+      created_at REAL DEFAULT (unixepoch())
+    )`;
+
+    // Run the loop: propose → evaluate → keep/discard
+    let bestConfig = { ...config };
+    let bestScore: number | null = null;
+    const history: any[] = [];
+
+    // 1. Baseline evaluation
+    const baselineScore = await this._autoresearchEval(config, input.evalTasks);
+    bestScore = baselineScore;
+
+    this.sql`INSERT INTO autoresearch_experiments
+      (iteration, description, hypothesis, modification, score, baseline_score, status)
+      VALUES (0, 'baseline', '', '', ${baselineScore}, ${baselineScore}, 'keep')`;
+
+    // 2. Iterate
+    for (let i = 1; i <= maxIterations; i++) {
+      // Ask LLM to propose a config change
+      const proposal = await this._autoresearchPropose(bestConfig, history, bestScore, i, input.evalTasks);
+      if (!proposal || !proposal.modification || Object.keys(proposal.modification).length === 0) {
+        continue;
+      }
+
+      // Apply modification to a candidate config
+      const candidateConfig = { ...bestConfig, ...proposal.modification };
+
+      // Evaluate candidate
+      const score = await this._autoresearchEval(candidateConfig, input.evalTasks);
+      const improved = score > (bestScore || 0);
+      const status = improved ? "keep" : "discard";
+
+      const exp = {
+        iteration: i,
+        description: proposal.description || `change ${i}`,
+        hypothesis: proposal.hypothesis || "",
+        score,
+        improvement: score - (bestScore || 0),
+        status,
+      };
+      history.push(exp);
+
+      this.sql`INSERT INTO autoresearch_experiments
+        (iteration, description, hypothesis, modification, score, baseline_score, status)
+        VALUES (${i}, ${exp.description}, ${exp.hypothesis},
+                ${JSON.stringify(proposal.modification)}, ${score}, ${bestScore || 0}, ${status})`;
+
+      if (improved) {
+        bestScore = score;
+        bestConfig = candidateConfig;
+      }
+    }
+
+    // 3. Apply best if requested
+    if (applyBest && bestScore !== null && bestScore > baselineScore) {
+      this.setConfig(bestConfig);
+    }
+
+    // 4. Ingest results to backend
+    void this._sendIngest("/api/v1/edge-ingest/autoresearch/complete", {
+      org_id: config.orgId || "",
+      agent_name: agentName,
+      iterations: maxIterations,
+      baseline_score: baselineScore,
+      best_score: bestScore,
+      improvements_kept: history.filter(e => e.status === "keep").length,
+      experiments_discarded: history.filter(e => e.status === "discard").length,
+      applied: applyBest && bestScore !== null && bestScore > baselineScore,
+    });
+
+    return {
+      agent: agentName,
+      iterations: history.length,
+      baselineScore,
+      bestScore,
+      improvementsKept: history.filter(e => e.status === "keep").length,
+      experimentsDiscarded: history.filter(e => e.status === "discard").length,
+      applied: applyBest && bestScore !== null && bestScore > baselineScore,
+      history,
+    };
+  }
+
+  @callable()
+  getAutoresearchResults(limit: number = 20): any[] {
+    try {
+      return this.sql`SELECT * FROM autoresearch_experiments ORDER BY created_at DESC LIMIT ${limit}`;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Evaluate a config against eval tasks using the LLM. */
+  private async _autoresearchEval(
+    config: AgentConfig,
+    tasks: Array<{ name: string; input: string; expected: string; grader?: string }>,
+  ): Promise<number> {
+    let passed = 0;
+    for (const task of tasks) {
+      try {
+        // Run the agent with this config on the task input
+        const prevConfig = this.state.config;
+        this.setState({ ...this.state, config });
+        const results = await this.run(task.input);
+        this.setState({ ...this.state, config: prevConfig });
+
+        // Grade: check if output contains expected
+        const output = results?.[results.length - 1]?.content || "";
+        const grader = task.grader || "contains";
+        if (grader === "exact") {
+          if (output.toLowerCase().trim() === task.expected.toLowerCase().trim()) passed++;
+        } else {
+          if (output.toLowerCase().includes(task.expected.toLowerCase())) passed++;
+        }
+      } catch {
+        // Failed trial
+      }
+    }
+    return tasks.length > 0 ? passed / tasks.length : 0;
+  }
+
+  /** Ask the LLM to propose a config modification. */
+  private async _autoresearchPropose(
+    config: AgentConfig,
+    history: any[],
+    bestScore: number | null,
+    iteration: number,
+    tasks: Array<{ name: string; input: string; expected: string }>,
+  ): Promise<{ modification: Partial<AgentConfig>; description: string; hypothesis: string } | null> {
+    const mutableFields = ["systemPrompt", "temperature", "maxTokens"];
+    const historyStr = history.slice(-10).map(e =>
+      `  [${e.status === "keep" ? "+" : "-"}] #${e.iteration}: ${e.description} (score=${e.score?.toFixed(3)}, delta=${e.improvement?.toFixed(3)})`
+    ).join("\n");
+
+    const taskSummary = tasks.slice(0, 5).map((t, i) =>
+      `  ${i + 1}. ${t.name}: "${t.input.slice(0, 60)}..."`
+    ).join("\n");
+
+    const prompt = `You are an autonomous agent researcher. Propose ONE targeted change to improve this agent's eval pass_rate.
+
+Current best score: ${bestScore?.toFixed(3) ?? "unknown"}
+Iteration: ${iteration}
+
+Current config:
+  systemPrompt: "${(config.systemPrompt || "").slice(0, 300)}..."
+  temperature: ${config.temperature ?? 0}
+  model: ${config.model || "default"}
+
+Eval tasks:
+${taskSummary}
+
+${historyStr ? `Experiment history:\n${historyStr}` : "No experiments yet."}
+
+Respond in this exact format:
+HYPOTHESIS: <why this change will help>
+DESCRIPTION: <one-line summary>
+MODIFICATION_JSON: <valid JSON with fields to change, e.g. {"systemPrompt": "new prompt", "temperature": 0.1}>`;
+
+    try {
+      const response = await this._llmComplete(prompt, "You are an agent optimization researcher. Return only the requested format.");
+      const content = typeof response === "string" ? response : "";
+
+      const hypMatch = content.match(/HYPOTHESIS:\s*(.+)/);
+      const descMatch = content.match(/DESCRIPTION:\s*(.+)/);
+      const jsonMatch = content.match(/MODIFICATION_JSON:\s*(\{[\s\S]*?\})/);
+
+      if (!jsonMatch) return null;
+
+      try {
+        const modification = JSON.parse(jsonMatch[1]);
+        return {
+          modification,
+          description: descMatch?.[1]?.trim() || `change ${iteration}`,
+          hypothesis: hypMatch?.[1]?.trim() || "",
+        };
+      } catch {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+  }
+
   // ── Conversation Intelligence ─────────────────────────────────
 
   @callable()
@@ -1269,6 +1498,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     return this.sql`SELECT * FROM schedules ORDER BY created_at DESC LIMIT 100`;
   }
 
+  // ── Dynamic Worker Sandbox (JS/TS code execution) ──────────────
+
+  @callable()
+  async execCode(code: string, language: string = "", timeoutMs: number = 10000): Promise<any> {
+    const lang = (language || this._detectLanguage(code)) as "javascript" | "python" | "bash";
+    if (lang === "bash") {
+      return { error: "Bash not supported in Dynamic Workers. Use sandbox_exec with E2B backend." };
+    }
+    return JSON.parse(await this._execDynamicWorker(code, lang, timeoutMs));
+  }
+
   // ── Queueing (async jobs) ──────────────────────────────────────
 
   @callable()
@@ -1321,6 +1561,28 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         costUsd: this.state.totalCostUsd,
         turnResults: results,
       });
+    }
+
+    // Exec code — Dynamic Worker sandbox (JS/Python)
+    if (path === "exec-code" && request.method === "POST") {
+      const body = await request.json() as { code: string; language?: string; timeoutMs?: number };
+      const result = await this.execCode(body.code, body.language || "", body.timeoutMs || 10000);
+      return Response.json(result);
+    }
+
+    // Sandbox exec — routes to Dynamic Worker (JS/Python) or Sandbox SDK (bash)
+    if (path === "sandbox" && request.method === "POST") {
+      const body = await request.json() as { command: string; sandbox_id?: string; timeout_ms?: number };
+      const lang = this._detectLanguage(body.command);
+      if ((lang === "javascript" || lang === "python") && this.env.LOADER) {
+        const result = await this._execDynamicWorker(body.command, lang, body.timeout_ms || 30000);
+        return Response.json(JSON.parse(result));
+      }
+      if (this.env.SANDBOX) {
+        const result = await this._execSandboxContainer(body.command, body.sandbox_id || "", body.timeout_ms || 30000);
+        return Response.json(JSON.parse(result));
+      }
+      return Response.json({ error: "No sandbox backend available (LOADER or SANDBOX binding required)" }, { status: 503 });
     }
 
     // Config
@@ -2180,6 +2442,46 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   }
 
   private async _runTool(name: string, args: any, sessionId: string, turn: number): Promise<string> {
+    // Dynamic Worker sandbox — code execution in V8 isolate (JS/TS/Python)
+    if (name === "dynamic_exec" || name === "dynamic-exec") {
+      const lang = args.language || this._detectLanguage(args.code || "");
+      return this._execDynamicWorker(args.code || "", lang, args.timeout_ms || 10000);
+    }
+
+    // sandbox_exec — smart routing across 3 sandbox backends
+    if (name === "sandbox_exec" || name === "sandbox-exec") {
+      const cmd = args.command || "";
+      const lang = this._detectLanguage(cmd);
+
+      // JS/Python → Dynamic Worker (instant, free)
+      if ((lang === "javascript" || lang === "python") && this.env.LOADER) {
+        return this._execDynamicWorker(cmd, lang, args.timeout_ms || 30000);
+      }
+
+      // Bash/shell → Sandbox SDK container (full Linux, fast)
+      if (this.env.SANDBOX) {
+        return this._execSandboxContainer(cmd, args.sandbox_id || "", args.timeout_ms || 30000);
+      }
+
+      // Fallback → E2B via backend proxy
+    }
+
+    // File operations in sandbox container
+    if (name === "sandbox_file_write" || name === "sandbox-file-write") {
+      if (this.env.SANDBOX) {
+        return this._sandboxFileWrite(args.path || "", args.content || "", args.sandbox_id || "");
+      }
+    }
+    if (name === "sandbox_file_read" || name === "sandbox-file-read") {
+      if (this.env.SANDBOX) {
+        return this._sandboxFileRead(args.path || "", args.sandbox_id || "");
+      }
+    }
+    if (name === "sandbox_kill" || name === "sandbox-kill") {
+      // Sandbox SDK containers auto-cleanup; no explicit kill needed
+      return JSON.stringify({ killed: true, sandbox_id: args.sandbox_id || "", note: "Sandbox containers auto-cleanup on idle" });
+    }
+
     if (this._ingestBase() && this.env.BACKEND_INGEST_TOKEN) {
       return this._callToolViaBackendProxy(name, args, sessionId, turn);
     }
@@ -2198,6 +2500,235 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
       default:
         return `Unknown tool: ${name}`;
+    }
+  }
+
+  private _detectLanguage(code: string): "javascript" | "python" | "bash" {
+    const jsSignals = [
+      /\b(const|let|var|function|async|await|import|export|class|=>)\b/,
+      /\bconsole\.(log|error|warn)\b/,
+      /\b(fetch|Response|JSON\.(parse|stringify))\b/,
+    ];
+    const pySignals = [
+      /\b(def |class |import |from |print\(|if __name__)/m,
+      /\b(lambda |yield |async def|await )\b/,
+      /\b(pandas|numpy|requests|json\.loads|\.append\()\b/,
+    ];
+    const bashSignals = [
+      /^(pip |apt |sudo |curl |wget |ls |cd |mkdir |rm |cat |echo |grep )/m,
+      /\b(bash|sh|#!\/)\b/,
+    ];
+    const jsScore = jsSignals.filter(r => r.test(code)).length;
+    const pyScore = pySignals.filter(r => r.test(code)).length;
+    const bashScore = bashSignals.filter(r => r.test(code)).length;
+
+    if (pyScore >= jsScore && pyScore >= bashScore && pyScore > 0) return "python";
+    if (jsScore >= bashScore && jsScore > 0) return "javascript";
+    return "bash";
+  }
+
+  private async _execDynamicWorker(
+    code: string,
+    language: "javascript" | "python" | "bash" = "javascript",
+    timeoutMs: number = 10000,
+  ): Promise<string> {
+    if (!this.env.LOADER) {
+      return JSON.stringify({ error: "Dynamic Worker LOADER binding not available" });
+    }
+
+    const workerId = `sandbox-${language}-${crypto.randomUUID().slice(0, 12)}`;
+    const start = Date.now();
+
+    try {
+      let mainModule: string;
+      let modules: Record<string, string>;
+
+      if (language === "python") {
+        // Python Dynamic Worker — uses {py: string} format for Python modules
+        // See: https://developers.cloudflare.com/workers/runtime-apis/bindings/worker-loader/
+        mainModule = "main.py";
+        modules = {
+          "main.py": { py: `
+from workers import WorkerEntrypoint, Response
+import json, sys, io
+
+class Default(WorkerEntrypoint):
+    async def fetch(self, request):
+        __stdout = io.StringIO()
+        __stderr = io.StringIO()
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = __stdout, __stderr
+        exit_code = 0
+        try:
+${code.split("\n").map(line => "            " + line).join("\n")}
+        except Exception as e:
+            print(str(e), file=sys.stderr)
+            exit_code = 1
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+        return Response.json({
+            "stdout": __stdout.getvalue(),
+            "stderr": __stderr.getvalue(),
+            "exit_code": exit_code,
+        })
+` } as any,
+        };
+      } else {
+        // JavaScript/TypeScript Dynamic Worker — instant cold start
+        mainModule = "index.js";
+        modules = {
+          "index.js": `
+const __output = [];
+const __errors = [];
+console.log = (...args) => __output.push(args.map(String).join(" "));
+console.error = (...args) => __errors.push(args.map(String).join(" "));
+
+export default {
+  async fetch(req, env, ctx) {
+    try {
+      ${code}
+      return Response.json({
+        stdout: __output.join("\\n"),
+        stderr: __errors.join("\\n"),
+        exit_code: 0,
+      });
+    } catch (err) {
+      return Response.json({
+        stdout: __output.join("\\n"),
+        stderr: err.message || String(err),
+        exit_code: 1,
+      });
+    }
+  }
+};
+`,
+        };
+      }
+
+      // Load dynamic worker using the LOADER API (open beta)
+      // See: https://blog.cloudflare.com/dynamic-workers/
+      const worker = this.env.LOADER.load({
+        compatibilityDate: "2026-03-01",
+        mainModule,
+        modules,
+        globalOutbound: null, // Block all outbound network for security
+      });
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await worker.getEntrypoint().fetch(
+          new Request("http://sandbox/exec"),
+          { signal: controller.signal },
+        );
+        clearTimeout(timeout);
+
+        let result: any;
+        if (language === "python") {
+          // Python Workers SDK Response.json() returns proper JSON
+          result = await response.json();
+        } else {
+          result = await response.json();
+        }
+
+        return JSON.stringify({
+          sandbox_id: workerId,
+          sandbox_type: "dynamic_worker",
+          language,
+          stdout: result.stdout || "",
+          stderr: result.stderr || "",
+          exit_code: result.exit_code ?? 0,
+          duration_ms: Date.now() - start,
+        });
+      } catch (err: any) {
+        clearTimeout(timeout);
+        if (err.name === "AbortError") {
+          return JSON.stringify({
+            sandbox_id: workerId,
+            sandbox_type: "dynamic_worker",
+            language,
+            stdout: "",
+            stderr: `Execution timed out after ${timeoutMs}ms`,
+            exit_code: -1,
+            duration_ms: Date.now() - start,
+          });
+        }
+        throw err;
+      }
+    } catch (err: any) {
+      return JSON.stringify({
+        sandbox_id: workerId,
+        sandbox_type: "dynamic_worker",
+        language,
+        stdout: "",
+        stderr: `Dynamic Worker error: ${err.message || err}`,
+        exit_code: -1,
+        duration_ms: Date.now() - start,
+      });
+    }
+  }
+
+  // ── Sandbox SDK (Cloudflare Containers) — bash/shell/native tools ──
+
+  private async _execSandboxContainer(
+    command: string,
+    sandboxId: string = "",
+    timeoutMs: number = 30000,
+  ): Promise<string> {
+    const start = Date.now();
+    const sid = sandboxId || `agent-${crypto.randomUUID().slice(0, 12)}`;
+
+    try {
+      const sandbox = getSandbox(this.env.SANDBOX, sid);
+      const result = await sandbox.exec(command, { timeout: Math.ceil(timeoutMs / 1000) });
+
+      return JSON.stringify({
+        sandbox_id: sid,
+        sandbox_type: "cloudflare_container",
+        stdout: result.stdout || "",
+        stderr: result.stderr || "",
+        exit_code: result.exitCode ?? 0,
+        duration_ms: Date.now() - start,
+      });
+    } catch (err: any) {
+      return JSON.stringify({
+        sandbox_id: sid,
+        sandbox_type: "cloudflare_container",
+        stdout: "",
+        stderr: `Sandbox error: ${err.message || err}`,
+        exit_code: -1,
+        duration_ms: Date.now() - start,
+      });
+    }
+  }
+
+  private async _sandboxFileWrite(
+    path: string,
+    content: string,
+    sandboxId: string = "",
+  ): Promise<string> {
+    const sid = sandboxId || `agent-${crypto.randomUUID().slice(0, 12)}`;
+    try {
+      const sandbox = getSandbox(this.env.SANDBOX, sid);
+      await sandbox.writeFile(path, content);
+      return JSON.stringify({ sandbox_id: sid, path, success: true });
+    } catch (err: any) {
+      return JSON.stringify({ sandbox_id: sid, path, success: false, error: err.message || String(err) });
+    }
+  }
+
+  private async _sandboxFileRead(
+    path: string,
+    sandboxId: string = "",
+  ): Promise<string> {
+    const sid = sandboxId || `agent-${crypto.randomUUID().slice(0, 12)}`;
+    try {
+      const sandbox = getSandbox(this.env.SANDBOX, sid);
+      const file = await sandbox.readFile(path);
+      return JSON.stringify({ sandbox_id: sid, path, content: file.content || "", success: true });
+    } catch (err: any) {
+      return JSON.stringify({ sandbox_id: sid, path, success: false, error: err.message || String(err) });
     }
   }
 
@@ -2391,6 +2922,14 @@ export class AgentOSMcpServer extends McpAgent<Env> {
 // Worker entry point — routes to agents
 // ---------------------------------------------------------------------------
 
+function detectLang(code: string): "javascript" | "python" | "bash" {
+  const py = [/\b(def |class |import |from |print\()/m, /\b(lambda |yield )\b/].filter(r => r.test(code)).length;
+  const js = [/\b(const|let|var|function|=>)\b/, /\bconsole\.\b/].filter(r => r.test(code)).length;
+  if (py > js) return "python";
+  if (js > 0) return "javascript";
+  return "bash";
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -2402,6 +2941,250 @@ export default {
     // Health check
     if (url.pathname === "/health") {
       return Response.json({ status: "ok", version: "0.2.0" });
+    }
+
+    // Dynamic Worker sandbox — JS/TS execution in V8 isolate (<10ms)
+    // Design: agents write JavaScript. Faster, cheaper, more secure than Python/bash.
+    // Python/bash available on backend via /sandbox/exec for edge cases only.
+    if (url.pathname === "/sandbox/exec-code" && request.method === "POST") {
+      const body = await request.json() as { code: string; timeoutMs?: number };
+      const code = body.code || "";
+      const language = (body.language || detectLang(code)) as "javascript" | "python" | "bash";
+
+      if (language === "python") {
+        // Python Dynamic Workers are documented but not yet functional in LOADER binding
+        // Fall through to Sandbox SDK container or E2B backend for Python execution
+        if (env.SANDBOX) {
+          try {
+            const sandbox = getSandbox(env.SANDBOX, `python-${crypto.randomUUID().slice(0, 12)}`);
+            const result = await sandbox.exec(`python3 -c ${JSON.stringify(code)}`, { timeout: Math.ceil((body.timeoutMs || 30000) / 1000) });
+            return Response.json({
+              sandbox_id: "cf-container",
+              sandbox_type: "cloudflare_container",
+              language: "python",
+              stdout: result.stdout || "",
+              stderr: result.stderr || "",
+              exit_code: result.exitCode ?? 0,
+            });
+          } catch (err: any) {
+            return Response.json({
+              sandbox_type: "cloudflare_container",
+              language: "python",
+              stdout: "",
+              stderr: `Sandbox SDK error: ${err.message || err}`,
+              exit_code: -1,
+            }, { status: 500 });
+          }
+        }
+        return Response.json({
+          error: "Python execution requires Sandbox SDK container. Dynamic Worker LOADER does not yet support Python.",
+          suggestion: "Use JavaScript for Dynamic Workers, or wait for Python support in LOADER.",
+        }, { status: 503 });
+      }
+
+      if (language === "bash") {
+        // Route bash to Sandbox SDK container if available
+        if (env.SANDBOX) {
+          try {
+            const sandbox = getSandbox(env.SANDBOX, `bash-${crypto.randomUUID().slice(0, 12)}`);
+            const result = await sandbox.exec(code, { timeout: Math.ceil((body.timeoutMs || 30000) / 1000) });
+            return Response.json({
+              sandbox_id: "cf-container",
+              sandbox_type: "cloudflare_container",
+              language: "bash",
+              stdout: result.stdout || "",
+              stderr: result.stderr || "",
+              exit_code: result.exitCode ?? 0,
+              duration_ms: 0,
+            });
+          } catch (err: any) {
+            return Response.json({
+              sandbox_type: "cloudflare_container",
+              language: "bash",
+              stdout: "",
+              stderr: `Sandbox SDK error: ${err.message || err}`,
+              exit_code: -1,
+            }, { status: 500 });
+          }
+        }
+        return Response.json({ error: "Bash requires Sandbox SDK (containers). SANDBOX binding not available." }, { status: 503 });
+      }
+      if (!env.LOADER) {
+        return Response.json({ error: "LOADER binding not available — Dynamic Workers not enabled" }, { status: 503 });
+      }
+
+      const workerId = `sandbox-${language}-${crypto.randomUUID().slice(0, 12)}`;
+      const start = Date.now();
+
+      let mainModule: string;
+      let modules: Record<string, string>;
+
+      if (language === "python") {
+        mainModule = "main.py";
+        modules = { "main.py": { py: `
+from workers import WorkerEntrypoint, Response
+import json, sys, io
+class Default(WorkerEntrypoint):
+    async def fetch(self, request):
+        out, err = io.StringIO(), io.StringIO()
+        sys.stdout, sys.stderr = out, err
+        ec = 0
+        try:
+${code.split("\n").map((l: string) => "            " + l).join("\n")}
+        except Exception as e:
+            print(str(e), file=sys.stderr); ec = 1
+        finally:
+            sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
+        return Response.json({"stdout": out.getvalue(), "stderr": err.getvalue(), "exit_code": ec})
+` } as any };
+      } else {
+        mainModule = "index.js";
+        modules = { "index.js": `
+const __o=[],__e=[];
+console.log=(...a)=>__o.push(a.map(String).join(" "));
+console.error=(...a)=>__e.push(a.map(String).join(" "));
+export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}
+` };
+      }
+
+      try {
+        const worker = env.LOADER.load({
+          compatibilityDate: "2026-03-01",
+          mainModule,
+          modules,
+          globalOutbound: null,
+        });
+        const resp = await worker.getEntrypoint().fetch(new Request("http://sandbox/exec"));
+        let result: any;
+        if (language === "python") {
+          const text = await resp.text();
+          try { result = JSON.parse(JSON.parse(text)); } catch { result = JSON.parse(text); }
+        } else {
+          result = await resp.json();
+        }
+        return Response.json({
+          sandbox_id: workerId,
+          sandbox_type: "dynamic_worker",
+          language,
+          stdout: result.stdout || "",
+          stderr: result.stderr || "",
+          exit_code: result.exit_code ?? 0,
+          duration_ms: Date.now() - start,
+        });
+      } catch (err: any) {
+        return Response.json({
+          sandbox_id: workerId,
+          sandbox_type: "dynamic_worker",
+          language,
+          stdout: "",
+          stderr: `Dynamic Worker error: ${err.message || err}`,
+          exit_code: -1,
+          duration_ms: Date.now() - start,
+        }, { status: 500 });
+      }
+    }
+
+    // ── Web Crawl (Cloudflare /crawl API → markdown, no browser needed) ──
+    if (url.pathname === "/browse/crawl" && request.method === "POST") {
+      const body = await request.json() as {
+        url: string;
+        maxPages?: number;
+        maxDepth?: number;
+        includePatterns?: string[];
+        excludePatterns?: string[];
+        format?: "markdown" | "html" | "json";
+      };
+      if (!body.url) {
+        return Response.json({ error: "url is required" }, { status: 400 });
+      }
+
+      try {
+        // Use Cloudflare's Browser Rendering /crawl endpoint
+        const crawlResp = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID || ""}/browser-rendering/crawl`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${env.CLOUDFLARE_API_TOKEN || ""}`,
+            },
+            body: JSON.stringify({
+              url: body.url,
+              scrapeOptions: { formats: [body.format || "markdown"] },
+              limit: body.maxPages || 5,
+              maxDepth: body.maxDepth || 1,
+              includePaths: body.includePatterns,
+              excludePaths: body.excludePatterns,
+            }),
+          },
+        );
+        const result = await crawlResp.json() as any;
+        return Response.json({
+          success: crawlResp.ok,
+          pages: result.result?.data || result.data || [],
+          metadata: result.result?.metadata || {},
+        });
+      } catch (err: any) {
+        return Response.json({ error: `Crawl failed: ${err.message}` }, { status: 500 });
+      }
+    }
+
+    // ── Browser Render (full Puppeteer — for JS-heavy sites, auth, anti-bot) ──
+    if (url.pathname === "/browse/render" && request.method === "POST") {
+      const body = await request.json() as {
+        url: string;
+        action?: "text" | "screenshot" | "html" | "links";
+        waitFor?: string;
+        timeout?: number;
+      };
+      if (!body.url) {
+        return Response.json({ error: "url is required" }, { status: 400 });
+      }
+      if (!env.BROWSER) {
+        return Response.json({ error: "BROWSER binding not available" }, { status: 503 });
+      }
+
+      try {
+        // Launch headless browser via Cloudflare Browser Rendering
+        const puppeteer = await import("@cloudflare/puppeteer");
+        const browser = await puppeteer.default.launch(env.BROWSER);
+        const page = await browser.newPage();
+        await page.goto(body.url, {
+          waitUntil: "networkidle0",
+          timeout: body.timeout || 30000,
+        });
+
+        if (body.waitFor) {
+          await page.waitForSelector(body.waitFor, { timeout: 10000 }).catch(() => {});
+        }
+
+        let result: any = {};
+        const action = body.action || "text";
+
+        if (action === "screenshot") {
+          const screenshot = await page.screenshot({ encoding: "base64" });
+          result = { screenshot, format: "base64/png" };
+        } else if (action === "html") {
+          result = { html: await page.content() };
+        } else if (action === "links") {
+          const links = await page.$$eval("a[href]", (anchors: any[]) =>
+            anchors.map((a) => ({ href: a.href, text: a.textContent?.trim() })).filter((l: any) => l.href),
+          );
+          result = { links };
+        } else {
+          const text = await page.$eval("body", (el: any) => el.innerText);
+          result = { text };
+        }
+
+        await browser.close();
+        return Response.json({ success: true, url: body.url, ...result });
+      } catch (err: any) {
+        return Response.json({
+          success: false,
+          url: body.url,
+          error: `Browser render failed: ${err.message}`,
+        }, { status: 500 });
+      }
     }
 
     // Serve static assets (portal SPA)

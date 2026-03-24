@@ -281,8 +281,19 @@ class TestToolsRouter:
 
 class TestObservabilityRouter:
     def _auth_header(self, api_client):
-        signup = api_client.post("/api/v1/auth/signup", json={"email": "obs@test.com", "password": "p"}).json()
-        return {"Authorization": f"Bearer {signup['token']}"}
+        email = "obs@test.com"
+        password = "pass12345"
+        signup_resp = api_client.post("/api/v1/auth/signup", json={"email": email, "password": password})
+        if signup_resp.status_code == 200:
+            data = signup_resp.json()
+            assert "token" in data, data
+            return {"Authorization": f"Bearer {data['token']}"}
+        assert signup_resp.status_code == 409, signup_resp.json()
+        login_resp = api_client.post("/api/v1/auth/login", json={"email": email, "password": password})
+        assert login_resp.status_code == 200, login_resp.json()
+        token = login_resp.json().get("token")
+        assert token
+        return {"Authorization": f"Bearer {token}"}
 
     def test_stats(self, api_client):
         headers = self._auth_header(api_client)

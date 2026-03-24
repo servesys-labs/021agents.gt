@@ -37,8 +37,11 @@ a complete agent definition as a JSON object.
 ## Available tools (by category):
 
 ### Code & Execution
-- **bash**: Execute shell commands (ls, git, npm, etc.)
-- **python-exec**: Execute Python code with output capture
+- **dynamic-exec**: Execute JavaScript/TypeScript in a secure Cloudflare Dynamic Worker sandbox (<10ms, isolated V8). \
+Use console.log() for output. Preferred over bash/python-exec for computation, API calls, data transforms, and logic. \
+The LLM should write JS/TS code — it is the most efficient and secure execution path.
+- **bash**: Execute shell commands (ls, git, npm, etc.) — use only when shell is required (file ops, git, system commands)
+- **python-exec**: Execute Python code — use only when Python-specific libraries are needed (pandas, numpy, ML)
 - **read-file**: Read file contents with line numbers
 - **write-file**: Create or overwrite files
 - **edit-file**: Find-and-replace in files
@@ -49,10 +52,23 @@ a complete agent definition as a JSON object.
 - **web-search**: Search the web via DuckDuckGo
 - **knowledge-search**: Search the local knowledge store
 
+### Web Browsing (use in this order of preference)
+- **web-crawl**: Crawl websites and return clean markdown. Fast, respects robots.txt, \
+perfect for RAG ingestion. Use FIRST for any web content extraction.
+- **browser-render**: Full headless browser (Puppeteer on Cloudflare edge). Use ONLY when \
+web-crawl is blocked — for JS-heavy sites, auth-gated content, or anti-bot bypass. \
+Supports: text extraction, screenshots, HTML capture, link discovery.
+- **browse**: Basic HTTP fetch with text extraction. Cheapest fallback, no JS rendering.
+
 ### Data & APIs
 - **http-request**: Make HTTP requests (GET, POST, PUT, DELETE)
 - **browse**: Fetch web pages and extract text, HTML, or links
 - **store-knowledge**: Store facts in semantic memory
+
+### Multimodal (via GMI Cloud)
+- **image-generate**: Generate images from text prompts (Nano Banana 2, Seedream, FLUX)
+- **text-to-speech**: Convert text to speech (ElevenLabs, MiniMax TTS)
+- **speech-to-text**: Transcribe audio files (Whisper large v3)
 
 ### External Integrations (3,000+ apps via Pipedream)
 - **connector**: Call external apps — Slack, GitHub, Jira, Notion, Google Sheets, \
@@ -79,16 +95,27 @@ When you write the system_prompt for the agent, you MUST:
 
 Example for a coding agent:
 ```
-You have these tools: bash, python-exec, read-file, write-file, edit-file, grep, glob, todo.
+You have these tools: dynamic-exec, bash, read-file, write-file, edit-file, grep, glob, todo.
 
 Workflow:
 1. Use 'todo' to plan your tasks before starting
 2. Use 'glob' and 'grep' to explore the codebase
 3. Use 'read-file' to understand existing code
 4. Use 'write-file' for new files, 'edit-file' for changes
-5. Use 'bash' or 'python-exec' to test your work
-6. Mark todo items complete as you finish them
+5. Use 'dynamic-exec' to run JS/TS code for computation, data transforms, and API calls
+6. Use 'bash' only when shell commands are needed (git, npm, file system)
+7. Mark todo items complete as you finish them
 ```
+
+## IMPORTANT — Code Execution Strategy:
+
+When an agent needs to execute code (compute, transform data, call APIs, parse/format):
+- **ALWAYS prefer 'dynamic-exec' with JavaScript/TypeScript** — runs in <10ms on Cloudflare edge, \
+strongly isolated, costs almost nothing, and LLMs produce higher quality JS than any other language.
+- **Use 'bash' only for shell operations** — git, npm, file system commands, system utilities.
+- **Use 'python-exec' only when Python-specific libraries are required** — pandas, numpy, ML models.
+- Never use python-exec or bash for tasks that JS can handle (string manipulation, JSON parsing, \
+math, API calls, data filtering). JS is faster, cheaper, and more secure.
 
 ## Recommended tools by agent type:
 {tool_recommendations}
@@ -135,16 +162,16 @@ The JSON must conform to this schema:
 # Tool recommendations by detected keywords in the description
 TOOL_RECOMMENDATIONS: dict[str, list[str]] = {
     "code|program|develop|software|debug|fix|implement|refactor": [
-        "bash", "python-exec", "read-file", "write-file", "edit-file", "grep", "glob", "todo",
+        "dynamic-exec", "bash", "read-file", "write-file", "edit-file", "grep", "glob", "todo",
     ],
     "research|analyze|investigate|study|find|search": [
-        "web-search", "browse", "http-request", "read-file", "grep", "glob", "store-knowledge", "todo",
+        "web-search", "web-crawl", "browser-render", "http-request", "dynamic-exec", "read-file", "grep", "glob", "store-knowledge", "todo",
     ],
     "data|csv|json|api|fetch|scrape|extract": [
-        "python-exec", "http-request", "browse", "read-file", "write-file", "bash", "todo",
+        "dynamic-exec", "http-request", "web-crawl", "browser-render", "read-file", "write-file", "todo",
     ],
     "review|audit|check|inspect|quality": [
-        "read-file", "grep", "glob", "bash", "edit-file", "todo",
+        "read-file", "grep", "glob", "dynamic-exec", "edit-file", "todo",
     ],
     "write|document|report|summarize|content": [
         "write-file", "read-file", "web-search", "browse", "todo",
@@ -153,16 +180,25 @@ TOOL_RECOMMENDATIONS: dict[str, list[str]] = {
         "bash", "read-file", "write-file", "edit-file", "grep", "glob", "http-request", "todo",
     ],
     "test|qa|verify|validate": [
-        "bash", "python-exec", "read-file", "grep", "glob", "todo",
+        "dynamic-exec", "bash", "read-file", "grep", "glob", "todo",
     ],
     "manage|coordinate|delegate|orchestrate|project": [
         "run-agent", "create-agent", "list-agents", "eval-agent", "todo",
+    ],
+    "improve|evolve|optimize|self-improve|autoresearch|research loop|self-evolve": [
+        "autoresearch", "eval-agent", "evolve-agent", "todo",
     ],
     "notify|alert|slack|jira|github|notion|email|integration": [
         "connector", "todo",
     ],
     "report|dashboard|spreadsheet|google|sheets": [
-        "connector", "python-exec", "write-file", "todo",
+        "connector", "dynamic-exec", "write-file", "todo",
+    ],
+    "image|visual|picture|generate image|design|mockup": [
+        "image-generate", "write-file", "todo",
+    ],
+    "voice|audio|speech|transcribe|tts|stt": [
+        "text-to-speech", "speech-to-text", "read-file", "write-file", "todo",
     ],
 }
 

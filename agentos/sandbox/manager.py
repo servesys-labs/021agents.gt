@@ -70,6 +70,7 @@ class SandboxManager:
         self.local_sandbox_root = (Path.cwd() / root).resolve()
         self._sessions: dict[str, SandboxSession] = {}
         self._path_mappings: dict[str, PathMapping] = {}
+        self._e2b_instances: dict[str, Any] = {}  # SDK Sandbox instances
         self._default_sandbox_id: str | None = None
 
     @property
@@ -103,16 +104,25 @@ class SandboxManager:
             logger.info("Created local fallback sandbox: %s", session.sandbox_id)
             return session
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{E2B_API_BASE}/sandboxes",
-                headers=self._headers(),
-                json={"templateID": template, "timeout": timeout_sec},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        # Use E2B SDK for sandbox creation (SDK handles WebSocket protocol)
+        try:
+            from e2b_code_interpreter import Sandbox as E2BSandbox
 
-        sandbox_id = data["sandboxID"]
+            sbx = E2BSandbox.create(template=template, timeout=timeout_sec, api_key=self.api_key)
+            sandbox_id = sbx.sandbox_id
+            self._e2b_instances[sandbox_id] = sbx
+        except ImportError:
+            # Fallback to REST API for create-only (exec won't work without SDK)
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{E2B_API_BASE}/sandboxes",
+                    headers=self._headers(),
+                    json={"templateID": template, "timeout": timeout_sec},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+            sandbox_id = data["sandboxID"]
+
         session = SandboxSession(sandbox_id=sandbox_id, template=template)
         self._sessions[sandbox_id] = session
         self._default_sandbox_id = sandbox_id
@@ -140,6 +150,29 @@ class SandboxManager:
         if sid.startswith("local-"):
             return await self._exec_local(sid, command, timeout_ms)
 
+        # Use E2B SDK if we have a live instance (SDK handles WebSocket protocol)
+        sbx = self._e2b_instances.get(sid)
+        if sbx is not None:
+            try:
+                result = sbx.commands.run(command, timeout=timeout_ms // 1000)
+                self._touch(sid)
+                return ExecResult(
+                    sandbox_id=sid,
+                    stdout=result.stdout or "",
+                    stderr=result.stderr or "",
+                    exit_code=result.exit_code if hasattr(result, "exit_code") else 0,
+                    duration_ms=(time.time() - start) * 1000,
+                )
+            except Exception as exc:
+                return ExecResult(
+                    sandbox_id=sid,
+                    stdout="",
+                    stderr=f"E2B SDK error: {exc}",
+                    exit_code=-1,
+                    duration_ms=(time.time() - start) * 1000,
+                )
+
+        # Fallback: REST API (only works for lifecycle, not exec — will likely 404)
         async with httpx.AsyncClient(timeout=max(timeout_ms / 1000 + 5, 35.0)) as client:
             resp = await client.post(
                 f"{E2B_API_BASE}/sandboxes/{sid}/commands",
@@ -224,6 +257,16 @@ class SandboxManager:
             except Exception as e:
                 return FileResult(sandbox_id=sid, path=path, success=False, error=str(e))
 
+        # Use E2B SDK if available
+        sbx = self._e2b_instances.get(sid)
+        if sbx is not None:
+            try:
+                sbx.files.write(path, content)
+                self._touch(sid)
+                return FileResult(sandbox_id=sid, path=path, success=True)
+            except Exception as exc:
+                return FileResult(sandbox_id=sid, path=path, success=False, error=str(exc))
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 f"{E2B_API_BASE}/sandboxes/{sid}/files",
@@ -248,6 +291,17 @@ class SandboxManager:
                 return FileResult(sandbox_id=sid, path=path, content=content, success=True)
             except Exception as e:
                 return FileResult(sandbox_id=sid, path=path, success=False, error=str(e))
+
+        # Use E2B SDK if available
+        sbx = self._e2b_instances.get(sid)
+        if sbx is not None:
+            try:
+                content_bytes = sbx.files.read(path)
+                file_content = content_bytes.decode("utf-8", errors="replace") if isinstance(content_bytes, bytes) else str(content_bytes)
+                self._touch(sid)
+                return FileResult(sandbox_id=sid, path=path, content=file_content, success=True)
+            except Exception as exc:
+                return FileResult(sandbox_id=sid, path=path, success=False, error=str(exc))
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(
@@ -298,17 +352,32 @@ class SandboxManager:
                 self._default_sandbox_id = None
             return True
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.delete(
-                f"{E2B_API_BASE}/sandboxes/{sid}",
-                headers=self._headers(),
-            )
+        # Use E2B SDK if available
+        sbx = self._e2b_instances.pop(sid, None)
+        if sbx is not None:
+            try:
+                sbx.kill()
+            except Exception as exc:
+                logger.warning("E2B SDK kill failed for %s: %s", sid, exc)
+
+        if sbx is None:
+            # Fallback to REST API
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.delete(
+                    f"{E2B_API_BASE}/sandboxes/{sid}",
+                    headers=self._headers(),
+                )
+                if not resp.is_success:
+                    self._sessions.pop(sid, None)
+                    if self._default_sandbox_id == sid:
+                        self._default_sandbox_id = None
+                    return False
 
         self._sessions.pop(sid, None)
         self._path_mappings.pop(sid, None)
         if self._default_sandbox_id == sid:
             self._default_sandbox_id = None
-        return resp.is_success
+        return True
 
     async def keepalive(self, sandbox_id: str | None = None, timeout_sec: int = 300) -> bool:
         """Extend sandbox timeout."""

@@ -11,6 +11,10 @@ Integrates with the Evolution subsystem to:
 The key difference from the old stub: modifications are ACTUALLY APPLIED
 to the agent config before re-evaluation. Each iteration produces a
 real A/B comparison.
+
+For fully autonomous, LLM-driven agent research (no pre-defined hypotheses),
+use ``AutoResearchLoop.autonomous()`` which delegates to the autoresearch
+subsystem's ``AgentResearchLoop``.
 """
 
 from __future__ import annotations
@@ -58,7 +62,45 @@ class AutoResearchLoop:
 
     Unlike the previous stub, this actually applies modifications to
     the agent config and creates new agent functions for each experiment.
+
+    For fully autonomous operation (LLM generates hypotheses), use the
+    ``autonomous()`` classmethod which creates an ``AgentResearchLoop``.
     """
+
+    @classmethod
+    def autonomous(
+        cls,
+        agent,
+        eval_tasks: list[dict],
+        *,
+        max_iterations: int = 20,
+        model: str = "claude-sonnet-4-6-20250627",
+        **kwargs,
+    ):
+        """Create a fully autonomous research loop for an agent.
+
+        Instead of pre-defined hypotheses, an LLM proposes modifications
+        based on eval results — the autoresearch pattern applied to agents.
+
+        Args:
+            agent: Agent instance to evolve.
+            eval_tasks: List of eval task dicts (name, input, expected, grader).
+            max_iterations: Max experiments to run.
+            model: LLM model for hypothesis generation.
+            **kwargs: Passed to AgentResearchLoop.
+
+        Returns:
+            An ``AgentResearchLoop`` instance (call ``.run()`` to start).
+        """
+        from agentos.autoresearch.agent_research import AgentResearchLoop
+
+        return AgentResearchLoop(
+            agent=agent,
+            eval_tasks=eval_tasks,
+            max_iterations=max_iterations,
+            model=model,
+            **kwargs,
+        )
 
     def __init__(
         self,

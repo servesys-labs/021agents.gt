@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -15,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from agentos.api.deps import CurrentUser, get_current_user, _get_db, require_scope
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+logger = logging.getLogger(__name__)
 
 
 def _coerce_per_token_price(raw: Any) -> float | None:
@@ -53,6 +56,235 @@ def _extract_gmi_token_prices(model_obj: dict[str, Any]) -> tuple[float | None, 
     in_price = next((p for p in (_coerce_per_token_price(x) for x in input_candidates) if p is not None), None)
     out_price = next((p for p in (_coerce_per_token_price(x) for x in output_candidates) if p is not None), None)
     return in_price, out_price
+
+
+async def sync_gmi_pricing_catalog_internal(
+    *,
+    dry_run: bool = False,
+    actor: str = "system",
+    db: Any | None = None,
+) -> dict[str, Any]:
+    """Internal GMI pricing/model sync for API and background scheduler."""
+    api_key = (os.environ.get("GMI_API_KEY", "") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="GMI_API_KEY not configured on backend")
+
+    config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "default.json"
+    api_base = "https://api.gmi-serving.com/v1"
+    try:
+        raw = json.loads(config_path.read_text()) if config_path.exists() else {}
+        api_base = (
+            raw.get("llm", {})
+            .get("providers", {})
+            .get("gmi", {})
+            .get("api_base", api_base)
+        ) or api_base
+    except Exception:
+        pass
+
+    models_url = f"{api_base.rstrip('/')}/models"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                models_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if not resp.is_success:
+            raise HTTPException(status_code=502, detail=f"GMI models endpoint error: {resp.status_code}")
+        payload = resp.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GMI sync failed: {exc}") from exc
+
+    db = db or _get_db()
+    now = time.time()
+    catalog = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(catalog, list):
+        raise HTTPException(status_code=502, detail="Unexpected GMI models response format")
+
+    threshold_pct = max(0.0, float(os.environ.get("GMI_PRICE_ALERT_DELTA_PCT", "0.20") or 0.20))
+    active_models: set[str] = set()
+    upserts = 0
+    deprecated_count = 0
+    pricing_rows_written = 0
+    sync_version = time.strftime("gmi-%Y%m%d-%H%M%S", time.gmtime(now))
+    alerts: list[dict[str, Any]] = []
+
+    for item in catalog:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or item.get("model") or "").strip()
+        if not model_id:
+            continue
+        active_models.add(model_id)
+
+        deprecated = bool(item.get("deprecated") or str(item.get("status", "")).lower() in {"deprecated", "sunset"})
+        if deprecated:
+            deprecated_count += 1
+            alerts.append({"type": "model_deprecated", "model": model_id, "status": str(item.get("status", ""))})
+
+        in_price, out_price = _extract_gmi_token_prices(item)
+        prev_in = db.get_active_pricing_rate(
+            resource_type="llm",
+            operation="infer",
+            unit="input_token",
+            provider="gmi",
+            model=model_id,
+        )
+        prev_out = db.get_active_pricing_rate(
+            resource_type="llm",
+            operation="infer",
+            unit="output_token",
+            provider="gmi",
+            model=model_id,
+        )
+
+        if in_price is not None and prev_in:
+            old = float(prev_in.get("unit_price_usd", 0.0) or 0.0)
+            if old > 0:
+                delta_pct = abs((float(in_price) - old) / old)
+                if delta_pct >= threshold_pct:
+                    alerts.append({"type": "price_delta", "model": model_id, "unit": "input_token", "old": old, "new": float(in_price), "delta_pct": round(delta_pct, 4)})
+        if out_price is not None and prev_out:
+            old = float(prev_out.get("unit_price_usd", 0.0) or 0.0)
+            if old > 0:
+                delta_pct = abs((float(out_price) - old) / old)
+                if delta_pct >= threshold_pct:
+                    alerts.append({"type": "price_delta", "model": model_id, "unit": "output_token", "old": old, "new": float(out_price), "delta_pct": round(delta_pct, 4)})
+
+        if dry_run:
+            continue
+
+        db.upsert_pricing_rate(
+            provider="gmi",
+            model=model_id,
+            resource_type="model_catalog",
+            operation="availability",
+            unit="model",
+            unit_price_usd=0.0,
+            source="gmi_sync",
+            pricing_version=sync_version,
+            effective_from=now,
+            is_active=not deprecated,
+            metadata_json=json.dumps({"deprecated": deprecated, "status": str(item.get("status", "")), "raw": item}),
+        )
+        upserts += 1
+
+        if in_price is not None:
+            db.upsert_pricing_rate(
+                provider="gmi",
+                model=model_id,
+                resource_type="llm",
+                operation="infer",
+                unit="input_token",
+                unit_price_usd=float(in_price),
+                source="gmi_sync",
+                pricing_version=sync_version,
+                effective_from=now,
+                is_active=not deprecated,
+                metadata_json=json.dumps({"deprecated": deprecated}),
+            )
+            pricing_rows_written += 1
+        if out_price is not None:
+            db.upsert_pricing_rate(
+                provider="gmi",
+                model=model_id,
+                resource_type="llm",
+                operation="infer",
+                unit="output_token",
+                unit_price_usd=float(out_price),
+                source="gmi_sync",
+                pricing_version=sync_version,
+                effective_from=now,
+                is_active=not deprecated,
+                metadata_json=json.dumps({"deprecated": deprecated}),
+            )
+            pricing_rows_written += 1
+
+    missing_models = 0
+    if not dry_run:
+        rows = db.conn.execute(
+            """SELECT DISTINCT model FROM pricing_catalog
+               WHERE provider = ? AND resource_type = ? AND operation = ? AND is_active = 1""",
+            ("gmi", "llm", "infer"),
+        ).fetchall()
+        known = {str(dict(r).get("model", "")) for r in rows if dict(r).get("model")}
+        to_deactivate = sorted(m for m in known if m not in active_models)
+        missing_models = len(to_deactivate)
+        for model_id in to_deactivate:
+            db.conn.execute(
+                """UPDATE pricing_catalog
+                   SET is_active = 0, effective_to = ?, updated_at = ?
+                   WHERE provider = ? AND model = ? AND resource_type = ? AND operation = ? AND is_active = 1""",
+                (now, now, "gmi", model_id, "llm", "infer"),
+            )
+            alerts.append({"type": "model_removed_from_catalog", "model": model_id})
+        db.conn.commit()
+
+        db.audit(
+            action="pricing.sync.gmi",
+            user_id=actor,
+            resource_type="pricing_catalog",
+            resource_id="gmi",
+            changes={
+                "pricing_version": sync_version,
+                "models_seen": len(active_models),
+                "deprecated_seen": deprecated_count,
+                "rows_upserted": pricing_rows_written,
+                "models_marked_inactive": missing_models,
+                "alerts_count": len(alerts),
+                "threshold_pct": threshold_pct,
+            },
+        )
+        if alerts:
+            db.audit(
+                action="pricing.sync.gmi.alert",
+                user_id=actor,
+                resource_type="pricing_catalog",
+                resource_id="gmi",
+                changes={"pricing_version": sync_version, "alerts": alerts[:200], "total_alerts": len(alerts)},
+            )
+            logger.warning("GMI pricing sync alerts detected: %d", len(alerts))
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "provider": "gmi",
+        "models_seen": len(active_models),
+        "deprecated_seen": deprecated_count,
+        "catalog_rows_upserted": upserts,
+        "pricing_rows_upserted": pricing_rows_written,
+        "models_marked_inactive": missing_models,
+        "pricing_version": sync_version,
+        "alerts_count": len(alerts),
+        "source_url": models_url,
+    }
+
+
+async def run_gmi_pricing_sync_loop() -> None:
+    """Background loop to keep GMI catalog/rates fresh."""
+    enabled = str(os.environ.get("GMI_PRICING_SYNC_ENABLED", "true")).strip().lower() not in {"0", "false", "off", "no"}
+    if not enabled:
+        logger.info("GMI pricing sync loop disabled by GMI_PRICING_SYNC_ENABLED")
+        return
+    interval = max(300, int(float(os.environ.get("GMI_PRICING_SYNC_INTERVAL_SECONDS", "21600") or 21600)))
+    logger.info("GMI pricing sync loop started (interval=%ss)", interval)
+    while True:
+        try:
+            result = await sync_gmi_pricing_catalog_internal(dry_run=False, actor="system-sync")
+            logger.info(
+                "GMI pricing sync completed (models=%s, pricing_rows=%s, alerts=%s)",
+                result.get("models_seen"),
+                result.get("pricing_rows_upserted"),
+                result.get("alerts_count"),
+            )
+        except Exception as exc:
+            logger.warning("GMI pricing sync loop error: %s", exc)
+        await asyncio.sleep(interval)
 
 
 @router.get("/usage")
@@ -249,152 +481,4 @@ async def sync_gmi_pricing_catalog(
     if not user.has_role("admin"):
         raise HTTPException(status_code=403, detail="Admin role required for pricing sync")
 
-    api_key = (os.environ.get("GMI_API_KEY", "") or "").strip()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="GMI_API_KEY not configured on backend")
-
-    # Use config/default.json as source of truth for provider base URL.
-    config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "default.json"
-    api_base = "https://api.gmi-serving.com/v1"
-    try:
-        raw = json.loads(config_path.read_text()) if config_path.exists() else {}
-        api_base = (
-            raw.get("llm", {})
-            .get("providers", {})
-            .get("gmi", {})
-            .get("api_base", api_base)
-        ) or api_base
-    except Exception:
-        pass
-
-    models_url = f"{api_base.rstrip('/')}/models"
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(
-                models_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-        if not resp.is_success:
-            raise HTTPException(status_code=502, detail=f"GMI models endpoint error: {resp.status_code}")
-        payload = resp.json()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"GMI sync failed: {exc}") from exc
-
-    db = _get_db()
-    now = time.time()
-    catalog = payload.get("data") if isinstance(payload, dict) else payload
-    if not isinstance(catalog, list):
-        raise HTTPException(status_code=502, detail="Unexpected GMI models response format")
-
-    active_models: set[str] = set()
-    upserts = 0
-    deprecated_count = 0
-    pricing_rows_written = 0
-    sync_version = time.strftime("gmi-%Y%m%d-%H%M%S", time.gmtime(now))
-
-    for item in catalog:
-        if not isinstance(item, dict):
-            continue
-        model_id = str(item.get("id") or item.get("model") or "").strip()
-        if not model_id:
-            continue
-        active_models.add(model_id)
-
-        deprecated = bool(item.get("deprecated") or str(item.get("status", "")).lower() in {"deprecated", "sunset"})
-        if deprecated:
-            deprecated_count += 1
-
-        in_price, out_price = _extract_gmi_token_prices(item)
-        if dry_run:
-            continue
-
-        # Always upsert a model-availability marker row (unit=model, price=0).
-        db.upsert_pricing_rate(
-            provider="gmi",
-            model=model_id,
-            resource_type="model_catalog",
-            operation="availability",
-            unit="model",
-            unit_price_usd=0.0,
-            source="gmi_sync",
-            pricing_version=sync_version,
-            effective_from=now,
-            is_active=not deprecated,
-            metadata_json=json.dumps(
-                {
-                    "deprecated": deprecated,
-                    "status": str(item.get("status", "")),
-                    "raw": item,
-                }
-            ),
-        )
-        upserts += 1
-
-        if in_price is not None:
-            db.upsert_pricing_rate(
-                provider="gmi",
-                model=model_id,
-                resource_type="llm",
-                operation="infer",
-                unit="input_token",
-                unit_price_usd=float(in_price),
-                source="gmi_sync",
-                pricing_version=sync_version,
-                effective_from=now,
-                is_active=not deprecated,
-                metadata_json=json.dumps({"deprecated": deprecated}),
-            )
-            pricing_rows_written += 1
-        if out_price is not None:
-            db.upsert_pricing_rate(
-                provider="gmi",
-                model=model_id,
-                resource_type="llm",
-                operation="infer",
-                unit="output_token",
-                unit_price_usd=float(out_price),
-                source="gmi_sync",
-                pricing_version=sync_version,
-                effective_from=now,
-                is_active=not deprecated,
-                metadata_json=json.dumps({"deprecated": deprecated}),
-            )
-            pricing_rows_written += 1
-
-    missing_models = 0
-    if not dry_run:
-        # Mark previously active GMI llm rates as inactive when model disappears from catalog.
-        rows = db.conn.execute(
-            """SELECT DISTINCT model FROM pricing_catalog
-               WHERE provider = ? AND resource_type = ? AND operation = ? AND is_active = 1""",
-            ("gmi", "llm", "infer"),
-        ).fetchall()
-        known = {str(r["model"]) for r in rows if r.get("model")}
-        to_deactivate = sorted(m for m in known if m not in active_models)
-        missing_models = len(to_deactivate)
-        for model_id in to_deactivate:
-            db.conn.execute(
-                """UPDATE pricing_catalog
-                   SET is_active = 0, effective_to = ?, updated_at = ?
-                   WHERE provider = ? AND model = ? AND resource_type = ? AND operation = ? AND is_active = 1""",
-                (now, now, "gmi", model_id, "llm", "infer"),
-            )
-        db.conn.commit()
-
-    return {
-        "ok": True,
-        "dry_run": dry_run,
-        "provider": "gmi",
-        "models_seen": len(active_models),
-        "deprecated_seen": deprecated_count,
-        "catalog_rows_upserted": upserts,
-        "pricing_rows_upserted": pricing_rows_written,
-        "models_marked_inactive": missing_models,
-        "pricing_version": sync_version,
-        "source_url": models_url,
-    }
+    return await sync_gmi_pricing_catalog_internal(dry_run=dry_run, actor=user.user_id or "api-user")
