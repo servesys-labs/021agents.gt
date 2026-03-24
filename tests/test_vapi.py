@@ -448,3 +448,131 @@ class TestVapiAPIExtended:
         })
         assert resp3.status_code == 200
         assert resp3.json()["duration_seconds"] == 30
+
+
+# ── Production-Readiness: Integration + Edge Cases ──────────────────
+
+
+class TestVapiFullLifecycleIntegration:
+    """Verify call + events are both persisted through webhooks."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from agentos.core.database import AgentDB
+        db = AgentDB(tmp_path / "vapi_int.db")
+        db.initialize()
+        yield db
+        db.close()
+
+    def test_full_lifecycle_persists_call_and_events(self, db):
+        from agentos.integrations.voice_platforms.vapi import VapiAdapter
+        adapter = VapiAdapter(db=db)
+
+        # Start
+        adapter.process_webhook({
+            "message": {"type": "call.started", "call": {"id": "lc-1", "customer": {"number": "+1234"}}},
+        }, org_id="org1")
+
+        call = db.get_vapi_call("lc-1")
+        assert call is not None
+        assert call["status"] == "connected"
+
+        # Transcript
+        adapter.process_webhook({
+            "message": {"type": "transcript", "call": {"id": "lc-1"}, "transcript": "Hello", "role": "user"},
+        })
+
+        # Function call
+        adapter.process_webhook({
+            "message": {"type": "function-call", "call": {"id": "lc-1"},
+                        "functionCall": {"name": "search", "parameters": {"q": "test"}}},
+        })
+
+        # End
+        adapter.process_webhook({
+            "message": {"type": "end-of-call-report", "call": {"id": "lc-1"},
+                        "durationSeconds": 60, "cost": 0.25, "transcript": "Full transcript here"},
+        })
+
+        # Verify call updated
+        call = db.get_vapi_call("lc-1")
+        assert call["status"] == "ended"
+        assert call["duration_seconds"] == 60.0
+        assert call["cost_usd"] == 0.25
+        assert call["transcript"] == "Full transcript here"
+
+        # Verify ALL events persisted
+        events = db.list_vapi_events("lc-1")
+        assert len(events) >= 3  # transcript, function-call, end-of-call
+        event_types = {e["event_type"] for e in events}
+        assert "transcript" in event_types
+        assert "function-call" in event_types
+
+    def test_summary_with_zero_costs(self, db):
+        db.insert_vapi_call(call_id="z1", org_id="org1")
+        db.insert_vapi_call(call_id="z2", org_id="org1")
+        summary = db.vapi_call_summary(org_id="org1")
+        assert summary["total_calls"] == 2
+        assert summary["total_cost_usd"] == 0.0
+        assert summary["total_duration_seconds"] == 0.0
+
+
+class TestVapiWebhookEdgeCases:
+    def test_empty_payload(self):
+        from agentos.integrations.voice_platforms.vapi import VapiAdapter
+        adapter = VapiAdapter()
+        result = adapter.process_webhook({})
+        assert result["processed"] is True
+
+    def test_missing_call_id(self):
+        from agentos.integrations.voice_platforms.vapi import VapiAdapter
+        adapter = VapiAdapter()
+        result = adapter.process_webhook({"message": {"type": "transcript", "transcript": "hi"}})
+        assert result["processed"] is True
+
+    def test_duplicate_call_started(self):
+        """Second call.started for same ID should not crash."""
+        from agentos.integrations.voice_platforms.vapi import VapiAdapter
+        from agentos.core.database import AgentDB
+        import tempfile
+        db = AgentDB(tempfile.mktemp(suffix=".db"))
+        db.initialize()
+        adapter = VapiAdapter(db=db)
+
+        adapter.process_webhook({"message": {"type": "call.started", "call": {"id": "dup-1"}}})
+        # Second start for same call — should handle gracefully (INSERT OR IGNORE)
+        adapter.process_webhook({"message": {"type": "call.started", "call": {"id": "dup-1"}}})
+        call = db.get_vapi_call("dup-1")
+        assert call is not None
+        db.close()
+
+
+class TestVapiAuthEnforcement:
+    @pytest.fixture
+    def api_client(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "agents").mkdir()
+        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
+        db = create_database(tmp_path / "data" / "agent.db")
+        for m in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
+            for s in m.split(";"):
+                s = s.strip()
+                if s and not s.startswith("--"):
+                    try: db.conn.execute(s)
+                    except: pass
+        db.conn.commit(); db.close()
+        from agentos.api.app import create_app
+        from agentos.core.harness import AgentHarness
+        return TestClient(create_app(AgentHarness()))
+
+    def test_webhook_bypasses_auth(self, api_client):
+        """Webhooks should NOT require auth."""
+        resp = api_client.post("/api/v1/voice/vapi/webhook", json={"message": {"type": "test"}})
+        assert resp.status_code == 200
+
+    def test_calls_require_auth(self, api_client):
+        assert api_client.get("/api/v1/voice/vapi/calls").status_code == 401
+
+    def test_summary_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/voice/vapi/calls/summary").status_code == 401

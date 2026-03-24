@@ -755,3 +755,171 @@ class TestSecurityAPIExtended:
         data = resp.json()
         assert "summary" in data
         assert "remediations" in data
+
+
+# ── Production-Readiness: Integration + Edge Cases ──────────────────
+
+
+class TestSecurityScanIntegration:
+    """Full pipeline: scan → findings → risk profile → query."""
+
+    def test_scan_persists_everything(self, tmp_path):
+        from agentos.core.database import AgentDB
+        from agentos.security.redteam import RedTeamRunner
+
+        db = AgentDB(tmp_path / "sec_int.db")
+        db.initialize()
+
+        runner = RedTeamRunner(db=db)
+        result = runner.scan_config(
+            agent_name="int-agent",
+            agent_config={"governance": {}, "tools": [], "max_turns": 999},
+            org_id="org1",
+        )
+
+        # Verify scan persisted
+        scan = db.get_security_scan(result["scan_id"])
+        assert scan is not None
+        assert scan["agent_name"] == "int-agent"
+
+        # Verify findings persisted
+        findings = db.list_security_findings(scan_id=result["scan_id"])
+        assert len(findings) == len(result.get("findings", []))
+
+        # Verify each finding has aivss_score
+        for f in findings:
+            assert f.get("aivss_score", 0) >= 0
+
+        # Verify risk profile created
+        profile = db.get_risk_profile("int-agent")
+        assert profile is not None
+        assert profile["risk_score"] == result["risk_score"]
+        assert profile["last_scan_id"] == result["scan_id"]
+
+        db.close()
+
+    def test_multiple_scans_update_profile(self, tmp_path):
+        from agentos.core.database import AgentDB
+        from agentos.security.redteam import RedTeamRunner
+
+        db = AgentDB(tmp_path / "multi_scan.db")
+        db.initialize()
+
+        runner = RedTeamRunner(db=db)
+        # First scan (insecure)
+        r1 = runner.scan_config("agent1", {"governance": {}, "tools": [], "max_turns": 999}, org_id="o1")
+        # Second scan (more secure)
+        r2 = runner.scan_config("agent1", {
+            "governance": {"budget_limit_usd": 10, "require_confirmation_for_destructive": True},
+            "tools": [], "max_turns": 20,
+        }, org_id="o1")
+
+        # Profile should reflect latest scan
+        profile = db.get_risk_profile("agent1")
+        assert profile["last_scan_id"] == r2["scan_id"]
+
+        # Both scans in history
+        scans = db.list_security_scans(agent_name="agent1")
+        assert len(scans) == 2
+
+        db.close()
+
+
+class TestSecurityAuthEnforcement:
+    @pytest.fixture
+    def api_client(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "agents").mkdir()
+        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
+        db = create_database(tmp_path / "data" / "agent.db")
+        for m in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
+            for s in m.split(";"):
+                s = s.strip()
+                if s and not s.startswith("--"):
+                    try: db.conn.execute(s)
+                    except: pass
+        db.conn.commit(); db.close()
+        from agentos.api.app import create_app
+        from agentos.core.harness import AgentHarness
+        return TestClient(create_app(AgentHarness()))
+
+    def test_probes_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/security/probes").status_code == 401
+
+    def test_scans_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/security/scans").status_code == 401
+
+    def test_risk_profiles_requires_auth(self, api_client):
+        assert api_client.get("/api/v1/security/risk-profiles").status_code == 401
+
+
+# ── Runtime Scan API + Timeout Handling ─────────────────────────────
+
+
+class TestRuntimeScanAPI:
+    @pytest.fixture
+    def api_client(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "agents").mkdir()
+        (tmp_path / "eval").mkdir()
+
+        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
+        db = create_database(tmp_path / "data" / "agent.db")
+        for migration in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
+            for stmt in migration.split(";"):
+                stmt = stmt.strip()
+                if stmt and not stmt.startswith("--"):
+                    try:
+                        db.conn.execute(stmt)
+                    except Exception:
+                        pass
+        db.conn.commit()
+        db.close()
+
+        from agentos.api.app import create_app
+        from agentos.core.harness import AgentHarness
+        app = create_app(AgentHarness())
+        return TestClient(app)
+
+    def _auth_headers(self, api_client):
+        email = f"rtscan-{uuid.uuid4().hex[:8]}@test.com"
+        resp = api_client.post("/api/v1/auth/signup", json={
+            "email": email, "password": "testpass123", "name": "RT Scan",
+        })
+        return {"Authorization": f"Bearer {resp.json().get('token', '')}"}
+
+    def test_runtime_scan_endpoint_no_agent(self, api_client):
+        """POST /security/scan/nonexistent/runtime should return 404 when agent not found."""
+        headers = self._auth_headers(api_client)
+        resp = api_client.post("/api/v1/security/scan/nonexistent/runtime", headers=headers)
+        # Should be 404 (agent not found) or 500 (could not load agent)
+        assert resp.status_code in (404, 500)
+
+    @pytest.mark.asyncio
+    async def test_runtime_scan_timeout_handling(self):
+        """A run_fn that exceeds probe_timeout should produce a failed probe with timeout evidence."""
+        import asyncio
+        from agentos.security.redteam import RedTeamRunner
+
+        runner = RedTeamRunner()
+
+        async def slow_agent(input_text: str) -> str:
+            await asyncio.sleep(30)  # Way longer than any reasonable timeout
+            return "I should never return this"
+
+        result = await runner.scan_runtime(
+            agent_name="timeout-agent",
+            agent_config={"governance": {}, "tools": [], "max_turns": 10},
+            run_fn=slow_agent,
+            probe_timeout=0.1,  # Very short timeout to trigger quickly
+        )
+        assert result["status"] == "completed"
+        assert result["failed"] > 0
+        # At least one finding should mention timeout
+        timeout_findings = [
+            f for f in result.get("findings", [])
+            if "timeout" in f.get("evidence", "").lower() or "timed out" in f.get("evidence", "").lower()
+        ]
+        assert len(timeout_findings) > 0, "Expected at least one finding with timeout evidence"

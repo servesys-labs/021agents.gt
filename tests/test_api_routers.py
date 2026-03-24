@@ -910,6 +910,39 @@ class TestEdgeIngestBridge:
         )
         assert event.status_code == 200
 
+        generic_call = api_client.post(
+            "/api/v1/edge-ingest/voice/call",
+            json={
+                "call_id": "edge-voice-1",
+                "platform": "retell",
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "phone_number": "+15557654321",
+                "direction": "outbound",
+                "status": "completed",
+                "duration_seconds": 9,
+                "transcript": "generic voice",
+                "cost_usd": 0.05,
+                "platform_agent_id": "retell-1",
+                "metadata": {"provider": "retell"},
+            },
+            headers=headers,
+        )
+        assert generic_call.status_code == 200
+
+        generic_event = api_client.post(
+            "/api/v1/edge-ingest/voice/event",
+            json={
+                "call_id": "edge-voice-1",
+                "platform": "retell",
+                "org_id": "org-test",
+                "event_type": "call.completed",
+                "payload_json": "{\"ok\":true}",
+            },
+            headers=headers,
+        )
+        assert generic_event.status_code == 200
+
         from agentos.core.db_config import initialize_db, get_db
 
         initialize_db()
@@ -926,9 +959,19 @@ class TestEdgeIngestBridge:
             "SELECT COUNT(*) AS cnt FROM vapi_events WHERE call_id = ?",
             (call_id,),
         ).fetchone()
+        g_call_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM voice_calls WHERE call_id = ?",
+            ("edge-voice-1",),
+        ).fetchone()
+        g_evt_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM voice_events WHERE call_id = ?",
+            ("edge-voice-1",),
+        ).fetchone()
         assert int(ep_row["cnt"]) >= 1
         assert int(call_row["cnt"]) >= 1
         assert int(evt_row["cnt"]) >= 1
+        assert int(g_call_row["cnt"]) >= 1
+        assert int(g_evt_row["cnt"]) >= 1
 
     def test_releases_rejects_invalid_canary_weight(self, api_client):
         headers = self._auth_header(api_client, "canvas-releases-invalid@test.com")
