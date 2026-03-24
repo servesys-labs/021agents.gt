@@ -1,30 +1,15 @@
-"""Autoresearch — autonomous self-improvement via the research loop pattern.
+"""Autoresearch — autonomous agent self-improvement.
 
-Two modes:
-    1. **Training research** (karpathy/autoresearch-style):
-       Edit train.py → run training → measure val_bpb → keep/discard.
-       Use: `agentos autoresearch run`
+Primary mode (agent research):
+    Edit agent config → evaluate via EvalGym → keep if better → repeat.
+    No GPU needed. Use: ``agentos autoresearch agent <name> <tasks.json>``
 
-    2. **Agent research** (meta-agent self-improvement):
-       Edit agent config → evaluate via EvalGym → measure pass_rate → keep/discard.
-       Use: `agentos autoresearch agent <name> <tasks.json>`
+Optional mode (training research, requires PyTorch + GPU):
+    Edit train.py → run training → measure val_bpb → keep/discard.
+    Use: ``agentos autoresearch init --training`` then ``agentos autoresearch run``
+    See ``agentos.autoresearch.ml`` for the training harness.
 
-Both share the same core pattern: hypothesis → mutate artifact → evaluate
-with a fixed metric → keep if better, discard if not → repeat.
-
-Components:
-    driver           — Training-level autoresearch (train.py + val_bpb)
-    agent_research   — Agent-level autoresearch (config + EvalGym)
-    backends         — Execution backends (in-process, E2B sandbox, GPU cloud)
-    results          — TSV experiment log
-    program          — program.md generator (agent instructions)
-    defaults/        — Starter prepare.py + train.py (nanochat-compatible)
-
-Execution backends:
-    in-process       — Local subprocess (CPU). Free. Agent autoresearch uses this.
-    e2b              — E2B cloud sandbox (CPU). ~$0.10/hr. Isolated execution.
-    gmi / gpu-h100   — GMI Cloud serverless GPU H100 ($2.98/hr). Same GMI_API_KEY as inference.
-    gpu-h200         — GMI Cloud serverless GPU H200 ($3.98/hr). Largest models.
+Cost: ~$0.10 per iteration (LLM calls for proposal + evaluation).
 """
 
 from agentos.autoresearch.driver import AutoResearchDriver, ExperimentStatus

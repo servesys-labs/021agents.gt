@@ -319,6 +319,7 @@ def main() -> None:
     ar_init.add_argument("directory", nargs="?", default=".", help="Workspace directory (default: .)")
     ar_init.add_argument("--time-budget", type=int, default=300, help="Training time budget in seconds (default: 300)")
     ar_init.add_argument("--force", action="store_true", help="Overwrite existing files")
+    ar_init.add_argument("--training", action="store_true", help="Scaffold ML training workspace (requires PyTorch + GPU)")
 
     ar_run = ar_sub.add_parser("run", help="Start the autonomous research loop")
     ar_run.add_argument("--workspace", type=str, default=".", help="Workspace directory")
@@ -3394,66 +3395,74 @@ async def cmd_autoresearch(args: argparse.Namespace) -> None:
 
 
 def _autoresearch_init(args: argparse.Namespace) -> None:
-    """Initialize an autoresearch workspace with prepare.py, train.py, program.md."""
+    """Initialize an autoresearch workspace."""
     import shutil
 
     workspace = Path(args.directory).resolve()
     workspace.mkdir(parents=True, exist_ok=True)
     force = getattr(args, "force", False)
     time_budget = getattr(args, "time_budget", 300)
+    training = getattr(args, "training", False)
 
-    defaults_dir = Path(__file__).parent / "autoresearch" / "defaults"
+    if training:
+        # ML training mode — scaffold train.py + prepare.py (requires PyTorch + GPU)
+        ml_dir = Path(__file__).parent / "autoresearch" / "ml"
 
-    files_to_copy = [
-        ("prepare.py", "prepare.py"),
-        ("train.py", "train.py"),
-    ]
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            print("Warning: PyTorch not installed. Training autoresearch requires:")
+            print("  pip install torch")
+            print()
 
-    created = []
-    for src_name, dst_name in files_to_copy:
-        src = defaults_dir / src_name
-        dst = workspace / dst_name
-        if dst.exists() and not force:
-            print(f"  Skip (exists): {dst_name}")
-            continue
-        shutil.copy2(src, dst)
-        created.append(dst_name)
-        print(f"  Created: {dst_name}")
+        for src_name in ["prepare.py", "train.py"]:
+            src = ml_dir / src_name
+            dst = workspace / src_name
+            if dst.exists() and not force:
+                print(f"  Skip (exists): {src_name}")
+                continue
+            if src.exists():
+                shutil.copy2(src, dst)
+                print(f"  Created: {src_name}")
 
-    # Generate program.md
-    from agentos.autoresearch.program import write_program
+        # Generate program.md
+        from agentos.autoresearch.program import write_program
 
-    program_path = workspace / "program.md"
-    if not program_path.exists() or force:
-        write_program(
-            program_path,
-            time_budget=time_budget,
-        )
-        created.append("program.md")
-        print(f"  Created: program.md")
+        program_path = workspace / "program.md"
+        if not program_path.exists() or force:
+            write_program(program_path, time_budget=time_budget)
+            print(f"  Created: program.md")
+
+        # .gitignore
+        gitignore = workspace / ".gitignore"
+        ignore_entries = {"results.tsv", "run.log", "__pycache__/"}
+        if not gitignore.exists():
+            gitignore.write_text("\n".join(sorted(ignore_entries)) + "\n")
+            print(f"  Created: .gitignore")
+
+        print(f"\nTraining workspace initialized in {workspace}")
+        print(f"\nNext steps:")
+        print(f"  1. python prepare.py              # prepare data + tokenizer")
+        print(f"  2. agentos autoresearch run        # start training research loop")
     else:
-        print(f"  Skip (exists): program.md")
+        # Agent mode — scaffold eval tasks template (no GPU needed)
+        eval_dir = workspace / "eval"
+        eval_dir.mkdir(parents=True, exist_ok=True)
 
-    # Create .gitignore for results.tsv and run.log
-    gitignore = workspace / ".gitignore"
-    ignore_entries = {"results.tsv", "run.log", "__pycache__/"}
-    if gitignore.exists():
-        existing = set(gitignore.read_text().splitlines())
-        new_entries = ignore_entries - existing
-        if new_entries:
-            with gitignore.open("a") as f:
-                for entry in sorted(new_entries):
-                    f.write(f"\n{entry}")
-            print(f"  Updated: .gitignore")
-    else:
-        gitignore.write_text("\n".join(sorted(ignore_entries)) + "\n")
-        created.append(".gitignore")
-        print(f"  Created: .gitignore")
+        eval_path = eval_dir / "tasks.json"
+        if not eval_path.exists() or force:
+            sample_tasks = json.dumps([
+                {"name": "example", "input": "What is 2+2?", "expected": "4", "grader": "contains"},
+            ], indent=2)
+            eval_path.write_text(sample_tasks + "\n")
+            print(f"  Created: eval/tasks.json (edit with your eval tasks)")
+        else:
+            print(f"  Skip (exists): eval/tasks.json")
 
-    print(f"\nAutoresearch workspace initialized in {workspace}")
-    print(f"\nNext steps:")
-    print(f"  1. python prepare.py          # prepare data + tokenizer")
-    print(f"  2. agentos autoresearch run    # start autonomous research")
+        print(f"\nAgent autoresearch workspace initialized in {workspace}")
+        print(f"\nNext steps:")
+        print(f"  1. Edit eval/tasks.json with your eval tasks")
+        print(f"  2. agentos autoresearch agent <name> eval/tasks.json")
 
 
 async def _autoresearch_run(args: argparse.Namespace) -> None:
@@ -3632,12 +3641,15 @@ async def _autoresearch_agent(args: argparse.Namespace) -> None:
         db=db,
     )
 
+    cost = loop.estimate_cost()
+
     print(f"Agent autoresearch: '{agent.config.name}' v{agent.config.version}")
     print(f"  Eval tasks:   {len(eval_tasks)}")
     print(f"  Metric:       {metric}")
     print(f"  Max iters:    {max_iters}")
     print(f"  Model:        {args.model}")
     print(f"  Trials/task:  {args.trials}")
+    print(f"  Est. cost:    ~${cost['estimated_total_usd']:.2f} ({cost['total_llm_calls']} LLM calls)")
     print("=" * 60)
     print("  [+] = kept  [-] = discarded")
     print()

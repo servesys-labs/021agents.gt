@@ -42,17 +42,60 @@ async def exec_command(
     request: ExecRequest,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Execute a command in a sandbox. Uses E2B if API key is set, local fallback otherwise."""
+    """Execute a command in a sandbox.
+
+    Routing priority:
+    1. Cloudflare Sandbox SDK container (AGENTOS_WORKER_URL set) — isolated, secure
+    2. E2B (E2B_API_KEY set) — external sandbox service
+    3. 503 error — no sandbox available
+
+    Agent code NEVER runs on the control plane (Railway backend).
+    """
+    import os
+    import httpx
+
+    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
+    if worker_url:
+        # Route to Cloudflare Sandbox SDK container
+        try:
+            async with httpx.AsyncClient(timeout=max(request.timeout_ms / 1000 + 10, 45)) as client:
+                resp = await client.post(
+                    f"{worker_url}/sandbox/shell",
+                    json={
+                        "command": request.command,
+                        "sandbox_id": request.sandbox_id or "",
+                        "timeout": max(1, request.timeout_ms // 1000),
+                    },
+                )
+                if resp.status_code == 200:
+                    return resp.json()
+                return {
+                    "sandbox_id": "", "stdout": "",
+                    "stderr": f"Container error: {resp.text[:300]}",
+                    "exit_code": -1, "duration_ms": 0,
+                }
+        except Exception as exc:
+            return {
+                "sandbox_id": "", "stdout": "",
+                "stderr": f"Worker request failed: {exc}",
+                "exit_code": -1, "duration_ms": 0,
+            }
+
+    # Fallback to E2B if configured
     from agentos.sandbox import SandboxManager
     mgr = SandboxManager()
-    if not mgr.has_api_key and not mgr.allow_local_fallback:
-        raise HTTPException(status_code=503, detail="E2B_API_KEY not configured and local fallback disabled")
-    result = await mgr.exec(command=request.command, sandbox_id=request.sandbox_id or None, timeout_ms=request.timeout_ms)
-    return {
-        "sandbox_id": result.sandbox_id, "stdout": result.stdout,
-        "stderr": result.stderr, "exit_code": result.exit_code,
-        "duration_ms": result.duration_ms,
-    }
+    if mgr.has_api_key:
+        result = await mgr.exec(command=request.command, sandbox_id=request.sandbox_id or None, timeout_ms=request.timeout_ms)
+        return {
+            "sandbox_id": result.sandbox_id, "stdout": result.stdout,
+            "stderr": result.stderr, "exit_code": result.exit_code,
+            "duration_ms": result.duration_ms,
+        }
+
+    raise HTTPException(
+        status_code=503,
+        detail="No sandbox available. Set AGENTOS_WORKER_URL for Cloudflare containers or E2B_API_KEY for E2B.",
+    )
 
 
 @router.get("/list")

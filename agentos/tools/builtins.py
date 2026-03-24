@@ -1274,12 +1274,14 @@ async def autoresearch(
             max_iterations=max_iterations,
         )
 
+        cost = loop.estimate_cost()
         summary = await loop.run()
 
         # Format results
         lines = [
             f"Autoresearch Report: {agent_name}",
             f"{'=' * 50}",
+            f"  Est. cost:     ~${cost['estimated_total_usd']:.2f} ({cost['total_llm_calls']} LLM calls)",
             f"  Iterations:    {summary['iterations']}",
             f"  Baseline:      {summary['baseline_score']:.3f}",
             f"  Best {metric}: {summary['best_score']:.3f}",

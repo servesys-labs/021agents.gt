@@ -64,7 +64,7 @@ class AutoResearchLoop:
     the agent config and creates new agent functions for each experiment.
 
     For fully autonomous operation (LLM generates hypotheses), use the
-    ``autonomous()`` classmethod which creates an ``AgentResearchLoop``.
+    ``autonomous()`` classmethod which delegates to EvolutionLoop.
     """
 
     @classmethod
@@ -79,8 +79,8 @@ class AutoResearchLoop:
     ):
         """Create a fully autonomous research loop for an agent.
 
-        Instead of pre-defined hypotheses, an LLM proposes modifications
-        based on eval results — the autoresearch pattern applied to agents.
+        Delegates to ``EvolutionLoop.autonomous_research()`` — the single
+        code path for all agent improvement, whether human-reviewed or not.
 
         Args:
             agent: Agent instance to evolve.

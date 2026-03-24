@@ -63,11 +63,16 @@ class AgentExperiment:
 class AgentResearchLoop:
     """Autonomous self-improvement loop for agents.
 
-    This is the autoresearch pattern applied to agent evolution:
+    Prefer ``EvolutionLoop.autonomous_research()`` for new code — it
+    routes through the same ledger and versioning as human-reviewed
+    evolution. This class is kept for direct usage and the autoresearch
+    tool handler.
+
+    Pattern:
     1. LLM proposes a modification to the agent config
     2. Modified config is evaluated via EvalGym
     3. If primary metric improves → keep, else → discard
-    4. Log result to TSV and repeat
+    4. Log result to TSV (and DB if provided) and repeat
 
     Unlike EvolutionLoop (which requires human approval), this runs
     fully autonomously — the LLM is both the proposer and the decision
@@ -144,6 +149,33 @@ class AgentResearchLoop:
 
     def stop(self) -> None:
         self._stopped = True
+
+    def estimate_cost(self) -> dict[str, Any]:
+        """Estimate the cost of running this autoresearch loop.
+
+        Returns a dict with per-iteration and total estimates.
+        """
+        tasks = len(self.eval_tasks)
+        trials = self.trials_per_task
+        iters = self.max_iterations or 10
+
+        # Per iteration: 1 proposer call + (tasks × trials) eval calls
+        eval_calls_per_iter = tasks * trials
+        proposer_cost = 0.005  # ~$0.005 per proposer call (short prompt)
+        eval_cost_per_call = 0.005  # ~$0.005 per agent eval call
+        cost_per_iter = proposer_cost + (eval_calls_per_iter * eval_cost_per_call)
+        # Baseline eval adds one extra round
+        baseline_cost = eval_calls_per_iter * eval_cost_per_call
+        total = baseline_cost + (cost_per_iter * iters)
+
+        return {
+            "cost_per_iteration_usd": round(cost_per_iter, 3),
+            "baseline_cost_usd": round(baseline_cost, 3),
+            "estimated_total_usd": round(total, 2),
+            "iterations": iters,
+            "eval_calls_per_iteration": eval_calls_per_iter,
+            "total_llm_calls": 1 + eval_calls_per_iter + iters * (1 + eval_calls_per_iter),
+        }
 
     async def run(self) -> dict[str, Any]:
         """Run the full autonomous agent research loop."""

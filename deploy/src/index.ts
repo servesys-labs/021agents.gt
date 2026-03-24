@@ -3214,6 +3214,71 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       }
     }
 
+    // ── Shell execution (Sandbox SDK container — bash/python/node) ──
+    // All agent shell commands run here, isolated from the control plane.
+    if (url.pathname === "/sandbox/shell" && request.method === "POST") {
+      const body = await request.json() as { command: string; sandbox_id?: string; timeout?: number };
+      if (!body.command) {
+        return Response.json({ error: "command is required" }, { status: 400 });
+      }
+      if (!env.SANDBOX) {
+        return Response.json({ error: "SANDBOX binding not available" }, { status: 503 });
+      }
+
+      const sid = body.sandbox_id || `shell-${crypto.randomUUID().slice(0, 12)}`;
+      const start = Date.now();
+      try {
+        const sandbox = getSandbox(env.SANDBOX, sid);
+        const result = await sandbox.exec(body.command, {
+          timeout: body.timeout || 30,
+        });
+        return Response.json({
+          sandbox_id: sid,
+          sandbox_type: "cloudflare_container",
+          stdout: result.stdout || "",
+          stderr: result.stderr || "",
+          exit_code: result.exitCode ?? 0,
+          duration_ms: Date.now() - start,
+        });
+      } catch (err: any) {
+        return Response.json({
+          sandbox_id: sid,
+          sandbox_type: "cloudflare_container",
+          stdout: "",
+          stderr: `Container error: ${err.message || err}`,
+          exit_code: -1,
+          duration_ms: Date.now() - start,
+        }, { status: 500 });
+      }
+    }
+
+    // ── File operations in container ──
+    if (url.pathname === "/sandbox/file/write" && request.method === "POST") {
+      const body = await request.json() as { path: string; content: string; sandbox_id?: string };
+      if (!env.SANDBOX) return Response.json({ error: "SANDBOX binding not available" }, { status: 503 });
+      const sid = body.sandbox_id || "default";
+      try {
+        const sandbox = getSandbox(env.SANDBOX, sid);
+        await sandbox.writeFile(body.path, body.content);
+        return Response.json({ success: true, sandbox_id: sid, path: body.path });
+      } catch (err: any) {
+        return Response.json({ success: false, error: err.message }, { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/sandbox/file/read" && request.method === "POST") {
+      const body = await request.json() as { path: string; sandbox_id?: string };
+      if (!env.SANDBOX) return Response.json({ error: "SANDBOX binding not available" }, { status: 503 });
+      const sid = body.sandbox_id || "default";
+      try {
+        const sandbox = getSandbox(env.SANDBOX, sid);
+        const file = await sandbox.readFile(body.path);
+        return Response.json({ success: true, sandbox_id: sid, path: body.path, content: file.content || "" });
+      } catch (err: any) {
+        return Response.json({ success: false, error: err.message }, { status: 500 });
+      }
+    }
+
     // Serve static assets (portal SPA)
     return env.ASSETS.fetch(request);
   },

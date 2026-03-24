@@ -251,6 +251,66 @@ class EvolutionLoop:
 
         return self.agent_config
 
+    # ── Autonomous Research (no human review) ────────────────────
+
+    async def autonomous_research(
+        self,
+        eval_tasks: list[dict],
+        *,
+        max_iterations: int = 10,
+        trials_per_task: int = 3,
+        primary_metric: str = "pass_rate",
+        model: str = "claude-sonnet-4-6-20250627",
+        provider: str = "anthropic",
+        temperature: float = 0.7,
+        db: Any | None = None,
+        on_experiment: Any | None = None,
+    ) -> dict[str, Any]:
+        """Run autoresearch: LLM proposes config changes, eval scores them, no human review.
+
+        This is the EvolutionLoop equivalent of ``agentos autoresearch agent``.
+        Instead of analyze→propose→review→apply, it does:
+        propose (LLM) → evaluate (EvalGym) → keep if better → repeat.
+
+        Delegates to AgentResearchLoop for the actual iteration logic.
+        """
+        from agentos.autoresearch.agent_research import AgentResearchLoop
+
+        # Create a minimal Agent-like wrapper so AgentResearchLoop works
+        class _AgentShim:
+            def __init__(self, config):
+                self.config = config
+
+        agent_shim = _AgentShim(self.agent_config)
+
+        loop = AgentResearchLoop(
+            agent=agent_shim,
+            eval_tasks=eval_tasks,
+            primary_metric=primary_metric,
+            max_iterations=max_iterations,
+            trials_per_task=trials_per_task,
+            model=model,
+            provider=provider,
+            temperature=temperature,
+            db=db,
+            on_experiment=on_experiment,
+        )
+
+        summary = await loop.run()
+
+        # If improvements were found, apply the best config through the ledger
+        if summary.get("improvements_kept", 0) > 0:
+            best = summary.get("best_config", {})
+            if best:
+                self.agent_config = AgentConfig.from_dict(best)
+                save_agent_config(self.agent_config)
+                logger.info(
+                    "Autoresearch applied best config → %s v%s",
+                    self.agent_config.name, self.agent_config.version,
+                )
+
+        return summary
+
     # ── Convenience ───────────────────────────────────────────────
 
     def status(self) -> dict[str, Any]:

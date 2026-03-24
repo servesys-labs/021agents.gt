@@ -376,32 +376,20 @@ class TestDriver:
 
 
 class TestInit:
-    def test_init_creates_files(self, tmp_path: Path):
-        """Test that autoresearch init creates the expected files."""
-        from agentos.autoresearch.defaults import __file__ as defaults_init
-        import shutil
+    def test_init_creates_program(self, tmp_path: Path):
+        """Test that program.md is generated correctly."""
+        write_program(tmp_path / "program.md")
 
-        defaults_dir = Path(defaults_init).parent
-
-        workspace = tmp_path / "research"
-        workspace.mkdir()
-
-        # Copy defaults
-        for name in ["prepare.py", "train.py"]:
-            src = defaults_dir / name
-            if src.exists():
-                shutil.copy2(src, workspace / name)
-
-        # Write program.md
-        write_program(workspace / "program.md")
-
-        assert (workspace / "prepare.py").exists()
-        assert (workspace / "train.py").exists()
-        assert (workspace / "program.md").exists()
-
-        content = (workspace / "program.md").read_text()
+        assert (tmp_path / "program.md").exists()
+        content = (tmp_path / "program.md").read_text()
         assert "val_bpb" in content
         assert "300 seconds" in content
+
+    def test_ml_training_files_exist(self):
+        """Test that ML training files are in the ml/ subpackage."""
+        ml_dir = Path(__file__).parent.parent / "agentos" / "autoresearch" / "ml"
+        assert (ml_dir / "train.py").exists()
+        assert (ml_dir / "prepare.py").exists()
 
 
 # ── Agent Research — proposal parsing ────────────────────────────────────────
