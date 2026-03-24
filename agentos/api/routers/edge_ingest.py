@@ -595,3 +595,88 @@ async def ingest_compliance_check(
     )
     db.conn.commit()
     return {"ingested": True}
+
+
+@router.post("/episode")
+async def ingest_episode(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+):
+    """Persist one episodic-memory entry from edge worker."""
+    _require_ingest_token(authorization=authorization, x_edge_token=x_edge_token)
+    db = _get_db()
+    episode_id = _payload_text(payload, "id", "", 64)
+    if not episode_id:
+        raise HTTPException(status_code=400, detail="id required")
+    db.insert_episode(
+        {
+            "id": episode_id,
+            "input": _payload_text(payload, "input", "", 5000),
+            "output": _payload_text(payload, "output", "", 10000),
+            "outcome": _payload_text(payload, "outcome", "", 128),
+            "metadata": payload.get("metadata", {}),
+            "timestamp": float(payload.get("created_at", 0) or time.time()),
+        }
+    )
+    return {"ingested": True, "id": episode_id}
+
+
+@router.post("/vapi/call")
+async def ingest_vapi_call(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+):
+    """Upsert one Vapi call row from edge worker."""
+    _require_ingest_token(authorization=authorization, x_edge_token=x_edge_token)
+    db = _get_db()
+    call_id = _payload_text(payload, "call_id", "", 64)
+    if not call_id:
+        raise HTTPException(status_code=400, detail="call_id required")
+    db.insert_vapi_call(
+        call_id=call_id,
+        org_id=_payload_text(payload, "org_id", "", 64),
+        agent_name=_payload_text(payload, "agent_name", "", 128),
+        phone_number=_payload_text(payload, "phone_number", "", 64),
+        direction=_payload_text(payload, "direction", "outbound", 32),
+        status=_payload_text(payload, "status", "pending", 32),
+        vapi_assistant_id=_payload_text(payload, "vapi_assistant_id", "", 128),
+        metadata=payload.get("metadata", {}),
+        started_at=float(payload.get("started_at", 0) or time.time()),
+    )
+    # Optional mutable fields update.
+    db.update_vapi_call(
+        call_id,
+        status=_payload_text(payload, "status", "pending", 32),
+        duration_seconds=float(payload.get("duration_seconds", 0) or 0),
+        transcript=_payload_text(payload, "transcript", "", 20000),
+        cost_usd=float(payload.get("cost_usd", 0) or 0),
+        ended_at=float(payload.get("ended_at", 0) or 0),
+        agent_name=_payload_text(payload, "agent_name", "", 128),
+    )
+    return {"ingested": True, "call_id": call_id}
+
+
+@router.post("/vapi/event")
+async def ingest_vapi_event(
+    payload: dict[str, Any],
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+):
+    """Persist one Vapi event row from edge worker."""
+    _require_ingest_token(authorization=authorization, x_edge_token=x_edge_token)
+    db = _get_db()
+    call_id = _payload_text(payload, "call_id", "", 64)
+    if not call_id:
+        raise HTTPException(status_code=400, detail="call_id required")
+    event_type = _payload_text(payload, "event_type", "", 64)
+    if not event_type:
+        raise HTTPException(status_code=400, detail="event_type required")
+    db.insert_vapi_event(
+        call_id=call_id,
+        event_type=event_type,
+        payload_json=_payload_text(payload, "payload_json", "{}", 50000),
+        org_id=_payload_text(payload, "org_id", "", 64),
+    )
+    return {"ingested": True, "call_id": call_id, "event_type": event_type}

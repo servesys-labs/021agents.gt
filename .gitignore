@@ -69,6 +69,13 @@ sessions/*.json
 sessions/*.jsonl
 !sessions/.gitkeep
 evolution_state*.json
+agents/*-meta-agent.json
+agents/smoke-*.json
+agents/bench*-*.json
+agents/verify*-*.json
+agents/autofix-smoke-*.json
+agents/e2e-demo-*.json
+agents/quick-*.json
 
 # ------------------------------
 # Secrets / credentials

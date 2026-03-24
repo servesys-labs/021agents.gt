@@ -487,6 +487,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
         // Store in episodic memory
         this.sql`INSERT INTO episodes (id, input, output) VALUES (${sessionId}, ${input}, ${response.content})`;
+        await this._mirrorEpisodeToBackend({
+          id: sessionId,
+          input,
+          output: response.content,
+          outcome: "completed",
+          metadata: {
+            agent_name: this.state.config.agentName || "agentos",
+            org_id: this.state.config.orgId || "",
+            project_id: this.state.config.projectId || "",
+          },
+          created_at: Date.now() / 1000,
+        });
         this.sql`INSERT INTO sessions (id, input, output, turns, cost_usd, model) VALUES (${sessionId}, ${input}, ${response.content}, ${turn}, ${this.state.totalCostUsd}, ${response.model})`;
         this._recordEvent({
           sessionId,
@@ -643,9 +655,272 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   }
 
   @callable()
+  createSecurityScan(input: {
+    scanType?: string;
+    status?: string;
+    totalProbes?: number;
+    passed?: number;
+    failed?: number;
+    errors?: number;
+    riskScore?: number;
+    riskLevel?: string;
+  } = {}): any {
+    const scanId = crypto.randomUUID().slice(0, 16);
+    const scanType = String(input.scanType || "runtime");
+    const status = String(input.status || "completed");
+    const totalProbes = Number(input.totalProbes || 0);
+    const passed = Number(input.passed || 0);
+    const failed = Number(input.failed || 0);
+    const errors = Number(input.errors || 0);
+    const riskScore = Number(input.riskScore || 0);
+    const riskLevel = String(input.riskLevel || "unknown");
+    this.sql`INSERT INTO security_scans (
+      scan_id, agent_name, scan_type, status, total_probes, passed, failed, risk_score, risk_level
+    ) VALUES (
+      ${scanId}, ${this.state.config.agentName || "agentos"}, ${scanType}, ${status},
+      ${totalProbes}, ${passed}, ${failed}, ${riskScore}, ${riskLevel}
+    )`;
+    this._recordEvent({
+      sessionId: scanId,
+      turn: 0,
+      eventType: "security.scan",
+      action: "create",
+      status,
+      details: { scanType, totalProbes, passed, failed, errors, riskScore, riskLevel },
+    });
+    void this._sendIngest("/api/v1/edge-ingest/security/scan", {
+      scan_id: scanId,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      scan_type: scanType,
+      status,
+      total_probes: totalProbes,
+      passed,
+      failed,
+      errors,
+      risk_score: riskScore,
+      risk_level: riskLevel,
+      created_at: Date.now() / 1000,
+    });
+    return { scanId, status, riskScore, riskLevel };
+  }
+
+  @callable()
   listSecurityFindings(scanId: string = ""): any[] {
     if (scanId) return this.sql`SELECT * FROM security_findings WHERE scan_id = ${scanId} ORDER BY aivss_score DESC`;
     return this.sql`SELECT * FROM security_findings ORDER BY aivss_score DESC LIMIT 100`;
+  }
+
+  @callable()
+  createSecurityFinding(input: {
+    scanId: string;
+    probeName?: string;
+    category?: string;
+    severity?: string;
+    title?: string;
+    evidence?: string;
+    aivssScore?: number;
+  }): any {
+    const scanId = String(input.scanId || "");
+    if (!scanId) return { error: "scanId required" };
+    const probeName = String(input.probeName || "probe");
+    const category = String(input.category || "unknown");
+    const severity = String(input.severity || "info");
+    const title = String(input.title || "finding");
+    const evidence = String(input.evidence || "");
+    const aivssScore = Number(input.aivssScore || 0);
+    this.sql`INSERT INTO security_findings (
+      scan_id, agent_name, probe_name, category, severity, title, evidence, aivss_score
+    ) VALUES (
+      ${scanId}, ${this.state.config.agentName || "agentos"}, ${probeName}, ${category}, ${severity}, ${title}, ${evidence}, ${aivssScore}
+    )`;
+    this._recordEvent({
+      sessionId: scanId,
+      turn: 0,
+      eventType: "security.finding",
+      action: "create",
+      status: "ok",
+      details: { probeName, category, severity, title, aivssScore },
+    });
+    void this._sendIngest("/api/v1/edge-ingest/security/finding", {
+      scan_id: scanId,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      probe_id: probeName,
+      probe_name: probeName,
+      category,
+      layer: "runtime",
+      severity,
+      status: "open",
+      title,
+      description: title,
+      evidence,
+      remediation: "",
+      aivss_vector: "",
+      aivss_score: aivssScore,
+      created_at: Date.now() / 1000,
+    });
+    return { created: true, scanId, probeName, severity, aivssScore };
+  }
+
+  @callable()
+  upsertRiskProfile(input: {
+    riskScore?: number;
+    riskLevel?: string;
+    aivssVectorJson?: string;
+    lastScanId?: string;
+    findingsSummaryJson?: string;
+  } = {}): any {
+    const agentName = this.state.config.agentName || "agentos";
+    const riskScore = Number(input.riskScore || 0);
+    const riskLevel = String(input.riskLevel || "unknown");
+    const aivssVectorJson = String(input.aivssVectorJson || "{}");
+    const lastScanId = String(input.lastScanId || "");
+    const findingsSummaryJson = String(input.findingsSummaryJson || "{}");
+    const existing = this.sql<{ id: number }>`SELECT id FROM agent_risk_profiles WHERE agent_name = ${agentName} LIMIT 1`;
+    if (existing.length > 0) {
+      this.sql`UPDATE agent_risk_profiles
+        SET risk_score = ${riskScore},
+            risk_level = ${riskLevel},
+            aivss_vector_json = ${aivssVectorJson},
+            last_scan_id = ${lastScanId},
+            findings_summary_json = ${findingsSummaryJson},
+            updated_at = ${Date.now() / 1000}
+        WHERE id = ${existing[0].id}`;
+    } else {
+      this.sql`INSERT INTO agent_risk_profiles (
+        agent_name, risk_score, risk_level, aivss_vector_json, last_scan_id, findings_summary_json, updated_at
+      ) VALUES (
+        ${agentName}, ${riskScore}, ${riskLevel}, ${aivssVectorJson}, ${lastScanId}, ${findingsSummaryJson}, ${Date.now() / 1000}
+      )`;
+    }
+    this._recordEvent({
+      sessionId: lastScanId || agentName,
+      turn: 0,
+      eventType: "security.risk_profile",
+      action: "upsert",
+      status: "ok",
+      details: { riskScore, riskLevel, lastScanId },
+    });
+    void this._sendIngest("/api/v1/edge-ingest/security/risk-profile", {
+      org_id: this.state.config.orgId || "",
+      agent_name: agentName,
+      risk_score: riskScore,
+      risk_level: riskLevel,
+      aivss_vector_json: aivssVectorJson,
+      last_scan_id: lastScanId,
+      findings_summary_json: findingsSummaryJson,
+      updated_at: Date.now() / 1000,
+    });
+    return { agentName, riskScore, riskLevel };
+  }
+
+  @callable()
+  listRiskProfiles(): any[] {
+    return this.sql`SELECT * FROM agent_risk_profiles ORDER BY updated_at DESC LIMIT 100`;
+  }
+
+  // ── Voice (Vapi) ───────────────────────────────────────────────
+
+  @callable()
+  upsertVapiCall(input: {
+    callId: string;
+    phoneNumber?: string;
+    direction?: string;
+    status?: string;
+    durationSeconds?: number;
+    transcript?: string;
+    costUsd?: number;
+    vapiAssistantId?: string;
+    metadata?: Record<string, unknown>;
+    startedAt?: number;
+    endedAt?: number;
+  }): any {
+    const callId = String(input.callId || "");
+    if (!callId) return { error: "callId required" };
+    const existing = this.sql<{ call_id: string }>`SELECT call_id FROM vapi_calls WHERE call_id = ${callId} LIMIT 1`;
+    if (existing.length > 0) {
+      this.sql`UPDATE vapi_calls
+        SET agent_name = ${this.state.config.agentName || "agentos"},
+            phone_number = ${String(input.phoneNumber || "")},
+            direction = ${String(input.direction || "outbound")},
+            status = ${String(input.status || "pending")},
+            duration_seconds = ${Number(input.durationSeconds || 0)},
+            transcript = ${String(input.transcript || "")},
+            cost_usd = ${Number(input.costUsd || 0)}
+        WHERE call_id = ${callId}`;
+    } else {
+      this.sql`INSERT INTO vapi_calls (
+        call_id, agent_name, phone_number, direction, status, duration_seconds, transcript, cost_usd
+      ) VALUES (
+        ${callId}, ${this.state.config.agentName || "agentos"}, ${String(input.phoneNumber || "")},
+        ${String(input.direction || "outbound")}, ${String(input.status || "pending")},
+        ${Number(input.durationSeconds || 0)}, ${String(input.transcript || "")}, ${Number(input.costUsd || 0)}
+      )`;
+    }
+    this._recordEvent({
+      sessionId: callId,
+      turn: 0,
+      eventType: "voice.call",
+      action: "upsert",
+      status: String(input.status || "pending"),
+      details: { direction: input.direction || "outbound", durationSeconds: Number(input.durationSeconds || 0) },
+      costUsd: Number(input.costUsd || 0),
+    });
+    void this._mirrorVapiCallToBackend({
+      call_id: callId,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      phone_number: String(input.phoneNumber || ""),
+      direction: String(input.direction || "outbound"),
+      status: String(input.status || "pending"),
+      duration_seconds: Number(input.durationSeconds || 0),
+      transcript: String(input.transcript || ""),
+      cost_usd: Number(input.costUsd || 0),
+      vapi_assistant_id: String(input.vapiAssistantId || ""),
+      metadata: input.metadata || {},
+      started_at: Number(input.startedAt || Date.now() / 1000),
+      ended_at: Number(input.endedAt || 0),
+    });
+    return { callId, status: String(input.status || "pending") };
+  }
+
+  @callable()
+  recordVapiEvent(input: {
+    callId: string;
+    eventType: string;
+    payload?: Record<string, unknown>;
+  }): any {
+    const callId = String(input.callId || "");
+    const eventType = String(input.eventType || "");
+    if (!callId || !eventType) return { error: "callId and eventType required" };
+    const payloadJson = JSON.stringify(input.payload || {});
+    this.sql`INSERT INTO vapi_events (call_id, event_type, payload_json) VALUES (${callId}, ${eventType}, ${payloadJson})`;
+    this._recordEvent({
+      sessionId: callId,
+      turn: 0,
+      eventType: "voice.event",
+      action: eventType,
+      status: "ok",
+      details: input.payload || {},
+    });
+    void this._mirrorVapiEventToBackend({
+      call_id: callId,
+      org_id: this.state.config.orgId || "",
+      event_type: eventType,
+      payload_json: payloadJson,
+    });
+    return { recorded: true, callId, eventType };
+  }
+
+  @callable()
+  listVapiCalls(limit: number = 50): any[] {
+    return this.sql`SELECT * FROM vapi_calls ORDER BY created_at DESC LIMIT ${limit}`;
+  }
+
+  @callable()
+  listVapiEvents(callId: string, limit: number = 100): any[] {
+    return this.sql`SELECT * FROM vapi_events WHERE call_id = ${callId} ORDER BY created_at DESC LIMIT ${limit}`;
   }
 
   // ── Issues ──────────────────────────────────────────────────
@@ -682,6 +957,19 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   @callable()
   resolveIssue(issueId: string): any {
     this.sql`UPDATE issues SET status = 'resolved' WHERE issue_id = ${issueId}`;
+    void this._sendIngest("/api/v1/edge-ingest/issues", {
+      issue_id: issueId,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      title: "",
+      description: "",
+      category: "unknown",
+      severity: "low",
+      status: "resolved",
+      source: "manual",
+      metadata_json: "{}",
+      updated_at: Date.now() / 1000,
+    });
     return { resolved: true, issueId };
   }
 
@@ -780,6 +1068,50 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       },
       sentimentDistribution: Object.fromEntries(sentDist.map(r => [r.sentiment, r.cnt])),
     };
+  }
+
+  @callable()
+  recordComplianceCheck(input: {
+    imageId?: string;
+    imageName?: string;
+    status?: string;
+    driftCount?: number;
+    driftFields?: string[];
+    driftDetailsJson?: string;
+  } = {}): any {
+    const agentName = this.state.config.agentName || "agentos";
+    const imageId = String(input.imageId || "");
+    const imageName = String(input.imageName || "");
+    const status = String(input.status || "unchecked");
+    const driftCount = Number(input.driftCount || 0);
+    const driftFields = JSON.stringify(input.driftFields || []);
+    const driftDetailsJson = String(input.driftDetailsJson || "{}");
+    this.sql`INSERT INTO compliance_checks (
+      agent_name, image_id, status, drift_count, drift_fields
+    ) VALUES (
+      ${agentName}, ${imageId}, ${status}, ${driftCount}, ${driftFields}
+    )`;
+    this._recordEvent({
+      sessionId: imageId || agentName,
+      turn: 0,
+      eventType: "compliance.check",
+      action: "record",
+      status,
+      details: { imageId, driftCount },
+    });
+    void this._sendIngest("/api/v1/edge-ingest/compliance-check", {
+      org_id: this.state.config.orgId || "",
+      agent_name: agentName,
+      image_id: imageId,
+      image_name: imageName,
+      status,
+      drift_count: driftCount,
+      drift_fields: driftFields,
+      drift_details_json: driftDetailsJson,
+      checked_by: "worker",
+      created_at: Date.now() / 1000,
+    });
+    return { recorded: true, status, driftCount };
   }
 
   // ── Scheduling (cron jobs) ──────────────────────────────────────
@@ -930,11 +1262,80 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // Security
     if (path === "security-scans") {
+      if (request.method === "POST") {
+        const body = await request.json() as {
+          scanType?: string; status?: string; totalProbes?: number; passed?: number; failed?: number;
+          errors?: number; riskScore?: number; riskLevel?: string;
+        };
+        return Response.json(this.createSecurityScan(body || {}));
+      }
       return Response.json({ scans: this.listSecurityScans() });
     }
     if (path === "security-findings") {
+      if (request.method === "POST") {
+        const body = await request.json() as {
+          scanId?: string; probeName?: string; category?: string; severity?: string;
+          title?: string; evidence?: string; aivssScore?: number;
+        };
+        if (!body.scanId) return Response.json({ error: "scanId required" }, { status: 400 });
+        return Response.json(this.createSecurityFinding({
+          scanId: body.scanId,
+          probeName: body.probeName,
+          category: body.category,
+          severity: body.severity,
+          title: body.title,
+          evidence: body.evidence,
+          aivssScore: body.aivssScore,
+        }));
+      }
       const scanId = url.searchParams.get("scan_id") || "";
       return Response.json({ findings: this.listSecurityFindings(scanId) });
+    }
+    if (path === "security-risk-profiles") {
+      if (request.method === "POST") {
+        const body = await request.json() as {
+          riskScore?: number; riskLevel?: string; aivssVectorJson?: string;
+          lastScanId?: string; findingsSummaryJson?: string;
+        };
+        return Response.json(this.upsertRiskProfile(body || {}));
+      }
+      return Response.json({ profiles: this.listRiskProfiles() });
+    }
+    if (path === "vapi-calls") {
+      if (request.method === "POST") {
+        const body = await request.json() as {
+          callId?: string; phoneNumber?: string; direction?: string; status?: string; durationSeconds?: number;
+          transcript?: string; costUsd?: number; vapiAssistantId?: string; metadata?: Record<string, unknown>;
+          startedAt?: number; endedAt?: number;
+        };
+        if (!body.callId) return Response.json({ error: "callId required" }, { status: 400 });
+        return Response.json(this.upsertVapiCall({
+          callId: body.callId,
+          phoneNumber: body.phoneNumber,
+          direction: body.direction,
+          status: body.status,
+          durationSeconds: body.durationSeconds,
+          transcript: body.transcript,
+          costUsd: body.costUsd,
+          vapiAssistantId: body.vapiAssistantId,
+          metadata: body.metadata,
+          startedAt: body.startedAt,
+          endedAt: body.endedAt,
+        }));
+      }
+      return Response.json({ calls: this.listVapiCalls() });
+    }
+    if (path === "vapi-events") {
+      if (request.method === "POST") {
+        const body = await request.json() as { callId?: string; eventType?: string; payload?: Record<string, unknown> };
+        if (!body.callId || !body.eventType) {
+          return Response.json({ error: "callId and eventType required" }, { status: 400 });
+        }
+        return Response.json(this.recordVapiEvent({ callId: body.callId, eventType: body.eventType, payload: body.payload || {} }));
+      }
+      const callId = url.searchParams.get("call_id") || "";
+      if (!callId) return Response.json({ error: "call_id required" }, { status: 400 });
+      return Response.json({ events: this.listVapiEvents(callId) });
     }
 
     // Issues
@@ -961,6 +1362,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       return Response.json({ images: this.listGoldImages() });
     }
     if (path === "compliance") {
+      if (request.method === "POST") {
+        const body = await request.json() as {
+          imageId?: string; imageName?: string; status?: string; driftCount?: number;
+          driftFields?: string[]; driftDetailsJson?: string;
+        };
+        return Response.json(this.recordComplianceCheck(body || {}));
+      }
       return Response.json({ checks: this.listComplianceChecks() });
     }
 
@@ -1432,6 +1840,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           WHERE id = ${row.id}`;
       }
     }
+  }
+
+  private async _mirrorEpisodeToBackend(episodePayload: Record<string, unknown>): Promise<void> {
+    await this._sendIngest("/api/v1/edge-ingest/episode", episodePayload);
+  }
+
+  private async _mirrorVapiCallToBackend(callPayload: Record<string, unknown>): Promise<void> {
+    await this._sendIngest("/api/v1/edge-ingest/vapi/call", callPayload);
+  }
+
+  private async _mirrorVapiEventToBackend(eventPayload: Record<string, unknown>): Promise<void> {
+    await this._sendIngest("/api/v1/edge-ingest/vapi/event", eventPayload);
   }
 
   private async _mirrorTurnToBackend(sessionId: string, turnPayload: Record<string, unknown>): Promise<void> {

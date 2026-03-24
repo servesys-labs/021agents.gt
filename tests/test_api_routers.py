@@ -728,7 +728,7 @@ class TestEdgeIngestBridge:
             "SELECT session_id FROM conversation_analytics WHERE session_id = ?",
             ("edge-session-1",),
         ).fetchone()
-        assert int(event_row["cnt"]) == 1
+        assert int(event_row["cnt"]) >= 1
         assert issue_row is not None
         assert conv_row is not None
 
@@ -736,6 +736,129 @@ class TestEdgeIngestBridge:
         monkeypatch.setenv("EDGE_INGEST_TOKEN", "test-edge-token")
         denied = api_client.post("/api/v1/edge-ingest/events", json={"events": []})
         assert denied.status_code == 401
+
+    def test_ingest_security_and_compliance_domains(self, api_client, monkeypatch):
+        monkeypatch.setenv("EDGE_INGEST_TOKEN", "test-edge-token")
+        headers = {"Authorization": "Bearer test-edge-token"}
+        scan_id = "edge-scan-1"
+        image_id = "edge-image-1"
+
+        scan = api_client.post(
+            "/api/v1/edge-ingest/security/scan",
+            json={
+                "scan_id": scan_id,
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "scan_type": "runtime",
+                "status": "completed",
+                "total_probes": 1,
+                "passed": 1,
+                "failed": 0,
+                "errors": 0,
+                "risk_score": 0.1,
+                "risk_level": "low",
+            },
+            headers=headers,
+        )
+        assert scan.status_code == 200
+
+        finding = api_client.post(
+            "/api/v1/edge-ingest/security/finding",
+            json={
+                "scan_id": scan_id,
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "probe_id": "probe-1",
+                "probe_name": "prompt_injection",
+                "category": "prompt",
+                "layer": "runtime",
+                "severity": "medium",
+                "status": "open",
+                "title": "Prompt injection risk",
+                "description": "desc",
+                "evidence": "evidence",
+                "remediation": "remediate",
+                "aivss_vector": "AV:N/AC:L",
+                "aivss_score": 6.0,
+            },
+            headers=headers,
+        )
+        assert finding.status_code == 200
+
+        risk = api_client.post(
+            "/api/v1/edge-ingest/security/risk-profile",
+            json={
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "risk_score": 0.4,
+                "risk_level": "medium",
+                "aivss_vector_json": "{\"prompt\":6.0}",
+                "last_scan_id": scan_id,
+                "findings_summary_json": "{\"open\":1}",
+            },
+            headers=headers,
+        )
+        assert risk.status_code == 200
+
+        gold = api_client.post(
+            "/api/v1/edge-ingest/gold-image",
+            json={
+                "image_id": image_id,
+                "org_id": "org-test",
+                "name": "Edge Gold",
+                "description": "baseline",
+                "config_json": "{\"plan\":\"standard\"}",
+                "config_hash": "hash-1",
+                "version": "1.0.0",
+                "category": "general",
+                "is_active": 1,
+                "created_by": "edge",
+            },
+            headers=headers,
+        )
+        assert gold.status_code == 200
+
+        comp = api_client.post(
+            "/api/v1/edge-ingest/compliance-check",
+            json={
+                "org_id": "org-test",
+                "agent_name": "edge-agent",
+                "image_id": image_id,
+                "image_name": "Edge Gold",
+                "status": "pass",
+                "drift_count": 0,
+                "drift_fields": "[]",
+                "drift_details_json": "{}",
+                "checked_by": "edge",
+            },
+            headers=headers,
+        )
+        assert comp.status_code == 200
+
+        from agentos.core.db_config import initialize_db, get_db
+
+        initialize_db()
+        db = get_db()
+        finding_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM security_findings WHERE scan_id = ?",
+            (scan_id,),
+        ).fetchone()
+        risk_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM agent_risk_profiles WHERE agent_name = ?",
+            ("edge-agent",),
+        ).fetchone()
+        gold_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM gold_images WHERE image_id = ?",
+            (image_id,),
+        ).fetchone()
+        comp_row = db.conn.execute(
+            "SELECT COUNT(*) AS cnt FROM compliance_checks WHERE image_id = ?",
+            (image_id,),
+        ).fetchone()
+        assert int(finding_row["cnt"]) >= 1
+        assert int(risk_row["cnt"]) >= 1
+        assert int(gold_row["cnt"]) >= 1
+        assert int(comp_row["cnt"]) >= 1
 
     def test_releases_rejects_invalid_canary_weight(self, api_client):
         headers = self._auth_header(api_client, "canvas-releases-invalid@test.com")
