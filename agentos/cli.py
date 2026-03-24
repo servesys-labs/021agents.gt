@@ -324,7 +324,7 @@ def main() -> None:
     ar_run = ar_sub.add_parser("run", help="Start the autonomous research loop")
     ar_run.add_argument("--workspace", type=str, default=".", help="Workspace directory")
     ar_run.add_argument("--max-iterations", type=int, default=0, help="Max experiments (0=unlimited)")
-    ar_run.add_argument("--model", type=str, default="claude-sonnet-4-6-20250627", help="LLM model for hypothesis generation")
+    ar_run.add_argument("--model", type=str, default="anthropic/claude-sonnet-4.6", help="LLM model for hypothesis generation")
     ar_run.add_argument("--provider", type=str, default="anthropic", help="LLM provider")
     ar_run.add_argument("--temperature", type=float, default=0.7, help="LLM temperature (default: 0.7)")
     ar_run.add_argument("--train-command", type=str, default="", help="Custom training command (default: uv run train.py)")
@@ -346,7 +346,7 @@ def main() -> None:
     ar_agent.add_argument("name", help="Agent name or path")
     ar_agent.add_argument("tasks_file", help="JSON file with eval tasks")
     ar_agent.add_argument("--max-iterations", type=int, default=20, help="Max experiments (default: 20)")
-    ar_agent.add_argument("--model", type=str, default="claude-sonnet-4-6-20250627", help="LLM model for hypothesis generation")
+    ar_agent.add_argument("--model", type=str, default="anthropic/claude-sonnet-4.6", help="LLM model for hypothesis generation")
     ar_agent.add_argument("--provider", type=str, default="anthropic", help="LLM provider")
     ar_agent.add_argument("--temperature", type=float, default=0.7, help="LLM temperature")
     ar_agent.add_argument("--trials", type=int, default=3, help="Trials per eval task (default: 3)")
@@ -3210,7 +3210,7 @@ def _get_grader_provider():
 
     if anthropic_key:
         return HttpProvider(
-            model_id="claude-haiku-4-5-20251001",
+            model_id="anthropic/claude-haiku-4.5",
             api_base="https://api.anthropic.com",
             api_key=anthropic_key,
         )
@@ -3653,7 +3653,7 @@ async def _autoresearch_agent(args: argparse.Namespace) -> None:
         primary_metric=metric,
         max_iterations=max_iters,
         trials_per_task=getattr(args, "trials", 3),
-        model=getattr(args, "model", "claude-sonnet-4-6-20250627"),
+        model=getattr(args, "model", "anthropic/claude-sonnet-4.6"),
         provider=getattr(args, "provider", "anthropic"),
         temperature=getattr(args, "temperature", 0.7),
         on_experiment=on_experiment,

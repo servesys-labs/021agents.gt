@@ -13,7 +13,7 @@ This bridges the standalone autoresearch driver to the AgentOS evolution
 system, giving agents the ability to self-improve continuously.
 
 Usage:
-    loop = AgentResearchLoop(agent, eval_tasks, model="claude-sonnet-4-6-20250627")
+    loop = AgentResearchLoop(agent, eval_tasks, model="anthropic/claude-sonnet-4.6")
     summary = await loop.run()
 
 Or via CLI:
@@ -89,7 +89,7 @@ class AgentResearchLoop:
         max_iterations: int = 0,
         improvement_threshold: float = 0.0,
         trials_per_task: int = 3,
-        model: str = "claude-sonnet-4-6-20250627",
+        model: str = "anthropic/claude-sonnet-4.6",
         provider: str = "anthropic",
         temperature: float = 0.7,
         results_path: Path | None = None,

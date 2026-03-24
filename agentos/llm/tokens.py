@@ -57,7 +57,7 @@ def count_message_tokens(messages: list[dict[str, str]], model: str = "cl100k_ba
 def estimate_cost(
     input_tokens: int,
     output_tokens: int,
-    model: str = "claude-sonnet-4-6-20250627",
+    model: str = "anthropic/claude-sonnet-4.6",
 ) -> float:
     """Estimate API cost in USD based on token counts.
 

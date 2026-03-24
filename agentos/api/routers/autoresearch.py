@@ -18,7 +18,7 @@ _active_tasks: dict[str, asyncio.Task] = {}
 
 class AutoResearchStartRequest(BaseModel):
     workspace: str = "."
-    model: str = "claude-sonnet-4-6-20250627"
+    model: str = "anthropic/claude-sonnet-4.6"
     provider: str = "anthropic"
     max_iterations: int = 0
     time_budget: int = 300

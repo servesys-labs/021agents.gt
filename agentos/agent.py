@@ -596,7 +596,7 @@ class Agent:
                     gmi_model = model if tier_provider_name != "gmi" else tier_model
                     provider = _make_provider(gmi_model, "gmi")
                 if provider is None and anthropic_key:
-                    fallback_model = model if "claude" in model else "claude-sonnet-4-6-20250627"
+                    fallback_model = model if "claude" in model else "anthropic/claude-sonnet-4.6"
                     provider = _make_provider(fallback_model, "anthropic")
                 if provider is None and openai_key:
                     provider = _make_provider("gpt-5.4-mini", "openai")

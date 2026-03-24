@@ -6,7 +6,7 @@ Import from here in agent.py, builder.py, cli.py, etc. to avoid circular deps.
 import re
 
 # The default LLM model used across init scaffolding, agent configs, and the builder.
-DEFAULT_MODEL = "claude-sonnet-4-6-20250627"
+DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 
 # The default LLM provider.
 DEFAULT_PROVIDER = "anthropic"

@@ -260,7 +260,7 @@ class EvolutionLoop:
         max_iterations: int = 10,
         trials_per_task: int = 3,
         primary_metric: str = "pass_rate",
-        model: str = "claude-sonnet-4-6-20250627",
+        model: str = "anthropic/claude-sonnet-4.6",
         provider: str = "anthropic",
         temperature: float = 0.7,
         db: Any | None = None,

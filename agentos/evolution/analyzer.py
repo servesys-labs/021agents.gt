@@ -440,8 +440,8 @@ class FailureAnalyzer:
             current_model = agent_config.get("model", "")
             # Suggest downgrading to a cheaper model if using an expensive one
             cheaper_models = {
-                "claude-sonnet-4-6-20250627": ("claude-haiku-4-5-20251001", "Haiku 4.5"),
-                "claude-opus-4-6-20250627": ("claude-sonnet-4-6-20250627", "Sonnet 4.6"),
+                "anthropic/claude-sonnet-4.6": ("anthropic/claude-haiku-4.5", "Haiku 4.5"),
+                "anthropic/claude-opus-4.6": ("anthropic/claude-sonnet-4.6", "Sonnet 4.6"),
                 "gpt-5.4": ("gpt-5.4-mini", "GPT-5.4 Mini"),
                 "gpt-5.4-mini": ("gpt-5.4-nano", "GPT-5.4 Nano"),
                 "gpt-4o": ("gpt-4o-mini", "GPT-4o Mini"),

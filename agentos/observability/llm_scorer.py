@@ -50,7 +50,7 @@ class LLMQualityScorer:
     def __init__(
         self,
         api_key: str = "",
-        model: str = "claude-haiku-4-5-20251001",
+        model: str = "anthropic/claude-haiku-4.5",
         provider: str = "anthropic",
     ):
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")

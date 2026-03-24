@@ -74,7 +74,7 @@ class AutoResearchLoop:
         eval_tasks: list[dict],
         *,
         max_iterations: int = 20,
-        model: str = "claude-sonnet-4-6-20250627",
+        model: str = "anthropic/claude-sonnet-4.6",
         **kwargs,
     ):
         """Create a fully autonomous research loop for an agent.

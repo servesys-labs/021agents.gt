@@ -481,7 +481,7 @@ class LLMProposer:
 
     def __init__(
         self,
-        model: str = "claude-sonnet-4-6-20250627",
+        model: str = "anthropic/claude-sonnet-4.6",
         provider: str = "anthropic",
         program_md: str = "",
         max_tokens: int = 16384,
