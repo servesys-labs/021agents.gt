@@ -167,111 +167,7 @@ function inferResourcesFromPromptAndTools(prompt: string, tools: string[]): Meta
   return resources;
 }
 
-/* ── Demo data ───────────────────────────────────────────────── */
-const demoNodes: Node[] = [
-  {
-    id: "agent-1",
-    type: "agent",
-    position: { x: 480, y: 180 },
-    data: {
-      name: "Support Bot",
-      model: "gpt-4.1-mini",
-      status: "online",
-      tools: ["slack_send_message", "search_docs", "create_ticket"],
-      efficiency: 89,
-      activity: [4, 7, 3, 9, 12, 8, 6, 11, 5, 8, 10, 7],
-    },
-  },
-  {
-    id: "agent-2",
-    type: "agent",
-    position: { x: 480, y: 420 },
-    data: {
-      name: "Data Analyst",
-      model: "gpt-4o",
-      status: "draft",
-      tools: ["query_database", "create_chart"],
-      efficiency: undefined,
-      activity: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    },
-  },
-  {
-    id: "knowledge-1",
-    type: "knowledge",
-    position: { x: 80, y: 120 },
-    data: {
-      name: "Product Docs",
-      docCount: 24,
-      totalSize: "2.4 MB",
-      status: "ready",
-      chunkCount: 342,
-    },
-  },
-  {
-    id: "knowledge-2",
-    type: "knowledge",
-    position: { x: 80, y: 320 },
-    data: {
-      name: "FAQ Database",
-      docCount: 156,
-      totalSize: "890 KB",
-      status: "ready",
-      chunkCount: 1204,
-    },
-  },
-  {
-    id: "datasource-1",
-    type: "datasource",
-    position: { x: 100, y: 500 },
-    data: {
-      name: "Analytics DB",
-      type: "postgres",
-      status: "connected",
-      tableCount: 47,
-    },
-  },
-  {
-    id: "connector-1",
-    type: "connector",
-    position: { x: 860, y: 140 },
-    data: {
-      name: "Slack",
-      app: "Slack Workspace",
-      status: "authenticated",
-      toolCount: 5,
-    },
-  },
-  {
-    id: "connector-2",
-    type: "connector",
-    position: { x: 860, y: 320 },
-    data: {
-      name: "GitHub",
-      app: "GitHub Org",
-      status: "pending",
-      toolCount: 0,
-    },
-  },
-  {
-    id: "mcp-1",
-    type: "mcpServer",
-    position: { x: 860, y: 490 },
-    data: {
-      name: "Internal CRM",
-      url: "https://crm.internal/mcp",
-      status: "healthy",
-      toolCount: 8,
-    },
-  },
-];
-
-const demoEdges: Edge[] = [
-  makeEdge("e-k1-a1", "knowledge-1", "agent-1", "var(--color-chart-purple)"),
-  makeEdge("e-k2-a1", "knowledge-2", "agent-1", "var(--color-chart-purple)"),
-  makeEdge("e-ds1-a2", "datasource-1", "agent-2", "var(--color-chart-cyan)"),
-  makeEdge("e-a1-c1", "agent-1", "connector-1", "var(--color-chart-green)"),
-  makeEdge("e-a2-mcp1", "agent-2", "mcp-1", "var(--color-chart-blue)"),
-];
+/* ── Demo data removed — canvas starts empty ─────────────────── */
 
 /* ═══════════════════════════════════════════════════════════════
    CANVAS WORKSPACE — Railway-style
@@ -439,17 +335,17 @@ function CanvasWorkspaceInner() {
           setCurrentProject(preferred.slug || preferred.name);
           setActiveProjectId(preferred.project_id);
         } else {
-          // No projects yet — show demo canvas so the UI isn't empty
+          // No projects yet — start with empty canvas
           const local = loadLayout();
-          setNodes(local?.nodes || demoNodes);
-          setEdges(local?.edges || demoEdges);
+          setNodes(local?.nodes || []);
+          setEdges(local?.edges || []);
           setCanvasReady(true);
         }
       } catch {
-        // API unavailable — show demo canvas
+        // API unavailable — start with empty canvas or localStorage fallback
         const local = loadLayout();
-        setNodes(local?.nodes || demoNodes);
-        setEdges(local?.edges || demoEdges);
+        setNodes(local?.nodes || []);
+        setEdges(local?.edges || []);
         setCanvasReady(true);
       }
     };
@@ -483,24 +379,18 @@ function CanvasWorkspaceInner() {
         const loadedNodes = Array.isArray(resp.nodes) ? resp.nodes : [];
         const loadedEdges = Array.isArray(resp.edges) ? resp.edges : [];
 
-        if (loadedNodes.length > 0) {
-          setNodes(loadedNodes as Node[]);
-          setEdges(loadedEdges as Edge[]);
-          setTimeout(() => {
-            fitView({ padding: 0.2, duration: 300 });
-            skipLayoutPersistRef.current = false;
-          }, 120);
-          addLogEntry(`Loaded canvas for ${currentProject}`, "done");
-        } else {
-          // Empty project — load demo data for first-time experience
-          setNodes(demoNodes);
-          setEdges(demoEdges);
-          setTimeout(() => {
-            fitView({ padding: 0.2, duration: 300 });
-            skipLayoutPersistRef.current = false;
-          }, 120);
-          addLogEntry(`New project — starter canvas loaded`, "done");
-        }
+        setNodes(loadedNodes as Node[]);
+        setEdges(loadedEdges as Edge[]);
+        setTimeout(() => {
+          if (loadedNodes.length > 0) fitView({ padding: 0.2, duration: 300 });
+          skipLayoutPersistRef.current = false;
+        }, 120);
+        addLogEntry(
+          loadedNodes.length > 0
+            ? `Loaded canvas for ${currentProject}`
+            : `Empty canvas for ${currentProject} — add nodes to get started`,
+          "done",
+        );
         setCanvasReady(true);
       } catch {
         // API unavailable — try localStorage fallback
@@ -510,8 +400,8 @@ function CanvasWorkspaceInner() {
           setNodes(local.nodes);
           setEdges(local.edges);
         } else {
-          setNodes(demoNodes);
-          setEdges(demoEdges);
+          setNodes([]);
+          setEdges([]);
         }
         skipLayoutPersistRef.current = false;
         setCanvasReady(true);
@@ -1390,11 +1280,10 @@ function CanvasWorkspaceInner() {
         <button
           onClick={() => {
             localStorage.removeItem(LAYOUT_KEY);
-            setNodes(demoNodes);
-            setEdges(demoEdges);
+            setNodes([]);
+            setEdges([]);
             setDetailNode(null);
-            setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 100);
-            addLogEntry("Canvas reset to default layout", "done");
+            addLogEntry("Canvas cleared", "done");
           }}
           className="flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:text-text-primary hover:bg-surface-overlay rounded-md transition-colors mr-1"
           title="Reset canvas"
