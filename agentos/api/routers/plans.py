@@ -20,19 +20,27 @@ async def list_plans():
     raw = json.loads(config_path.read_text())
     plans = raw.get("llm", {}).get("plans", {})
 
+    all_tiers = ["simple", "moderate", "complex", "tool_call", "image_gen", "vision", "tts", "stt"]
     result = {}
     for name, plan in plans.items():
         tiers = {}
-        for tier in ["simple", "moderate", "complex", "tool_call"]:
+        for tier in all_tiers:
             if tier in plan:
-                tiers[tier] = {
+                tier_data: dict[str, Any] = {
                     "model": plan[tier].get("model", ""),
                     "provider": plan[tier].get("provider", ""),
-                    "max_tokens": plan[tier].get("max_tokens", 4096),
                 }
+                if "max_tokens" in plan[tier]:
+                    tier_data["max_tokens"] = plan[tier]["max_tokens"]
+                if "per_request" in plan[tier]:
+                    tier_data["per_request"] = plan[tier]["per_request"]
+                if plan[tier].get("dedicated"):
+                    tier_data["dedicated"] = True
+                tiers[tier] = tier_data
         result[name] = {
             "description": plan.get("_description", ""),
             "tiers": tiers,
+            "multimodal": any(t in plan for t in ["image_gen", "vision", "tts", "stt"]),
         }
 
     return {"plans": result}

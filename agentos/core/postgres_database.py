@@ -27,6 +27,7 @@ from agentos.core.database import (
     MIGRATION_V9_TO_V10,
     MIGRATION_V10_TO_V11,
     MIGRATION_V11_TO_V12,
+    MIGRATION_V12_TO_V13,
 )
 
 
@@ -161,6 +162,8 @@ class PostgresAgentDB(AgentDB):
             self._executescript_safe(MIGRATION_V10_TO_V11)
         if current < 12:
             self._executescript_safe(MIGRATION_V11_TO_V12)
+        if current < 13:
+            self._executescript_safe(MIGRATION_V12_TO_V13)
         self._ensure_runtime_tables()
         self._ensure_runtime_columns()
         self.conn.execute(
@@ -235,6 +238,22 @@ class PostgresAgentDB(AgentDB):
             if row:
                 continue
             self.conn.execute(f"ALTER TABLE issues ADD COLUMN {col} {ddl}")
+        billing_checks = (
+            ("pricing_source", "TEXT NOT NULL DEFAULT 'fallback_env'"),
+            ("pricing_key", "TEXT NOT NULL DEFAULT ''"),
+            ("unit", "TEXT NOT NULL DEFAULT ''"),
+            ("unit_price_usd", "DOUBLE PRECISION NOT NULL DEFAULT 0.0"),
+            ("quantity", "DOUBLE PRECISION NOT NULL DEFAULT 0.0"),
+            ("pricing_version", "TEXT NOT NULL DEFAULT ''"),
+        )
+        for col, ddl in billing_checks:
+            row = self.conn.execute(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = ? AND column_name = ?",
+                ("billing_records", col),
+            ).fetchone()
+            if row:
+                continue
+            self.conn.execute(f"ALTER TABLE billing_records ADD COLUMN {col} {ddl}")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_org ON sessions(org_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
 
