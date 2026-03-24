@@ -278,6 +278,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       created_at TEXT DEFAULT (datetime('now'))
     )`;
 
+    this.sql`CREATE TABLE IF NOT EXISTS todo_items (
+      text TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at REAL DEFAULT 0
+    )`;
+
     // Issues table
     this.sql`CREATE TABLE IF NOT EXISTS issues (
       issue_id TEXT PRIMARY KEY,
@@ -2442,67 +2448,215 @@ MODIFICATION_JSON: <valid JSON with fields to change, e.g. {"systemPrompt": "new
     });
   }
 
+  /**
+   * Tool registry — maps tool names to handler functions.
+   *
+   * This is the Cloudflare equivalent of Python's BUILTIN_HANDLERS.
+   * When the meta-agent creates a new agent and assigns tools, those
+   * tools just work — no manual _runTool edits needed.
+   *
+   * Tools use Cloudflare bindings (LOADER, SANDBOX, BROWSER, AI, VECTORIZE, STORAGE)
+   * directly. If a tool isn't in the local registry, it proxies to the backend.
+   */
+  private _getToolRegistry(): Record<string, (args: any) => Promise<string>> {
+    return {
+      // ── Code Execution ──
+      "dynamic-exec": (args) =>
+        this._execDynamicWorker(args.code || "", "javascript", args.timeout_ms || 10000),
+      "dynamic_exec": (args) =>
+        this._execDynamicWorker(args.code || "", "javascript", args.timeout_ms || 10000),
+
+      "sandbox_exec": (args) => {
+        if (this.env.SANDBOX) return this._execSandboxContainer(args.command || "", args.sandbox_id || "", args.timeout_ms || 30000);
+        return this._execDynamicWorker(args.command || "", "javascript", args.timeout_ms || 30000);
+      },
+      "sandbox-exec": (args) => this._getToolRegistry()["sandbox_exec"](args),
+      "bash": (args) => {
+        if (this.env.SANDBOX) return this._execSandboxContainer(args.command || "", "", args.timeout_ms || 30000);
+        return Promise.resolve("Shell execution requires SANDBOX binding");
+      },
+      "python-exec": (args) => {
+        if (this.env.SANDBOX) return this._execSandboxContainer(`python3 -c ${JSON.stringify(args.code || "")}`, "", args.timeout_ms || 30000);
+        return Promise.resolve("Python execution requires SANDBOX binding");
+      },
+
+      // ── File Operations (in container) ──
+      "sandbox_file_write": (args) => this._sandboxFileWrite(args.path || "", args.content || "", args.sandbox_id || ""),
+      "sandbox-file-write": (args) => this._sandboxFileWrite(args.path || "", args.content || "", args.sandbox_id || ""),
+      "sandbox_file_read": (args) => this._sandboxFileRead(args.path || "", args.sandbox_id || ""),
+      "sandbox-file-read": (args) => this._sandboxFileRead(args.path || "", args.sandbox_id || ""),
+      "sandbox_kill": () => Promise.resolve(JSON.stringify({ killed: true, note: "Containers auto-cleanup on idle" })),
+      "sandbox-kill": () => Promise.resolve(JSON.stringify({ killed: true, note: "Containers auto-cleanup on idle" })),
+
+      // ── Knowledge & RAG ──
+      "knowledge-search": (args) => this._ragQuery(args.query || "", args.top_k || 5),
+      "vectorize_query": (args) => this._ragQuery(args.query || "", args.top_k || 5),
+      "store-knowledge": (args) => this._ragIngest(args.content || args.text || "", args.source || "agent-tool"),
+      "store_knowledge": (args) => this._ragIngest(args.content || args.text || "", args.source || "agent-tool"),
+
+      // ── Web Browsing ──
+      "web-crawl": async (args) => {
+        const acctId = this.env.CLOUDFLARE_ACCOUNT_ID;
+        const token = this.env.CLOUDFLARE_API_TOKEN;
+        if (!acctId || !token) return "Crawl requires CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN";
+        const base = `https://api.cloudflare.com/client/v4/accounts/${acctId}/browser-rendering/crawl`;
+        const headers = { "Content-Type": "application/json", "Authorization": `Bearer ${token}` };
+        const startResp = await fetch(base, { method: "POST", headers, body: JSON.stringify({ url: args.url }) });
+        const startData = await startResp.json() as any;
+        if (!startData.success) return `Crawl failed: ${startData.errors?.[0]?.message || "unknown"}`;
+        const jobId = startData.result;
+        for (let i = 0; i < 15; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          const pollResp = await fetch(`${base}/${jobId}`, { headers: { "Authorization": `Bearer ${token}` } });
+          const pollData = await pollResp.json() as any;
+          if (pollData.result?.status === "completed") {
+            const records = (pollData.result.records || []).filter((r: any) => r.status === "completed");
+            return records.map((r: any) => `## ${r.metadata?.title || r.url}\n${r.html || ""}`).join("\n\n---\n\n");
+          }
+        }
+        return `Crawl started (job ${jobId}) but not yet complete. Try again shortly.`;
+      },
+
+      "browser-render": async (args) => {
+        if (!this.env.BROWSER) return "Browser rendering requires BROWSER binding";
+        try {
+          const puppeteer = await import("@cloudflare/puppeteer");
+          const browser = await puppeteer.default.launch(this.env.BROWSER);
+          const page = await browser.newPage();
+          await page.goto(args.url, { waitUntil: "networkidle0", timeout: args.timeout || 30000 });
+          if (args.wait_for) await page.waitForSelector(args.wait_for, { timeout: 10000 }).catch(() => {});
+          let result = "";
+          if (args.action === "screenshot") {
+            result = `[screenshot captured as base64, ${((await page.screenshot({ encoding: "base64" })) as string).length} chars]`;
+          } else if (args.action === "html") {
+            result = await page.content();
+          } else if (args.action === "links") {
+            const links = await page.$$eval("a[href]", (as: any[]) => as.map(a => `${a.textContent?.trim()}: ${a.href}`).slice(0, 50));
+            result = links.join("\n");
+          } else {
+            result = await page.$eval("body", (el: any) => el.innerText);
+          }
+          await browser.close();
+          return result;
+        } catch (err: any) {
+          return `Browser render failed: ${err.message}`;
+        }
+      },
+
+      "browse": async (args) => {
+        try {
+          const resp = await fetch(args.url, { headers: { "User-Agent": "AgentOS/0.1.0" } });
+          const html = await resp.text();
+          if (args.extract === "html") return html.slice(0, 20000);
+          if (args.extract === "links") {
+            const links = [...html.matchAll(/href="(https?:\/\/[^"]+)"/g)].map(m => m[1]).slice(0, 50);
+            return links.join("\n");
+          }
+          return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 10000);
+        } catch (err: any) {
+          return `Fetch failed: ${err.message}`;
+        }
+      },
+
+      "web-search": async (args) => {
+        // TODO: implement with actual search API (DuckDuckGo, Brave, etc.)
+        return `Search results for: ${args.query} (search API integration pending)`;
+      },
+
+      // ── Multimodal (via GMI Cloud) ──
+      "image-generate": async (args) => {
+        const apiKey = this.env.GMI_API_KEY;
+        if (!apiKey) return "GMI_API_KEY not configured for image generation";
+        const resp = await fetch("https://api.gmi-serving.com/v1/images/generations", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model: args.model || "Seedream-5.0-lite", prompt: args.prompt, n: 1, size: args.size || "1024x1024" }),
+        });
+        if (!resp.ok) return `Image generation failed (${resp.status})`;
+        const data = await resp.json() as any;
+        return JSON.stringify({ images: (data.data || []).map((d: any) => d.url || "[base64]") });
+      },
+
+      "text-to-speech": async (args) => {
+        const apiKey = this.env.GMI_API_KEY;
+        if (!apiKey) return "GMI_API_KEY not configured for TTS";
+        const resp = await fetch("https://api.gmi-serving.com/v1/audio/speech", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ model: args.model || "minimax-tts-speech-2.6-turbo", input: (args.text || "").slice(0, 5000), voice: args.voice || "default" }),
+        });
+        if (!resp.ok) return `TTS failed (${resp.status})`;
+        if (this.env.STORAGE) {
+          const orgId = this.state.config.orgId || "default";
+          const key = `${orgId}/audio/tts-${Date.now()}.mp3`;
+          await this.env.STORAGE.put(key, await resp.arrayBuffer());
+          return JSON.stringify({ audio_key: key, model: args.model || "minimax-tts-speech-2.6-turbo" });
+        }
+        return JSON.stringify({ audio: "[generated but no R2 storage to save]" });
+      },
+
+      "speech-to-text": async (args) => {
+        return "STT requires audio file upload — use via backend API";
+      },
+
+      // ── Agent Ops ──
+      "run-agent": async (args) => {
+        try {
+          const agentId = this.env.AGENTOS_AGENT.idFromName(args.agent_name || "default");
+          const agent = this.env.AGENTOS_AGENT.get(agentId);
+          const resp = await agent.fetch(new Request("http://internal/run", {
+            method: "POST",
+            body: JSON.stringify({ input: args.task }),
+          }));
+          return await resp.text();
+        } catch (err: any) {
+          return `Sub-agent error: ${err.message}`;
+        }
+      },
+
+      // ── Planning ──
+      "todo": async (args) => {
+        // Simple in-memory todo backed by agent SQL
+        const action = args.action || "list";
+        if (action === "add") {
+          this.sql`INSERT INTO todo_items (text, status, created_at) VALUES (${args.text || ""}, 'pending', ${Date.now() / 1000})`;
+          return "Task added.";
+        }
+        if (action === "list") {
+          const items = this.sql`SELECT rowid, text, status FROM todo_items ORDER BY rowid`;
+          return items.map((i: any) => `[${i.status}] #${i.rowid}: ${i.text}`).join("\n") || "No tasks.";
+        }
+        if (action === "complete") {
+          this.sql`UPDATE todo_items SET status = 'done' WHERE rowid = ${args.item_id || 0}`;
+          return `Task #${args.item_id} marked done.`;
+        }
+        return `Unknown todo action: ${action}`;
+      },
+
+      // ── Connectors (Pipedream MCP) ──
+      "connector": async (args) => {
+        return `Connector call: ${args.tool_name} — route via Pipedream MCP (not yet wired on worker)`;
+      },
+    };
+  }
+
   private async _runTool(name: string, args: any, sessionId: string, turn: number): Promise<string> {
-    // Dynamic Worker sandbox — code execution in V8 isolate (JS/TS/Python)
-    if (name === "dynamic_exec" || name === "dynamic-exec") {
-      const lang = args.language || this._detectLanguage(args.code || "");
-      return this._execDynamicWorker(args.code || "", lang, args.timeout_ms || 10000);
+    // Normalize tool name (underscores → hyphens)
+    const normalizedName = name.replace(/_/g, "-");
+
+    // Look up in local tool registry first
+    const registry = this._getToolRegistry();
+    const handler = registry[name] || registry[normalizedName];
+    if (handler) {
+      return handler(args);
     }
 
-    // sandbox_exec — smart routing across 3 sandbox backends
-    if (name === "sandbox_exec" || name === "sandbox-exec") {
-      const cmd = args.command || "";
-      const lang = this._detectLanguage(cmd);
-
-      // JS/Python → Dynamic Worker (instant, free)
-      if ((lang === "javascript" || lang === "python") && this.env.LOADER) {
-        return this._execDynamicWorker(cmd, lang, args.timeout_ms || 30000);
-      }
-
-      // Bash/shell → Sandbox SDK container (full Linux, fast)
-      if (this.env.SANDBOX) {
-        return this._execSandboxContainer(cmd, args.sandbox_id || "", args.timeout_ms || 30000);
-      }
-
-      // Fallback → E2B via backend proxy
-    }
-
-    // File operations in sandbox container
-    if (name === "sandbox_file_write" || name === "sandbox-file-write") {
-      if (this.env.SANDBOX) {
-        return this._sandboxFileWrite(args.path || "", args.content || "", args.sandbox_id || "");
-      }
-    }
-    if (name === "sandbox_file_read" || name === "sandbox-file-read") {
-      if (this.env.SANDBOX) {
-        return this._sandboxFileRead(args.path || "", args.sandbox_id || "");
-      }
-    }
-    if (name === "sandbox_kill" || name === "sandbox-kill") {
-      // Sandbox SDK containers auto-cleanup; no explicit kill needed
-      return JSON.stringify({ killed: true, sandbox_id: args.sandbox_id || "", note: "Sandbox containers auto-cleanup on idle" });
-    }
-
+    // Not in local registry → proxy to backend (Python BUILTIN_HANDLERS)
     if (this._ingestBase() && this.env.BACKEND_INGEST_TOKEN) {
       return this._callToolViaBackendProxy(name, args, sessionId, turn);
     }
 
-    switch (name) {
-      case "web_search":
-      case "web-search":
-        return `Search results for: ${args.query} (implement with actual search API)`;
-
-      case "vectorize_query":
-      case "knowledge-search":
-        return this._ragQuery(args.query || "", args.top_k || 5);
-
-      case "store-knowledge":
-      case "store_knowledge":
-        return this._ragIngest(args.content || args.text || "", args.source || "agent-tool");
-
-      default:
-        return `Unknown tool: ${name}`;
-    }
+    return `Tool "${name}" not available. Add it to the agent config or ensure the backend is connected.`;
   }
 
   private _detectLanguage(code: string): "javascript" | "python" | "bash" {

@@ -80,9 +80,10 @@ or a customer asks to "make it better". Call with `action="run"`, an `eval_file`
 - `list-tools` — See all available tools.
 
 ### Code & Execution
-- `bash` — Run shell commands (git, npm, ls, curl, etc.)
-- `python-exec` — Execute Python code with output capture. Use for computation, \
-data analysis, file processing.
+- `dynamic-exec` — Execute JavaScript/TypeScript in a Cloudflare Worker sandbox (<10ms, isolated). \
+Preferred for computation, API calls, data transforms. Use console.log() for output.
+- `bash` — Run shell commands (git, npm, ls, curl, etc.) — use only when shell is required.
+- `python-exec` — Execute Python code — use only when Python-specific libraries are needed.
 - `read-file` — Read file contents with line numbers.
 - `write-file` — Create or overwrite files.
 - `edit-file` — Find-and-replace in files (must match exactly once).
@@ -91,16 +92,26 @@ data analysis, file processing.
 
 ### Web & Data
 - `web-search` — Search the web via DuckDuckGo.
-- `browse` — Fetch a web page and extract text, HTML, or links.
+- `web-crawl` — Crawl websites and return clean markdown. Fast, respects robots.txt. Use first.
+- `browser-render` — Full headless browser (Puppeteer). Use when web-crawl is blocked (JS-heavy sites).
+- `browse` — Basic HTTP fetch with text extraction. Cheapest fallback.
 - `http-request` — Make HTTP requests (GET, POST, PUT, DELETE).
 - `store-knowledge` — Store facts in semantic memory.
 - `knowledge-search` — Search the local knowledge store.
+
+### Multimodal (via GMI Cloud)
+- `image-generate` — Generate images from text (Seedream, FLUX, GLM-Image).
+- `text-to-speech` — Convert text to speech (ElevenLabs, MiniMax TTS).
+- `speech-to-text` — Transcribe audio (Whisper large v3).
 
 ### External Integrations
 - `connector` — Call 3,000+ external apps (Slack, GitHub, Jira, Notion, Google Sheets, \
 Stripe, HubSpot, etc.) via Pipedream. OAuth is handled automatically. Example: \
 `connector(tool_name="slack-send-message", arguments={{"channel": "#alerts", "text": "Deploy done"}})`
 - `a2a-send` — Communicate with agents in other frameworks (LangChain, CrewAI, AWS Bedrock)
+
+### Sandbox
+- `sandbox_exec` — Execute commands in an isolated E2B sandbox.
 
 ### Planning
 - `todo` — Manage a task list. Use this to plan multi-step work before executing.
@@ -147,7 +158,8 @@ The tool_call tier handles this automatically.
 2. **Write specific system prompts** — Tell the agent exactly what tools it has, \
 when to use each, and what workflow to follow. Generic prompts produce generic agents.
 3. **Assign the right tools** — File-based tasks need read-file/write-file/grep/glob. \
-Web tasks need web-search/browse/http-request. Code tasks need bash/python-exec.
+Web tasks need web-search/web-crawl/http-request. Code tasks need dynamic-exec (preferred), \
+bash (shell only), or python-exec (Python libraries only). Prefer dynamic-exec for computation.
 4. **Delegate, don't do everything** — Create specialized agents and use `run-agent` \
 to delegate. A coding agent + a review agent > one agent doing both.
 5. **Eval everything** — Create eval tasks with LLM rubric graders (not 'contains'). \
@@ -282,6 +294,7 @@ It costs ~$0.10/iteration so warn about cost for large runs.
 """
 
 ORCHESTRATOR_TOOLS = [
+    # Agent lifecycle
     "create-agent",
     "run-agent",
     "eval-agent",
@@ -289,10 +302,8 @@ ORCHESTRATOR_TOOLS = [
     "autoresearch",
     "list-agents",
     "list-tools",
-    "web-search",
-    "browse",
-    "store-knowledge",
-    "knowledge-search",
+    # Code & execution
+    "dynamic-exec",
     "bash",
     "python-exec",
     "read-file",
@@ -300,10 +311,25 @@ ORCHESTRATOR_TOOLS = [
     "edit-file",
     "grep",
     "glob",
+    # Web & data
+    "web-search",
+    "web-crawl",
+    "browser-render",
+    "browse",
     "http-request",
-    "todo",
-    "a2a-send",
+    "store-knowledge",
+    "knowledge-search",
+    # Multimodal
+    "image-generate",
+    "text-to-speech",
+    "speech-to-text",
+    # External
     "connector",
+    "a2a-send",
+    # Sandbox
+    "sandbox_exec",
+    # Planning
+    "todo",
 ]
 
 AGENT_TEMPLATES: dict[str, dict] = {

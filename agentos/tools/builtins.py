@@ -1541,7 +1541,7 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 "name": {"type": "string", "description": "Optional name for the agent"},
                 "tools": {
                     "type": "array", "items": {"type": "string"},
-                    "description": "Optional list of tools to assign. Available: bash, python-exec, read-file, write-file, edit-file, grep, glob, web-search, http-request, store-knowledge, knowledge-search, todo, create-agent, eval-agent, evolve-agent, autoresearch, list-agents, list-tools. If omitted, tools are auto-detected from description.",
+                    "description": "Optional list of tools to assign. Available: dynamic-exec, bash, python-exec, read-file, write-file, edit-file, grep, glob, web-search, web-crawl, browser-render, browse, http-request, store-knowledge, knowledge-search, image-generate, text-to-speech, speech-to-text, connector, todo, run-agent, a2a-send, create-agent, eval-agent, evolve-agent, autoresearch, list-agents, list-tools, sandbox_exec. If omitted, tools are auto-detected from description.",
                 },
             },
             "required": ["description"],
