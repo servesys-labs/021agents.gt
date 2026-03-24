@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -283,6 +283,13 @@ CREATE TABLE IF NOT EXISTS billing_records (
     gpu_cost_usd    REAL NOT NULL DEFAULT 0.0,
     -- Total
     total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    -- Pricing snapshot for invoice-grade reproducibility
+    pricing_source  TEXT NOT NULL DEFAULT 'fallback_env',  -- catalog / fallback_env
+    pricing_key     TEXT NOT NULL DEFAULT '',              -- e.g. llm:gmi:model or tool:web-search
+    unit            TEXT NOT NULL DEFAULT '',              -- input_token / call / second
+    unit_price_usd  REAL NOT NULL DEFAULT 0.0,
+    quantity        REAL NOT NULL DEFAULT 0.0,
+    pricing_version TEXT NOT NULL DEFAULT '',              -- catalog version hash/label
     -- Trace
     session_id      TEXT NOT NULL DEFAULT '',
     trace_id        TEXT NOT NULL DEFAULT '',
@@ -296,6 +303,27 @@ CREATE INDEX IF NOT EXISTS idx_billing_org ON billing_records(org_id);
 CREATE INDEX IF NOT EXISTS idx_billing_customer ON billing_records(customer_id);
 CREATE INDEX IF NOT EXISTS idx_billing_created ON billing_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_billing_type ON billing_records(cost_type);
+
+CREATE TABLE IF NOT EXISTS pricing_catalog (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    resource_type   TEXT NOT NULL DEFAULT '',      -- llm / tool / sandbox / connector
+    operation       TEXT NOT NULL DEFAULT '',      -- infer / web-search / exec
+    unit            TEXT NOT NULL DEFAULT '',      -- input_token / output_token / call / second
+    unit_price_usd  REAL NOT NULL DEFAULT 0.0,
+    currency        TEXT NOT NULL DEFAULT 'USD',
+    source          TEXT NOT NULL DEFAULT 'manual', -- manual / synced
+    pricing_version TEXT NOT NULL DEFAULT '',
+    effective_from  REAL NOT NULL DEFAULT 0.0,
+    effective_to    REAL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pricing_lookup ON pricing_catalog(resource_type, provider, model, operation, unit, is_active, effective_from);
+CREATE INDEX IF NOT EXISTS idx_pricing_effective ON pricing_catalog(effective_from, effective_to);
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- GPU ENDPOINTS — dedicated GPU endpoint tracking
@@ -1438,6 +1466,36 @@ CREATE INDEX IF NOT EXISTS idx_voice_events_platform ON voice_events(platform);
 CREATE INDEX IF NOT EXISTS idx_voice_events_type ON voice_events(event_type);
 """;
 
+MIGRATION_V12_TO_V13 = """\
+ALTER TABLE billing_records ADD COLUMN pricing_source TEXT NOT NULL DEFAULT 'fallback_env';
+ALTER TABLE billing_records ADD COLUMN pricing_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE billing_records ADD COLUMN unit TEXT NOT NULL DEFAULT '';
+ALTER TABLE billing_records ADD COLUMN unit_price_usd REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE billing_records ADD COLUMN quantity REAL NOT NULL DEFAULT 0.0;
+ALTER TABLE billing_records ADD COLUMN pricing_version TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS pricing_catalog (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    resource_type   TEXT NOT NULL DEFAULT '',
+    operation       TEXT NOT NULL DEFAULT '',
+    unit            TEXT NOT NULL DEFAULT '',
+    unit_price_usd  REAL NOT NULL DEFAULT 0.0,
+    currency        TEXT NOT NULL DEFAULT 'USD',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    pricing_version TEXT NOT NULL DEFAULT '',
+    effective_from  REAL NOT NULL DEFAULT 0.0,
+    effective_to    REAL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_pricing_lookup ON pricing_catalog(resource_type, provider, model, operation, unit, is_active, effective_from);
+CREATE INDEX IF NOT EXISTS idx_pricing_effective ON pricing_catalog(effective_from, effective_to);
+""";
+
 RUNTIME_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS billing_records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1455,6 +1513,12 @@ CREATE TABLE IF NOT EXISTS billing_records (
     gpu_hours       REAL NOT NULL DEFAULT 0.0,
     gpu_cost_usd    REAL NOT NULL DEFAULT 0.0,
     total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    pricing_source  TEXT NOT NULL DEFAULT 'fallback_env',
+    pricing_key     TEXT NOT NULL DEFAULT '',
+    unit            TEXT NOT NULL DEFAULT '',
+    unit_price_usd  REAL NOT NULL DEFAULT 0.0,
+    quantity        REAL NOT NULL DEFAULT 0.0,
+    pricing_version TEXT NOT NULL DEFAULT '',
     session_id      TEXT NOT NULL DEFAULT '',
     trace_id        TEXT NOT NULL DEFAULT '',
     period_start    REAL,
@@ -1465,6 +1529,27 @@ CREATE INDEX IF NOT EXISTS idx_billing_org ON billing_records(org_id);
 CREATE INDEX IF NOT EXISTS idx_billing_customer ON billing_records(customer_id);
 CREATE INDEX IF NOT EXISTS idx_billing_created ON billing_records(created_at);
 CREATE INDEX IF NOT EXISTS idx_billing_type ON billing_records(cost_type);
+
+CREATE TABLE IF NOT EXISTS pricing_catalog (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider        TEXT NOT NULL DEFAULT '',
+    model           TEXT NOT NULL DEFAULT '',
+    resource_type   TEXT NOT NULL DEFAULT '',
+    operation       TEXT NOT NULL DEFAULT '',
+    unit            TEXT NOT NULL DEFAULT '',
+    unit_price_usd  REAL NOT NULL DEFAULT 0.0,
+    currency        TEXT NOT NULL DEFAULT 'USD',
+    source          TEXT NOT NULL DEFAULT 'manual',
+    pricing_version TEXT NOT NULL DEFAULT '',
+    effective_from  REAL NOT NULL DEFAULT 0.0,
+    effective_to    REAL,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT 0,
+    updated_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pricing_lookup ON pricing_catalog(resource_type, provider, model, operation, unit, is_active, effective_from);
+CREATE INDEX IF NOT EXISTS idx_pricing_effective ON pricing_catalog(effective_from, effective_to);
 
 CREATE TABLE IF NOT EXISTS otel_events (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2021,6 +2106,10 @@ class AgentDB:
             issue_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(issues)").fetchall()}
         except Exception:
             issue_cols = set()
+        try:
+            billing_cols = {row[1] for row in self.conn.execute("PRAGMA table_info(billing_records)").fetchall()}
+        except Exception:
+            billing_cols = set()
         if "execution_mode" not in turn_cols:
             self.conn.execute(
                 "ALTER TABLE turns ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'sequential'"
@@ -2065,6 +2154,31 @@ class AgentDB:
                 )
             if "resolved_at" not in issue_cols:
                 self.conn.execute("ALTER TABLE issues ADD COLUMN resolved_at REAL")
+        if billing_cols:
+            if "pricing_source" not in billing_cols:
+                self.conn.execute(
+                    "ALTER TABLE billing_records ADD COLUMN pricing_source TEXT NOT NULL DEFAULT 'fallback_env'"
+                )
+            if "pricing_key" not in billing_cols:
+                self.conn.execute(
+                    "ALTER TABLE billing_records ADD COLUMN pricing_key TEXT NOT NULL DEFAULT ''"
+                )
+            if "unit" not in billing_cols:
+                self.conn.execute(
+                    "ALTER TABLE billing_records ADD COLUMN unit TEXT NOT NULL DEFAULT ''"
+                )
+            if "unit_price_usd" not in billing_cols:
+                self.conn.execute(
+                    "ALTER TABLE billing_records ADD COLUMN unit_price_usd REAL NOT NULL DEFAULT 0.0"
+                )
+            if "quantity" not in billing_cols:
+                self.conn.execute(
+                    "ALTER TABLE billing_records ADD COLUMN quantity REAL NOT NULL DEFAULT 0.0"
+                )
+            if "pricing_version" not in billing_cols:
+                self.conn.execute(
+                    "ALTER TABLE billing_records ADD COLUMN pricing_version TEXT NOT NULL DEFAULT ''"
+                )
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_org ON sessions(org_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id)")
         try:
@@ -2208,6 +2322,25 @@ class AgentDB:
                 self.conn.executescript(MIGRATION_V11_TO_V12)
             except sqlite3.OperationalError as exc:
                 logger.debug("v12 migration partial: %s", exc)
+            self.conn.commit()
+        if from_version < 13:
+            logger.info("Migrating database from v%d to v13 (pricing catalog + billing snapshots)", from_version)
+            existing_billing_cols = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(billing_records)").fetchall()
+            }
+            for stmt in MIGRATION_V12_TO_V13.split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                if "ALTER TABLE" in stmt and "ADD COLUMN" in stmt:
+                    col_name = stmt.split("ADD COLUMN")[1].strip().split()[0]
+                    if col_name in existing_billing_cols:
+                        continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                        raise
             self.conn.commit()
 
     def _seed_security_event_types(self) -> None:
@@ -4208,6 +4341,79 @@ class AgentDB:
 
     # ── Billing ─────────────────────────────────────────────────────────
 
+    def upsert_pricing_rate(
+        self,
+        *,
+        provider: str,
+        model: str,
+        resource_type: str,
+        operation: str,
+        unit: str,
+        unit_price_usd: float,
+        currency: str = "USD",
+        source: str = "manual",
+        pricing_version: str = "",
+        effective_from: float | None = None,
+        effective_to: float | None = None,
+        is_active: bool = True,
+        metadata_json: str = "{}",
+    ) -> int:
+        """Insert pricing rate row (deactivates overlapping active rows for same key)."""
+        now = time.time()
+        eff_from = float(effective_from if effective_from is not None else now)
+        with self.tx() as cur:
+            cur.execute(
+                """UPDATE pricing_catalog
+                   SET is_active = 0, updated_at = ?
+                   WHERE resource_type = ? AND provider = ? AND model = ? AND operation = ? AND unit = ? AND is_active = 1""",
+                (now, resource_type, provider, model, operation, unit),
+            )
+            cur.execute(
+                """INSERT INTO pricing_catalog (
+                    provider, model, resource_type, operation, unit, unit_price_usd, currency,
+                    source, pricing_version, effective_from, effective_to, is_active, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    provider, model, resource_type, operation, unit, float(unit_price_usd), currency,
+                    source, pricing_version, eff_from, effective_to, int(bool(is_active)), metadata_json, now, now,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def get_active_pricing_rate(
+        self,
+        *,
+        resource_type: str,
+        operation: str,
+        unit: str,
+        provider: str = "",
+        model: str = "",
+        at_ts: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Return best active pricing row for key at timestamp.
+
+        Resolution order:
+          1) exact provider + exact model
+          2) exact provider + wildcard model=''
+          3) wildcard provider='' + wildcard model=''
+        """
+        ts = float(at_ts if at_ts is not None else time.time())
+        candidates: list[tuple[str, str]] = [(provider, model), (provider, ""), ("", "")]
+        for p, m in candidates:
+            row = self.conn.execute(
+                """SELECT * FROM pricing_catalog
+                   WHERE resource_type = ? AND operation = ? AND unit = ?
+                     AND provider = ? AND model = ? AND is_active = 1
+                     AND effective_from <= ?
+                     AND (effective_to IS NULL OR effective_to >= ?)
+                   ORDER BY effective_from DESC, id DESC
+                   LIMIT 1""",
+                (resource_type, operation, unit, p, m, ts, ts),
+            ).fetchone()
+            if row:
+                return dict(row)
+        return None
+
     def record_billing(
         self,
         cost_type: str,
@@ -4226,6 +4432,12 @@ class AgentDB:
         gpu_cost_usd: float = 0.0,
         session_id: str = "",
         trace_id: str = "",
+        pricing_source: str = "fallback_env",
+        pricing_key: str = "",
+        unit: str = "",
+        unit_price_usd: float = 0.0,
+        quantity: float = 0.0,
+        pricing_version: str = "",
     ) -> int:
         """Record a billing entry for customer charging."""
         with self.tx() as cur:
@@ -4234,13 +4446,15 @@ class AgentDB:
                     org_id, customer_id, agent_name, cost_type, description,
                     model, provider, input_tokens, output_tokens, inference_cost_usd,
                     gpu_type, gpu_hours, gpu_cost_usd, total_cost_usd,
-                    session_id, trace_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    session_id, trace_id,
+                    pricing_source, pricing_key, unit, unit_price_usd, quantity, pricing_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     org_id, customer_id, agent_name, cost_type, description,
                     model, provider, input_tokens, output_tokens, inference_cost_usd,
                     gpu_type, gpu_hours, gpu_cost_usd, total_cost_usd,
                     session_id, trace_id,
+                    pricing_source, pricing_key, unit, unit_price_usd, quantity, pricing_version,
                 ),
             )
             return cur.lastrowid

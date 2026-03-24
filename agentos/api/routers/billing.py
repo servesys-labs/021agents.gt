@@ -3,13 +3,56 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import json
+import os
+import time
+from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 
-from agentos.api.deps import CurrentUser, get_current_user, _get_db
+from agentos.api.deps import CurrentUser, get_current_user, _get_db, require_scope
 
 router = APIRouter(prefix="/billing", tags=["billing"])
+
+
+def _coerce_per_token_price(raw: Any) -> float | None:
+    """Best-effort normalize provider pricing into USD/token."""
+    try:
+        v = float(raw)
+    except Exception:
+        return None
+    if v <= 0:
+        return None
+    # Heuristic: provider catalogs often publish per-1M token prices.
+    return (v / 1_000_000.0) if v > 0.05 else v
+
+
+def _extract_gmi_token_prices(model_obj: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Extract input/output token prices from flexible model payloads."""
+    pricing = model_obj.get("pricing", {}) if isinstance(model_obj.get("pricing"), dict) else {}
+
+    input_candidates = [
+        pricing.get("input_per_million"),
+        pricing.get("input_cost_per_1m"),
+        pricing.get("prompt_per_million"),
+        pricing.get("prompt_cost_per_1m"),
+        model_obj.get("input_per_million"),
+        model_obj.get("prompt_per_million"),
+    ]
+    output_candidates = [
+        pricing.get("output_per_million"),
+        pricing.get("output_cost_per_1m"),
+        pricing.get("completion_per_million"),
+        pricing.get("completion_cost_per_1m"),
+        model_obj.get("output_per_million"),
+        model_obj.get("completion_per_million"),
+    ]
+
+    in_price = next((p for p in (_coerce_per_token_price(x) for x in input_candidates) if p is not None), None)
+    out_price = next((p for p in (_coerce_per_token_price(x) for x in output_candidates) if p is not None), None)
+    return in_price, out_price
 
 
 @router.get("/usage")
@@ -126,4 +169,232 @@ async def create_checkout(plan: str = "standard", user: CurrentUser = Depends(ge
     return {
         "checkout_url": f"https://checkout.stripe.com/placeholder?plan={plan}",
         "note": "Stripe integration pending",
+    }
+
+
+@router.get("/pricing")
+async def list_pricing_catalog(
+    resource_type: str = "",
+    provider: str = "",
+    model: str = "",
+    operation: str = "",
+    user: CurrentUser = Depends(require_scope("billing:read")),
+):
+    """List active pricing catalog entries (org-wide control plane view)."""
+    db = _get_db()
+    sql = "SELECT * FROM pricing_catalog WHERE is_active = 1"
+    params: list[Any] = []
+    if resource_type:
+        sql += " AND resource_type = ?"
+        params.append(resource_type)
+    if provider:
+        sql += " AND provider = ?"
+        params.append(provider)
+    if model:
+        sql += " AND model = ?"
+        params.append(model)
+    if operation:
+        sql += " AND operation = ?"
+        params.append(operation)
+    sql += " ORDER BY resource_type, provider, model, operation, unit, effective_from DESC"
+    rows = db.conn.execute(sql, params).fetchall()
+    return {"pricing": [dict(r) for r in rows], "count": len(rows)}
+
+
+@router.post("/pricing")
+async def upsert_pricing_catalog(
+    payload: dict[str, Any],
+    user: CurrentUser = Depends(require_scope("billing:write")),
+):
+    """Upsert one pricing rule (deactivates previous active row for same key)."""
+    if not user.has_role("admin"):
+        raise HTTPException(status_code=403, detail="Admin role required for pricing updates")
+
+    db = _get_db()
+    provider = str(payload.get("provider", "") or "")
+    model = str(payload.get("model", "") or "")
+    resource_type = str(payload.get("resource_type", "") or "")
+    operation = str(payload.get("operation", "") or "")
+    unit = str(payload.get("unit", "") or "")
+    if not resource_type or not operation or not unit:
+        raise HTTPException(status_code=400, detail="resource_type, operation, and unit are required")
+
+    row_id = db.upsert_pricing_rate(
+        provider=provider,
+        model=model,
+        resource_type=resource_type,
+        operation=operation,
+        unit=unit,
+        unit_price_usd=float(payload.get("unit_price_usd", 0.0) or 0.0),
+        currency=str(payload.get("currency", "USD") or "USD"),
+        source=str(payload.get("source", "manual") or "manual"),
+        pricing_version=str(payload.get("pricing_version", "") or ""),
+        effective_from=payload.get("effective_from"),
+        effective_to=payload.get("effective_to"),
+        is_active=bool(payload.get("is_active", True)),
+        metadata_json=str(payload.get("metadata_json", "{}") or "{}"),
+    )
+    return {"ok": True, "id": row_id}
+
+
+@router.post("/pricing/sync-gmi")
+async def sync_gmi_pricing_catalog(
+    dry_run: bool = False,
+    user: CurrentUser = Depends(require_scope("billing:write")),
+):
+    """Sync GMI model catalog/rates into pricing_catalog and mark missing models inactive.
+
+    This endpoint is designed for periodic scheduling (e.g., hourly/daily cron).
+    """
+    if not user.has_role("admin"):
+        raise HTTPException(status_code=403, detail="Admin role required for pricing sync")
+
+    api_key = (os.environ.get("GMI_API_KEY", "") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="GMI_API_KEY not configured on backend")
+
+    # Use config/default.json as source of truth for provider base URL.
+    config_path = Path(__file__).resolve().parent.parent.parent.parent / "config" / "default.json"
+    api_base = "https://api.gmi-serving.com/v1"
+    try:
+        raw = json.loads(config_path.read_text()) if config_path.exists() else {}
+        api_base = (
+            raw.get("llm", {})
+            .get("providers", {})
+            .get("gmi", {})
+            .get("api_base", api_base)
+        ) or api_base
+    except Exception:
+        pass
+
+    models_url = f"{api_base.rstrip('/')}/models"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(
+                models_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if not resp.is_success:
+            raise HTTPException(status_code=502, detail=f"GMI models endpoint error: {resp.status_code}")
+        payload = resp.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"GMI sync failed: {exc}") from exc
+
+    db = _get_db()
+    now = time.time()
+    catalog = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(catalog, list):
+        raise HTTPException(status_code=502, detail="Unexpected GMI models response format")
+
+    active_models: set[str] = set()
+    upserts = 0
+    deprecated_count = 0
+    pricing_rows_written = 0
+    sync_version = time.strftime("gmi-%Y%m%d-%H%M%S", time.gmtime(now))
+
+    for item in catalog:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or item.get("model") or "").strip()
+        if not model_id:
+            continue
+        active_models.add(model_id)
+
+        deprecated = bool(item.get("deprecated") or str(item.get("status", "")).lower() in {"deprecated", "sunset"})
+        if deprecated:
+            deprecated_count += 1
+
+        in_price, out_price = _extract_gmi_token_prices(item)
+        if dry_run:
+            continue
+
+        # Always upsert a model-availability marker row (unit=model, price=0).
+        db.upsert_pricing_rate(
+            provider="gmi",
+            model=model_id,
+            resource_type="model_catalog",
+            operation="availability",
+            unit="model",
+            unit_price_usd=0.0,
+            source="gmi_sync",
+            pricing_version=sync_version,
+            effective_from=now,
+            is_active=not deprecated,
+            metadata_json=json.dumps(
+                {
+                    "deprecated": deprecated,
+                    "status": str(item.get("status", "")),
+                    "raw": item,
+                }
+            ),
+        )
+        upserts += 1
+
+        if in_price is not None:
+            db.upsert_pricing_rate(
+                provider="gmi",
+                model=model_id,
+                resource_type="llm",
+                operation="infer",
+                unit="input_token",
+                unit_price_usd=float(in_price),
+                source="gmi_sync",
+                pricing_version=sync_version,
+                effective_from=now,
+                is_active=not deprecated,
+                metadata_json=json.dumps({"deprecated": deprecated}),
+            )
+            pricing_rows_written += 1
+        if out_price is not None:
+            db.upsert_pricing_rate(
+                provider="gmi",
+                model=model_id,
+                resource_type="llm",
+                operation="infer",
+                unit="output_token",
+                unit_price_usd=float(out_price),
+                source="gmi_sync",
+                pricing_version=sync_version,
+                effective_from=now,
+                is_active=not deprecated,
+                metadata_json=json.dumps({"deprecated": deprecated}),
+            )
+            pricing_rows_written += 1
+
+    missing_models = 0
+    if not dry_run:
+        # Mark previously active GMI llm rates as inactive when model disappears from catalog.
+        rows = db.conn.execute(
+            """SELECT DISTINCT model FROM pricing_catalog
+               WHERE provider = ? AND resource_type = ? AND operation = ? AND is_active = 1""",
+            ("gmi", "llm", "infer"),
+        ).fetchall()
+        known = {str(r["model"]) for r in rows if r.get("model")}
+        to_deactivate = sorted(m for m in known if m not in active_models)
+        missing_models = len(to_deactivate)
+        for model_id in to_deactivate:
+            db.conn.execute(
+                """UPDATE pricing_catalog
+                   SET is_active = 0, effective_to = ?, updated_at = ?
+                   WHERE provider = ? AND model = ? AND resource_type = ? AND operation = ? AND is_active = 1""",
+                (now, now, "gmi", model_id, "llm", "infer"),
+            )
+        db.conn.commit()
+
+    return {
+        "ok": True,
+        "dry_run": dry_run,
+        "provider": "gmi",
+        "models_seen": len(active_models),
+        "deprecated_seen": deprecated_count,
+        "catalog_rows_upserted": upserts,
+        "pricing_rows_upserted": pricing_rows_written,
+        "models_marked_inactive": missing_models,
+        "pricing_version": sync_version,
+        "source_url": models_url,
     }
