@@ -225,6 +225,7 @@ class Agent:
         self._apply_project_defaults()
         self._observer = None
         self._tracer = None
+        self._runtime_context: dict[str, str] = {}
         self._init_db()
         self._harness = self._build_harness()
         self._attach_observability()
@@ -541,16 +542,13 @@ class Agent:
         Called before _build_harness so memory classes can use the DB.
         """
         self._db = None
-        data_dir = Path.cwd() / "data"
-        db_path = data_dir / "agent.db"
-        if data_dir.is_dir():
-            try:
-                from agentos.core.database import AgentDB
-                self._db = AgentDB(db_path)
-                self._db.initialize()
-            except Exception as exc:
-                logger.warning("Could not open database at %s: %s", db_path, exc)
-                self._db = None
+        try:
+            from agentos.core.db_config import get_db, initialize_db
+            initialize_db()
+            self._db = get_db()
+        except Exception as exc:
+            logger.warning("Could not open configured database backend: %s", exc)
+            self._db = None
 
     def _attach_observability(self) -> None:
         """Auto-attach observer, tracer, and DB if data/ dir exists.
@@ -568,10 +566,139 @@ class Agent:
             event_bus=self._harness.event_bus,
             db=self._db,
         )
+        cfg_with_scope = {
+            **self.config.to_dict(),
+            "_org_id": self._runtime_context.get("org_id", ""),
+            "_project_id": self._runtime_context.get("project_id", ""),
+            "_user_id": self._runtime_context.get("user_id", ""),
+        }
         self._observer.attach(
             agent_name=self.config.name,
-            agent_config=self.config.to_dict(),
+            agent_config=cfg_with_scope,
         )
+
+        # Auto-score sessions for conversation intelligence
+        self._attach_conversation_scoring()
+
+        # Run compliance check against gold images (non-blocking)
+        self._check_compliance_on_start()
+
+    def _attach_conversation_scoring(self) -> None:
+        """Auto-score sessions on SESSION_END for conversation intelligence."""
+        from agentos.core.events import EventType, Event
+
+        async def _on_session_end(event: Event) -> None:
+            try:
+                if not self._db or not self._observer:
+                    return
+                records = self._observer.records
+                if not records:
+                    return
+                last_record = records[-1]
+                session_id = getattr(last_record, "session_id", "")
+                if not session_id:
+                    return
+
+                # Load turns from DB
+                turns = self._db.get_turns(session_id)
+                if not turns:
+                    return
+
+                from agentos.observability.analytics import ConversationAnalytics
+                analytics = ConversationAnalytics()
+                result = analytics.score_session(
+                    session_id=session_id,
+                    turns=turns,
+                    input_text=getattr(last_record, "input_text", ""),
+                    agent_name=self.config.name,
+                    db=self._db,
+                )
+
+                # Emit scored event
+                await self._harness.event_bus.emit(Event(
+                    type=EventType.CONVERSATION_SCORED,
+                    data={
+                        "session_id": session_id,
+                        "avg_quality": result.get("avg_quality", 0),
+                        "avg_sentiment": result.get("avg_sentiment_score", 0),
+                        "dominant_sentiment": result.get("dominant_sentiment", "neutral"),
+                        "topics": result.get("topics", []),
+                    },
+                    source="conversation_intelligence",
+                ))
+
+                # Auto-detect issues from scored session
+                try:
+                    session_data = last_record.to_dict() if hasattr(last_record, "to_dict") else {}
+                    scores = self._db.query_conversation_scores(session_id=session_id)
+                    from agentos.issues.detector import IssueDetector
+                    from agentos.issues.remediation import RemediationEngine
+                    detector = IssueDetector(db=self._db)
+                    issues = detector.detect_from_session(
+                        session_id=session_id,
+                        agent_name=self.config.name,
+                        org_id=self._runtime_context.get("org_id", ""),
+                        session_data=session_data,
+                        scores=scores,
+                    )
+                    if issues:
+                        engine = RemediationEngine()
+                        for issue in issues:
+                            fix = engine.suggest_fix(issue)
+                            self._db.update_issue(issue["issue_id"], suggested_fix=fix)
+                        await self._harness.event_bus.emit(Event(
+                            type=EventType.ISSUE_CREATED,
+                            data={"session_id": session_id, "count": len(issues)},
+                            source="issue_detector",
+                        ))
+                except Exception as exc:
+                    logger.debug("Issue detection failed for session %s: %s", session_id, exc)
+
+            except Exception:
+                pass  # Don't let scoring failures break the session
+
+        self._harness.event_bus.on(EventType.SESSION_END, _on_session_end)
+
+    def _check_compliance_on_start(self) -> None:
+        """Non-blocking compliance check at agent startup. Logs warnings for drift."""
+        if not self._db:
+            return
+        try:
+            from agentos.config.compliance import ComplianceChecker
+            checker = ComplianceChecker(self._db)
+            report = checker.check_agent(
+                agent_name=self.config.name,
+                agent_config=self.config.to_dict(),
+            )
+            if report.status == "critical":
+                logger.warning(
+                    "COMPLIANCE CRITICAL: Agent '%s' has critical config drift from gold image '%s' (%d drifts)",
+                    self.config.name, report.image_name, report.total_drifts,
+                )
+            elif report.status == "drifted":
+                logger.info(
+                    "Compliance drift: Agent '%s' has %d config drifts from gold image '%s'",
+                    self.config.name, report.total_drifts, report.image_name,
+                )
+        except Exception:
+            pass  # Compliance check is best-effort
+
+    def set_runtime_context(self, *, org_id: str = "", project_id: str = "", user_id: str = "") -> None:
+        """Set per-request tenancy context used for observability persistence."""
+        self._runtime_context = {
+            "org_id": org_id or "",
+            "project_id": project_id or "",
+            "user_id": user_id or "",
+        }
+        # Update observer config in-place for the current request lifecycle.
+        if self._observer is not None:
+            cfg_with_scope = {
+                **self.config.to_dict(),
+                "_org_id": self._runtime_context.get("org_id", ""),
+                "_project_id": self._runtime_context.get("project_id", ""),
+                "_user_id": self._runtime_context.get("user_id", ""),
+            }
+            self._observer.attach(agent_name=self.config.name, agent_config=cfg_with_scope)
 
     @property
     def db(self):

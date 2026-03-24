@@ -147,17 +147,8 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         openapi_url="/openapi.json",
     )
 
-    # Build a real harness from the first available agent so /run uses a real LLM.
-    if harness is None:
-        try:
-            from agentos.agent import Agent, list_agents
-            agents = list_agents()
-            if agents:
-                default_agent = Agent.from_name(agents[0].name)
-                harness = default_agent._harness
-                logger.info("Default harness loaded from agent '%s'", agents[0].name)
-        except Exception as exc:
-            logger.warning("Could not load default agent for harness: %s", exc)
+    # Build a harness — avoid eager Agent.from_name() which triggers heavy DB
+    # init and can block startup when Supabase/Postgres is slow or unreachable.
     _harness = harness or AgentHarness.from_config_file()
 
     # Rate limiting
@@ -181,6 +172,12 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         projects, audit, policies, slos, releases, jobs, workflows, retention,
         secrets, mcp_control, connectors, stripe_billing,
         skills as skills_router, middleware as middleware_router,
+        conversation_intel,
+        gold_images,
+        issues as issues_router,
+        redteam,
+        voice_webhooks,
+        edge_ingest,
     )
     for r in [
         auth.router, agents_router.router, sessions.router,
@@ -194,6 +191,12 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         secrets.router, mcp_control.router, connectors.router,
         stripe_billing.router,
         skills_router.router, middleware_router.router,
+        conversation_intel.router,
+        gold_images.router,
+        issues_router.router,
+        redteam.router,
+        voice_webhooks.router,
+        edge_ingest.router,
     ]:
         app.include_router(r, prefix="/api/v1")
 
@@ -201,6 +204,12 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
     @app.on_event("startup")
     async def _start_background_services() -> None:
         import asyncio
+
+        # DB init runs in a thread so the server can accept health checks immediately.
+        # All endpoints that need the DB go through initialize_db() which blocks until done.
+        loop = asyncio.get_event_loop()
+        from agentos.core.db_config import initialize_db
+        loop.run_in_executor(None, initialize_db)
 
         # Background scheduler — checks for due schedules every 60s
         try:
