@@ -47,6 +47,32 @@ class EventType(str, Enum):
     # Sandbox virtual path events
     SANDBOX_PATH_TRANSLATED = "sandbox_path_translated"
 
+    # Conversation intelligence events
+    CONVERSATION_SCORED = "conversation_scored"
+    TURN_SCORED = "turn_scored"
+    QUALITY_ALERT = "quality_alert"
+    SENTIMENT_ALERT = "sentiment_alert"
+
+    # Issue tracking events
+    ISSUE_CREATED = "issue_created"
+    ISSUE_TRIAGED = "issue_triaged"
+    ISSUE_RESOLVED = "issue_resolved"
+    ISSUE_FIX_SUGGESTED = "issue_fix_suggested"
+
+    # Gold image and compliance events
+    GOLD_IMAGE_CREATED = "gold_image_created"
+    GOLD_IMAGE_UPDATED = "gold_image_updated"
+    GOLD_IMAGE_APPROVED = "gold_image_approved"
+    GOLD_IMAGE_DELETED = "gold_image_deleted"
+    COMPLIANCE_CHECK_PASSED = "compliance_check_passed"
+    COMPLIANCE_CHECK_FAILED = "compliance_check_failed"
+
+    # Security red-teaming events
+    SECURITY_SCAN_STARTED = "security_scan_started"
+    SECURITY_SCAN_COMPLETED = "security_scan_completed"
+    SECURITY_FINDING_DETECTED = "security_finding_detected"
+    SECURITY_RISK_UPDATED = "security_risk_updated"
+
     # Evolution events (outer-loop agent)
     EVOLUTION_ANALYSIS = "evolution_analysis"
     EVOLUTION_PROPOSAL = "evolution_proposal"
