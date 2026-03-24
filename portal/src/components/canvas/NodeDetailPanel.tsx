@@ -167,6 +167,117 @@ function getStatusColor(status?: string): string {
   }
 }
 
+/* ── Memory Episodes list (fetched from API) ──────────────────────── */
+function MemoryEpisodesList({ agentName }: { agentName: string }) {
+  const episodesQuery = useApiQuery<{ episodes?: Array<{ id: string; summary: string; turns?: number; created_at?: string }> }>(
+    `/api/v1/memory/${encodeURIComponent(agentName)}/episodes?limit=20`,
+    Boolean(agentName),
+  );
+  const episodes = episodesQuery.data?.episodes ?? [];
+
+  if (episodesQuery.loading) return <p className="text-xs text-text-muted">Loading episodes...</p>;
+  if (episodes.length === 0) return <EmptyTab message="No episodes recorded yet." />;
+
+  return (
+    <div className="space-y-2">
+      {episodes.map((ep) => (
+        <div key={ep.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <code className="text-xs font-mono text-accent">{ep.id}</code>
+            <span className="text-xs text-text-muted">{ep.created_at ? new Date(ep.created_at).toLocaleString() : "—"}</span>
+            <button className="ml-auto text-text-muted hover:text-status-error"><Trash2 size={11} /></button>
+          </div>
+          <p className="text-sm text-text-primary">{ep.summary}</p>
+          <span className="text-xs text-text-muted">{ep.turns ?? 0} turns</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── Memory Procedures list (fetched from API) ────────────────────── */
+function MemoryProceduresList({ agentName }: { agentName: string }) {
+  const proceduresQuery = useApiQuery<{ procedures?: Array<{ name: string; description: string; success_rate?: number }> }>(
+    `/api/v1/memory/${encodeURIComponent(agentName)}/procedures?limit=20`,
+    Boolean(agentName),
+  );
+  const procedures = proceduresQuery.data?.procedures ?? [];
+
+  if (proceduresQuery.loading) return <p className="text-xs text-text-muted">Loading procedures...</p>;
+  if (procedures.length === 0) return <EmptyTab message="No learned procedures yet." />;
+
+  return (
+    <div className="space-y-2">
+      {procedures.map((p) => (
+        <div key={p.name} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <code className="text-xs font-mono text-accent">{p.name}</code>
+            <span className="ml-auto text-xs text-status-live">{p.success_rate != null ? `${p.success_rate}%` : "—"}</span>
+          </div>
+          <p className="text-sm text-text-secondary">{p.description}</p>
+          {p.success_rate != null && (
+            <div className="mt-2 h-1.5 bg-white-alpha-8 rounded-full overflow-hidden">
+              <div className="h-full bg-status-live rounded-full" style={{ width: `${p.success_rate}%` }} />
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── Memory Facts list (fetched from API) ─────────────────────────── */
+function MemoryFactsList({ agentName }: { agentName: string }) {
+  const factsQuery = useApiQuery<{ facts?: Array<{ key: string; value: string }> }>(
+    `/api/v1/memory/${encodeURIComponent(agentName)}/facts?limit=20`,
+    Boolean(agentName),
+  );
+  const facts = factsQuery.data?.facts ?? [];
+
+  if (factsQuery.loading) return <p className="text-xs text-text-muted mb-4">Loading facts...</p>;
+  if (facts.length === 0) return <div className="mb-4"><EmptyTab message="No facts stored — the agent will learn over time." /></div>;
+
+  return (
+    <div className="space-y-2 mb-4">
+      {facts.map((f) => (
+        <div key={f.key} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
+          <div className="flex items-center gap-2 mb-1">
+            <code className="text-xs font-mono text-accent">{f.key}</code>
+            <button className="ml-auto text-text-muted hover:text-status-error"><Trash2 size={11} /></button>
+          </div>
+          <p className="text-sm text-text-secondary">{f.value}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ── Available Tools list (fetched from API) ──────────────────────── */
+function AvailableToolsList({ agentName }: { agentName: string }) {
+  const toolsQuery = useApiQuery<{ tools?: string[] } | string[]>(
+    `/api/v1/agents/${encodeURIComponent(agentName)}/tools`,
+    Boolean(agentName),
+  );
+  const availableTools: string[] = Array.isArray(toolsQuery.data)
+    ? toolsQuery.data
+    : (toolsQuery.data?.tools ?? []);
+
+  if (toolsQuery.loading) return <p className="text-xs text-text-muted">Loading available tools...</p>;
+  if (availableTools.length === 0) return <EmptyTab message="No additional tools available from the server." />;
+
+  return (
+    <div className="space-y-1.5 max-h-64 overflow-y-auto">
+      {availableTools.map((tool) => (
+        <div key={tool} className="flex items-center gap-3 px-4 py-2.5 bg-white-alpha-5 rounded-lg border border-border-default">
+          <Zap size={12} className="text-text-muted flex-shrink-0" />
+          <code className="text-xs font-mono text-text-secondary flex-1">{tool}</code>
+          <button className="text-xs text-accent hover:underline">+ Add</button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    MAIN COMPONENT — Railway-style floating card
    ═══════════════════════════════════════════════════════════════════ */
@@ -413,7 +524,7 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
   onUpdateNode?: (nodeId: string, data: NodeData) => void;
 }) {
   const [vars, setVars] = useState<{ key: string; value: string }[]>(
-    data.variables || [{ key: "OPENAI_API_KEY", value: "sk-***" }, { key: "LOG_LEVEL", value: "info" }],
+    data.variables || [],
   );
   const [newVarKey, setNewVarKey] = useState("");
   const [newVarValue, setNewVarValue] = useState("");
@@ -453,31 +564,39 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
       );
 
     /* ── Deployments ───────────────────────────────────────── */
-    case "deployments":
+    case "deployments": {
+      const deployHistoryQuery = useApiQuery<{ deployments?: Array<{ id: string; version: string; status: string; created_at?: string; environment?: string }> }>(
+        `/api/v1/deploy/${encodeURIComponent(data.name || "")}/history`,
+        Boolean(data.name),
+      );
+      const deployments = deployHistoryQuery.data?.deployments ?? [];
+
       return (
         <div className="max-w-2xl">
+          <DeployStatusSection agentName={data.name || ""} />
           <SectionTitle>Deployment History</SectionTitle>
+          {deployHistoryQuery.loading && <p className="text-xs text-text-muted mb-4">Loading deployment history...</p>}
           <div className="space-y-2">
-            {[
-              { id: "d1", version: "v1.3.2", status: "active", time: "2 hours ago", env: "production" },
-              { id: "d2", version: "v1.3.1", status: "superseded", time: "1 day ago", env: "production" },
-              { id: "d3", version: "v1.3.0", status: "superseded", time: "3 days ago", env: "staging" },
-            ].map((d) => (
+            {deployments.map((d) => (
               <div key={d.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4 flex items-center gap-3">
-                <span className={`w-2.5 h-2.5 rounded-full ${d.status === "active" ? "bg-status-live" : "bg-text-muted"}`} />
+                <span className={`w-2.5 h-2.5 rounded-full ${d.status === "active" || d.status === "deployed" ? "bg-status-live" : "bg-text-muted"}`} />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-text-primary font-mono">{d.version}</p>
-                  <p className="text-xs text-text-muted">{d.env} &middot; {d.time}</p>
+                  <p className="text-xs text-text-muted">{d.environment || "—"} &middot; {d.created_at ? new Date(d.created_at).toLocaleString() : "—"}</p>
                 </div>
                 <StatusPill status={d.status} />
               </div>
             ))}
           </div>
+          {deployments.length === 0 && !deployHistoryQuery.loading && (
+            <EmptyTab message="No deployments yet — deploy this agent to see history here." />
+          )}
           <button className="mt-4 w-full py-2.5 text-sm font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
             + Deploy New Version
           </button>
         </div>
       );
+    }
 
     /* ── Variables ─────────────────────────────────────────── */
     case "variables":
@@ -508,26 +627,45 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
       );
 
     /* ── Metrics ──────────────────────────────────────────── */
-    case "metrics":
+    case "metrics": {
+      const statsQuery = useApiQuery<{
+        avg_latency_ms?: number;
+        success_rate?: number;
+        total_tokens?: number;
+        total_cost_usd?: number;
+      }>(
+        `/api/v1/sessions/stats/summary?agent_name=${encodeURIComponent(data.name || "")}&since_days=1`,
+        Boolean(data.name),
+      );
+      const stats = statsQuery.data;
+
+      const metricCards = [
+        { label: "Avg Latency", value: stats?.avg_latency_ms != null ? `${(stats.avg_latency_ms / 1000).toFixed(1)}s` : "—" },
+        { label: "Success Rate", value: stats?.success_rate != null ? `${(stats.success_rate * 100).toFixed(1)}%` : "—" },
+        { label: "Token Usage (24h)", value: stats?.total_tokens != null ? `${(stats.total_tokens / 1000).toFixed(1)}K` : "—" },
+        { label: "Cost (24h)", value: stats?.total_cost_usd != null ? `$${stats.total_cost_usd.toFixed(2)}` : "—" },
+      ];
+
       return (
         <div className="max-w-2xl">
           <SectionTitle>Performance Metrics</SectionTitle>
-          <div className="grid grid-cols-2 gap-4 mb-6">
-            {[
-              { label: "Avg Latency", value: "1.2s", trend: "-5%" },
-              { label: "Success Rate", value: "98.7%", trend: "+0.3%" },
-              { label: "Token Usage", value: "12.4K/day", trend: "+12%" },
-              { label: "Cost (24h)", value: "$2.41", trend: "-8%" },
-            ].map((m) => (
-              <div key={m.label} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
-                <p className="text-xs text-text-muted">{m.label}</p>
-                <p className="text-xl font-semibold text-text-primary mt-1">{m.value}</p>
-                <p className={`text-xs mt-1 ${m.trend.startsWith("-") ? "text-status-live" : "text-status-warning"}`}>{m.trend}</p>
-              </div>
-            ))}
-          </div>
+          {statsQuery.loading && <p className="text-xs text-text-muted mb-4">Loading metrics...</p>}
+          {statsQuery.error && !statsQuery.loading && (
+            <EmptyTab message="No metrics available — run the agent to start collecting data." />
+          )}
+          {!statsQuery.loading && !statsQuery.error && (
+            <div className="grid grid-cols-2 gap-4 mb-6">
+              {metricCards.map((m) => (
+                <div key={m.label} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
+                  <p className="text-xs text-text-muted">{m.label}</p>
+                  <p className="text-xl font-semibold text-text-primary mt-1">{m.value}</p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       );
+    }
 
     default:
       return <EmptyTab message={`Tab "${tabId}" not implemented`} />;
@@ -625,21 +763,20 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
             {toolsList.length === 0 && <EmptyTab message="No tools configured" />}
           </div>
           <SectionTitle>Available Tools</SectionTitle>
-          <div className="space-y-1.5 max-h-64 overflow-y-auto">
-            {["web_search", "sandbox_exec", "file_read", "file_write", "send_email", "http_request", "create_chart", "query_database"].map((tool) => (
-              <div key={tool} className="flex items-center gap-3 px-4 py-2.5 bg-white-alpha-5 rounded-lg border border-border-default">
-                <Zap size={12} className="text-text-muted flex-shrink-0" />
-                <code className="text-xs font-mono text-text-secondary flex-1">{tool}</code>
-                <button className="text-xs text-accent hover:underline">+ Add</button>
-              </div>
-            ))}
-          </div>
+          <AvailableToolsList agentName={data.name || ""} />
         </div>
       );
     }
 
     /* ── Sessions ─────────────────────────────────────────── */
-    case "sessions":
+    case "sessions": {
+      const sessionsQuery = useApiQuery<{ sessions: Array<{ session_id?: string; id?: string; status?: string; turns?: number; started_at?: string; total_tokens?: number; task?: string }> }>(
+        `/api/v1/sessions?agent_name=${encodeURIComponent(data.name || "")}&limit=10`,
+        Boolean(data.name),
+      );
+      const sessions = sessionsQuery.data?.sessions ?? [];
+      const filteredSessions = sessions.filter((s) => sessionFilter === "all" || s.status === sessionFilter);
+
       return (
         <div>
           <div className="flex items-center justify-between mb-4">
@@ -653,35 +790,34 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
               ))}
             </div>
           </div>
+          {sessionsQuery.loading && <p className="text-xs text-text-muted mb-4">Loading sessions...</p>}
           <div className="space-y-2">
-            {[
-              { id: "sess_a1b2", status: "active", turns: 12, started: "5 min ago", tokens: "3.2K", task: "Analyzing Q4 revenue data" },
-              { id: "sess_c3d4", status: "completed", turns: 8, started: "1 hour ago", tokens: "2.1K", task: "Draft weekly report" },
-              { id: "sess_e5f6", status: "completed", turns: 24, started: "3 hours ago", tokens: "8.7K", task: "Customer support ticket #4521" },
-              { id: "sess_g7h8", status: "failed", turns: 3, started: "5 hours ago", tokens: "0.4K", task: "API integration test" },
-              { id: "sess_i9j0", status: "completed", turns: 15, started: "1 day ago", tokens: "5.3K", task: "Code review PR #287" },
-            ].filter((s) => sessionFilter === "all" || s.status === sessionFilter).map((s) => (
-              <div key={s.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
+            {filteredSessions.map((s) => (
+              <div key={s.session_id || s.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
-                  <code className="text-xs font-mono text-accent">{s.id}</code>
-                  <StatusPill status={s.status} />
+                  <code className="text-xs font-mono text-accent">{s.session_id || s.id || "—"}</code>
+                  <StatusPill status={s.status || "unknown"} />
                   {s.status === "active" && (
                     <button className="ml-auto text-xs text-status-error hover:underline flex items-center gap-1">
                       <Pause size={11} /> Terminate
                     </button>
                   )}
                 </div>
-                <p className="text-sm text-text-primary mb-1.5">{s.task}</p>
+                <p className="text-sm text-text-primary mb-1.5">{s.task || "—"}</p>
                 <div className="flex items-center gap-4 text-xs text-text-muted">
-                  <span className="flex items-center gap-1"><MessageSquare size={11} /> {s.turns} turns</span>
-                  <span className="flex items-center gap-1"><Zap size={11} /> {s.tokens} tokens</span>
-                  <span className="flex items-center gap-1"><Clock size={11} /> {s.started}</span>
+                  <span className="flex items-center gap-1"><MessageSquare size={11} /> {s.turns ?? 0} turns</span>
+                  <span className="flex items-center gap-1"><Zap size={11} /> {s.total_tokens != null ? `${(s.total_tokens / 1000).toFixed(1)}K` : "—"} tokens</span>
+                  <span className="flex items-center gap-1"><Clock size={11} /> {s.started_at ? new Date(s.started_at).toLocaleString() : "—"}</span>
                 </div>
               </div>
             ))}
           </div>
+          {filteredSessions.length === 0 && !sessionsQuery.loading && (
+            <EmptyTab message="No sessions yet — run the agent to see data here." />
+          )}
         </div>
       );
+    }
 
     /* ── Memory ───────────────────────────────────────────── */
     case "memory":
@@ -698,23 +834,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
 
           {memoryTab === "facts" && (
             <div>
-              <div className="space-y-2 mb-4">
-                {[
-                  { key: "user_preference", value: "Prefers concise responses with bullet points" },
-                  { key: "timezone", value: "America/Chicago (CDT)" },
-                  { key: "role", value: "Senior Product Manager at TechCorp" },
-                  { key: "communication_style", value: "Direct and data-driven" },
-                  { key: "project_context", value: "Working on Q1 2026 product roadmap" },
-                ].map((f) => (
-                  <div key={f.key} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
-                    <div className="flex items-center gap-2 mb-1">
-                      <code className="text-xs font-mono text-accent">{f.key}</code>
-                      <button className="ml-auto text-text-muted hover:text-status-error"><Trash2 size={11} /></button>
-                    </div>
-                    <p className="text-sm text-text-secondary">{f.value}</p>
-                  </div>
-                ))}
-              </div>
+              <MemoryFactsList agentName={data.name || ""} />
               <div className="flex gap-2">
                 <input value={newFact.key} onChange={(e) => setNewFact({ ...newFact, key: e.target.value })} placeholder="key"
                   className="flex-1 px-3 py-2 text-sm font-mono bg-white-alpha-5 border border-border-default rounded-lg text-text-primary placeholder:text-text-muted focus:outline-none focus:border-accent/50" />
@@ -733,44 +853,11 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           )}
 
           {memoryTab === "episodes" && (
-            <div className="space-y-2">
-              {[
-                { id: "ep_1", summary: "Helped user draft product requirements document", turns: 15, time: "2 hours ago" },
-                { id: "ep_2", summary: "Analyzed competitor pricing data from CSV upload", turns: 8, time: "5 hours ago" },
-                { id: "ep_3", summary: "Debugged API integration with Stripe webhooks", turns: 22, time: "1 day ago" },
-              ].map((ep) => (
-                <div key={ep.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
-                  <div className="flex items-center gap-2 mb-1">
-                    <code className="text-xs font-mono text-accent">{ep.id}</code>
-                    <span className="text-xs text-text-muted">{ep.time}</span>
-                    <button className="ml-auto text-text-muted hover:text-status-error"><Trash2 size={11} /></button>
-                  </div>
-                  <p className="text-sm text-text-primary">{ep.summary}</p>
-                  <span className="text-xs text-text-muted">{ep.turns} turns</span>
-                </div>
-              ))}
-            </div>
+            <MemoryEpisodesList agentName={data.name || ""} />
           )}
 
           {memoryTab === "procedures" && (
-            <div className="space-y-2">
-              {[
-                { name: "weekly_report", description: "Generate weekly status report from Jira + Slack data", successRate: 95 },
-                { name: "code_review", description: "Review PR against team coding standards", successRate: 88 },
-                { name: "customer_response", description: "Draft customer support response using knowledge base", successRate: 92 },
-              ].map((p) => (
-                <div key={p.name} className="bg-white-alpha-5 rounded-lg border border-border-default p-3">
-                  <div className="flex items-center gap-2 mb-1">
-                    <code className="text-xs font-mono text-accent">{p.name}</code>
-                    <span className="ml-auto text-xs text-status-live">{p.successRate}%</span>
-                  </div>
-                  <p className="text-sm text-text-secondary">{p.description}</p>
-                  <div className="mt-2 h-1.5 bg-white-alpha-8 rounded-full overflow-hidden">
-                    <div className="h-full bg-status-live rounded-full" style={{ width: `${p.successRate}%` }} />
-                  </div>
-                </div>
-              ))}
-            </div>
+            <MemoryProceduresList agentName={data.name || ""} />
           )}
         </div>
       );
@@ -1107,29 +1194,32 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
     }
 
     /* ── Eval ─────────────────────────────────────────────── */
-    case "eval":
+    case "eval": {
+      const evalQuery = useApiQuery<{ runs?: Array<{ id: string; task_file?: string; status?: string; score?: number; tasks?: number; created_at?: string; avg_latency_ms?: number; cost_usd?: number }> }>(
+        `/api/v1/eval/runs?agent_name=${encodeURIComponent(data.name || "")}&limit=10`,
+        Boolean(data.name),
+      );
+      const evalRuns = evalQuery.data?.runs ?? [];
+
       return (
         <div>
           <SectionTitle>Evaluation Runs</SectionTitle>
+          {evalQuery.loading && <p className="text-xs text-text-muted mb-4">Loading evaluation runs...</p>}
           <div className="space-y-2 mb-6">
-            {[
-              { id: "eval_001", taskFile: "support-tasks.jsonl", status: "passed", score: 94, tasks: 50, time: "2 hours ago", latency: "1.2s", cost: "$0.85" },
-              { id: "eval_002", taskFile: "coding-tasks.jsonl", status: "passed", score: 87, tasks: 30, time: "1 day ago", latency: "2.4s", cost: "$1.20" },
-              { id: "eval_003", taskFile: "reasoning-tasks.jsonl", status: "failed", score: 62, tasks: 25, time: "3 days ago", latency: "3.1s", cost: "$0.95" },
-            ].map((ev) => (
+            {evalRuns.map((ev) => (
               <div key={ev.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <code className="text-xs font-mono text-accent">{ev.id}</code>
-                  <StatusPill status={ev.status} />
-                  <span className="ml-auto text-xs text-text-muted">{ev.time}</span>
+                  <StatusPill status={ev.status || "unknown"} />
+                  <span className="ml-auto text-xs text-text-muted">{ev.created_at ? new Date(ev.created_at).toLocaleString() : "—"}</span>
                 </div>
-                <p className="text-sm text-text-primary mb-2">{ev.taskFile}</p>
+                <p className="text-sm text-text-primary mb-2">{ev.task_file || "—"}</p>
                 <div className="grid grid-cols-4 gap-3">
                   {[
-                    { label: "Score", value: `${ev.score}%` },
-                    { label: "Tasks", value: `${ev.tasks}` },
-                    { label: "Latency", value: ev.latency },
-                    { label: "Cost", value: ev.cost },
+                    { label: "Score", value: ev.score != null ? `${ev.score}%` : "—" },
+                    { label: "Tasks", value: ev.tasks != null ? `${ev.tasks}` : "—" },
+                    { label: "Latency", value: ev.avg_latency_ms != null ? `${(ev.avg_latency_ms / 1000).toFixed(1)}s` : "—" },
+                    { label: "Cost", value: ev.cost_usd != null ? `$${ev.cost_usd.toFixed(2)}` : "—" },
                   ].map((m) => (
                     <div key={m.label} className="text-center">
                       <p className="text-[10px] text-text-muted">{m.label}</p>
@@ -1137,13 +1227,18 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                     </div>
                   ))}
                 </div>
-                <div className="mt-2 h-1.5 bg-white-alpha-8 rounded-full overflow-hidden">
-                  <div className={`h-full rounded-full ${ev.score >= 80 ? "bg-status-live" : ev.score >= 60 ? "bg-status-warning" : "bg-status-error"}`}
-                    style={{ width: `${ev.score}%` }} />
-                </div>
+                {ev.score != null && (
+                  <div className="mt-2 h-1.5 bg-white-alpha-8 rounded-full overflow-hidden">
+                    <div className={`h-full rounded-full ${ev.score >= 80 ? "bg-status-live" : ev.score >= 60 ? "bg-status-warning" : "bg-status-error"}`}
+                      style={{ width: `${ev.score}%` }} />
+                  </div>
+                )}
               </div>
             ))}
           </div>
+          {evalRuns.length === 0 && !evalQuery.loading && (
+            <EmptyTab message="No evaluations yet — upload a task file and run an eval." />
+          )}
 
           <SectionTitle>Run New Evaluation</SectionTitle>
           <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
@@ -1162,6 +1257,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           </button>
         </div>
       );
+    }
 
     /* ── Releases ─────────────────────────────────────────── */
     case "releases": {
@@ -1204,11 +1300,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           {channelsQuery.loading && <p className="text-xs text-text-muted mb-4">Loading channels...</p>}
           {channelsQuery.error && <p className="text-xs text-status-error mb-4">Failed to load channels: {channelsQuery.error}</p>}
           <div className="space-y-2 mb-6">
-            {(channels.length > 0 ? channels : [
-              { name: "production", version: "\u2014", traffic: 100, status: "unknown" },
-              { name: "staging", version: "\u2014", traffic: 100, status: "unknown" },
-              { name: "canary", version: "\u2014", traffic: 0, status: "unknown" },
-            ]).map((ch) => (
+            {channels.map((ch) => (
               <div key={ch.name} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <Tag size={13} className="text-accent" />
@@ -1224,6 +1316,9 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
                 </div>
               </div>
             ))}
+            {channels.length === 0 && !channelsQuery.loading && (
+              <EmptyTab message="No channels configured." />
+            )}
           </div>
 
           <SectionTitle>Version History</SectionTitle>
@@ -1338,54 +1433,66 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: Kno
           </div>
         </div>
       );
-    case "documents":
+    case "documents": {
+      const docsQuery = useApiQuery<{ documents?: Array<{ name: string; size?: string; chunks?: number }> }>(
+        `/api/v1/knowledge/${encodeURIComponent(data.name || "")}/documents`,
+        Boolean(data.name),
+      );
+      const documents = docsQuery.data?.documents ?? [];
+
       return (
         <div className="max-w-2xl">
           <SectionTitle>Documents</SectionTitle>
+          {docsQuery.loading && <p className="text-xs text-text-muted mb-4">Loading documents...</p>}
           <div className="space-y-2 mb-4">
-            {[
-              { name: "getting-started.md", size: "24 KB", chunks: 12 },
-              { name: "api-reference.md", size: "156 KB", chunks: 89 },
-              { name: "faq.md", size: "8 KB", chunks: 6 },
-              { name: "troubleshooting.pdf", size: "2.1 MB", chunks: 142 },
-              { name: "changelog.md", size: "45 KB", chunks: 28 },
-            ].map((doc) => (
+            {documents.map((doc) => (
               <div key={doc.name} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <FileText size={14} className="text-chart-purple flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-mono text-text-primary truncate">{doc.name}</p>
-                  <p className="text-xs text-text-muted">{doc.size} &middot; {doc.chunks} chunks</p>
+                  <p className="text-xs text-text-muted">{doc.size || "—"} &middot; {doc.chunks ?? 0} chunks</p>
                 </div>
                 <button className="text-text-muted hover:text-status-error transition-colors"><Trash2 size={13} /></button>
               </div>
             ))}
           </div>
+          {documents.length === 0 && !docsQuery.loading && (
+            <EmptyTab message="No documents uploaded yet." />
+          )}
           <button className="w-full py-2.5 text-sm font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors flex items-center justify-center gap-2">
             <Upload size={14} /> Upload Document
           </button>
         </div>
       );
-    case "chunks":
+    }
+    case "chunks": {
+      const chunksQuery = useApiQuery<{ chunks?: Array<{ id: string; source?: string; text?: string }> }>(
+        `/api/v1/knowledge/${encodeURIComponent(data.name || "")}/chunks?limit=20`,
+        Boolean(data.name),
+      );
+      const chunks = chunksQuery.data?.chunks ?? [];
+
       return (
         <div className="max-w-2xl">
           <SectionTitle>Chunk Browser</SectionTitle>
+          {chunksQuery.loading && <p className="text-xs text-text-muted mb-4">Loading chunks...</p>}
           <div className="space-y-2">
-            {[
-              { id: "chunk_001", source: "api-reference.md", text: "The /agents endpoint accepts POST requests with a JSON body containing the agent configuration..." },
-              { id: "chunk_002", source: "getting-started.md", text: "To create your first agent, navigate to the Canvas and right-click to add a new Agent node..." },
-              { id: "chunk_003", source: "faq.md", text: "Q: How do I connect a knowledge base? A: Click the Knowledge node and use the Documents tab to upload files..." },
-            ].map((chunk) => (
+            {chunks.map((chunk) => (
               <div key={chunk.id} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <div className="flex items-center gap-2 mb-2">
                   <code className="text-xs font-mono text-accent">{chunk.id}</code>
-                  <span className="text-xs text-text-muted">{chunk.source}</span>
+                  <span className="text-xs text-text-muted">{chunk.source || "—"}</span>
                 </div>
-                <p className="text-sm text-text-secondary leading-relaxed">{chunk.text}</p>
+                <p className="text-sm text-text-secondary leading-relaxed">{chunk.text || "—"}</p>
               </div>
             ))}
           </div>
+          {chunks.length === 0 && !chunksQuery.loading && (
+            <EmptyTab message="No chunks yet — upload documents to generate chunks." />
+          )}
         </div>
       );
+    }
     case "settings":
       return (
         <div className="max-w-2xl">
@@ -1423,37 +1530,56 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: Da
           </div>
         </div>
       );
-    case "tables":
+    case "tables": {
+      const tablesQuery = useApiQuery<{ tables?: string[] }>(
+        `/api/v1/datasources/${encodeURIComponent(data.name || "")}/tables`,
+        Boolean(data.name),
+      );
+      const tables = tablesQuery.data?.tables ?? [];
+
       return (
         <div className="max-w-2xl">
           <SectionTitle>Tables</SectionTitle>
+          {tablesQuery.loading && <p className="text-xs text-text-muted mb-4">Loading tables...</p>}
           <div className="space-y-1.5">
-            {["users", "orders", "products", "analytics_events", "sessions", "invoices"].map((t) => (
+            {tables.map((t) => (
               <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Layers size={13} className="text-chart-cyan flex-shrink-0" />
                 <code className="text-sm font-mono text-text-primary">{t}</code>
               </div>
             ))}
           </div>
+          {tables.length === 0 && !tablesQuery.loading && (
+            <EmptyTab message="No tables found — connect the data source to see tables." />
+          )}
         </div>
       );
-    case "queries":
+    }
+    case "queries": {
+      const queriesQuery = useApiQuery<{ queries?: Array<{ name: string; query: string }> }>(
+        `/api/v1/datasources/${encodeURIComponent(data.name || "")}/queries`,
+        Boolean(data.name),
+      );
+      const savedQueries = queriesQuery.data?.queries ?? [];
+
       return (
         <div className="max-w-2xl">
           <SectionTitle>Saved Queries</SectionTitle>
+          {queriesQuery.loading && <p className="text-xs text-text-muted mb-4">Loading queries...</p>}
           <div className="space-y-2">
-            {[
-              { name: "Active users", query: "SELECT COUNT(*) FROM users WHERE last_active > NOW() - INTERVAL '7 days'" },
-              { name: "Revenue today", query: "SELECT SUM(amount) FROM orders WHERE created_at::date = CURRENT_DATE" },
-            ].map((q) => (
+            {savedQueries.map((q) => (
               <div key={q.name} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
                 <p className="text-sm font-medium text-text-primary mb-2">{q.name}</p>
                 <code className="text-xs font-mono text-text-secondary block bg-white-alpha-8 rounded p-2">{q.query}</code>
               </div>
             ))}
           </div>
+          {savedQueries.length === 0 && !queriesQuery.loading && (
+            <EmptyTab message="No saved queries yet." />
+          )}
         </div>
       );
+    }
     case "settings":
       return (
         <div className="max-w-2xl">
@@ -1491,29 +1617,40 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: Con
         <div className="max-w-2xl">
           <SectionTitle>Available Tools</SectionTitle>
           <div className="space-y-1.5">
-            {(data.toolList || ["send_message", "list_channels", "create_channel", "upload_file", "search_messages"]).map((t: string) => (
+            {(data.toolList || []).map((t: string) => (
               <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Zap size={13} className="text-chart-green flex-shrink-0" />
                 <code className="text-sm font-mono text-text-primary">{t}</code>
               </div>
             ))}
+            {(data.toolList || []).length === 0 && (
+              <EmptyTab message="No tools available — authorize the connector to discover tools." />
+            )}
           </div>
         </div>
       );
-    case "oauth":
+    case "oauth": {
+      const oauthQuery = useApiQuery<{ status?: string; scopes?: string; token_expires_at?: string }>(
+        `/api/v1/connectors/${encodeURIComponent(data.name || "")}/oauth/status`,
+        Boolean(data.name),
+      );
+      const oauth = oauthQuery.data;
+
       return (
         <div className="max-w-2xl">
           <SectionTitle>OAuth Configuration</SectionTitle>
+          {oauthQuery.loading && <p className="text-xs text-text-muted mb-4">Loading OAuth status...</p>}
           <div className="bg-white-alpha-5 rounded-lg border border-border-default p-5">
-            <InfoRow label="Auth Status" value={<StatusPill status={data.status === "authed" ? "active" : "pending"} />} />
-            <InfoRow label="Scopes" value="read, write, admin" />
-            <InfoRow label="Token Expires" value="in 30 days" />
+            <InfoRow label="Auth Status" value={<StatusPill status={oauth?.status || (data.status === "authed" || data.status === "authenticated" ? "active" : "pending")} />} />
+            <InfoRow label="Scopes" value={oauth?.scopes || "—"} />
+            <InfoRow label="Token Expires" value={oauth?.token_expires_at ? new Date(oauth.token_expires_at).toLocaleString() : "—"} />
           </div>
           <button className="mt-4 w-full py-2.5 text-sm font-medium border border-dashed border-border-default rounded-lg text-text-muted hover:border-accent/40 hover:text-accent transition-colors">
             Re-authorize OAuth
           </button>
         </div>
       );
+    }
     case "settings":
       return (
         <div className="max-w-2xl">
@@ -1550,34 +1687,57 @@ function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: Mcp
         <div className="max-w-2xl">
           <SectionTitle>Server Tools</SectionTitle>
           <div className="space-y-1.5">
-            {(data.toolList || ["get_customer", "update_customer", "list_tickets", "create_ticket", "search_kb", "get_order", "update_order", "send_notification"]).map((t: string) => (
+            {(data.toolList || []).map((t: string) => (
               <div key={t} className="flex items-center gap-3 px-4 py-3 bg-white-alpha-5 rounded-lg border border-border-default">
                 <Zap size={13} className="text-chart-blue flex-shrink-0" />
                 <code className="text-sm font-mono text-text-primary">{t}</code>
               </div>
             ))}
+            {(data.toolList || []).length === 0 && (
+              <EmptyTab message="No tools discovered — connect to the MCP server to see tools." />
+            )}
           </div>
         </div>
       );
-    case "health":
+    case "health": {
+      const healthQuery = useApiQuery<{
+        uptime_percent?: number;
+        avg_latency_ms?: number;
+        requests_24h?: number;
+        errors_24h?: number;
+      }>(
+        `/api/v1/mcp/${encodeURIComponent(data.name || "")}/health`,
+        Boolean(data.name),
+      );
+      const health = healthQuery.data;
+
+      const healthMetrics = [
+        { label: "Uptime", value: health?.uptime_percent != null ? `${health.uptime_percent}%` : "—" },
+        { label: "Avg Latency", value: health?.avg_latency_ms != null ? `${health.avg_latency_ms}ms` : "—" },
+        { label: "Requests (24h)", value: health?.requests_24h != null ? health.requests_24h.toLocaleString() : "—" },
+        { label: "Errors (24h)", value: health?.errors_24h != null ? `${health.errors_24h}` : "—" },
+      ];
+
       return (
         <div className="max-w-2xl">
           <SectionTitle>Health Status</SectionTitle>
-          <div className="grid grid-cols-2 gap-4 mb-6">
-            {[
-              { label: "Uptime", value: "99.9%" },
-              { label: "Avg Latency", value: "45ms" },
-              { label: "Requests (24h)", value: "12,847" },
-              { label: "Errors (24h)", value: "3" },
-            ].map((m) => (
-              <div key={m.label} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
-                <p className="text-xs text-text-muted">{m.label}</p>
-                <p className="text-xl font-semibold text-text-primary mt-1">{m.value}</p>
-              </div>
-            ))}
-          </div>
+          {healthQuery.loading && <p className="text-xs text-text-muted mb-4">Loading health data...</p>}
+          {healthQuery.error && !healthQuery.loading && (
+            <EmptyTab message="Connect to see health data." />
+          )}
+          {!healthQuery.loading && !healthQuery.error && (
+            <div className="grid grid-cols-2 gap-4 mb-6">
+              {healthMetrics.map((m) => (
+                <div key={m.label} className="bg-white-alpha-5 rounded-lg border border-border-default p-4">
+                  <p className="text-xs text-text-muted">{m.label}</p>
+                  <p className="text-xl font-semibold text-text-primary mt-1">{m.value}</p>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       );
+    }
     case "settings":
       return (
         <div className="max-w-2xl">
