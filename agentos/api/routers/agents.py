@@ -184,8 +184,8 @@ async def delete_agent(name: str, user: CurrentUser = Depends(require_scope("age
 
     deleted_any = False
 
-    # Soft-delete from DB
-    if delete_agent_from_db(name):
+    # Soft-delete from DB (scoped to user's org)
+    if delete_agent_from_db(name, org_id=user.org_id):
         deleted_any = True
 
     # Remove from filesystem
@@ -460,7 +460,7 @@ async def clone_agent(name: str, new_name: str, user: CurrentUser = Depends(get_
         config = agent.config
         config.name = new_name
         config.agent_id = ""  # Will get new ID
-        save_agent_config(config)
+        save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
         return AgentResponse(
             name=config.name, description=config.description, model=config.model,
             tools=config.tools, tags=config.tags, version=config.version,
@@ -474,7 +474,7 @@ async def import_agent(config: dict[str, Any], user: CurrentUser = Depends(get_c
     """Import an agent from a JSON config."""
     from agentos.agent import AgentConfig, save_agent_config
     agent_config = AgentConfig.from_dict(config)
-    save_agent_config(agent_config)
+    save_agent_config(agent_config, org_id=user.org_id, created_by=user.user_id)
     return AgentResponse(
         name=agent_config.name, description=agent_config.description,
         model=agent_config.model, tools=agent_config.tools,

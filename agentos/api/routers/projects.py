@@ -55,6 +55,8 @@ def _bootstrap_project_meta_agent(
     project_name: str,
     project_description: str,
     project_plan: str,
+    org_id: str = "",
+    created_by: str = "",
 ) -> dict[str, Any]:
     """Create (or reuse) a project-scoped orchestrator meta-agent."""
     base_name = f"{slug}-meta-agent".strip("-") or f"project-{project_id[:8]}-meta-agent"
@@ -89,7 +91,7 @@ def _bootstrap_project_meta_agent(
         tags=list(dict.fromkeys([*tpl["tags"], "project-meta-agent", f"project:{project_id}"])),
         plan=_project_plan_to_agent_plan(project_plan),
     )
-    save_agent_config(config)
+    save_agent_config(config, org_id=org_id, project_id=project_id, created_by=created_by)
     return {"name": config.name, "created": True}
 
 
@@ -142,6 +144,8 @@ async def create_project(name: str, description: str = "", plan: str = "standard
             project_name=name,
             project_description=description,
             project_plan=plan,
+            org_id=user.org_id,
+            created_by=user.user_id,
         )
     except Exception as exc:
         logger.warning("Project %s created but meta-agent bootstrap failed: %s", project_id, exc)

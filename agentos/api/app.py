@@ -215,7 +215,20 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         # All endpoints that need the DB go through initialize_db() which blocks until done.
         loop = asyncio.get_event_loop()
         from agentos.core.db_config import initialize_db
-        loop.run_in_executor(None, initialize_db)
+
+        def _init_and_seed():
+            initialize_db()
+            # Seed filesystem agents into DB (idempotent, runs on every startup).
+            # Ensures agents/*.json are queryable from any pod.
+            try:
+                from agentos.agent import seed_agents_to_db
+                count = seed_agents_to_db()
+                if count:
+                    logger.info("Seeded %d filesystem agents into DB", count)
+            except Exception as exc:
+                logger.warning("Agent seeding failed (non-fatal): %s", exc)
+
+        loop.run_in_executor(None, _init_and_seed)
 
         # Background scheduler — checks for due schedules every 60s
         try:
@@ -287,9 +300,6 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
     dashboard_dir = Path(__file__).parent.parent / "dashboard"
     if dashboard_dir.is_dir():
         app.mount("/static", StaticFiles(directory=str(dashboard_dir)), name="static")
-
-    # Cache of loaded Agent instances
-    _agent_cache: dict[str, Any] = {}
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> HealthResponse:
@@ -402,14 +412,10 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
     ) -> RunResponse:
         """Run a named agent on a task."""
         from agentos.agent import Agent
-        # Cache agent instances for reuse (preserves memory across calls)
-        if agent_name not in _agent_cache:
-            try:
-                _agent_cache[agent_name] = Agent.from_name(agent_name)
-            except FileNotFoundError:
-                raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
-
-        agent = _agent_cache[agent_name]
+        try:
+            agent = Agent.from_name(agent_name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
         results = await agent.run(request.input)
         return _build_run_response(results)
 
@@ -420,12 +426,11 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
     ) -> list[dict[str, Any]]:
         """List tools available to a specific agent."""
         from agentos.agent import Agent
-        if agent_name not in _agent_cache:
-            try:
-                _agent_cache[agent_name] = Agent.from_name(agent_name)
-            except FileNotFoundError:
-                raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
-        return _agent_cache[agent_name]._harness.tool_executor.available_tools()
+        try:
+            agent = Agent.from_name(agent_name)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
+        return agent._harness.tool_executor.available_tools()
 
     # ── Sandbox endpoints ────────────────────────────────────────────────
     # Always require auth — these endpoints can execute arbitrary commands.

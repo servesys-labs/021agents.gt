@@ -48,6 +48,7 @@ export interface Env {
   BACKEND_INGEST_URL?: string;
   BACKEND_INGEST_TOKEN?: string;
   BACKEND_PROXY_ONLY?: string;
+  WORKER_PROXY_MODE?: string;  // "true" → run() delegates to backend, worker becomes thin proxy
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
   TELEGRAM_BOT_TOKEN?: string;
@@ -444,8 +445,81 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   // ── Callable Methods (RPC from client) ──────────────────────────
 
+  private _isProxyMode(): boolean {
+    const raw = String(this.env.WORKER_PROXY_MODE ?? "").trim().toLowerCase();
+    return raw === "true" || raw === "1" || raw === "on" || raw === "yes";
+  }
+
+  /**
+   * Proxy run() to backend /runtime-proxy/agent/run.
+   * The backend runs the full harness (tools, memory, governance, compliance).
+   * The worker just relays the request and formats the response.
+   */
+  private async _runViaBackend(input: string): Promise<TurnResult[]> {
+    const config = this.state.config;
+    const base = this._ingestBase();
+    const started = Date.now();
+
+    const resp = await this._safeFetch(`${base}/api/v1/runtime-proxy/agent/run`, {
+      method: "POST",
+      headers: this._ingestHeaders(),
+      body: JSON.stringify({
+        agent_name: config.agentName || "agentos",
+        task: input,
+        org_id: config.orgId || "",
+        project_id: config.projectId || "",
+        channel: "worker",
+        channel_user_id: this.name || "",
+      }),
+    });
+
+    const data = await resp.json() as any;
+    const elapsed = Date.now() - started;
+
+    if (!resp.ok) {
+      return [{
+        turn: 1,
+        content: "",
+        toolResults: [],
+        done: true,
+        error: `Backend error (${resp.status}): ${data.detail || "unknown"}`,
+        costUsd: 0,
+        model: config.model,
+      }];
+    }
+
+    // Record session locally for observability
+    const sessionId = data.session_id || crypto.randomUUID().slice(0, 16);
+    this._recordEvent({
+      sessionId,
+      turn: 0,
+      eventType: "session.complete",
+      action: "run_proxy",
+      plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
+      status: data.success ? "ok" : "error",
+      latencyMs: elapsed,
+      costUsd: data.cost_usd || 0,
+      details: { turns: data.turns, tool_calls: data.tool_calls, source: "backend_proxy" },
+    });
+
+    return [{
+      turn: data.turns || 1,
+      content: data.output || "",
+      toolResults: [],
+      done: true,
+      error: data.success ? undefined : "Backend reported failure",
+      costUsd: data.cost_usd || 0,
+      model: config.model,
+    }];
+  }
+
   @callable()
   async run(input: string): Promise<TurnResult[]> {
+    // Proxy mode: delegate entire run to backend
+    if (this._isProxyMode()) {
+      return this._runViaBackend(input);
+    }
+
     const results: TurnResult[] = [];
     const config = this.state.config;
     const sessionId = crypto.randomUUID().slice(0, 16);
@@ -3981,6 +4055,190 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       } catch (err: any) {
         return Response.json({ success: false, error: err.message }, { status: 500 });
       }
+    }
+
+    // ── /cf/* — Cloudflare binding callbacks for backend ────────────
+    // The backend calls these when it needs CF-specific resources.
+    // Authenticated via edge token (same as backend ingest).
+
+    if (url.pathname.startsWith("/cf/")) {
+      const edgeToken = env.BACKEND_INGEST_TOKEN || "";
+      const authHeader = request.headers.get("Authorization") || "";
+      const xEdge = request.headers.get("X-Edge-Token") || "";
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : xEdge;
+      if (!edgeToken || token !== edgeToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+
+      // /cf/sandbox/exec — run code in Dynamic Worker or Container
+      if (url.pathname === "/cf/sandbox/exec" && request.method === "POST") {
+        const body = await request.json() as { code: string; language?: string; timeoutMs?: number };
+        const code = body.code || "";
+        const language = (body.language || detectLang(code)) as "javascript" | "python" | "bash";
+        const timeout = body.timeoutMs || 30000;
+
+        if (language === "javascript" || language === "python") {
+          try {
+            const workerCode = `export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:"",exit_code:0})}catch(e){return Response.json({stdout:"",stderr:e.message,exit_code:1})}}}`;
+            const loaded = await env.LOADER.load(workerCode);
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeout);
+            const result = await loaded.fetch("http://internal/run", { signal: controller.signal });
+            clearTimeout(timer);
+            return Response.json(await result.json());
+          } catch (err: any) {
+            return Response.json({ stdout: "", stderr: err.message, exit_code: 1 });
+          }
+        }
+
+        if (language === "bash" && env.SANDBOX) {
+          try {
+            const sandbox = getSandbox(env.SANDBOX, `cf-exec-${crypto.randomUUID().slice(0, 8)}`);
+            const result = await sandbox.exec(code, { timeout: Math.ceil(timeout / 1000) });
+            return Response.json({ stdout: result.stdout || "", stderr: result.stderr || "", exit_code: result.exitCode ?? 0 });
+          } catch (err: any) {
+            return Response.json({ stdout: "", stderr: err.message, exit_code: 1 });
+          }
+        }
+
+        return Response.json({ error: `unsupported language: ${language}` }, { status: 400 });
+      }
+
+      // /cf/ai/embed — embed text via Workers AI
+      if (url.pathname === "/cf/ai/embed" && request.method === "POST") {
+        const body = await request.json() as { texts: string[] };
+        try {
+          const result = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: body.texts }) as any;
+          return Response.json({ vectors: result.data || [] });
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // /cf/rag/query — semantic search via Vectorize
+      if (url.pathname === "/cf/rag/query" && request.method === "POST") {
+        const body = await request.json() as { query: string; topK?: number; org_id?: string; agent_name?: string };
+        try {
+          const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [body.query] }) as any;
+          const queryVec = embedResult.data?.[0];
+          if (!queryVec) return Response.json({ results: [] });
+
+          const filter: Record<string, string> = {};
+          if (body.org_id) filter.org_id = body.org_id;
+          if (body.agent_name) filter.agent_name = body.agent_name;
+
+          const matches = await env.VECTORIZE.query(queryVec, {
+            topK: body.topK || 10,
+            filter: Object.keys(filter).length > 0 ? filter : undefined,
+            returnMetadata: "all",
+          });
+
+          const results = (matches.matches || []).map((m: any) => ({
+            id: m.id,
+            score: m.score,
+            text: m.metadata?.text || "",
+            source: m.metadata?.source || "",
+            chunk_index: m.metadata?.chunk_index || 0,
+          }));
+          return Response.json({ results });
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // /cf/rag/ingest — chunk, embed, store in Vectorize + R2
+      if (url.pathname === "/cf/rag/ingest" && request.method === "POST") {
+        const body = await request.json() as { text: string; source?: string; org_id?: string; agent_name?: string };
+        try {
+          const words = body.text.split(/\s+/);
+          const chunks: string[] = [];
+          for (let i = 0; i < words.length; i += 400) {
+            chunks.push(words.slice(i, i + 512).join(" "));
+          }
+
+          const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks }) as any;
+          const vectors = embedResult.data || [];
+
+          const vecInserts = vectors.map((vec: number[], idx: number) => ({
+            id: `${body.source || "text"}-${Date.now()}-${idx}`,
+            values: vec,
+            metadata: {
+              text: chunks[idx],
+              source: body.source || "api",
+              org_id: body.org_id || "",
+              agent_name: body.agent_name || "",
+              chunk_index: idx,
+            },
+          }));
+
+          if (vecInserts.length > 0) {
+            await env.VECTORIZE.upsert(vecInserts);
+          }
+
+          // Store original text in R2
+          const r2Key = `rag/${body.org_id || "global"}/${body.source || "text"}-${Date.now()}.txt`;
+          await env.STORAGE.put(r2Key, body.text, {
+            customMetadata: { source: body.source || "api", org_id: body.org_id || "", agent_name: body.agent_name || "" },
+          });
+
+          return Response.json({ chunks: chunks.length, vectors: vecInserts.length, r2_key: r2Key });
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // /cf/storage/put — upload to R2
+      if (url.pathname === "/cf/storage/put" && request.method === "POST") {
+        const key = url.searchParams.get("key");
+        if (!key) return Response.json({ error: "key required" }, { status: 400 });
+        await env.STORAGE.put(key, request.body, {
+          customMetadata: Object.fromEntries(
+            [...request.headers.entries()].filter(([k]) => k.startsWith("x-meta-")).map(([k, v]) => [k.slice(7), v])
+          ),
+        });
+        return Response.json({ success: true, key });
+      }
+
+      // /cf/storage/get — download from R2
+      if (url.pathname === "/cf/storage/get" && request.method === "GET") {
+        const key = url.searchParams.get("key");
+        if (!key) return Response.json({ error: "key required" }, { status: 400 });
+        const obj = await env.STORAGE.get(key);
+        if (!obj) return Response.json({ error: "not found" }, { status: 404 });
+        return new Response(obj.body, {
+          headers: { "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream" },
+        });
+      }
+
+      // /cf/browse/crawl — crawl URL via Cloudflare
+      if (url.pathname === "/cf/browse/crawl" && request.method === "POST") {
+        const body = await request.json() as { url: string; waitMs?: number };
+        try {
+          const crawlResp = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/urlscanner/v2/crawl`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ url: body.url }),
+          });
+          const crawlData = await crawlResp.json() as any;
+          return Response.json(crawlData);
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // /cf/browse/render — render URL via Puppeteer
+      if (url.pathname === "/cf/browse/render" && request.method === "POST") {
+        const body = await request.json() as { url: string; selector?: string };
+        try {
+          const browserResp = await env.BROWSER.fetch(`https://internal/render?url=${encodeURIComponent(body.url)}`);
+          const html = await browserResp.text();
+          return Response.json({ html: html.slice(0, 50000), url: body.url });
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      return Response.json({ error: "unknown /cf endpoint" }, { status: 404 });
     }
 
     // Serve static assets (portal SPA)

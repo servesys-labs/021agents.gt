@@ -250,49 +250,44 @@ def save_agent_to_db(
     project_id: str = "",
     created_by: str = "",
 ) -> bool:
-    """Persist an agent config to the agents table. Returns True on success."""
+    """Persist an agent config to the agents table. Returns True on success.
+
+    Delegates to AgentDB.upsert_agent() which handles race-safe upsert
+    on the (org_id, project_id, name) unique index.
+    """
     db = _get_registry_db()
     if db is None:
         return False
     try:
-        agent_id = config.agent_id or config.name
-        config_json = json.dumps(config.to_dict())
-        import time as _time
-        now = _time.time()
-        db.conn.execute(
-            """INSERT INTO agents (agent_id, org_id, project_id, name, description,
-               version, config_json, is_active, created_by, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
-            ON CONFLICT (agent_id) DO UPDATE SET
-                name = EXCLUDED.name,
-                description = EXCLUDED.description,
-                version = EXCLUDED.version,
-                config_json = EXCLUDED.config_json,
-                updated_at = EXCLUDED.updated_at""",
-            (agent_id, org_id, project_id, config.name, config.description,
-             config.version, config_json, created_by, now, now),
+        db.upsert_agent(
+            org_id=org_id,
+            project_id=project_id,
+            name=config.name,
+            config_dict=config.to_dict(),
+            created_by=created_by,
+            agent_id=config.agent_id or "",
+            version=config.version,
         )
-        db.conn.commit()
         return True
     except Exception as exc:
         logger.warning("Failed to save agent '%s' to DB: %s", config.name, exc)
-        try:
-            db.conn.rollback()
-        except Exception:
-            pass
         return False
 
 
 def get_agent_from_db(name: str, org_id: str = "", project_id: str = "") -> AgentConfig | None:
-    """Load an agent config from the DB by name. Returns None if not found."""
+    """Load an agent config from the DB by name. Returns None if not found.
+
+    If org_id/project_id are provided, scopes the lookup. Otherwise falls
+    back to name-only search (for CLI / single-tenant compat).
+    """
     db = _get_registry_db()
     if db is None:
         return None
     try:
-        row = db.conn.execute(
-            "SELECT config_json FROM agents WHERE name = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
-            (name,),
-        ).fetchone()
+        if org_id:
+            row = db.get_agent(org_id, project_id or "", name)
+        else:
+            row = db.get_agent_by_name(name)
         if not row:
             return None
         data = json.loads(row["config_json"]) if isinstance(row["config_json"], str) else row["config_json"]
@@ -302,15 +297,22 @@ def get_agent_from_db(name: str, org_id: str = "", project_id: str = "") -> Agen
         return None
 
 
-def _list_agents_from_db() -> list[AgentConfig] | None:
-    """List all active agents from DB. Returns None if DB unavailable."""
+def _list_agents_from_db(org_id: str = "") -> list[AgentConfig] | None:
+    """List active agents from DB. Returns None if DB unavailable.
+
+    If org_id is provided, scopes to that org. Otherwise lists all.
+    """
     db = _get_registry_db()
     if db is None:
         return None
     try:
-        rows = db.conn.execute(
-            "SELECT config_json FROM agents WHERE is_active = 1 ORDER BY name"
-        ).fetchall()
+        if org_id:
+            rows = db.list_agents_for_org(org_id)
+        else:
+            rows = db.conn.execute(
+                "SELECT config_json FROM agents WHERE is_active = 1 ORDER BY name"
+            ).fetchall()
+            rows = [dict(r) for r in rows]
         agents = []
         for row in rows:
             try:
@@ -324,20 +326,59 @@ def _list_agents_from_db() -> list[AgentConfig] | None:
         return None
 
 
-def delete_agent_from_db(name: str) -> bool:
-    """Soft-delete an agent from the DB. Returns True on success."""
+def delete_agent_from_db(name: str, org_id: str = "", project_id: str = "") -> bool:
+    """Soft-delete an agent from the DB. Returns True on success.
+
+    Scoping:
+      - org_id + project_id → exact match on all three
+      - org_id only         → matches name within org (any project)
+      - neither             → matches by name globally (legacy compat)
+    """
     db = _get_registry_db()
     if db is None:
         return False
     try:
-        db.conn.execute(
-            "UPDATE agents SET is_active = 0 WHERE name = ?", (name,)
-        )
-        db.conn.commit()
-        return True
+        import time as _time
+        now = _time.time()
+        if org_id and project_id:
+            return db.delete_agent(org_id, project_id, name)
+        elif org_id:
+            cur = db.conn.execute(
+                "UPDATE agents SET is_active = 0, updated_at = ? "
+                "WHERE org_id = ? AND name = ? AND is_active = 1",
+                (now, org_id, name),
+            )
+            db.conn.commit()
+            return (cur.rowcount or 0) > 0
+        else:
+            cur = db.conn.execute(
+                "UPDATE agents SET is_active = 0, updated_at = ? WHERE name = ? AND is_active = 1",
+                (now, name),
+            )
+            db.conn.commit()
+            return (cur.rowcount or 0) > 0
     except Exception as exc:
         logger.warning("Failed to delete agent '%s' from DB: %s", name, exc)
         return False
+
+
+def seed_agents_to_db() -> int:
+    """Seed filesystem agents into the DB (idempotent). Returns count seeded."""
+    db = _get_registry_db()
+    if db is None:
+        return 0
+    count = 0
+    for config in _list_agents_from_fs():
+        try:
+            db.upsert_agent(
+                org_id="", project_id="", name=config.name,
+                config_dict=config.to_dict(), created_by="auto-seed",
+                agent_id=config.agent_id or "", version=config.version,
+            )
+            count += 1
+        except Exception as exc:
+            logger.warning("Failed to seed agent '%s': %s", config.name, exc)
+    return count
 
 
 class Agent:
