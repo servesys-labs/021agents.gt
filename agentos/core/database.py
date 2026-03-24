@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -1638,6 +1638,27 @@ CREATE INDEX IF NOT EXISTS idx_ar_exp_status ON autoresearch_experiments(status)
 CREATE INDEX IF NOT EXISTS idx_ar_exp_created ON autoresearch_experiments(created_at);
 """;
 
+MIGRATION_V14_TO_V15 = """\
+CREATE TABLE IF NOT EXISTS agents (
+    agent_id        TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    project_id      TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    version         TEXT NOT NULL DEFAULT '0.1.0',
+    config_json     TEXT NOT NULL DEFAULT '{}',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    updated_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_org_project_name
+    ON agents(org_id, project_id, name);
+CREATE INDEX IF NOT EXISTS idx_agents_org ON agents(org_id);
+CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(org_id, project_id);
+CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
+""";
+
 RUNTIME_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS billing_records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2278,10 +2299,14 @@ class AgentDB:
         current = self.schema_version()
 
         if current == 0:
-            # Fresh database — create everything from scratch
+            # Fresh database — create everything from scratch.
+            # SCHEMA_SQL covers tables up to ~V13.  We then run only
+            # post-SCHEMA_SQL migrations to add newer tables (e.g. V15
+            # agents table) without replaying all 13 old migrations.
             self.conn.executescript(SCHEMA_SQL)
+            self._migrate_post_schema(current)
         else:
-            # Existing database — apply migrations
+            # Existing database — apply all pending migrations
             self._migrate(current)
         self._ensure_runtime_tables()
         self._ensure_runtime_columns()
@@ -2554,6 +2579,34 @@ class AgentDB:
                 self.conn.executescript(MIGRATION_V13_TO_V14)
             except sqlite3.OperationalError as exc:
                 logger.debug("v14 migration partial: %s", exc)
+            self.conn.commit()
+        if from_version < 15:
+            logger.info("Migrating database from v%d to v15 (agents registry table)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V14_TO_V15)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v15 migration partial: %s", exc)
+            self.conn.commit()
+
+    def _migrate_post_schema(self, from_version: int) -> None:
+        """Run only migrations that add tables beyond what SCHEMA_SQL provides.
+
+        SCHEMA_SQL covers tables up to ~V13.  This method runs V14+ so
+        that fresh databases get the agents table etc. without replaying
+        all 13 early migrations (which do ALTER TABLE on existing tables
+        and cause noise on a clean schema).
+        """
+        if from_version < 14:
+            try:
+                self.conn.executescript(MIGRATION_V13_TO_V14)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v14 post-schema partial: %s", exc)
+            self.conn.commit()
+        if from_version < 15:
+            try:
+                self.conn.executescript(MIGRATION_V14_TO_V15)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v15 post-schema partial: %s", exc)
             self.conn.commit()
 
     def _seed_security_event_types(self) -> None:
@@ -5073,6 +5126,130 @@ class AgentDB:
             return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
         except sqlite3.OperationalError:
             return []
+
+
+    # ── Agent registry CRUD ────────────────────────────────────────────────
+
+    def upsert_agent(
+        self,
+        org_id: str,
+        project_id: str,
+        name: str,
+        config_dict: dict[str, Any],
+        created_by: str = "",
+        agent_id: str = "",
+        version: str = "",
+    ) -> dict[str, Any]:
+        """Insert or update an agent in the registry. Returns the row.
+
+        Race-safe: if two concurrent inserts hit the unique constraint,
+        the loser retries as an update.
+        """
+        import uuid as _uuid
+
+        agent_id = agent_id or config_dict.get("agent_id", "") or _uuid.uuid4().hex
+        version = version or config_dict.get("version", "0.1.0")
+        description = config_dict.get("description", "")
+        config_json = json.dumps(config_dict, default=str)
+        now = time.time()
+
+        # Try update first (covers the conflict path for SQLite which
+        # doesn't support ON CONFLICT with all index types cleanly).
+        existing = self.get_agent(org_id, project_id, name)
+        if existing:
+            self.conn.execute(
+                "UPDATE agents SET config_json = ?, version = ?, description = ?, "
+                "updated_at = ?, is_active = 1 WHERE org_id = ? AND project_id = ? AND name = ?",
+                (config_json, version, description, now, org_id, project_id, name),
+            )
+            self.conn.commit()
+            return self.get_agent(org_id, project_id, name) or {}
+
+        try:
+            self.conn.execute(
+                "INSERT INTO agents (agent_id, org_id, project_id, name, description, "
+                "version, config_json, is_active, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)",
+                (agent_id, org_id, project_id, name, description,
+                 version, config_json, created_by, now, now),
+            )
+            self.conn.commit()
+        except Exception as exc:
+            # Concurrent insert hit the unique constraint — retry as update
+            msg = str(exc).lower()
+            if "unique" in msg or "duplicate" in msg or "constraint" in msg:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+                self.conn.execute(
+                    "UPDATE agents SET config_json = ?, version = ?, description = ?, "
+                    "updated_at = ?, is_active = 1 WHERE org_id = ? AND project_id = ? AND name = ?",
+                    (config_json, version, description, now, org_id, project_id, name),
+                )
+                self.conn.commit()
+            else:
+                raise
+        return self.get_agent(org_id, project_id, name) or {}
+
+    def get_agent(self, org_id: str, project_id: str, name: str) -> dict[str, Any] | None:
+        """Get an agent by (org_id, project_id, name). Returns None if not found."""
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM agents WHERE org_id = ? AND project_id = ? AND name = ? AND is_active = 1",
+                (org_id, project_id, name),
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def get_agent_by_name(self, name: str) -> dict[str, Any] | None:
+        """Fallback lookup by name only (for CLI/single-tenant compat).
+
+        Returns the first active agent matching the name, regardless of org/project.
+        """
+        try:
+            row = self.conn.execute(
+                "SELECT * FROM agents WHERE name = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+                (name,),
+            ).fetchone()
+            return dict(row) if row else None
+        except Exception:
+            return None
+
+    def list_agents_for_org(
+        self, org_id: str, project_id: str | None = None, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """List active agents for an org, optionally filtered by project."""
+        try:
+            if project_id is not None:
+                rows = self.conn.execute(
+                    "SELECT * FROM agents WHERE org_id = ? AND project_id = ? AND is_active = 1 "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (org_id, project_id, limit),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM agents WHERE org_id = ? AND is_active = 1 "
+                    "ORDER BY updated_at DESC LIMIT ?",
+                    (org_id, limit),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def delete_agent(self, org_id: str, project_id: str, name: str) -> bool:
+        """Soft-delete an agent (set is_active = 0). Returns True if a row was updated."""
+        try:
+            cur = self.conn.execute(
+                "UPDATE agents SET is_active = 0, updated_at = ? "
+                "WHERE org_id = ? AND project_id = ? AND name = ? AND is_active = 1",
+                (time.time(), org_id, project_id, name),
+            )
+            self.conn.commit()
+            return (cur.rowcount or 0) > 0
+        except Exception:
+            return False
 
 
 def create_database(path: str | Path) -> AgentDB:

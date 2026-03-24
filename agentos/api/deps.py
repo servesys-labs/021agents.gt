@@ -45,7 +45,8 @@ _auth_cache_lock = threading.Lock()
 
 def _cache_get(key: str):
     """Get a cached auth result, or None if missing/expired."""
-    entry = _auth_cache.get(key)
+    with _auth_cache_lock:
+        entry = _auth_cache.get(key)
     if entry is None:
         return None
     ts, user = entry

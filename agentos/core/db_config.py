@@ -78,3 +78,45 @@ def initialize_db() -> None:
         db.initialize()
         _db_initialized = True
         logger.info("Database initialized (one-time)")
+
+
+def shutdown_db() -> None:
+    """Close the DB instance and its connection pool (if any).
+
+    Call this from FastAPI shutdown hooks or atexit handlers to avoid
+    leaking connections on Railway redeploy.
+    """
+    global _db_instance, _db_initialized
+    with _db_lock:
+        if _db_instance is not None:
+            pool = getattr(_db_instance, "_pool", None)
+            primary_conn = getattr(_db_instance, "_conn", None)
+
+            # Step 1: Return the primary connection to the pool before
+            # closing it.  pool.putconn() is safe even if the conn is
+            # already idle — it just marks it available.  We must do this
+            # BEFORE pool.close() so the pool can cleanly close all conns.
+            if pool is not None and primary_conn is not None:
+                raw = getattr(primary_conn, "_conn", None)
+                if raw is not None:
+                    try:
+                        pool.putconn(raw)
+                    except Exception:
+                        pass
+
+            # Step 2: Close the pool (closes all connections it owns).
+            if pool is not None:
+                try:
+                    pool.close()
+                    logger.info("Postgres connection pool closed")
+                except Exception as exc:
+                    logger.warning("Error closing pool: %s", exc)
+            elif primary_conn is not None:
+                # SQLite or non-pooled — close directly
+                try:
+                    primary_conn.close()
+                except Exception:
+                    pass
+
+            _db_instance = None
+            _db_initialized = False

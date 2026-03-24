@@ -169,8 +169,18 @@ def load_agent_config(path: str | Path) -> AgentConfig:
     return AgentConfig.from_dict(data)
 
 
-def save_agent_config(config: AgentConfig, path: str | Path | None = None) -> Path:
-    """Save an agent definition to a YAML or JSON file."""
+def save_agent_config(
+    config: AgentConfig,
+    path: str | Path | None = None,
+    org_id: str = "",
+    project_id: str = "",
+    created_by: str = "",
+) -> Path:
+    """Save an agent definition — dual-write to DB + filesystem."""
+    # 1. Write to DB (primary, works across pods)
+    save_agent_to_db(config, org_id=org_id, project_id=project_id, created_by=created_by)
+
+    # 2. Write to filesystem (backward compat, local dev)
     if path is None:
         agents_dir = _resolve_agents_dir()
         agents_dir.mkdir(parents=True, exist_ok=True)
@@ -193,7 +203,21 @@ def save_agent_config(config: AgentConfig, path: str | Path | None = None) -> Pa
 
 
 def list_agents(directory: str | Path | None = None) -> list[AgentConfig]:
-    """Discover all agent definitions in a directory."""
+    """Discover all agent definitions — DB first, filesystem fallback."""
+    db_agents = _list_agents_from_db()
+    if db_agents is not None:
+        # Merge: DB is authoritative, but include filesystem-only agents
+        db_names = {a.name for a in db_agents}
+        fs_agents = _list_agents_from_fs(directory)
+        for a in fs_agents:
+            if a.name not in db_names:
+                db_agents.append(a)
+        return db_agents
+    return _list_agents_from_fs(directory)
+
+
+def _list_agents_from_fs(directory: str | Path | None = None) -> list[AgentConfig]:
+    """Discover agent definitions from filesystem."""
     directory = Path(directory) if directory else _resolve_agents_dir()
     if not directory.exists():
         return []
@@ -206,6 +230,114 @@ def list_agents(directory: str | Path | None = None) -> list[AgentConfig]:
             except Exception as exc:
                 logger.warning("Skipping %s: %s", p, exc)
     return agents
+
+
+# ── DB-backed agent registry ─────────────────────────────────────────
+
+def _get_registry_db():
+    """Get DB for agent registry, or None if unavailable."""
+    try:
+        from agentos.core.db_config import get_db, initialize_db
+        initialize_db()
+        return get_db()
+    except Exception:
+        return None
+
+
+def save_agent_to_db(
+    config: AgentConfig,
+    org_id: str = "",
+    project_id: str = "",
+    created_by: str = "",
+) -> bool:
+    """Persist an agent config to the agents table. Returns True on success."""
+    db = _get_registry_db()
+    if db is None:
+        return False
+    try:
+        agent_id = config.agent_id or config.name
+        config_json = json.dumps(config.to_dict())
+        import time as _time
+        now = _time.time()
+        db.conn.execute(
+            """INSERT INTO agents (agent_id, org_id, project_id, name, description,
+               version, config_json, is_active, created_by, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+            ON CONFLICT (agent_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                version = EXCLUDED.version,
+                config_json = EXCLUDED.config_json,
+                updated_at = EXCLUDED.updated_at""",
+            (agent_id, org_id, project_id, config.name, config.description,
+             config.version, config_json, created_by, now, now),
+        )
+        db.conn.commit()
+        return True
+    except Exception as exc:
+        logger.warning("Failed to save agent '%s' to DB: %s", config.name, exc)
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+        return False
+
+
+def get_agent_from_db(name: str, org_id: str = "", project_id: str = "") -> AgentConfig | None:
+    """Load an agent config from the DB by name. Returns None if not found."""
+    db = _get_registry_db()
+    if db is None:
+        return None
+    try:
+        row = db.conn.execute(
+            "SELECT config_json FROM agents WHERE name = ? AND is_active = 1 ORDER BY updated_at DESC LIMIT 1",
+            (name,),
+        ).fetchone()
+        if not row:
+            return None
+        data = json.loads(row["config_json"]) if isinstance(row["config_json"], str) else row["config_json"]
+        return AgentConfig.from_dict(data)
+    except Exception as exc:
+        logger.warning("Failed to load agent '%s' from DB: %s", name, exc)
+        return None
+
+
+def _list_agents_from_db() -> list[AgentConfig] | None:
+    """List all active agents from DB. Returns None if DB unavailable."""
+    db = _get_registry_db()
+    if db is None:
+        return None
+    try:
+        rows = db.conn.execute(
+            "SELECT config_json FROM agents WHERE is_active = 1 ORDER BY name"
+        ).fetchall()
+        agents = []
+        for row in rows:
+            try:
+                data = json.loads(row["config_json"]) if isinstance(row["config_json"], str) else row["config_json"]
+                agents.append(AgentConfig.from_dict(data))
+            except Exception as exc:
+                logger.warning("Skipping malformed DB agent: %s", exc)
+        return agents
+    except Exception as exc:
+        logger.warning("Failed to list agents from DB: %s", exc)
+        return None
+
+
+def delete_agent_from_db(name: str) -> bool:
+    """Soft-delete an agent from the DB. Returns True on success."""
+    db = _get_registry_db()
+    if db is None:
+        return False
+    try:
+        db.conn.execute(
+            "UPDATE agents SET is_active = 0 WHERE name = ?", (name,)
+        )
+        db.conn.commit()
+        return True
+    except Exception as exc:
+        logger.warning("Failed to delete agent '%s' from DB: %s", name, exc)
+        return False
 
 
 class Agent:
@@ -803,10 +935,16 @@ class Agent:
 
     @classmethod
     def from_name(cls, name: str, directory: str | Path | None = None) -> Agent:
-        """Load a named agent from the agents directory."""
+        """Load a named agent — DB first, filesystem fallback."""
+        # Try DB registry first (works across pods, no filesystem needed)
+        db_config = get_agent_from_db(name)
+        if db_config is not None:
+            return cls(db_config)
+
+        # Filesystem fallback (local dev, legacy agents)
         directory = Path(directory) if directory else _resolve_agents_dir()
         for ext in (".yaml", ".yml", ".json"):
             p = directory / f"{name}{ext}"
             if p.exists():
                 return cls.from_file(p)
-        raise FileNotFoundError(f"No agent definition found for '{name}' in {directory}")
+        raise FileNotFoundError(f"No agent definition found for '{name}'")
