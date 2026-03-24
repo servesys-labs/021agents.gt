@@ -13,24 +13,6 @@ from agentos.api.deps import CurrentUser, get_current_user, _get_db
 router = APIRouter(prefix="/voice", tags=["voice"])
 
 PLATFORM_CONFIGS = {
-    "elevenlabs": {
-        "adapter_cls": "agentos.integrations.voice_platforms.elevenlabs.ElevenLabsAdapter",
-        "api_key_env": "ELEVENLABS_API_KEY",
-        "webhook_secret_env": "ELEVENLABS_WEBHOOK_SECRET",
-        "signature_header": "x-elevenlabs-signature",
-    },
-    "retell": {
-        "adapter_cls": "agentos.integrations.voice_platforms.retell.RetellAdapter",
-        "api_key_env": "RETELL_API_KEY",
-        "webhook_secret_env": "RETELL_WEBHOOK_SECRET",
-        "signature_header": "x-retell-signature",
-    },
-    "bland": {
-        "adapter_cls": "agentos.integrations.voice_platforms.bland.BlandAdapter",
-        "api_key_env": "BLAND_API_KEY",
-        "webhook_secret_env": "BLAND_WEBHOOK_SECRET",
-        "signature_header": "x-bland-signature",
-    },
     "tavus": {
         "adapter_cls": "agentos.integrations.voice_platforms.tavus.TavusAdapter",
         "api_key_env": "TAVUS_API_KEY",
@@ -38,6 +20,8 @@ PLATFORM_CONFIGS = {
         "signature_header": "x-tavus-signature",
     },
 }
+# Note: ElevenLabs, Retell, Bland removed — TTS/STT via GMI native tools,
+# call management via Pipedream MCP connectors if needed.
 
 
 def _load_adapter(platform: str, db: Any = None, need_api_key: bool = False):
@@ -274,32 +258,7 @@ async def create_platform_call(
     adapter = _load_adapter(platform, db=db, need_api_key=True)
 
     # Route to the platform-specific create method
-    if platform == "elevenlabs":
-        result = await adapter.create_conversation(
-            agent_id=body.get("agent_id", ""),
-            first_message=body.get("first_message", ""),
-            agent_name=body.get("agent_name", ""),
-            org_id=user.org_id,
-        )
-    elif platform == "retell":
-        result = await adapter.create_call(
-            from_number=body.get("from_number", ""),
-            to_number=body.get("to_number", ""),
-            agent_id=body.get("agent_id", ""),
-            agent_name=body.get("agent_name", ""),
-            org_id=user.org_id,
-        )
-    elif platform == "bland":
-        result = await adapter.create_call(
-            phone_number=body.get("phone_number", ""),
-            task=body.get("task", ""),
-            voice=body.get("voice", ""),
-            agent_name=body.get("agent_name", ""),
-            org_id=user.org_id,
-            first_sentence=body.get("first_sentence", ""),
-            max_duration=body.get("max_duration", 300),
-        )
-    elif platform == "tavus":
+    if platform == "tavus":
         result = await adapter.create_conversation(
             persona_id=body.get("persona_id", ""),
             context=body.get("context", ""),

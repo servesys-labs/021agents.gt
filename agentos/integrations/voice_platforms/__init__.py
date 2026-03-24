@@ -1,15 +1,14 @@
-"""Voice platform integrations — Vapi, ElevenLabs, Retell, Bland, Tavus."""
+"""Voice platform integrations — Vapi (phone) + Tavus (video).
+
+ElevenLabs, Retell, and Bland are available via:
+  - GMI Cloud API for TTS/STT inference (native multimodal tools)
+  - Pipedream MCP for call management / webhooks (3,000+ app connectors)
+"""
 
 from agentos.integrations.voice_platforms.vapi import VapiAdapter
-from agentos.integrations.voice_platforms.elevenlabs import ElevenLabsAdapter
-from agentos.integrations.voice_platforms.retell import RetellAdapter
-from agentos.integrations.voice_platforms.bland import BlandAdapter
 from agentos.integrations.voice_platforms.tavus import TavusAdapter
 
 __all__ = [
     "VapiAdapter",
-    "ElevenLabsAdapter",
-    "RetellAdapter",
-    "BlandAdapter",
     "TavusAdapter",
 ]
