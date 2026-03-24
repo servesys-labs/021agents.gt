@@ -97,6 +97,32 @@ def _extract_project_scope(agent: Any) -> str:
     return ""
 
 
+def _enforce_compliance(agent: Any, user: CurrentUser) -> None:
+    """Block execution if agent has critical drift from its gold image."""
+    try:
+        db = _get_db()
+        from agentos.config.compliance import ComplianceChecker
+        checker = ComplianceChecker(db)
+        report = checker.check_agent(
+            agent_name=agent.config.name,
+            agent_config=agent.config.to_dict(),
+            org_id=user.org_id,
+            checked_by=user.user_id,
+        )
+        if report.status == "critical":
+            drift_fields = ", ".join(d.field for d in report.drifted_fields[:5])
+            raise HTTPException(
+                status_code=403,
+                detail=f"Agent '{agent.config.name}' has critical config drift from gold image "
+                       f"'{report.image_name}': {drift_fields}. "
+                       f"Fix the drift or update the gold image before running.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Compliance check is best-effort — don't block on infra errors
+
+
 def _enforce_project_scope_access(scoped_project_id: str, user: CurrentUser) -> None:
     """Ensure caller can execute a project-scoped agent."""
     if not scoped_project_id:
@@ -181,6 +207,7 @@ async def run_agent(
 
     scoped_project_id = _extract_project_scope(agent)
     _enforce_project_scope_access(scoped_project_id, user)
+    _enforce_compliance(agent, user)
     if hasattr(agent, "set_runtime_context"):
         agent.set_runtime_context(
             org_id=user.org_id,
@@ -237,6 +264,7 @@ async def run_agent_stream(
 
     scoped_project_id = _extract_project_scope(agent)
     _enforce_project_scope_access(scoped_project_id, user)
+    _enforce_compliance(agent, user)
     if hasattr(agent, "set_runtime_context"):
         agent.set_runtime_context(
             org_id=user.org_id,

@@ -340,6 +340,30 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       created_at TEXT DEFAULT (datetime('now'))
     )`;
 
+    this.sql`CREATE TABLE IF NOT EXISTS voice_calls (
+      call_id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      agent_name TEXT DEFAULT '',
+      phone_number TEXT DEFAULT '',
+      direction TEXT DEFAULT 'outbound',
+      status TEXT DEFAULT 'pending',
+      duration_seconds REAL DEFAULT 0,
+      transcript TEXT DEFAULT '',
+      cost_usd REAL DEFAULT 0,
+      platform_agent_id TEXT DEFAULT '',
+      metadata_json TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
+    this.sql`CREATE TABLE IF NOT EXISTS voice_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      call_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      payload_json TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now'))
+    )`;
+
     // Conversation intelligence tables
     this.sql`CREATE TABLE IF NOT EXISTS conversation_scores (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -923,6 +947,106 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     return this.sql`SELECT * FROM vapi_events WHERE call_id = ${callId} ORDER BY created_at DESC LIMIT ${limit}`;
   }
 
+  @callable()
+  upsertVoiceCall(input: {
+    callId: string;
+    platform: string;
+    phoneNumber?: string;
+    direction?: string;
+    status?: string;
+    durationSeconds?: number;
+    transcript?: string;
+    costUsd?: number;
+    platformAgentId?: string;
+    metadata?: Record<string, unknown>;
+  }): any {
+    const callId = String(input.callId || "");
+    const platform = String(input.platform || "");
+    if (!callId || !platform) return { error: "callId and platform required" };
+    const exists = this.sql<{ call_id: string }>`SELECT call_id FROM voice_calls WHERE call_id = ${callId} LIMIT 1`;
+    if (exists.length > 0) {
+      this.sql`UPDATE voice_calls
+        SET platform = ${platform},
+            agent_name = ${this.state.config.agentName || "agentos"},
+            phone_number = ${String(input.phoneNumber || "")},
+            direction = ${String(input.direction || "outbound")},
+            status = ${String(input.status || "pending")},
+            duration_seconds = ${Number(input.durationSeconds || 0)},
+            transcript = ${String(input.transcript || "")},
+            cost_usd = ${Number(input.costUsd || 0)},
+            platform_agent_id = ${String(input.platformAgentId || "")},
+            metadata_json = ${JSON.stringify(input.metadata || {})}
+        WHERE call_id = ${callId}`;
+    } else {
+      this.sql`INSERT INTO voice_calls (
+        call_id, platform, agent_name, phone_number, direction, status,
+        duration_seconds, transcript, cost_usd, platform_agent_id, metadata_json
+      ) VALUES (
+        ${callId}, ${platform}, ${this.state.config.agentName || "agentos"},
+        ${String(input.phoneNumber || "")}, ${String(input.direction || "outbound")},
+        ${String(input.status || "pending")}, ${Number(input.durationSeconds || 0)},
+        ${String(input.transcript || "")}, ${Number(input.costUsd || 0)},
+        ${String(input.platformAgentId || "")}, ${JSON.stringify(input.metadata || {})}
+      )`;
+    }
+    void this._sendIngest("/api/v1/edge-ingest/voice/call", {
+      call_id: callId,
+      platform,
+      org_id: this.state.config.orgId || "",
+      agent_name: this.state.config.agentName || "agentos",
+      phone_number: String(input.phoneNumber || ""),
+      direction: String(input.direction || "outbound"),
+      status: String(input.status || "pending"),
+      duration_seconds: Number(input.durationSeconds || 0),
+      transcript: String(input.transcript || ""),
+      cost_usd: Number(input.costUsd || 0),
+      platform_agent_id: String(input.platformAgentId || ""),
+      metadata: input.metadata || {},
+      created_at: Date.now() / 1000,
+    });
+    return { callId, platform, status: String(input.status || "pending") };
+  }
+
+  @callable()
+  recordVoiceEvent(input: {
+    callId: string;
+    platform: string;
+    eventType: string;
+    payload?: Record<string, unknown>;
+  }): any {
+    const callId = String(input.callId || "");
+    const platform = String(input.platform || "");
+    const eventType = String(input.eventType || "");
+    if (!callId || !platform || !eventType) return { error: "callId, platform, eventType required" };
+    const payloadJson = JSON.stringify(input.payload || {});
+    this.sql`INSERT INTO voice_events (call_id, platform, event_type, payload_json) VALUES (${callId}, ${platform}, ${eventType}, ${payloadJson})`;
+    void this._sendIngest("/api/v1/edge-ingest/voice/event", {
+      call_id: callId,
+      platform,
+      org_id: this.state.config.orgId || "",
+      event_type: eventType,
+      payload_json: payloadJson,
+      created_at: Date.now() / 1000,
+    });
+    return { recorded: true, callId, platform, eventType };
+  }
+
+  @callable()
+  listVoiceCalls(platform: string = "", limit: number = 50): any[] {
+    if (platform) {
+      return this.sql`SELECT * FROM voice_calls WHERE platform = ${platform} ORDER BY created_at DESC LIMIT ${limit}`;
+    }
+    return this.sql`SELECT * FROM voice_calls ORDER BY created_at DESC LIMIT ${limit}`;
+  }
+
+  @callable()
+  listVoiceEvents(callId: string, platform: string = "", limit: number = 100): any[] {
+    if (platform) {
+      return this.sql`SELECT * FROM voice_events WHERE call_id = ${callId} AND platform = ${platform} ORDER BY created_at DESC LIMIT ${limit}`;
+    }
+    return this.sql`SELECT * FROM voice_events WHERE call_id = ${callId} ORDER BY created_at DESC LIMIT ${limit}`;
+  }
+
   // ── Issues ──────────────────────────────────────────────────
 
   @callable()
@@ -1014,7 +1138,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const posCount = posWords.filter(w => lower.includes(w)).length;
     const negCount = negWords.filter(w => lower.includes(w)).length;
     const sentimentScore = (posCount - negCount) / Math.max(posCount + negCount, 1);
+    const sentimentConfidence = Math.min(1, Math.max(0.1, (posCount + negCount) / 4));
     const sentiment = posCount > negCount ? "positive" : negCount > posCount ? "negative" : "neutral";
+    const hasHallucinationRisk = /\b(guess|unsure|not sure|maybe|probably)\b/i.test(output) ? 1 : 0;
 
     // Persist
     this.sql`INSERT INTO conversation_scores (session_id, turn_number, sentiment, sentiment_score, quality_overall, relevance_score, coherence_score, helpfulness_score) VALUES (${sessionId}, ${1}, ${sentiment}, ${sentimentScore}, ${quality}, ${relevance}, ${coherence}, ${helpfulness})`;
@@ -1026,13 +1152,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       agent_name: this.state.config.agentName || "agentos",
       sentiment,
       sentiment_score: sentimentScore,
+      sentiment_confidence: sentimentConfidence,
       relevance_score: relevance,
       coherence_score: coherence,
       helpfulness_score: helpfulness,
+      safety_score: 1.0,
       quality_overall: quality,
       topic: "",
       intent: "",
       has_tool_failure: 0,
+      has_hallucination_risk: hasHallucinationRisk,
+      scorer_model: "heuristic",
       created_at: Date.now() / 1000,
     });
     void this._sendIngest("/api/v1/edge-ingest/conversation/analytics", {
@@ -1046,6 +1176,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       topics_json: "[]",
       total_turns: 1,
       tool_failure_count: 0,
+      hallucination_risk_count: hasHallucinationRisk,
       created_at: Date.now() / 1000,
     });
 
@@ -1336,6 +1467,50 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const callId = url.searchParams.get("call_id") || "";
       if (!callId) return Response.json({ error: "call_id required" }, { status: 400 });
       return Response.json({ events: this.listVapiEvents(callId) });
+    }
+    if (path === "voice-calls") {
+      if (request.method === "POST") {
+        const body = await request.json() as {
+          callId?: string; platform?: string; phoneNumber?: string; direction?: string; status?: string;
+          durationSeconds?: number; transcript?: string; costUsd?: number; platformAgentId?: string;
+          metadata?: Record<string, unknown>;
+        };
+        if (!body.callId || !body.platform) {
+          return Response.json({ error: "callId and platform required" }, { status: 400 });
+        }
+        return Response.json(this.upsertVoiceCall({
+          callId: body.callId,
+          platform: body.platform,
+          phoneNumber: body.phoneNumber,
+          direction: body.direction,
+          status: body.status,
+          durationSeconds: body.durationSeconds,
+          transcript: body.transcript,
+          costUsd: body.costUsd,
+          platformAgentId: body.platformAgentId,
+          metadata: body.metadata || {},
+        }));
+      }
+      const platform = url.searchParams.get("platform") || "";
+      return Response.json({ calls: this.listVoiceCalls(platform) });
+    }
+    if (path === "voice-events") {
+      if (request.method === "POST") {
+        const body = await request.json() as { callId?: string; platform?: string; eventType?: string; payload?: Record<string, unknown> };
+        if (!body.callId || !body.platform || !body.eventType) {
+          return Response.json({ error: "callId, platform, eventType required" }, { status: 400 });
+        }
+        return Response.json(this.recordVoiceEvent({
+          callId: body.callId,
+          platform: body.platform,
+          eventType: body.eventType,
+          payload: body.payload || {},
+        }));
+      }
+      const callId = url.searchParams.get("call_id") || "";
+      const platform = url.searchParams.get("platform") || "";
+      if (!callId) return Response.json({ error: "call_id required" }, { status: 400 });
+      return Response.json({ events: this.listVoiceEvents(callId, platform) });
     }
 
     // Issues

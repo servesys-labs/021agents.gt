@@ -47,6 +47,7 @@ type SecurityFinding = {
   description: string;
   evidence: string;
   aivss_score: number;
+  aivss_vector: string;
 };
 
 type RiskProfile = {
@@ -54,6 +55,7 @@ type RiskProfile = {
   risk_score: number;
   risk_level: string;
   last_scan_id: string;
+  aivss_vector_json: string;
   findings_summary: { total?: number; by_severity?: Record<string, number> };
 };
 
@@ -241,6 +243,7 @@ export const SecurityPage = () => {
                       <th className="text-center py-2 px-3">AIVSS Score</th>
                       <th className="text-center py-2 px-3">Risk Level</th>
                       <th className="text-right py-2 px-3">Findings</th>
+                      <th className="text-left py-2 px-3">AIVSS Vector</th>
                       <th className="text-left py-2 px-3">Last Scan</th>
                     </tr>
                   </thead>
@@ -253,6 +256,14 @@ export const SecurityPage = () => {
                           <span className={`text-[10px] font-semibold uppercase ${riskColor(p.risk_level)}`}>{p.risk_level}</span>
                         </td>
                         <td className="py-2 px-3 text-right text-text-muted">{p.findings_summary?.total ?? 0}</td>
+                        <td className="py-2 px-3 font-mono text-text-muted text-[10px]">
+                          {(() => {
+                            try {
+                              const v = typeof p.aivss_vector_json === "string" ? JSON.parse(p.aivss_vector_json) : p.aivss_vector_json;
+                              return v?.vector_string || "—";
+                            } catch { return "—"; }
+                          })()}
+                        </td>
                         <td className="py-2 px-3 font-mono text-text-muted text-[10px]">{p.last_scan_id?.slice(0, 12)}</td>
                       </tr>
                     ))}
@@ -282,6 +293,7 @@ export const SecurityPage = () => {
                           <th className="text-left py-2 px-3">Category</th>
                           <th className="text-center py-2 px-3">Severity</th>
                           <th className="text-center py-2 px-3">AIVSS</th>
+                          <th className="text-left py-2 px-3">Vector</th>
                           <th className="text-left py-2 px-3">Evidence</th>
                         </tr>
                       </thead>
@@ -294,6 +306,7 @@ export const SecurityPage = () => {
                               <span className={`text-[10px] font-semibold uppercase ${riskColor(f.severity)}`}>{f.severity}</span>
                             </td>
                             <td className="py-2 px-3 text-center"><ScoreGauge score={f.aivss_score} size="sm" /></td>
+                            <td className="py-2 px-3 font-mono text-text-muted text-[10px] truncate max-w-[180px]">{f.aivss_vector || "—"}</td>
                             <td className="py-2 px-3 text-text-muted truncate max-w-[200px]">{f.evidence}</td>
                           </tr>
                         ))}
@@ -328,6 +341,9 @@ export const SecurityPage = () => {
                 <div className="flex items-center gap-2 text-[10px] text-text-muted mb-2">
                   <span>{f.category}</span>
                   <span>AIVSS: {f.aivss_score.toFixed(1)}</span>
+                  {f.aivss_vector && (
+                    <span className="font-mono text-text-muted/70">{f.aivss_vector}</span>
+                  )}
                 </div>
                 <p className="text-[10px] text-text-secondary">{f.evidence}</p>
               </div>
