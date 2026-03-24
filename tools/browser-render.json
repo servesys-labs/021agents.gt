@@ -1,0 +1,29 @@
+{
+  "name": "browser-render",
+  "description": "Render a page with a full headless browser (Puppeteer on Cloudflare edge). Use when web-crawl is blocked or site needs JavaScript rendering, authentication, or anti-bot bypass. Supports text extraction, screenshots, HTML, and link discovery.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "URL to render in the browser"
+      },
+      "action": {
+        "type": "string",
+        "enum": ["text", "screenshot", "html", "links"],
+        "description": "What to extract from the page (default: text)",
+        "default": "text"
+      },
+      "wait_for": {
+        "type": "string",
+        "description": "CSS selector to wait for before extracting content"
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "Page load timeout in milliseconds (default: 30000)",
+        "default": 30000
+      }
+    },
+    "required": ["url"]
+  }
+}

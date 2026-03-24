@@ -10,12 +10,14 @@
     "types": "wrangler types"
   },
   "dependencies": {
-    "agents": "^0.7.9",
-    "@cloudflare/ai-chat": "^0.1.0"
+    "@cloudflare/ai-chat": "^0.1.0",
+    "@cloudflare/puppeteer": "^1.0.6",
+    "@cloudflare/sandbox": "^0.7.0",
+    "agents": "^0.7.9"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260301.0",
     "typescript": "^5.7",
-    "wrangler": "^4.16"
+    "wrangler": "^4.77.0"
   }
 }

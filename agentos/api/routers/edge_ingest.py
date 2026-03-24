@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import json
 import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Header, HTTPException
 
@@ -766,3 +769,96 @@ async def ingest_voice_event(
         org_id=_payload_text(payload, "org_id", "", 64),
     )
     return {"ingested": True, "call_id": call_id, "platform": platform, "event_type": event_type}
+
+
+@router.post("/autoresearch/complete")
+async def ingest_autoresearch_complete(
+    payload: dict[str, Any],
+    authorization: str | None = Header(None),
+    x_edge_token: str | None = Header(None),
+) -> dict[str, Any]:
+    """Ingest autoresearch run completion from edge worker.
+
+    Writes to autoresearch_runs table for full observability.
+    """
+    _require_ingest_token(authorization, x_edge_token)
+    db = _get_db()
+
+    run_data = {
+        "run_id": _payload_text(payload, "run_id", "", 64),
+        "org_id": _payload_text(payload, "org_id", "", 64),
+        "agent_name": _payload_text(payload, "agent_name", "", 128),
+        "mode": _payload_text(payload, "mode", "agent", 32),
+        "primary_metric": _payload_text(payload, "primary_metric", "pass_rate", 64),
+        "status": "completed",
+        "total_iterations": int(payload.get("iterations", 0)),
+        "baseline_score": float(payload.get("baseline_score", 0)),
+        "best_score": float(payload.get("best_score", 0)),
+        "improvements_kept": int(payload.get("improvements_kept", 0)),
+        "experiments_discarded": int(payload.get("experiments_discarded", 0)),
+        "applied": bool(payload.get("applied", False)),
+        "total_cost_usd": float(payload.get("total_cost_usd", 0)),
+        "elapsed_seconds": float(payload.get("elapsed_seconds", 0)),
+        "source": "edge",
+        "completed_at": time.time(),
+    }
+
+    try:
+        db.insert_autoresearch_run(run_data)
+    except Exception as exc:
+        logger.warning("Failed to insert autoresearch run: %s", exc)
+
+    return {
+        "ingested": True,
+        "agent_name": run_data["agent_name"],
+        "iterations": run_data["total_iterations"],
+        "baseline_score": run_data["baseline_score"],
+        "best_score": run_data["best_score"],
+        "applied": run_data["applied"],
+    }
+
+
+@router.post("/autoresearch/experiment")
+async def ingest_autoresearch_experiment(
+    payload: dict[str, Any],
+    authorization: str | None = Header(None),
+    x_edge_token: str | None = Header(None),
+) -> dict[str, Any]:
+    """Ingest a single autoresearch experiment from edge worker.
+
+    Each experiment (hypothesis → eval → keep/discard) is written
+    individually so the dashboard can show real-time progress.
+    """
+    _require_ingest_token(authorization, x_edge_token)
+    db = _get_db()
+
+    exp_data = {
+        "run_id": _payload_text(payload, "run_id", "", 64),
+        "org_id": _payload_text(payload, "org_id", "", 64),
+        "agent_name": _payload_text(payload, "agent_name", "", 128),
+        "iteration": int(payload.get("iteration", 0)),
+        "hypothesis": _payload_text(payload, "hypothesis", "", 2000),
+        "description": _payload_text(payload, "description", "", 500),
+        "modification": payload.get("modification", {}),
+        "score_before": float(payload.get("score_before", 0)),
+        "score_after": float(payload.get("score_after", 0)),
+        "improvement": float(payload.get("improvement", 0)),
+        "primary_metric": _payload_text(payload, "primary_metric", "pass_rate", 64),
+        "all_metrics": payload.get("all_metrics", {}),
+        "status": _payload_text(payload, "status", "discard", 16),
+        "val_bpb": float(payload.get("val_bpb", 0)),
+        "commit_hash": _payload_text(payload, "commit_hash", "", 16),
+        "total_cost_usd": float(payload.get("total_cost_usd", 0)),
+    }
+
+    try:
+        db.insert_autoresearch_experiment(exp_data)
+    except Exception as exc:
+        logger.warning("Failed to insert autoresearch experiment: %s", exc)
+
+    return {
+        "ingested": True,
+        "run_id": exp_data["run_id"],
+        "iteration": exp_data["iteration"],
+        "status": exp_data["status"],
+    }

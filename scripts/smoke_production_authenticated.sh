@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# smoke_production_authenticated.sh — 25-check production smoke test
+# smoke_production_authenticated.sh — 27-check production smoke test
 #
 # Usage:
 #   scripts/smoke_production_authenticated.sh [URL] [EMAIL] [PASSWORD]

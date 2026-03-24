@@ -6,13 +6,13 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
+# Install Python dependencies (including sandbox/E2B support)
 COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[dev,postgres]" && pip install pyyaml python-multipart
+RUN pip install --no-cache-dir -e ".[dev,postgres,sandbox]" && pip install pyyaml python-multipart
 
 # Copy source
 COPY . .
-RUN pip install --no-cache-dir -e ".[postgres]"
+RUN pip install --no-cache-dir -e ".[postgres,sandbox]"
 
 # Initialize default project
 RUN mkdir -p data agents tools eval sessions && \

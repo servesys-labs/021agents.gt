@@ -14,6 +14,7 @@ import {
   Bug,
   Shield,
   Phone,
+  FlaskConical,
   Settings,
   LogOut,
   CreditCard,
@@ -42,6 +43,7 @@ const topNav: NavItem[] = [
   { path: "/compliance", label: "Compliance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/issues", label: "Issues", icon: <Bug size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/security", label: "Security", icon: <Shield size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/autoresearch", label: "Autoresearch", icon: <FlaskConical size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/voice", label: "Voice", icon: <Phone size={iconSize} strokeWidth={iconStroke} /> },
 ];
 

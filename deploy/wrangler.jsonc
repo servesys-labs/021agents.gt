@@ -26,25 +26,40 @@
       {
         "name": "AGENTOS_MCP",
         "class_name": "AgentOSMcpServer"
+      },
+      {
+        "name": "SANDBOX",
+        "class_name": "AgentSandbox"
       }
     ]
   },
 
-  // SQLite migration for Agent + MCP state persistence
+  // Durable Object migrations — AgentSandbox is a new container-backed SQLite class
   "migrations": [
     {
-      "tag": "v1",
-      "new_sqlite_classes": ["AgentOSAgent", "AgentOSMcpServer"]
-    },
-    {
       "tag": "v2",
-      "new_sqlite_classes": ["AgentOSAgent"]
-    },
-    {
-      "tag": "v3",
-      "new_sqlite_classes": ["AgentOSMcpServer"]
+      "new_sqlite_classes": ["AgentSandbox"]
     }
   ],
+
+  // Dynamic Workers — open beta, available to all paid Workers users
+  // See: https://blog.cloudflare.com/dynamic-workers/
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  // Sandbox SDK (Containers) — open beta for all paid Workers users
+  "containers": [
+    {
+      "class_name": "AgentSandbox",
+      "image": "./sandbox.Dockerfile",
+      "instance_type": "lite",
+      "max_instances": 10
+    }
+  ],
+
+  // Browser Rendering — headless Puppeteer on Cloudflare edge
+  "browser": {
+    "binding": "BROWSER"
+  },
 
   // Workers AI binding for LLM inference and embeddings
   "ai": {

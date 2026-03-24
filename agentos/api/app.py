@@ -179,6 +179,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         voice_webhooks,
         edge_ingest,
         runtime_proxy,
+        autoresearch,
     )
     for r in [
         auth.router, agents_router.router, sessions.router,
@@ -199,6 +200,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         voice_webhooks.router,
         edge_ingest.router,
         runtime_proxy.router,
+        autoresearch.router,
     ]:
         app.include_router(r, prefix="/api/v1")
 
@@ -227,6 +229,15 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
             logger.info("Background scheduler started")
         except Exception as exc:
             logger.warning("Could not start background scheduler: %s", exc)
+
+        # Background pricing sync loop — keeps GMI model/rate catalog fresh.
+        try:
+            from agentos.api.routers.billing import run_gmi_pricing_sync_loop
+
+            asyncio.create_task(run_gmi_pricing_sync_loop())
+            logger.info("Background GMI pricing sync loop started")
+        except Exception as exc:
+            logger.warning("Could not start GMI pricing sync loop: %s", exc)
 
         # Background job worker — dequeues and processes async jobs
         async def _run_job_worker() -> None:

@@ -80,22 +80,29 @@ class TestConnectorBillingTracking:
         db.close()
 
         from agentos.connectors.hub import ConnectorHub, ConnectorResult, PipedreamProvider
+        from agentos.core import db_config
 
         # Mock the provider to avoid real API calls
         mock_provider = AsyncMock(spec=PipedreamProvider)
         mock_provider.name = "pipedream"
         mock_provider.call_tool = AsyncMock(return_value=ConnectorResult(success=True, data="ok"))
 
+        captured: dict[str, object] = {}
+
+        class _FakeDB:
+            def record_billing(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr(db_config, "initialize_db", lambda: None)
+        monkeypatch.setattr(db_config, "get_db", lambda: _FakeDB())
+
         hub = ConnectorHub.__new__(ConnectorHub)
         hub._provider = mock_provider
 
         asyncio.run(hub.call_tool("test-tool", {"key": "val"}, org_id="org-test"))
 
-        # Verify billing was recorded
-        from agentos.core.database import AgentDB
-        db = AgentDB(tmp_path / "data" / "agent.db")
-        db.initialize()
-        summary = db.billing_summary(org_id="org-test")
-        assert summary["total_records"] == 1
-        assert summary["by_cost_type"].get("connector", 0) == pytest.approx(0.001)
-        db.close()
+        # Verify billing was recorded with expected payload shape.
+        assert captured["cost_type"] == "connector"
+        assert float(captured["total_cost_usd"]) == pytest.approx(0.001)
+        assert captured["org_id"] == "org-test"
+        assert captured["model"] == "test-tool"

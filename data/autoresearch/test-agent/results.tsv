@@ -1,0 +1,61 @@
+commit	val_bpb	memory_gb	status	description
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name
+base	0.500000	0.0	keep	baseline (pass_rate=0.500)
+iter001	0.500000	0.0	discard	change 1
+iter002	0.500000	0.0	discard	change 2
+base	0.800000	0.0	keep	baseline (pass_rate=0.800)
+iter001	0.800000	0.0	discard	hack the agent name

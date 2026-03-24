@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -759,6 +759,78 @@ CREATE TABLE IF NOT EXISTS vapi_events (
 );
 CREATE INDEX IF NOT EXISTS idx_vapi_events_call ON vapi_events(call_id);
 CREATE INDEX IF NOT EXISTS idx_vapi_events_type ON vapi_events(event_type);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- AUTORESEARCH — full observability for autonomous improvement loops
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS autoresearch_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    mode            TEXT NOT NULL DEFAULT 'agent',
+    primary_metric  TEXT NOT NULL DEFAULT 'pass_rate',
+    max_iterations  INTEGER NOT NULL DEFAULT 0,
+    proposer_model  TEXT NOT NULL DEFAULT '',
+    proposer_provider TEXT NOT NULL DEFAULT '',
+    backend         TEXT NOT NULL DEFAULT 'in-process',
+    status          TEXT NOT NULL DEFAULT 'running',
+    total_iterations INTEGER NOT NULL DEFAULT 0,
+    baseline_score  REAL NOT NULL DEFAULT 0.0,
+    best_score      REAL NOT NULL DEFAULT 0.0,
+    improvements_kept INTEGER NOT NULL DEFAULT 0,
+    experiments_discarded INTEGER NOT NULL DEFAULT 0,
+    experiments_crashed INTEGER NOT NULL DEFAULT 0,
+    best_config_json TEXT NOT NULL DEFAULT '{}',
+    applied         INTEGER NOT NULL DEFAULT 0,
+    total_inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    total_gpu_cost_usd REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    elapsed_seconds REAL NOT NULL DEFAULT 0.0,
+    started_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    completed_at    REAL,
+    source          TEXT NOT NULL DEFAULT 'backend',
+    error_message   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_agent ON autoresearch_runs(agent_name);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_org ON autoresearch_runs(org_id);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_status ON autoresearch_runs(status);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_started ON autoresearch_runs(started_at);
+
+CREATE TABLE IF NOT EXISTS autoresearch_experiments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    iteration       INTEGER NOT NULL DEFAULT 0,
+    hypothesis      TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    modification_json TEXT NOT NULL DEFAULT '{}',
+    config_before_json TEXT NOT NULL DEFAULT '{}',
+    config_after_json TEXT NOT NULL DEFAULT '{}',
+    score_before    REAL NOT NULL DEFAULT 0.0,
+    score_after     REAL NOT NULL DEFAULT 0.0,
+    improvement     REAL NOT NULL DEFAULT 0.0,
+    primary_metric  TEXT NOT NULL DEFAULT 'pass_rate',
+    all_metrics_json TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'discard',
+    val_bpb         REAL NOT NULL DEFAULT 0.0,
+    peak_vram_mb    REAL NOT NULL DEFAULT 0.0,
+    training_seconds REAL NOT NULL DEFAULT 0.0,
+    num_steps       INTEGER NOT NULL DEFAULT 0,
+    num_params_m    REAL NOT NULL DEFAULT 0.0,
+    inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    gpu_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    commit_hash     TEXT NOT NULL DEFAULT '',
+    error_message   TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_run ON autoresearch_experiments(run_id);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_agent ON autoresearch_experiments(agent_name);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_status ON autoresearch_experiments(status);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_created ON autoresearch_experiments(created_at);
 """
 
 # ── Migration from v1 → v2 ─────────────────────────────────────────────────
@@ -1496,6 +1568,76 @@ CREATE INDEX IF NOT EXISTS idx_pricing_lookup ON pricing_catalog(resource_type, 
 CREATE INDEX IF NOT EXISTS idx_pricing_effective ON pricing_catalog(effective_from, effective_to);
 """;
 
+MIGRATION_V13_TO_V14 = """\
+CREATE TABLE IF NOT EXISTS autoresearch_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    mode            TEXT NOT NULL DEFAULT 'agent',
+    primary_metric  TEXT NOT NULL DEFAULT 'pass_rate',
+    max_iterations  INTEGER NOT NULL DEFAULT 0,
+    proposer_model  TEXT NOT NULL DEFAULT '',
+    proposer_provider TEXT NOT NULL DEFAULT '',
+    backend         TEXT NOT NULL DEFAULT 'in-process',
+    status          TEXT NOT NULL DEFAULT 'running',
+    total_iterations INTEGER NOT NULL DEFAULT 0,
+    baseline_score  REAL NOT NULL DEFAULT 0.0,
+    best_score      REAL NOT NULL DEFAULT 0.0,
+    improvements_kept INTEGER NOT NULL DEFAULT 0,
+    experiments_discarded INTEGER NOT NULL DEFAULT 0,
+    experiments_crashed INTEGER NOT NULL DEFAULT 0,
+    best_config_json TEXT NOT NULL DEFAULT '{}',
+    applied         INTEGER NOT NULL DEFAULT 0,
+    total_inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    total_gpu_cost_usd REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    elapsed_seconds REAL NOT NULL DEFAULT 0.0,
+    started_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    completed_at    REAL,
+    source          TEXT NOT NULL DEFAULT 'backend',
+    error_message   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_agent ON autoresearch_runs(agent_name);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_org ON autoresearch_runs(org_id);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_status ON autoresearch_runs(status);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_started ON autoresearch_runs(started_at);
+
+CREATE TABLE IF NOT EXISTS autoresearch_experiments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    iteration       INTEGER NOT NULL DEFAULT 0,
+    hypothesis      TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    modification_json TEXT NOT NULL DEFAULT '{}',
+    config_before_json TEXT NOT NULL DEFAULT '{}',
+    config_after_json TEXT NOT NULL DEFAULT '{}',
+    score_before    REAL NOT NULL DEFAULT 0.0,
+    score_after     REAL NOT NULL DEFAULT 0.0,
+    improvement     REAL NOT NULL DEFAULT 0.0,
+    primary_metric  TEXT NOT NULL DEFAULT 'pass_rate',
+    all_metrics_json TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'discard',
+    val_bpb         REAL NOT NULL DEFAULT 0.0,
+    peak_vram_mb    REAL NOT NULL DEFAULT 0.0,
+    training_seconds REAL NOT NULL DEFAULT 0.0,
+    num_steps       INTEGER NOT NULL DEFAULT 0,
+    num_params_m    REAL NOT NULL DEFAULT 0.0,
+    inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    gpu_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    commit_hash     TEXT NOT NULL DEFAULT '',
+    error_message   TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_run ON autoresearch_experiments(run_id);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_agent ON autoresearch_experiments(agent_name);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_status ON autoresearch_experiments(status);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_created ON autoresearch_experiments(created_at);
+""";
+
 RUNTIME_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS billing_records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2027,6 +2169,70 @@ CREATE TABLE IF NOT EXISTS job_queue (
 CREATE INDEX IF NOT EXISTS idx_job_status ON job_queue(status);
 CREATE INDEX IF NOT EXISTS idx_job_agent ON job_queue(agent_name);
 CREATE INDEX IF NOT EXISTS idx_job_idempotency ON job_queue(idempotency_key);
+
+CREATE TABLE IF NOT EXISTS autoresearch_runs (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    mode            TEXT NOT NULL DEFAULT 'agent',
+    primary_metric  TEXT NOT NULL DEFAULT 'pass_rate',
+    max_iterations  INTEGER NOT NULL DEFAULT 0,
+    proposer_model  TEXT NOT NULL DEFAULT '',
+    proposer_provider TEXT NOT NULL DEFAULT '',
+    backend         TEXT NOT NULL DEFAULT 'in-process',
+    status          TEXT NOT NULL DEFAULT 'running',
+    total_iterations INTEGER NOT NULL DEFAULT 0,
+    baseline_score  REAL NOT NULL DEFAULT 0.0,
+    best_score      REAL NOT NULL DEFAULT 0.0,
+    improvements_kept INTEGER NOT NULL DEFAULT 0,
+    experiments_discarded INTEGER NOT NULL DEFAULT 0,
+    experiments_crashed INTEGER NOT NULL DEFAULT 0,
+    best_config_json TEXT NOT NULL DEFAULT '{}',
+    applied         INTEGER NOT NULL DEFAULT 0,
+    total_inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    total_gpu_cost_usd REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    elapsed_seconds REAL NOT NULL DEFAULT 0.0,
+    started_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+    completed_at    REAL,
+    source          TEXT NOT NULL DEFAULT 'backend',
+    error_message   TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_agent ON autoresearch_runs(agent_name);
+CREATE INDEX IF NOT EXISTS idx_ar_runs_org ON autoresearch_runs(org_id);
+
+CREATE TABLE IF NOT EXISTS autoresearch_experiments (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    iteration       INTEGER NOT NULL DEFAULT 0,
+    hypothesis      TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    modification_json TEXT NOT NULL DEFAULT '{}',
+    config_before_json TEXT NOT NULL DEFAULT '{}',
+    config_after_json TEXT NOT NULL DEFAULT '{}',
+    score_before    REAL NOT NULL DEFAULT 0.0,
+    score_after     REAL NOT NULL DEFAULT 0.0,
+    improvement     REAL NOT NULL DEFAULT 0.0,
+    primary_metric  TEXT NOT NULL DEFAULT 'pass_rate',
+    all_metrics_json TEXT NOT NULL DEFAULT '{}',
+    status          TEXT NOT NULL DEFAULT 'discard',
+    val_bpb         REAL NOT NULL DEFAULT 0.0,
+    peak_vram_mb    REAL NOT NULL DEFAULT 0.0,
+    training_seconds REAL NOT NULL DEFAULT 0.0,
+    num_steps       INTEGER NOT NULL DEFAULT 0,
+    num_params_m    REAL NOT NULL DEFAULT 0.0,
+    inference_cost_usd REAL NOT NULL DEFAULT 0.0,
+    gpu_cost_usd    REAL NOT NULL DEFAULT 0.0,
+    total_cost_usd  REAL NOT NULL DEFAULT 0.0,
+    commit_hash     TEXT NOT NULL DEFAULT '',
+    error_message   TEXT NOT NULL DEFAULT '',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_run ON autoresearch_experiments(run_id);
+CREATE INDEX IF NOT EXISTS idx_ar_exp_agent ON autoresearch_experiments(agent_name);
 """
 
 
@@ -2341,6 +2547,13 @@ class AgentDB:
                 except sqlite3.OperationalError as exc:
                     if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
                         raise
+            self.conn.commit()
+        if from_version < 14:
+            logger.info("Migrating database from v%d to v14 (autoresearch observability)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V13_TO_V14)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v14 migration partial: %s", exc)
             self.conn.commit()
 
     def _seed_security_event_types(self) -> None:
@@ -4557,6 +4770,170 @@ class AgentDB:
                 (now, hours, cost, endpoint_id),
             )
         return {"endpoint_id": endpoint_id, "hours": hours, "cost_usd": cost}
+
+    # ── Autoresearch ──────────────────────────────────────────────────────
+
+    def insert_autoresearch_run(self, run: dict[str, Any]) -> int:
+        """Insert an autoresearch run record. Returns the row ID."""
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO autoresearch_runs (
+                    run_id, org_id, agent_name, mode, primary_metric,
+                    max_iterations, proposer_model, proposer_provider, backend,
+                    status, total_iterations, baseline_score, best_score,
+                    improvements_kept, experiments_discarded, experiments_crashed,
+                    best_config_json, applied,
+                    total_inference_cost_usd, total_gpu_cost_usd, total_cost_usd,
+                    elapsed_seconds, started_at, completed_at, source, error_message
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    run.get("run_id", ""),
+                    run.get("org_id", ""),
+                    run.get("agent_name", ""),
+                    run.get("mode", "agent"),
+                    run.get("primary_metric", "pass_rate"),
+                    run.get("max_iterations", 0),
+                    run.get("proposer_model", ""),
+                    run.get("proposer_provider", ""),
+                    run.get("backend", "in-process"),
+                    run.get("status", "running"),
+                    run.get("total_iterations", 0),
+                    run.get("baseline_score", 0.0),
+                    run.get("best_score", 0.0),
+                    run.get("improvements_kept", 0),
+                    run.get("experiments_discarded", 0),
+                    run.get("experiments_crashed", 0),
+                    json.dumps(run.get("best_config", {})),
+                    1 if run.get("applied") else 0,
+                    run.get("total_inference_cost_usd", 0.0),
+                    run.get("total_gpu_cost_usd", 0.0),
+                    run.get("total_cost_usd", 0.0),
+                    run.get("elapsed_seconds", 0.0),
+                    run.get("started_at", time.time()),
+                    run.get("completed_at"),
+                    run.get("source", "backend"),
+                    run.get("error_message", ""),
+                ),
+            )
+            return cur.lastrowid or 0
+
+    def update_autoresearch_run(self, run_id: str, updates: dict[str, Any]) -> None:
+        """Update an autoresearch run (e.g., when completed)."""
+        sets = []
+        params: list[Any] = []
+        for key in [
+            "status", "total_iterations", "best_score",
+            "improvements_kept", "experiments_discarded", "experiments_crashed",
+            "applied", "total_cost_usd", "elapsed_seconds", "completed_at",
+            "error_message",
+        ]:
+            if key in updates:
+                col = key
+                if key == "applied":
+                    sets.append(f"{col} = ?")
+                    params.append(1 if updates[key] else 0)
+                elif key == "best_config":
+                    sets.append("best_config_json = ?")
+                    params.append(json.dumps(updates[key]))
+                else:
+                    sets.append(f"{col} = ?")
+                    params.append(updates[key])
+        if not sets:
+            return
+        params.append(run_id)
+        with self.tx() as cur:
+            cur.execute(
+                f"UPDATE autoresearch_runs SET {', '.join(sets)} WHERE run_id = ?",
+                params,
+            )
+
+    def insert_autoresearch_experiment(self, exp: dict[str, Any]) -> int:
+        """Insert a single autoresearch experiment record."""
+        with self.tx() as cur:
+            cur.execute(
+                """INSERT INTO autoresearch_experiments (
+                    run_id, org_id, agent_name, iteration,
+                    hypothesis, description, modification_json,
+                    config_before_json, config_after_json,
+                    score_before, score_after, improvement, primary_metric,
+                    all_metrics_json, status,
+                    val_bpb, peak_vram_mb, training_seconds, num_steps, num_params_m,
+                    inference_cost_usd, gpu_cost_usd, total_cost_usd,
+                    commit_hash, error_message
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )""",
+                (
+                    exp.get("run_id", ""),
+                    exp.get("org_id", ""),
+                    exp.get("agent_name", ""),
+                    exp.get("iteration", 0),
+                    exp.get("hypothesis", ""),
+                    exp.get("description", ""),
+                    json.dumps(exp.get("modification", {})),
+                    json.dumps(exp.get("config_before", {})),
+                    json.dumps(exp.get("config_after", {})),
+                    exp.get("score_before", 0.0),
+                    exp.get("score_after", 0.0),
+                    exp.get("improvement", 0.0),
+                    exp.get("primary_metric", "pass_rate"),
+                    json.dumps(exp.get("all_metrics", {})),
+                    exp.get("status", "discard"),
+                    exp.get("val_bpb", 0.0),
+                    exp.get("peak_vram_mb", 0.0),
+                    exp.get("training_seconds", 0.0),
+                    exp.get("num_steps", 0),
+                    exp.get("num_params_m", 0.0),
+                    exp.get("inference_cost_usd", 0.0),
+                    exp.get("gpu_cost_usd", 0.0),
+                    exp.get("total_cost_usd", 0.0),
+                    exp.get("commit_hash", ""),
+                    exp.get("error_message", ""),
+                ),
+            )
+            return cur.lastrowid or 0
+
+    def query_autoresearch_runs(
+        self, agent_name: str = "", org_id: str = "", limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Query autoresearch runs with optional filters."""
+        sql = "SELECT * FROM autoresearch_runs WHERE 1=1"
+        params: list[Any] = []
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        sql += " ORDER BY started_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        except Exception:
+            return []
+
+    def query_autoresearch_experiments(
+        self, run_id: str = "", agent_name: str = "", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Query autoresearch experiments with optional filters."""
+        sql = "SELECT * FROM autoresearch_experiments WHERE 1=1"
+        params: list[Any] = []
+        if run_id:
+            sql += " AND run_id = ?"
+            params.append(run_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        except Exception:
+            return []
 
     def list_gpu_endpoints(self, status: str | None = None, org_id: str = "") -> list[dict[str, Any]]:
         sql = "SELECT * FROM gpu_endpoints WHERE 1=1"

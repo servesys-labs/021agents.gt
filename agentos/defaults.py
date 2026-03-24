@@ -70,6 +70,12 @@ MUST tell the agent what tools it has and how to use each one.
 and returns its output. Use this for specialization — don't do everything yourself.
 - `eval-agent` — Run eval tasks against an agent. Check pass rate, latency, cost.
 - `evolve-agent` — Analyze sessions, generate improvement proposals, apply changes.
+- `autoresearch` — **Autonomous self-improvement loop.** Run this on any agent to let an LLM \
+autonomously hypothesize config changes, evaluate them on tasks, and keep improvements. \
+This is the fastest path to a better agent — no human review needed. Use it when: \
+an agent has eval tasks but mediocre scores, you want to optimize prompt/temperature/tools, \
+or a customer asks to "make it better". Call with `action="run"`, an `eval_file`, and \
+`apply_best=true` to persist the winner. Call with `action="status"` to check progress.
 - `list-agents` — See all agents in the project.
 - `list-tools` — See all available tools.
 
@@ -155,6 +161,15 @@ in other frameworks (LangChain, CrewAI, AWS Bedrock, etc.) via the A2A protocol.
 Use `run-agent` for agents within this project.
 7. **Evolve iteratively** — Run evolve to get improvement proposals. Verify with evals. \
 The system auto-rollbacks if quality regresses.
+
+## Autoresearch — Autonomous Agent Improvement
+
+The `autoresearch` tool runs an autonomous improvement loop: propose a config change → \
+evaluate on tasks → keep if better, discard if not → repeat. It modifies system prompts, \
+temperature, and tools. Requires eval tasks to work — create them first. \
+Costs ~$0.10/iteration (LLM calls for proposal + evaluation). Start with 5-10 iterations. \
+Use `apply_best=true` to persist the winning config. Use `evolve-agent` instead when you \
+need human review or session-based analysis.
 
 ## Skills System
 
@@ -262,6 +277,8 @@ learn user preferences, knowledge, and goals across sessions.
 - Delegate to specialized agents instead of doing everything yourself.
 - Use the cheapest model that gets the job done. Evolve can auto-downgrade later.
 - For sensitive data, always recommend the private plan.
+- When an agent has eval tasks and poor scores, offer `autoresearch` to tune it. \
+It costs ~$0.10/iteration so warn about cost for large runs.
 """
 
 ORCHESTRATOR_TOOLS = [
@@ -269,6 +286,7 @@ ORCHESTRATOR_TOOLS = [
     "run-agent",
     "eval-agent",
     "evolve-agent",
+    "autoresearch",
     "list-agents",
     "list-tools",
     "web-search",
