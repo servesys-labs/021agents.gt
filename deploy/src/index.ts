@@ -77,6 +77,7 @@ interface AgentConfig {
   maxTurns: number;
   budgetLimitUsd: number;
   blockedTools: string[];
+  tools: string[];  // Tool names this agent has access to
   systemPrompt: string;
   agentName: string;
   agentDescription: string;
@@ -184,6 +185,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       maxTurns: 50,
       budgetLimitUsd: 10.0,
       blockedTools: [],
+      tools: [],
       systemPrompt: "You are a helpful AI assistant.",
       agentName: "agentos",
       agentDescription: "AgentOS Agent",
@@ -3855,17 +3857,41 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
         body: JSON.stringify({ chat_id: chatId, action: "typing" }),
       });
 
-      // Route to agent — each Telegram chat gets its own agent instance
-      // Use getAgentByName for proper Agents SDK routing
-      const agent = await getAgentByName<AgentOSAgent>(env.AGENTOS_AGENT, `telegram-${chatId}`);
+      // Route to backend — same agent, same tools, same memory.
+      // Telegram is just a channel, not a separate agent.
+      const agentName = env.TELEGRAM_AGENT_NAME || "my-assistant";
+      const backendUrl = env.BACKEND_INGEST_URL || "";
+      const edgeToken = env.BACKEND_INGEST_TOKEN || "";
       try {
         const userInput = text.startsWith("/ask ") ? text.slice(5) : text;
 
-        // Call agent.run() directly via Durable Object RPC
-        const results = await agent.run(userInput);
-        const last = results[results.length - 1];
-        let output = last?.content ?? "";
-        if (!output && last?.error) output = `Error: ${last.error}`;
+        // Call runtime-proxy/agent/run — edge-token auth, full backend harness
+        const resp = await fetch(`${backendUrl}/api/v1/runtime-proxy/agent/run`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${edgeToken}`,
+          },
+          body: JSON.stringify({
+            agent_name: agentName,
+            task: userInput,
+            channel: "telegram",
+            channel_user_id: String(chatId),
+          }),
+        });
+
+        let output = "";
+        if (resp.ok) {
+          const data = await resp.json() as any;
+          output = data.output || data.content || "";
+          if (!output && data.turnResults) {
+            const last = data.turnResults[data.turnResults.length - 1];
+            output = last?.content || "";
+          }
+        } else {
+          const errText = await resp.text();
+          output = `Error (${resp.status}): ${errText.slice(0, 200)}`;
+        }
         if (!output) output = "I processed your message but have no response.";
 
         // Send reply (split if > 4096 chars)

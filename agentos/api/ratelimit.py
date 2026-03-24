@@ -1,7 +1,10 @@
 """Rate limiting middleware — per API key and per org.
 
-Uses a simple in-memory sliding window counter. For production at scale,
-swap to Redis-backed limiter.
+Uses an in-memory sliding window counter with bounded memory.
+The _windows dict is capped at MAX_KEYS entries; when exceeded,
+stale keys are evicted in bulk to amortize cleanup cost.
+
+For multi-pod production, swap to Redis-backed limiter.
 """
 
 from __future__ import annotations
@@ -14,22 +17,49 @@ from fastapi import Request
 from starlette.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
+MAX_KEYS = 10_000          # Max unique rate-limit keys before eviction
+EVICT_FRACTION = 0.25      # Remove oldest 25% on eviction
+WINDOW_SECONDS = 60        # Sliding window size
+
 
 class RateLimiter:
-    """In-memory sliding window rate limiter."""
+    """In-memory sliding window rate limiter with bounded memory."""
 
     def __init__(self, requests_per_minute: int = 60, burst: int = 10) -> None:
         self.rpm = requests_per_minute
         self.burst = burst
         self._windows: dict[str, list[float]] = defaultdict(list)
+        self._call_count = 0  # Track calls for periodic eviction
+
+    def _maybe_evict(self) -> None:
+        """Evict stale keys when over capacity. Runs every 500 calls."""
+        self._call_count += 1
+        if self._call_count < 500:
+            return
+        self._call_count = 0
+
+        now = time.time()
+        # Remove keys with no recent activity
+        stale = [k for k, v in self._windows.items() if not v or now - v[-1] > WINDOW_SECONDS]
+        for k in stale:
+            del self._windows[k]
+
+        # If still over limit, remove oldest by last-activity time
+        if len(self._windows) > MAX_KEYS:
+            by_last_activity = sorted(self._windows.items(), key=lambda x: x[1][-1] if x[1] else 0)
+            to_remove = int(len(by_last_activity) * EVICT_FRACTION)
+            for k, _ in by_last_activity[:to_remove]:
+                del self._windows[k]
 
     def check(self, key: str) -> bool:
         """Returns True if request is allowed, False if rate limited."""
+        self._maybe_evict()
+
         now = time.time()
         window = self._windows[key]
 
         # Remove requests older than 60 seconds
-        window[:] = [t for t in window if now - t < 60]
+        window[:] = [t for t in window if now - t < WINDOW_SECONDS]
 
         # Check burst (per-second)
         recent = sum(1 for t in window if now - t < 1)
@@ -46,8 +76,17 @@ class RateLimiter:
     def remaining(self, key: str) -> int:
         now = time.time()
         window = self._windows[key]
-        window[:] = [t for t in window if now - t < 60]
+        window[:] = [t for t in window if now - t < WINDOW_SECONDS]
         return max(0, self.rpm - len(window))
+
+    def stats(self) -> dict[str, Any]:
+        """Return limiter stats for monitoring."""
+        return {
+            "unique_keys": len(self._windows),
+            "max_keys": MAX_KEYS,
+            "rpm_limit": self.rpm,
+            "burst_limit": self.burst,
+        }
 
 
 # Global limiter instance
