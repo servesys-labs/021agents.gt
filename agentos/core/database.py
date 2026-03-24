@@ -5252,11 +5252,14 @@ class AgentDB:
             return False
 
 
-    def teardown_agent(self, name: str, hard_delete: bool = False) -> dict[str, Any]:
+    def teardown_agent(self, name: str, org_id: str = "", hard_delete: bool = False) -> dict[str, Any]:
         """Cascading cleanup of all data associated with an agent.
 
         Removes sessions, turns, costs, evals, issues, compliance records,
-        schedules, webhooks, memory facts, gold images, and the agent itself.
+        schedules, webhooks, memory facts, and the agent itself.
+
+        When org_id is provided, ALL deletes are scoped to that org to prevent
+        cross-tenant data deletion when two orgs have agents with the same name.
 
         If hard_delete=True, rows are DELETEd. Otherwise agent is soft-deleted
         and associated records are left for audit (but marked for retention purge).
@@ -5265,6 +5268,18 @@ class AgentDB:
         """
         now = time.time()
         counts: dict[str, int] = {}
+
+        # Build org-scoped WHERE clause for tables that have org_id
+        if org_id:
+            agent_where = "agent_name = ? AND org_id = ?"
+            agent_params: tuple = (name, org_id)
+            session_where = "agent_name = ? AND org_id = ?"
+            session_params: tuple = (name, org_id)
+        else:
+            agent_where = "agent_name = ?"
+            agent_params = (name,)
+            session_where = "agent_name = ?"
+            session_params = (name,)
 
         # Tables with agent_name column to cascade.
         # NOTE: sessions handled separately (turns/errors/feedback/memory FK to it).
@@ -5278,17 +5293,25 @@ class AgentDB:
             "conversation_analytics",
         ]
 
+        # Not all tables have org_id — use agent_name-only for those that don't
         for table in agent_name_tables:
             try:
+                # Try org-scoped first, fall back to name-only
                 if hard_delete:
-                    cur = self.conn.execute(
-                        f"DELETE FROM {table} WHERE agent_name = ?", (name,)
-                    )
+                    try:
+                        cur = self.conn.execute(
+                            f"DELETE FROM {table} WHERE {agent_where}", agent_params)
+                    except Exception:
+                        cur = self.conn.execute(
+                            f"DELETE FROM {table} WHERE agent_name = ?", (name,))
                     counts[table] = cur.rowcount or 0
                 else:
-                    cur = self.conn.execute(
-                        f"SELECT COUNT(*) as cnt FROM {table} WHERE agent_name = ?", (name,)
-                    )
+                    try:
+                        cur = self.conn.execute(
+                            f"SELECT COUNT(*) as cnt FROM {table} WHERE {agent_where}", agent_params)
+                    except Exception:
+                        cur = self.conn.execute(
+                            f"SELECT COUNT(*) as cnt FROM {table} WHERE agent_name = ?", (name,))
                     row = cur.fetchone()
                     cnt = row["cnt"] if isinstance(row, dict) else (row[0] if row else 0)
                     counts[table] = int(cnt)
@@ -5297,47 +5320,44 @@ class AgentDB:
 
         # Tables linked via session_id (not agent_name) → delete BEFORE sessions
         session_linked_tables = ["turns", "errors", "feedback", "memory_facts", "middleware_events"]
+        session_subquery = f"SELECT session_id FROM sessions WHERE {session_where}"
         if hard_delete:
             for table in session_linked_tables:
                 try:
                     cur = self.conn.execute(
-                        f"DELETE FROM {table} WHERE session_id IN "
-                        "(SELECT session_id FROM sessions WHERE agent_name = ?)",
-                        (name,),
+                        f"DELETE FROM {table} WHERE session_id IN ({session_subquery})",
+                        session_params,
                     )
                     counts[table] = cur.rowcount or 0
                 except Exception:
                     counts[table] = 0
 
-            # Now delete sessions themselves
+            # Now delete sessions themselves (org-scoped)
             try:
                 cur = self.conn.execute(
-                    "DELETE FROM sessions WHERE agent_name = ?", (name,),
+                    f"DELETE FROM sessions WHERE {session_where}", session_params,
                 )
                 counts["sessions"] = cur.rowcount or 0
             except Exception:
                 counts["sessions"] = 0
 
-            # Commit all the hard deletes so far
             try:
                 self.conn.commit()
             except Exception:
                 pass
         else:
-            # Soft-delete: just count what would be affected
             for table in session_linked_tables:
                 try:
                     row = self.conn.execute(
-                        f"SELECT COUNT(*) as cnt FROM {table} WHERE session_id IN "
-                        "(SELECT session_id FROM sessions WHERE agent_name = ?)",
-                        (name,),
+                        f"SELECT COUNT(*) as cnt FROM {table} WHERE session_id IN ({session_subquery})",
+                        session_params,
                     ).fetchone()
                     counts[table] = int(row["cnt"] if isinstance(row, dict) else (row[0] if row else 0))
                 except Exception:
                     counts[table] = 0
             try:
                 row = self.conn.execute(
-                    "SELECT COUNT(*) as cnt FROM sessions WHERE agent_name = ?", (name,)
+                    f"SELECT COUNT(*) as cnt FROM sessions WHERE {session_where}", session_params,
                 ).fetchone()
                 counts["sessions"] = int(row["cnt"] if isinstance(row, dict) else (row[0] if row else 0))
             except Exception:
@@ -5368,15 +5388,24 @@ class AgentDB:
         except Exception:
             counts["webhooks"] = 0
 
-        # Soft-delete or hard-delete the agent record itself
+        # Soft-delete or hard-delete the agent record itself (org-scoped)
         try:
             if hard_delete:
-                self.conn.execute("DELETE FROM agents WHERE name = ?", (name,))
+                if org_id:
+                    self.conn.execute("DELETE FROM agents WHERE name = ? AND org_id = ?", (name, org_id))
+                else:
+                    self.conn.execute("DELETE FROM agents WHERE name = ?", (name,))
             else:
-                self.conn.execute(
-                    "UPDATE agents SET is_active = 0, updated_at = ? WHERE name = ?",
-                    (now, name),
-                )
+                if org_id:
+                    self.conn.execute(
+                        "UPDATE agents SET is_active = 0, updated_at = ? WHERE name = ? AND org_id = ?",
+                        (now, name, org_id),
+                    )
+                else:
+                    self.conn.execute(
+                        "UPDATE agents SET is_active = 0, updated_at = ? WHERE name = ?",
+                        (now, name),
+                    )
             self.conn.commit()
             counts["agent"] = 1
         except Exception:

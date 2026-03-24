@@ -195,7 +195,7 @@ async def delete_agent(
 
     # 1. Cascading DB cleanup
     db = _get_db()
-    teardown_result = db.teardown_agent(name, hard_delete=hard_delete)
+    teardown_result = db.teardown_agent(name, org_id=user.org_id, hard_delete=hard_delete)
 
     if teardown_result.get("counts", {}).get("agent", 0) == 0:
         # Agent wasn't in DB — check filesystem
