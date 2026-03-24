@@ -23,6 +23,10 @@ from agentos.core.database import (
     MIGRATION_V5_TO_V6,
     MIGRATION_V6_TO_V7,
     MIGRATION_V7_TO_V8,
+    MIGRATION_V8_TO_V9,
+    MIGRATION_V9_TO_V10,
+    MIGRATION_V10_TO_V11,
+    MIGRATION_V11_TO_V12,
 )
 
 
@@ -149,6 +153,14 @@ class PostgresAgentDB(AgentDB):
             self._executescript_safe(MIGRATION_V6_TO_V7)
         if current < 8:
             self._executescript_safe(MIGRATION_V7_TO_V8)
+        if current < 9:
+            self._executescript_safe(MIGRATION_V8_TO_V9)
+        if current < 10:
+            self._executescript_safe(MIGRATION_V9_TO_V10)
+        if current < 11:
+            self._executescript_safe(MIGRATION_V10_TO_V11)
+        if current < 12:
+            self._executescript_safe(MIGRATION_V11_TO_V12)
         self._ensure_runtime_tables()
         self._ensure_runtime_columns()
         self.conn.execute(

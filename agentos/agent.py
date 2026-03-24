@@ -604,8 +604,10 @@ class Agent:
                 if not turns:
                     return
 
+                import os
                 from agentos.observability.analytics import ConversationAnalytics
-                analytics = ConversationAnalytics()
+                use_llm = bool(os.environ.get("ANTHROPIC_API_KEY", ""))
+                analytics = ConversationAnalytics(use_llm=use_llm)
                 result = analytics.score_session(
                     session_id=session_id,
                     turns=turns,

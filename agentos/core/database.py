@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -1399,6 +1399,45 @@ CREATE INDEX IF NOT EXISTS idx_vapi_events_call ON vapi_events(call_id);
 CREATE INDEX IF NOT EXISTS idx_vapi_events_type ON vapi_events(event_type);
 """;
 
+MIGRATION_V11_TO_V12 = """\
+-- Generic voice_calls table for ElevenLabs, Retell, Bland, Tavus (Vapi keeps its own table)
+CREATE TABLE IF NOT EXISTS voice_calls (
+    call_id         TEXT PRIMARY KEY,
+    platform        TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    phone_number    TEXT NOT NULL DEFAULT '',
+    direction       TEXT NOT NULL DEFAULT 'outbound',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    transcript      TEXT NOT NULL DEFAULT '',
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    platform_agent_id TEXT NOT NULL DEFAULT '',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    started_at      REAL,
+    ended_at        REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_platform ON voice_calls(platform);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_org ON voice_calls(org_id);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_agent ON voice_calls(agent_name);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_status ON voice_calls(status);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_created ON voice_calls(created_at);
+
+CREATE TABLE IF NOT EXISTS voice_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id         TEXT NOT NULL DEFAULT '',
+    platform        TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    event_type      TEXT NOT NULL DEFAULT '',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_voice_events_call ON voice_events(call_id);
+CREATE INDEX IF NOT EXISTS idx_voice_events_platform ON voice_events(platform);
+CREATE INDEX IF NOT EXISTS idx_voice_events_type ON voice_events(event_type);
+""";
+
 RUNTIME_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS billing_records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1622,6 +1661,74 @@ CREATE TABLE IF NOT EXISTS agent_risk_profiles (
 );
 CREATE INDEX IF NOT EXISTS idx_risk_org ON agent_risk_profiles(org_id);
 CREATE INDEX IF NOT EXISTS idx_risk_agent ON agent_risk_profiles(agent_name);
+
+CREATE TABLE IF NOT EXISTS vapi_calls (
+    call_id         TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    phone_number    TEXT NOT NULL DEFAULT '',
+    direction       TEXT NOT NULL DEFAULT 'outbound',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    transcript      TEXT NOT NULL DEFAULT '',
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    vapi_assistant_id TEXT NOT NULL DEFAULT '',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    started_at      REAL,
+    ended_at        REAL,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_org ON vapi_calls(org_id);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_agent ON vapi_calls(agent_name);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_status ON vapi_calls(status);
+CREATE INDEX IF NOT EXISTS idx_vapi_calls_created ON vapi_calls(created_at);
+
+CREATE TABLE IF NOT EXISTS vapi_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id         TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    event_type      TEXT NOT NULL DEFAULT '',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_vapi_events_call ON vapi_events(call_id);
+CREATE INDEX IF NOT EXISTS idx_vapi_events_type ON vapi_events(event_type);
+
+CREATE TABLE IF NOT EXISTS voice_calls (
+    call_id         TEXT PRIMARY KEY,
+    platform        TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    agent_name      TEXT NOT NULL DEFAULT '',
+    phone_number    TEXT NOT NULL DEFAULT '',
+    direction       TEXT NOT NULL DEFAULT 'outbound',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    duration_seconds REAL NOT NULL DEFAULT 0.0,
+    transcript      TEXT NOT NULL DEFAULT '',
+    cost_usd        REAL NOT NULL DEFAULT 0.0,
+    platform_agent_id TEXT NOT NULL DEFAULT '',
+    metadata_json   TEXT NOT NULL DEFAULT '{}',
+    started_at      REAL,
+    ended_at        REAL,
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_platform ON voice_calls(platform);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_org ON voice_calls(org_id);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_agent ON voice_calls(agent_name);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_status ON voice_calls(status);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_created ON voice_calls(created_at);
+
+CREATE TABLE IF NOT EXISTS voice_events (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    call_id         TEXT NOT NULL DEFAULT '',
+    platform        TEXT NOT NULL DEFAULT '',
+    org_id          TEXT NOT NULL DEFAULT '',
+    event_type      TEXT NOT NULL DEFAULT '',
+    payload_json    TEXT NOT NULL DEFAULT '{}',
+    created_at      REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_voice_events_call ON voice_events(call_id);
+CREATE INDEX IF NOT EXISTS idx_voice_events_platform ON voice_events(platform);
+CREATE INDEX IF NOT EXISTS idx_voice_events_type ON voice_events(event_type);
 
 CREATE TABLE IF NOT EXISTS projects (
     project_id      TEXT PRIMARY KEY,
@@ -2094,6 +2201,13 @@ class AgentDB:
                 self.conn.executescript(MIGRATION_V10_TO_V11)
             except sqlite3.OperationalError as exc:
                 logger.debug("v11 migration partial: %s", exc)
+            self.conn.commit()
+        if from_version < 12:
+            logger.info("Migrating database from v%d to v12 (generic voice platform tables)", from_version)
+            try:
+                self.conn.executescript(MIGRATION_V11_TO_V12)
+            except sqlite3.OperationalError as exc:
+                logger.debug("v12 migration partial: %s", exc)
             self.conn.commit()
 
     def _seed_security_event_types(self) -> None:
@@ -3817,14 +3931,31 @@ class AgentDB:
 
     def insert_vapi_call(self, call_id: str, **kwargs: Any) -> None:
         self.conn.execute(
-            """INSERT OR IGNORE INTO vapi_calls (call_id, org_id, agent_name, phone_number,
-               direction, status, vapi_assistant_id, metadata_json, started_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (call_id, kwargs.get("org_id", ""), kwargs.get("agent_name", ""),
-             kwargs.get("phone_number", ""), kwargs.get("direction", "outbound"),
-             kwargs.get("status", "pending"), kwargs.get("vapi_assistant_id", ""),
-             json.dumps(kwargs.get("metadata", {})),
-             kwargs.get("started_at", time.time())),
+            """INSERT INTO vapi_calls (
+               call_id, org_id, agent_name, phone_number, direction, status,
+               vapi_assistant_id, metadata_json, started_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(call_id) DO UPDATE SET
+               org_id = excluded.org_id,
+               agent_name = excluded.agent_name,
+               phone_number = excluded.phone_number,
+               direction = excluded.direction,
+               status = excluded.status,
+               vapi_assistant_id = excluded.vapi_assistant_id,
+               metadata_json = excluded.metadata_json,
+               started_at = excluded.started_at
+            """,
+            (
+                call_id,
+                kwargs.get("org_id", ""),
+                kwargs.get("agent_name", ""),
+                kwargs.get("phone_number", ""),
+                kwargs.get("direction", "outbound"),
+                kwargs.get("status", "pending"),
+                kwargs.get("vapi_assistant_id", ""),
+                json.dumps(kwargs.get("metadata", {})),
+                kwargs.get("started_at", time.time()),
+            ),
         )
         self.conn.commit()
 
@@ -3890,6 +4021,116 @@ class AgentDB:
         return {
             "total_calls": total["cnt"] if total else 0,
             "by_status": {r["status"]: r["cnt"] for r in by_status},
+            "total_cost_usd": round(cost["total"], 4) if cost else 0,
+            "total_duration_seconds": round(cost["dur"], 1) if cost else 0,
+        }
+
+    # ── Generic Voice Platform Methods (ElevenLabs, Retell, Bland, Tavus) ──
+
+    def insert_voice_call(self, call_id: str, platform: str, **kwargs: Any) -> None:
+        self.conn.execute(
+            """INSERT INTO voice_calls (
+               call_id, platform, org_id, agent_name, phone_number, direction,
+               status, platform_agent_id, metadata_json, started_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(call_id) DO UPDATE SET
+               platform = excluded.platform,
+               org_id = excluded.org_id,
+               agent_name = excluded.agent_name,
+               phone_number = excluded.phone_number,
+               direction = excluded.direction,
+               status = excluded.status,
+               platform_agent_id = excluded.platform_agent_id,
+               metadata_json = excluded.metadata_json,
+               started_at = excluded.started_at
+            """,
+            (
+                call_id,
+                platform,
+                kwargs.get("org_id", ""),
+                kwargs.get("agent_name", ""),
+                kwargs.get("phone_number", ""),
+                kwargs.get("direction", "outbound"),
+                kwargs.get("status", "pending"),
+                kwargs.get("platform_agent_id", ""),
+                json.dumps(kwargs.get("metadata", {})),
+                kwargs.get("started_at", time.time()),
+            ),
+        )
+        self.conn.commit()
+
+    def update_voice_call(self, call_id: str, **kwargs: Any) -> None:
+        allowed = {"status", "duration_seconds", "transcript", "cost_usd", "ended_at", "agent_name"}
+        updates = {k: v for k, v in kwargs.items() if k in allowed}
+        if not updates:
+            return
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        values = list(updates.values()) + [call_id]
+        self.conn.execute(f"UPDATE voice_calls SET {set_clause} WHERE call_id = ?", values)
+        self.conn.commit()
+
+    def get_voice_call(self, call_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM voice_calls WHERE call_id = ?", (call_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["metadata"] = json.loads(d.get("metadata_json", "{}"))
+        return d
+
+    def list_voice_calls(self, platform: str = "", org_id: str = "", agent_name: str = "",
+                         status: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM voice_calls WHERE 1=1"
+        params: list[Any] = []
+        if platform:
+            sql += " AND platform = ?"
+            params.append(platform)
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def insert_voice_event(self, call_id: str, platform: str, event_type: str,
+                           payload_json: str = "{}", org_id: str = "") -> None:
+        self.conn.execute(
+            "INSERT INTO voice_events (call_id, platform, org_id, event_type, payload_json) VALUES (?, ?, ?, ?, ?)",
+            (call_id, platform, org_id, event_type, payload_json),
+        )
+        self.conn.commit()
+
+    def list_voice_events(self, call_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM voice_events WHERE call_id = ? ORDER BY created_at DESC LIMIT ?",
+            (call_id, limit),
+        ).fetchall()]
+
+    def voice_call_summary(self, platform: str = "", org_id: str = "") -> dict[str, Any]:
+        conditions = ["1=1"]
+        params: list[Any] = []
+        if platform:
+            conditions.append("platform = ?")
+            params.append(platform)
+        if org_id:
+            conditions.append("org_id = ?")
+            params.append(org_id)
+        where = " AND ".join(conditions)
+        total = self.conn.execute(f"SELECT COUNT(*) as cnt FROM voice_calls WHERE {where}", params).fetchone()
+        by_platform = self.conn.execute(
+            f"SELECT platform, COUNT(*) as cnt FROM voice_calls WHERE {where} GROUP BY platform", params
+        ).fetchall()
+        cost = self.conn.execute(
+            f"SELECT COALESCE(SUM(cost_usd), 0) as total, COALESCE(SUM(duration_seconds), 0) as dur FROM voice_calls WHERE {where}", params
+        ).fetchone()
+        return {
+            "total_calls": total["cnt"] if total else 0,
+            "by_platform": {r["platform"]: r["cnt"] for r in by_platform},
             "total_cost_usd": round(cost["total"], 4) if cost else 0,
             "total_duration_seconds": round(cost["dur"], 1) if cost else 0,
         }
