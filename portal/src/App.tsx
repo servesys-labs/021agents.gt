@@ -29,6 +29,21 @@ const ObservabilityPage = lazy(() =>
 const MetricsPage = lazy(() =>
   import("./pages/evolution").then((m) => ({ default: m.EvolutionPage })),
 );
+const IntelligencePage = lazy(() =>
+  import("./pages/intelligence").then((m) => ({ default: m.IntelligencePage })),
+);
+const CompliancePage = lazy(() =>
+  import("./pages/compliance").then((m) => ({ default: m.CompliancePage })),
+);
+const IssuesPage = lazy(() =>
+  import("./pages/issues").then((m) => ({ default: m.IssuesPage })),
+);
+const SecurityPage = lazy(() =>
+  import("./pages/security").then((m) => ({ default: m.SecurityPage })),
+);
+const VoicePage = lazy(() =>
+  import("./pages/voice").then((m) => ({ default: m.VoicePage })),
+);
 const SettingsPage = lazy(() =>
   import("./pages/settings").then((m) => ({ default: m.SettingsPage })),
 );
@@ -57,6 +72,11 @@ function App() {
             { name: "overview", list: "/overview" },
             { name: "observability", list: "/observability" },
             { name: "metrics", list: "/metrics" },
+            { name: "intelligence", list: "/intelligence" },
+            { name: "compliance", list: "/compliance" },
+            { name: "issues", list: "/issues" },
+            { name: "security", list: "/security" },
+            { name: "voice", list: "/voice" },
             { name: "settings", list: "/settings" },
             { name: "billing", list: "/billing" },
             { name: "login", list: "/login" },
@@ -92,6 +112,11 @@ function App() {
                 <Route path="/overview" element={<OverviewPage />} />
                 <Route path="/observability" element={<ObservabilityPage />} />
                 <Route path="/metrics" element={<MetricsPage />} />
+                <Route path="/intelligence" element={<IntelligencePage />} />
+                <Route path="/compliance" element={<CompliancePage />} />
+                <Route path="/issues" element={<IssuesPage />} />
+                <Route path="/security" element={<SecurityPage />} />
+                <Route path="/voice" element={<VoicePage />} />
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route path="/billing" element={<BillingPage />} />
               </Route>

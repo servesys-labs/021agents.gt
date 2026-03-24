@@ -529,6 +529,29 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
   const [newVarKey, setNewVarKey] = useState("");
   const [newVarValue, setNewVarValue] = useState("");
 
+  const deployHistoryQuery = useApiQuery<{
+    deployments?: Array<{
+      id: string;
+      version: string;
+      status: string;
+      created_at?: string;
+      environment?: string;
+    }>;
+  }>(
+    `/api/v1/deploy/${encodeURIComponent(data.name || "")}/history`,
+    tabId === "deployments" && Boolean(data.name),
+  );
+
+  const statsQuery = useApiQuery<{
+    avg_latency_ms?: number;
+    success_rate?: number;
+    total_tokens?: number;
+    total_cost_usd?: number;
+  }>(
+    `/api/v1/sessions/stats/summary?agent_name=${encodeURIComponent(data.name || "")}&since_days=1`,
+    tabId === "metrics" && Boolean(data.name),
+  );
+
   switch (tabId) {
     /* ── Overview ──────────────────────────────────────────── */
     case "overview":
@@ -565,10 +588,6 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
 
     /* ── Deployments ───────────────────────────────────────── */
     case "deployments": {
-      const deployHistoryQuery = useApiQuery<{ deployments?: Array<{ id: string; version: string; status: string; created_at?: string; environment?: string }> }>(
-        `/api/v1/deploy/${encodeURIComponent(data.name || "")}/history`,
-        Boolean(data.name),
-      );
       const deployments = deployHistoryQuery.data?.deployments ?? [];
 
       return (
@@ -628,15 +647,6 @@ function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
 
     /* ── Metrics ──────────────────────────────────────────── */
     case "metrics": {
-      const statsQuery = useApiQuery<{
-        avg_latency_ms?: number;
-        success_rate?: number;
-        total_tokens?: number;
-        total_cost_usd?: number;
-      }>(
-        `/api/v1/sessions/stats/summary?agent_name=${encodeURIComponent(data.name || "")}&since_days=1`,
-        Boolean(data.name),
-      );
       const stats = statsQuery.data;
 
       const metricCards = [

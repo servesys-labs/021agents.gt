@@ -7,6 +7,10 @@ import {
   DollarSign,
   Layers,
   Filter,
+  Brain,
+  ThumbsUp,
+  ThumbsDown,
+  Minus,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -88,6 +92,13 @@ export const SessionsPage = () => {
   const sessionsQuery = useApiQuery<SessionInfo[]>(
     `/api/v1/sessions?limit=${limit}&offset=${offset}`,
   );
+  const intelQuery = useApiQuery<Array<{
+    session_id: string;
+    avg_quality: number;
+    dominant_sentiment: string;
+    avg_sentiment_score: number;
+    tool_failure_count: number;
+  }>>("/api/v1/intelligence/analytics?limit=200");
   const turnsQuery = useApiQuery<SessionTurn[]>(
     `/api/v1/sessions/${selectedSession ?? ""}/turns`,
     Boolean(selectedSession),
@@ -177,6 +188,11 @@ export const SessionsPage = () => {
 
   const turns = safeArray<SessionTurn>(turnsQuery.data);
   const traceSessions = safeArray<TraceSession>(traceQuery.data?.sessions);
+
+  // Intelligence lookup by session_id
+  const intelMap = new Map(
+    (intelQuery.data ?? []).map((a) => [a.session_id, a]),
+  );
   const traceStep = traceSessions[traceCursor] ?? null;
 
   return (
@@ -324,6 +340,8 @@ export const SessionsPage = () => {
                     <th>Status</th>
                     <th>Turns</th>
                     <th>Cost</th>
+                    <th>Quality</th>
+                    <th>Sentiment</th>
                     <th>Duration</th>
                     <th style={{ width: "48px" }}></th>
                   </tr>
@@ -356,6 +374,31 @@ export const SessionsPage = () => {
                         <span className="text-text-muted text-sm font-mono">
                           ${toNumber(s.cost_total_usd).toFixed(4)}
                         </span>
+                      </td>
+                      <td>
+                        {(() => {
+                          const intel = intelMap.get(s.session_id);
+                          if (!intel) return <span className="text-text-muted text-[10px]">—</span>;
+                          const q = intel.avg_quality ?? 0;
+                          return (
+                            <div className="flex items-center gap-1.5">
+                              <div className="w-12 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
+                                <div className="h-full bg-chart-purple rounded-full" style={{ width: `${q * 100}%` }} />
+                              </div>
+                              <span className="text-[10px] text-text-muted font-mono">{Math.round(q * 100)}%</span>
+                            </div>
+                          );
+                        })()}
+                      </td>
+                      <td>
+                        {(() => {
+                          const intel = intelMap.get(s.session_id);
+                          if (!intel) return <span className="text-text-muted text-[10px]">—</span>;
+                          const sent = intel.dominant_sentiment ?? "neutral";
+                          const icon = sent === "positive" ? <ThumbsUp size={10} /> : sent === "negative" ? <ThumbsDown size={10} /> : <Minus size={10} />;
+                          const color = sent === "positive" ? "text-status-live" : sent === "negative" ? "text-status-error" : "text-text-muted";
+                          return <span className={`inline-flex items-center gap-1 text-[10px] ${color}`}>{icon} {sent}</span>;
+                        })()}
                       </td>
                       <td>
                         <span className="text-text-muted text-sm font-mono">

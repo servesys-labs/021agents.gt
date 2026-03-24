@@ -9,6 +9,11 @@ import {
   LayoutDashboard,
   Activity,
   BarChart3,
+  Brain,
+  ShieldCheck,
+  Bug,
+  Shield,
+  Phone,
   Settings,
   LogOut,
   CreditCard,
@@ -33,6 +38,11 @@ const topNav: NavItem[] = [
   { path: "/overview", label: "Overview", icon: <LayoutDashboard size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/observability", label: "Observability", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/metrics", label: "Metrics", icon: <BarChart3 size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/intelligence", label: "Intelligence", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/compliance", label: "Compliance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/issues", label: "Issues", icon: <Bug size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/security", label: "Security", icon: <Shield size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/voice", label: "Voice", icon: <Phone size={iconSize} strokeWidth={iconStroke} /> },
 ];
 
 const bottomNav: NavItem[] = [

@@ -11,6 +11,8 @@ import {
   Play,
   Brain,
   Server,
+  Sparkles,
+  ThumbsUp,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -27,6 +29,12 @@ type DashStats = {
   total_cost_usd?: number;
   error_rate_pct?: number;
 };
+type IntelSummary = {
+  total_scored_turns?: number;
+  avg_quality_score?: number;
+  avg_sentiment_score?: number;
+  tool_failure_count?: number;
+};
 type RecentActivity = {
   id: string;
   type: string;
@@ -39,7 +47,9 @@ export const DashboardPage = () => {
   const navigate = useNavigate();
   const statsQuery = useApiQuery<DashStats>("/api/v1/dashboard/stats");
   const activityQuery = useApiQuery<{ activities: RecentActivity[] }>("/api/v1/dashboard/activity?limit=10");
+  const intelQuery = useApiQuery<IntelSummary>("/api/v1/intelligence/summary?since_days=30");
   const stats = statsQuery.data ?? {};
+  const intel = intelQuery.data ?? {};
   const activities = useMemo(() => activityQuery.data?.activities ?? [], [activityQuery.data]);
 
   const kpis = [
@@ -49,6 +59,8 @@ export const DashboardPage = () => {
     { label: "Total Runs", value: stats.total_runs ?? 0, icon: Play, color: "bg-accent/10", iconColor: "text-accent", link: "/runtime" },
     { label: "Avg Latency", value: `${(stats.avg_latency_ms ?? 0).toFixed(0)}ms`, icon: Clock, color: "bg-chart-yellow/10", iconColor: "text-chart-yellow", link: "/evolution" },
     { label: "Error Rate", value: `${(stats.error_rate_pct ?? 0).toFixed(1)}%`, icon: AlertTriangle, color: "bg-status-error/10", iconColor: "text-status-error", link: "/sessions" },
+    { label: "Avg Quality", value: `${Math.round((intel.avg_quality_score ?? 0) * 100)}%`, icon: Sparkles, color: "bg-chart-purple/10", iconColor: "text-chart-purple", link: "/intelligence" },
+    { label: "Sentiment", value: `${(intel.avg_sentiment_score ?? 0) >= 0 ? "+" : ""}${(intel.avg_sentiment_score ?? 0).toFixed(2)}`, icon: ThumbsUp, color: "bg-chart-cyan/10", iconColor: "text-chart-cyan", link: "/intelligence" },
   ];
 
   const quickActions = [
@@ -72,11 +84,11 @@ export const DashboardPage = () => {
       <PageHeader
         title="Dashboard"
         subtitle="Control plane overview"
-        onRefresh={() => { void statsQuery.refetch(); void activityQuery.refetch(); }}
+        onRefresh={() => { void statsQuery.refetch(); void activityQuery.refetch(); void intelQuery.refetch(); }}
       />
 
       {/* KPI grid */}
-      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {kpis.map((kpi) => (
           <div
             key={kpi.label}
