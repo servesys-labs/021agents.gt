@@ -50,7 +50,6 @@ import {
   Bell,
   Sparkles,
   Plus,
-  Command,
   Search,
   MessageSquare,
 } from "lucide-react";

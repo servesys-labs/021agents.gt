@@ -449,35 +449,9 @@ textarea::placeholder {
   border-radius: 0.5rem !important;
 }
 
-/* Controls */
+/* Default React Flow controls hidden — using custom CanvasControls */
 .react-flow__controls {
-  background-color: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-}
-
-.react-flow__controls-button {
-  background-color: var(--color-surface-raised) !important;
-  border: 1px solid var(--color-border-default) !important;
-  color: var(--color-text-secondary) !important;
-  fill: var(--color-text-secondary) !important;
-  border-radius: 0.375rem !important;
-  width: 28px !important;
-  height: 28px !important;
-  margin-bottom: 4px !important;
-}
-
-.react-flow__controls-button:hover {
-  background-color: var(--color-surface-overlay) !important;
-  border-color: var(--color-border-strong) !important;
-  color: var(--color-text-primary) !important;
-  fill: var(--color-text-primary) !important;
-}
-
-.react-flow__controls-button svg {
-  fill: currentColor !important;
-  max-width: 14px !important;
-  max-height: 14px !important;
+  display: none !important;
 }
 
 /* Attribution - hide in production */
@@ -495,77 +469,7 @@ textarea::placeholder {
   outline-offset: 2px !important;
 }
 
-/* Canvas node cards — glassmorphic */
-.canvas-node {
-  background: var(--color-glass-heavy);
-  backdrop-filter: blur(20px) saturate(1.5);
-  -webkit-backdrop-filter: blur(20px) saturate(1.5);
-  border: 1px solid var(--color-glass-border-strong);
-  border-radius: 0.75rem;
-  padding: 1rem;
-  min-width: 200px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-  cursor: grab;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.25), inset 0 1px 0 var(--color-glass-highlight);
-}
-
-.canvas-node:hover {
-  border-color: var(--color-border-strong);
-}
-
-.canvas-node.selected,
-.react-flow__node.selected .canvas-node {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 1px var(--color-accent), 0 0 20px var(--color-node-glow-orange);
-}
-
-/* Canvas context menu — glassmorphic */
-.canvas-context-menu {
-  background: var(--color-glass-overlay);
-  backdrop-filter: blur(32px) saturate(1.8);
-  -webkit-backdrop-filter: blur(32px) saturate(1.8);
-  border: 1px solid var(--color-glass-border-strong);
-  border-radius: 0.5rem;
-  padding: 0.25rem;
-  min-width: 180px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), inset 0 1px 0 var(--color-glass-highlight);
-  z-index: 100;
-}
-
-.canvas-context-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 0.75rem;
-  font-size: 0.8125rem;
-  color: var(--color-text-secondary);
-  border-radius: 0.375rem;
-  cursor: pointer;
-  transition: background-color 0.1s ease, color 0.1s ease;
-  width: 100%;
-  border: none;
-  background: none;
-  text-align: left;
-}
-
-.canvas-context-menu-item:hover {
-  background-color: var(--color-glass-highlight);
-  color: var(--color-text-primary);
-}
-
-.canvas-context-menu-item.danger {
-  color: var(--color-status-error);
-}
-
-.canvas-context-menu-item.danger:hover {
-  background-color: var(--color-node-glow-red-hover);
-}
-
-.canvas-context-menu-separator {
-  height: 1px;
-  background-color: var(--color-glass-border);
-  margin: 0.25rem 0;
-}
+/* Legacy canvas-node/context-menu classes removed — components use Tailwind utilities directly */
 
 /* Agent config drawer — glassmorphic */
 .config-drawer {
@@ -626,16 +530,6 @@ textarea::placeholder {
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
-}
-
-/* React Flow overrides for dark theme */
-.react-flow__minimap {
-  border-radius: 0.75rem !important;
-}
-
-/* Default React Flow controls hidden — using custom CanvasControls */
-.react-flow__controls {
-  display: none !important;
 }
 
 
