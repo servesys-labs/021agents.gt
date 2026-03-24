@@ -178,6 +178,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         redteam,
         voice_webhooks,
         edge_ingest,
+        runtime_proxy,
     )
     for r in [
         auth.router, agents_router.router, sessions.router,
@@ -197,6 +198,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         redteam.router,
         voice_webhooks.router,
         edge_ingest.router,
+        runtime_proxy.router,
     ]:
         app.include_router(r, prefix="/api/v1")
 

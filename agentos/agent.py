@@ -398,9 +398,14 @@ class Agent:
                 )
             return None
 
+        # Multimodal tiers — no text-model fallback for these
+        _multimodal_tiers = {Complexity.IMAGE_GEN, Complexity.TTS, Complexity.STT}
+
         # Register providers per complexity tier — supports mixed providers
         for tier in Complexity:
             tier_cfg = routing_config.get(tier.value, {})
+            if not tier_cfg:
+                continue  # Skip tiers not defined in the plan
             tier_model = tier_cfg.get("model", model)
             tier_provider_name = tier_cfg.get("provider", "")
             tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
@@ -411,16 +416,22 @@ class Agent:
             # 1. GMI (if key exists — works with any model)
             # 2. Anthropic (with Claude model)
             # 3. OpenAI (with GPT model)
-            gmi_key = os.environ.get("GMI_API_KEY", "")
-            if provider is None and gmi_key:
-                # Use the agent's own model for GMI fallback (it's likely a valid GMI model ID)
-                gmi_model = model if tier_provider_name != "gmi" else tier_model
-                provider = _make_provider(gmi_model, "gmi")
-            if provider is None and anthropic_key:
-                fallback_model = model if "claude" in model else "claude-sonnet-4-6-20250627"
-                provider = _make_provider(fallback_model, "anthropic")
-            if provider is None and openai_key:
-                provider = _make_provider("gpt-5.4-mini", "openai")
+            # Note: multimodal tiers (image_gen, tts, stt) skip text-model fallbacks
+            if tier not in _multimodal_tiers:
+                gmi_key = os.environ.get("GMI_API_KEY", "")
+                if provider is None and gmi_key:
+                    gmi_model = model if tier_provider_name != "gmi" else tier_model
+                    provider = _make_provider(gmi_model, "gmi")
+                if provider is None and anthropic_key:
+                    fallback_model = model if "claude" in model else "claude-sonnet-4-6-20250627"
+                    provider = _make_provider(fallback_model, "anthropic")
+                if provider is None and openai_key:
+                    provider = _make_provider("gpt-5.4-mini", "openai")
+            elif provider is None:
+                # For multimodal tiers, try GMI only (they host image/audio models)
+                gmi_key = os.environ.get("GMI_API_KEY", "")
+                if gmi_key:
+                    provider = _make_provider(tier_model, "gmi")
 
             if provider is not None:
                 llm_router.register(tier, provider, max_tokens=tier_max_tokens)
