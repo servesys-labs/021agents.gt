@@ -64,6 +64,7 @@
     "DEFAULT_PLAN": "standard",
     "DEFAULT_PROVIDER": "gmi",
     "DEFAULT_MODEL": "deepseek-ai/DeepSeek-V3.2",
-    "BACKEND_INGEST_URL": ""
+    "BACKEND_INGEST_URL": "https://backend-production-b174.up.railway.app",
+    "BACKEND_PROXY_ONLY": "true"
   }
 }
