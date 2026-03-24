@@ -3328,19 +3328,37 @@ def _exchange_token_with_server(
 
 
 def _get_builder_provider(args: argparse.Namespace):
-    """Get an LLM provider for the agent builder based on CLI args and env vars."""
+    """Get an LLM provider for the agent builder based on CLI args and env vars.
+
+    Priority: GMI Cloud (routes to Claude via OpenAI-compatible API) → Anthropic direct → OpenAI → stub.
+    GMI is preferred because it provides the widest model selection through a single API key.
+    """
     from agentos.llm.provider import HttpProvider, StubProvider
 
     provider_name = getattr(args, "provider", None)
     model = getattr(args, "model", None)
 
     # Check for API keys in environment
+    gmi_key = os.environ.get("GMI_API_KEY", "")
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
     openai_key = os.environ.get("OPENAI_API_KEY", "")
 
     if provider_name == "stub":
         return StubProvider()
 
+    # GMI Cloud — primary provider (routes to Claude Sonnet via OpenAI-compatible API)
+    if provider_name == "gmi" or (not provider_name and gmi_key):
+        if not gmi_key:
+            print("Error: GMI_API_KEY not set")
+            sys.exit(1)
+        gmi_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
+        return HttpProvider(
+            model_id=model or "anthropic/claude-sonnet-4.6",
+            api_base=gmi_base,
+            api_key=gmi_key,
+        )
+
+    # Anthropic direct
     if provider_name == "anthropic" or (not provider_name and anthropic_key):
         if not anthropic_key:
             print("Error: ANTHROPIC_API_KEY not set")
@@ -3352,6 +3370,7 @@ def _get_builder_provider(args: argparse.Namespace):
             headers={"anthropic-version": "2023-06-01"},
         )
 
+    # OpenAI
     if provider_name == "openai" or (not provider_name and openai_key):
         if not openai_key:
             print("Error: OPENAI_API_KEY not set")
@@ -3364,7 +3383,7 @@ def _get_builder_provider(args: argparse.Namespace):
 
     # Fallback to stub with a helpful message
     print("Note: No LLM API key found. Using stub provider.")
-    print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real LLM-powered creation.")
+    print("  Set GMI_API_KEY (recommended), ANTHROPIC_API_KEY, or OPENAI_API_KEY.")
     print()
     return StubProvider()
 

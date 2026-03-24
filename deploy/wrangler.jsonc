@@ -56,6 +56,30 @@
     }
   ],
 
+  // Queues — guaranteed delivery telemetry pipeline (DO → Queue → Supabase)
+  "queues": {
+    "producers": [
+      { "binding": "TELEMETRY_QUEUE", "queue": "agentos-telemetry" }
+    ],
+    "consumers": [
+      {
+        "queue": "agentos-telemetry",
+        "max_batch_size": 50,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "agentos-telemetry-dlq"
+      }
+    ]
+  },
+
+  // Hyperdrive — accelerated Supabase Postgres connection from edge
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "775f7e11ce8c479993855531f728770a"
+    }
+  ],
+
   // R2 — object storage for RAG docs, generated files, agent artifacts
   "r2_buckets": [
     {

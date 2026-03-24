@@ -683,16 +683,19 @@ class Agent:
                 agent_name=self.config.name,
                 agent_config=self.config.to_dict(),
             )
+            # Only warn for agents that have a matching gold image
+            # Skip silently for: no_gold_images, no_matching_gold_image
             if report.status == "critical":
                 logger.warning(
-                    "COMPLIANCE CRITICAL: Agent '%s' has critical config drift from gold image '%s' (%d drifts)",
-                    self.config.name, report.image_name, report.total_drifts,
+                    "Compliance drift: Agent '%s' has %d critical drifts from gold image '%s'",
+                    self.config.name, report.total_drifts, report.image_name,
                 )
             elif report.status == "drifted":
-                logger.info(
+                logger.debug(
                     "Compliance drift: Agent '%s' has %d config drifts from gold image '%s'",
                     self.config.name, report.total_drifts, report.image_name,
                 )
+            # no_gold_images, no_matching_gold_image, compliant — all silent
         except Exception:
             pass  # Compliance check is best-effort
 

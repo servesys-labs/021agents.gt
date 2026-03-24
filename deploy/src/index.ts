@@ -15,6 +15,7 @@ import {
   Connection,
   callable,
   routeAgentRequest,
+  getAgentByName,
   type StreamingResponse,
 } from "agents";
 import { McpAgent } from "agents/mcp";
@@ -35,6 +36,8 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   LOADER: any; // Dynamic Worker Loader — V8 isolate sandbox (JS/TS)
   SANDBOX: DurableObjectNamespace; // Sandbox SDK — full Linux container
+  TELEMETRY_QUEUE: Queue; // Queue — guaranteed delivery telemetry pipeline
+  HYPERDRIVE: Hyperdrive; // Hyperdrive — accelerated Supabase Postgres
   STORAGE: R2Bucket; // R2 — org/project-scoped file storage
   BROWSER: Fetcher; // Browser Rendering — headless Puppeteer on edge
   ANTHROPIC_API_KEY?: string;
@@ -2360,6 +2363,21 @@ MODIFICATION_JSON: <valid JSON with fields to change, e.g. {"systemPrompt": "new
   }
 
   private async _sendIngest(endpoint: string, payload: Record<string, unknown>): Promise<void> {
+    // Primary: Cloudflare Queue (guaranteed delivery, non-blocking)
+    if (this.env.TELEMETRY_QUEUE) {
+      const type = endpoint.includes("/session") ? "session"
+        : endpoint.includes("/turn") ? "turn"
+        : endpoint.includes("/episode") ? "episode"
+        : "event";
+      try {
+        await this.env.TELEMETRY_QUEUE.send({ type, payload });
+        return;
+      } catch {
+        // Queue send failed — fall through to HTTP backup
+      }
+    }
+
+    // Fallback: HTTP POST to backend (legacy, fragile)
     const base = this._ingestBase();
     if (!base || !this.env.BACKEND_INGEST_TOKEN) return;
     try {
@@ -3812,12 +3830,20 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       const messageId = msg.message_id;
       const tgApi = `https://api.telegram.org/bot${botToken}`;
 
-      // Handle /start command
+      // Handle commands
       if (text.startsWith("/start")) {
         await fetch(`${tgApi}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: "👋 Hi! Send me a message and I'll help." }),
+          body: JSON.stringify({ chat_id: chatId, text: `👋 Hi! Send me a message and I'll help.\n\nYour chat ID: \`${chatId}\``, parse_mode: "Markdown" }),
+        });
+        return Response.json({ ok: true });
+      }
+      if (text === "/myid") {
+        await fetch(`${tgApi}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: `Your chat ID: ${chatId}` }),
         });
         return Response.json({ ok: true });
       }
@@ -3830,15 +3856,17 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
       });
 
       // Route to agent — each Telegram chat gets its own agent instance
-      const agentId = env.AGENTOS_AGENT.idFromName(`telegram-${chatId}`);
-      const agent = env.AGENTOS_AGENT.get(agentId);
+      // Use getAgentByName for proper Agents SDK routing
+      const agent = await getAgentByName<AgentOSAgent>(env.AGENTOS_AGENT, `telegram-${chatId}`);
       try {
-        const agentResp = await agent.fetch(new Request("http://internal/run", {
-          method: "POST",
-          body: JSON.stringify({ input: text.startsWith("/ask ") ? text.slice(5) : text }),
-        }));
-        const data = await agentResp.json() as any;
-        const output = data.output || data.turnResults?.[data.turnResults?.length - 1]?.content || "I processed your message but have no response.";
+        const userInput = text.startsWith("/ask ") ? text.slice(5) : text;
+
+        // Call agent.run() directly via Durable Object RPC
+        const results = await agent.run(userInput);
+        const last = results[results.length - 1];
+        let output = last?.content ?? "";
+        if (!output && last?.error) output = `Error: ${last.error}`;
+        if (!output) output = "I processed your message but have no response.";
 
         // Send reply (split if > 4096 chars)
         for (let i = 0; i < output.length; i += 4000) {
@@ -3931,5 +3959,97 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
 
     // Serve static assets (portal SPA)
     return env.ASSETS.fetch(request);
+  },
+
+  // ── Queue Consumer — writes telemetry to Supabase via Hyperdrive ──
+  // Messages flow: Agent DO → TELEMETRY_QUEUE → this consumer → Supabase Postgres
+  // Guaranteed delivery, batched writes, automatic retries.
+  async queue(batch: MessageBatch<{ type: string; payload: Record<string, unknown> }>, env: Env): Promise<void> {
+    if (!env.HYPERDRIVE) {
+      // Can't write to DB — retry later
+      batch.retryAll();
+      return;
+    }
+
+    // Connect to Supabase via Hyperdrive (connection pooling + caching at edge)
+    const pg = await import("pg");
+    const client = new pg.default.Client({ connectionString: env.HYPERDRIVE.connectionString });
+    await client.connect();
+
+    try {
+      for (const msg of batch.messages) {
+        const { type, payload } = msg.body;
+
+        try {
+          if (type === "session") {
+            await client.query(
+              `INSERT INTO sessions (
+                session_id, org_id, project_id, agent_name, status,
+                input_text, output_text, model, trace_id, parent_session_id,
+                depth, step_count, action_count, wall_clock_seconds,
+                cost_total_usd, created_at
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,to_timestamp($16))
+              ON CONFLICT (session_id) DO UPDATE SET
+                status=EXCLUDED.status, output_text=EXCLUDED.output_text,
+                cost_total_usd=EXCLUDED.cost_total_usd, step_count=EXCLUDED.step_count`,
+              [
+                payload.session_id, payload.org_id || "", payload.project_id || "",
+                payload.agent_name || "agentos", payload.status || "success",
+                payload.input_text || "", payload.output_text || "",
+                payload.model || "", payload.trace_id || "", payload.parent_session_id || "",
+                payload.depth || 0, payload.step_count || 0, payload.action_count || 0,
+                payload.wall_clock_seconds || 0, payload.cost_total_usd || 0,
+                payload.created_at || Date.now() / 1000,
+              ],
+            );
+          } else if (type === "turn") {
+            await client.query(
+              `INSERT INTO turns (
+                session_id, turn_number, model_used, input_tokens, output_tokens,
+                latency_ms, llm_content, cost_total_usd,
+                tool_calls_json, tool_results_json, errors_json,
+                execution_mode, plan_json, reflection_json,
+                started_at, ended_at
+              ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,to_timestamp($15),to_timestamp($16))
+              ON CONFLICT DO NOTHING`,
+              [
+                payload.session_id, payload.turn_number || 0, payload.model_used || "",
+                payload.input_tokens || 0, payload.output_tokens || 0,
+                payload.latency_ms || 0, payload.llm_content || "", payload.cost_total_usd || 0,
+                payload.tool_calls_json || "[]", payload.tool_results_json || "[]",
+                payload.errors_json || "[]", payload.execution_mode || "sequential",
+                payload.plan_json || "{}", payload.reflection_json || "{}",
+                payload.started_at || Date.now() / 1000, payload.ended_at || Date.now() / 1000,
+              ],
+            );
+          } else if (type === "episode") {
+            await client.query(
+              `INSERT INTO episodes (session_id, input, output, created_at)
+               VALUES ($1,$2,$3,to_timestamp($4)) ON CONFLICT DO NOTHING`,
+              [payload.session_id, payload.input, payload.output, payload.created_at || Date.now() / 1000],
+            );
+          } else if (type === "event") {
+            await client.query(
+              `INSERT INTO otel_events (session_id, turn_number, event_type, action, plan, tier, provider, model, tool_name, status, latency_ms, details_json, created_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,to_timestamp($13)) ON CONFLICT DO NOTHING`,
+              [
+                payload.session_id, payload.turn || 0, payload.event_type || "",
+                payload.action || "", payload.plan || "", payload.tier || "",
+                payload.provider || "", payload.model || "", payload.tool_name || "",
+                payload.status || "", payload.latency_ms || 0,
+                JSON.stringify(payload.details || {}), payload.created_at || Date.now() / 1000,
+              ],
+            );
+          }
+          // Message processed successfully
+          msg.ack();
+        } catch (err) {
+          // Individual message failed — retry it
+          msg.retry();
+        }
+      }
+    } finally {
+      await client.end();
+    }
   },
 } satisfies ExportedHandler<Env>;

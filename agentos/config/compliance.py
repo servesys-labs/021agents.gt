@@ -51,7 +51,10 @@ class ComplianceChecker:
                 checked_by=checked_by,
             )
 
-        # Check against all active gold images, find best match
+        # Check against relevant gold images only:
+        # 1. Gold images created from this specific agent (name match)
+        # 2. Gold images with matching category/tags
+        # 3. Skip if no relevant gold image exists (don't compare unrelated agents)
         images = self.db.list_gold_images(org_id=org_id, active_only=True)
         if not images:
             return DriftReport(
@@ -61,8 +64,34 @@ class ComplianceChecker:
                 status="no_gold_images",
             )
 
-        best_report: DriftReport | None = None
+        # Filter to relevant images
+        agent_tags = set(agent_config.get("tags", []))
+        agent_category = agent_config.get("category", "")
+        relevant = []
         for gold in images:
+            gold_name = gold.get("name", "")
+            gold_category = gold.get("category", "general")
+            # Match by name: gold image was created from this agent
+            if agent_name in gold_name or gold_name.replace("-gold", "") == agent_name:
+                relevant.append(gold)
+            # Match by category
+            elif agent_category and gold_category == agent_category:
+                relevant.append(gold)
+            # Match by tags overlap
+            elif agent_tags and set(gold.get("tags", [])) & agent_tags:
+                relevant.append(gold)
+
+        if not relevant:
+            # No relevant gold image — this is normal for new/unrelated agents
+            return DriftReport(
+                agent_name=agent_name,
+                image_id="",
+                image_name="none",
+                status="no_matching_gold_image",
+            )
+
+        best_report: DriftReport | None = None
+        for gold in relevant:
             report = self._check_against_image(
                 agent_name=agent_name,
                 agent_config=agent_config,
