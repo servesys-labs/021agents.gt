@@ -6,6 +6,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "setup": "node scripts/setup.mjs",
+    "setup:auto": "node scripts/setup.mjs --auto",
     "tail": "wrangler tail",
     "types": "wrangler types"
   },

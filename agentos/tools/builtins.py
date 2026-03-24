@@ -1317,31 +1317,21 @@ async def dynamic_exec(code: str, language: str = "javascript", timeout_ms: int 
     This is the preferred code execution tool — faster, cheaper, and more secure than
     bash or python-exec. Write JS/TS for computation, data transforms, API calls, and logic.
 
-    Falls back to local Node.js subprocess if AGENTOS_WORKER_URL is not set.
+    Falls back to local Node.js subprocess if CloudflareClient is not configured.
     """
-    import httpx
-    import os
-
     # Auto-detect language if not specified
     if not language:
         py_signals = ["def ", "import ", "print(", "class ", "from ", "if __name__"]
         language = "python" if any(s in code for s in py_signals) else "javascript"
 
-    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
-    if worker_url:
-        # Route to Cloudflare Worker which has the LOADER binding
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if cf:
         try:
-            async with httpx.AsyncClient(timeout=max(timeout_ms / 1000 + 5, 15.0)) as client:
-                resp = await client.post(
-                    f"{worker_url}/agents/agentos/default/exec-code",
-                    headers={"Content-Type": "application/json"},
-                    json={"code": code, "language": language, "timeoutMs": timeout_ms},
-                )
-                if resp.status_code == 200:
-                    return resp.text
-                return json.dumps({"error": f"Worker returned {resp.status_code}: {resp.text[:300]}"})
+            result = await cf.sandbox_exec(code, language=language, timeout_ms=timeout_ms)
+            return json.dumps(result)
         except Exception as exc:
-            return json.dumps({"error": f"Worker request failed: {exc}"})
+            return json.dumps({"error": f"CF sandbox exec failed: {exc}"})
 
     # Local fallback: run via subprocess
     import asyncio
@@ -1373,7 +1363,7 @@ async def dynamic_exec(code: str, language: str = "javascript", timeout_ms: int 
                 "exit_code": proc.returncode or 0,
             })
     except FileNotFoundError:
-        return json.dumps({"error": f"{runtime} not found. Install it or set AGENTOS_WORKER_URL."})
+        return json.dumps({"error": f"{runtime} not found. Set AGENTOS_WORKER_URL for CF sandbox."})
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 
@@ -1385,20 +1375,17 @@ async def web_crawl(url: str, max_pages: int = 5, max_depth: int = 1,
     Uses Cloudflare's Browser Rendering /crawl API — fast, respects robots.txt,
     returns clean markdown perfect for RAG ingestion. No browser needed.
 
-    Falls back to basic HTTP fetch if worker URL not configured.
+    Falls back to basic HTTP fetch if CloudflareClient is not configured.
     """
-    import httpx
-    import os
-
-    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
-    if worker_url:
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if cf:
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    f"{worker_url}/browse/crawl",
-                    json={"url": url, "maxPages": max_pages, "maxDepth": max_depth, "format": format},
-                )
-                return resp.text
+            result = await cf.browse_crawl(
+                url, limit=max_pages, depth=max_depth,
+                formats=["markdown"] if format == "markdown" else [format],
+            )
+            return json.dumps(result)
         except Exception as exc:
             return json.dumps({"error": f"Crawl request failed: {exc}"})
 
@@ -1423,20 +1410,18 @@ async def browser_render(url: str, action: str = "text", wait_for: str = "",
     authentication, or anti-bot bypass. Supports: text extraction, screenshots,
     HTML capture, and link discovery.
 
-    Falls back to basic HTTP fetch if worker URL not configured.
+    Falls back to basic HTTP fetch if CloudflareClient is not configured.
     """
-    import httpx
-    import os
-
-    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
-    if worker_url:
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if cf:
         try:
-            async with httpx.AsyncClient(timeout=max(timeout / 1000 + 10, 45)) as client:
-                resp = await client.post(
-                    f"{worker_url}/browse/render",
-                    json={"url": url, "action": action, "waitFor": wait_for, "timeout": timeout},
-                )
-                return resp.text
+            result = await cf.browse_render(
+                url, action=action,
+                wait_for_selector=wait_for,
+                timeout_ms=timeout,
+            )
+            return json.dumps(result)
         except Exception as exc:
             return json.dumps({"error": f"Browser render failed: {exc}"})
 

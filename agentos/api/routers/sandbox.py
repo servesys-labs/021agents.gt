@@ -45,39 +45,33 @@ async def exec_command(
     """Execute a command in a sandbox.
 
     Routing priority:
-    1. Cloudflare Sandbox SDK container (AGENTOS_WORKER_URL set) — isolated, secure
+    1. Cloudflare Sandbox SDK container (via CloudflareClient) — isolated, secure
     2. E2B (E2B_API_KEY set) — external sandbox service
     3. 503 error — no sandbox available
 
     Agent code NEVER runs on the control plane (Railway backend).
     """
-    import os
-    import httpx
+    from agentos.infra.cloudflare_client import get_cf_client
 
-    worker_url = os.environ.get("AGENTOS_WORKER_URL", "")
-    if worker_url:
-        # Route to Cloudflare Sandbox SDK container
+    cf = get_cf_client()
+    if cf:
         try:
-            async with httpx.AsyncClient(timeout=max(request.timeout_ms / 1000 + 10, 45)) as client:
-                resp = await client.post(
-                    f"{worker_url}/sandbox/shell",
-                    json={
-                        "command": request.command,
-                        "sandbox_id": request.sandbox_id or "",
-                        "timeout": max(1, request.timeout_ms // 1000),
-                    },
-                )
-                if resp.status_code == 200:
-                    return resp.json()
-                return {
-                    "sandbox_id": "", "stdout": "",
-                    "stderr": f"Container error: {resp.text[:300]}",
-                    "exit_code": -1, "duration_ms": 0,
-                }
+            result = await cf.sandbox_exec(
+                code=request.command,
+                language="bash",
+                timeout_ms=request.timeout_ms,
+            )
+            return {
+                "sandbox_id": result.get("sandbox_id", ""),
+                "stdout": result.get("stdout", ""),
+                "stderr": result.get("stderr", ""),
+                "exit_code": result.get("exit_code", 0),
+                "duration_ms": result.get("duration_ms", 0),
+            }
         except Exception as exc:
             return {
                 "sandbox_id": "", "stdout": "",
-                "stderr": f"Worker request failed: {exc}",
+                "stderr": f"CF sandbox failed: {exc}",
                 "exit_code": -1, "duration_ms": 0,
             }
 
