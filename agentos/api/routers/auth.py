@@ -75,6 +75,37 @@ async def signup(request: SignupRequest):
     )
     db.conn.commit()
 
+    # Create default project for new org
+    try:
+        from agentos.api.routers.projects import _bootstrap_project_meta_agent
+        project_id = uuid.uuid4().hex[:16]
+        slug = request.email.split("@")[0].lower().replace(".", "-")[:30] or "my-agents"
+        db.conn.execute(
+            "INSERT INTO projects (project_id, org_id, name, slug, description, default_env, default_plan, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (project_id, org_id, f"{slug}'s project", slug, "Default project", "development", "standard", time.time(), time.time()),
+        )
+        # Create default environments
+        for env_name in ("development", "staging", "production"):
+            env_id = uuid.uuid4().hex[:16]
+            db.conn.execute(
+                "INSERT INTO environments (env_id, project_id, name, is_active, created_at) VALUES (?, ?, ?, 1, ?)",
+                (env_id, project_id, env_name, time.time()),
+            )
+        db.conn.commit()
+        # Bootstrap meta-agent
+        try:
+            _bootstrap_project_meta_agent(
+                project_id=project_id, slug=slug,
+                project_name=f"{slug}'s project",
+                project_description="Default project",
+                project_plan="standard",
+            )
+        except Exception:
+            pass  # Meta-agent is nice-to-have, don't fail signup
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Default project creation failed: %s", exc)
+
     token = create_token(user_id=user_id, email=request.email, extra={"org_id": org_id})
 
     return TokenResponse(token=token, user_id=user_id, email=request.email, org_id=org_id, provider="local")

@@ -25,6 +25,7 @@ import { AgentLog, type LogEntry } from "../../components/canvas/AgentLog";
 import { AddNodeToolbar } from "../../components/canvas/AddNodeToolbar";
 import { CanvasControls } from "../../components/canvas/CanvasControls";
 import { CanvasGlow } from "../../components/canvas/CanvasGlow"; // mouse glow effect
+import { WelcomeOverlay } from "../../components/canvas/WelcomeOverlay";
 import { AlignmentGuides } from "../../components/canvas/AlignmentGuides";
 import { NodeDetailPanel } from "../../components/canvas/NodeDetailPanel";
 import { CommandPalette, type CommandAction } from "../../components/canvas/CommandPalette";
@@ -191,6 +192,9 @@ function CanvasWorkspaceInner() {
   const [nodes, setNodes, onNodesChange] = useNodesState(localFallback?.nodes || []);
   const [edges, setEdges, onEdgesChange] = useEdgesState(localFallback?.edges || []);
   const [canvasReady, setCanvasReady] = useState(false);
+
+  // Onboarding welcome overlay
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem("oneshots-onboarding-complete"));
 
   // Context menu
   const [contextMenu, setContextMenu] = useState<{
@@ -1130,6 +1134,13 @@ function CanvasWorkspaceInner() {
     return () => window.removeEventListener("canvas:run-agent", handleRunAgent);
   }, [nodes, addLogEntry]);
 
+  /* ── Auto-open meta-agent for new users ─────────────────── */
+  useEffect(() => {
+    if (canvasReady && showWelcome && nodes.length === 0) {
+      setAgentRailOpen(true);
+    }
+  }, [canvasReady, showWelcome, nodes.length]);
+
   /* ── Default edge options ────────────────────────────────── */
   const defaultEdgeOptions = useMemo(
     () => ({
@@ -1418,6 +1429,22 @@ function CanvasWorkspaceInner() {
           </div>
         )}
       </div>
+
+      {/* ── Welcome Overlay (onboarding) ───────────────────────── */}
+      {showWelcome && (
+        <WelcomeOverlay
+          onDismiss={() => {
+            localStorage.setItem("oneshots-onboarding-complete", "1");
+            setShowWelcome(false);
+          }}
+          onStartScratch={() => {
+            // Just dismiss — empty canvas is ready
+          }}
+          onOpenMetaAgent={() => {
+            setAgentRailOpen(true);
+          }}
+        />
+      )}
 
       {/* ── Command Palette (Cmd+K) ──────────────────────────── */}
       <CommandPalette
