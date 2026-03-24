@@ -47,14 +47,12 @@ def _cache_get(key: str):
     """Get a cached auth result, or None if missing/expired."""
     with _auth_cache_lock:
         entry = _auth_cache.get(key)
-    if entry is None:
-        return None
-    ts, user = entry
-    if time.time() - ts > _AUTH_CACHE_TTL:
-        # Expired — remove lazily
-        with _auth_cache_lock:
+        if entry is None:
+            return None
+        ts, user = entry
+        if time.time() - ts > _AUTH_CACHE_TTL:
             _auth_cache.pop(key, None)
-        return None
+            return None
     return user
 
 

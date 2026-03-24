@@ -47,6 +47,7 @@ export interface Env {
   AUTH_JWT_SECRET?: string;
   BACKEND_INGEST_URL?: string;
   BACKEND_INGEST_TOKEN?: string;
+  EDGE_INGEST_TOKEN?: string;  // alias for BACKEND_INGEST_TOKEN (backend→worker direction)
   BACKEND_PROXY_ONLY?: string;
   WORKER_PROXY_MODE?: string;  // "true" → run() delegates to backend, worker becomes thin proxy
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -4080,12 +4081,15 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
     // Authenticated via edge token (same as backend ingest).
 
     if (url.pathname.startsWith("/cf/")) {
-      const edgeToken = env.BACKEND_INGEST_TOKEN || "";
+      const edgeToken = env.EDGE_INGEST_TOKEN || env.BACKEND_INGEST_TOKEN || "";
+      if (!edgeToken) {
+        return Response.json({ error: "edge_token_not_configured" }, { status: 503 });
+      }
       const authHeader = request.headers.get("Authorization") || "";
       const xEdge = request.headers.get("X-Edge-Token") || "";
       const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : xEdge;
-      if (!edgeToken || token !== edgeToken) {
-        return Response.json({ error: "unauthorized" }, { status: 401 });
+      if (token !== edgeToken) {
+        return Response.json({ error: "invalid_edge_token" }, { status: 401 });
       }
 
       // /cf/sandbox/exec — run code in Dynamic Worker or Container
@@ -4324,16 +4328,21 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
           if (queryVec) {
             const filter: Record<string, string> = { agent_name: agentName };
             if (orgId) filter.org_id = orgId;
-            const matches = await env.VECTORIZE.query(queryVec, {
-              topK: 1000,
-              filter,
-              returnMetadata: "none",
-            });
-            const ids = (matches.matches || []).map((m: any) => m.id);
-            if (ids.length > 0) {
+            // Vectorize max topK is 100; loop to delete in batches
+            let totalDeleted = 0;
+            for (let batch = 0; batch < 10; batch++) {
+              const matches = await env.VECTORIZE.query(queryVec, {
+                topK: 100,
+                filter,
+                returnMetadata: "none",
+              });
+              const ids = (matches.matches || []).map((m: any) => m.id);
+              if (ids.length === 0) break; // no more matches
               await env.VECTORIZE.deleteByIds(ids);
+              totalDeleted += ids.length;
+              if (ids.length < 100) break; // last batch
             }
-            results.vectorize_deleted = ids.length;
+            results.vectorize_deleted = totalDeleted;
           }
         } catch (err: any) {
           results.vectorize_error = err.message;
