@@ -81,7 +81,9 @@ Linear, HubSpot, Gmail, Stripe, and 3,000+ more. OAuth is managed automatically.
 - **a2a-send**: Send a message to an external A2A agent (LangChain, CrewAI, AWS Bedrock)
 - **create-agent**: Create new agents
 - **eval-agent**: Evaluate an agent with test cases
-- **evolve-agent**: Analyze and improve an agent
+- **evolve-agent**: Analyze sessions, generate improvement proposals, apply with human review
+- **autoresearch**: Autonomous self-improvement loop — proposes config changes, evaluates, \
+keeps improvements. No human review. Costs ~$0.10/iteration. Requires eval tasks.
 - **list-agents**: List all agents in the project
 - **list-tools**: List all available tools
 
