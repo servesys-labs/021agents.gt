@@ -217,6 +217,22 @@ class CloudflareClient:
             "timeout": timeout_ms,
         })
 
+    # ── Agent Teardown ─────────────────────────────────────────────
+
+    async def teardown_agent(
+        self,
+        agent_name: str,
+        org_id: str = "",
+    ) -> dict[str, Any]:
+        """Clean up all CF-side resources for a deleted agent.
+
+        Removes: Vectorize entries, R2 files under the agent's prefix.
+        """
+        return await self._post("/cf/agent/teardown", {
+            "agent_name": agent_name,
+            "org_id": org_id,
+        })
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def close(self) -> None:

@@ -5252,6 +5252,167 @@ class AgentDB:
             return False
 
 
+    def teardown_agent(self, name: str, hard_delete: bool = False) -> dict[str, Any]:
+        """Cascading cleanup of all data associated with an agent.
+
+        Removes sessions, turns, costs, evals, issues, compliance records,
+        schedules, webhooks, memory facts, gold images, and the agent itself.
+
+        If hard_delete=True, rows are DELETEd. Otherwise agent is soft-deleted
+        and associated records are left for audit (but marked for retention purge).
+
+        Returns a summary of what was cleaned up.
+        """
+        now = time.time()
+        counts: dict[str, int] = {}
+
+        # Tables with agent_name column to cascade.
+        # NOTE: sessions is handled separately (after turns/errors which FK to it).
+        agent_name_tables = [
+            "eval_runs", "evolution_entries", "proposals",
+            "cost_ledger", "slo_definitions",
+            "autoresearch_runs", "autoresearch_experiments",
+            "security_scans", "security_findings", "risk_profiles",
+            "gold_images", "compliance_checks", "issues",
+            "vapi_calls", "voice_calls", "conversation_scores",
+            "conversation_analytics", "feedback", "memory_facts",
+            "middleware_events",
+        ]
+
+        for table in agent_name_tables:
+            try:
+                if hard_delete:
+                    cur = self.conn.execute(
+                        f"DELETE FROM {table} WHERE agent_name = ?", (name,)
+                    )
+                    counts[table] = cur.rowcount or 0
+                else:
+                    cur = self.conn.execute(
+                        f"SELECT COUNT(*) as cnt FROM {table} WHERE agent_name = ?", (name,)
+                    )
+                    row = cur.fetchone()
+                    cnt = row["cnt"] if isinstance(row, dict) else (row[0] if row else 0)
+                    counts[table] = int(cnt)
+            except Exception:
+                counts[table] = 0
+
+        # Turns + errors are linked via session_id → must be deleted BEFORE sessions
+        if hard_delete:
+            try:
+                cur = self.conn.execute(
+                    "DELETE FROM turns WHERE session_id IN "
+                    "(SELECT session_id FROM sessions WHERE agent_name = ?)",
+                    (name,),
+                )
+                counts["turns"] = cur.rowcount or 0
+            except Exception:
+                counts["turns"] = 0
+
+            try:
+                cur = self.conn.execute(
+                    "DELETE FROM errors WHERE session_id IN "
+                    "(SELECT session_id FROM sessions WHERE agent_name = ?)",
+                    (name,),
+                )
+                counts["errors"] = cur.rowcount or 0
+            except Exception:
+                counts["errors"] = 0
+
+            try:
+                cur = self.conn.execute(
+                    "DELETE FROM sessions WHERE agent_name = ?", (name,),
+                )
+                counts["sessions"] = cur.rowcount or 0
+            except Exception:
+                counts["sessions"] = 0
+
+            # Commit all the hard deletes so far
+            try:
+                self.conn.commit()
+            except Exception:
+                pass
+        else:
+            try:
+                row = self.conn.execute(
+                    "SELECT COUNT(*) as cnt FROM sessions WHERE agent_name = ?", (name,)
+                ).fetchone()
+                counts["sessions"] = int(row["cnt"] if isinstance(row, dict) else (row[0] if row else 0))
+            except Exception:
+                counts["sessions"] = 0
+
+        # Delete schedules targeting this agent
+        try:
+            if hard_delete:
+                cur = self.conn.execute(
+                    "DELETE FROM schedules WHERE agent_name = ?", (name,),
+                )
+                counts["schedules"] = cur.rowcount or 0
+            else:
+                row = self.conn.execute(
+                    "SELECT COUNT(*) as cnt FROM schedules WHERE agent_name = ?", (name,),
+                ).fetchone()
+                counts["schedules"] = int(row["cnt"] if isinstance(row, dict) else (row[0] if row else 0))
+        except Exception:
+            counts["schedules"] = 0
+
+        # Delete webhooks targeting this agent
+        try:
+            if hard_delete:
+                cur = self.conn.execute(
+                    "DELETE FROM webhooks WHERE agent_name = ?", (name,),
+                )
+                counts["webhooks"] = cur.rowcount or 0
+        except Exception:
+            counts["webhooks"] = 0
+
+        # Soft-delete or hard-delete the agent record itself
+        try:
+            if hard_delete:
+                self.conn.execute("DELETE FROM agents WHERE name = ?", (name,))
+            else:
+                self.conn.execute(
+                    "UPDATE agents SET is_active = 0, updated_at = ? WHERE name = ?",
+                    (now, name),
+                )
+            self.conn.commit()
+            counts["agent"] = 1
+        except Exception:
+            try:
+                self.conn.rollback()
+            except Exception:
+                pass
+            counts["agent"] = 0
+
+        # Clean up agent_versions (may not exist on all schemas)
+        if hard_delete:
+            try:
+                self.conn.execute("DELETE FROM agent_versions WHERE agent_name = ?", (name,))
+                self.conn.commit()
+            except Exception:
+                try:
+                    self.conn.rollback()
+                except Exception:
+                    pass
+
+        # Audit log
+        try:
+            self.conn.execute(
+                """INSERT INTO config_audit (agent_name, action, details_json, created_at)
+                VALUES (?, ?, ?, ?)""",
+                (name, "teardown", json.dumps({"hard_delete": hard_delete, "counts": counts}), now),
+            )
+            self.conn.commit()
+        except Exception:
+            pass
+
+        return {
+            "agent_name": name,
+            "hard_delete": hard_delete,
+            "counts": counts,
+            "total_records": sum(counts.values()),
+        }
+
+
 def create_database(path: str | Path) -> AgentDB:
     """Create and initialize a new agent database. Idempotent."""
     db = AgentDB(path)

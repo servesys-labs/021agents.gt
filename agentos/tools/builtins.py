@@ -195,6 +195,68 @@ async def create_agent(description: str, name: str | None = None, tools: list[st
     )
 
 
+async def delete_agent_tool(
+    agent_name: str,
+    hard_delete: bool = False,
+    confirm: bool = False,
+) -> str:
+    """Delete an agent and clean up all associated resources.
+
+    This removes the agent config, sessions, turns, costs, evals, issues,
+    compliance records, Vectorize embeddings, and R2 files. Irreversible
+    when hard_delete=True.
+
+    Args:
+        agent_name: Name of the agent to delete
+        hard_delete: If True, permanently DELETE all rows. If False, soft-delete (default).
+        confirm: Must be True to proceed — safety check against accidental deletion.
+    """
+    if not confirm:
+        return (
+            f"Safety check: set confirm=true to delete agent '{agent_name}'.\n"
+            f"This will {'permanently delete' if hard_delete else 'soft-delete'} the agent "
+            f"and clean up all associated resources (sessions, costs, RAG data, etc.)."
+        )
+
+    from agentos.core.db_config import get_db, initialize_db
+    from agentos.agent import _resolve_agents_dir
+
+    initialize_db()
+    db = get_db()
+    result = db.teardown_agent(agent_name, hard_delete=hard_delete)
+
+    # Remove filesystem config
+    agents_dir = _resolve_agents_dir()
+    for ext in (".json", ".yaml", ".yml"):
+        p = agents_dir / f"{agent_name}{ext}"
+        if p.exists():
+            p.unlink()
+
+    # Clean up CF resources (Vectorize, R2) — best-effort
+    cf_status = "skipped (no CloudflareClient)"
+    try:
+        from agentos.infra.cloudflare_client import get_cf_client
+        cf = get_cf_client()
+        if cf:
+            cf_result = await cf.teardown_agent(agent_name=agent_name)
+            cf_status = json.dumps(cf_result.get("cleanup", {}))
+    except Exception as exc:
+        cf_status = f"error: {exc}"
+
+    counts = result.get("counts", {})
+    total = result.get("total_records", 0)
+    mode = "HARD DELETED" if hard_delete else "soft-deleted"
+
+    lines = [f"Agent '{agent_name}' {mode}."]
+    if total > 0:
+        lines.append(f"  DB records affected: {total}")
+        for table, count in sorted(counts.items()):
+            if count > 0:
+                lines.append(f"    {table}: {count}")
+    lines.append(f"  CF cleanup: {cf_status}")
+    return "\n".join(lines)
+
+
 async def eval_agent(agent_name: str, eval_file: str | None = None, trials: int = 3) -> str:
     """Run evaluation tasks against a named agent."""
     from agentos.agent import Agent, load_agent_config
@@ -1451,6 +1513,7 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "store-knowledge": store_knowledge,
     "knowledge-search": knowledge_search,
     "create-agent": create_agent,
+    "delete-agent": delete_agent_tool,
     "eval-agent": eval_agent,
     "evolve-agent": evolve_agent,
     "list-agents": list_agents_handler,
@@ -1537,6 +1600,18 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 },
             },
             "required": ["description"],
+        },
+    },
+    "delete-agent": {
+        "description": "Delete an agent and clean up all associated resources (sessions, costs, RAG data, Vectorize, R2). Requires confirm=true as a safety check.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "agent_name": {"type": "string", "description": "Name of the agent to delete"},
+                "hard_delete": {"type": "boolean", "description": "If true, permanently DELETE all rows. If false (default), soft-delete.", "default": False},
+                "confirm": {"type": "boolean", "description": "Must be true to proceed — safety check against accidental deletion", "default": False},
+            },
+            "required": ["agent_name"],
         },
     },
     "eval-agent": {

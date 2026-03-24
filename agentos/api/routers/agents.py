@@ -177,28 +177,74 @@ async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser
 
 
 @router.delete("/{name}")
-async def delete_agent(name: str, user: CurrentUser = Depends(require_scope("agents:write"))):
-    """Delete an agent (DB soft-delete + filesystem removal)."""
+async def delete_agent(
+    name: str,
+    hard_delete: bool = False,
+    user: CurrentUser = Depends(require_scope("agents:write")),
+):
+    """Delete an agent and cascade-clean all associated resources.
+
+    Cleans up: DB records (sessions, turns, costs, evals, issues, compliance,
+    schedules, webhooks, memory), Vectorize entries, R2 files, filesystem config.
+
+    ?hard_delete=true  → permanently DELETE all rows (irreversible)
+    ?hard_delete=false → soft-delete agent, count associated records (default)
+    """
     from pathlib import Path
-    from agentos.agent import _resolve_agents_dir, delete_agent_from_db
+    from agentos.agent import _resolve_agents_dir
 
-    deleted_any = False
+    # 1. Cascading DB cleanup
+    db = _get_db()
+    teardown_result = db.teardown_agent(name, hard_delete=hard_delete)
 
-    # Soft-delete from DB (scoped to user's org)
-    if delete_agent_from_db(name, org_id=user.org_id):
-        deleted_any = True
+    if teardown_result.get("counts", {}).get("agent", 0) == 0:
+        # Agent wasn't in DB — check filesystem
+        agents_dir = _resolve_agents_dir()
+        found_fs = any(
+            (agents_dir / f"{name}{ext}").exists()
+            for ext in (".json", ".yaml", ".yml")
+        )
+        if not found_fs:
+            raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    # Remove from filesystem
+    # 2. Remove from filesystem
     agents_dir = _resolve_agents_dir()
     for ext in (".json", ".yaml", ".yml"):
         p = agents_dir / f"{name}{ext}"
         if p.exists():
             p.unlink()
-            deleted_any = True
 
-    if not deleted_any:
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-    return {"deleted": name}
+    # 3. Clean up CF-side resources (Vectorize, R2) — best-effort
+    cf_cleanup = {}
+    try:
+        from agentos.infra.cloudflare_client import get_cf_client
+        cf = get_cf_client()
+        if cf:
+            cf_cleanup = await cf.teardown_agent(agent_name=name, org_id=user.org_id)
+    except Exception as exc:
+        cf_cleanup = {"error": str(exc)}
+
+    # 4. Audit log
+    try:
+        db.conn.execute(
+            """INSERT INTO config_audit (agent_name, action, details_json, created_at)
+            VALUES (?, ?, ?, ?)""",
+            (name, "delete", json.dumps({
+                "user": user.user_id, "org": user.org_id,
+                "hard_delete": hard_delete, "cf_cleanup": cf_cleanup,
+            }), time.time()),
+        )
+        db.conn.commit()
+    except Exception:
+        pass
+
+    return {
+        "deleted": name,
+        "hard_delete": hard_delete,
+        "db_cleanup": teardown_result.get("counts", {}),
+        "cf_cleanup": cf_cleanup,
+        "total_records_affected": teardown_result.get("total_records", 0),
+    }
 
 
 @router.post("/{name}/run", response_model=RunResponse)

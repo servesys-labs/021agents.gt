@@ -4288,6 +4288,67 @@ export default{async fetch(){try{${code};return Response.json({stdout:__o.join("
         }
       }
 
+      // /cf/agent/teardown — clean up all CF resources for a deleted agent
+      if (url.pathname === "/cf/agent/teardown" && request.method === "POST") {
+        const body = await request.json() as { agent_name: string; org_id?: string };
+        const agentName = body.agent_name || "";
+        const orgId = body.org_id || "";
+        if (!agentName) return Response.json({ error: "agent_name required" }, { status: 400 });
+
+        const results: Record<string, number | string> = {};
+
+        // 1. Delete Vectorize entries for this agent
+        try {
+          // Vectorize doesn't have a bulk delete-by-metadata API yet,
+          // so we query matching vectors and delete by ID
+          const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [agentName] }) as any;
+          const queryVec = embedResult.data?.[0];
+          if (queryVec) {
+            const filter: Record<string, string> = { agent_name: agentName };
+            if (orgId) filter.org_id = orgId;
+            const matches = await env.VECTORIZE.query(queryVec, {
+              topK: 1000,
+              filter,
+              returnMetadata: "none",
+            });
+            const ids = (matches.matches || []).map((m: any) => m.id);
+            if (ids.length > 0) {
+              await env.VECTORIZE.deleteByIds(ids);
+            }
+            results.vectorize_deleted = ids.length;
+          }
+        } catch (err: any) {
+          results.vectorize_error = err.message;
+        }
+
+        // 2. Delete R2 files under the agent's prefix
+        try {
+          const prefix = orgId ? `rag/${orgId}/${agentName}` : `rag/global/${agentName}`;
+          const listed = await env.STORAGE.list({ prefix, limit: 1000 });
+          const keys = listed.objects.map((o: any) => o.key);
+          for (const key of keys) {
+            await env.STORAGE.delete(key);
+          }
+          results.r2_deleted = keys.length;
+
+          // Also check for telegram-scoped files
+          const tgPrefix = `telegram-`;
+          const tgListed = await env.STORAGE.list({ prefix: tgPrefix, limit: 100 });
+          let tgDeleted = 0;
+          for (const obj of tgListed.objects) {
+            if (obj.key.includes(agentName)) {
+              await env.STORAGE.delete(obj.key);
+              tgDeleted++;
+            }
+          }
+          if (tgDeleted > 0) results.r2_telegram_deleted = tgDeleted;
+        } catch (err: any) {
+          results.r2_error = err.message;
+        }
+
+        return Response.json({ agent_name: agentName, org_id: orgId, cleanup: results });
+      }
+
       return Response.json({ error: "unknown /cf endpoint" }, { status: 404 });
     }
 

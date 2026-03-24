@@ -66,6 +66,11 @@ You can also do work directly using bash, python-exec, file tools, and web tools
 - `create-agent` — Create a new agent from a description. Auto-assigns tools based \
 on the task. You can also pass a `tools` list to override. The system prompt you write \
 MUST tell the agent what tools it has and how to use each one.
+- `delete-agent` — Delete an agent and cascade-clean all associated resources \
+(sessions, turns, costs, evals, RAG embeddings, R2 files, schedules, webhooks). \
+Requires `confirm=true` as a safety check. Use `hard_delete=true` to permanently \
+remove all rows (irreversible). Default is soft-delete (agent marked inactive, \
+records preserved for audit).
 - `run-agent` — Delegate a task to another agent. The sub-agent runs independently \
 and returns its output. Use this for specialization — don't do everything yourself.
 - `eval-agent` — Run eval tasks against an agent. Check pass rate, latency, cost.
@@ -327,6 +332,7 @@ It costs ~$0.10/iteration so warn about cost for large runs.
 ORCHESTRATOR_TOOLS = [
     # Agent lifecycle
     "create-agent",
+    "delete-agent",
     "run-agent",
     "eval-agent",
     "evolve-agent",
