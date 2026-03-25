@@ -3553,6 +3553,322 @@ class AgentDB:
             )
             return bool((cur.rowcount or 0) > 0)
 
+    def insert_span_feedback(
+        self,
+        *,
+        trace_id: str,
+        span_id: str,
+        rating: int,
+        score: float = 0.0,
+        comment: str = "",
+        labels: list[str] | None = None,
+        author: str = "",
+        source: str = "human",
+        session_id: str = "",
+        turn: int = 0,
+    ) -> int:
+        """Insert feedback attached to a specific span/node execution."""
+        with self.tx() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS span_feedback (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trace_id        TEXT NOT NULL DEFAULT '',
+                    session_id      TEXT NOT NULL DEFAULT '',
+                    span_id         TEXT NOT NULL DEFAULT '',
+                    turn            INTEGER NOT NULL DEFAULT 0,
+                    rating          INTEGER NOT NULL DEFAULT 0,
+                    score           REAL NOT NULL DEFAULT 0.0,
+                    comment         TEXT NOT NULL DEFAULT '',
+                    labels_json     TEXT NOT NULL DEFAULT '[]',
+                    author          TEXT NOT NULL DEFAULT '',
+                    source          TEXT NOT NULL DEFAULT 'human',
+                    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+                )"""
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_span_feedback_trace ON span_feedback(trace_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_span_feedback_span ON span_feedback(span_id)"
+            )
+            cur.execute(
+                """INSERT INTO span_feedback (
+                    trace_id, session_id, span_id, turn, rating, score,
+                    comment, labels_json, author, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    trace_id,
+                    session_id,
+                    span_id,
+                    turn,
+                    int(rating),
+                    float(score),
+                    comment,
+                    json.dumps(labels or []),
+                    author,
+                    source,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def query_span_feedback(
+        self,
+        *,
+        trace_id: str = "",
+        span_id: str = "",
+        session_id: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Query span-level feedback records."""
+        sql = "SELECT * FROM span_feedback WHERE 1=1"
+        params: list[Any] = []
+        if trace_id:
+            sql += " AND trace_id = ?"
+            params.append(trace_id)
+        if span_id:
+            sql += " AND span_id = ?"
+            params.append(span_id)
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = self.conn.execute(sql, params).fetchall()
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["labels"] = json.loads(item.get("labels_json", "[]"))
+            except Exception:
+                item["labels"] = []
+            out.append(item)
+        return out
+
+    def span_feedback_summary(self, *, trace_id: str = "") -> dict[str, Any]:
+        """Aggregate ratings/scores for span feedback records."""
+        sql = (
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN rating > 0 THEN 1 ELSE 0 END) AS positive, "
+            "SUM(CASE WHEN rating = 0 THEN 1 ELSE 0 END) AS neutral, "
+            "SUM(CASE WHEN rating < 0 THEN 1 ELSE 0 END) AS negative, "
+            "AVG(score) AS avg_score "
+            "FROM span_feedback WHERE 1=1"
+        )
+        params: list[Any] = []
+        if trace_id:
+            sql += " AND trace_id = ?"
+            params.append(trace_id)
+        try:
+            row = self.conn.execute(sql, params).fetchone()
+        except Exception:
+            return {"total": 0, "positive": 0, "neutral": 0, "negative": 0, "avg_score": 0.0}
+        total = int(row["total"] or 0) if row else 0
+        positive = int(row["positive"] or 0) if row else 0
+        neutral = int(row["neutral"] or 0) if row else 0
+        negative = int(row["negative"] or 0) if row else 0
+        avg_score = float(row["avg_score"] or 0.0) if row else 0.0
+        return {
+            "total": total,
+            "positive": positive,
+            "neutral": neutral,
+            "negative": negative,
+            "approval_rate": (positive / total) if total else 0.0,
+            "avg_score": avg_score,
+        }
+
+    def upsert_trace_lineage(self, lineage: dict[str, Any]) -> None:
+        """Upsert trace lineage record linking trace/session/eval/version."""
+        with self.tx() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS trace_lineage (
+                    trace_id         TEXT PRIMARY KEY,
+                    session_id       TEXT NOT NULL DEFAULT '',
+                    agent_name       TEXT NOT NULL DEFAULT '',
+                    agent_version    TEXT NOT NULL DEFAULT '',
+                    model            TEXT NOT NULL DEFAULT '',
+                    prompt_hash      TEXT NOT NULL DEFAULT '',
+                    eval_run_id      INTEGER NOT NULL DEFAULT 0,
+                    experiment_id    TEXT NOT NULL DEFAULT '',
+                    dataset_id       TEXT NOT NULL DEFAULT '',
+                    commit_sha       TEXT NOT NULL DEFAULT '',
+                    metadata_json    TEXT NOT NULL DEFAULT '{}',
+                    created_at       REAL NOT NULL DEFAULT (unixepoch('now')),
+                    updated_at       REAL NOT NULL DEFAULT (unixepoch('now'))
+                )"""
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trace_lineage_agent ON trace_lineage(agent_name)"
+            )
+            now = time.time()
+            cur.execute(
+                """INSERT INTO trace_lineage (
+                    trace_id, session_id, agent_name, agent_version, model, prompt_hash,
+                    eval_run_id, experiment_id, dataset_id, commit_sha, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(trace_id) DO UPDATE SET
+                    session_id = excluded.session_id,
+                    agent_name = excluded.agent_name,
+                    agent_version = excluded.agent_version,
+                    model = excluded.model,
+                    prompt_hash = excluded.prompt_hash,
+                    eval_run_id = excluded.eval_run_id,
+                    experiment_id = excluded.experiment_id,
+                    dataset_id = excluded.dataset_id,
+                    commit_sha = excluded.commit_sha,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(lineage.get("trace_id", "")),
+                    str(lineage.get("session_id", "")),
+                    str(lineage.get("agent_name", "")),
+                    str(lineage.get("agent_version", "")),
+                    str(lineage.get("model", "")),
+                    str(lineage.get("prompt_hash", "")),
+                    int(lineage.get("eval_run_id", 0) or 0),
+                    str(lineage.get("experiment_id", "")),
+                    str(lineage.get("dataset_id", "")),
+                    str(lineage.get("commit_sha", "")),
+                    json.dumps(lineage.get("metadata", {})),
+                    now,
+                    now,
+                ),
+            )
+
+    def list_trace_lineage(
+        self,
+        *,
+        trace_id: str = "",
+        agent_name: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """List trace lineage records by trace or agent."""
+        sql = "SELECT * FROM trace_lineage WHERE 1=1"
+        params: list[Any] = []
+        if trace_id:
+            sql += " AND trace_id = ?"
+            params.append(trace_id)
+        if agent_name:
+            sql += " AND agent_name = ?"
+            params.append(agent_name)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = self.conn.execute(sql, params).fetchall()
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.get("metadata_json", "{}"))
+            except Exception:
+                item["metadata"] = {}
+            out.append(item)
+        return out
+
+    def upsert_meta_proposal(self, proposal: dict[str, Any]) -> None:
+        """Persist a meta-agent generated proposal for human review."""
+        with self.tx() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS meta_proposals (
+                    id              TEXT PRIMARY KEY,
+                    agent_name      TEXT NOT NULL DEFAULT '',
+                    title           TEXT NOT NULL DEFAULT '',
+                    rationale       TEXT NOT NULL DEFAULT '',
+                    category        TEXT NOT NULL DEFAULT '',
+                    priority        REAL NOT NULL DEFAULT 0.0,
+                    status          TEXT NOT NULL DEFAULT 'pending',
+                    reviewer_note   TEXT NOT NULL DEFAULT '',
+                    modification_json TEXT NOT NULL DEFAULT '{}',
+                    evidence_json   TEXT NOT NULL DEFAULT '{}',
+                    created_at      REAL NOT NULL DEFAULT (unixepoch('now')),
+                    reviewed_at     REAL
+                )"""
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_meta_proposals_agent ON meta_proposals(agent_name)"
+            )
+            cur.execute(
+                """INSERT INTO meta_proposals (
+                    id, agent_name, title, rationale, category, priority, status,
+                    reviewer_note, modification_json, evidence_json, created_at, reviewed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    agent_name = excluded.agent_name,
+                    title = excluded.title,
+                    rationale = excluded.rationale,
+                    category = excluded.category,
+                    priority = excluded.priority,
+                    status = excluded.status,
+                    reviewer_note = excluded.reviewer_note,
+                    modification_json = excluded.modification_json,
+                    evidence_json = excluded.evidence_json,
+                    reviewed_at = excluded.reviewed_at
+                """,
+                (
+                    str(proposal.get("id", "")),
+                    str(proposal.get("agent_name", "")),
+                    str(proposal.get("title", "")),
+                    str(proposal.get("rationale", "")),
+                    str(proposal.get("category", "")),
+                    float(proposal.get("priority", 0.0) or 0.0),
+                    str(proposal.get("status", "pending")),
+                    str(proposal.get("reviewer_note", "")),
+                    json.dumps(proposal.get("modification", {})),
+                    json.dumps(proposal.get("evidence", {})),
+                    float(proposal.get("created_at", time.time()) or time.time()),
+                    proposal.get("reviewed_at"),
+                ),
+            )
+
+    def list_meta_proposals(
+        self,
+        *,
+        agent_name: str,
+        status: str = "",
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List meta proposals for an agent."""
+        sql = "SELECT * FROM meta_proposals WHERE agent_name = ?"
+        params: list[Any] = [agent_name]
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY priority DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = self.conn.execute(sql, params).fetchall()
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["modification"] = json.loads(item.get("modification_json", "{}"))
+            except Exception:
+                item["modification"] = {}
+            try:
+                item["evidence"] = json.loads(item.get("evidence_json", "{}"))
+            except Exception:
+                item["evidence"] = {}
+            out.append(item)
+        return out
+
+    def review_meta_proposal(self, proposal_id: str, status: str, note: str = "") -> bool:
+        """Review (approve/reject) a meta proposal."""
+        with self.tx() as cur:
+            cur.execute(
+                """UPDATE meta_proposals
+                   SET status = ?, reviewer_note = ?, reviewed_at = ?
+                   WHERE id = ?""",
+                (status, note, time.time(), proposal_id),
+            )
+            return bool((cur.rowcount or 0) > 0)
+
     def build_trace_run_tree(self, trace_id: str) -> dict[str, Any]:
         """Build a LangSmith-style run tree for one trace."""
         spans = self.query_trace_spans(trace_id)

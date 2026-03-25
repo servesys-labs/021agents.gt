@@ -566,3 +566,68 @@ class TestRuntimeEventPersistence:
         assert isinstance(report["recommendations"], list)
         assert report["recommendations"]
         db.close()
+
+    def test_span_feedback_lineage_and_meta_proposals(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        # Span feedback
+        fid = db.insert_span_feedback(
+            trace_id="trace-x",
+            span_id="span-x",
+            rating=1,
+            score=0.9,
+            comment="Great node behavior",
+            labels=["correctness"],
+            author="u-1",
+            source="human",
+            session_id="sess-x",
+            turn=1,
+        )
+        assert fid > 0
+        fb = db.query_span_feedback(trace_id="trace-x")
+        assert len(fb) == 1
+        assert fb[0]["span_id"] == "span-x"
+        summary = db.span_feedback_summary(trace_id="trace-x")
+        assert summary["total"] == 1
+        assert summary["approval_rate"] == pytest.approx(1.0)
+
+        # Lineage
+        db.upsert_trace_lineage({
+            "trace_id": "trace-x",
+            "session_id": "sess-x",
+            "agent_name": "agent-x",
+            "agent_version": "0.2.0",
+            "model": "anthropic/claude-sonnet-4.6",
+            "prompt_hash": "abc123",
+            "eval_run_id": 42,
+            "experiment_id": "exp-1",
+            "dataset_id": "ds-1",
+            "commit_sha": "deadbeef",
+            "metadata": {"channel": "staging"},
+        })
+        lineage = db.list_trace_lineage(trace_id="trace-x")
+        assert len(lineage) == 1
+        assert lineage[0]["agent_name"] == "agent-x"
+        assert lineage[0]["metadata"]["channel"] == "staging"
+
+        # Meta proposals
+        db.upsert_meta_proposal({
+            "id": "meta-prop-1",
+            "agent_name": "agent-x",
+            "title": "Reduce node failures",
+            "rationale": "Node error rate is high",
+            "category": "runtime",
+            "priority": 0.8,
+            "status": "pending",
+            "modification": {"harness": {"max_retries": 4}},
+            "evidence": {"node_error_rate": 0.2},
+            "created_at": time.time(),
+        })
+        props = db.list_meta_proposals(agent_name="agent-x")
+        assert len(props) == 1
+        assert props[0]["id"] == "meta-prop-1"
+        ok = db.review_meta_proposal("meta-prop-1", status="approved", note="looks good")
+        assert ok is True
+        props2 = db.list_meta_proposals(agent_name="agent-x", status="approved")
+        assert len(props2) == 1
+        assert props2[0]["reviewer_note"] == "looks good"
+        db.close()

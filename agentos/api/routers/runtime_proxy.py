@@ -147,23 +147,16 @@ async def agent_run_proxy(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    # Per-request runtime override must not mutate shared cached agents.
+    # Graph runtime is the only mode — no override needed.
+    # Request-scoped instance only needed for enterprise features.
     run_agent_instance = agent
-    requested_runtime_mode = payload.runtime_mode
-    requires_request_scoped_instance = (
-        requested_runtime_mode == "graph"
-        or isinstance(payload.require_human_approval, bool)
-        or isinstance(payload.enable_checkpoints, bool)
-    )
-    if requires_request_scoped_instance:
+    if isinstance(payload.require_human_approval, bool) or isinstance(payload.enable_checkpoints, bool):
         run_agent_instance = _get_request_scoped_agent(name)
         harness_cfg = (
             run_agent_instance.config.harness
             if isinstance(run_agent_instance.config.harness, dict)
             else {}
         )
-        if requested_runtime_mode == "graph":
-            harness_cfg["runtime_mode"] = requested_runtime_mode
         if isinstance(payload.require_human_approval, bool):
             harness_cfg["require_human_approval"] = payload.require_human_approval
         if isinstance(payload.enable_checkpoints, bool):
