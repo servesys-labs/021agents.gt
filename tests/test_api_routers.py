@@ -359,6 +359,54 @@ class TestObservabilityRouter:
         assert resp.status_code == 200
         assert "entries" in resp.json()
 
+    def test_meta_control_plane(self, api_client):
+        headers = self._auth_header(api_client)
+        # Seed one scoped session so ownership + telemetry lookup works.
+        from agentos.core.database import create_database
+        db = create_database(Path("data/agent.db"))
+        db.insert_session({
+            "session_id": "sess-meta-cp-1",
+            "org_id": "",
+            "agent_name": "test-agent",
+            "timestamp": 1.0,
+            "status": "success",
+            "stop_reason": "completed",
+            "step_count": 2,
+            "wall_clock_seconds": 1.0,
+            "trace_id": "trace-meta-cp-1",
+            "composition": {"agent_name": "test-agent"},
+            "cost": {"total_usd": 0.01},
+            "benchmark_cost": {},
+        })
+        db.insert_runtime_event({
+            "event_id": "evt-meta-cp-1",
+            "event_type": "node_start",
+            "event_source": "graph_runtime",
+            "event_ts": 1.0,
+            "org_id": "",
+            "agent_name": "test-agent",
+            "session_id": "sess-meta-cp-1",
+            "trace_id": "trace-meta-cp-1",
+            "node_id": "llm",
+            "turn": 1,
+            "payload": {},
+        })
+        db.close()
+
+        resp = api_client.get(
+            "/api/v1/observability/agents/test-agent/meta-control-plane"
+            "?generate_proposals=true&persist_generated=false",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["agent_name"] == "test-agent"
+        assert "meta_report" in data
+        assert "meta_proposals" in data
+        assert "pending_approvals" in data
+        assert "suggested_eval_plan" in data
+        assert isinstance(data["meta_proposals"]["items"], list)
+
 
 class TestOrgsRouter:
     def _auth_header(self, api_client):

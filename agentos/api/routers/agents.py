@@ -20,12 +20,8 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 
 def _set_runtime_mode_override(agent: Any, runtime_mode: str | None) -> str:
-    """Set per-request runtime mode and return previous value."""
-    harness_cfg = agent.config.harness if isinstance(agent.config.harness, dict) else {}
-    prev = str(harness_cfg.get("runtime_mode", "graph")).strip().lower() or "graph"
-    if runtime_mode == "graph":
-        harness_cfg["runtime_mode"] = runtime_mode
-    return prev
+    """No-op — graph runtime is the only mode. Kept for API compat."""
+    return "graph"
 
 
 def _set_harness_bool_override(agent: Any, key: str, value: bool | None) -> bool:
