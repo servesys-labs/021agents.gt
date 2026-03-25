@@ -59,7 +59,7 @@ class LLMGrader(Grader):
 
         # With a real LLM (recommended)
         from agentos.llm.provider import HttpProvider
-        provider = HttpProvider(model_id="anthropic/claude-sonnet-4", ...)
+        provider = HttpProvider(model_id="anthropic/claude-sonnet-4.6", ...)
         grader = LLMGrader(criteria="correctness", provider=provider)
 
         # Without a provider (heuristic fallback)
