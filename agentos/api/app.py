@@ -247,15 +247,6 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         except Exception as exc:
             logger.warning("Could not start background scheduler: %s", exc)
 
-        # Background pricing sync loop — keeps GMI model/rate catalog fresh.
-        try:
-            from agentos.api.routers.billing import run_gmi_pricing_sync_loop
-
-            asyncio.create_task(run_gmi_pricing_sync_loop())
-            logger.info("Background GMI pricing sync loop started")
-        except Exception as exc:
-            logger.warning("Could not start GMI pricing sync loop: %s", exc)
-
         # Background job worker — dequeues and processes async jobs
         async def _run_job_worker() -> None:
             while True:

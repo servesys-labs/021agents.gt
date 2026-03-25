@@ -261,208 +261,6 @@ class E2BSandboxBackend:
         return TrainingOutput.parse(log_text, returncode)
 
 
-# ── GMI Cloud GPU Backend ────────────────────────────────────────────────────
-
-# GMI Cloud API base for serverless GPU sandboxes
-GMI_API_BASE = "https://api.gmi-serving.com/v1"
-
-
-class GMICloudGPUBackend:
-    """Runs training on a serverless GPU sandbox via GMI Cloud.
-
-    Uses the same ``GMI_API_KEY`` as inference — one API key for
-    everything (LLM calls, embeddings, GPU training sandboxes).
-
-    Best for:
-    - Real neural network training (Karpathy-style autoresearch)
-    - Large models that need 40-80GB VRAM
-    - The full nanochat training loop
-
-    Lifecycle:
-    1. POST /sandboxes → provisions a GPU sandbox with PyTorch pre-installed
-    2. POST /sandboxes/{id}/files → uploads workspace (train.py, prepare.py)
-    3. POST /sandboxes/{id}/exec → runs training command, streams output
-    4. DELETE /sandboxes/{id} → tears down (unless keep_alive=True)
-
-    Cost: ~$2.98/hr for H100, ~$3.98/hr for H200.
-    A 5-minute training run costs ~$0.25 on H100.
-    """
-
-    def __init__(
-        self,
-        gpu_type: str = "h100",
-        gpu_count: int = 1,
-        keep_alive: bool = False,
-        org_id: str = "",
-    ) -> None:
-        self.gpu_type = gpu_type
-        self.gpu_count = gpu_count
-        self.keep_alive = keep_alive
-        self.org_id = org_id
-        self._sandbox_id: str | None = None
-        self._api_base = os.environ.get("GMI_API_BASE", GMI_API_BASE)
-
-    def _api_key(self) -> str:
-        key = os.environ.get("GMI_API_KEY", "")
-        if not key:
-            raise RuntimeError(
-                "GMI_API_KEY not set. GPU sandboxes use the same API key as "
-                "inference. Set GMI_API_KEY to enable GPU training."
-            )
-        return key
-
-    @property
-    def name(self) -> str:
-        return f"gmi-{self.gpu_type}"
-
-    @property
-    def requires_gpu(self) -> bool:
-        return True
-
-    def cost_estimate(self, time_budget: int) -> str:
-        rates = {"h100": 2.98, "h200": 3.98}
-        rate = rates.get(self.gpu_type, 2.98)
-        # Training time + ~1min overhead for provisioning
-        total_minutes = (time_budget + 60) / 60
-        cost = rate * total_minutes / 60
-        return f"~${cost:.2f} per experiment ({self.gpu_type} @ ${rate}/hr)"
-
-    async def setup(self, workspace: Path) -> None:
-        """Provision a serverless GPU sandbox via GMI Cloud."""
-        import httpx
-
-        api_key = self._api_key()
-
-        logger.info(
-            "Provisioning GMI %s x%d GPU sandbox...",
-            self.gpu_type, self.gpu_count,
-        )
-
-        async with httpx.AsyncClient(timeout=120) as client:
-            # 1. Create sandbox
-            resp = await client.post(
-                f"{self._api_base}/sandboxes",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "gpu_type": self.gpu_type,
-                    "gpu_count": self.gpu_count,
-                    "template": "pytorch",  # pre-installed PyTorch + CUDA
-                    "timeout_seconds": 3600,  # 1hr max lifetime
-                },
-            )
-            if resp.status_code >= 400:
-                raise RuntimeError(
-                    f"GMI GPU sandbox provisioning failed: {resp.status_code} {resp.text}"
-                )
-
-            data = resp.json()
-            self._sandbox_id = data.get("sandbox_id", "")
-
-            if not self._sandbox_id:
-                raise RuntimeError("GMI returned empty sandbox_id")
-
-            # 2. Upload workspace files
-            for f in workspace.iterdir():
-                if f.is_file() and f.suffix in (".py", ".toml", ".txt", ".json", ".yaml", ".yml", ".md"):
-                    await client.post(
-                        f"{self._api_base}/sandboxes/{self._sandbox_id}/files",
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        json={
-                            "path": f"/workspace/{f.name}",
-                            "content": f.read_text(),
-                        },
-                    )
-
-        logger.info("GMI GPU sandbox %s ready", self._sandbox_id)
-
-    async def teardown(self) -> None:
-        """Terminate the GPU sandbox."""
-        if not self._sandbox_id or self.keep_alive:
-            return
-
-        try:
-            import httpx
-            api_key = self._api_key()
-            async with httpx.AsyncClient(timeout=30) as client:
-                await client.delete(
-                    f"{self._api_base}/sandboxes/{self._sandbox_id}",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                )
-            logger.info("GMI GPU sandbox %s terminated", self._sandbox_id)
-        except Exception as exc:
-            logger.warning("Failed to terminate GMI sandbox %s: %s", self._sandbox_id, exc)
-
-        self._sandbox_id = None
-
-    async def run_training(
-        self,
-        command: str,
-        workspace: Path,
-        timeout: int,
-        env: dict[str, str] | None = None,
-    ) -> TrainingOutput:
-        """Run training command in the GMI GPU sandbox."""
-        import httpx
-
-        if not self._sandbox_id:
-            await self.setup(workspace)
-
-        api_key = self._api_key()
-
-        # Sync train.py if modified since setup
-        train_path = workspace / "train.py"
-        if train_path.exists():
-            async with httpx.AsyncClient(timeout=30) as client:
-                await client.post(
-                    f"{self._api_base}/sandboxes/{self._sandbox_id}/files",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "path": "/workspace/train.py",
-                        "content": train_path.read_text(),
-                    },
-                )
-
-        # Execute training command
-        env_prefix = ""
-        if env:
-            env_prefix = " ".join(f"{k}={v}" for k, v in env.items()) + " "
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout + 60) as client:
-                resp = await client.post(
-                    f"{self._api_base}/sandboxes/{self._sandbox_id}/exec",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "command": f"cd /workspace && {env_prefix}{command}",
-                        "timeout_seconds": timeout,
-                    },
-                )
-
-                if resp.status_code >= 400:
-                    return TrainingOutput.parse(
-                        f"GMI EXEC ERROR: {resp.status_code} {resp.text}",
-                        returncode=-1,
-                    )
-
-                data = resp.json()
-                log_text = data.get("stdout", "") + "\n" + data.get("stderr", "")
-                returncode = data.get("exit_code", -1)
-
-        except httpx.TimeoutException:
-            log_text = f"TIMEOUT: GPU training exceeded {timeout}s"
-            returncode = -1
-        except Exception as exc:
-            log_text = f"GMI EXECUTION ERROR: {exc}"
-            returncode = -1
-
-        return TrainingOutput.parse(log_text, returncode)
-
-
-# Keep old name as alias for backwards compatibility
-GPUCloudBackend = GMICloudGPUBackend
 
 
 # ── Backend factory ──────────────────────────────────────────────────────────
@@ -478,8 +276,6 @@ def get_backend(
         name: Backend name. Options:
             - "in-process" / "local" — local subprocess (CPU, free)
             - "e2b" / "sandbox"     — E2B cloud sandbox (CPU, ~$0.10/hr)
-            - "gpu" / "gpu-h100"    — GMI Cloud H100 ($2.98/hr, same GMI_API_KEY as inference)
-            - "gpu-h200"            — GMI Cloud H200 ($3.98/hr)
         **kwargs: Passed to the backend constructor.
 
     Returns:
@@ -491,13 +287,6 @@ def get_backend(
         "e2b": E2BSandboxBackend,
         "e2b-sandbox": E2BSandboxBackend,
         "sandbox": E2BSandboxBackend,
-        "gpu": GMICloudGPUBackend,
-        "gpu-cloud": GMICloudGPUBackend,
-        "gpu-h100": lambda **kw: GMICloudGPUBackend(gpu_type="h100", **kw),
-        "gpu-h200": lambda **kw: GMICloudGPUBackend(gpu_type="h200", **kw),
-        "gmi": GMICloudGPUBackend,
-        "gmi-h100": lambda **kw: GMICloudGPUBackend(gpu_type="h100", **kw),
-        "gmi-h200": lambda **kw: GMICloudGPUBackend(gpu_type="h200", **kw),
     }
 
     factory = backends.get(name)
@@ -510,17 +299,7 @@ def get_backend(
 
 
 def recommend_backend(has_gpu_code: bool = False, needs_isolation: bool = False) -> str:
-    """Recommend the best backend based on workload characteristics.
-
-    Args:
-        has_gpu_code: True if the training script imports torch/cuda.
-        needs_isolation: True if untrusted code needs sandboxing (CPU).
-
-    Returns:
-        Backend name string.
-    """
-    if has_gpu_code:
-        return "gmi-h100"  # GMI Cloud GPU — same API key as inference
+    """Recommend the best backend based on workload characteristics."""
     if needs_isolation:
-        return "e2b"  # E2B sandbox — CPU isolation
+        return "e2b"
     return "in-process"

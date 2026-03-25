@@ -28,7 +28,7 @@ WORKER_TOOLS = {
     # Already on CF (RAG, browse, sandbox)
     "dynamic-exec", "web-crawl", "browser-render",
     "store-knowledge", "knowledge-search",
-    # GMI API (image, audio)
+    # Workers AI (image, audio)
     "image-generate", "text-to-speech", "speech-to-text",
     # Stateful
     "todo",

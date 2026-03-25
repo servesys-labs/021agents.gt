@@ -54,7 +54,7 @@ def test_record_billing_persists_pricing_snapshot(isolated_db):
         cost_type="inference",
         total_cost_usd=0.42,
         org_id="org-a",
-        provider="gmi",
+        provider="workers-ai",
         model="deepseek-ai/DeepSeek-V3.2",
         pricing_source="catalog",
         pricing_key="llm:gmi:deepseek-ai/DeepSeek-V3.2:infer",
@@ -90,7 +90,7 @@ def test_pricing_catalog_resolution_order(isolated_db):
         effective_from=now,
     )
     db.upsert_pricing_rate(
-        provider="gmi",
+        provider="workers-ai",
         model="",
         resource_type="llm",
         operation="infer",
@@ -100,7 +100,7 @@ def test_pricing_catalog_resolution_order(isolated_db):
         effective_from=now,
     )
     db.upsert_pricing_rate(
-        provider="gmi",
+        provider="workers-ai",
         model="model-a",
         resource_type="llm",
         operation="infer",
@@ -113,14 +113,14 @@ def test_pricing_catalog_resolution_order(isolated_db):
         resource_type="llm",
         operation="infer",
         unit="input_token",
-        provider="gmi",
+        provider="workers-ai",
         model="model-a",
     )
     provider_fallback = db.get_active_pricing_rate(
         resource_type="llm",
         operation="infer",
         unit="input_token",
-        provider="gmi",
+        provider="workers-ai",
         model="model-b",
     )
     global_fallback = db.get_active_pricing_rate(
@@ -143,7 +143,7 @@ def test_runtime_proxy_llm_uses_catalog_rate(isolated_db, monkeypatch):
     db = create_database(Path("data/agent.db"))
     db.initialize()
     db.upsert_pricing_rate(
-        provider="gmi",
+        provider="workers-ai",
         model="deepseek-ai/DeepSeek-V3.2",
         resource_type="llm",
         operation="infer",
@@ -152,7 +152,7 @@ def test_runtime_proxy_llm_uses_catalog_rate(isolated_db, monkeypatch):
         pricing_version="catalog-v1",
     )
     db.upsert_pricing_rate(
-        provider="gmi",
+        provider="workers-ai",
         model="deepseek-ai/DeepSeek-V3.2",
         resource_type="llm",
         operation="infer",
@@ -185,7 +185,7 @@ def test_runtime_proxy_llm_uses_catalog_rate(isolated_db, monkeypatch):
         headers={"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"},
         json={
             "messages": [{"role": "user", "content": "hi"}],
-            "provider": "gmi",
+            "provider": "workers-ai",
             "model": "deepseek-ai/DeepSeek-V3.2",
             "session_id": "sess-proxy-1",
             "org_id": "org-a",
@@ -282,79 +282,6 @@ def test_runtime_proxy_tool_and_sandbox_billing_shapes(isolated_db, monkeypatch)
     assert len(rows) == 2
     assert all(r["cost_type"] == "tool_execution" for r in rows)
     assert all(r["pricing_source"] in ("catalog", "fallback_env") for r in rows)
-    db2.close()
-
-
-def test_sync_gmi_internal_marks_removed_and_writes_audit(isolated_db, monkeypatch):
-    import agentos.api.routers.billing as billing_router
-    from agentos.core.database import create_database
-
-    monkeypatch.setenv("GMI_API_KEY", "dummy-key")
-    monkeypatch.setenv("GMI_PRICE_ALERT_DELTA_PCT", "0.01")
-
-    db = create_database(Path("data/agent.db"))
-    db.initialize()
-    # Pre-existing model that should be marked inactive.
-    db.upsert_pricing_rate(
-        provider="gmi",
-        model="old-model",
-        resource_type="llm",
-        operation="infer",
-        unit="input_token",
-        unit_price_usd=0.001,
-        pricing_version="old",
-    )
-    db.close()
-
-    class _Resp:
-        is_success = True
-
-        @staticmethod
-        def json():
-            return {
-                "data": [
-                    {
-                        "id": "new-model",
-                        "status": "active",
-                        "pricing": {"input_per_million": 1.0, "output_per_million": 2.0},
-                    },
-                    {
-                        "id": "deprecated-model",
-                        "status": "deprecated",
-                        "pricing": {"input_per_million": 3.0, "output_per_million": 6.0},
-                    },
-                ]
-            }
-
-    class _Client:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def get(self, *args, **kwargs):
-            return _Resp()
-
-    monkeypatch.setattr(billing_router.httpx, "AsyncClient", lambda timeout=30.0: _Client())
-
-    result = asyncio.run(billing_router.sync_gmi_pricing_catalog_internal(dry_run=False, actor="test-sync"))
-    assert result["ok"] is True
-    assert result["models_seen"] == 2
-    assert result["models_marked_inactive"] >= 1
-    assert result["alerts_count"] >= 1
-
-    db2 = create_database(Path("data/agent.db"))
-    db2.initialize()
-    old_active = db2.conn.execute(
-        """SELECT COUNT(*) AS cnt FROM pricing_catalog
-           WHERE provider='gmi' AND model='old-model' AND resource_type='llm' AND operation='infer' AND is_active=1"""
-    ).fetchone()
-    assert int(old_active["cnt"]) == 0
-    audit_rows = db2.conn.execute(
-        "SELECT COUNT(*) AS cnt FROM audit_log WHERE action IN ('pricing.sync.gmi','pricing.sync.gmi.alert')"
-    ).fetchone()
-    assert int(audit_rows["cnt"]) >= 1
     db2.close()
 
 
@@ -488,7 +415,7 @@ def test_runtime_proxy_agent_resume_from_checkpoint(isolated_db, monkeypatch):
     db2.close()
 
 
-def test_runtime_proxy_langchain_invoke_batch_and_events(isolated_db, monkeypatch):
+def test_runtime_proxy_runnable_invoke_batch_and_events(isolated_db, monkeypatch):
     import agentos.api.routers.runtime_proxy as rp
     from agentos.core.harness import TurnResult
     from agentos.llm.provider import LLMResponse
@@ -509,33 +436,46 @@ def test_runtime_proxy_langchain_invoke_batch_and_events(isolated_db, monkeypatc
                 stop_reason="completed",
             )]
 
-    monkeypatch.setattr(rp, "_get_cached_agent", lambda name: _DummyAgent("ok"))
+    monkeypatch.setattr(rp, "_get_request_scoped_agent", lambda name: _DummyAgent("ok"))
     client = _client(monkeypatch)
     headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
 
     inv = client.post(
-        "/api/v1/runtime-proxy/langchain/invoke",
+        "/api/v1/runtime-proxy/runnable/invoke",
         headers=headers,
-        json={"agent_name": "test-agent", "input": {"input": "hello"}},
+        json={
+            "agent_name": "test-agent",
+            "input": {"input": "hello"},
+            "config": {"run_name": "r1", "tags": ["a"], "metadata": {"k": "v"}},
+        },
     )
     assert inv.status_code == 200
     body = inv.json()
     assert body["output"] == "ok:hello"
     assert body["metadata"]["success"] is True
+    assert body["metadata"]["run_name"] == "r1"
+    assert body["metadata"]["tags"] == ["a"]
+    assert body["metadata"]["metadata"] == {"k": "v"}
 
     bat = client.post(
-        "/api/v1/runtime-proxy/langchain/batch",
+        "/api/v1/runtime-proxy/runnable/batch",
         headers=headers,
-        json={"agent_name": "test-agent", "inputs": ["one", {"query": "two"}]},
+        json={
+            "agent_name": "test-agent",
+            "inputs": ["one", {"query": "two"}],
+            "config": {"max_concurrency": 2},
+        },
     )
     assert bat.status_code == 200
     b = bat.json()
     assert len(b["outputs"]) == 2
+    assert b["batch_metadata"]["max_concurrency"] == 2
+    assert b["outputs"][0]["ok"] is True
     assert b["outputs"][0]["output"] == "ok:one"
     assert b["outputs"][1]["output"] == "ok:two"
 
     evt = client.post(
-        "/api/v1/runtime-proxy/langchain/stream-events",
+        "/api/v1/runtime-proxy/runnable/stream-events",
         headers=headers,
         json={"agent_name": "test-agent", "input": "events"},
     )
@@ -543,4 +483,147 @@ def test_runtime_proxy_langchain_invoke_batch_and_events(isolated_db, monkeypatc
     events = evt.json()["events"]
     assert events[0]["event"] == "on_chain_start"
     assert events[-1]["event"] == "on_chain_end"
+
+
+def test_runtime_proxy_runnable_stream_events_uses_runtime_event_log(isolated_db, monkeypatch):
+    import agentos.api.routers.runtime_proxy as rp
+    from agentos.core.database import create_database
+    from agentos.core.harness import TurnResult
+    from agentos.llm.provider import LLMResponse
+
+    db = create_database(Path("data/agent.db"))
+    db.initialize()
+    db.insert_runtime_event(
+        {
+            "event_id": "evt1",
+            "event_type": "llm_request",
+            "trace_id": "trace-evt",
+            "session_id": "sess-evt",
+            "payload": {"turn": 1},
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "evt2",
+            "event_type": "llm_response",
+            "trace_id": "trace-evt",
+            "session_id": "sess-evt",
+            "payload": {"turn": 1, "model": "stub"},
+        }
+    )
+    db.close()
+
+    class _Observer:
+        def __init__(self):
+            self.records = [type("Rec", (), {"session_id": "sess-evt", "trace_id": "trace-evt"})()]
+
+    class _DummyAgent:
+        def __init__(self):
+            self.config = type("Cfg", (), {"harness": {"runtime_mode": "graph"}})()
+            self._observer = _Observer()
+
+        def set_runtime_context(self, **kwargs):
+            return None
+
+        async def run(self, task: str):
+            return [TurnResult(
+                turn_number=1,
+                llm_response=LLMResponse(content=f"ok:{task}", model="stub"),
+                done=True,
+                stop_reason="completed",
+            )]
+
+    monkeypatch.setattr(rp, "_get_request_scoped_agent", lambda name: _DummyAgent())
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
+    resp = client.post(
+        "/api/v1/runtime-proxy/runnable/stream-events",
+        headers=headers,
+        json={"agent_name": "test-agent", "input": "hello"},
+    )
+    assert resp.status_code == 200
+    events = resp.json()["events"]
+    names = [e["event"] for e in events]
+    assert "on_llm_start" in names
+    assert "on_llm_end" in names
+
+
+def test_runtime_proxy_runnable_latency_breakdown(isolated_db, monkeypatch):
+    from agentos.core.database import create_database
+
+    db = create_database(Path("data/agent.db"))
+    db.initialize()
+    base = time.time()
+    db.insert_runtime_event(
+        {
+            "event_id": "a1",
+            "event_type": "llm_request",
+            "trace_id": "trace-lat",
+            "session_id": "sess-lat",
+            "event_ts": base,
+            "payload": {"turn": 1},
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "a2",
+            "event_type": "llm_response",
+            "trace_id": "trace-lat",
+            "session_id": "sess-lat",
+            "event_ts": base + 0.4,
+            "payload": {"turn": 1},
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "a3",
+            "event_type": "tool_call",
+            "trace_id": "trace-lat",
+            "session_id": "sess-lat",
+            "event_ts": base + 0.45,
+            "payload": {"turn": 1},
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "a4",
+            "event_type": "tool_result",
+            "trace_id": "trace-lat",
+            "session_id": "sess-lat",
+            "event_ts": base + 0.95,
+            "payload": {"turn": 1},
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "a5",
+            "event_type": "node_end",
+            "trace_id": "trace-lat",
+            "session_id": "sess-lat",
+            "event_ts": base + 1.0,
+            "node_id": "llm",
+            "latency_ms": 410.0,
+            "payload": {"latency_ms": 410.0},
+        }
+    )
+    db.close()
+
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
+    resp = client.post(
+        "/api/v1/runtime-proxy/runnable/latency-breakdown",
+        headers=headers,
+        json={"trace_id": "trace-lat"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trace_id"] == "trace-lat"
+    assert body["event_count"] >= 5
+    assert body["llm_calls"] == 1
+    assert body["tool_calls"] == 1
+    assert float(body["llm_ms"]) == pytest.approx(400.0, abs=2.0)
+    assert float(body["tool_ms"]) == pytest.approx(500.0, abs=2.0)
+    assert float(body["node_reported_ms"]) == pytest.approx(410.0, abs=2.0)
+    assert body["diagnosis"] == "tool_bound"
+    assert any("Tool execution dominates runtime" in r for r in body["diagnosis_reasons"])
 

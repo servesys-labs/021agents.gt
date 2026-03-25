@@ -8,8 +8,8 @@ import re
 # The default LLM model used across init scaffolding, agent configs, and the builder.
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 
-# The default LLM provider (GMI Cloud — single API key for all models).
-DEFAULT_PROVIDER = "gmi"
+# The default LLM provider (CF Worker routes to Workers AI or OpenRouter).
+DEFAULT_PROVIDER = "workers-ai"
 
 
 # ── Shared slugify ───────────────────────────────────────────────────────────

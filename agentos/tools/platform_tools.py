@@ -539,9 +539,40 @@ async def view_traces(
             for r in rows:
                 r = dict(r)
                 lines.append(
-                    f"  {r.get('id', '?')[:8]} | {r.get('agent_name', '?')} | "
-                    f"turns={r.get('turn_count', 0)} cost=${r.get('total_cost_usd', 0) or 0:.4f} | "
+                    f"  {str(r.get('session_id', '?'))[:8]} | {r.get('agent_name', '?')} | "
+                    f"turns={int(r.get('step_count', 0) or 0)} cost=${float(r.get('cost_total_usd', 0.0) or 0.0):.4f} | "
                     f"{r.get('status', '?')}"
+                )
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Error: {exc}"
+
+    if action == "trace":
+        try:
+            resolved_trace_id = trace_id
+            if not resolved_trace_id and session_id:
+                row = db.conn.execute(
+                    "SELECT trace_id FROM sessions WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                if row:
+                    resolved_trace_id = str(row.get("trace_id", ""))
+            if not resolved_trace_id:
+                return "trace action requires trace_id or session_id"
+            sessions = db.query_trace(resolved_trace_id)
+            spans = db.query_trace_spans(resolved_trace_id)
+            events = db.query_runtime_events(trace_id=resolved_trace_id, limit=max(100, limit * 50))
+            checkpoints = db.list_graph_checkpoints(trace_id=resolved_trace_id, limit=max(50, limit * 10))
+            eval_trials = db.list_eval_trials_by_trace(resolved_trace_id, limit=max(50, limit * 10))
+            rollup = db.trace_cost_rollup(resolved_trace_id)
+            lines = [
+                f"Trace {resolved_trace_id}",
+                f"  sessions={len(sessions)} spans={len(spans)} events={len(events)} checkpoints={len(checkpoints)} eval_trials={len(eval_trials)}",
+                f"  total_cost=${float(rollup.get('total_cost_usd', 0.0) or 0.0):.4f} total_turns={int(rollup.get('total_turns', 0) or 0)}",
+            ]
+            for s in sessions[:limit]:
+                lines.append(
+                    f"  - {str(s.get('session_id', ''))[:8]} {s.get('agent_name', '?')} status={s.get('status', '?')} stop={s.get('stop_reason', '')}"
                 )
             return "\n".join(lines)
         except Exception as exc:
@@ -549,10 +580,14 @@ async def view_traces(
 
     if action == "errors":
         try:
-            sql = "SELECT * FROM errors WHERE 1=1"
+            sql = (
+                "SELECT e.*, s.agent_name "
+                "FROM errors e LEFT JOIN sessions s ON s.session_id = e.session_id "
+                "WHERE 1=1"
+            )
             params = []
             if agent_name:
-                sql += " AND agent_name = ?"
+                sql += " AND s.agent_name = ?"
                 params.append(agent_name)
             sql += " ORDER BY created_at DESC LIMIT 20"
             rows = db.conn.execute(sql, params).fetchall()
@@ -561,7 +596,9 @@ async def view_traces(
             lines = [f"Recent errors ({len(rows)}):"]
             for r in rows:
                 r = dict(r)
-                lines.append(f"  {r.get('error_type', '?')}: {r.get('message', '?')[:80]}")
+                lines.append(
+                    f"  {r.get('source', '?')} | agent={r.get('agent_name', '?')} | {str(r.get('message', '?'))[:80]}"
+                )
             return "\n".join(lines)
         except Exception as exc:
             return f"Error: {exc}"

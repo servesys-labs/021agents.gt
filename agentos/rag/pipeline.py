@@ -16,29 +16,13 @@ logger = logging.getLogger(__name__)
 
 
 def _get_embedder():
-    """Get an embedding function. Tries GMI API, then numpy fallback.
+    """Get an embedding function. Tries CF worker, then numpy fallback.
 
     Returns a callable that takes list[str] and returns list[list[float]],
     or None if no embedding method is available.
     """
-    import os
-
-    gmi_key = os.environ.get("GMI_API_KEY", "")
-    if gmi_key:
-        def _gmi_embed(texts: list[str]) -> list[list[float]]:
-            import httpx
-            resp = httpx.post(
-                "https://api.gmi-serving.com/v1/embeddings",
-                headers={"Authorization": f"Bearer {gmi_key}", "Content-Type": "application/json"},
-                json={"model": "BAAI/bge-base-en-v1.5", "input": texts},
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return [item["embedding"] for item in data.get("data", [])]
-            logger.warning("GMI embedding failed (%s), using fallback", resp.status_code)
-            return _numpy_embed(texts)
-        return _gmi_embed
+    # Embeddings route through CF worker via CloudflareClient.embed()
+    # For local/offline usage, fall back to numpy bag-of-words.
 
     # Fallback: simple numpy bag-of-words embeddings (works offline)
     try:

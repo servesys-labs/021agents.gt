@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import pytest
 
 from agentos.tools.builtins import (
@@ -12,6 +13,7 @@ from agentos.tools.builtins import (
     list_tools_handler,
     BUILTIN_HANDLERS,
 )
+from agentos.core.database import create_database
 
 
 class TestBuiltinRegistry:
@@ -263,3 +265,103 @@ class TestToolSchemaIntegration:
         props = schema["input_schema"]["properties"]
         assert "agent_name" in props
         assert "action" in props
+
+
+class TestViewTracesTool:
+    @pytest.mark.asyncio
+    async def test_trace_action_returns_trace_summary(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+
+        db = create_database(tmp_path / "data" / "agent.db")
+        db.initialize()
+        now = time.time()
+        db.insert_session({
+            "session_id": "sess-trace-1",
+            "agent_name": "trace-agent",
+            "trace_id": "trace-123",
+            "timestamp": now,
+            "status": "success",
+            "stop_reason": "completed",
+            "step_count": 2,
+            "wall_clock_seconds": 1.2,
+            "composition": {"agent_name": "trace-agent"},
+            "cost": {"total_usd": 0.02},
+            "benchmark_cost": {},
+        })
+        db.insert_spans([{
+            "span_id": "span-root-1",
+            "trace_id": "trace-123",
+            "parent_span_id": "",
+            "name": "session",
+            "kind": "session",
+            "status": "ok",
+            "start_time": now,
+            "end_time": now + 0.1,
+            "duration_ms": 100.0,
+            "attributes": {"turn": 1},
+            "events": [],
+        }], session_id="sess-trace-1")
+        db.insert_runtime_event({
+            "event_id": "evt-1",
+            "event_type": "node_start",
+            "event_source": "graph_runtime",
+            "event_ts": now,
+            "agent_name": "trace-agent",
+            "session_id": "sess-trace-1",
+            "trace_id": "trace-123",
+            "turn": 1,
+            "node_id": "llm",
+            "payload": {"node_id": "llm"},
+        })
+        db.upsert_graph_checkpoint(
+            checkpoint_id="cp-1",
+            agent_name="trace-agent",
+            session_id="sess-trace-1",
+            trace_id="trace-123",
+            status="pending_approval",
+            payload={"checkpoint_id": "cp-1"},
+        )
+
+        import agentos.tools.platform_tools as platform_tools
+        monkeypatch.setattr(platform_tools, "_get_db", lambda: db)
+
+        out = await platform_tools.view_traces(action="trace", trace_id="trace-123")
+        assert "Trace trace-123" in out
+        assert "sessions=1" in out
+        assert "spans=1" in out
+        assert "events=1" in out
+        assert "checkpoints=1" in out
+        db.close()
+
+    @pytest.mark.asyncio
+    async def test_recent_action_uses_current_session_schema(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        db = create_database(tmp_path / "data" / "agent.db")
+        db.initialize()
+        now = time.time()
+        db.insert_session({
+            "session_id": "sess-recent-1",
+            "agent_name": "recent-agent",
+            "trace_id": "trace-recent-1",
+            "timestamp": now,
+            "status": "success",
+            "stop_reason": "completed",
+            "step_count": 3,
+            "wall_clock_seconds": 1.8,
+            "composition": {"agent_name": "recent-agent"},
+            "cost": {"total_usd": 0.03},
+            "benchmark_cost": {},
+        })
+
+        import agentos.tools.platform_tools as platform_tools
+        monkeypatch.setattr(platform_tools, "_get_db", lambda: db)
+
+        out = await platform_tools.view_traces(action="recent", agent_name="recent-agent", limit=5)
+        assert "Recent sessions (1):" in out
+        assert "recent-agent" in out
+        assert "turns=3" in out
+        assert "cost=$0.0300" in out
+        assert "success" in out
+        db.close()

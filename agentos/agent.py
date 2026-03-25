@@ -18,13 +18,6 @@ from agentos.env import load_dotenv_if_present
 
 logger = logging.getLogger(__name__)
 
-# Module-level GMI model cache — ONE HTTP call per process, not per agent.
-_gmi_model_cache: set[str] | None = None
-
-def _gmi_validate_cached(model_id: str) -> bool:
-    """Check if a model exists on GMI. Skipped — GMI removed from provider chain."""
-    return False
-
 
 def _resolve_agents_dir() -> Path:
     """Resolve the agents directory — cwd/agents/ first, then package root.
@@ -504,10 +497,6 @@ class Agent:
             except Exception:
                 pass
 
-        # Validate GMI models (uses module-level cache — one HTTP call per process)
-        def _validate_gmi_model(model_id: str) -> bool:
-            return _gmi_validate_cached(model_id)
-
         def _make_provider(tier_model: str, tier_provider: str) -> HttpProvider | None:
             """Create an LLM provider — ALL calls go through the CF worker.
 
@@ -546,15 +535,9 @@ class Agent:
             role_max_tokens = role_cfg.get("max_tokens", self.config.max_tokens)
 
             prov = _make_provider(role_model, role_provider_name)
-            # Fallback chain for text models
-            if prov is None and role_provider_name not in ("gmi-requestqueue", "cloudflare"):
-                gmi_key = os.environ.get("GMI_API_KEY", "")
-                if gmi_key:
-                    prov = _make_provider(role_model, "gmi")
-                if prov is None and anthropic_key:
-                    prov = _make_provider(model if "claude" in model else "anthropic/claude-sonnet-4.6", "anthropic")
-                if prov is None and openai_key:
-                    prov = _make_provider("openai/gpt-5.4-mini", "openai")
+            # Fallback chain for text models — all route through CF worker
+            if prov is None:
+                prov = _make_provider(role_model, "workers-ai")
 
             if prov is not None:
                 llm_router.register_category(category, role, prov, max_tokens=role_max_tokens)
@@ -581,13 +564,7 @@ class Agent:
 
                 prov = _make_provider(tier_model, tier_provider_name)
                 if prov is None and tier_name not in ("image_gen", "tts", "stt"):
-                    gmi_key = os.environ.get("GMI_API_KEY", "")
-                    if prov is None and gmi_key:
-                        prov = _make_provider(tier_model, "gmi")
-                    if prov is None and anthropic_key:
-                        prov = _make_provider(model if "claude" in model else "anthropic/claude-sonnet-4.6", "anthropic")
-                    if prov is None and openai_key:
-                        prov = _make_provider("openai/gpt-5.4-mini", "openai")
+                    prov = _make_provider(tier_model, "workers-ai")
 
                 # Map flat tier to Complexity enum for backward compat
                 tier_map = {t.value: t for t in Complexity}

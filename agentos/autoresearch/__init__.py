@@ -19,8 +19,6 @@ from agentos.autoresearch.backends import (
     ExecutionBackend,
     InProcessBackend,
     E2BSandboxBackend,
-    GMICloudGPUBackend,
-    GPUCloudBackend,  # alias
     get_backend,
     recommend_backend,
 )
@@ -34,8 +32,6 @@ __all__ = [
     "ExecutionBackend",
     "InProcessBackend",
     "E2BSandboxBackend",
-    "GMICloudGPUBackend",
-    "GPUCloudBackend",
     "get_backend",
     "recommend_backend",
 ]

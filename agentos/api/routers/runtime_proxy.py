@@ -820,7 +820,7 @@ async def runnable_latency_breakdown_proxy(
 
 class LLMInferRequest(BaseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
-    provider: str = "gmi"
+    provider: str = "workers-ai"
     model: str
     max_tokens: int = 4096
     temperature: float = 0.0
@@ -863,7 +863,7 @@ async def llm_infer(
     """Run provider inference from backend-held credentials for edge workers."""
     _require_edge_token(authorization=authorization, x_edge_token=x_edge_token)
 
-    provider = (payload.provider or "gmi").strip().lower()
+    provider = (payload.provider or "workers-ai").strip().lower()
     model = (payload.model or "").strip()
     if not model:
         raise HTTPException(status_code=400, detail="model is required")

@@ -137,7 +137,7 @@ class LLMQualityScorer:
             )
         else:
             # OpenAI-compatible
-            api_base = "https://api.openai.com/v1" if self.provider == "openai" else os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
+            api_base = "https://api.openai.com/v1" if self.provider == "openai" else "https://openrouter.ai/api/v1"
             resp = httpx.post(
                 f"{api_base}/chat/completions",
                 headers={

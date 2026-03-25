@@ -1095,118 +1095,64 @@ async def todo(action: str, text: str = "", item_id: int = 0, status: str = "") 
 
 
 # ---------------------------------------------------------------------------
-# Multimodal tools — image gen, TTS, STT via GMI Cloud
+# Multimodal tools — image gen, TTS, STT via CF Workers AI
 # ---------------------------------------------------------------------------
 
 async def image_generate(prompt: str, model: str = "", size: str = "1024x1024",
                          num_images: int = 1) -> str:
-    """Generate images via GMI Cloud (Nano Banana 2, Seedream, GLM-Image, FLUX, etc.).
+    """Generate images via CF Workers AI (FLUX, etc.).
 
     Returns a JSON array of image URLs or base64 data.
+    Routes through /cf/tool/exec on the CF worker.
     """
-    import httpx
-    import os
+    from agentos.infra.cloudflare_client import get_cf_client
 
-    api_key = os.environ.get("GMI_API_KEY", "")
-    if not api_key:
-        return "Error: GMI_API_KEY not configured. Set it to use image generation."
+    cf = get_cf_client()
+    if cf is None:
+        return "Error: AGENTOS_WORKER_URL not configured. Image generation requires CF worker."
 
-    api_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
-    model = model or os.environ.get("DEFAULT_IMAGE_MODEL", "Seedream-5.0-lite")
-
+    model = model or "@cf/black-forest-labs/FLUX.1-schnell"
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{api_base}/images/generations",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "prompt": prompt,
-                    "n": min(num_images, 4),
-                    "size": size,
-                },
-            )
-            if resp.status_code != 200:
-                return f"Image generation failed ({resp.status_code}): {resp.text[:300]}"
-
-            data = resp.json()
-            images = data.get("data", [])
-            results = []
-            for img in images:
-                url = img.get("url", "")
-                if url:
-                    results.append(url)
-                elif img.get("b64_json"):
-                    results.append(f"[base64 image, {len(img['b64_json'])} chars]")
-            return json.dumps({"images": results, "model": model, "count": len(results)})
+        result = await cf.tool_exec("image-generate", {
+            "prompt": prompt,
+            "model": model,
+            "num_images": min(num_images, 4),
+            "size": size,
+        })
+        return json.dumps(result)
     except Exception as exc:
         return f"Image generation error: {exc}"
 
 
 async def text_to_speech(text: str, model: str = "", voice: str = "default") -> str:
-    """Convert text to speech via GMI Cloud (ElevenLabs, MiniMax TTS, Inworld, etc.).
+    """Convert text to speech via CF Workers AI (Deepgram Aura, etc.).
 
     Returns path to the generated audio file or base64 audio data.
     """
-    import httpx
-    import os
+    from agentos.infra.cloudflare_client import get_cf_client
 
-    api_key = os.environ.get("GMI_API_KEY", "")
-    if not api_key:
-        return "Error: GMI_API_KEY not configured. Set it to use text-to-speech."
+    cf = get_cf_client()
+    if cf is None:
+        return "Error: AGENTOS_WORKER_URL not configured. TTS requires CF worker."
 
-    api_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
-    model = model or os.environ.get("DEFAULT_TTS_MODEL", "minimax-tts-speech-2.6-turbo")
-
+    model = model or "@cf/deepgram/aura-asteria-en"
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"{api_base}/audio/speech",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "input": text[:5000],
-                    "voice": voice,
-                },
-            )
-            if resp.status_code != 200:
-                return f"TTS failed ({resp.status_code}): {resp.text[:300]}"
-
-            # Save audio to file
-            audio_path = Path.cwd() / "data" / f"tts_{int(time.time())}.mp3"
-            audio_path.parent.mkdir(parents=True, exist_ok=True)
-            audio_path.write_bytes(resp.content)
-            return json.dumps({
-                "audio_file": str(audio_path),
-                "model": model,
-                "voice": voice,
-                "size_bytes": len(resp.content),
-                "text_length": len(text),
-            })
+        result = await cf.tool_exec("text-to-speech", {
+            "text": text[:5000],
+            "model": model,
+            "voice": voice,
+        })
+        return json.dumps(result)
     except Exception as exc:
         return f"TTS error: {exc}"
 
 
 async def speech_to_text(audio_path: str, model: str = "", language: str = "") -> str:
-    """Transcribe audio to text via GMI Cloud (Whisper, etc.).
+    """Transcribe audio to text via CF Workers AI (Whisper).
 
     Accepts a path to an audio file (mp3, wav, m4a, webm, etc.).
     """
-    import httpx
-    import os
-
-    api_key = os.environ.get("GMI_API_KEY", "")
-    if not api_key:
-        return "Error: GMI_API_KEY not configured. Set it to use speech-to-text."
-
-    api_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
-    model = model or os.environ.get("DEFAULT_STT_MODEL", "whisper-large-v3")
+    model = model or "@cf/openai/whisper"
 
     audio_file = Path(audio_path)
     if not audio_file.exists():
@@ -1889,7 +1835,7 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "image-generate": {
-        "description": "Generate images from a text prompt via GMI Cloud (Nano Banana 2, Seedream, GLM-Image, FLUX)",
+        "description": "Generate images from a text prompt via CF Workers AI (FLUX)",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1902,7 +1848,7 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "text-to-speech": {
-        "description": "Convert text to speech via GMI Cloud (ElevenLabs, MiniMax TTS, Inworld). Returns audio file path.",
+        "description": "Convert text to speech via CF Workers AI (Deepgram Aura). Returns audio file path.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1914,7 +1860,7 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "speech-to-text": {
-        "description": "Transcribe audio to text via GMI Cloud (Whisper). Accepts mp3, wav, m4a, webm files.",
+        "description": "Transcribe audio to text via CF Workers AI (Whisper). Accepts mp3, wav, m4a, webm files.",
         "input_schema": {
             "type": "object",
             "properties": {
