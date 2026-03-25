@@ -3351,14 +3351,15 @@ export default {
     if (dispatchMatch && env.DISPATCHER) {
       const [, orgSlug, agentName] = dispatchMatch;
       const workerName = `agentos-${orgSlug}-${agentName}`;
-      const bodyText = await request.text().catch(() => "{}");
+      const hasBody = ["POST", "PUT", "PATCH"].includes(request.method);
+      const bodyText = hasBody ? await request.text().catch(() => "{}") : null;
 
       try {
         const userWorker = env.DISPATCHER.get(workerName);
         const dispatchReq = new Request(request.url, {
           method: request.method,
           headers: request.headers,
-          body: bodyText,
+          ...(bodyText !== null ? { body: bodyText } : {}),
         });
         const dispatchResp = await userWorker.fetch(dispatchReq);
 
