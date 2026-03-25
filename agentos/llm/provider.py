@@ -255,14 +255,27 @@ class HttpProvider:
         else:
             payload["max_tokens"] = max_tokens
         if tools:
-            # Convert MCP-style tools to OpenAI function-calling format
+            # Convert MCP-style tools to OpenAI function-calling format.
+            # GPT-5.x strictly validates schemas — ensure all array types have "items".
+            def _fix_schema(schema: dict) -> dict:
+                """Ensure array types have items defined (GPT-5.x requirement)."""
+                if not isinstance(schema, dict):
+                    return schema
+                fixed = dict(schema)
+                for key, val in fixed.items():
+                    if isinstance(val, dict):
+                        if val.get("type") == "array" and "items" not in val:
+                            val = {**val, "items": {"type": "string"}}
+                        fixed[key] = _fix_schema(val)
+                return fixed
+
             payload["tools"] = [
                 {
                     "type": "function",
                     "function": {
                         "name": t.get("name", ""),
                         "description": t.get("description", ""),
-                        "parameters": t.get("input_schema", {}),
+                        "parameters": _fix_schema(t.get("input_schema", {})),
                     },
                 }
                 for t in tools
