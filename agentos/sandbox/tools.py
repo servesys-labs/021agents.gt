@@ -80,22 +80,49 @@ def sandbox_tool_definitions() -> list[dict[str, Any]]:
 
 
 async def handle_sandbox_tool(name: str, args: dict[str, Any]) -> Any:
-    """Execute a sandbox tool call. Returns the result dict."""
+    """Execute a sandbox tool call.
+
+    Tries E2B sandbox first. If E2B is unavailable (no API key), falls
+    back to Cloudflare container sandbox via CloudflareClient.
+    """
     mgr = get_manager()
 
     if name == "sandbox_exec":
-        result = await mgr.exec(
-            command=args["command"],
-            sandbox_id=args.get("sandbox_id"),
-            timeout_ms=int(args.get("timeout_ms", 30000)),
-        )
-        return {
-            "sandbox_id": result.sandbox_id,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "exit_code": result.exit_code,
-            "duration_ms": result.duration_ms,
-        }
+        try:
+            result = await mgr.exec(
+                command=args["command"],
+                sandbox_id=args.get("sandbox_id"),
+                timeout_ms=int(args.get("timeout_ms", 30000)),
+            )
+            return {
+                "sandbox_id": result.sandbox_id,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.exit_code,
+                "duration_ms": result.duration_ms,
+            }
+        except Exception as e2b_err:
+            # Fall back to Cloudflare container sandbox
+            logger.info("E2B sandbox unavailable (%s), trying CF sandbox", e2b_err)
+            try:
+                from agentos.infra.cloudflare_client import get_cf_client
+                cf = get_cf_client()
+                if cf:
+                    cf_result = await cf.sandbox_exec(
+                        code=args["command"],
+                        language="bash",
+                        timeout_ms=int(args.get("timeout_ms", 30000)),
+                    )
+                    return {
+                        "sandbox_id": "cf-container",
+                        "stdout": cf_result.get("stdout", ""),
+                        "stderr": cf_result.get("stderr", ""),
+                        "exit_code": cf_result.get("exit_code", 1),
+                        "duration_ms": 0,
+                    }
+            except Exception as cf_err:
+                logger.warning("CF sandbox also failed: %s", cf_err)
+            raise  # Re-raise original E2B error if both fail
 
     if name == "sandbox_file_write":
         result = await mgr.file_write(
