@@ -379,6 +379,9 @@ class TestObserverTurnPersistence:
         assert len(rows) == 1
         assert rows[0]["turn_number"] == 1
         assert rows[0]["model_used"] == "claude"
+        runtime_events = db.query_runtime_events(trace_id=observer.records[0].trace_id)
+        assert runtime_events
+        assert any(evt["event_type"] == "session_start" for evt in runtime_events)
         db.close()
 
 
@@ -412,4 +415,55 @@ class TestGraphCheckpointPersistence:
         row2 = db.get_graph_checkpoint("cp-123")
         assert row2 is not None
         assert row2["status"] == "resumed"
+        db.close()
+
+    def test_list_graph_checkpoints_filters(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        db.upsert_graph_checkpoint(
+            checkpoint_id="cp-a",
+            agent_name="agent-a",
+            session_id="sess-a",
+            trace_id="trace-a",
+            status="pending_approval",
+            payload={"checkpoint_id": "cp-a"},
+        )
+        db.upsert_graph_checkpoint(
+            checkpoint_id="cp-b",
+            agent_name="agent-b",
+            session_id="sess-b",
+            trace_id="trace-b",
+            status="resumed",
+            payload={"checkpoint_id": "cp-b"},
+        )
+        rows = db.list_graph_checkpoints(trace_id="trace-a")
+        assert len(rows) == 1
+        assert rows[0]["checkpoint_id"] == "cp-a"
+        db.close()
+
+
+class TestRuntimeEventPersistence:
+    def test_insert_and_query_runtime_events(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        db.insert_runtime_event({
+            "event_id": "evt-1",
+            "event_type": "node_start",
+            "event_source": "graph_runtime",
+            "event_ts": time.time(),
+            "org_id": "org-1",
+            "project_id": "proj-1",
+            "agent_name": "agent-a",
+            "session_id": "sess-1",
+            "trace_id": "trace-1",
+            "turn": 1,
+            "node_id": "llm",
+            "status": "running",
+            "attempt": 1,
+            "latency_ms": 0.0,
+            "payload": {"node_id": "llm", "turn": 1},
+        })
+        rows = db.query_runtime_events(trace_id="trace-1")
+        assert len(rows) == 1
+        assert rows[0]["event_type"] == "node_start"
+        assert rows[0]["node_id"] == "llm"
+        assert rows[0]["payload"]["turn"] == 1
         db.close()

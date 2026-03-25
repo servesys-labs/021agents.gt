@@ -16,6 +16,23 @@ from agentos.api.deps import CurrentUser, get_current_user, _get_db
 router = APIRouter(prefix="/observability", tags=["observability"])
 
 
+def _trace_is_owned(db: Any, trace_id: str, org_id: str) -> bool:
+    """Check if a trace belongs to the caller org across telemetry tables."""
+    checks = [
+        ("SELECT COUNT(*) AS cnt FROM sessions WHERE trace_id = ? AND org_id = ?", (trace_id, org_id)),
+        ("SELECT COUNT(*) AS cnt FROM billing_records WHERE trace_id = ? AND org_id = ?", (trace_id, org_id)),
+        ("SELECT COUNT(*) AS cnt FROM runtime_events WHERE trace_id = ? AND org_id = ?", (trace_id, org_id)),
+    ]
+    for sql, params in checks:
+        try:
+            row = db.conn.execute(sql, params).fetchone()
+            if row and int(row["cnt"]) > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 @router.get("/stats")
 async def db_stats(user: CurrentUser = Depends(get_current_user)):
     """Get database health and table counts."""
@@ -43,18 +60,75 @@ async def cost_ledger(
 
 
 @router.get("/traces/{trace_id}")
-async def get_trace(trace_id: str, user: CurrentUser = Depends(get_current_user)):
-    """Get full trace chain with cost rollup."""
+async def get_trace(
+    trace_id: str,
+    include_spans: bool = True,
+    include_events: bool = True,
+    include_checkpoints: bool = True,
+    include_eval_trials: bool = True,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get full trace chain with LangSmith-style telemetry bundle."""
     db = _get_db()
-    ownership = db.conn.execute(
-        "SELECT COUNT(*) AS cnt FROM billing_records WHERE trace_id = ? AND org_id = ?",
-        (trace_id, user.org_id),
-    ).fetchone()
-    if not ownership or int(ownership["cnt"]) == 0:
+    if not _trace_is_owned(db, trace_id, user.org_id):
         raise HTTPException(status_code=404, detail="Trace not found")
     sessions = db.query_trace(trace_id)
     rollup = db.trace_cost_rollup(trace_id)
-    return {"trace_id": trace_id, "sessions": sessions, "cost_rollup": rollup}
+    spans = db.query_trace_spans(trace_id) if include_spans else []
+    events = db.query_runtime_events(trace_id=trace_id, limit=2000) if include_events else []
+    checkpoints = db.list_graph_checkpoints(trace_id=trace_id, limit=500) if include_checkpoints else []
+    eval_trials = db.list_eval_trials_by_trace(trace_id, limit=500) if include_eval_trials else []
+    return {
+        "trace_id": trace_id,
+        "sessions": sessions,
+        "cost_rollup": rollup,
+        "spans": spans,
+        "runtime_events": events,
+        "graph_checkpoints": checkpoints,
+        "eval_trials": eval_trials,
+    }
+
+
+@router.get("/traces/{trace_id}/events")
+async def get_trace_events(
+    trace_id: str,
+    limit: int = 2000,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get runtime events for a trace (node lifecycle, tool, llm, errors)."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"trace_id": trace_id, "events": db.query_runtime_events(trace_id=trace_id, limit=limit)}
+
+
+@router.get("/traces/{trace_id}/checkpoints")
+async def get_trace_checkpoints(
+    trace_id: str,
+    limit: int = 500,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get persisted graph checkpoints for a trace."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {
+        "trace_id": trace_id,
+        "checkpoints": db.list_graph_checkpoints(trace_id=trace_id, limit=limit),
+    }
+
+
+@router.get("/traces/{trace_id}/eval-trials")
+async def get_trace_eval_trials(
+    trace_id: str,
+    limit: int = 500,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get eval trials linked to this trace id."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"trace_id": trace_id, "eval_trials": db.list_eval_trials_by_trace(trace_id, limit=limit)}
 
 
 @router.get("/billing/export")

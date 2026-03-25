@@ -973,7 +973,9 @@ export default {
         }
       }
 
-      // /cf/llm/infer — LLM inference via Workers AI (edge, <1s for small models)
+      // /cf/llm/infer — Universal LLM endpoint
+      // Routes: @cf/* → Workers AI (edge) | others → OpenRouter via BYOK
+      // Backend never calls LLM providers directly — all go through this worker.
       if (url.pathname === "/cf/llm/infer" && request.method === "POST") {
         const body = await request.json() as {
           model: string;
@@ -981,27 +983,100 @@ export default {
           max_tokens?: number;
           temperature?: number;
           tools?: any[];
+          provider?: string;  // "workers-ai" | "openrouter" | auto-detect from model
         };
         const model = body.model || "@cf/meta/llama-3.1-8b-instruct";
+        const isWorkersAI = model.startsWith("@cf/");
         const started = Date.now();
+
         try {
-          const aiResult = await env.AI.run(model, {
-            messages: body.messages,
-            max_tokens: body.max_tokens || 1024,
-            temperature: body.temperature || 0,
-            ...(body.tools ? { tools: body.tools } : {}),
-          }) as any;
+          let content = "";
+          let toolCalls: any[] = [];
+          let inputTokens = 0;
+          let outputTokens = 0;
+          let resolvedModel = model;
+
+          if (isWorkersAI) {
+            // ── Workers AI (edge inference, sub-second) ──
+            const aiResult = await env.AI.run(model, {
+              messages: body.messages,
+              max_tokens: body.max_tokens || 1024,
+              temperature: body.temperature || 0,
+              ...(body.tools ? { tools: body.tools } : {}),
+            }) as any;
+            content = aiResult.response || aiResult.content || "";
+            toolCalls = aiResult.tool_calls || [];
+            inputTokens = aiResult.usage?.input_tokens || 0;
+            outputTokens = aiResult.usage?.output_tokens || 0;
+
+          } else {
+            // ── OpenRouter (400+ models, BYOK) ──
+            const orKey = env.OPENROUTER_API_KEY || "";
+            if (!orKey) {
+              return Response.json({ error: "OPENROUTER_API_KEY not configured on worker" }, { status: 503 });
+            }
+
+            // Build payload — handle GPT-5.x max_completion_tokens
+            const payload: Record<string, any> = {
+              model,
+              messages: body.messages.map(m => ({
+                ...m,
+                role: m.role === "system" && model.includes("gpt-5") ? "developer" : m.role,
+              })),
+              temperature: body.temperature || 0,
+            };
+            if (model.includes("gpt-5")) {
+              payload.max_completion_tokens = body.max_tokens || 1024;
+            } else {
+              payload.max_tokens = body.max_tokens || 1024;
+            }
+            if (body.tools) {
+              // Fix array schemas for GPT-5.x strict validation
+              payload.tools = body.tools.map((t: any) => {
+                const params = t.function?.parameters || t.parameters || {};
+                const fixed = JSON.parse(JSON.stringify(params));
+                const fixArrays = (obj: any) => {
+                  if (!obj || typeof obj !== "object") return;
+                  for (const [k, v] of Object.entries(obj)) {
+                    if (v && typeof v === "object") {
+                      const val = v as Record<string, any>;
+                      if (val.type === "array" && !val.items) val.items = { type: "string" };
+                      fixArrays(val);
+                    }
+                  }
+                };
+                fixArrays(fixed);
+                return { type: "function", function: { name: t.function?.name || t.name, description: t.function?.description || t.description, parameters: fixed } };
+              });
+            }
+
+            const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+              method: "POST",
+              headers: { "Authorization": `Bearer ${orKey}`, "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+
+            if (!resp.ok) {
+              const errBody = await resp.text();
+              return Response.json({ error: `OpenRouter ${resp.status}: ${errBody.slice(0, 200)}`, model }, { status: resp.status });
+            }
+
+            const data = await resp.json() as any;
+            const choice = (data.choices || [{}])[0];
+            const msg = choice.message || {};
+            content = msg.content || "";
+            toolCalls = (msg.tool_calls || []).map((tc: any) => ({
+              id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments,
+            }));
+            inputTokens = data.usage?.prompt_tokens || 0;
+            outputTokens = data.usage?.completion_tokens || 0;
+            resolvedModel = data.model || model;
+          }
+
           const latencyMs = Date.now() - started;
-          // Workers AI returns { response: "text" } for text gen
-          const content = aiResult.response || aiResult.content || "";
-          const toolCalls = aiResult.tool_calls || [];
           return Response.json({
-            content,
-            model,
-            tool_calls: toolCalls,
-            input_tokens: aiResult.usage?.input_tokens || 0,
-            output_tokens: aiResult.usage?.output_tokens || 0,
-            latency_ms: latencyMs,
+            content, model: resolvedModel, provider: isWorkersAI ? "workers-ai" : "openrouter",
+            tool_calls: toolCalls, input_tokens: inputTokens, output_tokens: outputTokens, latency_ms: latencyMs,
           });
         } catch (err: any) {
           return Response.json({ error: err.message, model }, { status: 500 });

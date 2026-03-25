@@ -3309,6 +3309,167 @@ class AgentDB:
                 (time.time(), checkpoint_id),
             )
 
+    def list_graph_checkpoints(
+        self,
+        *,
+        trace_id: str = "",
+        session_id: str = "",
+        status: str = "",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """List persisted graph checkpoints with optional filters."""
+        sql = (
+            "SELECT checkpoint_id, agent_name, session_id, trace_id, status, "
+            "payload_json, metadata_json, created_at, updated_at "
+            "FROM graph_checkpoints WHERE 1=1"
+        )
+        params: list[Any] = []
+        if trace_id:
+            sql += " AND trace_id = ?"
+            params.append(trace_id)
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = self.conn.execute(sql, params).fetchall()
+        except Exception:
+            return []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.get("payload_json", "{}"))
+            except Exception:
+                item["payload"] = {}
+            try:
+                item["metadata"] = json.loads(item.get("metadata_json", "{}"))
+            except Exception:
+                item["metadata"] = {}
+            result.append(item)
+        return result
+
+    def insert_runtime_event(self, event: dict[str, Any]) -> None:
+        """Persist one runtime event for trace-level replay/analysis."""
+        with self.tx() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS runtime_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id        TEXT NOT NULL DEFAULT '',
+                    event_type      TEXT NOT NULL DEFAULT '',
+                    event_source    TEXT NOT NULL DEFAULT '',
+                    event_ts        REAL NOT NULL DEFAULT 0.0,
+                    org_id          TEXT NOT NULL DEFAULT '',
+                    project_id      TEXT NOT NULL DEFAULT '',
+                    agent_name      TEXT NOT NULL DEFAULT '',
+                    session_id      TEXT NOT NULL DEFAULT '',
+                    trace_id        TEXT NOT NULL DEFAULT '',
+                    turn            INTEGER NOT NULL DEFAULT 0,
+                    node_id         TEXT NOT NULL DEFAULT '',
+                    status          TEXT NOT NULL DEFAULT '',
+                    attempt         INTEGER NOT NULL DEFAULT 0,
+                    latency_ms      REAL NOT NULL DEFAULT 0.0,
+                    payload_json    TEXT NOT NULL DEFAULT '{}',
+                    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+                )"""
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runtime_events_trace ON runtime_events(trace_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runtime_events_session ON runtime_events(session_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runtime_events_type ON runtime_events(event_type)"
+            )
+            cur.execute(
+                """INSERT INTO runtime_events (
+                    event_id, event_type, event_source, event_ts,
+                    org_id, project_id, agent_name, session_id, trace_id,
+                    turn, node_id, status, attempt, latency_ms, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(event.get("event_id", "")),
+                    str(event.get("event_type", "")),
+                    str(event.get("event_source", "")),
+                    float(event.get("event_ts", time.time()) or time.time()),
+                    str(event.get("org_id", "")),
+                    str(event.get("project_id", "")),
+                    str(event.get("agent_name", "")),
+                    str(event.get("session_id", "")),
+                    str(event.get("trace_id", "")),
+                    int(event.get("turn", 0) or 0),
+                    str(event.get("node_id", "")),
+                    str(event.get("status", "")),
+                    int(event.get("attempt", 0) or 0),
+                    float(event.get("latency_ms", 0.0) or 0.0),
+                    json.dumps(event.get("payload", {})),
+                ),
+            )
+
+    def query_runtime_events(
+        self,
+        *,
+        trace_id: str = "",
+        session_id: str = "",
+        event_types: list[str] | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Query runtime events for observability timelines."""
+        sql = "SELECT * FROM runtime_events WHERE 1=1"
+        params: list[Any] = []
+        if trace_id:
+            sql += " AND trace_id = ?"
+            params.append(trace_id)
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if event_types:
+            placeholders = ", ".join("?" for _ in event_types)
+            sql += f" AND event_type IN ({placeholders})"
+            params.extend(event_types)
+        sql += " ORDER BY event_ts ASC, id ASC LIMIT ?"
+        params.append(limit)
+        try:
+            rows = self.conn.execute(sql, params).fetchall()
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.get("payload_json", "{}"))
+            except Exception:
+                item["payload"] = {}
+            out.append(item)
+        return out
+
+    def list_eval_trials_by_trace(self, trace_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """List eval trial records linked to a trace id."""
+        try:
+            rows = self.conn.execute(
+                """SELECT * FROM eval_trials
+                   WHERE trace_id = ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ?""",
+                (trace_id, limit),
+            ).fetchall()
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.get("metadata_json", "{}"))
+            except Exception:
+                item["metadata"] = {}
+            out.append(item)
+        return out
+
     def insert_session_errors(self, session_id: str, errors: list[dict[str, Any]]) -> None:
         """Insert error records for a session."""
         with self.tx() as cur:

@@ -100,6 +100,7 @@ class Observer:
         self.event_bus.on(EventType.TOOL_CALL, self._on_tool_call)
         self.event_bus.on(EventType.TOOL_RESULT, self._on_tool_result)
         self.event_bus.on(EventType.ERROR, self._on_error)
+        self.event_bus.on_all(self._on_any_event)
 
         self._attached = True
         logger.info("Observer attached for agent '%s'", agent_name)
@@ -329,6 +330,36 @@ class Observer:
             turn=len(rec.turns),
         )
         rec.errors.append(err)
+
+    async def _on_any_event(self, event: Event) -> None:
+        """Persist runtime events for trace-level observability timelines."""
+        if not self._attached or self._db is None:
+            return
+        sid = str(event.data.get("session_id", "") or self._current_session_id or "")
+        trace_id = str(event.data.get("trace_id", ""))
+        if not trace_id and sid in self._sessions:
+            trace_id = str(self._sessions[sid].trace_id)
+        payload = dict(event.data) if isinstance(event.data, dict) else {"data": str(event.data)}
+        try:
+            self._db.insert_runtime_event({
+                "event_id": event.id,
+                "event_type": str(event.type.value),
+                "event_source": event.source or "",
+                "event_ts": event.timestamp,
+                "org_id": self._agent_config.get("_org_id", ""),
+                "project_id": self._agent_config.get("_project_id", ""),
+                "agent_name": self._agent_name,
+                "session_id": sid,
+                "trace_id": trace_id,
+                "turn": int(payload.get("turn", 0) or 0),
+                "node_id": str(payload.get("node_id", "")),
+                "status": str(payload.get("status", "")),
+                "attempt": int(payload.get("attempt", 0) or 0),
+                "latency_ms": float(payload.get("latency_ms", 0.0) or 0.0),
+                "payload": payload,
+            })
+        except Exception:
+            logger.debug("Failed to persist runtime event", exc_info=True)
 
     def _append_to_storage(self, record: SessionRecord) -> None:
         """Append a record to JSONL storage."""

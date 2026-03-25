@@ -509,70 +509,32 @@ class Agent:
             return _gmi_validate_cached(model_id)
 
         def _make_provider(tier_model: str, tier_provider: str) -> HttpProvider | None:
-            """Create an LLM provider for a specific model and provider combo."""
-            # Workers AI — edge inference, sub-second, no API key needed
-            if tier_provider == "workers-ai" or (not tier_provider and tier_model.startswith("@cf/")):
-                from agentos.llm.provider import WorkersAIProvider
+            """Create an LLM provider — ALL calls go through the CF worker.
+
+            The worker's /cf/llm/infer handles routing:
+              @cf/* models → Workers AI (edge, sub-second)
+              Everything else → OpenRouter (BYOK, 400+ models)
+
+            Backend never calls LLM providers directly. No API keys needed
+            on the backend for LLM inference — the worker holds them all.
+            """
+            from agentos.llm.provider import WorkersAIProvider
+
+            # All providers route through the worker's /cf/llm/infer
+            if tier_provider in ("workers-ai", "openrouter", "cloudflare", ""):
                 return WorkersAIProvider(model_id=tier_model)
 
-            # OpenRouter — 400+ models, auto-fallback between providers
-            if tier_provider == "openrouter":
-                or_key = os.environ.get("OPENROUTER_API_KEY", "")
-                if not or_key:
-                    return None
-                return HttpProvider(
-                    model_id=tier_model,
-                    api_base="https://openrouter.ai/api/v1",
-                    api_key=or_key,
-                )
-
-            if tier_provider == "anthropic" or (not tier_provider and "claude" in tier_model):
-                if not anthropic_key:
-                    return None
-                return HttpProvider(
-                    model_id=tier_model,
-                    api_base="https://api.anthropic.com",
-                    api_key=anthropic_key,
-                    headers={"anthropic-version": "2023-06-01"},
-                )
-            elif tier_provider == "openai" or (not tier_provider and "gpt" in tier_model):
-                if not openai_key:
-                    return None
-                return HttpProvider(
-                    model_id=tier_model,
-                    api_base="https://api.openai.com",
-                    api_key=openai_key,
-                )
-            elif tier_provider == "cloudflare" or (not tier_provider and "@cf/" in tier_model):
-                if not cf_token or not cf_account:
-                    return None
-                return HttpProvider(
-                    model_id=tier_model,
-                    api_base=f"https://api.cloudflare.com/client/v4/accounts/{cf_account}/ai",
-                    api_key=cf_token,
-                )
-            elif tier_provider == "gmi":
-                gmi_key = os.environ.get("GMI_API_KEY", "")
-                gmi_base = os.environ.get("GMI_API_BASE", "https://api.gmi-serving.com/v1")
-                if not gmi_key:
-                    return None
-                # Validate model exists on GMI
-                if not _validate_gmi_model(tier_model):
-                    logger.warning("Skipping GMI model '%s' — not available on your account", tier_model)
-                    return None
-                return HttpProvider(
-                    model_id=tier_model,
-                    api_base=gmi_base,
-                    api_key=gmi_key,
-                )
-            elif tier_provider == "local":
+            # Local dev fallback (no worker available)
+            if tier_provider == "local":
                 local_base = os.environ.get("LOCAL_LLM_BASE", "http://localhost:11434/v1")
                 return HttpProvider(
                     model_id=tier_model,
                     api_base=local_base,
                     api_key=os.environ.get("LOCAL_LLM_KEY", "not-needed"),
                 )
-            return None
+
+            # Unknown provider — try via worker anyway
+            return WorkersAIProvider(model_id=tier_model)
 
         # Multimodal tiers — no text-model fallback for these
         _multimodal_tiers = {Complexity.IMAGE_GEN, Complexity.TTS, Complexity.STT}
