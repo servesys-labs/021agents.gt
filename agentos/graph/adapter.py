@@ -13,6 +13,7 @@ from agentos.graph.nodes import (
     GraphTurnState,
     HarnessSetupNode,
     LLMNode,
+    RecordNode,
     ToolExecNode,
     TurnResultNode,
 )
@@ -45,6 +46,7 @@ async def run_with_graph_runtime(harness: AgentHarness, user_input: str) -> list
             LLMNode(harness),
             ToolExecNode(harness),
             TurnResultNode(harness, state),
+            RecordNode(harness),
         ])
         if harness._async_memory_updater and not harness._async_memory_started:
             harness._async_memory_updater.start()
@@ -70,23 +72,9 @@ async def run_with_graph_runtime(harness: AgentHarness, user_input: str) -> list
                 mw_ctx.messages = ctx.messages
                 mw_ctx.injected_messages = []
                 await harness.event_bus.emit(Event(type=EventType.TURN_START, data={"turn": turn}))
-                before_len = len(ctx.session_state["results"])
+                ctx.session_state["current_turn"] = turn
+                ctx.session_state["previous_results_count"] = len(ctx.session_state["results"])
                 ctx = await runtime.run(ctx)
-                after_len = len(ctx.session_state["results"])
-                if after_len > before_len:
-                    latest = ctx.session_state["results"][-1]
-                    mw_ctx.tool_results = latest.tool_results
-                    harness._notify_turn(latest)
-                else:
-                    mw_ctx.tool_results = []
-                await harness.middleware_chain.run_on_turn_end(mw_ctx)
-                last_result = ctx.session_state["results"][-1] if ctx.session_state["results"] else None
-                await harness.event_bus.emit(Event(type=EventType.TURN_END, data={
-                    "turn": turn,
-                    "execution_mode": last_result.execution_mode if last_result else "sequential",
-                    "plan_artifact": last_result.plan_artifact if last_result else {},
-                    "reflection": last_result.reflection if last_result else {},
-                }))
                 if state.done:
                     break
             return ctx.session_state["results"]

@@ -383,6 +383,12 @@ export GRAPH_RUNTIME=true
 export AGENTOS_RUNTIME_MODE=graph
 ```
 
+API callers can override runtime mode per request (without changing saved agent config):
+
+- `POST /api/v1/agents/{name}/run` with body field `"runtime_mode": "harness" | "graph"`
+- `POST /api/v1/agents/{name}/run/stream` with body field `"runtime_mode": "harness" | "graph"`
+- `POST /api/v1/runtime-proxy/agent/run` with body field `"runtime_mode": "harness" | "graph"`
+
 ## Memory System
 
 | Tier | Persistence | Purpose |

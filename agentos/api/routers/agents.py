@@ -19,6 +19,15 @@ from agentos.api.schemas import (
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
+def _set_runtime_mode_override(agent: Any, runtime_mode: str | None) -> str:
+    """Set per-request runtime mode and return previous value."""
+    harness_cfg = agent.config.harness if isinstance(agent.config.harness, dict) else {}
+    prev = str(harness_cfg.get("runtime_mode", "harness")).strip().lower() or "harness"
+    if runtime_mode in {"harness", "graph"}:
+        harness_cfg["runtime_mode"] = runtime_mode
+    return prev
+
+
 @router.get("", response_model=list[AgentResponse])
 async def list_agents():
     """List all available agents."""
@@ -284,7 +293,11 @@ async def run_agent(
         )
 
     start = time.monotonic()
-    results = await agent.run(request.task)
+    prev_runtime_mode = _set_runtime_mode_override(agent, request.runtime_mode)
+    try:
+        results = await agent.run(request.task)
+    finally:
+        _set_runtime_mode_override(agent, prev_runtime_mode)
     elapsed = (time.monotonic() - start) * 1000
 
     output = ""
@@ -341,6 +354,7 @@ async def run_agent_stream(
         )
 
     turn_queue: asyncio.Queue = asyncio.Queue()
+    prev_runtime_mode = _set_runtime_mode_override(agent, request.runtime_mode)
 
     def on_turn(result):
         content = result.llm_response.content if result.llm_response else ""
@@ -356,19 +370,22 @@ async def run_agent_stream(
     agent._harness.on_turn_complete = on_turn
 
     async def event_stream():
-        task = asyncio.create_task(agent.run(request.task))
-        while not task.done():
-            try:
-                data = await asyncio.wait_for(turn_queue.get(), timeout=0.5)
+        try:
+            task = asyncio.create_task(agent.run(request.task))
+            while not task.done():
+                try:
+                    data = await asyncio.wait_for(turn_queue.get(), timeout=0.5)
+                    yield f"data: {json.dumps(data)}\n\n"
+                    if data.get("done"):
+                        break
+                except asyncio.TimeoutError:
+                    continue
+            while not turn_queue.empty():
+                data = turn_queue.get_nowait()
                 yield f"data: {json.dumps(data)}\n\n"
-                if data.get("done"):
-                    break
-            except asyncio.TimeoutError:
-                continue
-        while not turn_queue.empty():
-            data = turn_queue.get_nowait()
-            yield f"data: {json.dumps(data)}\n\n"
-        yield "data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
+        finally:
+            _set_runtime_mode_override(agent, prev_runtime_mode)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 

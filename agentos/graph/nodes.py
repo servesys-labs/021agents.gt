@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from agentos.core.events import Event, EventType
 from agentos.core.harness import AgentHarness, TurnResult
 from agentos.graph.context import GraphContext
 from agentos.middleware.base import MiddlewareContext
@@ -194,6 +195,7 @@ class TurnResultNode:
 
         if ctx.session_state.get("skipped_llm"):
             ctx.session_state["skipped_llm"] = False
+            ctx.session_state["skip_turn_end"] = True
             return ctx
 
         if llm_response is None:
@@ -411,4 +413,48 @@ class TurnResultNode:
             ))
         if self.state.tool_sequence:
             await self.harness._store_procedure(self.state.user_input, self.state.tool_sequence)
+        return ctx
+
+
+class RecordNode:
+    """Record per-turn side effects (callbacks, middleware turn end, events)."""
+
+    node_id = "record"
+
+    def __init__(self, harness: AgentHarness):
+        self.harness = harness
+
+    def should_skip(self, ctx: GraphContext) -> bool:
+        return False
+
+    async def execute(self, ctx: GraphContext) -> GraphContext:
+        if ctx.session_state.pop("skip_turn_end", False):
+            return ctx
+
+        current_turn = int(ctx.session_state.get("current_turn", 0))
+        previous_count = int(ctx.session_state.get("previous_results_count", 0))
+        results = ctx.session_state.get("results", [])
+        latest = results[-1] if isinstance(results, list) and len(results) > previous_count else None
+
+        mw_ctx = ctx.session_state.get("middleware_ctx")
+        if isinstance(mw_ctx, MiddlewareContext):
+            mw_ctx.tool_results = latest.tool_results if latest else []
+
+        if latest is not None:
+            self.harness._notify_turn(latest)
+            if latest.stop_reason == "middleware_halt":
+                await self.harness.event_bus.emit(Event(type=EventType.MIDDLEWARE_HALT, data={
+                    "turn": current_turn,
+                    "reason": latest.error or "Halted by middleware",
+                }))
+
+        if isinstance(mw_ctx, MiddlewareContext):
+            await self.harness.middleware_chain.run_on_turn_end(mw_ctx)
+
+        await self.harness.event_bus.emit(Event(type=EventType.TURN_END, data={
+            "turn": current_turn,
+            "execution_mode": latest.execution_mode if latest else "sequential",
+            "plan_artifact": latest.plan_artifact if latest else {},
+            "reflection": latest.reflection if latest else {},
+        }))
         return ctx

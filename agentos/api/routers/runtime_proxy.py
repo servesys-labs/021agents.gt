@@ -111,6 +111,7 @@ class AgentRunProxyRequest(BaseModel):
     project_id: str = ""
     channel: str = ""          # e.g. "telegram", "discord", "portal"
     channel_user_id: str = ""  # e.g. Telegram chat_id
+    runtime_mode: str = "harness"  # harness | graph (optional per-request override)
 
 
 @router.post("/agent/run")
@@ -136,6 +137,13 @@ async def agent_run_proxy(
         agent = _get_cached_agent(name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    # Per-request runtime mode override for cached agents.
+    harness_cfg = agent.config.harness if isinstance(agent.config.harness, dict) else {}
+    prev_runtime_mode = str(harness_cfg.get("runtime_mode", "harness")).strip().lower() or "harness"
+    requested_runtime_mode = str(payload.runtime_mode or "").strip().lower()
+    if requested_runtime_mode in {"harness", "graph"}:
+        harness_cfg["runtime_mode"] = requested_runtime_mode
 
     # Set runtime context (org/project) so billing, telemetry, and scoping work
     if hasattr(agent, "set_runtime_context"):
@@ -164,6 +172,8 @@ async def agent_run_proxy(
     except Exception as exc:
         logger.exception("agent run proxy error for %s", name)
         raise HTTPException(status_code=502, detail=f"agent run failed: {exc}") from exc
+    finally:
+        harness_cfg["runtime_mode"] = prev_runtime_mode
 
     elapsed_ms = int((time.time() - started) * 1000)
 

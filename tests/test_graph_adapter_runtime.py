@@ -90,6 +90,48 @@ class _ToolThenFinalizeProvider:
         )
 
 
+class _TwoToolsThenFinalizeProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    @property
+    def model_id(self) -> str:
+        return "graph-adapter-two-tools"
+
+    async def complete(self, messages, max_tokens=4096, temperature=0.0, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="call two tools",
+                model=self.model_id,
+                tool_calls=[
+                    {"id": "t1", "name": "tool_a", "arguments": {"value": 1}},
+                    {"id": "t2", "name": "tool_b", "arguments": {"value": 2}},
+                ],
+                usage={"input_tokens": 4, "output_tokens": 4},
+                cost_usd=0.001,
+            )
+        return LLMResponse(
+            content="final after two tools",
+            model=self.model_id,
+            usage={"input_tokens": 4, "output_tokens": 4},
+            cost_usd=0.001,
+        )
+
+
+class _SkipFirstTurnMiddleware(Middleware):
+    name = "skipper"
+    order = 5
+
+    def __init__(self) -> None:
+        self.called = 0
+
+    async def before_model(self, ctx):
+        self.called += 1
+        if self.called == 1:
+            ctx.skip_llm_call = True
+
+
 def _router_with_provider(provider) -> LLMRouter:
     router = LLMRouter()
     for tier in Complexity:
@@ -143,6 +185,26 @@ class _FakeAsyncUpdater:
 
     def queue_update(self, update) -> None:
         self.queued_updates.append(update)
+
+
+def _tool_executor() -> ToolExecutor:
+    mcp = MCPClient()
+    mcp.register_server(MCPServer(name="tools", tools=[
+        MCPTool(name="tool_a", description="A", input_schema={"type": "object"}),
+        MCPTool(name="tool_b", description="B", input_schema={"type": "object"}),
+    ]))
+
+    async def tool_a(value=0):
+        await asyncio.sleep(0.001)
+        return {"tool": "tool_a", "result": value}
+
+    async def tool_b(value=0):
+        await asyncio.sleep(0.001)
+        return {"tool": "tool_b", "result": value}
+
+    mcp.register_handler("tool_a", tool_a)
+    mcp.register_handler("tool_b", tool_b)
+    return ToolExecutor(mcp_client=mcp)
 
 
 @pytest.mark.asyncio
@@ -211,6 +273,7 @@ async def test_graph_adapter_includes_skills_async_memory_and_procedures_in_syst
     class _Proc:
         name = "tool_playbook"
         success_rate = 0.9
+        description = "Preferred multi-tool sequence"
         steps = [{"tool": "tool_a"}, {"tool": "tool_b"}]
 
     harness.memory_manager.procedural.find_best = lambda _input, limit=3: [_Proc()]
@@ -254,3 +317,173 @@ async def test_graph_adapter_persists_episode_and_procedure_on_completion() -> N
     harness._store_procedure.assert_awaited_once()
     assert harness._async_memory_updater.started is True
     assert len(harness._async_memory_updater.queued_updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_event_payload_parity_simple_flow() -> None:
+    provider_a = _SimpleProvider()
+    provider_b = _SimpleProvider()
+    harness_ref = AgentHarness(
+        config=HarnessConfig(max_turns=2, enable_reflection_stage=False),
+        llm_router=_router_with_provider(provider_a),
+    )
+    harness_graph = AgentHarness(
+        config=HarnessConfig(max_turns=2, enable_reflection_stage=False),
+        llm_router=_router_with_provider(provider_b),
+    )
+    ref_events = []
+    graph_events = []
+
+    async def _ref_listener(event):
+        ref_events.append(event)
+
+    async def _graph_listener(event):
+        graph_events.append(event)
+
+    harness_ref.event_bus.on_all(_ref_listener)
+    harness_graph.event_bus.on_all(_graph_listener)
+    await harness_ref.run("event parity simple")
+    await run_with_graph_runtime(harness_graph, "event parity simple")
+
+    tracked = {
+        EventType.SESSION_START,
+        EventType.TASK_RECEIVED,
+        EventType.TURN_START,
+        EventType.LLM_REQUEST,
+        EventType.LLM_RESPONSE,
+        EventType.TURN_END,
+        EventType.SESSION_END,
+    }
+    ref_types = [e.type for e in ref_events if e.type in tracked]
+    graph_types = [e.type for e in graph_events if e.type in tracked]
+    assert ref_types == graph_types
+
+    ref_task = next(e for e in ref_events if e.type == EventType.TASK_RECEIVED)
+    graph_task = next(e for e in graph_events if e.type == EventType.TASK_RECEIVED)
+    assert ref_task.data["complexity"] == graph_task.data["complexity"]
+
+    ref_start = next(e for e in ref_events if e.type == EventType.SESSION_START)
+    graph_start = next(e for e in graph_events if e.type == EventType.SESSION_START)
+    assert ref_start.data["input"] == graph_start.data["input"] == "event parity simple"
+    assert ref_start.data["middleware_chain"] == graph_start.data["middleware_chain"]
+    assert isinstance(ref_start.data.get("session_id", ""), str)
+    assert isinstance(graph_start.data.get("session_id", ""), str)
+
+    ref_turn_end = [e for e in ref_events if e.type == EventType.TURN_END][-1]
+    graph_turn_end = [e for e in graph_events if e.type == EventType.TURN_END][-1]
+    assert ref_turn_end.data["execution_mode"] == graph_turn_end.data["execution_mode"] == "sequential"
+    assert isinstance(ref_turn_end.data["plan_artifact"], dict)
+    assert isinstance(graph_turn_end.data["plan_artifact"], dict)
+    assert isinstance(ref_turn_end.data["reflection"], dict)
+    assert isinstance(graph_turn_end.data["reflection"], dict)
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_skip_llm_does_not_emit_turn_end_on_skipped_turn() -> None:
+    skipper_ref = _SkipFirstTurnMiddleware()
+    skipper_graph = _SkipFirstTurnMiddleware()
+    harness_ref = AgentHarness(
+        config=HarnessConfig(max_turns=2, enable_reflection_stage=False),
+        llm_router=_router_with_provider(_SimpleProvider()),
+        middleware_chain=MiddlewareChain([skipper_ref]),
+    )
+    harness_graph = AgentHarness(
+        config=HarnessConfig(max_turns=2, enable_reflection_stage=False),
+        llm_router=_router_with_provider(_SimpleProvider()),
+        middleware_chain=MiddlewareChain([skipper_graph]),
+    )
+    ref_events = []
+    graph_events = []
+
+    async def _ref_listener(event):
+        ref_events.append(event)
+
+    async def _graph_listener(event):
+        graph_events.append(event)
+
+    harness_ref.event_bus.on_all(_ref_listener)
+    harness_graph.event_bus.on_all(_graph_listener)
+    await harness_ref.run("skip llm once")
+    await run_with_graph_runtime(harness_graph, "skip llm once")
+
+    ref_turn_starts = [e for e in ref_events if e.type == EventType.TURN_START]
+    graph_turn_starts = [e for e in graph_events if e.type == EventType.TURN_START]
+    ref_turn_ends = [e for e in ref_events if e.type == EventType.TURN_END]
+    graph_turn_ends = [e for e in graph_events if e.type == EventType.TURN_END]
+
+    assert len(ref_turn_starts) == len(graph_turn_starts) == 2
+    assert len(ref_turn_ends) == len(graph_turn_ends) == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_tool_event_order_parity_sequential() -> None:
+    provider_ref = _TwoToolsThenFinalizeProvider()
+    provider_graph = _TwoToolsThenFinalizeProvider()
+    harness_ref = AgentHarness(
+        config=HarnessConfig(max_turns=3, parallel_tool_calls=False, enable_reflection_stage=False),
+        llm_router=_router_with_provider(provider_ref),
+        tool_executor=_tool_executor(),
+    )
+    harness_graph = AgentHarness(
+        config=HarnessConfig(max_turns=3, parallel_tool_calls=False, enable_reflection_stage=False),
+        llm_router=_router_with_provider(provider_graph),
+        tool_executor=_tool_executor(),
+    )
+    ref_events = []
+    graph_events = []
+
+    async def _ref_listener(event):
+        ref_events.append(event)
+
+    async def _graph_listener(event):
+        graph_events.append(event)
+
+    harness_ref.event_bus.on_all(_ref_listener)
+    harness_graph.event_bus.on_all(_graph_listener)
+    await harness_ref.run("tool event parity")
+    await run_with_graph_runtime(harness_graph, "tool event parity")
+
+    ref_tool_calls = [e.data.get("name", "") for e in ref_events if e.type == EventType.TOOL_CALL]
+    graph_tool_calls = [e.data.get("name", "") for e in graph_events if e.type == EventType.TOOL_CALL]
+    ref_tool_results = [e.data.get("tool", "") for e in ref_events if e.type == EventType.TOOL_RESULT]
+    graph_tool_results = [e.data.get("tool", "") for e in graph_events if e.type == EventType.TOOL_RESULT]
+
+    assert ref_tool_calls == graph_tool_calls == ["tool_a", "tool_b"]
+    assert ref_tool_results == graph_tool_results == ["tool_a", "tool_b"]
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_tool_event_payload_parity_parallel() -> None:
+    provider_ref = _TwoToolsThenFinalizeProvider()
+    provider_graph = _TwoToolsThenFinalizeProvider()
+    harness_ref = AgentHarness(
+        config=HarnessConfig(max_turns=3, parallel_tool_calls=True, enable_reflection_stage=False),
+        llm_router=_router_with_provider(provider_ref),
+        tool_executor=_tool_executor(),
+    )
+    harness_graph = AgentHarness(
+        config=HarnessConfig(max_turns=3, parallel_tool_calls=True, enable_reflection_stage=False),
+        llm_router=_router_with_provider(provider_graph),
+        tool_executor=_tool_executor(),
+    )
+    ref_events = []
+    graph_events = []
+
+    async def _ref_listener(event):
+        ref_events.append(event)
+
+    async def _graph_listener(event):
+        graph_events.append(event)
+
+    harness_ref.event_bus.on_all(_ref_listener)
+    harness_graph.event_bus.on_all(_graph_listener)
+    await harness_ref.run("tool event parity parallel")
+    await run_with_graph_runtime(harness_graph, "tool event parity parallel")
+
+    ref_tool_calls = sorted(e.data.get("name", "") for e in ref_events if e.type == EventType.TOOL_CALL)
+    graph_tool_calls = sorted(e.data.get("name", "") for e in graph_events if e.type == EventType.TOOL_CALL)
+    ref_tool_results = sorted(e.data.get("tool", "") for e in ref_events if e.type == EventType.TOOL_RESULT)
+    graph_tool_results = sorted(e.data.get("tool", "") for e in graph_events if e.type == EventType.TOOL_RESULT)
+
+    assert ref_tool_calls == graph_tool_calls == ["tool_a", "tool_b"]
+    assert ref_tool_results == graph_tool_results == ["tool_a", "tool_b"]
