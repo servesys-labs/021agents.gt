@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -111,7 +111,7 @@ class AgentRunProxyRequest(BaseModel):
     project_id: str = ""
     channel: str = ""          # e.g. "telegram", "discord", "portal"
     channel_user_id: str = ""  # e.g. Telegram chat_id
-    runtime_mode: str = "harness"  # harness | graph (optional per-request override)
+    runtime_mode: Literal["harness", "graph"] | None = None
 
 
 @router.post("/agent/run")
@@ -138,16 +138,22 @@ async def agent_run_proxy(
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    # Per-request runtime mode override for cached agents.
-    harness_cfg = agent.config.harness if isinstance(agent.config.harness, dict) else {}
-    prev_runtime_mode = str(harness_cfg.get("runtime_mode", "harness")).strip().lower() or "harness"
-    requested_runtime_mode = str(payload.runtime_mode or "").strip().lower()
+    # Per-request runtime override must not mutate shared cached agents.
+    run_agent_instance = agent
+    requested_runtime_mode = payload.runtime_mode
     if requested_runtime_mode in {"harness", "graph"}:
+        from agentos.agent import Agent
+        run_agent_instance = Agent.from_name(name)
+        harness_cfg = (
+            run_agent_instance.config.harness
+            if isinstance(run_agent_instance.config.harness, dict)
+            else {}
+        )
         harness_cfg["runtime_mode"] = requested_runtime_mode
 
     # Set runtime context (org/project) so billing, telemetry, and scoping work
-    if hasattr(agent, "set_runtime_context"):
-        agent.set_runtime_context(
+    if hasattr(run_agent_instance, "set_runtime_context"):
+        run_agent_instance.set_runtime_context(
             org_id=payload.org_id or "",
             project_id=payload.project_id or "",
             user_id=f"channel:{payload.channel}:{payload.channel_user_id}" if payload.channel else "",
@@ -168,12 +174,10 @@ async def agent_run_proxy(
 
     started = time.time()
     try:
-        results = await agent.run(task)
+        results = await run_agent_instance.run(task)
     except Exception as exc:
         logger.exception("agent run proxy error for %s", name)
         raise HTTPException(status_code=502, detail=f"agent run failed: {exc}") from exc
-    finally:
-        harness_cfg["runtime_mode"] = prev_runtime_mode
 
     elapsed_ms = int((time.time() - started) * 1000)
 
@@ -189,8 +193,8 @@ async def agent_run_proxy(
         total_cost += r.cost_usd
         total_tools += len(r.tool_results)
 
-    if hasattr(agent, "_observer") and agent._observer and agent._observer.records:
-        last_rec = agent._observer.records[-1]
+    if hasattr(run_agent_instance, "_observer") and run_agent_instance._observer and run_agent_instance._observer.records:
+        last_rec = run_agent_instance._observer.records[-1]
         session_id = last_rec.session_id
         trace_id = last_rec.trace_id
 
