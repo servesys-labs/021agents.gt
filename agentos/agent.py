@@ -116,7 +116,7 @@ class AgentConfig:
 
     # Harness config — controls middleware, skills, memory, retries
     harness: dict[str, Any] = field(default_factory=lambda: {
-        "runtime_mode": "graph",  # harness | graph
+        "runtime_mode": "graph",  # graph is active runtime; legacy "harness" values are ignored
         "enable_loop_detection": True,
         "enable_summarization": True,
         "enable_skills": True,

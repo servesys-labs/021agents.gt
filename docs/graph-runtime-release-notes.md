@@ -1,38 +1,53 @@
 # Graph Runtime Rollout Notes
 
+## Changelog Entry (2026-03-24)
+
+- Hard-cut runtime to graph-first execution in `Agent.run()` and removed legacy harness fallback behavior.
+- Standardized runtime-mode API contracts to graph-only while preserving request-scoped override safety in runtime-proxy.
+- Added node-level graph observability (`NODE_START`/`NODE_END`/`NODE_ERROR`) with persisted node spans linked by `trace_id` and `session_id`.
+- Linked eval persistence end-to-end with per-trial `session_id`/`trace_id` records for drill-down from eval runs to traces.
+- Added initial enterprise controls (`enable_checkpoints`, `require_human_approval`) in graph execution path and API request surfaces.
+
 ## Scope
 
-This release completes the graph runtime rollout controls while keeping `harness` as the default execution mode.
+This release completes the graph runtime hard cut. `Agent.run()` now executes via graph runtime.
 
 ## Implemented
 
-- Runtime selection in `Agent.run()` with explicit precedence:
-  1. `config.harness.runtime_mode` when set (`harness` or `graph`)
-  2. `GRAPH_RUNTIME` env flag
-  3. `AGENTOS_RUNTIME_MODE` env flag
-- Per-request runtime mode overrides on:
+- Graph runtime is now the active execution path in `Agent.run()`.
+- Runtime-mode request fields are graph-only (`"graph"` when supplied) on:
   - `POST /api/v1/agents/{name}/run`
   - `POST /api/v1/agents/{name}/run/stream`
   - `POST /api/v1/runtime-proxy/agent/run`
+  - `POST /api/v1/workflows/{workflow_id}/run`
 - Runtime-proxy override safety:
   - per-request overrides do not mutate shared cached agent config
   - override requests use a request-scoped agent instance
+- Node-level graph observability:
+  - `NODE_START`, `NODE_END`, `NODE_ERROR` events emitted
+  - node spans persisted with `trace_id` + `session_id`
+- Eval linkage:
+  - aggregate eval runs persisted to `eval_runs`
+  - per-trial records persisted to `eval_trials` with `session_id`/`trace_id`
+- Enterprise controls:
+  - optional `enable_checkpoints` and `require_human_approval` runtime flags
 
 ## Compatibility
 
-- Default behavior remains unchanged (`harness` mode).
+- Default behavior is graph runtime.
 - No schema-breaking changes to existing agent files.
-- API runtime override fields are optional; omitting them preserves saved agent config behavior.
+- API runtime override fields are optional; omitting them still runs graph runtime.
 
 ## Validation Summary
 
-- Runtime mode precedence tests pass.
+- Graph-only runtime tests pass.
 - Graph adapter lifecycle, timeout, tool parity, and event payload parity tests pass.
 - Broader runtime regression subset passes for middleware and DAG/runtime behavior.
+- Node span and eval trial-linkage regression tests pass.
 
 ## Operational Rollout Checklist
 
-1. Keep default `harness.runtime_mode = "harness"` in production.
-2. Enable `graph` mode on selected agents first.
-3. Compare pass rate/cost/latency against baseline eval tasks.
-4. Expand graph mode gradually after parity and observability checks.
+1. Keep `harness.runtime_mode = "graph"` in agent configs.
+2. Monitor pass rate/cost/latency against eval baselines.
+3. Use `eval_trials` trace/session linkage for drill-down on regressions.
+4. Use `enable_checkpoints` and `require_human_approval` for enterprise workflows as needed.
