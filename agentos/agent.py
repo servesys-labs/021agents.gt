@@ -581,40 +581,63 @@ class Agent:
         # Multimodal tiers — no text-model fallback for these
         _multimodal_tiers = {Complexity.IMAGE_GEN, Complexity.TTS, Complexity.STT}
 
-        # Register providers per complexity tier — supports mixed providers
-        for tier in Complexity:
-            tier_cfg = routing_config.get(tier.value, {})
-            if not tier_cfg:
-                continue  # Skip tiers not defined in the plan
-            tier_model = tier_cfg.get("model", model)
-            tier_provider_name = tier_cfg.get("provider", "")
-            tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
+        def _register_role(category: str, role: str, role_cfg: dict) -> None:
+            """Register a single category/role provider on the router."""
+            role_model = role_cfg.get("model", model)
+            role_provider_name = role_cfg.get("provider", "")
+            role_max_tokens = role_cfg.get("max_tokens", self.config.max_tokens)
 
-            provider = _make_provider(tier_model, tier_provider_name)
-
-            # Fallback: if configured provider unavailable, try in order:
-            # 1. GMI (if key exists — works with any model)
-            # 2. Anthropic (with Claude model)
-            # 3. OpenAI (with GPT model)
-            # Note: multimodal tiers (image_gen, tts, stt) skip text-model fallbacks
-            if tier not in _multimodal_tiers:
-                gmi_key = os.environ.get("GMI_API_KEY", "")
-                if provider is None and gmi_key:
-                    gmi_model = model if tier_provider_name != "gmi" else tier_model
-                    provider = _make_provider(gmi_model, "gmi")
-                if provider is None and anthropic_key:
-                    fallback_model = model if "claude" in model else "anthropic/claude-sonnet-4.6"
-                    provider = _make_provider(fallback_model, "anthropic")
-                if provider is None and openai_key:
-                    provider = _make_provider("gpt-5.4-mini", "openai")
-            elif provider is None:
-                # For multimodal tiers, try GMI only (they host image/audio models)
+            prov = _make_provider(role_model, role_provider_name)
+            # Fallback chain for text models
+            if prov is None and role_provider_name not in ("gmi-requestqueue", "cloudflare"):
                 gmi_key = os.environ.get("GMI_API_KEY", "")
                 if gmi_key:
-                    provider = _make_provider(tier_model, "gmi")
+                    prov = _make_provider(role_model, "gmi")
+                if prov is None and anthropic_key:
+                    prov = _make_provider(model if "claude" in model else "anthropic/claude-sonnet-4.6", "anthropic")
+                if prov is None and openai_key:
+                    prov = _make_provider("openai/gpt-5.4-mini", "openai")
 
-            if provider is not None:
-                llm_router.register(tier, provider, max_tokens=tier_max_tokens)
+            if prov is not None:
+                llm_router.register_category(category, role, prov, max_tokens=role_max_tokens)
+
+        # Register category routes from plan config (new structure)
+        # Plan config has: { general: {...}, coding: {...}, research: {...}, ... }
+        for category, roles in routing_config.items():
+            if category.startswith("_") or not isinstance(roles, dict):
+                continue
+            # Check if this is a category (nested dict) or a flat tier (has "model" key)
+            first_val = next(iter(roles.values()), None)
+            if isinstance(first_val, dict) and "model" in first_val:
+                # Category with roles: { "planner": {"model": ...}, "implementer": {...} }
+                for role, role_cfg in roles.items():
+                    if isinstance(role_cfg, dict) and "model" in role_cfg:
+                        _register_role(category, role, role_cfg)
+            elif "model" in roles:
+                # Flat tier (backward compat): { "model": "...", "provider": "..." }
+                tier_name = category
+                tier_cfg = roles
+                tier_model = tier_cfg.get("model", model)
+                tier_provider_name = tier_cfg.get("provider", "")
+                tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
+
+                prov = _make_provider(tier_model, tier_provider_name)
+                if prov is None and tier_name not in ("image_gen", "tts", "stt"):
+                    gmi_key = os.environ.get("GMI_API_KEY", "")
+                    if prov is None and gmi_key:
+                        prov = _make_provider(tier_model, "gmi")
+                    if prov is None and anthropic_key:
+                        prov = _make_provider(model if "claude" in model else "anthropic/claude-sonnet-4.6", "anthropic")
+                    if prov is None and openai_key:
+                        prov = _make_provider("openai/gpt-5.4-mini", "openai")
+
+                # Map flat tier to Complexity enum for backward compat
+                tier_map = {t.value: t for t in Complexity}
+                if tier_name in tier_map and prov is not None:
+                    llm_router.register(tier_map[tier_name], prov, max_tokens=tier_max_tokens)
+                # Also register as general.{tier_name} for the new router
+                if prov is not None:
+                    llm_router.register_category("general", tier_name, prov, max_tokens=tier_max_tokens)
 
         # Governance
         gov_data = self.config.governance
