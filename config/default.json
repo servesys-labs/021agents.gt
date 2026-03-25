@@ -15,7 +15,7 @@
       },
       "moderate": {
         "provider": "gmi",
-        "model": "anthropic/claude-sonnet-4.6",
+        "model": "anthropic/claude-haiku-4.5",
         "max_tokens": 4096
       },
       "complex": {
@@ -25,7 +25,7 @@
       },
       "tool_call": {
         "provider": "gmi",
-        "model": "anthropic/claude-sonnet-4.6",
+        "model": "anthropic/claude-haiku-4.5",
         "max_tokens": 4096
       }
     },
@@ -40,7 +40,7 @@
         },
         "moderate": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 2048
         },
         "complex": {
@@ -50,7 +50,7 @@
         },
         "tool_call": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 2048
         },
         "image_gen": {
@@ -83,7 +83,7 @@
         },
         "moderate": {
           "provider": "gmi",
-          "model": "anthropic/claude-sonnet-4.6",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "complex": {
@@ -93,7 +93,7 @@
         },
         "tool_call": {
           "provider": "gmi",
-          "model": "anthropic/claude-sonnet-4.6",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "image_gen": {
@@ -126,7 +126,7 @@
         },
         "moderate": {
           "provider": "gmi",
-          "model": "anthropic/claude-sonnet-4.6",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "complex": {
@@ -136,7 +136,7 @@
         },
         "tool_call": {
           "provider": "gmi",
-          "model": "anthropic/claude-sonnet-4.6",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "image_gen": {
@@ -171,7 +171,7 @@
         },
         "moderate": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 8192
         },
         "complex": {
@@ -181,7 +181,7 @@
         },
         "tool_call": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "image_gen": {
@@ -216,7 +216,7 @@
         },
         "moderate": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096,
           "dedicated": true
         },
@@ -228,7 +228,7 @@
         },
         "tool_call": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096,
           "dedicated": true
         },
@@ -267,7 +267,7 @@
         },
         "moderate": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "complex": {
@@ -277,7 +277,7 @@
         },
         "tool_call": {
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
+          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "image_gen": {
