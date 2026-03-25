@@ -128,9 +128,11 @@ async def agent_run_proxy(
     channel = (payload.channel or "").lower()
     if channel in ("telegram", "discord", "whatsapp", "sms"):
         task = (
-            f"[Channel: {channel} — respond concisely. "
-            f"Use short paragraphs. Highlight key facts with bold. "
-            f"No long essays. Max 3-4 sentences unless asked for detail.]\n\n"
+            f"[Channel: {channel} — IMPORTANT RULES: "
+            f"1) Use AT MOST 2 tool calls then give your answer. "
+            f"2) Keep response under 500 characters. "
+            f"3) Use short paragraphs with bold key facts. "
+            f"4) No long essays or multiple searches.]\n\n"
             f"{payload.task}"
         )
 
