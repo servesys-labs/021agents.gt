@@ -105,4 +105,36 @@ def test_default_invariants_are_named_and_stable() -> None:
         "terminal_stop_reason_valid",
         "non_terminal_stop_reason_valid",
         "respect_max_turns_bound",
+        "budget_stop_is_terminal",
+        "reflection_retry_has_reflection_signal",
+        "tool_error_requires_tool_failure_signal",
     ]
+
+
+def test_validate_turn_results_flags_budget_non_terminal() -> None:
+    bad_results = [
+        TurnResult(
+            turn_number=1,
+            done=False,
+            stop_reason="budget",
+            cost_usd=0.1,
+            cumulative_cost_usd=0.1,
+        ),
+    ]
+    violations = validate_turn_results(bad_results, max_turns=3)
+    assert any("Budget stop must be terminal" in item for item in violations)
+
+
+def test_validate_turn_results_flags_reflection_retry_without_metadata() -> None:
+    bad_results = [
+        TurnResult(
+            turn_number=1,
+            done=False,
+            stop_reason="reflection_retry",
+            cost_usd=0.1,
+            cumulative_cost_usd=0.1,
+            reflection={},
+        ),
+    ]
+    violations = validate_turn_results(bad_results, max_turns=3)
+    assert any("missing reflection metadata" in item for item in violations)

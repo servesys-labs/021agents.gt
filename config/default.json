@@ -1,5 +1,6 @@
 {
   "harness": {
+    "runtime_mode": "harness",
     "max_turns": 50,
     "timeout_seconds": 300,
     "retry_on_tool_failure": true,

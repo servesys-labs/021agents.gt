@@ -3,8 +3,10 @@
 import json
 import pytest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from agentos.agent import Agent, AgentConfig, load_agent_config, save_agent_config, list_agents
+from agentos.core.harness import TurnResult
 
 
 class TestAgentConfig:
@@ -185,3 +187,50 @@ TOOLS = [{
         assert gov.policy.budget_limit_usd == 1.5
         assert "dangerous-tool" in gov.policy.blocked_tools
         assert gov.policy.require_confirmation_for_destructive is False
+
+    @pytest.mark.asyncio
+    async def test_agent_run_uses_harness_by_default(self):
+        config = AgentConfig(name="default-runtime", max_turns=1)
+        agent = Agent(config)
+        expected = [TurnResult(turn_number=1, done=True, stop_reason="completed")]
+
+        with patch.object(agent._harness, "run", new=AsyncMock(return_value=expected)) as harness_run:
+            with patch("agentos.graph.adapter.run_with_graph_runtime", new=AsyncMock(return_value=[])) as graph_run:
+                results = await agent.run("hello")
+                assert results == expected
+                harness_run.assert_awaited_once()
+                graph_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_run_uses_graph_runtime_when_enabled_in_config(self):
+        config = AgentConfig(name="graph-runtime", max_turns=1)
+        config.harness["runtime_mode"] = "graph"
+        agent = Agent(config)
+        expected = [TurnResult(turn_number=1, done=True, stop_reason="completed")]
+
+        with patch.object(agent._harness, "run", new=AsyncMock(return_value=[])) as harness_run:
+            with patch(
+                "agentos.graph.adapter.run_with_graph_runtime",
+                new=AsyncMock(return_value=expected),
+            ) as graph_run:
+                results = await agent.run("hello")
+                assert results == expected
+                graph_run.assert_awaited_once()
+                harness_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_run_uses_graph_runtime_when_enabled_in_env(self, monkeypatch):
+        config = AgentConfig(name="graph-runtime-env", max_turns=1)
+        agent = Agent(config)
+        expected = [TurnResult(turn_number=1, done=True, stop_reason="completed")]
+        monkeypatch.setenv("GRAPH_RUNTIME", "true")
+
+        with patch.object(agent._harness, "run", new=AsyncMock(return_value=[])) as harness_run:
+            with patch(
+                "agentos.graph.adapter.run_with_graph_runtime",
+                new=AsyncMock(return_value=expected),
+            ) as graph_run:
+                results = await agent.run("hello")
+                assert results == expected
+                graph_run.assert_awaited_once()
+                harness_run.assert_not_called()

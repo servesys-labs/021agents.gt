@@ -66,6 +66,18 @@ DEFAULT_HARNESS_PARITY_INVARIANTS: tuple[HarnessParityInvariant, ...] = (
         invariant_id="respect_max_turns_bound",
         description="Result count never exceeds configured max turns.",
     ),
+    HarnessParityInvariant(
+        invariant_id="budget_stop_is_terminal",
+        description="Budget stop reason appears only on a terminal turn.",
+    ),
+    HarnessParityInvariant(
+        invariant_id="reflection_retry_has_reflection_signal",
+        description="Reflection retries must be non-terminal and include reflection metadata.",
+    ),
+    HarnessParityInvariant(
+        invariant_id="tool_error_requires_tool_failure_signal",
+        description="Tool error terminal state must include an error in tool results or explicit error text.",
+    ),
 )
 
 
@@ -132,6 +144,30 @@ def validate_turn_results(results: list[TurnResult], max_turns: int) -> list[str
                 violations.append(
                     "Non-terminal turn has invalid stop_reason="
                     f"{result.stop_reason!r} at turn {result.turn_number}."
+                )
+
+        if result.stop_reason == "budget" and not result.done:
+            violations.append(
+                f"Budget stop must be terminal at turn {result.turn_number}."
+            )
+
+        if result.stop_reason == "reflection_retry":
+            if result.done:
+                violations.append(
+                    f"Reflection retry must be non-terminal at turn {result.turn_number}."
+                )
+            if not isinstance(result.reflection, dict) or not result.reflection:
+                violations.append(
+                    f"Reflection retry missing reflection metadata at turn {result.turn_number}."
+                )
+
+        if result.stop_reason == "tool_error":
+            has_tool_error = any("error" in tr for tr in result.tool_results)
+            has_error_text = bool(result.error)
+            if not (has_tool_error or has_error_text):
+                violations.append(
+                    "Tool error stop_reason without tool error signal "
+                    f"at turn {result.turn_number}."
                 )
 
     return violations
