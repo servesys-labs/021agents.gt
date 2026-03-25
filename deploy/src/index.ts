@@ -1208,6 +1208,116 @@ export default {
         return Response.json({ agent_name: agentName, org_id: orgId, cleanup: results });
       }
 
+      // ── /cf/tool/exec — universal tool execution endpoint ──────
+      // The backend harness calls this for ALL tool execution.
+      // Each tool is routed to the appropriate CF binding.
+      if (url.pathname === "/cf/tool/exec" && request.method === "POST") {
+        const body = await request.json() as {
+          tool: string;
+          args: Record<string, any>;
+          session_id?: string;
+          turn?: number;
+        };
+        const { tool, args, session_id } = body;
+        const started = Date.now();
+
+        try {
+          let result: any;
+
+          switch (tool) {
+            // ── Web Search (DuckDuckGo HTML) ──
+            case "web-search": {
+              const query = args.query || "";
+              const maxResults = args.max_results || 5;
+              const resp = await fetch("https://html.duckduckgo.com/html/", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/x-www-form-urlencoded",
+                  "User-Agent": "AgentOS/0.2.0",
+                },
+                body: `q=${encodeURIComponent(query)}`,
+              });
+              const html = await resp.text();
+              // Parse results — same regex as Python handler
+              const linkRe = /<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>(.*?)<\/a>/g;
+              const snippetRe = /<a class="result__snippet"[^>]*>(.*?)<\/a>/gs;
+              const links: [string, string][] = [];
+              let m;
+              while ((m = linkRe.exec(html)) && links.length < maxResults) {
+                links.push([m[1], m[2].replace(/<[^>]+>/g, "").trim()]);
+              }
+              const snippets: string[] = [];
+              while ((m = snippetRe.exec(html)) && snippets.length < maxResults) {
+                snippets.push(m[1].replace(/<[^>]+>/g, "").trim());
+              }
+              const lines = links.map(([url, title], i) =>
+                `${i + 1}. ${title}\n   ${url}\n   ${snippets[i] || ""}`
+              );
+              result = lines.length > 0 ? lines.join("\n\n") : `No results found for: ${query}`;
+              break;
+            }
+
+            // ── Bash (Sandbox Container) ──
+            case "bash": {
+              const command = args.command || "";
+              const timeout = Math.min(args.timeout_seconds || 30, 120);
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const execResult = await sandbox.exec(command, { timeout });
+              result = JSON.stringify({
+                stdout: execResult.stdout || "",
+                stderr: execResult.stderr || "",
+                exit_code: execResult.exitCode ?? 0,
+              });
+              break;
+            }
+
+            // ── HTTP Request (Worker fetch) ──
+            case "http-request": {
+              const url = args.url || "";
+              const method = (args.method || "GET").toUpperCase();
+              const headers = args.headers || {};
+              const reqBody = args.body || "";
+              const timeout = args.timeout_seconds || 30;
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), timeout * 1000);
+              try {
+                const resp = await fetch(url, {
+                  method,
+                  headers: { ...headers },
+                  ...(method !== "GET" && method !== "HEAD" && reqBody ? { body: reqBody } : {}),
+                  signal: controller.signal,
+                });
+                clearTimeout(timer);
+                const respBody = await resp.text();
+                result = JSON.stringify({
+                  status: resp.status,
+                  headers: Object.fromEntries(resp.headers.entries()),
+                  body: respBody.slice(0, 10000),
+                });
+              } catch (err: any) {
+                clearTimeout(timer);
+                result = JSON.stringify({ error: err.message });
+              }
+              break;
+            }
+
+            default:
+              return Response.json({
+                tool, error: `Tool '${tool}' not yet available on worker. Coming soon.`,
+              }, { status: 400 });
+          }
+
+          const latencyMs = Date.now() - started;
+          return Response.json({ tool, result, latency_ms: latencyMs });
+
+        } catch (err: any) {
+          return Response.json({
+            tool, error: err.message || String(err), latency_ms: Date.now() - started,
+          }, { status: 500 });
+        }
+      }
+
       return Response.json({ error: "unknown /cf endpoint" }, { status: 404 });
     }
 

@@ -217,6 +217,37 @@ class CloudflareClient:
             "timeout": timeout_ms,
         })
 
+    # ── Tool Execution ─────────────────────────────────────────────
+
+    async def tool_exec(
+        self,
+        tool_name: str,
+        args: dict[str, Any],
+        session_id: str = "",
+        turn: int = 0,
+    ) -> dict[str, Any]:
+        """Execute a tool on the Cloudflare worker.
+
+        The worker's /cf/tool/exec endpoint routes to the appropriate
+        CF binding (Sandbox, LOADER, fetch, Vectorize, etc.).
+
+        Returns: {"tool": name, "result": "..."} or {"tool": name, "error": "..."}
+        """
+        client = await self._get_client()
+        # Longer timeout for sandbox operations (container spin-up + execution)
+        resp = await client.post(
+            f"{self.worker_url}/cf/tool/exec",
+            json={
+                "tool": tool_name,
+                "args": args,
+                "session_id": session_id,
+                "turn": turn,
+            },
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ── Agent Teardown ─────────────────────────────────────────────
 
     async def teardown_agent(

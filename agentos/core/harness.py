@@ -654,6 +654,9 @@ class AgentHarness:
                     "_parent_session_id": getattr(self, '_current_session_id', ''),
                     "_parent_depth": self.depth,
                 }
+            # Set session context for remote tool execution (CF worker)
+            self.tool_executor.session_id = getattr(self, '_current_session_id', '')
+            self.tool_executor.turn = getattr(self, '_turn', 0)
             result = await self.tool_executor.execute(tool_name, arguments)
             await self.event_bus.emit(Event(type=EventType.TOOL_RESULT, data=result))
             return result
