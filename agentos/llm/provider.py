@@ -237,14 +237,23 @@ class HttpProvider:
                     "content": m.get("content", ""),
                 })
             else:
-                oai_messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+                role = m.get("role", "user")
+                # GPT-5.x uses "developer" instead of "system"
+                if role == "system" and "gpt-5" in self._model_id:
+                    role = "developer"
+                oai_messages.append({"role": role, "content": m.get("content", "")})
 
         payload: dict[str, Any] = {
             "model": self._model_id,
             "messages": oai_messages,
-            "max_tokens": max_tokens,
             "temperature": temperature,
         }
+        # GPT-5.x rejects max_tokens — use max_completion_tokens instead.
+        # Other providers (DeepSeek, Qwen, etc.) still use max_tokens.
+        if "gpt-5" in self._model_id:
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
         if tools:
             # Convert MCP-style tools to OpenAI function-calling format
             payload["tools"] = [

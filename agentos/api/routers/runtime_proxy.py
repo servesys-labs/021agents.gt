@@ -234,8 +234,12 @@ async def llm_infer(
                     },
                     json={
                         "model": model,
-                        "messages": payload.messages,
-                        "max_tokens": int(max(1, payload.max_tokens)),
+                        "messages": [
+                            {**m, "role": "developer" if m.get("role") == "system" and "gpt-5" in model else m.get("role", "user")}
+                            for m in payload.messages
+                        ],
+                        **( {"max_completion_tokens": int(max(1, payload.max_tokens))} if "gpt-5" in model
+                            else {"max_tokens": int(max(1, payload.max_tokens))} ),
                         "temperature": float(payload.temperature),
                     },
                 )
