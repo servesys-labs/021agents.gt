@@ -531,6 +531,22 @@ class Agent:
 
         def _make_provider(tier_model: str, tier_provider: str) -> HttpProvider | None:
             """Create an LLM provider for a specific model and provider combo."""
+            # Workers AI — edge inference, sub-second, no API key needed
+            if tier_provider == "workers-ai" or (not tier_provider and tier_model.startswith("@cf/")):
+                from agentos.llm.provider import WorkersAIProvider
+                return WorkersAIProvider(model_id=tier_model)
+
+            # OpenRouter — 400+ models, auto-fallback
+            if tier_provider == "openrouter":
+                or_key = os.environ.get("OPENROUTER_API_KEY", "")
+                if not or_key:
+                    return None
+                return HttpProvider(
+                    model_id=tier_model,
+                    api_base="https://openrouter.ai/api/v1",
+                    api_key=or_key,
+                )
+
             if tier_provider == "anthropic" or (not tier_provider and "claude" in tier_model):
                 if not anthropic_key:
                     return None

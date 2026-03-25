@@ -151,6 +151,16 @@ class TestAuthRouter:
 
 
 class TestAgentsRouter:
+    def _auth_header(self, api_client, email: str = "agents-run@test.com"):
+        password = "pass12345"
+        signup = api_client.post("/api/v1/auth/signup", json={"email": email, "password": password})
+        if signup.status_code == 200:
+            token = signup.json().get("token")
+            return {"Authorization": f"Bearer {token}"}
+        login = api_client.post("/api/v1/auth/login", json={"email": email, "password": password})
+        token = login.json().get("token")
+        return {"Authorization": f"Bearer {token}"}
+
     def test_list_agents(self, api_client):
         resp = api_client.get("/api/v1/agents")
         assert resp.status_code == 200
@@ -218,6 +228,47 @@ class TestAgentsRouter:
         list_after_create = api_client.get("/api/v1/agents")
         assert list_after_create.status_code == 200
         assert any(a["name"] == "canvas-draft-agent" for a in list_after_create.json())
+
+    def test_run_agent_omitted_runtime_mode_preserves_saved_graph_config(self, api_client, monkeypatch):
+        from agentos.core.harness import TurnResult
+        from agentos.llm.provider import LLMResponse
+
+        graph_agent = {
+            "name": "graph-default-agent",
+            "description": "graph by config",
+            "version": "0.1.0",
+            "system_prompt": "You are graph-first.",
+            "model": "stub-model",
+            "tools": [],
+            "governance": {"budget_limit_usd": 10.0},
+            "memory": {},
+            "max_turns": 3,
+            "harness": {"runtime_mode": "graph"},
+            "tags": [],
+        }
+        (Path.cwd() / "agents" / "graph-default-agent.json").write_text(json.dumps(graph_agent, indent=2))
+
+        expected = [TurnResult(
+            turn_number=1,
+            llm_response=LLMResponse(content="graph path", model="test"),
+            done=True,
+            stop_reason="completed",
+        )]
+        headers = self._auth_header(api_client, "graph-default-run@test.com")
+
+        async def _fake_graph_run(harness, user_input):
+            return expected
+
+        monkeypatch.setattr("agentos.graph.adapter.run_with_graph_runtime", _fake_graph_run)
+        resp = api_client.post(
+            "/api/v1/agents/graph-default-agent/run",
+            json={"task": "hello"},  # runtime_mode intentionally omitted
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["output"] == "graph path"
 
 
 class TestSessionsRouter:
@@ -1035,6 +1086,42 @@ class TestEdgeIngestBridge:
         delete = api_client.delete(f"/api/v1/workflows/{workflow_id}", headers=headers)
         assert delete.status_code == 200
         assert delete.json()["deleted"] == workflow_id
+
+    def test_workflow_run_accepts_runtime_mode_override(self, api_client, monkeypatch):
+        from agentos.core.harness import TurnResult
+        from agentos.llm.provider import LLMResponse
+
+        headers = self._auth_header(api_client, "canvas-workflows-runtime@test.com")
+        create = api_client.post(
+            "/api/v1/workflows",
+            json={
+                "name": "Runtime Override Flow",
+                "steps": [
+                    {"id": "s1", "type": "llm", "agent": "test-agent", "task": "echo {{input}}"},
+                ],
+            },
+            headers=headers,
+        )
+        assert create.status_code == 200
+        workflow_id = create.json()["workflow_id"]
+
+        async def _fake_graph_run(harness, user_input):
+            return [TurnResult(
+                turn_number=1,
+                llm_response=LLMResponse(content="workflow graph path", model="test"),
+                done=True,
+                stop_reason="completed",
+            )]
+
+        monkeypatch.setattr("agentos.graph.adapter.run_with_graph_runtime", _fake_graph_run)
+        run = api_client.post(
+            f"/api/v1/workflows/{workflow_id}/run",
+            json={"input_text": "hello", "runtime_mode": "graph"},
+            headers=headers,
+        )
+        assert run.status_code == 200
+        assert run.json()["status"] == "completed"
+        assert run.json()["final_output"] == "workflow graph path"
 
     def test_workflow_validate_rejects_bad_dependency(self, api_client):
         headers = self._auth_header(api_client, "canvas-workflow-validate@test.com")

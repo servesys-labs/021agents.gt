@@ -91,6 +91,31 @@ class CloudflareClient:
         resp.raise_for_status()
         return resp
 
+    # ── LLM Inference (Workers AI — edge, sub-second) ───────────────
+
+    async def llm_infer(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Run LLM inference via Workers AI on the CF edge.
+
+        For @cf/ models: Llama, GPT-OSS, Kimi, Nemotron, etc.
+        Sub-second latency for small models, no external API call.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if tools:
+            payload["tools"] = tools
+        return await self._post("/cf/llm/infer", payload)
+
     # ── Sandbox ──────────────────────────────────────────────────────
 
     async def sandbox_exec(

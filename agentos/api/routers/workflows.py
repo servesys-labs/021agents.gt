@@ -7,7 +7,7 @@ import logging
 import uuid
 import asyncio
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -42,6 +42,7 @@ class CreateWorkflowRequest(BaseModel):
 
 class RunWorkflowRequest(BaseModel):
     input_text: str = ""
+    runtime_mode: Literal["harness", "graph"] | None = None
 
 
 def _derive_run_metadata(
@@ -188,6 +189,7 @@ async def run_workflow(workflow_id: str, request: RunWorkflowRequest | None = No
     from agentos.agent import Agent
 
     input_text = request.input_text if request else ""
+    requested_runtime_mode = request.runtime_mode if request else None
 
     db = _get_db()
     row = db.conn.execute(
@@ -215,6 +217,10 @@ async def run_workflow(workflow_id: str, request: RunWorkflowRequest | None = No
         if not agent_name:
             raise ValueError(f"Step '{step.get('id', '?')}' missing agent")
         agent = Agent.from_name(agent_name)
+        if requested_runtime_mode in {"harness", "graph"}:
+            harness_cfg = agent.config.harness if isinstance(agent.config.harness, dict) else {}
+            harness_cfg["runtime_mode"] = requested_runtime_mode
+            agent.config.harness = harness_cfg
         agent._harness.trace_id = trace_id
         results = await agent.run(resolved_task)
         output = ""

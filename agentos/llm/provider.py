@@ -66,6 +66,77 @@ class StubProvider:
         )
 
 
+class WorkersAIProvider:
+    """LLM provider that runs on Cloudflare Workers AI (edge, sub-second).
+
+    Calls the worker's /cf/llm/infer endpoint which uses env.AI.run().
+    No external API call — inference happens on CF's edge GPUs.
+    """
+
+    def __init__(self, model_id: str) -> None:
+        self._model_id = model_id
+
+    @property
+    def model_id(self) -> str:
+        return self._model_id
+
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> LLMResponse:
+        from agentos.infra.cloudflare_client import get_cf_client
+
+        cf = get_cf_client()
+        if cf is None:
+            raise RuntimeError("WorkersAIProvider requires AGENTOS_WORKER_URL to be configured")
+
+        # Convert tools to Workers AI format if present
+        ai_tools = None
+        if tools:
+            ai_tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name", ""),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("input_schema", {}),
+                    },
+                }
+                for t in tools
+            ]
+
+        start = time.monotonic()
+        result = await cf.llm_infer(
+            model=self._model_id,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tools=ai_tools,
+        )
+        elapsed_ms = (time.monotonic() - start) * 1000
+
+        content = result.get("content", "")
+        tool_calls = result.get("tool_calls", [])
+        input_tokens = result.get("input_tokens", 0)
+        output_tokens = result.get("output_tokens", 0)
+
+        # Estimate cost based on Workers AI Neuron pricing
+        # ~$0.011 per 1K Neurons, varies by model
+        cost_usd = (input_tokens + output_tokens) * 0.000001  # rough estimate
+
+        return LLMResponse(
+            content=content,
+            model=self._model_id,
+            tool_calls=tool_calls,
+            usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
+            cost_usd=cost_usd,
+            latency_ms=elapsed_ms,
+        )
+
+
 class HttpProvider:
     """Generic HTTP-based LLM provider using httpx.
 
