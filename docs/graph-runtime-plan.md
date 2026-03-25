@@ -67,10 +67,10 @@ GraphRuntime
 
 ### Week 3 — Agent Wiring + Runtime Flag
 - Update `Agent.__init__` to build graph instead of harness
-- `Agent.run()` delegates to graph runtime when `GRAPH_RUNTIME=true`
+- `Agent.run()` delegates to graph runtime
 - Keep `AgentConfig` backward compatible
 - Add execution mode detection: chat vs standard vs enterprise
-- Deliverable: graph path behind feature flag
+- Deliverable: graph path active in production
 
 ### Week 4 — API Unification
 - `/runtime-proxy/agent/run` routes through graph runtime
@@ -102,7 +102,7 @@ GraphRuntime
 - Deliverable: recoverable enterprise-grade runs
 
 ### Week 8 — Hard Cut + Cleanup
-- Make graph runtime default (`GRAPH_RUNTIME=true`)
+- Make graph runtime default
 - Remove harness fallback path
 - Remove `agentos/core/harness.py` (or archive)
 - Update docs, codemap
