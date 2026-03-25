@@ -999,6 +999,26 @@ class Agent:
 
         return results
 
+    async def resume_from_checkpoint(self, checkpoint_payload: dict[str, Any]) -> list:
+        """Resume a graph run from a persisted checkpoint payload."""
+        from agentos.graph.adapter import resume_with_graph_runtime
+
+        results = await resume_with_graph_runtime(self._harness, checkpoint_payload)
+
+        if self._db:
+            try:
+                session_id = ""
+                if self._observer and self._observer.records:
+                    session_id = self._observer.records[-1].session_id
+                graph_node_spans = getattr(self._harness, "_graph_node_spans", [])
+                if graph_node_spans:
+                    self._db.insert_spans(graph_node_spans, session_id=session_id)
+                    self._harness._graph_node_spans = []
+            except Exception as exc:
+                logger.warning("Failed to persist resumed graph spans: %s", exc)
+
+        return results
+
     @classmethod
     def from_file(cls, path: str | Path) -> Agent:
         """Load an agent from a YAML/JSON definition file."""

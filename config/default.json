@@ -10,8 +10,8 @@
     "default_model": "claude-sonnet-4-6-20250627",
     "routing": {
       "simple": {
-        "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-        "provider": "workers-ai",
+        "model": "google/gemini-2.5-flash",
+        "provider": "openrouter",
         "max_tokens": 2048
       },
       "moderate": {
@@ -25,8 +25,8 @@
         "max_tokens": 8192
       },
       "tool_call": {
-        "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-        "provider": "workers-ai",
+        "model": "google/gemini-2.5-flash",
+        "provider": "openrouter",
         "max_tokens": 4096
       }
     },
@@ -35,69 +35,69 @@
         "_description": "Budget \u2014 Workers AI edge inference, free tier",
         "general": {
           "simple": {
-            "model": "@cf/meta/llama-3.1-8b-instruct",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 1024
           },
           "moderate": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 2048
           },
           "complex": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "tool_call": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 2048
           }
         },
         "coding": {
           "planner": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "implementer": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "reviewer": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "debugger": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           }
         },
         "research": {
           "search": {
-            "model": "@cf/meta/llama-3.1-8b-instruct",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 1024
           },
           "analyze": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "synthesize": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           }
         },
         "creative": {
           "write": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "image": {
@@ -111,8 +111,8 @@
         },
         "multimodal": {
           "vision": {
-            "model": "@cf/meta/llama-3.2-11b-vision-instruct",
-            "provider": "workers-ai",
+            "model": "anthropic/claude-sonnet-4.6",
+            "provider": "openrouter",
             "max_tokens": 2048
           },
           "stt": {
@@ -125,8 +125,8 @@
         "_description": "Production \u2014 Workers AI for speed, OpenRouter for quality",
         "general": {
           "simple": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 2048
           },
           "moderate": {
@@ -140,8 +140,8 @@
             "max_tokens": 8192
           },
           "tool_call": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           }
         },
@@ -169,8 +169,8 @@
         },
         "research": {
           "search": {
-            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-            "provider": "workers-ai",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 2048
           },
           "analyze": {

@@ -7,6 +7,7 @@
 - Added node-level graph observability (`NODE_START`/`NODE_END`/`NODE_ERROR`) with persisted node spans linked by `trace_id` and `session_id`.
 - Linked eval persistence end-to-end with per-trial `session_id`/`trace_id` records for drill-down from eval runs to traces.
 - Added initial enterprise controls (`enable_checkpoints`, `require_human_approval`) in graph execution path and API request surfaces.
+- Added approval pause/resume contract with durable graph checkpoints and resume endpoints on both agent and runtime-proxy surfaces.
 
 ## Scope
 
@@ -23,6 +24,12 @@ This release completes the graph runtime hard cut. `Agent.run()` now executes vi
 - Runtime-proxy override safety:
   - per-request overrides do not mutate shared cached agent config
   - override requests use a request-scoped agent instance
+- Approval-gated pause/resume:
+  - run responses include `stop_reason` and `checkpoint_id`
+  - paused runs persist checkpoint payloads to `graph_checkpoints`
+  - resume endpoints:
+    - `POST /api/v1/agents/{name}/run/checkpoints/{checkpoint_id}/resume`
+    - `POST /api/v1/runtime-proxy/agent/run/checkpoints/{checkpoint_id}/resume`
 - Node-level graph observability:
   - `NODE_START`, `NODE_END`, `NODE_ERROR` events emitted
   - node spans persisted with `trace_id` + `session_id`
@@ -31,6 +38,7 @@ This release completes the graph runtime hard cut. `Agent.run()` now executes vi
   - per-trial records persisted to `eval_trials` with `session_id`/`trace_id`
 - Enterprise controls:
   - optional `enable_checkpoints` and `require_human_approval` runtime flags
+  - approvals can interrupt execution and resume from persisted checkpoint
 
 ## Compatibility
 

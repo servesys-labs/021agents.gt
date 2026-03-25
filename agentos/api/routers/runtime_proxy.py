@@ -25,6 +25,12 @@ _agent_cache: dict[str, Any] = {}
 _AGENT_CACHE_MAX = 50
 
 
+def _get_request_scoped_agent(name: str) -> Any:
+    """Create a fresh agent instance for request-scoped overrides/resume."""
+    from agentos.agent import Agent
+    return Agent.from_name(name)
+
+
 def _get_cached_agent(name: str) -> Any:
     """Get or create a cached Agent instance."""
     from agentos.agent import Agent
@@ -121,6 +127,7 @@ async def agent_run_proxy(
     payload: AgentRunProxyRequest,
     authorization: str | None = Header(default=None),
     x_edge_token: str | None = Header(default=None),
+    db: Any = Depends(_get_db_safe),
 ) -> dict[str, Any]:
     """Run an agent via edge token auth — same code path as /agents/{name}/run.
 
@@ -149,8 +156,7 @@ async def agent_run_proxy(
         or isinstance(payload.enable_checkpoints, bool)
     )
     if requires_request_scoped_instance:
-        from agentos.agent import Agent
-        run_agent_instance = Agent.from_name(name)
+        run_agent_instance = _get_request_scoped_agent(name)
         harness_cfg = (
             run_agent_instance.config.harness
             if isinstance(run_agent_instance.config.harness, dict)
@@ -198,12 +204,131 @@ async def agent_run_proxy(
     total_tools = 0
     session_id = ""
     trace_id = ""
+    stop_reason = ""
+    checkpoint_id = ""
 
     for r in results:
         if r.llm_response and r.llm_response.content:
             output = r.llm_response.content
         total_cost += r.cost_usd
         total_tools += len(r.tool_results)
+        stop_reason = r.stop_reason or stop_reason
+
+    if hasattr(run_agent_instance, "_observer") and run_agent_instance._observer and run_agent_instance._observer.records:
+        last_rec = run_agent_instance._observer.records[-1]
+        session_id = last_rec.session_id
+        trace_id = last_rec.trace_id
+
+    pending_checkpoint = getattr(run_agent_instance._harness, "_pending_graph_resume_payload", None)
+    if stop_reason == "human_approval_required" and isinstance(pending_checkpoint, dict):
+        candidate_id = str(pending_checkpoint.get("checkpoint_id", ""))
+        if candidate_id and db is not None:
+            try:
+                db.upsert_graph_checkpoint(
+                    checkpoint_id=candidate_id,
+                    agent_name=name,
+                    session_id=str(pending_checkpoint.get("session_id", "")),
+                    trace_id=str(pending_checkpoint.get("trace_id", "")),
+                    status="pending_approval",
+                    payload=pending_checkpoint,
+                    metadata={
+                        "created_by": f"channel:{payload.channel}:{payload.channel_user_id}" if payload.channel else "runtime_proxy",
+                        "org_id": payload.org_id or "",
+                        "project_id": payload.project_id or "",
+                        "source": "runtime_proxy",
+                    },
+                )
+                checkpoint_id = candidate_id
+            except Exception:
+                logger.warning("runtime proxy checkpoint persistence failed", exc_info=True)
+
+    return {
+        "success": not any(r.error for r in results),
+        "output": output,
+        "turns": len(results),
+        "tool_calls": total_tools,
+        "cost_usd": round(total_cost, 6),
+        "latency_ms": elapsed_ms,
+        "session_id": session_id,
+        "trace_id": trace_id,
+        "stop_reason": stop_reason,
+        "checkpoint_id": checkpoint_id,
+    }
+
+
+class AgentResumeProxyRequest(BaseModel):
+    """Resume an approval-gated run via a persisted checkpoint."""
+
+    agent_name: str
+    org_id: str = ""
+    project_id: str = ""
+    channel: str = ""
+    channel_user_id: str = ""
+
+
+@router.post("/agent/run/checkpoints/{checkpoint_id}/resume")
+async def agent_resume_proxy(
+    checkpoint_id: str,
+    payload: AgentResumeProxyRequest,
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+    db: Any = Depends(_get_db_safe),
+) -> dict[str, Any]:
+    """Resume a previously paused approval-gated run via runtime proxy."""
+    _require_edge_token(authorization=authorization, x_edge_token=x_edge_token)
+    if db is None:
+        raise HTTPException(status_code=503, detail="database unavailable for checkpoint resume")
+    name = (payload.agent_name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="agent_name is required")
+
+    row = db.get_graph_checkpoint(checkpoint_id)
+    if not row or str(row.get("agent_name", "")) != name:
+        raise HTTPException(status_code=404, detail=f"Checkpoint '{checkpoint_id}' not found for agent '{name}'")
+    status = str(row.get("status", ""))
+    if status == "resumed":
+        raise HTTPException(status_code=409, detail=f"Checkpoint '{checkpoint_id}' was already resumed")
+    if status != "pending_approval":
+        raise HTTPException(status_code=409, detail=f"Checkpoint '{checkpoint_id}' is not resumable (status={status})")
+
+    resume_payload = row.get("payload", {})
+    if not isinstance(resume_payload, dict):
+        raise HTTPException(status_code=400, detail=f"Checkpoint '{checkpoint_id}' payload is invalid")
+
+    try:
+        run_agent_instance = _get_request_scoped_agent(name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    if hasattr(run_agent_instance, "set_runtime_context"):
+        run_agent_instance.set_runtime_context(
+            org_id=payload.org_id or "",
+            project_id=payload.project_id or "",
+            user_id=f"channel:{payload.channel}:{payload.channel_user_id}" if payload.channel else "",
+        )
+
+    started = time.time()
+    try:
+        results = await run_agent_instance.resume_from_checkpoint(resume_payload)
+    except Exception as exc:
+        logger.exception("agent resume proxy error for %s", name)
+        raise HTTPException(status_code=502, detail=f"agent resume failed: {exc}") from exc
+    elapsed_ms = int((time.time() - started) * 1000)
+    db.mark_graph_checkpoint_resumed(checkpoint_id)
+
+    output = ""
+    total_cost = 0.0
+    total_tools = 0
+    session_id = ""
+    trace_id = ""
+    stop_reason = ""
+
+    for r in results:
+        if r.llm_response and r.llm_response.content:
+            output = r.llm_response.content
+        total_cost += r.cost_usd
+        total_tools += len(r.tool_results)
+        stop_reason = r.stop_reason or stop_reason
 
     if hasattr(run_agent_instance, "_observer") and run_agent_instance._observer and run_agent_instance._observer.records:
         last_rec = run_agent_instance._observer.records[-1]
@@ -219,6 +344,8 @@ async def agent_run_proxy(
         "latency_ms": elapsed_ms,
         "session_id": session_id,
         "trace_id": trace_id,
+        "stop_reason": stop_reason,
+        "checkpoint_id": checkpoint_id,
     }
 
 

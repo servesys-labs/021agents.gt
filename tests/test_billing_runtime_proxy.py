@@ -389,7 +389,7 @@ def test_runtime_proxy_agent_run_uses_request_scoped_override_without_mutating_c
     override_agent = _DummyAgent(runtime_mode="graph", output="override")
 
     monkeypatch.setattr(rp, "_get_cached_agent", lambda name: cached_agent)
-    monkeypatch.setattr(rp.Agent, "from_name", classmethod(lambda cls, name: override_agent))
+    monkeypatch.setattr(rp, "_get_request_scoped_agent", lambda name: override_agent)
 
     client = _client(monkeypatch)
     headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
@@ -405,4 +405,89 @@ def test_runtime_proxy_agent_run_uses_request_scoped_override_without_mutating_c
     assert override_agent.calls == 1
     assert cached_agent.calls == 0
     assert cached_agent.config.harness["runtime_mode"] == "graph"
+
+
+def test_runtime_proxy_agent_resume_from_checkpoint(isolated_db, monkeypatch):
+    import agentos.api.routers.runtime_proxy as rp
+    from agentos.core.database import create_database
+    from agentos.core.harness import TurnResult
+    from agentos.llm.provider import LLMResponse
+
+    class _PauseAgent:
+        def __init__(self):
+            self.config = type("Cfg", (), {"harness": {"runtime_mode": "graph"}})()
+            self._harness = type("Harness", (), {"_pending_graph_resume_payload": None})()
+            self._observer = None
+            self.calls = 0
+            self.resume_calls = 0
+
+        def set_runtime_context(self, **kwargs):
+            return None
+
+        async def run(self, task: str):
+            self.calls += 1
+            self._harness._pending_graph_resume_payload = {
+                "checkpoint_id": "cp-runtime-proxy-1",
+                "messages": [{"role": "user", "content": task}],
+                "llm_response": {"content": "call tool", "model": "stub", "tool_calls": []},
+                "current_turn": 1,
+                "cumulative_cost_usd": 0.0,
+                "trace_id": "trace-1",
+                "session_id": "sess-1",
+            }
+            return [TurnResult(
+                turn_number=1,
+                llm_response=LLMResponse(content="waiting approval", model="stub"),
+                done=True,
+                stop_reason="human_approval_required",
+            )]
+
+        async def resume_from_checkpoint(self, checkpoint_payload: dict):
+            self.resume_calls += 1
+            return [TurnResult(
+                turn_number=1,
+                llm_response=LLMResponse(content="resumed done", model="stub"),
+                done=True,
+                stop_reason="completed",
+            )]
+
+    cached_agent = _PauseAgent()
+    request_scoped_agent = _PauseAgent()
+    monkeypatch.setattr(rp, "_get_cached_agent", lambda name: cached_agent)
+    monkeypatch.setattr(rp, "_get_request_scoped_agent", lambda name: request_scoped_agent)
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
+
+    first = client.post(
+        "/api/v1/runtime-proxy/agent/run",
+        headers=headers,
+        json={"agent_name": "test-agent", "task": "hello", "require_human_approval": True},
+    )
+    assert first.status_code == 200
+    body = first.json()
+    assert body["stop_reason"] == "human_approval_required"
+    assert body["checkpoint_id"] == "cp-runtime-proxy-1"
+
+    db = create_database(Path("data/agent.db"))
+    row = db.get_graph_checkpoint("cp-runtime-proxy-1")
+    assert row is not None
+    assert row["status"] == "pending_approval"
+    db.close()
+
+    second = client.post(
+        "/api/v1/runtime-proxy/agent/run/checkpoints/cp-runtime-proxy-1/resume",
+        headers=headers,
+        json={"agent_name": "test-agent"},
+    )
+    assert second.status_code == 200
+    resumed = second.json()
+    assert resumed["success"] is True
+    assert resumed["output"] == "resumed done"
+    assert resumed["stop_reason"] == "completed"
+
+    db2 = create_database(Path("data/agent.db"))
+    row2 = db2.get_graph_checkpoint("cp-runtime-proxy-1")
+    assert row2 is not None
+    assert row2["status"] == "resumed"
+    db2.close()
 

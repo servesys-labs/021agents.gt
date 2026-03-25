@@ -7,7 +7,7 @@ import pytest
 
 from agentos.core.events import EventType
 from agentos.core.harness import AgentHarness, HarnessConfig
-from agentos.graph.adapter import run_with_graph_runtime
+from agentos.graph.adapter import resume_with_graph_runtime, run_with_graph_runtime
 from agentos.llm.provider import LLMResponse
 from agentos.llm.router import Complexity, LLMRouter
 from agentos.middleware.base import Middleware, MiddlewareChain
@@ -505,6 +505,31 @@ async def test_graph_adapter_human_approval_gate_blocks_tool_execution() -> None
     assert results
     assert results[-1].stop_reason == "human_approval_required"
     assert results[-1].done is True
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_resume_from_approval_checkpoint() -> None:
+    provider = _ToolThenFinalizeProvider()
+    harness = AgentHarness(
+        config=HarnessConfig(
+            max_turns=3,
+            enable_reflection_stage=False,
+            require_human_approval=True,
+        ),
+        llm_router=_router_with_provider(provider),
+        tool_executor=_tool_executor(),
+    )
+    paused = await run_with_graph_runtime(harness, "needs approval before tools")
+    assert paused
+    assert paused[-1].stop_reason == "human_approval_required"
+    payload = getattr(harness, "_pending_graph_resume_payload", None)
+    assert isinstance(payload, dict)
+    resumed = await resume_with_graph_runtime(harness, payload)
+    assert resumed
+    assert resumed[-1].stop_reason == "completed"
+    assert resumed[-1].done is True
+    assert resumed[-1].llm_response is not None
+    assert resumed[-1].llm_response.content == "final after tool"
 
 
 @pytest.mark.asyncio

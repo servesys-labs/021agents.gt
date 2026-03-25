@@ -3217,6 +3217,98 @@ class AgentDB:
             out.append(item)
         return out
 
+    def upsert_graph_checkpoint(
+        self,
+        *,
+        checkpoint_id: str,
+        agent_name: str,
+        session_id: str,
+        trace_id: str,
+        status: str,
+        payload: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist or update a resumable graph checkpoint payload."""
+        meta = metadata or {}
+        with self.tx() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS graph_checkpoints (
+                    checkpoint_id    TEXT PRIMARY KEY,
+                    agent_name       TEXT NOT NULL DEFAULT '',
+                    session_id       TEXT NOT NULL DEFAULT '',
+                    trace_id         TEXT NOT NULL DEFAULT '',
+                    status           TEXT NOT NULL DEFAULT 'pending',
+                    payload_json     TEXT NOT NULL DEFAULT '{}',
+                    metadata_json    TEXT NOT NULL DEFAULT '{}',
+                    created_at       REAL NOT NULL DEFAULT (unixepoch('now')),
+                    updated_at       REAL NOT NULL DEFAULT (unixepoch('now'))
+                )"""
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_graph_checkpoints_agent ON graph_checkpoints(agent_name)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_graph_checkpoints_status ON graph_checkpoints(status)"
+            )
+            now = time.time()
+            cur.execute(
+                """INSERT INTO graph_checkpoints (
+                    checkpoint_id, agent_name, session_id, trace_id, status,
+                    payload_json, metadata_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(checkpoint_id) DO UPDATE SET
+                    agent_name = excluded.agent_name,
+                    session_id = excluded.session_id,
+                    trace_id = excluded.trace_id,
+                    status = excluded.status,
+                    payload_json = excluded.payload_json,
+                    metadata_json = excluded.metadata_json,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    checkpoint_id,
+                    agent_name,
+                    session_id,
+                    trace_id,
+                    status,
+                    json.dumps(payload),
+                    json.dumps(meta),
+                    now,
+                    now,
+                ),
+            )
+
+    def get_graph_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
+        """Fetch one persisted graph checkpoint payload."""
+        with self.tx() as cur:
+            cur.execute(
+                """SELECT checkpoint_id, agent_name, session_id, trace_id, status,
+                          payload_json, metadata_json, created_at, updated_at
+                   FROM graph_checkpoints WHERE checkpoint_id = ?""",
+                (checkpoint_id,),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        out = dict(row)
+        try:
+            out["payload"] = json.loads(out.get("payload_json", "{}"))
+        except Exception:
+            out["payload"] = {}
+        try:
+            out["metadata"] = json.loads(out.get("metadata_json", "{}"))
+        except Exception:
+            out["metadata"] = {}
+        return out
+
+    def mark_graph_checkpoint_resumed(self, checkpoint_id: str) -> None:
+        """Mark a checkpoint as resumed (idempotent)."""
+        with self.tx() as cur:
+            cur.execute(
+                "UPDATE graph_checkpoints SET status = 'resumed', updated_at = ? WHERE checkpoint_id = ?",
+                (time.time(), checkpoint_id),
+            )
+
     def insert_session_errors(self, session_id: str, errors: list[dict[str, Any]]) -> None:
         """Insert error records for a session."""
         with self.tx() as cur:
