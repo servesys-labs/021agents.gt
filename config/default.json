@@ -9,296 +9,201 @@
     "default_model": "claude-sonnet-4-6-20250627",
     "routing": {
       "simple": {
+        "model": "openai/gpt-4o-mini",
         "provider": "gmi",
-        "model": "deepseek-ai/DeepSeek-V3.2",
         "max_tokens": 1024
       },
       "moderate": {
+        "model": "deepseek-ai/DeepSeek-V3.2",
         "provider": "gmi",
-        "model": "anthropic/claude-haiku-4.5",
         "max_tokens": 4096
       },
       "complex": {
+        "model": "anthropic/claude-sonnet-4.6",
         "provider": "gmi",
-        "model": "anthropic/claude-opus-4.6",
         "max_tokens": 8192
       },
       "tool_call": {
-        "provider": "gmi",
         "model": "anthropic/claude-haiku-4.5",
+        "provider": "gmi",
         "max_tokens": 4096
+      },
+      "vision": {
+        "model": "anthropic/claude-sonnet-4.6",
+        "provider": "gmi",
+        "max_tokens": 4096
+      },
+      "image_gen": {
+        "model": "seedream-5.0-lite",
+        "provider": "gmi-requestqueue"
+      },
+      "tts": {
+        "model": "elevenlabs-tts-v3",
+        "provider": "gmi-requestqueue"
+      },
+      "stt": {
+        "model": "@cf/openai/whisper",
+        "provider": "cloudflare"
       }
     },
     "plans": {
       "basic": {
-        "_description": "Budget-friendly \u2014 open-source models, ~$0.001 per run",
-        "_benchmarks": "DeepSeek-V3.2: MMLU-Pro 85.0, GPQA 82.4 | Qwen3.5-122B: MMLU-Pro 86.7, GPQA 86.6",
+        "_description": "Budget \u2014 fastest, cheapest, for prototyping and high-volume",
         "simple": {
+          "model": "openai/gpt-4o-mini",
           "provider": "gmi",
-          "model": "deepseek-ai/DeepSeek-V3.2",
-          "max_tokens": 1024
+          "max_tokens": 512
         },
         "moderate": {
+          "model": "openai/gpt-4o-mini",
           "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
-          "max_tokens": 2048
+          "max_tokens": 1024
         },
         "complex": {
+          "model": "deepseek-ai/DeepSeek-V3.2",
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-397B-A17B",
           "max_tokens": 4096
         },
         "tool_call": {
+          "model": "openai/gpt-4o-mini",
           "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
+          "max_tokens": 2048
+        },
+        "vision": {
+          "model": "openai/gpt-4o",
+          "provider": "gmi",
           "max_tokens": 2048
         },
         "image_gen": {
-          "provider": "gmi",
-          "model": "GLM-Image",
-          "per_request": 0.01
-        },
-        "vision": {
-          "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
-          "max_tokens": 2048
+          "model": "seedream-5.0-lite",
+          "provider": "gmi-requestqueue"
         },
         "tts": {
-          "provider": "gmi",
-          "model": "inworld-tts-1.5-mini",
-          "per_request": 0.005
+          "model": "elevenlabs-tts-v3",
+          "provider": "gmi-requestqueue"
         },
         "stt": {
-          "provider": "cloudflare",
           "model": "@cf/openai/whisper",
-          "per_request": 0.003
+          "provider": "cloudflare"
         }
       },
       "standard": {
-        "_description": "Balanced quality/cost \u2014 mix of open-source and frontier models, full multimodal",
         "simple": {
+          "model": "openai/gpt-4o-mini",
           "provider": "gmi",
-          "model": "deepseek-ai/DeepSeek-V3.2",
           "max_tokens": 1024
         },
         "moderate": {
+          "model": "deepseek-ai/DeepSeek-V3.2",
           "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "complex": {
+          "model": "anthropic/claude-sonnet-4.6",
           "provider": "gmi",
-          "model": "anthropic/claude-opus-4.6",
           "max_tokens": 8192
         },
         "tool_call": {
-          "provider": "gmi",
           "model": "anthropic/claude-haiku-4.5",
+          "provider": "gmi",
+          "max_tokens": 4096
+        },
+        "vision": {
+          "model": "anthropic/claude-sonnet-4.6",
+          "provider": "gmi",
           "max_tokens": 4096
         },
         "image_gen": {
-          "provider": "cloudflare",
-          "model": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-          "per_request": 0.035
-        },
-        "vision": {
-          "provider": "gmi",
-          "model": "anthropic/claude-opus-4.6",
-          "max_tokens": 4096
+          "model": "seedream-5.0-lite",
+          "provider": "gmi-requestqueue"
         },
         "tts": {
-          "provider": "none",
-          "model": "not-available",
-          "per_request": 0.06
+          "model": "elevenlabs-tts-v3",
+          "provider": "gmi-requestqueue"
         },
         "stt": {
-          "provider": "cloudflare",
           "model": "@cf/openai/whisper",
-          "per_request": 0.003
+          "provider": "cloudflare"
         }
       },
       "premium": {
-        "_description": "Maximum quality \u2014 frontier models, Nano Banana 2 image gen, ElevenLabs TTS",
+        "_description": "Max quality \u2014 best models, no compromise",
         "simple": {
+          "model": "anthropic/claude-haiku-4.5",
           "provider": "gmi",
-          "model": "anthropic/claude-sonnet-4.6",
           "max_tokens": 2048
         },
         "moderate": {
+          "model": "anthropic/claude-sonnet-4.6",
           "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
         "complex": {
-          "provider": "gmi",
           "model": "anthropic/claude-opus-4.6",
+          "provider": "gmi",
           "max_tokens": 8192
         },
         "tool_call": {
+          "model": "anthropic/claude-sonnet-4.6",
           "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
           "max_tokens": 4096
         },
-        "image_gen": {
-          "provider": "gmi",
-          "model": "gemini-3-pro-image-preview",
-          "per_request": 0.134,
-          "_note": "Nano Banana 2 (Google) via GMI"
-        },
         "vision": {
-          "provider": "gmi",
           "model": "anthropic/claude-opus-4.6",
+          "provider": "gmi",
           "max_tokens": 8192
         },
+        "image_gen": {
+          "model": "gemini-3-pro-image-preview",
+          "provider": "gmi-requestqueue"
+        },
         "tts": {
-          "provider": "gmi",
           "model": "elevenlabs-tts-v3",
-          "per_request": 0.1
+          "provider": "gmi-requestqueue"
         },
         "stt": {
-          "provider": "cloudflare",
           "model": "@cf/openai/whisper",
-          "per_request": 0.003
+          "provider": "cloudflare"
         }
       },
       "code": {
-        "_description": "Optimized for coding tasks \u2014 coding-specialized models + diagram/mockup generation",
-        "_benchmarks": "Qwen3-Coder-480B: LiveCodeBench top-tier | DeepSeek-V3.2: SWE-bench 70.0",
+        "_description": "Coding \u2014 optimized for software engineering tasks",
         "simple": {
+          "model": "openai/gpt-4o-mini",
           "provider": "gmi",
-          "model": "deepseek-ai/DeepSeek-V3.2",
           "max_tokens": 2048
         },
         "moderate": {
-          "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
-          "max_tokens": 8192
-        },
-        "complex": {
-          "provider": "gmi",
-          "model": "anthropic/claude-opus-4.6",
-          "max_tokens": 8192
-        },
-        "tool_call": {
-          "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
-          "max_tokens": 4096
-        },
-        "image_gen": {
-          "provider": "cloudflare",
-          "model": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-          "per_request": 0.035
-        },
-        "vision": {
-          "provider": "gmi",
-          "model": "anthropic/claude-opus-4.6",
-          "max_tokens": 4096
-        },
-        "tts": {
-          "provider": "none",
-          "model": "not-available",
-          "per_request": 0.06
-        },
-        "stt": {
-          "provider": "cloudflare",
-          "model": "@cf/openai/whisper",
-          "per_request": 0.003
-        }
-      },
-      "dedicated": {
-        "_description": "Dedicated GPU \u2014 isolated H200 endpoints via GMI Cloud, max data sovereignty + performance",
-        "_billing": "GPU compute: $3.98/hr per H200 + per-token inference costs",
-        "simple": {
-          "provider": "gmi",
           "model": "deepseek-ai/DeepSeek-V3.2",
-          "max_tokens": 1024,
-          "dedicated": true
-        },
-        "moderate": {
           "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
-          "max_tokens": 4096,
-          "dedicated": true
+          "max_tokens": 8192
         },
         "complex": {
+          "model": "anthropic/claude-sonnet-4.6",
           "provider": "gmi",
-          "model": "Qwen/Qwen3.5-397B-A17B",
-          "max_tokens": 8192,
-          "dedicated": true
-        },
-        "tool_call": {
-          "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
-          "max_tokens": 4096,
-          "dedicated": true
-        },
-        "image_gen": {
-          "provider": "cloudflare",
-          "model": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
-          "per_request": 0.035,
-          "dedicated": true
-        },
-        "vision": {
-          "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
-          "max_tokens": 4096,
-          "dedicated": true
-        },
-        "tts": {
-          "provider": "none",
-          "model": "not-available",
-          "per_request": 0.1,
-          "dedicated": true
-        },
-        "stt": {
-          "provider": "cloudflare",
-          "model": "@cf/openai/whisper",
-          "per_request": 0.003,
-          "dedicated": true
-        }
-      },
-      "private": {
-        "_description": "Data sovereignty \u2014 only open-source models, no data to Anthropic/OpenAI/Google",
-        "_benchmarks": "Qwen3.5-397B: MMLU-Pro 87.8, GPQA 88.4, SWE-bench 76.4 | Qwen3.5-122B: MMLU-Pro 86.7",
-        "simple": {
-          "provider": "gmi",
-          "model": "deepseek-ai/DeepSeek-V3.2",
-          "max_tokens": 1024
-        },
-        "moderate": {
-          "provider": "gmi",
-          "model": "anthropic/claude-haiku-4.5",
-          "max_tokens": 4096
-        },
-        "complex": {
-          "provider": "gmi",
-          "model": "Qwen/Qwen3.5-397B-A17B",
           "max_tokens": 8192
         },
         "tool_call": {
-          "provider": "gmi",
           "model": "anthropic/claude-haiku-4.5",
+          "provider": "gmi",
+          "max_tokens": 4096
+        },
+        "vision": {
+          "model": "anthropic/claude-sonnet-4.6",
+          "provider": "gmi",
           "max_tokens": 4096
         },
         "image_gen": {
-          "provider": "gmi",
-          "model": "GLM-Image",
-          "per_request": 0.01
-        },
-        "vision": {
-          "provider": "gmi",
-          "model": "Qwen/Qwen3.5-122B-A10B",
-          "max_tokens": 4096
+          "model": "seedream-5.0-lite",
+          "provider": "gmi-requestqueue"
         },
         "tts": {
-          "provider": "none",
-          "model": "not-available",
-          "per_request": 0.06
+          "model": "elevenlabs-tts-v3",
+          "provider": "gmi-requestqueue"
         },
         "stt": {
-          "provider": "cloudflare",
           "model": "@cf/openai/whisper",
-          "per_request": 0.003
+          "provider": "cloudflare"
         }
       }
     },
