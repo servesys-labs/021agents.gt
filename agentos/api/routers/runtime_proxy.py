@@ -123,9 +123,20 @@ async def agent_run_proxy(
             user_id=f"channel:{payload.channel}:{payload.channel_user_id}" if payload.channel else "",
         )
 
+    # Channel-aware formatting — tell the agent how to respond
+    task = payload.task
+    channel = (payload.channel or "").lower()
+    if channel in ("telegram", "discord", "whatsapp", "sms"):
+        task = (
+            f"[Channel: {channel} — respond concisely. "
+            f"Use short paragraphs. Highlight key facts with bold. "
+            f"No long essays. Max 3-4 sentences unless asked for detail.]\n\n"
+            f"{payload.task}"
+        )
+
     started = time.time()
     try:
-        results = await agent.run(payload.task)
+        results = await agent.run(task)
     except Exception as exc:
         logger.exception("agent run proxy error for %s", name)
         raise HTTPException(status_code=502, detail=f"agent run failed: {exc}") from exc
