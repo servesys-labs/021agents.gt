@@ -3260,7 +3260,7 @@ def _get_grader_provider():
 
     if anthropic_key:
         return HttpProvider(
-            model_id="anthropic/claude-haiku-4.5",
+            model_id="anthropic/claude-sonnet-4.6",
             api_base="https://api.anthropic.com",
             api_key=anthropic_key,
         )
