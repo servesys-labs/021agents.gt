@@ -1802,7 +1802,7 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "sandbox_exec": {
-        "description": "Execute a shell command in a secure E2B sandbox",
+        "description": "Execute a shell command in a secure sandbox (Cloudflare container or E2B)",
         "input_schema": {
             "type": "object",
             "properties": {

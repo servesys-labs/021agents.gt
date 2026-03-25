@@ -1,4 +1,4 @@
-"""Sandbox router — E2B sandbox management via v1 API."""
+"""Sandbox router — code execution via Cloudflare containers (primary) or E2B (fallback)."""
 
 from __future__ import annotations
 
@@ -28,11 +28,11 @@ async def create_sandbox(
     request: CreateSandboxRequest,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Create a new E2B sandbox."""
+    """Create a new sandbox (E2B — for persistent sandbox sessions)."""
     from agentos.sandbox import SandboxManager
     mgr = SandboxManager()
     if not mgr.has_api_key and not mgr.allow_local_fallback:
-        raise HTTPException(status_code=503, detail="E2B_API_KEY not configured and local fallback disabled")
+        raise HTTPException(status_code=503, detail="E2B_API_KEY not configured. Use /sandbox/exec for CF-based execution.")
     session = await mgr.create(template=request.template, timeout_sec=request.timeout_sec)
     return {"sandbox_id": session.sandbox_id, "template": session.template, "status": session.status}
 
