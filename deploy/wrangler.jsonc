@@ -98,6 +98,16 @@
     "binding": "AI"
   },
 
+  // Dispatch Namespace — multi-tenant agent isolation (Workers for Platforms)
+  // Each customer agent gets its own isolated worker in this namespace.
+  // Naming: agentos-{org_slug}-{agent_name}
+  "dispatch_namespaces": [
+    {
+      "binding": "DISPATCHER",
+      "namespace": "agentos-production"
+    }
+  ],
+
   // Vectorize for semantic memory / RAG
   "vectorize": [
     {

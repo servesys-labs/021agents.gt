@@ -406,29 +406,3 @@ class PostgresAgentDB(AgentDB):
         except Exception:
             self.conn.rollback()
             return 0
-
-
-class _PooledConnAdapter(_ConnAdapter):
-    """Connection adapter that returns itself to the pool on close().
-
-    After close(), any further operations raise RuntimeError to prevent
-    use-after-return bugs.
-    """
-
-    def __init__(self, conn, pool) -> None:
-        super().__init__(conn)
-        self._pool = pool
-        self._closed = False
-
-    def execute(self, sql: str, params: Any = None):
-        if self._closed:
-            raise RuntimeError("Cannot use a closed pooled connection")
-        return super().execute(sql, params)
-
-    def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        if self._pool and self._conn:
-            self._pool.putconn(self._conn)
-            self._conn = None

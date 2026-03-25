@@ -1,21 +1,47 @@
-"""Deploy router — trigger deploys, check status, view logs."""
+"""Deploy router — deploy/undeploy customer agent workers to Cloudflare dispatch namespace."""
 
 from __future__ import annotations
 
-import json
-import shutil
-from pathlib import Path
+import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from agentos.api.deps import CurrentUser, get_current_user
+from agentos.api.deps import CurrentUser, get_current_user, require_scope, _get_db
 
 router = APIRouter(prefix="/deploy", tags=["deploy"])
+logger = logging.getLogger(__name__)
+
+
+def _get_org_slug(db: Any, org_id: str) -> str:
+    """Resolve org_id to org slug for worker naming."""
+    if not org_id:
+        return "default"
+    try:
+        row = db.conn.execute(
+            "SELECT slug FROM orgs WHERE org_id = ?", (org_id,)
+        ).fetchone()
+        if row:
+            return row["slug"] if isinstance(row, dict) else row[0]
+    except Exception:
+        pass
+    # Fallback: use org_id directly (lowercase, hyphenated)
+    import re
+    return re.sub(r"[^a-z0-9-]", "-", org_id.lower()).strip("-")[:30] or "default"
 
 
 @router.post("/{agent_name}")
-async def deploy_agent(agent_name: str, user: CurrentUser = Depends(get_current_user)):
-    """Trigger a Cloudflare Workers deployment for an agent."""
+async def deploy_agent(
+    agent_name: str,
+    user: CurrentUser = Depends(require_scope("deploy:write")),
+):
+    """Deploy an agent as an isolated customer worker in the dispatch namespace.
+
+    Creates a stateless proxy worker at:
+      agentos-{org_slug}-{agent_name}
+
+    The worker routes all requests to the backend /runtime-proxy/agent/run.
+    """
     from agentos.agent import Agent
 
     try:
@@ -23,50 +49,124 @@ async def deploy_agent(agent_name: str, user: CurrentUser = Depends(get_current_
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
 
-    config = agent.config
-    gov = config.governance
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if not cf:
+        raise HTTPException(status_code=503, detail="CloudflareClient not configured (set AGENTOS_WORKER_URL)")
 
-    deploy_dir = Path.cwd() / "deploy"
-    package_deploy = Path(__file__).resolve().parent.parent.parent.parent / "deploy"
+    db = _get_db()
+    org_slug = _get_org_slug(db, user.org_id)
 
-    if not deploy_dir.exists() and package_deploy.exists():
-        shutil.copytree(package_deploy, deploy_dir)
+    result = await cf.deploy_customer_worker(
+        org_slug=org_slug,
+        agent_name=agent_name,
+        org_id=user.org_id,
+        project_id=user.project_id,
+    )
 
-    if not deploy_dir.exists():
-        raise HTTPException(status_code=503, detail="No deploy scaffold found")
+    if not result.get("deployed"):
+        raise HTTPException(status_code=502, detail=f"Deploy failed: {result}")
 
-    cf_config = {
-        "agentName": config.name,
-        "agentDescription": config.description,
-        "systemPrompt": config.system_prompt,
-        "maxTurns": config.max_turns,
-        "budgetLimitUsd": gov.get("budget_limit_usd", 10.0),
-        "model": config.model,
-    }
-
-    (deploy_dir / "agent-config.json").write_text(json.dumps(cf_config, indent=2) + "\n")
+    # Store worker name in agents table for quick lookup
+    worker_name = result.get("worker_name", "")
+    try:
+        db.conn.execute(
+            "UPDATE agents SET updated_at = (SELECT COALESCE(MAX(updated_at),0) FROM agents WHERE name = ?) "
+            "WHERE name = ?",
+            (agent_name, agent_name),
+        )
+        db.conn.commit()
+    except Exception:
+        pass
 
     return {
-        "status": "config_written",
-        "agent": config.name,
-        "deploy_dir": str(deploy_dir),
-        "next": "Run 'npm install && npx wrangler deploy' in deploy/",
+        "deployed": True,
+        "agent": agent_name,
+        "worker_name": worker_name,
+        "namespace": result.get("namespace", ""),
+        "dispatch_url": f"/agents/dispatch/{org_slug}/{agent_name}",
     }
+
+
+@router.delete("/{agent_name}")
+async def undeploy_agent(
+    agent_name: str,
+    user: CurrentUser = Depends(require_scope("deploy:write")),
+):
+    """Remove an agent's customer worker from the dispatch namespace."""
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if not cf:
+        raise HTTPException(status_code=503, detail="CloudflareClient not configured")
+
+    db = _get_db()
+    org_slug = _get_org_slug(db, user.org_id)
+
+    result = await cf.undeploy_customer_worker(org_slug, agent_name)
+
+    return {
+        "removed": result.get("removed", False),
+        "agent": agent_name,
+        "worker_name": result.get("worker_name", ""),
+    }
+
+
+@router.get("/workers")
+async def list_workers(
+    org: str = "",
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List all deployed customer workers. Filter by org slug."""
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if not cf:
+        return {"workers": [], "error": "CloudflareClient not configured"}
+
+    # If no org filter provided, use the user's org
+    if not org:
+        db = _get_db()
+        org = _get_org_slug(db, user.org_id)
+
+    workers = await cf.list_customer_workers(org_slug=org)
+    return {"workers": workers, "org": org, "count": len(workers)}
+
+
+@router.get("/workers/all")
+async def list_all_workers(
+    user: CurrentUser = Depends(require_scope("admin")),
+):
+    """List ALL deployed customer workers across all orgs (admin only)."""
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if not cf:
+        return {"workers": [], "error": "CloudflareClient not configured"}
+
+    workers = await cf.list_customer_workers()
+    return {"workers": workers, "count": len(workers)}
 
 
 @router.get("/{agent_name}/status")
-async def deploy_status(agent_name: str, user: CurrentUser = Depends(get_current_user)):
-    """Get deployment status for an agent."""
-    deploy_dir = Path.cwd() / "deploy"
-    config_path = deploy_dir / "agent-config.json"
+async def deploy_status(
+    agent_name: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Check if an agent has a deployed customer worker."""
+    from agentos.infra.cloudflare_client import get_cf_client
+    cf = get_cf_client()
+    if not cf:
+        return {"deployed": False, "agent": agent_name, "reason": "no_cf_client"}
 
-    if not config_path.exists():
-        return {"deployed": False, "agent": agent_name}
+    db = _get_db()
+    org_slug = _get_org_slug(db, user.org_id)
+    worker_name = cf._worker_name(org_slug, agent_name)
 
-    config = json.loads(config_path.read_text())
+    # Check if worker exists by trying to list and filter
+    workers = await cf.list_customer_workers(org_slug)
+    found = any(w["worker_name"] == worker_name for w in workers)
+
     return {
-        "deployed": True,
-        "agent": config.get("agentName", agent_name),
-        "model": config.get("model", ""),
-        "deploy_dir": str(deploy_dir),
+        "deployed": found,
+        "agent": agent_name,
+        "worker_name": worker_name if found else "",
+        "dispatch_url": f"/agents/dispatch/{org_slug}/{agent_name}" if found else "",
     }

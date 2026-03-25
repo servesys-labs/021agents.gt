@@ -100,6 +100,18 @@ async function main() {
     run("wrangler r2 bucket create agentos-storage", { ignoreError: true });
   }
 
+  // ── Step 3.5: Create dispatch namespace ──────────────────────────
+  console.log("\n\x1b[36m[3.5/6]\x1b[0m Provisioning dispatch namespace...");
+  const namespaces = run("wrangler dispatch-namespace list --json 2>/dev/null || echo '[]'", {
+    silent: true,
+    ignoreError: true,
+  });
+  if (namespaces.includes("agentos-production")) {
+    console.log("  Namespace 'agentos-production' exists, skipping.");
+  } else {
+    run("wrangler dispatch-namespace create agentos-production", { ignoreError: true });
+  }
+
   // ── Step 4: Create queues ─────────────────────────────────────────
   console.log("\n\x1b[36m[4/6]\x1b[0m Provisioning queues...");
   const queues = run("wrangler queues list --json 2>/dev/null || echo '[]'", {

@@ -233,6 +233,164 @@ class CloudflareClient:
             "org_id": org_id,
         })
 
+    # ── Dispatch Namespace (Workers for Platforms) ─────────────────
+
+    def _worker_name(self, org_slug: str, agent_name: str) -> str:
+        """Deterministic worker name: agentos-{org_slug}-{agent_name}."""
+        import re
+        slug = re.sub(r"[^a-z0-9-]", "-", f"{org_slug}-{agent_name}".lower())
+        slug = re.sub(r"-+", "-", slug).strip("-")
+        return f"agentos-{slug}"[:63]  # CF worker name limit
+
+    async def deploy_customer_worker(
+        self,
+        org_slug: str,
+        agent_name: str,
+        org_id: str = "",
+        project_id: str = "",
+    ) -> dict[str, Any]:
+        """Deploy a customer agent worker into the dispatch namespace.
+
+        The worker is a stateless proxy — same code for every agent,
+        only the env var bindings differ (AGENT_NAME, ORG_ID, etc.).
+        """
+        worker_name = self._worker_name(org_slug, agent_name)
+        account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+        namespace = os.environ.get("DISPATCH_NAMESPACE", "agentos-production")
+        backend_url = os.environ.get("AGENTOS_WORKER_URL", self.worker_url).strip()
+        backend_token = self.edge_token
+
+        if not account_id or not api_token:
+            return {"error": "CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN not set", "deployed": False}
+
+        # Read template
+        import importlib.resources
+        template_path = os.path.join(os.path.dirname(__file__), "..", "..", "deploy", "src", "customer-worker-template.js")
+        try:
+            template_code = open(template_path).read()
+        except FileNotFoundError:
+            # Fallback: inline minimal proxy
+            template_code = (
+                'export default{async fetch(r,e){const b=await r.json().catch(()=>({}));'
+                'const resp=await fetch(`${e.BACKEND_INGEST_URL}/api/v1/runtime-proxy/agent/run`,'
+                '{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${e.BACKEND_INGEST_TOKEN}`},'
+                'body:JSON.stringify({...b,agent_name:e.AGENT_NAME,org_id:e.ORG_ID,channel:"dispatch_worker"})});'
+                'return new Response(resp.body,{status:resp.status,headers:{"Content-Type":"application/json"}})}}'
+            )
+
+        # Multipart upload to dispatch namespace
+        metadata = {
+            "main_module": "index.js",
+            "bindings": [
+                {"type": "plain_text", "name": "AGENT_NAME", "text": agent_name},
+                {"type": "plain_text", "name": "ORG_ID", "text": org_id},
+                {"type": "plain_text", "name": "PROJECT_ID", "text": project_id},
+                {"type": "plain_text", "name": "BACKEND_INGEST_URL", "text": backend_url},
+                {"type": "secret_text", "name": "BACKEND_INGEST_TOKEN", "text": backend_token},
+            ],
+            "tags": [f"org:{org_slug}", f"agent:{agent_name}"],
+            "compatibility_date": "2026-03-01",
+        }
+
+        import json as _json
+        client = await self._get_client()
+
+        # Build multipart form manually
+        import io
+        boundary = "----AgentOSWorkerUpload"
+        body_parts = []
+        # Part 1: metadata JSON
+        body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"; filename=\"metadata.json\"\r\nContent-Type: application/json\r\n\r\n{_json.dumps(metadata)}")
+        # Part 2: worker script
+        body_parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"index.js\"; filename=\"index.js\"\r\nContent-Type: application/javascript+module\r\n\r\n{template_code}")
+        body_parts.append(f"--{boundary}--")
+        multipart_body = "\r\n".join(body_parts)
+
+        url = (
+            f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
+            f"/workers/dispatch/namespaces/{namespace}/scripts/{worker_name}"
+        )
+        resp = await client.put(
+            url,
+            content=multipart_body.encode(),
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+        )
+        data = resp.json()
+        return {
+            "deployed": resp.is_success,
+            "worker_name": worker_name,
+            "namespace": namespace,
+            "status_code": resp.status_code,
+            "result": data.get("result", data.get("errors", [])),
+        }
+
+    async def undeploy_customer_worker(
+        self,
+        org_slug: str,
+        agent_name: str,
+    ) -> dict[str, Any]:
+        """Remove a customer worker from the dispatch namespace."""
+        worker_name = self._worker_name(org_slug, agent_name)
+        account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+        namespace = os.environ.get("DISPATCH_NAMESPACE", "agentos-production")
+
+        if not account_id or not api_token:
+            return {"error": "CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN not set", "removed": False}
+
+        client = await self._get_client()
+        url = (
+            f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
+            f"/workers/dispatch/namespaces/{namespace}/scripts/{worker_name}"
+        )
+        resp = await client.delete(url, headers={"Authorization": f"Bearer {api_token}"})
+        return {
+            "removed": resp.is_success,
+            "worker_name": worker_name,
+            "status_code": resp.status_code,
+        }
+
+    async def list_customer_workers(
+        self,
+        org_slug: str = "",
+    ) -> list[dict[str, Any]]:
+        """List customer workers in the dispatch namespace. Filter by org_slug prefix."""
+        account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+        api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+        namespace = os.environ.get("DISPATCH_NAMESPACE", "agentos-production")
+
+        if not account_id or not api_token:
+            return []
+
+        client = await self._get_client()
+        url = (
+            f"https://api.cloudflare.com/client/v4/accounts/{account_id}"
+            f"/workers/dispatch/namespaces/{namespace}/scripts"
+        )
+        resp = await client.get(url, headers={"Authorization": f"Bearer {api_token}"})
+        if not resp.is_success:
+            return []
+
+        data = resp.json()
+        scripts = data.get("result", [])
+
+        # Filter by org prefix if specified
+        prefix = f"agentos-{org_slug}-" if org_slug else "agentos-"
+        return [
+            {
+                "worker_name": s.get("script_name", s.get("id", "")),
+                "created_on": s.get("created_on", ""),
+                "modified_on": s.get("modified_on", ""),
+                "tags": s.get("tags", []),
+            }
+            for s in scripts
+            if s.get("script_name", s.get("id", "")).startswith(prefix)
+        ]
+
     # ── Lifecycle ────────────────────────────────────────────────────
 
     async def close(self) -> None:

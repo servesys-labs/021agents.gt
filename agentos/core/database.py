@@ -2321,6 +2321,32 @@ class AgentDB:
     def _ensure_runtime_tables(self) -> None:
         """Ensure operational tables exist even on partially migrated DBs."""
         self.conn.executescript(RUNTIME_TABLES_SQL)
+        self._ensure_composite_indexes()
+
+    def _ensure_composite_indexes(self) -> None:
+        """Add composite indexes for multi-tenant query performance.
+
+        These cover the most common query patterns at scale:
+        - List sessions by org + agent
+        - Get turns for a session in order
+        - Query billing by org + date range
+        """
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_sessions_org_agent ON sessions(org_id, agent_name)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_org_created ON sessions(org_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_turns_session_turn ON turns(session_id, turn_number)",
+            "CREATE INDEX IF NOT EXISTS idx_billing_org_created ON billing_records(org_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_billing_org_agent ON billing_records(org_id, agent_name)",
+        ]
+        for sql in indexes:
+            try:
+                self.conn.execute(sql)
+            except Exception:
+                pass  # Table may not exist yet
+        try:
+            self.conn.commit()
+        except Exception:
+            pass
 
     def _ensure_runtime_columns(self) -> None:
         """Add runtime observability columns for legacy SQLite databases."""

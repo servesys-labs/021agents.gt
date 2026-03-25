@@ -154,7 +154,7 @@ class AsyncMemoryUpdater:
         self.min_confidence = min_confidence
         self._extract_fn = extract_fn  # Optional LLM-based extractor
 
-        self._queue: asyncio.Queue[MemoryUpdate] = asyncio.Queue()
+        self._queue: asyncio.Queue[MemoryUpdate] = asyncio.Queue(maxsize=1000)
         self._memory = UserMemory()
         self._task: asyncio.Task | None = None
         self._running = False
