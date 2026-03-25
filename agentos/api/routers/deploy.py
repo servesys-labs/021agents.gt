@@ -14,20 +14,8 @@ logger = logging.getLogger(__name__)
 
 
 def _get_org_slug(db: Any, org_id: str) -> str:
-    """Resolve org_id to org slug for worker naming."""
-    if not org_id:
-        return "default"
-    try:
-        row = db.conn.execute(
-            "SELECT slug FROM orgs WHERE org_id = ?", (org_id,)
-        ).fetchone()
-        if row:
-            return row["slug"] if isinstance(row, dict) else row[0]
-    except Exception:
-        pass
-    # Fallback: use org_id directly (lowercase, hyphenated)
-    import re
-    return re.sub(r"[^a-z0-9-]", "-", org_id.lower()).strip("-")[:30] or "default"
+    from agentos.infra.dispatch import get_org_slug
+    return get_org_slug(db, org_id)
 
 
 @router.post("/{agent_name}")

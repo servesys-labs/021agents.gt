@@ -68,6 +68,10 @@ async def create_agent(request: AgentCreateRequest, user: CurrentUser = Depends(
     # Snapshot version in agent_versions table
     _snapshot_version(config, user.user_id)
 
+    # Auto-deploy customer worker to dispatch namespace
+    from agentos.infra.dispatch import auto_deploy_agent
+    await auto_deploy_agent(config.name, user.org_id, user.project_id)
+
     return AgentResponse(
         name=config.name, description=config.description, model=config.model,
         tools=config.tools, tags=config.tags, version=config.version,
@@ -170,6 +174,10 @@ async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser
     # Snapshot updated version
     _snapshot_version(config, user.user_id)
 
+    # Re-deploy customer worker with updated config
+    from agentos.infra.dispatch import auto_deploy_agent
+    await auto_deploy_agent(config.name, user.org_id, user.project_id)
+
     return AgentResponse(
         name=config.name, description=config.description, model=config.model,
         tools=config.tools, tags=config.tags, version=config.version,
@@ -223,6 +231,10 @@ async def delete_agent(
             cf_cleanup = await cf.teardown_agent(agent_name=name, org_id=user.org_id)
     except Exception as exc:
         cf_cleanup = {"error": str(exc)}
+
+    # 4. Undeploy customer worker from dispatch namespace
+    from agentos.infra.dispatch import auto_undeploy_agent
+    undeploy_result = await auto_undeploy_agent(name, user.org_id)
 
     # 4. Audit log
     try:
