@@ -69,8 +69,8 @@
           "per_request": 0.005
         },
         "stt": {
-          "provider": "gmi",
-          "model": "whisper-large-v3",
+          "provider": "cloudflare",
+          "model": "@cf/openai/whisper",
           "per_request": 0.003
         }
       },
@@ -97,8 +97,8 @@
           "max_tokens": 4096
         },
         "image_gen": {
-          "provider": "gmi",
-          "model": "Seedream-5.0-lite",
+          "provider": "cloudflare",
+          "model": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
           "per_request": 0.035
         },
         "vision": {
@@ -107,13 +107,13 @@
           "max_tokens": 4096
         },
         "tts": {
-          "provider": "gmi",
-          "model": "minimax-tts-speech-2.6-turbo",
+          "provider": "none",
+          "model": "not-available",
           "per_request": 0.06
         },
         "stt": {
-          "provider": "gmi",
-          "model": "whisper-large-v3",
+          "provider": "cloudflare",
+          "model": "@cf/openai/whisper",
           "per_request": 0.003
         }
       },
@@ -156,8 +156,8 @@
           "per_request": 0.1
         },
         "stt": {
-          "provider": "gmi",
-          "model": "whisper-large-v3",
+          "provider": "cloudflare",
+          "model": "@cf/openai/whisper",
           "per_request": 0.003
         }
       },
@@ -185,8 +185,8 @@
           "max_tokens": 4096
         },
         "image_gen": {
-          "provider": "gmi",
-          "model": "Seedream-5.0-lite",
+          "provider": "cloudflare",
+          "model": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
           "per_request": 0.035
         },
         "vision": {
@@ -195,13 +195,13 @@
           "max_tokens": 4096
         },
         "tts": {
-          "provider": "gmi",
-          "model": "minimax-tts-speech-2.6-turbo",
+          "provider": "none",
+          "model": "not-available",
           "per_request": 0.06
         },
         "stt": {
-          "provider": "gmi",
-          "model": "whisper-large-v3",
+          "provider": "cloudflare",
+          "model": "@cf/openai/whisper",
           "per_request": 0.003
         }
       },
@@ -233,8 +233,8 @@
           "dedicated": true
         },
         "image_gen": {
-          "provider": "gmi",
-          "model": "Seedream-5.0-lite",
+          "provider": "cloudflare",
+          "model": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
           "per_request": 0.035,
           "dedicated": true
         },
@@ -245,14 +245,14 @@
           "dedicated": true
         },
         "tts": {
-          "provider": "gmi",
-          "model": "minimax-audio-voice-clone-speech-2.6-hd",
+          "provider": "none",
+          "model": "not-available",
           "per_request": 0.1,
           "dedicated": true
         },
         "stt": {
-          "provider": "gmi",
-          "model": "whisper-large-v3",
+          "provider": "cloudflare",
+          "model": "@cf/openai/whisper",
           "per_request": 0.003,
           "dedicated": true
         }
@@ -291,13 +291,13 @@
           "max_tokens": 4096
         },
         "tts": {
-          "provider": "gmi",
-          "model": "minimax-tts-speech-2.6-turbo",
+          "provider": "none",
+          "model": "not-available",
           "per_request": 0.06
         },
         "stt": {
-          "provider": "gmi",
-          "model": "whisper-large-v3",
+          "provider": "cloudflare",
+          "model": "@cf/openai/whisper",
           "per_request": 0.003
         }
       }

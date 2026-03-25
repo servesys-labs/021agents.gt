@@ -1603,19 +1603,25 @@ export default {
               break;
             }
 
-            // ── Multimodal (GMI Cloud API) ──
+            // ── Multimodal (Workers AI — free, no API key needed) ──
             case "image-generate": {
               const prompt = args.prompt || "";
-              const model = args.model || "Seedream-5.0-lite";
-              const gmiKey = env.GMI_API_KEY || "";
-              if (!gmiKey) { result = "GMI_API_KEY not configured on worker"; break; }
               try {
-                const resp = await fetch("https://api.gmi-serving.com/v1/images/generations", {
-                  method: "POST",
-                  headers: { Authorization: `Bearer ${gmiKey}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({ model, prompt, n: 1, size: args.size || "1024x1024" }),
+                const aiResult = await env.AI.run(
+                  "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+                  { prompt }
+                ) as ReadableStream | ArrayBuffer;
+                // Result is a PNG image as ArrayBuffer
+                const buf = aiResult instanceof ArrayBuffer
+                  ? aiResult
+                  : await new Response(aiResult).arrayBuffer();
+                const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+                result = JSON.stringify({
+                  format: "png",
+                  base64: b64.slice(0, 100) + "...",
+                  size_bytes: buf.byteLength,
+                  prompt,
                 });
-                result = await resp.text();
               } catch (err: any) {
                 result = `Image generation failed: ${err.message}`;
               }
@@ -1623,25 +1629,41 @@ export default {
             }
 
             case "text-to-speech": {
-              const text = args.text || "";
-              const model = args.model || "minimax-tts-speech-2.6-turbo";
-              const gmiKey = env.GMI_API_KEY || "";
-              if (!gmiKey) { result = "GMI_API_KEY not configured on worker"; break; }
-              try {
-                const resp = await fetch("https://api.gmi-serving.com/v1/audio/speech", {
-                  method: "POST",
-                  headers: { Authorization: `Bearer ${gmiKey}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({ model, input: text, voice: args.voice || "default" }),
-                });
-                result = `TTS generated (${resp.status}), ${resp.headers.get("content-length") || "?"} bytes`;
-              } catch (err: any) {
-                result = `TTS failed: ${err.message}`;
-              }
+              // Workers AI doesn't have TTS yet. Use the sandbox with a Python TTS lib,
+              // or return a clear error.
+              result = "TTS not available — Workers AI does not support text-to-speech yet. Use a dedicated TTS API.";
               break;
             }
 
             case "speech-to-text": {
-              result = "STT requires audio file upload — use via backend API";
+              // Workers AI has Whisper — but needs audio bytes as input
+              // For now, only works if audio is already in the sandbox or R2
+              const audioPath = args.audio_path || args.path || "";
+              if (!audioPath) {
+                result = "speech-to-text requires audio_path (path to audio file in sandbox or R2 key)";
+                break;
+              }
+              try {
+                // Try sandbox first
+                const sandboxId = `session-${session_id || "default"}`;
+                const sandbox = getSandbox(env.SANDBOX, sandboxId);
+                const catResult = await sandbox.exec(`cat "${audioPath}" | base64`, { timeout: 10 });
+                if (catResult.exitCode !== 0) {
+                  result = `Could not read audio file: ${catResult.stderr}`;
+                  break;
+                }
+                // Decode base64 and run Whisper
+                const audioBytes = Uint8Array.from(atob(catResult.stdout.trim()), c => c.charCodeAt(0));
+                const whisperResult = await env.AI.run("@cf/openai/whisper", {
+                  audio: [...audioBytes],
+                }) as any;
+                result = JSON.stringify({
+                  text: whisperResult.text || "",
+                  language: whisperResult.language || "",
+                });
+              } catch (err: any) {
+                result = `STT failed: ${err.message}`;
+              }
               break;
             }
 
