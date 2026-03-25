@@ -18,6 +18,39 @@ from agentos.env import load_dotenv_if_present
 
 logger = logging.getLogger(__name__)
 
+# Module-level GMI model cache — ONE HTTP call per process, not per agent.
+_gmi_model_cache: set[str] | None = None
+
+def _gmi_validate_cached(model_id: str) -> bool:
+    """Check if a model exists on GMI. Cached per process."""
+    global _gmi_model_cache
+    import os
+    gmi_key = os.environ.get("GMI_API_KEY", "")
+    if not gmi_key:
+        return False
+    if _gmi_model_cache is None:
+        try:
+            import httpx
+            resp = httpx.get(
+                "https://api.gmi-serving.com/v1/models",
+                headers={"Authorization": f"Bearer {gmi_key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                _gmi_model_cache = {m["id"] for m in data.get("data", [])}
+                logger.info("GMI: %d models available (cached)", len(_gmi_model_cache))
+            else:
+                _gmi_model_cache = set()
+        except Exception as exc:
+            _gmi_model_cache = set()
+            logger.warning("GMI model cache init failed: %s", exc)
+    if model_id in _gmi_model_cache:
+        return True
+    logger.warning("GMI: model '%s' not found in available models", model_id)
+    return False
+
+
 def _resolve_agents_dir() -> Path:
     """Resolve the agents directory — cwd/agents/ first, then package root.
 
@@ -491,35 +524,9 @@ class Agent:
             except Exception:
                 pass
 
-        # Validate GMI models at startup (cached per process)
-        _gmi_available_models: set[str] | None = None
+        # Validate GMI models (uses module-level cache — one HTTP call per process)
         def _validate_gmi_model(model_id: str) -> bool:
-            nonlocal _gmi_available_models
-            gmi_key = os.environ.get("GMI_API_KEY", "")
-            if not gmi_key:
-                return False
-            if _gmi_available_models is None:
-                try:
-                    import httpx
-                    resp = httpx.get(
-                        "https://api.gmi-serving.com/v1/models",
-                        headers={"Authorization": f"Bearer {gmi_key}"},
-                        timeout=10,
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        _gmi_available_models = {m["id"] for m in data.get("data", [])}
-                        logger.info("GMI: %d models available", len(_gmi_available_models))
-                    else:
-                        _gmi_available_models = set()
-                        logger.warning("GMI model validation failed: %s", resp.status_code)
-                except Exception as exc:
-                    _gmi_available_models = set()
-                    logger.warning("GMI model validation failed: %s", exc)
-            if model_id in _gmi_available_models:
-                return True
-            logger.warning("GMI: model '%s' not found in available models", model_id)
-            return False
+            return _gmi_validate_cached(model_id)
 
         def _make_provider(tier_model: str, tier_provider: str) -> HttpProvider | None:
             """Create an LLM provider for a specific model and provider combo."""
