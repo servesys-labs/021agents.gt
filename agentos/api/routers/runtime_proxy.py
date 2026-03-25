@@ -18,6 +18,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/runtime-proxy", tags=["runtime-proxy"])
 
+# Agent cache — avoids reconstructing Agent + LLM router on every request.
+# Bounded to 50 agents (LRU eviction). Each Agent holds its configured
+# providers, router, tools — first request is slow, subsequent are instant.
+_agent_cache: dict[str, Any] = {}
+_AGENT_CACHE_MAX = 50
+
+
+def _get_cached_agent(name: str) -> Any:
+    """Get or create a cached Agent instance."""
+    from agentos.agent import Agent
+
+    if name in _agent_cache:
+        return _agent_cache[name]
+
+    agent = Agent.from_name(name)
+
+    # Evict oldest if over limit
+    if len(_agent_cache) >= _AGENT_CACHE_MAX:
+        oldest = next(iter(_agent_cache))
+        del _agent_cache[oldest]
+
+    _agent_cache[name] = agent
+    return agent
+
 
 def _require_edge_token(authorization: str | None = None, x_edge_token: str | None = None) -> None:
     expected = (os.environ.get("EDGE_INGEST_TOKEN", "") or "").strip()
@@ -104,14 +128,12 @@ async def agent_run_proxy(
     """
     _require_edge_token(authorization=authorization, x_edge_token=x_edge_token)
 
-    from agentos.agent import Agent
-
     name = (payload.agent_name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="agent_name is required")
 
     try:
-        agent = Agent.from_name(name)
+        agent = _get_cached_agent(name)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
