@@ -216,15 +216,12 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         loop = asyncio.get_event_loop()
         from agentos.core.db_config import initialize_db
 
-        # DB init is fast — run synchronously so health checks work immediately
-        try:
-            initialize_db()
-        except Exception as exc:
-            logger.warning("DB init failed (will retry on first request): %s", exc)
+        # DB init in a thread — doesn't block the event loop.
+        # Seeding deferred to a separate async task to avoid blocking.
+        loop.run_in_executor(None, initialize_db)
 
-        # Seed agents in background — non-blocking, doesn't hold the thread pool
         async def _seed_agents():
-            await asyncio.sleep(5)  # Let the server accept requests first
+            await asyncio.sleep(10)  # Wait for DB init to complete
             try:
                 from agentos.agent import seed_agents_to_db
                 count = seed_agents_to_db()
