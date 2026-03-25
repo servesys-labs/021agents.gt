@@ -127,6 +127,15 @@ class EvolutionLoop:
                 self.analyzer.incorporate_feedback(report, feedback)
             except Exception:
                 pass  # DB may not have feedback table (v1 schema)
+            try:
+                telemetry = db.agent_meta_observability_report(
+                    agent_name=self.observer._agent_name,
+                    org_id=str(getattr(self.observer, "_agent_config", {}).get("_org_id", "")),
+                    limit_sessions=200,
+                )
+                self.analyzer.incorporate_meta_observability(report, telemetry)
+            except Exception:
+                pass
 
         self._latest_report = report
         return report

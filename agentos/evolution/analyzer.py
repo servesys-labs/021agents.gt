@@ -54,6 +54,7 @@ class AnalysisReport:
     tool_failure_rates: dict[str, float] = field(default_factory=dict)
     unused_tools: list[str] = field(default_factory=list)
     top_error_sources: list[tuple[str, int]] = field(default_factory=list)
+    observability_signals: dict[str, Any] = field(default_factory=dict)
     recommendations: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +72,7 @@ class AnalysisReport:
             "tool_failure_rates": self.tool_failure_rates,
             "unused_tools": self.unused_tools,
             "top_error_sources": self.top_error_sources,
+            "observability_signals": self.observability_signals,
             "recommendations": self.recommendations,
         }
 
@@ -253,6 +255,21 @@ class FailureAnalyzer:
                 f"Human feedback is positive ({approval:.0%} approval rate, "
                 f"{total} responses rated). Current agent behavior is well-received."
             )
+
+    def incorporate_meta_observability(
+        self,
+        report: AnalysisReport,
+        telemetry_report: dict[str, Any],
+    ) -> None:
+        """Enrich analysis with end-to-end runtime telemetry signals."""
+        if not telemetry_report:
+            return
+        signals = telemetry_report.get("signals", {})
+        if isinstance(signals, dict):
+            report.observability_signals = signals
+        for rec in telemetry_report.get("recommendations", []):
+            if isinstance(rec, str) and rec and rec not in report.recommendations:
+                report.recommendations.append(rec)
 
     def _generate_recommendations(
         self,
