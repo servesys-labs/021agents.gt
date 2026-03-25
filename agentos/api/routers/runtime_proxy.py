@@ -40,6 +40,11 @@ def _get_cached_agent(name: str) -> Any:
 
     agent = Agent.from_name(name)
 
+    # Enable fast-chat path for production runtime proxy.
+    # Simple messages skip the full graph runtime for lower latency.
+    if hasattr(agent, "_harness") and agent._harness:
+        agent._harness._enable_fast_chat = True
+
     # Evict oldest if over limit
     if len(_agent_cache) >= _AGENT_CACHE_MAX:
         oldest = next(iter(_agent_cache))
@@ -346,8 +351,8 @@ async def agent_resume_proxy(
     }
 
 
-def _langchain_input_to_task(value: Any) -> str:
-    """Normalize LangChain-style input payloads into AgentOS task text."""
+def _runnable_input_to_task(value: Any) -> str:
+    """Normalize runnable-style input payloads into AgentOS task text."""
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
@@ -359,8 +364,8 @@ def _langchain_input_to_task(value: Any) -> str:
     return str(value)
 
 
-class LangChainInvokeProxyRequest(BaseModel):
-    """LangChain/LangServe-style invoke contract over runtime proxy."""
+class RunnableInvokeProxyRequest(BaseModel):
+    """Runnable-style invoke contract over runtime proxy."""
 
     agent_name: str
     input: Any = ""
@@ -373,8 +378,8 @@ class LangChainInvokeProxyRequest(BaseModel):
     enable_checkpoints: bool | None = None
 
 
-class LangChainBatchProxyRequest(BaseModel):
-    """LangChain/LangServe-style batch contract over runtime proxy."""
+class RunnableBatchProxyRequest(BaseModel):
+    """Runnable-style batch contract over runtime proxy."""
 
     agent_name: str
     inputs: list[Any] = Field(default_factory=list)
@@ -387,15 +392,15 @@ class LangChainBatchProxyRequest(BaseModel):
     enable_checkpoints: bool | None = None
 
 
-@router.post("/langchain/invoke")
-async def langchain_invoke_proxy(
-    payload: LangChainInvokeProxyRequest,
+@router.post("/runnable/invoke")
+async def runnable_invoke_proxy(
+    payload: RunnableInvokeProxyRequest,
     authorization: str | None = Header(default=None),
     x_edge_token: str | None = Header(default=None),
     db: Any = Depends(_get_db_safe),
 ) -> dict[str, Any]:
-    """Invoke-style endpoint compatible with LangChain/LangServe clients."""
-    task = _langchain_input_to_task(payload.input)
+    """Invoke-style endpoint compatible with runnable clients."""
+    task = _runnable_input_to_task(payload.input)
     run = await agent_run_proxy(
         AgentRunProxyRequest(
             agent_name=payload.agent_name,
@@ -427,18 +432,18 @@ async def langchain_invoke_proxy(
     }
 
 
-@router.post("/langchain/batch")
-async def langchain_batch_proxy(
-    payload: LangChainBatchProxyRequest,
+@router.post("/runnable/batch")
+async def runnable_batch_proxy(
+    payload: RunnableBatchProxyRequest,
     authorization: str | None = Header(default=None),
     x_edge_token: str | None = Header(default=None),
     db: Any = Depends(_get_db_safe),
 ) -> dict[str, Any]:
-    """Batch-style endpoint compatible with LangChain/LangServe clients."""
+    """Batch-style endpoint compatible with runnable clients."""
     outputs: list[Any] = []
     for value in payload.inputs:
-        item = await langchain_invoke_proxy(
-            LangChainInvokeProxyRequest(
+        item = await runnable_invoke_proxy(
+            RunnableInvokeProxyRequest(
                 agent_name=payload.agent_name,
                 input=value,
                 config=payload.config,
@@ -457,15 +462,15 @@ async def langchain_batch_proxy(
     return {"outputs": outputs}
 
 
-@router.post("/langchain/stream-events")
-async def langchain_stream_events_proxy(
-    payload: LangChainInvokeProxyRequest,
+@router.post("/runnable/stream-events")
+async def runnable_stream_events_proxy(
+    payload: RunnableInvokeProxyRequest,
     authorization: str | None = Header(default=None),
     x_edge_token: str | None = Header(default=None),
     db: Any = Depends(_get_db_safe),
 ) -> dict[str, Any]:
-    """Return a LangChain-like event timeline for one invoke."""
-    invoke = await langchain_invoke_proxy(
+    """Return a runnable-style event timeline for one invoke."""
+    invoke = await runnable_invoke_proxy(
         payload,
         authorization=authorization,
         x_edge_token=x_edge_token,

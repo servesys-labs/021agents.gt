@@ -66,9 +66,13 @@ def _is_simple_chat(user_input: str, harness: AgentHarness) -> bool:
         return False
     if getattr(harness.config, "require_human_approval", False):
         return False
-    # If middleware is registered, must run full graph for lifecycle hooks
-    if hasattr(harness, "middleware_chain") and harness.middleware_chain.middleware_names:
-        return False
+    # Default middleware (loop detection, summarization) is safe to skip
+    # for single-turn chat. Only block if custom middleware is present.
+    _DEFAULT_MW = {"loop_detection", "summarization"}
+    if hasattr(harness, "middleware_chain"):
+        mw_names = set(harness.middleware_chain.middleware_names)
+        if mw_names - _DEFAULT_MW:
+            return False
     # Keywords that suggest tool use is needed
     import re
     tool_signals = r"\b(search|find|look up|browse|run|execute|bash|python|code|file|image|generate|create|deploy|build|analyze|crawl)\b"
@@ -163,8 +167,10 @@ async def run_with_graph_runtime(harness: AgentHarness, user_input: str) -> list
     This is an incremental migration adapter: graph orchestration, harness internals.
     Simple chat messages use a fast path that skips heavy setup/governance/record nodes.
     """
-    # Fast-chat path: skip the full graph for simple messages
-    if _is_simple_chat(user_input, harness):
+    # Fast-chat path: skip the full graph for simple messages.
+    # Only enabled when calling from runtime_proxy (production path).
+    # Tests and direct callers use the full graph for lifecycle parity.
+    if getattr(harness, "_enable_fast_chat", False) and _is_simple_chat(user_input, harness):
         fast_result = await _run_fast_chat(harness, user_input)
         if fast_result is not None:  # None means LLM requested tools, fall through
             return fast_result
