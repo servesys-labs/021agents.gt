@@ -1637,15 +1637,18 @@ export default {
             case "text-to-speech": {
               const text = args.text || "";
               const model = args.model || "elevenlabs-tts-v3";
-              const voiceId = args.voice_id || args.voice || "";
+              // Default voice: Rachel (conversational). See ElevenLabs voice list for alternatives.
+              const voiceId = args.voice_id || args.voice || "21m00Tcm4TlvDq8ikWAM";
               const gmiKey = env.GMI_API_KEY || "";
               if (!gmiKey) { result = "GMI_API_KEY not configured"; break; }
-              if (!voiceId) {
-                result = "text-to-speech requires voice_id. Available models: elevenlabs-tts-v3, minimax-tts-speech-2.6-turbo (requires source_audio for clone).";
-                break;
-              }
               try {
-                const payload: Record<string, any> = { text, voice_id: voiceId };
+                const payload: Record<string, any> = {
+                  text, voice_id: voiceId,
+                  stability: args.stability ?? 0.5,
+                  similarity_boost: args.similarity_boost ?? 0.75,
+                  speed: args.speed ?? 1.0,
+                  output_format: args.output_format || "mp3_44100_128",
+                };
                 if (args.source_audio) payload.source_audio = args.source_audio;
                 const resp = await fetch("https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests", {
                   method: "POST",
@@ -1653,11 +1656,14 @@ export default {
                   body: JSON.stringify({ model, payload }),
                 });
                 const data = await resp.json() as any;
-                if (data.outcome?.media_urls?.length) {
-                  result = JSON.stringify({
-                    audio_url: data.outcome.media_urls[0].url,
-                    model, request_id: data.request_id,
-                  });
+                // ElevenLabs may return immediately or queue
+                const audioUrl = data.outcome?.audio_url
+                  || data.outcome?.media?.[0]?.url
+                  || data.outcome?.media_urls?.[0]?.url || "";
+                if (audioUrl) {
+                  result = JSON.stringify({ audio_url: audioUrl, model, request_id: data.request_id, status: "success" });
+                } else if (data.status === "queued" || data.status === "processing") {
+                  result = JSON.stringify({ status: data.status, request_id: data.request_id, model, poll: `/requests/${data.request_id}` });
                 } else {
                   result = `TTS: ${data.error || data.status || JSON.stringify(data).slice(0, 200)}`;
                 }
