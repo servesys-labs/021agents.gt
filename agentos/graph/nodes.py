@@ -97,7 +97,6 @@ class GovernanceNode:
         return False
 
     async def execute(self, ctx: GraphContext) -> GraphContext:
-        # Keep policy intent explicit in graph mode; LLM node reads this flag.
         ctx.session_state["budget_blocked"] = not self.harness.governance.check_budget(0.01)
         return ctx
 
@@ -285,17 +284,18 @@ class TurnResultNode:
         tool_results = ctx.session_state.get("tool_results", [])
         has_tool_calls = bool(llm_response.tool_calls)
         execution_mode = ctx.session_state.get("execution_mode", "sequential")
+
         plan_artifact = self.harness._build_turn_plan_artifact(
-            user_input=self.state.user_input,
-            complexity=self.state.complexity,
-            available_tools=self.state.available_tools or [],
-            turn_number=turn_number,
-            execution_mode=execution_mode,
-            has_tool_calls=has_tool_calls,
-            done=not has_tool_calls,
-            reasoning_strategy=self.harness.config.reasoning_strategy,
-            backlog=self.state.backlog or [],
-        )
+                user_input=self.state.user_input,
+                complexity=self.state.complexity,
+                available_tools=self.state.available_tools or [],
+                turn_number=turn_number,
+                execution_mode=execution_mode,
+                has_tool_calls=has_tool_calls,
+                done=not has_tool_calls,
+                reasoning_strategy=self.harness.config.reasoning_strategy,
+                backlog=self.state.backlog or [],
+            )
 
         if has_tool_calls:
             failed = [tr for tr in tool_results if "error" in tr]
