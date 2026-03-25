@@ -379,6 +379,10 @@ API callers can request graph mode per request (without changing saved agent con
 - `POST /api/v1/runtime-proxy/agent/run` with body field `"runtime_mode": "graph"`
 - `POST /api/v1/workflows/{workflow_id}/run` with body field `"runtime_mode": "graph"`
 - Optional enterprise controls on agent run endpoints: `"enable_checkpoints": true` and `"require_human_approval": true`
+- Approval-gated runs may return `stop_reason: "human_approval_required"` with a `checkpoint_id` for resume.
+- Resume endpoints:
+  - `POST /api/v1/agents/{name}/run/checkpoints/{checkpoint_id}/resume`
+  - `POST /api/v1/runtime-proxy/agent/run/checkpoints/{checkpoint_id}/resume`
 
 Graph runtime notes:
 

@@ -326,12 +326,105 @@ async def run_agent(
     total_tools = 0
     session_id = ""
     trace_id = ""
+    stop_reason = ""
+    checkpoint_id = ""
 
     for r in results:
         if r.llm_response and r.llm_response.content:
             output = r.llm_response.content
         total_cost += r.cost_usd
         total_tools += len(r.tool_results)
+        stop_reason = r.stop_reason or stop_reason
+
+    if hasattr(agent, "_observer") and agent._observer and agent._observer.records:
+        last_rec = agent._observer.records[-1]
+        session_id = last_rec.session_id
+        trace_id = last_rec.trace_id
+
+    pending_checkpoint = getattr(agent._harness, "_pending_graph_resume_payload", None)
+    if stop_reason == "human_approval_required" and isinstance(pending_checkpoint, dict):
+        checkpoint_id = str(pending_checkpoint.get("checkpoint_id", ""))
+        if checkpoint_id:
+            db = _get_db()
+            db.upsert_graph_checkpoint(
+                checkpoint_id=checkpoint_id,
+                agent_name=name,
+                session_id=str(pending_checkpoint.get("session_id", "")),
+                trace_id=str(pending_checkpoint.get("trace_id", "")),
+                status="pending_approval",
+                payload=pending_checkpoint,
+                metadata={"created_by": user.user_id, "org_id": user.org_id},
+            )
+
+    return RunResponse(
+        success=not any(r.error for r in results),
+        output=output,
+        turns=len(results),
+        tool_calls=total_tools,
+        cost_usd=round(total_cost, 6),
+        latency_ms=round(elapsed, 1),
+        session_id=session_id,
+        trace_id=trace_id,
+        stop_reason=stop_reason,
+        checkpoint_id=checkpoint_id,
+    )
+
+
+@router.post("/{name}/run/checkpoints/{checkpoint_id}/resume", response_model=RunResponse)
+async def resume_agent_run_checkpoint(
+    name: str,
+    checkpoint_id: str,
+    user: CurrentUser = Depends(require_scope("agents:run")),
+):
+    """Resume a paused approval-gated graph run from checkpoint."""
+    from agentos.agent import Agent
+
+    try:
+        agent = Agent.from_name(name)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    scoped_project_id = _extract_project_scope(agent)
+    _enforce_project_scope_access(scoped_project_id, user)
+    _enforce_compliance(agent, user)
+    if hasattr(agent, "set_runtime_context"):
+        agent.set_runtime_context(
+            org_id=user.org_id,
+            project_id=scoped_project_id,
+            user_id=user.user_id,
+        )
+
+    db = _get_db()
+    row = db.get_graph_checkpoint(checkpoint_id)
+    if not row or str(row.get("agent_name", "")) != name:
+        raise HTTPException(status_code=404, detail=f"Checkpoint '{checkpoint_id}' not found for agent '{name}'")
+    status = str(row.get("status", ""))
+    if status == "resumed":
+        raise HTTPException(status_code=409, detail=f"Checkpoint '{checkpoint_id}' was already resumed")
+    if status != "pending_approval":
+        raise HTTPException(status_code=409, detail=f"Checkpoint '{checkpoint_id}' is not resumable (status={status})")
+
+    payload = row.get("payload", {})
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=f"Checkpoint '{checkpoint_id}' payload is invalid")
+
+    start = time.monotonic()
+    results = await agent.resume_from_checkpoint(payload)
+    db.mark_graph_checkpoint_resumed(checkpoint_id)
+    elapsed = (time.monotonic() - start) * 1000
+
+    output = ""
+    total_cost = 0.0
+    total_tools = 0
+    session_id = ""
+    trace_id = ""
+    stop_reason = ""
+    for r in results:
+        if r.llm_response and r.llm_response.content:
+            output = r.llm_response.content
+        total_cost += r.cost_usd
+        total_tools += len(r.tool_results)
+        stop_reason = r.stop_reason or stop_reason
 
     if hasattr(agent, "_observer") and agent._observer and agent._observer.records:
         last_rec = agent._observer.records[-1]
@@ -347,6 +440,8 @@ async def run_agent(
         latency_ms=round(elapsed, 1),
         session_id=session_id,
         trace_id=trace_id,
+        stop_reason=stop_reason,
+        checkpoint_id=checkpoint_id,
     )
 
 

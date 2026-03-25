@@ -156,6 +156,8 @@ class RunResponse(BaseModel):
     latency_ms: float
     session_id: str = ""
     trace_id: str = ""
+    stop_reason: str = ""
+    checkpoint_id: str = ""
 
 
 # ── Sessions ────────────────────────────────────────────────────────────

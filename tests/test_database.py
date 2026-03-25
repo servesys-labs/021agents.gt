@@ -380,3 +380,36 @@ class TestObserverTurnPersistence:
         assert rows[0]["turn_number"] == 1
         assert rows[0]["model_used"] == "claude"
         db.close()
+
+
+class TestGraphCheckpointPersistence:
+    def test_upsert_get_and_mark_resumed_checkpoint(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        payload = {
+            "checkpoint_id": "cp-123",
+            "messages": [{"role": "user", "content": "hello"}],
+            "llm_response": {"content": "call tool", "model": "m"},
+            "current_turn": 1,
+        }
+        db.upsert_graph_checkpoint(
+            checkpoint_id="cp-123",
+            agent_name="test-agent",
+            session_id="sess-1",
+            trace_id="trace-1",
+            status="pending_approval",
+            payload=payload,
+            metadata={"created_by": "u-1"},
+        )
+
+        row = db.get_graph_checkpoint("cp-123")
+        assert row is not None
+        assert row["agent_name"] == "test-agent"
+        assert row["status"] == "pending_approval"
+        assert row["payload"]["current_turn"] == 1
+        assert row["metadata"]["created_by"] == "u-1"
+
+        db.mark_graph_checkpoint_resumed("cp-123")
+        row2 = db.get_graph_checkpoint("cp-123")
+        assert row2 is not None
+        assert row2["status"] == "resumed"
+        db.close()
