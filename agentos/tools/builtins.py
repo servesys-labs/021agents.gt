@@ -1535,6 +1535,9 @@ BUILTIN_HANDLERS: dict[str, Any] = {
     "sandbox_file_write": sandbox_file_write,
     "sandbox_file_read": sandbox_file_read,
     "sandbox_kill": sandbox_kill,
+    "save-project": lambda **kw: "save-project executes on CF worker",
+    "load-project": lambda **kw: "load-project executes on CF worker",
+    "list-project-versions": lambda **kw: "list-project-versions executes on CF worker",
     "image-generate": image_generate,
     "text-to-speech": text_to_speech,
     "speech-to-text": speech_to_text,
@@ -1844,6 +1847,45 @@ BUILTIN_SCHEMAS: dict[str, dict[str, Any]] = {
                 "sandbox_id": {"type": "string", "description": "Sandbox ID to terminate"},
             },
             "required": ["sandbox_id"],
+        },
+    },
+    "save-project": {
+        "description": "Save the current workspace files to persistent storage (R2). Call this before ending a session to preserve your work. Files are versioned automatically.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workspace": {"type": "string", "description": "Directory to save (default: /workspace)", "default": "/workspace"},
+                "org_id": {"type": "string", "description": "Organization ID (auto-filled from context)"},
+                "project_id": {"type": "string", "description": "Project ID (auto-filled from context)"},
+                "agent_name": {"type": "string", "description": "Agent name (auto-filled from context)"},
+            },
+            "required": ["org_id", "agent_name"],
+        },
+    },
+    "load-project": {
+        "description": "Load a previously saved workspace from persistent storage (R2). Call this at the start of a session to restore files from a previous session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workspace": {"type": "string", "description": "Directory to extract into (default: /workspace)", "default": "/workspace"},
+                "org_id": {"type": "string", "description": "Organization ID (auto-filled from context)"},
+                "project_id": {"type": "string", "description": "Project ID (auto-filled from context)"},
+                "agent_name": {"type": "string", "description": "Agent name (auto-filled from context)"},
+                "version": {"type": "string", "description": "Version to load (default: latest)", "default": "latest"},
+            },
+            "required": ["org_id", "agent_name"],
+        },
+    },
+    "list-project-versions": {
+        "description": "List all saved versions of a project workspace.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "org_id": {"type": "string", "description": "Organization ID"},
+                "project_id": {"type": "string", "description": "Project ID"},
+                "agent_name": {"type": "string", "description": "Agent name"},
+            },
+            "required": ["org_id", "agent_name"],
         },
     },
     "image-generate": {

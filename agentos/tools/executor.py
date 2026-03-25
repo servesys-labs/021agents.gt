@@ -32,6 +32,8 @@ WORKER_TOOLS = {
     "image-generate", "text-to-speech", "speech-to-text",
     # Stateful
     "todo",
+    # Project persistence (Sandbox ↔ R2)
+    "save-project", "load-project", "list-project-versions",
 }
 
 
