@@ -3345,16 +3345,14 @@ export default {
     // MUST run BEFORE routeAgentRequest() which would match /agents/* broadly
     // URL: /agents/dispatch/{org_slug}/{agent_name}
     // Routes to the customer's isolated worker in the dispatch namespace.
-    // Falls back to backend proxy if worker not found (backward compat).
+    // Routes to the customer's isolated worker in the dispatch namespace.
+    // If worker not deployed: returns 503 with a clear error. No silent fallback.
     const dispatchMatch = url.pathname.match(/^\/agents\/dispatch\/([a-z0-9-]+)\/([a-z0-9-]+)/);
     if (dispatchMatch && env.DISPATCHER) {
       const [, orgSlug, agentName] = dispatchMatch;
       const workerName = `agentos-${orgSlug}-${agentName}`;
-      // Clone body before dispatch — consumed by fetch()
       const bodyText = await request.text().catch(() => "{}");
 
-      // Try dispatching to the customer worker.
-      // CF returns 400 "Invalid request" for non-existent scripts — detect and fall back.
       try {
         const userWorker = env.DISPATCHER.get(workerName);
         const dispatchReq = new Request(request.url, {
@@ -3363,49 +3361,29 @@ export default {
           body: bodyText,
         });
         const dispatchResp = await userWorker.fetch(dispatchReq);
-        if (dispatchResp.ok || (dispatchResp.status >= 200 && dispatchResp.status < 500 && dispatchResp.status !== 400)) {
-          return dispatchResp;  // Real response from deployed worker
-        }
-        // Status 400 or 5xx from dispatcher — likely "Invalid request" (worker not found)
-        // Check response body to be sure
-        const respText = await dispatchResp.text();
-        if (!respText.includes("Invalid request")) {
-          // It's a real 400 from the customer worker, return as-is
-          return new Response(respText, {
-            status: dispatchResp.status,
-            headers: dispatchResp.headers,
-          });
-        }
-        // Fall through to backend fallback
-      } catch (e: any) {
-        // JS exception from dispatcher — fall through
-      }
 
-      // Fallback: proxy directly to backend (worker not deployed)
-      {
-        const backendUrl = env.BACKEND_INGEST_URL || "";
-        const token = env.BACKEND_INGEST_TOKEN || "";
-        if (backendUrl && token) {
-          const body = JSON.parse(bodyText || "{}") as Record<string, any>;
-          const proxyResp = await fetch(`${backendUrl}/api/v1/runtime-proxy/agent/run`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${token}`,
-            },
-            body: JSON.stringify({
-              ...body,
-              agent_name: agentName,
-              org_id: body.org_id || "",
-              channel: "dispatch_fallback",
-            }),
-          });
-          return new Response(proxyResp.body, {
-            status: proxyResp.status,
-            headers: { "Content-Type": "application/json" },
-          });
+        // CF returns 400 "Invalid request" when the script doesn't exist
+        if (dispatchResp.status === 400) {
+          const respText = await dispatchResp.text();
+          if (respText.includes("Invalid request")) {
+            return Response.json({
+              error: "agent_not_deployed",
+              message: `Agent '${agentName}' is not deployed to the edge. Deploy it first via POST /api/v1/deploy/${agentName}, or try again later.`,
+              worker_name: workerName,
+            }, { status: 503 });
+          }
+          // Real 400 from the customer worker — pass through
+          return new Response(respText, { status: 400, headers: { "Content-Type": "application/json" } });
         }
-        return Response.json({ error: `Agent worker '${workerName}' not deployed`, fallback: "no_backend" }, { status: 404 });
+
+        return dispatchResp;
+      } catch (e: any) {
+        return Response.json({
+          error: "agent_not_deployed",
+          message: `Agent '${agentName}' is not deployed to the edge. Deploy it first via POST /api/v1/deploy/${agentName}, or try again later.`,
+          worker_name: workerName,
+          detail: e.message || "",
+        }, { status: 503 });
       }
     }
 
