@@ -1421,6 +1421,123 @@ export default {
               break;
             }
 
+            // ── Project Persistence (Sandbox ↔ R2) ──
+            case "save-project": {
+              const workspace = args.workspace || "/workspace";
+              const orgId = args.org_id || "";
+              const projectId = args.project_id || "";
+              const agentName = args.agent_name || "";
+              if (!orgId || !agentName) {
+                result = "save-project requires org_id and agent_name";
+                break;
+              }
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              try {
+                // Tar the workspace
+                const tarResult = await sandbox.exec(
+                  `cd ${workspace} 2>/dev/null && tar czf /tmp/workspace.tar.gz . 2>/dev/null || echo "__EMPTY__"`,
+                  { timeout: 30 }
+                );
+                if (tarResult.stdout?.includes("__EMPTY__")) {
+                  result = `No files found in ${workspace}`;
+                  break;
+                }
+                // Read tar as base64
+                const b64Result = await sandbox.exec(`base64 /tmp/workspace.tar.gz`, { timeout: 30 });
+                const b64Data = b64Result.stdout?.trim() || "";
+                if (!b64Data) {
+                  result = "Failed to read workspace archive";
+                  break;
+                }
+                // Upload to R2
+                const r2Key = `workspaces/${orgId}/${projectId || "default"}/${agentName}/latest.tar.gz`;
+                const versionKey = `workspaces/${orgId}/${projectId || "default"}/${agentName}/v${Date.now()}.tar.gz`;
+                const bytes = Uint8Array.from(atob(b64Data), c => c.charCodeAt(0));
+                await env.STORAGE.put(r2Key, bytes, {
+                  customMetadata: { org_id: orgId, project_id: projectId, agent_name: agentName, saved_at: new Date().toISOString() },
+                });
+                await env.STORAGE.put(versionKey, bytes, {
+                  customMetadata: { org_id: orgId, project_id: projectId, agent_name: agentName, saved_at: new Date().toISOString() },
+                });
+                // Count files
+                const countResult = await sandbox.exec(`find ${workspace} -type f | wc -l`, { timeout: 5 });
+                const fileCount = parseInt(countResult.stdout?.trim() || "0");
+                result = JSON.stringify({
+                  saved: true, r2_key: r2Key, version_key: versionKey,
+                  files: fileCount, size_bytes: bytes.byteLength,
+                });
+              } catch (err: any) {
+                result = `save-project failed: ${err.message}`;
+              }
+              break;
+            }
+
+            case "load-project": {
+              const workspace = args.workspace || "/workspace";
+              const orgId = args.org_id || "";
+              const projectId = args.project_id || "";
+              const agentName = args.agent_name || "";
+              const version = args.version || "latest";
+              if (!orgId || !agentName) {
+                result = "load-project requires org_id and agent_name";
+                break;
+              }
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              try {
+                const r2Key = version === "latest"
+                  ? `workspaces/${orgId}/${projectId || "default"}/${agentName}/latest.tar.gz`
+                  : `workspaces/${orgId}/${projectId || "default"}/${agentName}/${version}.tar.gz`;
+                const obj = await env.STORAGE.get(r2Key);
+                if (!obj) {
+                  result = JSON.stringify({ loaded: false, reason: "No saved workspace found. Start fresh." });
+                  break;
+                }
+                // Write tar to sandbox and extract
+                const buf = await obj.arrayBuffer();
+                const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+                await sandbox.writeFile("/tmp/workspace.tar.gz.b64", b64);
+                await sandbox.exec(`mkdir -p ${workspace}`, { timeout: 5 });
+                await sandbox.exec(
+                  `base64 -d /tmp/workspace.tar.gz.b64 > /tmp/workspace.tar.gz && cd ${workspace} && tar xzf /tmp/workspace.tar.gz`,
+                  { timeout: 30 }
+                );
+                const countResult = await sandbox.exec(`find ${workspace} -type f | wc -l`, { timeout: 5 });
+                const fileCount = parseInt(countResult.stdout?.trim() || "0");
+                result = JSON.stringify({
+                  loaded: true, r2_key: r2Key, files: fileCount,
+                  size_bytes: buf.byteLength,
+                });
+              } catch (err: any) {
+                result = `load-project failed: ${err.message}`;
+              }
+              break;
+            }
+
+            case "list-project-versions": {
+              const orgId = args.org_id || "";
+              const projectId = args.project_id || "";
+              const agentName = args.agent_name || "";
+              if (!orgId || !agentName) {
+                result = "list-project-versions requires org_id and agent_name";
+                break;
+              }
+              try {
+                const prefix = `workspaces/${orgId}/${projectId || "default"}/${agentName}/`;
+                const listed = await env.STORAGE.list({ prefix, limit: 50 });
+                const versions = listed.objects.map((o: any) => ({
+                  key: o.key.replace(prefix, ""),
+                  size: o.size,
+                  uploaded: o.uploaded,
+                }));
+                result = JSON.stringify({ versions, count: versions.length });
+              } catch (err: any) {
+                result = `list-project-versions failed: ${err.message}`;
+              }
+              break;
+            }
+
             // ── Browse (simple HTTP fetch, no JS rendering) ──
             case "browse": {
               const targetUrl = args.url || "";
