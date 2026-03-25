@@ -1228,12 +1228,11 @@ export default {
           let result: any;
 
           switch (tool) {
-            // ── Web Search (GPT-5.4-nano via Responses API — $0.01/1K searches) ──
+            // ── Web Search (DuckDuckGo HTML — free, no rate limits) ──
             case "web-search": {
               const query = args.query || "";
-              const gmiKey = env.GMI_API_KEY || "";
-              if (!gmiKey) {
-                // Fallback to DuckDuckGo HTML scraping if no GMI key
+              const maxResults = args.max_results || 5;
+              try {
                 const ddgResp = await fetch("https://html.duckduckgo.com/html/", {
                   method: "POST",
                   headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "AgentOS/0.2.0" },
@@ -1241,39 +1240,20 @@ export default {
                 });
                 const html = await ddgResp.text();
                 const linkRe = /<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>(.*?)<\/a>/g;
-                const links: string[] = [];
+                const snippetRe = /<a class="result__snippet"[^>]*>(.*?)<\/a>/gs;
+                const links: [string, string][] = [];
                 let m;
-                while ((m = linkRe.exec(html)) && links.length < 5) {
-                  links.push(`${links.length + 1}. ${m[2].replace(/<[^>]+>/g, "").trim()}\n   ${m[1]}`);
+                while ((m = linkRe.exec(html)) && links.length < maxResults) {
+                  links.push([m[1], m[2].replace(/<[^>]+>/g, "").trim()]);
                 }
-                result = links.length > 0 ? links.join("\n\n") : `No results for: ${query}`;
-                break;
-              }
-              // Primary: GPT-5.4-nano with built-in web search
-              try {
-                const searchResp = await fetch("https://api.gmi-serving.com/v1/responses", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", "Authorization": `Bearer ${gmiKey}` },
-                  body: JSON.stringify({
-                    model: "openai/gpt-5.4-nano",
-                    tools: [{ type: "web_search_preview" }],
-                    input: query,
-                  }),
-                });
-                const data = await searchResp.json() as any;
-                // Extract text from response
-                const output = data.output || [];
-                let text = "";
-                if (Array.isArray(output)) {
-                  for (const item of output) {
-                    if (item.type === "message") {
-                      for (const c of item.content || []) {
-                        if (c.type === "output_text") text += c.text;
-                      }
-                    }
-                  }
+                const snippets: string[] = [];
+                while ((m = snippetRe.exec(html)) && snippets.length < maxResults) {
+                  snippets.push(m[1].replace(/<[^>]+>/g, "").trim());
                 }
-                result = text || `No results for: ${query}`;
+                const lines = links.map(([url, title], i) =>
+                  `${i + 1}. ${title}\n   ${url}\n   ${snippets[i] || ""}`
+                );
+                result = lines.length > 0 ? lines.join("\n\n") : `No results found for: ${query}`;
               } catch (err: any) {
                 result = `Web search failed: ${err.message}`;
               }
