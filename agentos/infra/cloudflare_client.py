@@ -258,7 +258,15 @@ class CloudflareClient:
         account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
         api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
         namespace = os.environ.get("DISPATCH_NAMESPACE", "agentos-production")
-        backend_url = os.environ.get("AGENTOS_WORKER_URL", self.worker_url).strip()
+        # Customer worker calls the Railway BACKEND (not the worker).
+        # Resolve the backend's public URL from Railway env vars.
+        backend_url = os.environ.get("BACKEND_PUBLIC_URL", "").strip()
+        if not backend_url:
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+            if domain:
+                backend_url = f"https://{domain}"
+        if not backend_url:
+            backend_url = "https://backend-production-b174.up.railway.app"
         backend_token = self.edge_token
 
         if not account_id or not api_token:
