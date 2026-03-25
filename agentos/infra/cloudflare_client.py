@@ -24,7 +24,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_TIMEOUT = 60.0
+_DEFAULT_TIMEOUT = 30.0
 
 # Module-level singleton — avoids creating a new httpx.AsyncClient per call
 _cf_client_instance: CloudflareClient | None = None

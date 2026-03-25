@@ -9,11 +9,22 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
 
 router = APIRouter(prefix="/observability", tags=["observability"])
+
+
+class TraceAnnotationRequest(BaseModel):
+    annotation_type: str = Field("note", description="annotation type: note|issue|hypothesis|fix")
+    message: str = Field(..., min_length=1, max_length=5000)
+    severity: str = Field("info", description="info|warn|error")
+    span_id: str = ""
+    node_id: str = ""
+    turn: int = 0
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 def _trace_is_owned(db: Any, trace_id: str, org_id: str) -> bool:
@@ -66,6 +77,7 @@ async def get_trace(
     include_events: bool = True,
     include_checkpoints: bool = True,
     include_eval_trials: bool = True,
+    include_annotations: bool = True,
     user: CurrentUser = Depends(get_current_user),
 ):
     """Get full trace chain with LangSmith-style telemetry bundle."""
@@ -78,6 +90,7 @@ async def get_trace(
     events = db.query_runtime_events(trace_id=trace_id, limit=2000) if include_events else []
     checkpoints = db.list_graph_checkpoints(trace_id=trace_id, limit=500) if include_checkpoints else []
     eval_trials = db.list_eval_trials_by_trace(trace_id, limit=500) if include_eval_trials else []
+    annotations = db.list_trace_annotations(trace_id, limit=500) if include_annotations else []
     return {
         "trace_id": trace_id,
         "sessions": sessions,
@@ -86,7 +99,20 @@ async def get_trace(
         "runtime_events": events,
         "graph_checkpoints": checkpoints,
         "eval_trials": eval_trials,
+        "annotations": annotations,
     }
+
+
+@router.get("/traces/{trace_id}/run-tree")
+async def get_trace_run_tree(
+    trace_id: str,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Get hierarchical run tree with lifecycle artifacts for one trace."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return db.build_trace_run_tree(trace_id)
 
 
 @router.get("/traces/{trace_id}/events")
@@ -129,6 +155,75 @@ async def get_trace_eval_trials(
     if not _trace_is_owned(db, trace_id, user.org_id):
         raise HTTPException(status_code=404, detail="Trace not found")
     return {"trace_id": trace_id, "eval_trials": db.list_eval_trials_by_trace(trace_id, limit=limit)}
+
+
+@router.get("/traces/{trace_id}/annotations")
+async def get_trace_annotations(
+    trace_id: str,
+    limit: int = 500,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """List trace annotations for human/meta-agent review loops."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"trace_id": trace_id, "annotations": db.list_trace_annotations(trace_id, limit=limit)}
+
+
+@router.post("/traces/{trace_id}/annotations")
+async def add_trace_annotation(
+    trace_id: str,
+    request: TraceAnnotationRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Add a structured annotation to a trace/span/node."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    annotation_id = db.insert_trace_annotation(
+        trace_id=trace_id,
+        author=user.user_id,
+        annotation_type=request.annotation_type,
+        message=request.message,
+        span_id=request.span_id,
+        node_id=request.node_id,
+        turn=request.turn,
+        severity=request.severity,
+        metadata=request.metadata,
+    )
+    return {"trace_id": trace_id, "annotation_id": annotation_id}
+
+
+@router.delete("/traces/{trace_id}/annotations/{annotation_id}")
+async def delete_trace_annotation(
+    trace_id: str,
+    annotation_id: int,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Delete one annotation from a trace."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    deleted = db.delete_trace_annotation(annotation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Annotation not found")
+    return {"deleted": annotation_id, "trace_id": trace_id}
+
+
+@router.get("/agents/{agent_name}/meta-report")
+async def get_agent_meta_report(
+    agent_name: str,
+    limit_sessions: int = 200,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Meta-agent telemetry summary with actionable recommendations."""
+    db = _get_db()
+    report = db.agent_meta_observability_report(
+        agent_name=agent_name,
+        org_id=user.org_id,
+        limit_sessions=limit_sessions,
+    )
+    return report
 
 
 @router.get("/billing/export")

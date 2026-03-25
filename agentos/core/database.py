@@ -3470,6 +3470,273 @@ class AgentDB:
             out.append(item)
         return out
 
+    def insert_trace_annotation(
+        self,
+        *,
+        trace_id: str,
+        author: str,
+        annotation_type: str,
+        message: str,
+        span_id: str = "",
+        node_id: str = "",
+        turn: int = 0,
+        severity: str = "info",
+        metadata: dict[str, Any] | None = None,
+    ) -> int:
+        """Insert an observability annotation attached to a trace/span/node."""
+        with self.tx() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS trace_annotations (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trace_id        TEXT NOT NULL DEFAULT '',
+                    span_id         TEXT NOT NULL DEFAULT '',
+                    node_id         TEXT NOT NULL DEFAULT '',
+                    turn            INTEGER NOT NULL DEFAULT 0,
+                    annotation_type TEXT NOT NULL DEFAULT '',
+                    severity        TEXT NOT NULL DEFAULT 'info',
+                    message         TEXT NOT NULL DEFAULT '',
+                    metadata_json   TEXT NOT NULL DEFAULT '{}',
+                    author          TEXT NOT NULL DEFAULT '',
+                    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+                )"""
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trace_annotations_trace ON trace_annotations(trace_id)"
+            )
+            cur.execute(
+                """INSERT INTO trace_annotations (
+                    trace_id, span_id, node_id, turn, annotation_type, severity,
+                    message, metadata_json, author
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    trace_id,
+                    span_id,
+                    node_id,
+                    turn,
+                    annotation_type,
+                    severity,
+                    message,
+                    json.dumps(metadata or {}),
+                    author,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def list_trace_annotations(self, trace_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        """List annotations associated with a trace."""
+        try:
+            rows = self.conn.execute(
+                """SELECT * FROM trace_annotations
+                   WHERE trace_id = ?
+                   ORDER BY created_at DESC, id DESC
+                   LIMIT ?""",
+                (trace_id, limit),
+            ).fetchall()
+        except Exception:
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.get("metadata_json", "{}"))
+            except Exception:
+                item["metadata"] = {}
+            out.append(item)
+        return out
+
+    def delete_trace_annotation(self, annotation_id: int) -> bool:
+        """Delete one trace annotation by id."""
+        with self.tx() as cur:
+            cur.execute(
+                "DELETE FROM trace_annotations WHERE id = ?",
+                (annotation_id,),
+            )
+            return bool((cur.rowcount or 0) > 0)
+
+    def build_trace_run_tree(self, trace_id: str) -> dict[str, Any]:
+        """Build a LangSmith-style run tree for one trace."""
+        spans = self.query_trace_spans(trace_id)
+        runtime_events = self.query_runtime_events(trace_id=trace_id, limit=3000)
+        checkpoints = self.list_graph_checkpoints(trace_id=trace_id, limit=1000)
+        eval_trials = self.list_eval_trials_by_trace(trace_id, limit=500)
+        annotations = self.list_trace_annotations(trace_id, limit=500)
+
+        by_id: dict[str, dict[str, Any]] = {}
+        children: dict[str, list[dict[str, Any]]] = {}
+        root: dict[str, Any] | None = None
+        for span in spans:
+            node = {
+                "span_id": span.get("span_id", ""),
+                "parent_span_id": span.get("parent_span_id", ""),
+                "name": span.get("name", ""),
+                "kind": span.get("kind", ""),
+                "status": span.get("status", ""),
+                "start_time": span.get("start_time", 0.0),
+                "end_time": span.get("end_time", 0.0),
+                "duration_ms": span.get("duration_ms", 0.0),
+                "attributes": span.get("attributes", {}),
+                "events": span.get("events", []),
+                "children": [],
+            }
+            sid = str(node["span_id"])
+            by_id[sid] = node
+            pid = str(node["parent_span_id"] or "")
+            children.setdefault(pid, []).append(node)
+
+        for sid, node in by_id.items():
+            node["children"] = children.get(sid, [])
+        for node in by_id.values():
+            pid = str(node.get("parent_span_id") or "")
+            if not pid or pid not in by_id:
+                root = node
+                break
+
+        return {
+            "trace_id": trace_id,
+            "root": root or {},
+            "runtime_events": runtime_events,
+            "graph_checkpoints": checkpoints,
+            "eval_trials": eval_trials,
+            "annotations": annotations,
+            "counts": {
+                "spans": len(spans),
+                "runtime_events": len(runtime_events),
+                "checkpoints": len(checkpoints),
+                "eval_trials": len(eval_trials),
+                "annotations": len(annotations),
+            },
+        }
+
+    def agent_meta_observability_report(
+        self,
+        *,
+        agent_name: str,
+        org_id: str = "",
+        limit_sessions: int = 200,
+    ) -> dict[str, Any]:
+        """Aggregate end-to-end telemetry for meta-agent improvement suggestions."""
+        sql = (
+            "SELECT session_id, trace_id, status, stop_reason, step_count, wall_clock_seconds, cost_total_usd "
+            "FROM sessions WHERE agent_name = ?"
+        )
+        params: list[Any] = [agent_name]
+        if org_id:
+            sql += " AND org_id = ?"
+            params.append(org_id)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit_sessions)
+        sessions = [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        if not sessions:
+            return {
+                "agent_name": agent_name,
+                "total_sessions": 0,
+                "signals": {},
+                "recommendations": ["No session telemetry available yet."],
+            }
+
+        trace_ids = sorted({str(s.get("trace_id", "")) for s in sessions if s.get("trace_id")})
+        event_types: dict[str, int] = {}
+        node_errors = 0
+        node_starts = 0
+        if trace_ids:
+            placeholders = ", ".join("?" for _ in trace_ids)
+            rows = self.conn.execute(
+                f"""SELECT event_type, COUNT(*) AS cnt
+                    FROM runtime_events
+                    WHERE trace_id IN ({placeholders})
+                    GROUP BY event_type""",
+                trace_ids,
+            ).fetchall()
+            for row in rows:
+                et = str(row["event_type"])
+                cnt = int(row["cnt"] or 0)
+                event_types[et] = cnt
+            node_errors = int(event_types.get("node_error", 0))
+            node_starts = int(event_types.get("node_start", 0))
+
+        checkpoint_pending = 0
+        checkpoint_resumed = 0
+        try:
+            cp_rows = self.conn.execute(
+                """SELECT status, COUNT(*) AS cnt
+                   FROM graph_checkpoints
+                   WHERE agent_name = ?
+                   GROUP BY status""",
+                (agent_name,),
+            ).fetchall()
+            for row in cp_rows:
+                status = str(row["status"])
+                cnt = int(row["cnt"] or 0)
+                if status == "pending_approval":
+                    checkpoint_pending += cnt
+                if status == "resumed":
+                    checkpoint_resumed += cnt
+        except Exception:
+            pass
+
+        eval_trials_total = 0
+        eval_passes = 0
+        try:
+            row = self.conn.execute(
+                """SELECT COUNT(*) AS total,
+                          SUM(CASE WHEN t.passed = 1 THEN 1 ELSE 0 END) AS passed
+                   FROM eval_trials t
+                   JOIN eval_runs r ON r.id = t.eval_run_id
+                   WHERE r.agent_name = ?""",
+                (agent_name,),
+            ).fetchone()
+            if row:
+                eval_trials_total = int(row["total"] or 0)
+                eval_passes = int(row["passed"] or 0)
+        except Exception:
+            pass
+
+        total_sessions = len(sessions)
+        success_count = sum(1 for s in sessions if str(s.get("status", "")) == "success")
+        avg_turns = sum(int(s.get("step_count", 0) or 0) for s in sessions) / max(1, total_sessions)
+        avg_latency = sum(float(s.get("wall_clock_seconds", 0.0) or 0.0) for s in sessions) / max(1, total_sessions)
+        avg_cost = sum(float(s.get("cost_total_usd", 0.0) or 0.0) for s in sessions) / max(1, total_sessions)
+        node_error_rate = (node_errors / node_starts) if node_starts > 0 else 0.0
+        eval_pass_rate = (eval_passes / eval_trials_total) if eval_trials_total > 0 else None
+
+        recs: list[str] = []
+        if node_error_rate > 0.05:
+            recs.append(
+                f"Node error rate is {node_error_rate:.1%}; inspect node_error events and add retries/fallbacks for top failing nodes."
+            )
+        if checkpoint_pending > 0:
+            recs.append(
+                f"There are {checkpoint_pending} pending approval checkpoints; tighten approval routing or staffing to reduce stuck runs."
+            )
+        if eval_pass_rate is not None and eval_pass_rate < 0.8:
+            recs.append(
+                f"Eval pass rate is {eval_pass_rate:.1%}; prioritize prompt/tool governance proposals and run targeted regression evals."
+            )
+        if avg_turns > 8:
+            recs.append(
+                f"Average turn count is {avg_turns:.1f}; optimize planning/tool-selection to reduce loop depth."
+            )
+        if not recs:
+            recs.append("Telemetry health is stable; optimize cost/latency next via model and tool-call budget tuning.")
+
+        return {
+            "agent_name": agent_name,
+            "total_sessions": total_sessions,
+            "signals": {
+                "success_rate": success_count / max(1, total_sessions),
+                "avg_turns": avg_turns,
+                "avg_latency_seconds": avg_latency,
+                "avg_cost_usd": avg_cost,
+                "node_error_rate": node_error_rate,
+                "runtime_event_counts": event_types,
+                "checkpoint_pending": checkpoint_pending,
+                "checkpoint_resumed": checkpoint_resumed,
+                "eval_trials_total": eval_trials_total,
+                "eval_pass_rate": eval_pass_rate,
+            },
+            "recommendations": recs,
+        }
+
     def insert_session_errors(self, session_id: str, errors: list[dict[str, Any]]) -> None:
         """Insert error records for a session."""
         with self.tx() as cur:

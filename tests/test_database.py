@@ -467,3 +467,102 @@ class TestRuntimeEventPersistence:
         assert rows[0]["node_id"] == "llm"
         assert rows[0]["payload"]["turn"] == 1
         db.close()
+
+    def test_trace_annotations_crud_and_run_tree(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        # Seed one span and one runtime event so run-tree has data.
+        db.insert_spans([{
+            "span_id": "s-root",
+            "trace_id": "trace-tree-1",
+            "parent_span_id": "",
+            "name": "session",
+            "kind": "session",
+            "status": "ok",
+            "start_time": time.time(),
+            "end_time": time.time() + 0.1,
+            "duration_ms": 100.0,
+            "attributes": {"turn": 1},
+            "events": [],
+        }], session_id="sess-tree-1")
+        db.insert_runtime_event({
+            "event_id": "evt-tree-1",
+            "event_type": "node_start",
+            "event_source": "graph_runtime",
+            "event_ts": time.time(),
+            "trace_id": "trace-tree-1",
+            "session_id": "sess-tree-1",
+            "node_id": "llm",
+            "turn": 1,
+            "payload": {"node_id": "llm"},
+        })
+        aid = db.insert_trace_annotation(
+            trace_id="trace-tree-1",
+            author="u-1",
+            annotation_type="note",
+            message="Investigate latency spike",
+            node_id="llm",
+            severity="warn",
+        )
+        assert aid > 0
+        annotations = db.list_trace_annotations("trace-tree-1")
+        assert len(annotations) == 1
+        assert annotations[0]["message"] == "Investigate latency spike"
+        tree = db.build_trace_run_tree("trace-tree-1")
+        assert tree["trace_id"] == "trace-tree-1"
+        assert tree["counts"]["annotations"] == 1
+        assert tree["root"]["span_id"] == "s-root"
+        deleted = db.delete_trace_annotation(aid)
+        assert deleted is True
+        assert db.list_trace_annotations("trace-tree-1") == []
+        db.close()
+
+    def test_agent_meta_observability_report(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        now = time.time()
+        db.insert_session({
+            "session_id": "sess-meta-1",
+            "org_id": "org-1",
+            "agent_name": "agent-meta",
+            "timestamp": now,
+            "status": "success",
+            "stop_reason": "completed",
+            "step_count": 4,
+            "wall_clock_seconds": 2.0,
+            "trace_id": "trace-meta-1",
+            "composition": {"agent_name": "agent-meta"},
+            "cost": {"total_usd": 0.02},
+            "benchmark_cost": {},
+        })
+        db.insert_runtime_event({
+            "event_id": "evt-meta-1",
+            "event_type": "node_start",
+            "event_source": "graph_runtime",
+            "event_ts": now,
+            "org_id": "org-1",
+            "agent_name": "agent-meta",
+            "session_id": "sess-meta-1",
+            "trace_id": "trace-meta-1",
+            "node_id": "llm",
+            "turn": 1,
+            "payload": {},
+        })
+        db.insert_runtime_event({
+            "event_id": "evt-meta-2",
+            "event_type": "node_error",
+            "event_source": "graph_runtime",
+            "event_ts": now + 0.1,
+            "org_id": "org-1",
+            "agent_name": "agent-meta",
+            "session_id": "sess-meta-1",
+            "trace_id": "trace-meta-1",
+            "node_id": "llm",
+            "turn": 1,
+            "payload": {},
+        })
+        report = db.agent_meta_observability_report(agent_name="agent-meta", org_id="org-1")
+        assert report["agent_name"] == "agent-meta"
+        assert report["total_sessions"] == 1
+        assert "node_error_rate" in report["signals"]
+        assert isinstance(report["recommendations"], list)
+        assert report["recommendations"]
+        db.close()
