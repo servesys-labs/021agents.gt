@@ -36,6 +36,7 @@ from agentos.core.database import (
     MIGRATION_V11_TO_V12,
     MIGRATION_V12_TO_V13,
     MIGRATION_V14_TO_V15,
+    MIGRATION_V15_TO_V16,
 )
 
 _log = logging.getLogger(__name__)
@@ -276,6 +277,8 @@ class PostgresAgentDB(AgentDB):
             self._executescript_safe(MIGRATION_V12_TO_V13)
         if current < 15:
             self._executescript_safe(MIGRATION_V14_TO_V15)
+        if current < 16:
+            self._executescript_safe(MIGRATION_V15_TO_V16)
         self._ensure_runtime_tables()
         self._ensure_runtime_columns()
         self.conn.execute(

@@ -630,6 +630,9 @@ class AgentHarness:
                 "cost_usd": response.cost_usd,
                 "input_tokens": response.usage.get("input_tokens", 0),
                 "output_tokens": response.usage.get("output_tokens", 0),
+                "routing_category": getattr(response, "routing", {}).get("category", ""),
+                "routing_role": getattr(response, "routing", {}).get("role", ""),
+                "routing_complexity": getattr(response, "routing", {}).get("complexity", ""),
             })
         )
         self.governance.record_cost(response.cost_usd)

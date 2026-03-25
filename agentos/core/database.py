@@ -29,7 +29,7 @@ from typing import Any, Generator
 logger = logging.getLogger(__name__)
 
 # Current schema version — bump when you add migrations
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # ── Schema DDL ───────────────────────────────────────────────────────────────
 
@@ -1659,6 +1659,12 @@ CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(org_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_agents_name ON agents(name);
 """;
 
+MIGRATION_V15_TO_V16 = """\
+ALTER TABLE turns ADD COLUMN routing_category TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN routing_role TEXT NOT NULL DEFAULT '';
+ALTER TABLE turns ADD COLUMN routing_complexity TEXT NOT NULL DEFAULT '';
+""";
+
 RUNTIME_TABLES_SQL = """\
 CREATE TABLE IF NOT EXISTS billing_records (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2613,6 +2619,18 @@ class AgentDB:
             except sqlite3.OperationalError as exc:
                 logger.debug("v15 migration partial: %s", exc)
             self.conn.commit()
+        if from_version < 16:
+            logger.info("Migrating database from v%d to v16 (routing observability)", from_version)
+            for stmt in MIGRATION_V15_TO_V16.strip().split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column" not in str(exc).lower():
+                        logger.debug("v16 migration partial: %s", exc)
+            self.conn.commit()
 
     def _migrate_post_schema(self, from_version: int) -> None:
         """Run only migrations that add tables beyond what SCHEMA_SQL provides.
@@ -2633,6 +2651,16 @@ class AgentDB:
                 self.conn.executescript(MIGRATION_V14_TO_V15)
             except sqlite3.OperationalError as exc:
                 logger.debug("v15 post-schema partial: %s", exc)
+            self.conn.commit()
+        if from_version < 16:
+            for stmt in MIGRATION_V15_TO_V16.strip().split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                try:
+                    self.conn.execute(stmt)
+                except sqlite3.OperationalError:
+                    pass
             self.conn.commit()
 
     def _seed_security_event_types(self) -> None:
@@ -3042,8 +3070,9 @@ class AgentDB:
                         cost_tool_usd, cost_total_usd,
                         tool_calls_json, tool_results_json, errors_json,
                         execution_mode, plan_json, reflection_json,
+                        routing_category, routing_role, routing_complexity,
                         started_at, ended_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         turn.get("turn_number", 0),
@@ -3065,6 +3094,9 @@ class AgentDB:
                         turn.get("execution_mode", "sequential"),
                         json.dumps(turn.get("plan_artifact", {})),
                         json.dumps(turn.get("reflection", {})),
+                        turn.get("routing_category", ""),
+                        turn.get("routing_role", ""),
+                        turn.get("routing_complexity", ""),
                         turn.get("started_at", time.time()),
                         turn.get("ended_at", time.time()),
                     ),
