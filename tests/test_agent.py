@@ -221,6 +221,8 @@ TOOLS = [{
     @pytest.mark.asyncio
     async def test_agent_run_uses_graph_runtime_when_enabled_in_env(self, monkeypatch):
         config = AgentConfig(name="graph-runtime-env", max_turns=1)
+        # Remove explicit config mode so env flag can control runtime.
+        config.harness.pop("runtime_mode", None)
         agent = Agent(config)
         expected = [TurnResult(turn_number=1, done=True, stop_reason="completed")]
         monkeypatch.setenv("GRAPH_RUNTIME", "true")
@@ -234,3 +236,21 @@ TOOLS = [{
                 assert results == expected
                 graph_run.assert_awaited_once()
                 harness_run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_agent_run_harness_mode_overrides_env_graph(self, monkeypatch):
+        config = AgentConfig(name="harness-mode-wins", max_turns=1)
+        config.harness["runtime_mode"] = "harness"
+        agent = Agent(config)
+        expected = [TurnResult(turn_number=1, done=True, stop_reason="completed")]
+        monkeypatch.setenv("GRAPH_RUNTIME", "true")
+
+        with patch.object(agent._harness, "run", new=AsyncMock(return_value=expected)) as harness_run:
+            with patch(
+                "agentos.graph.adapter.run_with_graph_runtime",
+                new=AsyncMock(return_value=[]),
+            ) as graph_run:
+                results = await agent.run("hello")
+                assert results == expected
+                harness_run.assert_awaited_once()
+                graph_run.assert_not_called()

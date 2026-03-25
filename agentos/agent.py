@@ -116,6 +116,7 @@ class AgentConfig:
 
     # Harness config — controls middleware, skills, memory, retries
     harness: dict[str, Any] = field(default_factory=lambda: {
+        "runtime_mode": "harness",  # harness | graph
         "enable_loop_detection": True,
         "enable_summarization": True,
         "enable_skills": True,
@@ -1013,8 +1014,8 @@ class Agent:
 
         harness_cfg = self.config.harness if isinstance(self.config.harness, dict) else {}
         runtime_mode = str(harness_cfg.get("runtime_mode", "")).strip().lower()
-        if runtime_mode == "graph":
-            return True
+        if runtime_mode in {"harness", "graph"}:
+            return runtime_mode == "graph"
 
         env_graph = os.environ.get("GRAPH_RUNTIME", "").strip().lower()
         if env_graph in {"1", "true", "yes", "on"}:

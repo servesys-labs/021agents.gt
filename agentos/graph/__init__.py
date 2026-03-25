@@ -7,6 +7,7 @@ from agentos.graph.nodes import (
     GraphTurnState,
     HarnessSetupNode,
     LLMNode,
+    RecordNode,
     ToolExecNode,
     TurnResultNode,
 )
@@ -23,4 +24,5 @@ __all__ = [
     "LLMNode",
     "ToolExecNode",
     "TurnResultNode",
+    "RecordNode",
 ]
