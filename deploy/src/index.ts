@@ -3356,8 +3356,8 @@ export default {
       // Clone body before dispatch — consumed by fetch()
       const bodyText = await request.text().catch(() => "{}");
 
-      // Try dispatching to the customer worker
-      let dispatched = false;
+      // Try dispatching to the customer worker.
+      // CF returns 400 "Invalid request" for non-existent scripts — detect and fall back.
       try {
         const userWorker = env.DISPATCHER.get(workerName);
         const dispatchReq = new Request(request.url, {
@@ -3366,13 +3366,22 @@ export default {
           body: bodyText,
         });
         const dispatchResp = await userWorker.fetch(dispatchReq);
-        // CF returns 400 "Invalid request" for non-existent workers (not an exception)
-        if (dispatchResp.status !== 400 || !(await dispatchResp.clone().text()).includes("Invalid request")) {
-          return dispatchResp;
+        if (dispatchResp.ok || (dispatchResp.status >= 200 && dispatchResp.status < 500 && dispatchResp.status !== 400)) {
+          return dispatchResp;  // Real response from deployed worker
         }
-        // Fall through to fallback
+        // Status 400 or 5xx from dispatcher — likely "Invalid request" (worker not found)
+        // Check response body to be sure
+        const respText = await dispatchResp.text();
+        if (!respText.includes("Invalid request")) {
+          // It's a real 400 from the customer worker, return as-is
+          return new Response(respText, {
+            status: dispatchResp.status,
+            headers: dispatchResp.headers,
+          });
+        }
+        // Fall through to backend fallback
       } catch (e: any) {
-        // Exception means worker definitely not found — fall through
+        // JS exception from dispatcher — fall through
       }
 
       // Fallback: proxy directly to backend (worker not deployed)
