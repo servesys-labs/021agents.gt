@@ -361,3 +361,48 @@ def test_sync_gmi_internal_marks_removed_and_writes_audit(isolated_db, monkeypat
     assert int(audit_rows["cnt"]) >= 1
     db2.close()
 
+
+def test_runtime_proxy_agent_run_uses_request_scoped_override_without_mutating_cache(isolated_db, monkeypatch):
+    import agentos.api.routers.runtime_proxy as rp
+    from agentos.core.harness import TurnResult
+    from agentos.llm.provider import LLMResponse
+
+    class _DummyAgent:
+        def __init__(self, runtime_mode: str, output: str):
+            self.config = type("Cfg", (), {"harness": {"runtime_mode": runtime_mode}})()
+            self.output = output
+            self.calls = 0
+
+        def set_runtime_context(self, **kwargs):
+            return None
+
+        async def run(self, task: str):
+            self.calls += 1
+            return [TurnResult(
+                turn_number=1,
+                llm_response=LLMResponse(content=self.output, model="stub"),
+                done=True,
+                stop_reason="completed",
+            )]
+
+    cached_agent = _DummyAgent(runtime_mode="graph", output="cached")
+    override_agent = _DummyAgent(runtime_mode="graph", output="override")
+
+    monkeypatch.setattr(rp, "_get_cached_agent", lambda name: cached_agent)
+    monkeypatch.setattr(rp.Agent, "from_name", classmethod(lambda cls, name: override_agent))
+
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
+    resp = client.post(
+        "/api/v1/runtime-proxy/agent/run",
+        headers=headers,
+        json={"agent_name": "test-agent", "task": "hello", "runtime_mode": "harness"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["success"] is True
+    assert resp.json()["output"] == "override"
+    assert override_agent.calls == 1
+    assert cached_agent.calls == 0
+    assert cached_agent.config.harness["runtime_mode"] == "graph"
+

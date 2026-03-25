@@ -972,6 +972,41 @@ export default {
         }
       }
 
+      // /cf/llm/infer — LLM inference via Workers AI (edge, <1s for small models)
+      if (url.pathname === "/cf/llm/infer" && request.method === "POST") {
+        const body = await request.json() as {
+          model: string;
+          messages: { role: string; content: string }[];
+          max_tokens?: number;
+          temperature?: number;
+          tools?: any[];
+        };
+        const model = body.model || "@cf/meta/llama-3.1-8b-instruct";
+        const started = Date.now();
+        try {
+          const aiResult = await env.AI.run(model, {
+            messages: body.messages,
+            max_tokens: body.max_tokens || 1024,
+            temperature: body.temperature || 0,
+            ...(body.tools ? { tools: body.tools } : {}),
+          }) as any;
+          const latencyMs = Date.now() - started;
+          // Workers AI returns { response: "text" } for text gen
+          const content = aiResult.response || aiResult.content || "";
+          const toolCalls = aiResult.tool_calls || [];
+          return Response.json({
+            content,
+            model,
+            tool_calls: toolCalls,
+            input_tokens: aiResult.usage?.input_tokens || 0,
+            output_tokens: aiResult.usage?.output_tokens || 0,
+            latency_ms: latencyMs,
+          });
+        } catch (err: any) {
+          return Response.json({ error: err.message, model }, { status: 500 });
+        }
+      }
+
       // /cf/rag/query — semantic search via Vectorize
       if (url.pathname === "/cf/rag/query" && request.method === "POST") {
         const body = await request.json() as { query: string; topK?: number; org_id?: string; agent_name?: string };
