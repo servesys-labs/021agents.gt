@@ -216,10 +216,15 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         loop = asyncio.get_event_loop()
         from agentos.core.db_config import initialize_db
 
-        def _init_and_seed():
+        # DB init is fast — run synchronously so health checks work immediately
+        try:
             initialize_db()
-            # Seed filesystem agents into DB (idempotent, runs on every startup).
-            # Ensures agents/*.json are queryable from any pod.
+        except Exception as exc:
+            logger.warning("DB init failed (will retry on first request): %s", exc)
+
+        # Seed agents in background — non-blocking, doesn't hold the thread pool
+        async def _seed_agents():
+            await asyncio.sleep(5)  # Let the server accept requests first
             try:
                 from agentos.agent import seed_agents_to_db
                 count = seed_agents_to_db()
@@ -228,7 +233,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
             except Exception as exc:
                 logger.warning("Agent seeding failed (non-fatal): %s", exc)
 
-        loop.run_in_executor(None, _init_and_seed)
+        asyncio.create_task(_seed_agents())
 
         # Background scheduler — checks for due schedules every 60s
         try:
