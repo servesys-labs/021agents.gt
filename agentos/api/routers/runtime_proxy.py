@@ -212,7 +212,11 @@ async def agent_run_proxy(
         session_id = last_rec.session_id
         trace_id = last_rec.trace_id
 
-    pending_checkpoint = getattr(run_agent_instance._harness, "_pending_graph_resume_payload", None)
+    pending_checkpoint = getattr(
+        getattr(run_agent_instance, "_harness", None),
+        "_pending_graph_resume_payload",
+        None,
+    )
     if stop_reason == "human_approval_required" and isinstance(pending_checkpoint, dict):
         candidate_id = str(pending_checkpoint.get("checkpoint_id", ""))
         if candidate_id and db is not None:
@@ -342,6 +346,142 @@ async def agent_resume_proxy(
     }
 
 
+def _langchain_input_to_task(value: Any) -> str:
+    """Normalize LangChain-style input payloads into AgentOS task text."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("input", "question", "query", "text", "task"):
+            if key in value:
+                return str(value[key])
+    if value is None:
+        return ""
+    return str(value)
+
+
+class LangChainInvokeProxyRequest(BaseModel):
+    """LangChain/LangServe-style invoke contract over runtime proxy."""
+
+    agent_name: str
+    input: Any = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+    org_id: str = ""
+    project_id: str = ""
+    channel: str = ""
+    channel_user_id: str = ""
+    require_human_approval: bool | None = None
+    enable_checkpoints: bool | None = None
+
+
+class LangChainBatchProxyRequest(BaseModel):
+    """LangChain/LangServe-style batch contract over runtime proxy."""
+
+    agent_name: str
+    inputs: list[Any] = Field(default_factory=list)
+    config: dict[str, Any] = Field(default_factory=dict)
+    org_id: str = ""
+    project_id: str = ""
+    channel: str = ""
+    channel_user_id: str = ""
+    require_human_approval: bool | None = None
+    enable_checkpoints: bool | None = None
+
+
+@router.post("/langchain/invoke")
+async def langchain_invoke_proxy(
+    payload: LangChainInvokeProxyRequest,
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+    db: Any = Depends(_get_db_safe),
+) -> dict[str, Any]:
+    """Invoke-style endpoint compatible with LangChain/LangServe clients."""
+    task = _langchain_input_to_task(payload.input)
+    run = await agent_run_proxy(
+        AgentRunProxyRequest(
+            agent_name=payload.agent_name,
+            task=task,
+            org_id=payload.org_id,
+            project_id=payload.project_id,
+            channel=payload.channel,
+            channel_user_id=payload.channel_user_id,
+            require_human_approval=payload.require_human_approval,
+            enable_checkpoints=payload.enable_checkpoints,
+        ),
+        authorization=authorization,
+        x_edge_token=x_edge_token,
+        db=db,
+    )
+    return {
+        "output": run.get("output", ""),
+        "metadata": {
+            "success": bool(run.get("success", False)),
+            "turns": int(run.get("turns", 0) or 0),
+            "tool_calls": int(run.get("tool_calls", 0) or 0),
+            "cost_usd": float(run.get("cost_usd", 0.0) or 0.0),
+            "latency_ms": int(run.get("latency_ms", 0) or 0),
+            "session_id": str(run.get("session_id", "")),
+            "trace_id": str(run.get("trace_id", "")),
+            "stop_reason": str(run.get("stop_reason", "")),
+            "checkpoint_id": str(run.get("checkpoint_id", "")),
+        },
+    }
+
+
+@router.post("/langchain/batch")
+async def langchain_batch_proxy(
+    payload: LangChainBatchProxyRequest,
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+    db: Any = Depends(_get_db_safe),
+) -> dict[str, Any]:
+    """Batch-style endpoint compatible with LangChain/LangServe clients."""
+    outputs: list[Any] = []
+    for value in payload.inputs:
+        item = await langchain_invoke_proxy(
+            LangChainInvokeProxyRequest(
+                agent_name=payload.agent_name,
+                input=value,
+                config=payload.config,
+                org_id=payload.org_id,
+                project_id=payload.project_id,
+                channel=payload.channel,
+                channel_user_id=payload.channel_user_id,
+                require_human_approval=payload.require_human_approval,
+                enable_checkpoints=payload.enable_checkpoints,
+            ),
+            authorization=authorization,
+            x_edge_token=x_edge_token,
+            db=db,
+        )
+        outputs.append(item)
+    return {"outputs": outputs}
+
+
+@router.post("/langchain/stream-events")
+async def langchain_stream_events_proxy(
+    payload: LangChainInvokeProxyRequest,
+    authorization: str | None = Header(default=None),
+    x_edge_token: str | None = Header(default=None),
+    db: Any = Depends(_get_db_safe),
+) -> dict[str, Any]:
+    """Return a LangChain-like event timeline for one invoke."""
+    invoke = await langchain_invoke_proxy(
+        payload,
+        authorization=authorization,
+        x_edge_token=x_edge_token,
+        db=db,
+    )
+    output = str(invoke.get("output", ""))
+    metadata = dict(invoke.get("metadata", {}))
+    events: list[dict[str, Any]] = [
+        {"event": "on_chain_start", "name": "agentos_runtime_proxy", "data": {"input": payload.input}},
+    ]
+    if output:
+        events.append({"event": "on_chain_stream", "name": "agentos_runtime_proxy", "data": {"chunk": output}})
+    events.append({"event": "on_chain_end", "name": "agentos_runtime_proxy", "data": {"output": output, "metadata": metadata}})
+    return {"events": events}
+
+
 class LLMInferRequest(BaseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     provider: str = "gmi"
@@ -399,82 +539,29 @@ async def llm_infer(
     out_tokens = 0
     resolved_model = model
 
+    # Route ALL LLM calls through the CF worker — backend holds ZERO API keys.
+    # The worker's /cf/llm/infer handles: @cf/* → Workers AI, else → OpenRouter.
     try:
-        if provider in {"gmi", "openai"}:
-            api_base = "https://api.gmi-serving.com/v1" if provider == "gmi" else "https://api.openai.com/v1"
-            api_key = os.environ.get("GMI_API_KEY", "") if provider == "gmi" else os.environ.get("OPENAI_API_KEY", "")
-            if not api_key:
-                raise HTTPException(status_code=503, detail=f"{provider.upper()} API key not configured on backend")
+        from agentos.infra.cloudflare_client import get_cf_client
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    f"{api_base}/chat/completions",
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {api_key}",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {**m, "role": "developer" if m.get("role") == "system" and "gpt-5" in model else m.get("role", "user")}
-                            for m in payload.messages
-                        ],
-                        **( {"max_completion_tokens": int(max(1, payload.max_tokens))} if "gpt-5" in model
-                            else {"max_tokens": int(max(1, payload.max_tokens))} ),
-                        "temperature": float(payload.temperature),
-                    },
-                )
-            if not resp.is_success:
-                raise HTTPException(status_code=502, detail=f"{provider} upstream error: {resp.status_code}")
-            data = resp.json()
-            choice = (data.get("choices") or [{}])[0]
-            message = choice.get("message") or {}
-            content = message.get("content", "") or ""
-            tool_calls = message.get("tool_calls") or []
-            usage = data.get("usage") or {}
-            in_tokens = int(usage.get("prompt_tokens") or 0)
-            out_tokens = int(usage.get("completion_tokens") or 0)
-            resolved_model = data.get("model") or model
+        cf = get_cf_client()
+        if cf is None:
+            raise HTTPException(
+                status_code=503,
+                detail="AGENTOS_WORKER_URL not configured — cannot route LLM inference",
+            )
 
-        elif provider == "anthropic":
-            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-            if not api_key:
-                raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured on backend")
-            system_msg = ""
-            chat_messages: list[dict[str, Any]] = []
-            for msg in payload.messages:
-                if str(msg.get("role", "")).lower() == "system":
-                    system_msg = str(msg.get("content", "") or "")
-                else:
-                    chat_messages.append(msg)
-
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-api-key": api_key,
-                        "anthropic-version": "2023-06-01",
-                    },
-                    json={
-                        "model": model,
-                        "system": system_msg,
-                        "messages": chat_messages,
-                        "max_tokens": int(max(1, payload.max_tokens)),
-                    },
-                )
-            if not resp.is_success:
-                raise HTTPException(status_code=502, detail=f"anthropic upstream error: {resp.status_code}")
-            data = resp.json()
-            blocks = data.get("content") or []
-            content = "".join(str(block.get("text", "")) for block in blocks if block.get("type") == "text")
-            tool_calls = [block for block in blocks if block.get("type") == "tool_use"]
-            usage = data.get("usage") or {}
-            in_tokens = int(usage.get("input_tokens") or 0)
-            out_tokens = int(usage.get("output_tokens") or 0)
-            resolved_model = data.get("model") or model
-        else:
-            raise HTTPException(status_code=400, detail=f"unsupported provider: {provider}")
+        result = await cf.llm_infer(
+            model=model,
+            messages=list(payload.messages),
+            max_tokens=int(max(1, payload.max_tokens)),
+            temperature=float(payload.temperature),
+        )
+        content = str(result.get("content", "") or "")
+        tool_calls = list(result.get("tool_calls", []) or [])
+        in_tokens = int(result.get("input_tokens", 0) or 0)
+        out_tokens = int(result.get("output_tokens", 0) or 0)
+        resolved_model = str(result.get("model", "") or model)
     except HTTPException:
         raise
     except Exception as exc:
@@ -517,7 +604,12 @@ async def llm_infer(
         pricing_version = "estimate_cost_fallback"
     latency_ms = int((time.time() - started) * 1000)
 
-    if db is not None:
+    # Fire-and-forget billing — never block the response on DB writes.
+    import asyncio
+
+    async def _persist_billing() -> None:
+        if db is None:
+            return
         try:
             if payload.session_id:
                 db.record_cost(
@@ -549,6 +641,8 @@ async def llm_infer(
             )
         except Exception:
             logger.warning("runtime proxy billing persistence failed", exc_info=True)
+
+    asyncio.create_task(_persist_billing())
 
     return {
         "content": content,
@@ -637,7 +731,11 @@ async def tool_call(
     )
     tool_cost_usd = float(rate["unit_price_usd"]) * 1.0
 
-    if db is not None:
+    import asyncio
+
+    async def _persist_tool_billing() -> None:
+        if db is None:
+            return
         try:
             if payload.session_id:
                 db.record_cost(
@@ -669,6 +767,8 @@ async def tool_call(
             )
         except Exception:
             logger.warning("runtime proxy tool billing persistence failed", exc_info=True)
+
+    asyncio.create_task(_persist_tool_billing())
 
     return {
         "tool": name,
@@ -721,7 +821,11 @@ async def sandbox_exec(
     )
     sandbox_cost_usd = max(min_usd, float(base_rate["unit_price_usd"]) + (elapsed_sec * float(second_rate["unit_price_usd"])))
 
-    if db is not None:
+    import asyncio
+
+    async def _persist_sandbox_billing() -> None:
+        if db is None:
+            return
         try:
             if payload.session_id:
                 db.record_cost(
@@ -753,6 +857,8 @@ async def sandbox_exec(
             )
         except Exception:
             logger.warning("runtime proxy sandbox billing persistence failed", exc_info=True)
+
+    asyncio.create_task(_persist_sandbox_billing())
 
     return {"output": output, "latency_ms": latency_ms, "cost_usd": sandbox_cost_usd}
 

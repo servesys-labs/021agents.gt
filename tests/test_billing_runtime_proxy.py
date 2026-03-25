@@ -162,30 +162,22 @@ def test_runtime_proxy_llm_uses_catalog_rate(isolated_db, monkeypatch):
     )
     db.close()
 
-    monkeypatch.setenv("GMI_API_KEY", "dummy-key")
+    monkeypatch.setenv("AGENTOS_WORKER_URL", "http://fake-worker")
+    monkeypatch.setenv("EDGE_INGEST_TOKEN", "edge-test-token")
 
-    class _Resp:
-        is_success = True
-
-        @staticmethod
-        def json():
+    # Mock the CloudflareClient used by the /llm/infer endpoint
+    class _FakeCFClient:
+        async def llm_infer(self, model, messages, max_tokens=1024, temperature=0.0, tools=None):
             return {
+                "content": "ok",
                 "model": "deepseek-ai/DeepSeek-V3.2",
-                "choices": [{"message": {"content": "ok"}}],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 50},
+                "tool_calls": [],
+                "input_tokens": 100,
+                "output_tokens": 50,
             }
 
-    class _Client:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb):
-            return False
-
-        async def post(self, *args, **kwargs):
-            return _Resp()
-
-    monkeypatch.setattr(rp.httpx, "AsyncClient", lambda timeout=60.0: _Client())
+    import agentos.infra.cloudflare_client as cf_mod
+    monkeypatch.setattr(cf_mod, "get_cf_client", lambda: _FakeCFClient())
 
     client = _client(monkeypatch)
     resp = client.post(
@@ -203,6 +195,10 @@ def test_runtime_proxy_llm_uses_catalog_rate(isolated_db, monkeypatch):
     assert resp.status_code == 200
     payload = resp.json()
     assert float(payload["cost_usd"]) == pytest.approx((100 * 0.000001) + (50 * 0.000003))
+
+    # Billing is fire-and-forget — give the background task time to complete.
+    import time
+    time.sleep(0.1)
 
     from agentos.core.database import create_database as _db
     db2 = _db(Path("data/agent.db"))
@@ -490,4 +486,61 @@ def test_runtime_proxy_agent_resume_from_checkpoint(isolated_db, monkeypatch):
     assert row2 is not None
     assert row2["status"] == "resumed"
     db2.close()
+
+
+def test_runtime_proxy_langchain_invoke_batch_and_events(isolated_db, monkeypatch):
+    import agentos.api.routers.runtime_proxy as rp
+    from agentos.core.harness import TurnResult
+    from agentos.llm.provider import LLMResponse
+
+    class _DummyAgent:
+        def __init__(self, output: str):
+            self.config = type("Cfg", (), {"harness": {"runtime_mode": "graph"}})()
+            self.output = output
+
+        def set_runtime_context(self, **kwargs):
+            return None
+
+        async def run(self, task: str):
+            return [TurnResult(
+                turn_number=1,
+                llm_response=LLMResponse(content=f"{self.output}:{task}", model="stub"),
+                done=True,
+                stop_reason="completed",
+            )]
+
+    monkeypatch.setattr(rp, "_get_cached_agent", lambda name: _DummyAgent("ok"))
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
+
+    inv = client.post(
+        "/api/v1/runtime-proxy/langchain/invoke",
+        headers=headers,
+        json={"agent_name": "test-agent", "input": {"input": "hello"}},
+    )
+    assert inv.status_code == 200
+    body = inv.json()
+    assert body["output"] == "ok:hello"
+    assert body["metadata"]["success"] is True
+
+    bat = client.post(
+        "/api/v1/runtime-proxy/langchain/batch",
+        headers=headers,
+        json={"agent_name": "test-agent", "inputs": ["one", {"query": "two"}]},
+    )
+    assert bat.status_code == 200
+    b = bat.json()
+    assert len(b["outputs"]) == 2
+    assert b["outputs"][0]["output"] == "ok:one"
+    assert b["outputs"][1]["output"] == "ok:two"
+
+    evt = client.post(
+        "/api/v1/runtime-proxy/langchain/stream-events",
+        headers=headers,
+        json={"agent_name": "test-agent", "input": "events"},
+    )
+    assert evt.status_code == 200
+    events = evt.json()["events"]
+    assert events[0]["event"] == "on_chain_start"
+    assert events[-1]["event"] == "on_chain_end"
 

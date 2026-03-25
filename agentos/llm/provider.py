@@ -144,6 +144,24 @@ class HttpProvider:
     API formats, auto-detected from api_base.
     """
 
+    # Module-level shared client — reuses TCP+TLS connections across requests.
+    _shared_client: "httpx.AsyncClient | None" = None
+
+    @classmethod
+    def _get_shared_client(cls) -> "httpx.AsyncClient":
+        import httpx
+
+        if cls._shared_client is None or cls._shared_client.is_closed:
+            cls._shared_client = httpx.AsyncClient(
+                http2=True,
+                limits=httpx.Limits(
+                    max_keepalive_connections=20,
+                    max_connections=50,
+                ),
+                timeout=120.0,
+            )
+        return cls._shared_client
+
     def __init__(
         self,
         model_id: str,
@@ -243,14 +261,13 @@ class HttpProvider:
         }
 
         start = time.monotonic()
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self._api_base.rstrip('/')}/v1/messages" if not self._api_base.rstrip("/").endswith("/v1") else f"{self._api_base.rstrip('/')}/messages",
-                json=payload,
-                headers=headers,
-                timeout=120.0,
-            )
-            resp.raise_for_status()
+        client = self._get_shared_client()
+        resp = await client.post(
+            f"{self._api_base.rstrip('/')}/v1/messages" if not self._api_base.rstrip("/").endswith("/v1") else f"{self._api_base.rstrip('/')}/messages",
+            json=payload,
+            headers=headers,
+        )
+        resp.raise_for_status()
         elapsed_ms = (time.monotonic() - start) * 1000
         body = resp.json()
 
@@ -359,20 +376,20 @@ class HttpProvider:
         }
 
         start = time.monotonic()
-        async with httpx.AsyncClient() as client:
-            base = self._api_base.rstrip("/")
-            url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
+        client = self._get_shared_client()
+        base = self._api_base.rstrip("/")
+        url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
 
-            # Retry on 429 (rate limit) with exponential backoff
-            resp = None
-            for attempt in range(3):
-                resp = await client.post(url, json=payload, headers=headers, timeout=120.0)
-                if resp.status_code != 429:
-                    break
-                wait = (attempt + 1) * 2  # 2s, 4s, 6s
-                import asyncio
-                await asyncio.sleep(wait)
-            resp.raise_for_status()
+        # Retry on 429 (rate limit) with exponential backoff
+        resp = None
+        for attempt in range(3):
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 429:
+                break
+            wait = (attempt + 1) * 2  # 2s, 4s, 6s
+            import asyncio
+            await asyncio.sleep(wait)
+        resp.raise_for_status()
         elapsed_ms = (time.monotonic() - start) * 1000
         body = resp.json()
 

@@ -480,7 +480,11 @@ class TurnResultNode:
 
 
 class RecordNode:
-    """Record per-turn side effects (callbacks, middleware turn end, events)."""
+    """Record per-turn side effects (callbacks, middleware turn end, events).
+
+    All recording work runs as fire-and-forget background tasks so it never
+    blocks the response path.  Failures are logged but silently swallowed.
+    """
 
     node_id = "record"
 
@@ -491,6 +495,8 @@ class RecordNode:
         return False
 
     async def execute(self, ctx: GraphContext) -> GraphContext:
+        import asyncio
+
         if ctx.session_state.pop("skip_turn_end", False):
             return ctx
 
@@ -500,32 +506,41 @@ class RecordNode:
         latest = results[-1] if isinstance(results, list) and len(results) > previous_count else None
 
         mw_ctx = ctx.session_state.get("middleware_ctx")
-        if isinstance(mw_ctx, MiddlewareContext):
-            mw_ctx.tool_results = latest.tool_results if latest else []
 
-        if latest is not None:
-            self.harness._notify_turn(latest)
-            if latest.stop_reason == "middleware_halt":
-                await self.harness.event_bus.emit(Event(type=EventType.MIDDLEWARE_HALT, data={
+        # Fire-and-forget: schedule all recording as a background task
+        async def _record_bg() -> None:
+            try:
+                if isinstance(mw_ctx, MiddlewareContext):
+                    mw_ctx.tool_results = latest.tool_results if latest else []
+
+                if latest is not None:
+                    self.harness._notify_turn(latest)
+                    if latest.stop_reason == "middleware_halt":
+                        await self.harness.event_bus.emit(Event(type=EventType.MIDDLEWARE_HALT, data={
+                            "turn": current_turn,
+                            "reason": latest.error or "Halted by middleware",
+                        }))
+
+                if isinstance(mw_ctx, MiddlewareContext):
+                    await self.harness.middleware_chain.run_on_turn_end(mw_ctx)
+
+                turn_node_spans = [
+                    s
+                    for s in ctx.session_state.get("node_spans", [])
+                    if isinstance(s, dict)
+                    and isinstance(s.get("attributes"), dict)
+                    and int(s["attributes"].get("turn", 0)) == current_turn
+                ]
+                await self.harness.event_bus.emit(Event(type=EventType.TURN_END, data={
                     "turn": current_turn,
-                    "reason": latest.error or "Halted by middleware",
+                    "execution_mode": latest.execution_mode if latest else "sequential",
+                    "plan_artifact": latest.plan_artifact if latest else {},
+                    "reflection": latest.reflection if latest else {},
+                    "node_spans": turn_node_spans,
                 }))
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning("RecordNode background task failed", exc_info=True)
 
-        if isinstance(mw_ctx, MiddlewareContext):
-            await self.harness.middleware_chain.run_on_turn_end(mw_ctx)
-
-        turn_node_spans = [
-            s
-            for s in ctx.session_state.get("node_spans", [])
-            if isinstance(s, dict)
-            and isinstance(s.get("attributes"), dict)
-            and int(s["attributes"].get("turn", 0)) == current_turn
-        ]
-        await self.harness.event_bus.emit(Event(type=EventType.TURN_END, data={
-            "turn": current_turn,
-            "execution_mode": latest.execution_mode if latest else "sequential",
-            "plan_artifact": latest.plan_artifact if latest else {},
-            "reflection": latest.reflection if latest else {},
-            "node_spans": turn_node_spans,
-        }))
+        asyncio.create_task(_record_bg())
         return ctx
