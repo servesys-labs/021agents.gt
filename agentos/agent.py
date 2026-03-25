@@ -540,18 +540,14 @@ class Agent:
                 from agentos.llm.provider import WorkersAIProvider
                 return WorkersAIProvider(model_id=tier_model)
 
-            # OpenRouter via CF AI Gateway — caching, rate limits, analytics
+            # OpenRouter — 400+ models, auto-fallback between providers
             if tier_provider == "openrouter":
                 or_key = os.environ.get("OPENROUTER_API_KEY", "")
                 if not or_key:
                     return None
-                gateway_url = os.environ.get(
-                    "AI_GATEWAY_URL",
-                    "https://gateway.ai.cloudflare.com/v1/ae92d4bf7c6c448f442d084a2358dcd5/one-shots/openrouter"
-                )
                 return HttpProvider(
                     model_id=tier_model,
-                    api_base=gateway_url,
+                    api_base="https://openrouter.ai/api/v1",
                     api_key=or_key,
                 )
 
