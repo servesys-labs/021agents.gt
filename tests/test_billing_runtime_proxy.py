@@ -396,7 +396,7 @@ def test_runtime_proxy_agent_run_uses_request_scoped_override_without_mutating_c
     resp = client.post(
         "/api/v1/runtime-proxy/agent/run",
         headers=headers,
-        json={"agent_name": "test-agent", "task": "hello", "runtime_mode": "harness"},
+        json={"agent_name": "test-agent", "task": "hello", "enable_checkpoints": True},
     )
 
     assert resp.status_code == 200

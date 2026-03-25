@@ -138,7 +138,7 @@ An agent is a JSON/YAML file in `agents/`:
     "require_confirmation_for_destructive": true
   },
   "harness": {
-    "runtime_mode": "harness",
+    "runtime_mode": "graph",
     "enable_loop_detection": true,
     "enable_summarization": true,
     "enable_skills": true,
@@ -360,14 +360,11 @@ Composable hooks that wrap each LLM call:
 
 Both can be toggled per-agent via the `harness` config.
 
-### Runtime Mode (Experimental Graph Adapter)
+### Runtime Mode (Graph-First)
 
-`Agent.run()` supports two runtime modes:
+`Agent.run()` executes through the graph runtime by default.
 
-- `harness` (default): existing `AgentHarness` execution path.
-- `graph`: graph-node adapter path (incremental migration mode).
-
-Enable graph mode per agent:
+Graph mode is configured per agent:
 
 ```json
 "harness": {
@@ -375,25 +372,18 @@ Enable graph mode per agent:
 }
 ```
 
-Or via environment:
+API callers can request graph mode per request (without changing saved agent config):
 
-```bash
-export GRAPH_RUNTIME=true
-# or
-export AGENTOS_RUNTIME_MODE=graph
-```
+- `POST /api/v1/agents/{name}/run` with body field `"runtime_mode": "graph"`
+- `POST /api/v1/agents/{name}/run/stream` with body field `"runtime_mode": "graph"`
+- `POST /api/v1/runtime-proxy/agent/run` with body field `"runtime_mode": "graph"`
+- `POST /api/v1/workflows/{workflow_id}/run` with body field `"runtime_mode": "graph"`
+- Optional enterprise controls on agent run endpoints: `"enable_checkpoints": true` and `"require_human_approval": true`
 
-API callers can override runtime mode per request (without changing saved agent config):
+Graph runtime notes:
 
-- `POST /api/v1/agents/{name}/run` with body field `"runtime_mode": "harness" | "graph"`
-- `POST /api/v1/agents/{name}/run/stream` with body field `"runtime_mode": "harness" | "graph"`
-- `POST /api/v1/runtime-proxy/agent/run` with body field `"runtime_mode": "harness" | "graph"`
-- `POST /api/v1/workflows/{workflow_id}/run` with body field `"runtime_mode": "harness" | "graph"`
-
-Rollout notes:
-
-- API request override is optional; if omitted, the saved agent config mode is respected.
-- Runtime precedence is: explicit config mode (`harness`/`graph`) first, then env flags.
+- API request override is optional; if omitted, graph runtime still executes.
+- Legacy harness mode is no longer used by `Agent.run()`.
 - Runtime-proxy per-request overrides use a request-scoped agent instance to avoid cache races.
 
 See `docs/graph-runtime-release-notes.md` for migration and verification details.
@@ -818,7 +808,7 @@ config = AgentConfig(
     system_prompt="You are a concise assistant.",
     tools=["web-search", "read-file", "todo"],
     plan="basic",
-    harness={"runtime_mode": "harness", "enable_loop_detection": True, "max_retries": 5},
+    harness={"runtime_mode": "graph", "enable_loop_detection": True, "max_retries": 5},
 )
 agent = Agent(config)
 results = await agent.run("What's the weather today?")

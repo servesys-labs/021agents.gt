@@ -1,6 +1,6 @@
 {
   "harness": {
-    "runtime_mode": "harness",
+    "runtime_mode": "graph",
     "max_turns": 50,
     "timeout_seconds": 300,
     "retry_on_tool_failure": true,
@@ -15,25 +15,24 @@
         "max_tokens": 2048
       },
       "moderate": {
-        "model": "deepseek-ai/DeepSeek-V3.2",
-        "provider": "gmi",
+        "model": "google/gemini-2.5-flash",
+        "provider": "openrouter",
         "max_tokens": 4096
       },
       "complex": {
         "model": "anthropic/claude-sonnet-4.6",
-        "provider": "gmi",
+        "provider": "openrouter",
         "max_tokens": 8192
       },
       "tool_call": {
-        "model": "anthropic/claude-haiku-4.5",
-        "provider": "gmi",
+        "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "provider": "workers-ai",
         "max_tokens": 4096
       }
     },
     "plans": {
       "basic": {
-        "_description": "Budget \u2014 fast, cheap, for prototyping and high-volume",
-        "_price_per_1k_runs": 1.0,
+        "_description": "Budget \u2014 Workers AI edge inference, free tier",
         "general": {
           "simple": {
             "model": "@cf/meta/llama-3.1-8b-instruct",
@@ -46,35 +45,35 @@
             "max_tokens": 2048
           },
           "complex": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           },
           "tool_call": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 2048
           }
         },
         "coding": {
           "planner": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           },
           "implementer": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 8192
           },
           "reviewer": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           },
           "debugger": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           }
         },
@@ -85,46 +84,45 @@
             "max_tokens": 1024
           },
           "analyze": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           },
           "synthesize": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           }
         },
         "creative": {
           "write": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           },
           "image": {
-            "model": "seedream-5.0-lite",
-            "provider": "gmi-requestqueue"
+            "model": "google/gemini-2.5-flash-image",
+            "provider": "openrouter"
           },
           "voice": {
-            "model": "elevenlabs-tts-v3",
-            "provider": "gmi-requestqueue"
+            "model": "@cf/deepgram/aura-2-en",
+            "provider": "workers-ai"
           }
         },
         "multimodal": {
           "vision": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.2-11b-vision-instruct",
+            "provider": "workers-ai",
             "max_tokens": 2048
           },
           "stt": {
             "model": "@cf/openai/whisper",
-            "provider": "cloudflare"
+            "provider": "workers-ai"
           }
         }
       },
       "standard": {
-        "_description": "Production default \u2014 balanced quality and cost",
-        "_price_per_1k_runs": 10.0,
+        "_description": "Production \u2014 Workers AI for speed, OpenRouter for quality",
         "general": {
           "simple": {
             "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
@@ -132,175 +130,174 @@
             "max_tokens": 2048
           },
           "moderate": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "complex": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "tool_call": {
-            "model": "anthropic/claude-haiku-4.5",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 4096
           }
         },
         "coding": {
           "planner": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "implementer": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "reviewer": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "debugger": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           }
         },
         "research": {
           "search": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            "provider": "workers-ai",
             "max_tokens": 2048
           },
           "analyze": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "google/gemini-2.5-flash",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "synthesize": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           }
         },
         "creative": {
           "write": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "image": {
-            "model": "seedream-5.0-lite",
-            "provider": "gmi-requestqueue"
+            "model": "google/gemini-2.5-flash-image",
+            "provider": "openrouter"
           },
           "voice": {
-            "model": "elevenlabs-tts-v3",
-            "provider": "gmi-requestqueue"
+            "model": "@cf/deepgram/aura-2-en",
+            "provider": "workers-ai"
           }
         },
         "multimodal": {
           "vision": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "stt": {
             "model": "@cf/openai/whisper",
-            "provider": "cloudflare"
+            "provider": "workers-ai"
           }
         }
       },
       "premium": {
-        "_description": "Max quality \u2014 best models, no compromise",
-        "_price_per_1k_runs": 50.0,
+        "_description": "Max quality \u2014 best models via OpenRouter",
         "general": {
           "simple": {
-            "model": "deepseek-ai/DeepSeek-V3.2",
-            "provider": "gmi",
+            "model": "anthropic/claude-haiku-4.5",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "moderate": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "complex": {
             "model": "anthropic/claude-opus-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "tool_call": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           }
         },
         "coding": {
           "planner": {
             "model": "anthropic/claude-opus-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "implementer": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "reviewer": {
             "model": "anthropic/claude-opus-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "debugger": {
             "model": "anthropic/claude-opus-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           }
         },
         "research": {
           "search": {
             "model": "anthropic/claude-haiku-4.5",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 4096
           },
           "analyze": {
             "model": "anthropic/claude-sonnet-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "synthesize": {
             "model": "anthropic/claude-opus-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           }
         },
         "creative": {
           "write": {
             "model": "anthropic/claude-opus-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "image": {
-            "model": "gemini-3-pro-image-preview",
-            "provider": "gmi-requestqueue"
+            "model": "google/gemini-3-pro-image-preview",
+            "provider": "openrouter"
           },
           "voice": {
-            "model": "elevenlabs-tts-v3",
-            "provider": "gmi-requestqueue"
+            "model": "@cf/deepgram/aura-2-en",
+            "provider": "workers-ai"
           }
         },
         "multimodal": {
           "vision": {
             "model": "anthropic/claude-opus-4.6",
-            "provider": "gmi",
+            "provider": "openrouter",
             "max_tokens": 8192
           },
           "stt": {
             "model": "@cf/openai/whisper",
-            "provider": "cloudflare"
+            "provider": "workers-ai"
           }
         }
       }
@@ -345,7 +342,22 @@
         ],
         "note": "Any OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp, TGI). No data leaves your machine."
       }
-    }
+    },
+    "provider_config": {
+      "workers-ai": {
+        "type": "cloudflare",
+        "binding": "AI"
+      },
+      "openrouter": {
+        "type": "openai-compat",
+        "base_url": "https://openrouter.ai/api/v1",
+        "env_key": "OPENROUTER_API_KEY"
+      }
+    },
+    "fallback_chain": [
+      "workers-ai",
+      "openrouter"
+    ]
   },
   "memory": {
     "working": {

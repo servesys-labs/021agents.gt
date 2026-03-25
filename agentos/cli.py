@@ -2009,7 +2009,25 @@ async def cmd_eval(args: argparse.Namespace) -> None:
             report.agent_name = agent.config.name
             report.agent_version = agent.config.version
             report.model = agent.config.model
-            agent.db.insert_eval_run(report.to_dict())
+            eval_run_id = agent.db.insert_eval_run(report.to_dict())
+            trial_rows = []
+            for tr in report.trial_results:
+                meta = tr.metadata if isinstance(tr.metadata, dict) else {}
+                trial_rows.append({
+                    "task_name": tr.task_name,
+                    "trial": tr.trial,
+                    "score": tr.grade.score,
+                    "passed": tr.grade.passed,
+                    "latency_ms": tr.latency_ms,
+                    "cost_usd": tr.cost_usd,
+                    "tool_calls_count": tr.tool_calls_count,
+                    "error": tr.error or "",
+                    "stop_reason": tr.stop_reason or str(meta.get("stop_reason", "")),
+                    "session_id": str(meta.get("session_id", "")),
+                    "trace_id": str(meta.get("trace_id", "")),
+                    "metadata": meta,
+                })
+            agent.db.insert_eval_trials(eval_run_id, trial_rows)
         except Exception as exc:
             logger.warning("Could not persist eval run: %s", exc)
 
@@ -2282,17 +2300,31 @@ def _make_agent_fn(agent):
         total_cost = 0.0
         total_tool_calls = 0
         model = ""
+        stop_reason = ""
         for r in results:
             if r.llm_response:
                 output = r.llm_response.content
                 model = getattr(r, "model_used", "") or r.llm_response.model
             total_cost += getattr(r, "cost_usd", 0.0)
             total_tool_calls += len(r.tool_results) if r.tool_results else 0
+            if getattr(r, "stop_reason", ""):
+                stop_reason = r.stop_reason
+        session_id = ""
+        trace_id = ""
+        if getattr(agent, "_observer", None) and agent._observer.records:
+            rec = agent._observer.records[-1]
+            session_id = getattr(rec, "session_id", "")
+            trace_id = getattr(rec, "trace_id", "")
         return AgentResult(
             output=output,
             cost_usd=total_cost,
             tool_calls_count=total_tool_calls,
             model=model,
+            metadata={
+                "session_id": session_id,
+                "trace_id": trace_id,
+                "stop_reason": stop_reason,
+            },
         )
     return agent_fn
 

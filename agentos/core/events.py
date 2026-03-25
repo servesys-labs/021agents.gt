@@ -28,6 +28,9 @@ class EventType(str, Enum):
     SESSION_START = "session_start"
     SESSION_END = "session_end"
     GOVERNANCE_CHECK = "governance_check"
+    NODE_START = "node_start"
+    NODE_END = "node_end"
+    NODE_ERROR = "node_error"
 
     # Middleware events
     MIDDLEWARE_WARNING = "middleware_warning"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agentos.core.events import EventBus, EventType
 from agentos.core.graph_contract import assert_turn_results_valid
 from agentos.core.harness import AgentHarness, HarnessConfig
 from agentos.graph.context import GraphContext
@@ -133,3 +134,31 @@ async def test_graph_runtime_compatibility_scaffold_with_harness_output() -> Non
     assert from_graph[-1].stop_reason == direct[-1].stop_reason
     assert from_graph[-1].done == direct[-1].done
     assert_turn_results_valid(from_graph, max_turns=harness.config.max_turns)
+
+
+@pytest.mark.asyncio
+async def test_graph_runtime_emits_node_events_and_collects_node_spans() -> None:
+    runtime = GraphRuntime([
+        _AppendNode("node_a", "A"),
+        _AppendNode("node_b", "B"),
+    ])
+    bus = EventBus()
+    seen_types: list[EventType] = []
+
+    async def _on_any(event):
+        seen_types.append(event.type)
+
+    bus.on_all(_on_any)
+    ctx = GraphContext(session_state={
+        "event_bus": bus,
+        "trace_id": "trace-test",
+        "session_id": "session-test",
+        "current_turn": 1,
+    })
+    result = await runtime.run(ctx)
+    spans = result.session_state.get("node_spans", [])
+    assert len(spans) == 2
+    assert {s["name"] for s in spans} == {"node_a", "node_b"}
+    assert all(s["trace_id"] == "trace-test" for s in spans)
+    assert EventType.NODE_START in seen_types
+    assert EventType.NODE_END in seen_types

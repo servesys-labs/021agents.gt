@@ -44,6 +44,7 @@ export interface Env {
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
   GMI_API_KEY?: string;
+  OPENROUTER_API_KEY?: string;
   E2B_API_KEY?: string;
   AUTH_JWT_SECRET?: string;
   BACKEND_INGEST_URL?: string;
@@ -1759,69 +1760,60 @@ export default {
             }
 
             // ── Multimodal (GMI Cloud requestqueue API) ──
+            // ── Image Generation (Workers AI FLUX or OpenRouter Gemini) ──
             case "image-generate": {
               const prompt = args.prompt || "";
-              const model = args.model || "seedream-5.0-lite";
-              const gmiKey = env.GMI_API_KEY || "";
-              if (!gmiKey) { result = "GMI_API_KEY not configured"; break; }
               try {
-                const resp = await fetch("https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests", {
-                  method: "POST",
-                  headers: { Authorization: `Bearer ${gmiKey}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({ model, payload: { prompt } }),
+                // Primary: Workers AI FLUX (free, edge)
+                const aiResult = await env.AI.run(
+                  "@cf/bfl/flux-2-klein-4b",
+                  { prompt }
+                ) as ReadableStream | ArrayBuffer;
+                const buf = aiResult instanceof ArrayBuffer
+                  ? aiResult : await new Response(aiResult).arrayBuffer();
+                // Store in R2 and return URL
+                const key = `images/${Date.now()}-${Math.random().toString(36).slice(2,8)}.png`;
+                await env.STORAGE.put(key, buf, { customMetadata: { prompt } });
+                result = JSON.stringify({
+                  image_key: key, format: "png", size_bytes: buf.byteLength, model: "@cf/bfl/flux-2-klein-4b",
                 });
-                const data = await resp.json() as any;
-                if (data.status === "success" && data.outcome?.media_urls?.length) {
-                  result = JSON.stringify({
-                    image_url: data.outcome.media_urls[0].url,
-                    model,
-                    request_id: data.request_id,
-                  });
-                } else if (data.request_id) {
-                  // Async — poll for result
-                  result = JSON.stringify({ status: "processing", request_id: data.request_id, model });
-                } else {
-                  result = `Image gen failed: ${data.error || JSON.stringify(data).slice(0, 200)}`;
-                }
               } catch (err: any) {
-                result = `Image generation failed: ${err.message}`;
+                // Fallback: OpenRouter Gemini image
+                try {
+                  const orKey = env.OPENROUTER_API_KEY || "";
+                  if (orKey) {
+                    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+                      method: "POST",
+                      headers: { Authorization: `Bearer ${orKey}`, "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        model: "google/gemini-2.5-flash-image",
+                        messages: [{ role: "user", content: `Generate an image: ${prompt}` }],
+                      }),
+                    });
+                    const data = await resp.json() as any;
+                    const content = data.choices?.[0]?.message?.content || "";
+                    result = JSON.stringify({ description: content, model: "google/gemini-2.5-flash-image" });
+                  } else {
+                    result = `Image gen failed: ${err.message}`;
+                  }
+                } catch (e2: any) {
+                  result = `Image gen failed: ${err.message}, fallback: ${e2.message}`;
+                }
               }
               break;
             }
 
+            // ── Text-to-Speech (Workers AI Deepgram Aura) ──
             case "text-to-speech": {
               const text = args.text || "";
-              const model = args.model || "elevenlabs-tts-v3";
-              // Default voice: Rachel (conversational). See ElevenLabs voice list for alternatives.
-              const voiceId = args.voice_id || args.voice || "21m00Tcm4TlvDq8ikWAM";
-              const gmiKey = env.GMI_API_KEY || "";
-              if (!gmiKey) { result = "GMI_API_KEY not configured"; break; }
               try {
-                const payload: Record<string, any> = {
-                  text, voice_id: voiceId,
-                  stability: args.stability ?? 0.5,
-                  similarity_boost: args.similarity_boost ?? 0.75,
-                  speed: args.speed ?? 1.0,
-                  output_format: args.output_format || "mp3_44100_128",
-                };
-                if (args.source_audio) payload.source_audio = args.source_audio;
-                const resp = await fetch("https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests", {
-                  method: "POST",
-                  headers: { Authorization: `Bearer ${gmiKey}`, "Content-Type": "application/json" },
-                  body: JSON.stringify({ model, payload }),
+                const audioResult = await env.AI.run("@cf/deepgram/aura-2-en", { text }) as ArrayBuffer;
+                // Store audio in R2
+                const key = `audio/${Date.now()}-${Math.random().toString(36).slice(2,8)}.mp3`;
+                await env.STORAGE.put(key, audioResult, { customMetadata: { text: text.slice(0, 200) } });
+                result = JSON.stringify({
+                  audio_key: key, size_bytes: audioResult.byteLength, model: "@cf/deepgram/aura-2-en",
                 });
-                const data = await resp.json() as any;
-                // ElevenLabs may return immediately or queue
-                const audioUrl = data.outcome?.audio_url
-                  || data.outcome?.media?.[0]?.url
-                  || data.outcome?.media_urls?.[0]?.url || "";
-                if (audioUrl) {
-                  result = JSON.stringify({ audio_url: audioUrl, model, request_id: data.request_id, status: "success" });
-                } else if (data.status === "queued" || data.status === "processing") {
-                  result = JSON.stringify({ status: data.status, request_id: data.request_id, model, poll: `/requests/${data.request_id}` });
-                } else {
-                  result = `TTS: ${data.error || data.status || JSON.stringify(data).slice(0, 200)}`;
-                }
               } catch (err: any) {
                 result = `TTS failed: ${err.message}`;
               }

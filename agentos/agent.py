@@ -116,11 +116,13 @@ class AgentConfig:
 
     # Harness config — controls middleware, skills, memory, retries
     harness: dict[str, Any] = field(default_factory=lambda: {
-        "runtime_mode": "harness",  # harness | graph
+        "runtime_mode": "graph",  # harness | graph
         "enable_loop_detection": True,
         "enable_summarization": True,
         "enable_skills": True,
         "enable_async_memory": False,
+        "enable_checkpoints": False,
+        "require_human_approval": False,
         "max_context_tokens": 100_000,
         "retry_on_tool_failure": True,
         "max_retries": 3,
@@ -490,6 +492,8 @@ class Agent:
             enable_summarization=h.get("enable_summarization", True),
             enable_skills=h.get("enable_skills", True),
             enable_async_memory=h.get("enable_async_memory", False),
+            enable_checkpoints=h.get("enable_checkpoints", False),
+            require_human_approval=h.get("require_human_approval", False),
             max_context_tokens=h.get("max_context_tokens", 100_000),
             retry_on_tool_failure=h.get("retry_on_tool_failure", True),
             max_retries=h.get("max_retries", 3),
@@ -999,46 +1003,26 @@ class Agent:
         - Observed (SessionRecord built from EventBus events)
         - Persisted (to SQLite if data/ dir exists)
         """
-        if self._use_graph_runtime():
-            from agentos.graph.adapter import run_with_graph_runtime
-            results = await run_with_graph_runtime(self._harness, user_input)
-        else:
-            results = await self._harness.run(user_input)
+        from agentos.graph.adapter import run_with_graph_runtime
+        results = await run_with_graph_runtime(self._harness, user_input)
 
-        # Persist spans to DB if available
-        if self._db and self._tracer and self._tracer.span_count > 0:
+        # Persist spans to DB if available (classic tracer + graph node spans).
+        if self._db:
             try:
                 session_id = ""
                 if self._observer and self._observer.records:
                     session_id = self._observer.records[-1].session_id
-                self._db.insert_spans(self._tracer.export(), session_id=session_id)
-                self._tracer.clear()
+                if self._tracer and self._tracer.span_count > 0:
+                    self._db.insert_spans(self._tracer.export(), session_id=session_id)
+                    self._tracer.clear()
+                graph_node_spans = getattr(self._harness, "_graph_node_spans", [])
+                if graph_node_spans:
+                    self._db.insert_spans(graph_node_spans, session_id=session_id)
+                    self._harness._graph_node_spans = []
             except Exception as exc:
                 logger.warning("Failed to persist spans: %s", exc)
 
         return results
-
-    def _use_graph_runtime(self) -> bool:
-        """Return True when graph runtime is explicitly enabled.
-
-        Enablement sources (first true wins):
-        - Agent config: config.harness.runtime_mode == "graph"
-        - Env var: GRAPH_RUNTIME=true|1|yes|on
-        - Env var: AGENTOS_RUNTIME_MODE=graph
-        """
-        import os
-
-        harness_cfg = self.config.harness if isinstance(self.config.harness, dict) else {}
-        runtime_mode = str(harness_cfg.get("runtime_mode", "")).strip().lower()
-        if runtime_mode in {"harness", "graph"}:
-            return runtime_mode == "graph"
-
-        env_graph = os.environ.get("GRAPH_RUNTIME", "").strip().lower()
-        if env_graph in {"1", "true", "yes", "on"}:
-            return True
-
-        env_mode = os.environ.get("AGENTOS_RUNTIME_MODE", "").strip().lower()
-        return env_mode == "graph"
 
     @classmethod
     def from_file(cls, path: str | Path) -> Agent:

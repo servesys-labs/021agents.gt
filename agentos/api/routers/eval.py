@@ -46,7 +46,30 @@ async def get_eval_run(run_id: int):
     row = db.conn.execute("SELECT * FROM eval_runs WHERE id = ?", (run_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Eval run not found")
-    return dict(row)
+    data = dict(row)
+    try:
+        data["eval_conditions"] = json.loads(data.get("eval_conditions_json", "{}"))
+    except Exception:
+        data["eval_conditions"] = {}
+    try:
+        data["trials"] = db.get_eval_trials(run_id)
+    except Exception:
+        data["trials"] = []
+    return data
+
+
+@router.get("/runs/{run_id}/trials")
+async def list_eval_trials(run_id: int):
+    """Get per-trial details (with session/trace linkage) for an eval run."""
+    db = _get_db()
+    row = db.conn.execute("SELECT id FROM eval_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Eval run not found")
+    try:
+        trials = db.get_eval_trials(run_id)
+    except Exception:
+        trials = []
+    return {"run_id": run_id, "trials": trials}
 
 
 @router.post("/run")
@@ -94,15 +117,65 @@ async def run_eval(
         results = await agent.run(task_input)
         output = ""
         cost = 0.0
+        total_tool_calls = 0
+        stop_reason = ""
         for r in results:
             if r.llm_response:
                 output = r.llm_response.content
                 cost += r.cost_usd
-        return AgentResult(output=output, cost_usd=cost)
+            if r.tool_results:
+                total_tool_calls += len(r.tool_results)
+            if r.stop_reason:
+                stop_reason = r.stop_reason
+        session_id = ""
+        trace_id = ""
+        if getattr(agent, "_observer", None) and agent._observer.records:
+            rec = agent._observer.records[-1]
+            session_id = getattr(rec, "session_id", "")
+            trace_id = getattr(rec, "trace_id", "")
+        return AgentResult(
+            output=output,
+            cost_usd=cost,
+            tool_calls_count=total_tool_calls,
+            metadata={
+                "session_id": session_id,
+                "trace_id": trace_id,
+                "stop_reason": stop_reason,
+            },
+        )
 
     report = await gym.run(agent_fn)
+    report.agent_name = agent.config.name
+    report.agent_version = agent.config.version
+    report.model = agent.config.model
+    eval_run_id = 0
+    db = _get_db()
+    try:
+        eval_run_id = db.insert_eval_run(report.to_dict())
+        trial_rows = []
+        for tr in report.trial_results:
+            meta = tr.metadata if isinstance(tr.metadata, dict) else {}
+            trial_rows.append({
+                "task_name": tr.task_name,
+                "trial": tr.trial,
+                "score": tr.grade.score,
+                "passed": tr.grade.passed,
+                "latency_ms": tr.latency_ms,
+                "cost_usd": tr.cost_usd,
+                "tool_calls_count": tr.tool_calls_count,
+                "error": tr.error or "",
+                "stop_reason": tr.stop_reason or str(meta.get("stop_reason", "")),
+                "session_id": str(meta.get("session_id", "")),
+                "trace_id": str(meta.get("trace_id", "")),
+                "metadata": meta,
+            })
+        db.insert_eval_trials(eval_run_id, trial_rows)
+    except Exception:
+        # Backward compatibility: eval API should still return report even if persistence fails.
+        eval_run_id = 0
 
     return {
+        "run_id": eval_run_id,
         "pass_rate": report.pass_rate,
         "avg_score": report.avg_score,
         "avg_latency_ms": report.avg_latency_ms,

@@ -9,6 +9,8 @@ from agentos.core.events import Event, EventType
 from agentos.core.harness import AgentHarness, TurnResult
 from agentos.graph.context import GraphContext
 from agentos.graph.nodes import (
+    ApprovalNode,
+    CheckpointNode,
     GovernanceNode,
     GraphTurnState,
     HarnessSetupNode,
@@ -38,16 +40,33 @@ async def run_with_graph_runtime(harness: AgentHarness, user_input: str) -> list
         )
         ctx = GraphContext(
             messages=[{"role": "user", "content": user_input}],
-            session_state={"results": [], "middleware_ctx": mw_ctx},
+            session_state={
+                "results": [],
+                "middleware_ctx": mw_ctx,
+                "event_bus": harness.event_bus,
+                "trace_id": harness.trace_id,
+                "session_id": harness._current_session_id,
+                "node_spans": [],
+                "checkpoint_snapshots": [],
+            },
         )
-        runtime = GraphRuntime(nodes=[
+        setattr(harness, "_graph_node_spans", [])
+        runtime_nodes = [
             HarnessSetupNode(harness, state),
             GovernanceNode(harness),
-            LLMNode(harness),
-            ToolExecNode(harness),
+        ]
+        if getattr(harness.config, "enable_checkpoints", False):
+            runtime_nodes.append(CheckpointNode("checkpoint_pre_llm"))
+        runtime_nodes.append(LLMNode(harness))
+        runtime_nodes.append(ApprovalNode(harness, state))
+        runtime_nodes.append(ToolExecNode(harness))
+        if getattr(harness.config, "enable_checkpoints", False):
+            runtime_nodes.append(CheckpointNode("checkpoint_post_tools"))
+        runtime_nodes.extend([
             TurnResultNode(harness, state),
             RecordNode(harness),
         ])
+        runtime = GraphRuntime(nodes=runtime_nodes)
         if harness._async_memory_updater and not harness._async_memory_started:
             harness._async_memory_updater.start()
             harness._async_memory_started = True
@@ -75,6 +94,15 @@ async def run_with_graph_runtime(harness: AgentHarness, user_input: str) -> list
                 ctx.session_state["current_turn"] = turn
                 ctx.session_state["previous_results_count"] = len(ctx.session_state["results"])
                 ctx = await runtime.run(ctx)
+                turn_spans = [
+                    s
+                    for s in ctx.session_state.get("node_spans", [])
+                    if isinstance(s, dict)
+                    and isinstance(s.get("attributes"), dict)
+                    and int(s["attributes"].get("turn", 0)) == turn
+                ]
+                if turn_spans:
+                    harness._graph_node_spans.extend(turn_spans)
                 if state.done:
                     break
             return ctx.session_state["results"]

@@ -111,7 +111,9 @@ class AgentRunProxyRequest(BaseModel):
     project_id: str = ""
     channel: str = ""          # e.g. "telegram", "discord", "portal"
     channel_user_id: str = ""  # e.g. Telegram chat_id
-    runtime_mode: Literal["harness", "graph"] | None = None
+    runtime_mode: Literal["graph"] | None = None
+    require_human_approval: bool | None = None
+    enable_checkpoints: bool | None = None
 
 
 @router.post("/agent/run")
@@ -141,7 +143,12 @@ async def agent_run_proxy(
     # Per-request runtime override must not mutate shared cached agents.
     run_agent_instance = agent
     requested_runtime_mode = payload.runtime_mode
-    if requested_runtime_mode in {"harness", "graph"}:
+    requires_request_scoped_instance = (
+        requested_runtime_mode == "graph"
+        or isinstance(payload.require_human_approval, bool)
+        or isinstance(payload.enable_checkpoints, bool)
+    )
+    if requires_request_scoped_instance:
         from agentos.agent import Agent
         run_agent_instance = Agent.from_name(name)
         harness_cfg = (
@@ -149,7 +156,12 @@ async def agent_run_proxy(
             if isinstance(run_agent_instance.config.harness, dict)
             else {}
         )
-        harness_cfg["runtime_mode"] = requested_runtime_mode
+        if requested_runtime_mode == "graph":
+            harness_cfg["runtime_mode"] = requested_runtime_mode
+        if isinstance(payload.require_human_approval, bool):
+            harness_cfg["require_human_approval"] = payload.require_human_approval
+        if isinstance(payload.enable_checkpoints, bool):
+            harness_cfg["enable_checkpoints"] = payload.enable_checkpoints
 
     # Set runtime context (org/project) so billing, telemetry, and scoping work
     if hasattr(run_agent_instance, "set_runtime_context"):

@@ -3143,6 +3143,80 @@ class AgentDB:
             )
             return cur.lastrowid
 
+    def insert_eval_trials(self, eval_run_id: int, trials: list[dict[str, Any]]) -> None:
+        """Insert per-trial eval details with optional trace/session linkage."""
+        if not trials:
+            return
+        with self.tx() as cur:
+            cur.execute(
+                """CREATE TABLE IF NOT EXISTS eval_trials (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    eval_run_id     INTEGER NOT NULL,
+                    task_name       TEXT NOT NULL DEFAULT '',
+                    trial_number    INTEGER NOT NULL DEFAULT 0,
+                    score           REAL NOT NULL DEFAULT 0.0,
+                    passed          INTEGER NOT NULL DEFAULT 0,
+                    latency_ms      REAL NOT NULL DEFAULT 0.0,
+                    cost_usd        REAL NOT NULL DEFAULT 0.0,
+                    tool_calls      INTEGER NOT NULL DEFAULT 0,
+                    error           TEXT NOT NULL DEFAULT '',
+                    stop_reason     TEXT NOT NULL DEFAULT '',
+                    session_id      TEXT NOT NULL DEFAULT '',
+                    trace_id        TEXT NOT NULL DEFAULT '',
+                    metadata_json   TEXT NOT NULL DEFAULT '{}',
+                    created_at      REAL NOT NULL DEFAULT (unixepoch('now'))
+                )"""
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_trials_run ON eval_trials(eval_run_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_trials_trace ON eval_trials(trace_id)"
+            )
+            for trial in trials:
+                cur.execute(
+                    """INSERT INTO eval_trials (
+                        eval_run_id, task_name, trial_number, score, passed,
+                        latency_ms, cost_usd, tool_calls, error, stop_reason,
+                        session_id, trace_id, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        eval_run_id,
+                        trial.get("task_name", ""),
+                        int(trial.get("trial", 0) or 0),
+                        float(trial.get("score", 0.0) or 0.0),
+                        1 if trial.get("passed") else 0,
+                        float(trial.get("latency_ms", 0.0) or 0.0),
+                        float(trial.get("cost_usd", 0.0) or 0.0),
+                        int(trial.get("tool_calls_count", 0) or 0),
+                        str(trial.get("error", "") or ""),
+                        str(trial.get("stop_reason", "") or ""),
+                        str(trial.get("session_id", "") or ""),
+                        str(trial.get("trace_id", "") or ""),
+                        json.dumps(trial.get("metadata", {})),
+                    ),
+                )
+
+    def get_eval_trials(self, eval_run_id: int) -> list[dict[str, Any]]:
+        """Fetch per-trial rows for one eval run."""
+        with self.tx() as cur:
+            cur.execute(
+                """SELECT * FROM eval_trials
+                   WHERE eval_run_id = ?
+                   ORDER BY task_name, trial_number, id""",
+                (eval_run_id,),
+            )
+            rows = cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["metadata"] = json.loads(item.get("metadata_json", "{}"))
+            except Exception:
+                item["metadata"] = {}
+            out.append(item)
+        return out
+
     def insert_session_errors(self, session_id: str, errors: list[dict[str, Any]]) -> None:
         """Insert error records for a session."""
         with self.tx() as cur:
