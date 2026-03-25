@@ -289,18 +289,18 @@ class HttpProvider:
 
         start = time.monotonic()
         async with httpx.AsyncClient() as client:
-            # Avoid doubling /v1/ if api_base already ends with it
             base = self._api_base.rstrip("/")
-            if base.endswith("/v1"):
-                url = f"{base}/chat/completions"
-            else:
-                url = f"{base}/v1/chat/completions"
-            resp = await client.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=120.0,
-            )
+            url = f"{base}/chat/completions" if base.endswith("/v1") else f"{base}/v1/chat/completions"
+
+            # Retry on 429 (rate limit) with exponential backoff
+            resp = None
+            for attempt in range(3):
+                resp = await client.post(url, json=payload, headers=headers, timeout=120.0)
+                if resp.status_code != 429:
+                    break
+                wait = (attempt + 1) * 2  # 2s, 4s, 6s
+                import asyncio
+                await asyncio.sleep(wait)
             resp.raise_for_status()
         elapsed_ms = (time.monotonic() - start) * 1000
         body = resp.json()
