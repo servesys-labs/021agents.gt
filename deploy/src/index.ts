@@ -3353,9 +3353,17 @@ export default {
     if (dispatchMatch && env.DISPATCHER) {
       const [, orgSlug, agentName] = dispatchMatch;
       const workerName = `agentos-${orgSlug}-${agentName}`;
+      // Clone body before dispatch — request body is consumed by fetch()
+      const bodyText = await request.text().catch(() => "{}");
       try {
         const userWorker = env.DISPATCHER.get(workerName);
-        return await userWorker.fetch(request);
+        // Reconstruct request with cloned body
+        const dispatchReq = new Request(request.url, {
+          method: request.method,
+          headers: request.headers,
+          body: bodyText,
+        });
+        return await userWorker.fetch(dispatchReq);
       } catch (e: any) {
         const msg = e.message || "";
         if (msg.includes("not found") || msg.includes("no such script")) {
@@ -3363,7 +3371,7 @@ export default {
           const backendUrl = env.BACKEND_INGEST_URL || "";
           const token = env.BACKEND_INGEST_TOKEN || "";
           if (backendUrl && token) {
-            const body = await request.json().catch(() => ({})) as Record<string, any>;
+            const body = JSON.parse(bodyText || "{}") as Record<string, any>;
             const proxyResp = await fetch(`${backendUrl}/api/v1/runtime-proxy/agent/run`, {
               method: "POST",
               headers: {
