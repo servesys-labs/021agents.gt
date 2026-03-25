@@ -3336,16 +3336,13 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Route agent requests: /agents/:agent-name/:instance-name
-    const agentResponse = await routeAgentRequest(request, env);
-    if (agentResponse) return agentResponse;
-
     // Health check
     if (url.pathname === "/health") {
       return Response.json({ status: "ok", version: "0.2.0" });
     }
 
     // ── Dispatch Namespace — multi-tenant agent routing ──
+    // MUST run BEFORE routeAgentRequest() which would match /agents/* broadly
     // URL: /agents/dispatch/{org_slug}/{agent_name}
     // Routes to the customer's isolated worker in the dispatch namespace.
     // Falls back to backend proxy if worker not found (backward compat).
@@ -3411,6 +3408,11 @@ export default {
         return Response.json({ error: `Agent worker '${workerName}' not deployed`, fallback: "no_backend" }, { status: 404 });
       }
     }
+
+    // Route Agents SDK requests: /agents/:agent-name/:instance-name
+    // Runs AFTER dispatch routing so /agents/dispatch/* is handled separately
+    const agentResponse = await routeAgentRequest(request, env);
+    if (agentResponse) return agentResponse;
 
     // Dynamic Worker sandbox — JS/TS execution in V8 isolate (<10ms)
     // Design: agents write JavaScript. Faster, cheaper, more secure than Python/bash.
