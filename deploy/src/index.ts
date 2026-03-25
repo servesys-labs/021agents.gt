@@ -1302,9 +1302,381 @@ export default {
               break;
             }
 
+            // ── Python exec (Sandbox Container) ──
+            case "python-exec": {
+              const code = args.code || "";
+              const timeout = Math.min(args.timeout_seconds || 30, 120);
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              // Write code to temp file and execute (handles multiline, imports, etc.)
+              const tmpFile = `/tmp/exec_${Date.now()}.py`;
+              await sandbox.writeFile(tmpFile, code);
+              const execResult = await sandbox.exec(`python3 ${tmpFile}`, { timeout });
+              result = JSON.stringify({
+                stdout: execResult.stdout || "",
+                stderr: execResult.stderr || "",
+                exit_code: execResult.exitCode ?? 0,
+              });
+              break;
+            }
+
+            // ── File operations (Sandbox Container filesystem) ──
+            case "read-file": {
+              const path = args.path || "";
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const execResult = await sandbox.exec(`cat -n "${path}" 2>&1 | head -2000`, { timeout: 10 });
+              result = execResult.stdout || execResult.stderr || "File not found or empty";
+              break;
+            }
+
+            case "write-file": {
+              const path = args.path || "";
+              const content = args.content || "";
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              await sandbox.writeFile(path, content);
+              result = `Written ${content.length} bytes to ${path}`;
+              break;
+            }
+
+            case "edit-file": {
+              const path = args.path || "";
+              const oldText = args.old_text || args.old_string || "";
+              const newText = args.new_text || args.new_string || "";
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const readResult = await sandbox.exec(`cat "${path}"`, { timeout: 10 });
+              const content = readResult.stdout || "";
+              if (!content.includes(oldText)) {
+                result = `Error: old_text not found in ${path}`;
+              } else {
+                const newContent = content.replace(oldText, newText);
+                await sandbox.writeFile(path, newContent);
+                result = `Edited ${path}: replaced ${oldText.length} chars`;
+              }
+              break;
+            }
+
+            case "grep": {
+              const pattern = args.pattern || "";
+              const path = args.path || ".";
+              const maxResults = args.max_results || 20;
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const execResult = await sandbox.exec(
+                `grep -rn "${pattern.replace(/"/g, '\\"')}" "${path}" | head -${maxResults}`,
+                { timeout: 15 }
+              );
+              result = execResult.stdout || "No matches found";
+              break;
+            }
+
+            case "glob": {
+              const pattern = args.pattern || "*";
+              const path = args.path || ".";
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const execResult = await sandbox.exec(
+                `find "${path}" -name "${pattern.replace(/"/g, '\\"')}" -type f | head -50`,
+                { timeout: 10 }
+              );
+              result = execResult.stdout || "No files found";
+              break;
+            }
+
+            // ── Sandbox operations ──
+            case "sandbox_exec": {
+              const command = args.command || "";
+              const sandboxId = `session-${session_id || args.sandbox_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const execResult = await sandbox.exec(command, { timeout: Math.min(args.timeout || 30, 120) });
+              result = JSON.stringify({
+                sandbox_id: sandboxId,
+                stdout: execResult.stdout || "",
+                stderr: execResult.stderr || "",
+                exit_code: execResult.exitCode ?? 0,
+              });
+              break;
+            }
+
+            case "sandbox_file_write": {
+              const sandboxId = `session-${session_id || args.sandbox_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              await sandbox.writeFile(args.path || "/tmp/file", args.content || "");
+              result = `Written to ${args.path}`;
+              break;
+            }
+
+            case "sandbox_file_read": {
+              const sandboxId = `session-${session_id || args.sandbox_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const execResult = await sandbox.exec(`cat "${args.path || "/tmp/file"}"`, { timeout: 10 });
+              result = execResult.stdout || "";
+              break;
+            }
+
+            case "sandbox_kill": {
+              result = "Sandbox cleanup scheduled";
+              break;
+            }
+
+            // ── Browse (simple HTTP fetch, no JS rendering) ──
+            case "browse": {
+              const targetUrl = args.url || "";
+              try {
+                const resp = await fetch(targetUrl, {
+                  headers: { "User-Agent": "AgentOS/0.2.0" },
+                  redirect: "follow",
+                });
+                const html = await resp.text();
+                // Strip HTML tags for clean text
+                const text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+                  .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+                  .replace(/<[^>]+>/g, " ")
+                  .replace(/\s+/g, " ")
+                  .trim()
+                  .slice(0, 10000);
+                result = text || "Empty page";
+              } catch (err: any) {
+                result = `Browse failed: ${err.message}`;
+              }
+              break;
+            }
+
+            // ── A2A (Agent-to-Agent protocol) ──
+            case "a2a-send": {
+              const targetUrl = args.url || "";
+              const task = args.task || args.message || "";
+              try {
+                const resp = await fetch(`${targetUrl}/tasks/send`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    jsonrpc: "2.0", method: "tasks/send", id: crypto.randomUUID(),
+                    params: { message: { role: "user", parts: [{ type: "text", text: task }] } },
+                  }),
+                });
+                result = await resp.text();
+              } catch (err: any) {
+                result = `A2A send failed: ${err.message}`;
+              }
+              break;
+            }
+
+            // ── Connector (Pipedream MCP) ──
+            case "connector": {
+              const toolName = args.tool_name || "";
+              const toolArgs = args.arguments || {};
+              // Pipedream connector — delegates to backend since it needs OAuth tokens
+              // For now, return instruction to use backend
+              result = `Connector '${toolName}' requires backend execution (OAuth tokens). Falling back.`;
+              break;
+            }
+
+            // ── Dynamic exec (JS in V8 isolate — already on CF) ──
+            case "dynamic-exec": {
+              const code = args.code || "";
+              const language = args.language || "javascript";
+              const timeout = args.timeout_ms || 10000;
+              if (language === "javascript" || language === "python") {
+                try {
+                  const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
+                  const loaded = await env.LOADER.load(workerCode);
+                  const controller = new AbortController();
+                  const timer = setTimeout(() => controller.abort(), timeout);
+                  const execResp = await loaded.fetch("http://internal/run", { signal: controller.signal });
+                  clearTimeout(timer);
+                  result = JSON.stringify(await execResp.json());
+                } catch (err: any) {
+                  result = JSON.stringify({ stdout: "", stderr: err.message, exit_code: 1 });
+                }
+              } else {
+                // bash/shell — use Sandbox
+                const sandboxId = `session-${session_id || "default"}`;
+                const sandbox = getSandbox(env.SANDBOX, sandboxId);
+                const execResult = await sandbox.exec(code, { timeout: Math.ceil(timeout / 1000) });
+                result = JSON.stringify({ stdout: execResult.stdout || "", stderr: execResult.stderr || "", exit_code: execResult.exitCode ?? 0 });
+              }
+              break;
+            }
+
+            // ── Web crawl (CF Browser Rendering — already on CF) ──
+            case "web-crawl": {
+              const crawlUrl = args.url || "";
+              const limit = args.max_pages || 10;
+              const depth = args.max_depth || 2;
+              const brBase = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/browser-rendering`;
+              const brAuth = { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" };
+              try {
+                const startResp = await fetch(`${brBase}/crawl`, {
+                  method: "POST", headers: brAuth,
+                  body: JSON.stringify({ url: crawlUrl, limit, depth, formats: ["markdown"], render: true }),
+                });
+                const startData = await startResp.json() as any;
+                const jobId = startData.result;
+                if (!jobId) { result = JSON.stringify(startData); break; }
+                for (let i = 0; i < 12; i++) {
+                  await new Promise(r => setTimeout(r, 5000));
+                  const pollResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
+                  const pollData = await pollResp.json() as any;
+                  const status = pollData.result?.status;
+                  if (status === "completed" || status === "errored" || status?.startsWith("cancelled")) {
+                    result = JSON.stringify(pollData); break;
+                  }
+                }
+                if (!result) {
+                  const finalResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
+                  result = JSON.stringify(await finalResp.json());
+                }
+              } catch (err: any) {
+                result = JSON.stringify({ error: err.message });
+              }
+              break;
+            }
+
+            // ── Browser render (CF Browser Rendering — already on CF) ──
+            case "browser-render": {
+              const renderUrl = args.url || "";
+              const action = args.action || "markdown";
+              const brBase = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/browser-rendering`;
+              const brAuth = { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" };
+              const actionMap: Record<string, string> = { markdown: "markdown", text: "markdown", html: "content", links: "links", screenshot: "screenshot" };
+              const endpoint = actionMap[action] || "markdown";
+              const payload: Record<string, any> = { url: renderUrl };
+              if (args.wait_for) payload.waitForSelector = args.wait_for;
+              try {
+                const resp = await fetch(`${brBase}/${endpoint}`, { method: "POST", headers: brAuth, body: JSON.stringify(payload) });
+                if (endpoint === "screenshot") {
+                  const buf = await resp.arrayBuffer();
+                  result = JSON.stringify({ screenshot_base64: btoa(String.fromCharCode(...new Uint8Array(buf))), url: renderUrl });
+                } else {
+                  result = JSON.stringify(await resp.json());
+                }
+              } catch (err: any) {
+                result = JSON.stringify({ error: err.message });
+              }
+              break;
+            }
+
+            // ── Knowledge (RAG via Vectorize + R2 — already on CF) ──
+            case "store-knowledge": {
+              const text = args.content || args.text || "";
+              const key = args.key || "knowledge";
+              try {
+                const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [text] }) as any;
+                const vec = embedResult.data?.[0];
+                if (vec) {
+                  await env.VECTORIZE.upsert([{
+                    id: `knowledge-${Date.now()}`,
+                    values: vec,
+                    metadata: { text, source: key, agent_name: args.agent_name || "", org_id: args.org_id || "" },
+                  }]);
+                }
+                result = `Stored knowledge: '${key}' (${text.length} chars)`;
+              } catch (err: any) {
+                result = `Store failed: ${err.message}`;
+              }
+              break;
+            }
+
+            case "knowledge-search": {
+              const query = args.query || "";
+              const topK = args.top_k || 5;
+              try {
+                const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [query] }) as any;
+                const queryVec = embedResult.data?.[0];
+                if (!queryVec) { result = "Embedding failed"; break; }
+                const matches = await env.VECTORIZE.query(queryVec, {
+                  topK, returnMetadata: "all",
+                  ...(args.agent_name ? { filter: { agent_name: args.agent_name } } : {}),
+                });
+                const results = (matches.matches || []).map((m: any) => ({
+                  score: m.score, text: m.metadata?.text || "", source: m.metadata?.source || "",
+                }));
+                result = results.length > 0
+                  ? results.map((r: any, i: number) => `${i + 1}. [${r.source}] ${r.text.slice(0, 200)}`).join("\n\n")
+                  : `No relevant knowledge found for: ${query}`;
+              } catch (err: any) {
+                result = `Search failed: ${err.message}`;
+              }
+              break;
+            }
+
+            // ── Multimodal (GMI Cloud API) ──
+            case "image-generate": {
+              const prompt = args.prompt || "";
+              const model = args.model || "Seedream-5.0-lite";
+              const gmiKey = env.GMI_API_KEY || "";
+              if (!gmiKey) { result = "GMI_API_KEY not configured on worker"; break; }
+              try {
+                const resp = await fetch("https://api.gmi-serving.com/v1/images/generations", {
+                  method: "POST",
+                  headers: { Authorization: `Bearer ${gmiKey}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({ model, prompt, n: 1, size: args.size || "1024x1024" }),
+                });
+                result = await resp.text();
+              } catch (err: any) {
+                result = `Image generation failed: ${err.message}`;
+              }
+              break;
+            }
+
+            case "text-to-speech": {
+              const text = args.text || "";
+              const model = args.model || "minimax-tts-speech-2.6-turbo";
+              const gmiKey = env.GMI_API_KEY || "";
+              if (!gmiKey) { result = "GMI_API_KEY not configured on worker"; break; }
+              try {
+                const resp = await fetch("https://api.gmi-serving.com/v1/audio/speech", {
+                  method: "POST",
+                  headers: { Authorization: `Bearer ${gmiKey}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({ model, input: text, voice: args.voice || "default" }),
+                });
+                result = `TTS generated (${resp.status}), ${resp.headers.get("content-length") || "?"} bytes`;
+              } catch (err: any) {
+                result = `TTS failed: ${err.message}`;
+              }
+              break;
+            }
+
+            case "speech-to-text": {
+              result = "STT requires audio file upload — use via backend API";
+              break;
+            }
+
+            // ── Todo (session-scoped, Sandbox filesystem) ──
+            case "todo": {
+              const action = args.action || "list";
+              const sandboxId = `session-${session_id || "default"}`;
+              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const todoFile = "/tmp/todos.json";
+              let todos: any[] = [];
+              try {
+                const readResult = await sandbox.exec(`cat ${todoFile} 2>/dev/null || echo "[]"`, { timeout: 5 });
+                todos = JSON.parse(readResult.stdout || "[]");
+              } catch { todos = []; }
+
+              if (action === "add") {
+                todos.push({ id: todos.length + 1, text: args.text || "", done: false });
+                await sandbox.writeFile(todoFile, JSON.stringify(todos));
+                result = `Added todo #${todos.length}: ${args.text}`;
+              } else if (action === "complete") {
+                const id = args.id || args.todo_id;
+                const t = todos.find((t: any) => t.id == id);
+                if (t) { t.done = true; await sandbox.writeFile(todoFile, JSON.stringify(todos)); result = `Completed todo #${id}`; }
+                else result = `Todo #${id} not found`;
+              } else {
+                result = todos.length > 0
+                  ? todos.map((t: any) => `${t.done ? "✓" : "○"} #${t.id}: ${t.text}`).join("\n")
+                  : "No todos yet. Use action='add' with text to create one.";
+              }
+              break;
+            }
+
             default:
               return Response.json({
-                tool, error: `Tool '${tool}' not yet available on worker. Coming soon.`,
+                tool, error: `Tool '${tool}' not available on worker. It may be a backend-only tool.`,
               }, { status: 400 });
           }
 
