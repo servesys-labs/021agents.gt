@@ -22,32 +22,7 @@ logger = logging.getLogger(__name__)
 _gmi_model_cache: set[str] | None = None
 
 def _gmi_validate_cached(model_id: str) -> bool:
-    """Check if a model exists on GMI. Cached per process."""
-    global _gmi_model_cache
-    import os
-    gmi_key = os.environ.get("GMI_API_KEY", "")
-    if not gmi_key:
-        return False
-    if _gmi_model_cache is None:
-        try:
-            import httpx
-            resp = httpx.get(
-                "https://api.gmi-serving.com/v1/models",
-                headers={"Authorization": f"Bearer {gmi_key}"},
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                _gmi_model_cache = {m["id"] for m in data.get("data", [])}
-                logger.info("GMI: %d models available (cached)", len(_gmi_model_cache))
-            else:
-                _gmi_model_cache = set()
-        except Exception as exc:
-            _gmi_model_cache = set()
-            logger.warning("GMI model cache init failed: %s", exc)
-    if model_id in _gmi_model_cache:
-        return True
-    logger.warning("GMI: model '%s' not found in available models", model_id)
+    """Check if a model exists on GMI. Skipped — GMI removed from provider chain."""
     return False
 
 
