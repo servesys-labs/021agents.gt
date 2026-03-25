@@ -389,6 +389,14 @@ API callers can override runtime mode per request (without changing saved agent 
 - `POST /api/v1/agents/{name}/run/stream` with body field `"runtime_mode": "harness" | "graph"`
 - `POST /api/v1/runtime-proxy/agent/run` with body field `"runtime_mode": "harness" | "graph"`
 
+Rollout notes:
+
+- API request override is optional; if omitted, the saved agent config mode is respected.
+- Runtime precedence is: explicit config mode (`harness`/`graph`) first, then env flags.
+- Runtime-proxy per-request overrides use a request-scoped agent instance to avoid cache races.
+
+See `docs/graph-runtime-release-notes.md` for migration and verification details.
+
 ## Memory System
 
 | Tier | Persistence | Purpose |

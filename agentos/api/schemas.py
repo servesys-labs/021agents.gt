@@ -107,8 +107,8 @@ class ChatRequest(BaseModel):
 class AgentRunRequest(BaseModel):
     task: str = Field(..., description="Task to execute", max_length=50000)
     plan: str = Field("", description="LLM plan override")
-    runtime_mode: Literal["harness", "graph"] = Field(
-        "harness",
+    runtime_mode: Literal["harness", "graph"] | None = Field(
+        None,
         description="Runtime mode override for this request",
     )
     stream: bool = Field(False, description="Stream response via SSE")
