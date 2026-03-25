@@ -3353,46 +3353,53 @@ export default {
     if (dispatchMatch && env.DISPATCHER) {
       const [, orgSlug, agentName] = dispatchMatch;
       const workerName = `agentos-${orgSlug}-${agentName}`;
-      // Clone body before dispatch — request body is consumed by fetch()
+      // Clone body before dispatch — consumed by fetch()
       const bodyText = await request.text().catch(() => "{}");
+
+      // Try dispatching to the customer worker
+      let dispatched = false;
       try {
         const userWorker = env.DISPATCHER.get(workerName);
-        // Reconstruct request with cloned body
         const dispatchReq = new Request(request.url, {
           method: request.method,
           headers: request.headers,
           body: bodyText,
         });
-        return await userWorker.fetch(dispatchReq);
-      } catch (e: any) {
-        const msg = e.message || "";
-        if (msg.includes("not found") || msg.includes("no such script")) {
-          // Worker not deployed yet — fall back to backend runtime proxy
-          const backendUrl = env.BACKEND_INGEST_URL || "";
-          const token = env.BACKEND_INGEST_TOKEN || "";
-          if (backendUrl && token) {
-            const body = JSON.parse(bodyText || "{}") as Record<string, any>;
-            const proxyResp = await fetch(`${backendUrl}/api/v1/runtime-proxy/agent/run`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${token}`,
-              },
-              body: JSON.stringify({
-                ...body,
-                agent_name: agentName,
-                org_id: body.org_id || "",
-                channel: "dispatch_fallback",
-              }),
-            });
-            return new Response(proxyResp.body, {
-              status: proxyResp.status,
-              headers: { "Content-Type": "application/json" },
-            });
-          }
-          return Response.json({ error: `Agent worker '${workerName}' not deployed`, fallback: "no_backend" }, { status: 404 });
+        const dispatchResp = await userWorker.fetch(dispatchReq);
+        // CF returns 400 "Invalid request" for non-existent workers (not an exception)
+        if (dispatchResp.status !== 400 || !(await dispatchResp.clone().text()).includes("Invalid request")) {
+          return dispatchResp;
         }
-        return Response.json({ error: `dispatch error: ${msg}` }, { status: 502 });
+        // Fall through to fallback
+      } catch (e: any) {
+        // Exception means worker definitely not found — fall through
+      }
+
+      // Fallback: proxy directly to backend (worker not deployed)
+      {
+        const backendUrl = env.BACKEND_INGEST_URL || "";
+        const token = env.BACKEND_INGEST_TOKEN || "";
+        if (backendUrl && token) {
+          const body = JSON.parse(bodyText || "{}") as Record<string, any>;
+          const proxyResp = await fetch(`${backendUrl}/api/v1/runtime-proxy/agent/run`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              ...body,
+              agent_name: agentName,
+              org_id: body.org_id || "",
+              channel: "dispatch_fallback",
+            }),
+          });
+          return new Response(proxyResp.body, {
+            status: proxyResp.status,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return Response.json({ error: `Agent worker '${workerName}' not deployed`, fallback: "no_backend" }, { status: 404 });
       }
     }
 
