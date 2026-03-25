@@ -878,11 +878,14 @@ export default {
             const last = data.turnResults[data.turnResults.length - 1];
             output = last?.content || "";
           }
+          // Agent returned success:false with empty output — LLM call likely failed
+          if (!output && data.success === false) {
+            output = "⚠️ Sorry, I'm having trouble processing your request right now. The AI service may be temporarily overloaded. Please try again in a moment.";
+          }
         } else {
-          const errText = await resp.text();
-          output = `Error (${resp.status}): ${errText.slice(0, 200)}`;
+          output = "⚠️ Something went wrong on my end. Please try again in a moment.";
         }
-        if (!output) output = "I processed your message but have no response.";
+        if (!output) output = "⚠️ I couldn't generate a response. Please try again.";
 
         // Send reply (split if > 4096 chars)
         for (let i = 0; i < output.length; i += 4000) {
