@@ -53,6 +53,9 @@ class Observer:
         # Sessions auto-persist to SQLite with indexes, atomicity, etc.
     """
 
+    MAX_RECORDS = 1000   # Cap in-memory records to prevent OOM
+    MAX_SESSIONS = 100   # Cap concurrent in-flight sessions
+
     def __init__(
         self,
         event_bus: EventBus | None = None,
@@ -117,6 +120,14 @@ class Observer:
         config = self._agent_config
         system_prompt = config.get("system_prompt", "")
         prompt_hash = hashlib.sha256(system_prompt.encode()).hexdigest()[:12]
+
+        # Guard against leaked sessions filling memory
+        if len(self._sessions) >= self.MAX_SESSIONS:
+            oldest_sid = next(iter(self._sessions))
+            logger.warning("Observer: evicting stale session %s (limit %d)", oldest_sid, self.MAX_SESSIONS)
+            self._sessions.pop(oldest_sid, None)
+            self._session_start_times.pop(oldest_sid, None)
+            self._first_action_times.pop(oldest_sid, None)
 
         self._sessions[session_id] = SessionRecord(
             session_id=session_id,
@@ -190,6 +201,9 @@ class Observer:
             ) * 1000
 
         self._records.append(rec)
+        # Evict oldest records when over capacity (already persisted to DB)
+        if len(self._records) > self.MAX_RECORDS:
+            self._records = self._records[-self.MAX_RECORDS:]
 
         # Auto-persist: prefer SQLite, fall back to JSONL
         if self._db is not None:

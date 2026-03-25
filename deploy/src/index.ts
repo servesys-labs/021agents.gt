@@ -40,6 +40,7 @@ export interface Env {
   HYPERDRIVE: Hyperdrive; // Hyperdrive — accelerated Supabase Postgres
   STORAGE: R2Bucket; // R2 — org/project-scoped file storage
   BROWSER: Fetcher; // Browser Rendering — headless Puppeteer on edge
+  DISPATCHER?: any; // Dispatch Namespace — multi-tenant agent isolation
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
   GMI_API_KEY?: string;
@@ -3342,6 +3343,49 @@ export default {
     // Health check
     if (url.pathname === "/health") {
       return Response.json({ status: "ok", version: "0.2.0" });
+    }
+
+    // ── Dispatch Namespace — multi-tenant agent routing ──
+    // URL: /agents/dispatch/{org_slug}/{agent_name}
+    // Routes to the customer's isolated worker in the dispatch namespace.
+    // Falls back to backend proxy if worker not found (backward compat).
+    const dispatchMatch = url.pathname.match(/^\/agents\/dispatch\/([a-z0-9-]+)\/([a-z0-9-]+)/);
+    if (dispatchMatch && env.DISPATCHER) {
+      const [, orgSlug, agentName] = dispatchMatch;
+      const workerName = `agentos-${orgSlug}-${agentName}`;
+      try {
+        const userWorker = env.DISPATCHER.get(workerName);
+        return await userWorker.fetch(request);
+      } catch (e: any) {
+        const msg = e.message || "";
+        if (msg.includes("not found") || msg.includes("no such script")) {
+          // Worker not deployed yet — fall back to backend runtime proxy
+          const backendUrl = env.BACKEND_INGEST_URL || "";
+          const token = env.BACKEND_INGEST_TOKEN || "";
+          if (backendUrl && token) {
+            const body = await request.json().catch(() => ({})) as Record<string, any>;
+            const proxyResp = await fetch(`${backendUrl}/api/v1/runtime-proxy/agent/run`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                ...body,
+                agent_name: agentName,
+                org_id: body.org_id || "",
+                channel: "dispatch_fallback",
+              }),
+            });
+            return new Response(proxyResp.body, {
+              status: proxyResp.status,
+              headers: { "Content-Type": "application/json" },
+            });
+          }
+          return Response.json({ error: `Agent worker '${workerName}' not deployed`, fallback: "no_backend" }, { status: 404 });
+        }
+        return Response.json({ error: `dispatch error: ${msg}` }, { status: 502 });
+      }
     }
 
     // Dynamic Worker sandbox — JS/TS execution in V8 isolate (<10ms)

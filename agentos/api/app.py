@@ -306,6 +306,48 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         from agentos import __version__
         return HealthResponse(status="ok", version=__version__)
 
+    @app.get("/health/detailed")
+    async def health_detailed():
+        """Detailed health with pool, rate limiter, and observer stats."""
+        from agentos import __version__
+        from agentos.core.db_config import get_db, is_postgres
+        from agentos.api.ratelimit import _limiter
+
+        result: dict = {
+            "status": "ok",
+            "version": __version__,
+            "database": "postgres" if is_postgres() else "sqlite",
+        }
+
+        # Connection pool stats (Postgres only)
+        try:
+            db = get_db()
+            if hasattr(db, "pool_stats"):
+                result["pool"] = db.pool_stats()
+        except Exception:
+            result["pool"] = {"error": "unavailable"}
+
+        # Rate limiter stats
+        try:
+            result["rate_limiter"] = _limiter.stats()
+        except Exception:
+            pass
+
+        # Observer stats (if an observer is active)
+        try:
+            if _harness and hasattr(_harness, "_observer") and _harness._observer:
+                obs = _harness._observer
+                result["observer"] = {
+                    "records": len(obs._records),
+                    "max_records": obs.MAX_RECORDS,
+                    "active_sessions": len(obs._sessions),
+                    "max_sessions": obs.MAX_SESSIONS,
+                }
+        except Exception:
+            pass
+
+        return result
+
     @app.post("/run", response_model=RunResponse)
     async def run(request: RunRequest, user: CurrentUser = Depends(get_current_user)) -> RunResponse:
         runner = (
