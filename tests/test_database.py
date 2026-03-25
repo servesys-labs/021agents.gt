@@ -318,6 +318,33 @@ class TestEvalRunPersistence:
         assert json.loads(row["eval_conditions_json"]) == {"seed": 42, "perturbation": False}
         db.close()
 
+    def test_insert_eval_trials_with_trace_linkage(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        run_id = db.insert_eval_run({"agent_name": "my-agent"})
+        db.insert_eval_trials(run_id, [
+            {
+                "task_name": "task-a",
+                "trial": 1,
+                "score": 1.0,
+                "passed": True,
+                "latency_ms": 123.0,
+                "cost_usd": 0.01,
+                "tool_calls_count": 2,
+                "error": "",
+                "stop_reason": "completed",
+                "session_id": "sess-1",
+                "trace_id": "trace-1",
+                "metadata": {"seed": 42},
+            },
+        ])
+        rows = db.get_eval_trials(run_id)
+        assert len(rows) == 1
+        assert rows[0]["task_name"] == "task-a"
+        assert rows[0]["session_id"] == "sess-1"
+        assert rows[0]["trace_id"] == "trace-1"
+        assert rows[0]["metadata"]["seed"] == 42
+        db.close()
+
 
 class TestObserverTurnPersistence:
     """Tests that the Observer actually writes turns to the DB."""

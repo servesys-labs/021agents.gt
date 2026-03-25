@@ -42,7 +42,7 @@ class CreateWorkflowRequest(BaseModel):
 
 class RunWorkflowRequest(BaseModel):
     input_text: str = ""
-    runtime_mode: Literal["harness", "graph"] | None = None
+    runtime_mode: Literal["graph"] | None = None
 
 
 def _derive_run_metadata(
@@ -217,7 +217,7 @@ async def run_workflow(workflow_id: str, request: RunWorkflowRequest | None = No
         if not agent_name:
             raise ValueError(f"Step '{step.get('id', '?')}' missing agent")
         agent = Agent.from_name(agent_name)
-        if requested_runtime_mode in {"harness", "graph"}:
+        if requested_runtime_mode == "graph":
             harness_cfg = agent.config.harness if isinstance(agent.config.harness, dict) else {}
             harness_cfg["runtime_mode"] = requested_runtime_mode
             agent.config.harness = harness_cfg

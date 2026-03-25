@@ -3,6 +3,8 @@
 from agentos.graph.adapter import run_with_graph_runtime
 from agentos.graph.context import GraphContext
 from agentos.graph.nodes import (
+    ApprovalNode,
+    CheckpointNode,
     GovernanceNode,
     GraphTurnState,
     HarnessSetupNode,
@@ -20,8 +22,10 @@ __all__ = [
     "GraphRuntime",
     "GraphTurnState",
     "HarnessSetupNode",
+    "CheckpointNode",
     "GovernanceNode",
     "LLMNode",
+    "ApprovalNode",
     "ToolExecNode",
     "TurnResultNode",
     "RecordNode",

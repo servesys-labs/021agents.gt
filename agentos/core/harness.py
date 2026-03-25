@@ -56,6 +56,8 @@ class HarnessConfig:
     backlog_max_items: int = 8
     max_context_tokens: int = 100_000
     skills_dir: str = ""
+    enable_checkpoints: bool = False
+    require_human_approval: bool = False
 
 
 @dataclass

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -97,6 +99,67 @@ class GovernanceNode:
     async def execute(self, ctx: GraphContext) -> GraphContext:
         # Keep policy intent explicit in graph mode; LLM node reads this flag.
         ctx.session_state["budget_blocked"] = not self.harness.governance.check_budget(0.01)
+        return ctx
+
+
+class CheckpointNode:
+    """Checkpoint graph context snapshots for resume/debug workflows."""
+
+    def __init__(self, node_id: str):
+        self.node_id = node_id
+
+    def should_skip(self, ctx: GraphContext) -> bool:
+        return False
+
+    async def execute(self, ctx: GraphContext) -> GraphContext:
+        checkpoints = ctx.session_state.setdefault("checkpoint_snapshots", [])
+        if not isinstance(checkpoints, list):
+            checkpoints = []
+            ctx.session_state["checkpoint_snapshots"] = checkpoints
+        checkpoints.append({
+            "checkpoint_id": uuid.uuid4().hex[:16],
+            "node_id": self.node_id,
+            "turn": int(ctx.session_state.get("current_turn", 0)),
+            "timestamp": time.time(),
+            "message_count": len(ctx.messages),
+            "results_count": len(ctx.session_state.get("results", [])),
+        })
+        return ctx
+
+
+class ApprovalNode:
+    """Initial human gate: halt before tool execution when approval is required."""
+
+    node_id = "approval"
+
+    def __init__(self, harness: AgentHarness, state: GraphTurnState):
+        self.harness = harness
+        self.state = state
+
+    def should_skip(self, ctx: GraphContext) -> bool:
+        llm_response = ctx.session_state.get("llm_response")
+        if llm_response is None or not getattr(llm_response, "tool_calls", None):
+            return True
+        return not bool(self.harness.config.require_human_approval)
+
+    async def execute(self, ctx: GraphContext) -> GraphContext:
+        approved = bool(ctx.session_state.get("approval_granted"))
+        if approved:
+            return ctx
+        turn_number = len(ctx.session_state["results"]) + 1
+        result = TurnResult(
+            turn_number=turn_number,
+            llm_response=ctx.session_state.get("llm_response"),
+            done=True,
+            stop_reason="human_approval_required",
+            error="Awaiting human approval before executing tool calls",
+            cumulative_cost_usd=self.state.cumulative_cost,
+            execution_mode="sequential",
+        )
+        ctx.session_state["results"].append(result)
+        ctx.session_state["approval_pending"] = True
+        self.state.done = True
+        ctx.cancelled = True
         return ctx
 
 
@@ -451,10 +514,18 @@ class RecordNode:
         if isinstance(mw_ctx, MiddlewareContext):
             await self.harness.middleware_chain.run_on_turn_end(mw_ctx)
 
+        turn_node_spans = [
+            s
+            for s in ctx.session_state.get("node_spans", [])
+            if isinstance(s, dict)
+            and isinstance(s.get("attributes"), dict)
+            and int(s["attributes"].get("turn", 0)) == current_turn
+        ]
         await self.harness.event_bus.emit(Event(type=EventType.TURN_END, data={
             "turn": current_turn,
             "execution_mode": latest.execution_mode if latest else "sequential",
             "plan_artifact": latest.plan_artifact if latest else {},
             "reflection": latest.reflection if latest else {},
+            "node_spans": turn_node_spans,
         }))
         return ctx

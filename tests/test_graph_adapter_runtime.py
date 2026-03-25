@@ -487,3 +487,47 @@ async def test_graph_adapter_tool_event_payload_parity_parallel() -> None:
 
     assert ref_tool_calls == graph_tool_calls == ["tool_a", "tool_b"]
     assert ref_tool_results == graph_tool_results == ["tool_a", "tool_b"]
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_human_approval_gate_blocks_tool_execution() -> None:
+    provider = _ToolThenFinalizeProvider()
+    harness = AgentHarness(
+        config=HarnessConfig(
+            max_turns=2,
+            enable_reflection_stage=False,
+            require_human_approval=True,
+        ),
+        llm_router=_router_with_provider(provider),
+        tool_executor=_tool_executor(),
+    )
+    results = await run_with_graph_runtime(harness, "needs approval before tools")
+    assert results
+    assert results[-1].stop_reason == "human_approval_required"
+    assert results[-1].done is True
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_checkpoint_nodes_emit_node_spans() -> None:
+    harness = AgentHarness(
+        config=HarnessConfig(
+            max_turns=1,
+            enable_reflection_stage=False,
+            enable_checkpoints=True,
+        ),
+        llm_router=_router_with_provider(_SimpleProvider()),
+    )
+    turn_end_events = []
+
+    async def _on_turn_end(event):
+        if event.type == EventType.TURN_END:
+            turn_end_events.append(event)
+
+    harness.event_bus.on_all(_on_turn_end)
+    results = await run_with_graph_runtime(harness, "checkpoint trace")
+    assert results[-1].stop_reason == "completed"
+    assert turn_end_events
+    node_spans = turn_end_events[-1].data.get("node_spans", [])
+    span_names = {s.get("name", "") for s in node_spans if isinstance(s, dict)}
+    assert "checkpoint_pre_llm" in span_names
+    assert "checkpoint_post_tools" in span_names
