@@ -153,25 +153,42 @@ class LLMRouter:
         r"\b(email|letter|proposal|presentation|pitch)\b",
     ]
 
+    # Tool names that indicate an agent CAN do each category
+    _CODE_TOOLS = {"bash", "python-exec", "dynamic-exec", "read-file", "write-file",
+                   "edit-file", "grep", "glob", "sandbox_exec"}
+    _RESEARCH_TOOLS = {"web-search", "web-crawl", "browser-render", "browse",
+                       "knowledge-search", "http-request"}
+    _CREATIVE_TOOLS = {"image-generate", "text-to-speech", "speech-to-text"}
+
     def detect_category(self, messages: list[dict[str, str]]) -> TaskCategory:
-        """Detect the task category from conversation content."""
+        """Detect the task category from conversation content + available tools.
+
+        Tools gate what categories are possible. If the agent has no code tools,
+        it can never be CODING regardless of what the user says. This prevents
+        a customer-service agent from being routed to coding models.
+        """
         text = " ".join(m.get("content", "") for m in messages[-3:]).lower()
+        tool_names = {t.get("name", "") for t in self._tools}
+
+        # What categories are this agent CAPABLE of?
+        can_code = bool(tool_names & self._CODE_TOOLS)
+        can_research = bool(tool_names & self._RESEARCH_TOOLS)
+        can_create = bool(tool_names & self._CREATIVE_TOOLS)
 
         coding_score = sum(1 for p in self._CODING_SIGNALS if re.search(p, text))
         research_score = sum(1 for p in self._RESEARCH_SIGNALS if re.search(p, text))
         creative_score = sum(1 for p in self._CREATIVE_SIGNALS if re.search(p, text))
 
-        # Coding signals are very specific — 1 is enough
-        # Research and creative need 2 to avoid false positives
-        if coding_score >= 1 and coding_score >= research_score and coding_score >= creative_score:
+        # Only route to a category if the agent has the tools for it
+        if can_code and coding_score >= 1 and coding_score >= research_score and coding_score >= creative_score:
             return TaskCategory.CODING
-        if research_score >= 2 and research_score > creative_score:
+        if can_research and research_score >= 2 and research_score > creative_score:
             return TaskCategory.RESEARCH
-        if creative_score >= 1 and re.search(r"\b(image|draw|illustrate|voice|audio|tts|narrate)\b", text):
+        if can_create and creative_score >= 1 and re.search(r"\b(image|draw|illustrate|voice|audio|tts|narrate)\b", text):
             return TaskCategory.CREATIVE
-        if creative_score >= 2:
+        if can_create and creative_score >= 2:
             return TaskCategory.CREATIVE
-        if research_score >= 1 and re.search(r"\b(search|find|look up|research|investigate)\b", text):
+        if can_research and research_score >= 1 and re.search(r"\b(search|find|look up|research|investigate)\b", text):
             return TaskCategory.RESEARCH
         return TaskCategory.GENERAL
 
