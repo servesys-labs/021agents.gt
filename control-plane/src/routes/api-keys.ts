@@ -152,7 +152,7 @@ apiKeyRoutes.delete("/:key_id", requireScope("api_keys:write"), async (c) => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
-    UPDATE api_keys SET is_active = ${false}
+    UPDATE api_keys SET is_active = ${0}
     WHERE key_id = ${keyId} AND org_id = ${user.org_id}
     RETURNING key_id
   `;
@@ -203,7 +203,7 @@ apiKeyRoutes.post("/:key_id/rotate", requireScope("api_keys:write"), async (c) =
   const scopesJson = JSON.stringify(scopes);
 
   // Revoke old + create new in sequence
-  await sql`UPDATE api_keys SET is_active = ${false} WHERE key_id = ${keyId}`;
+  await sql`UPDATE api_keys SET is_active = ${0} WHERE key_id = ${keyId}`;
 
   await sql`
     INSERT INTO api_keys (

@@ -23,7 +23,10 @@ import {
   Users,
   Code,
   Terminal,
+  Wrench,
+  Globe,
 } from "lucide-react";
+import { QuotaWidget } from "../common/QuotaWidget";
 
 /* ── Clerk UserButton (lazy-loaded) ────────────────────────────── */
 
@@ -68,13 +71,16 @@ const topNav: NavItem[] = [
   { path: "/guardrails", label: "Guardrails", icon: <ShieldAlert size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/connectors", label: "Connectors", icon: <Plug size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/pipelines", label: "Pipelines", icon: <Database size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/tools", label: "Tools", icon: <Wrench size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/codemode", label: "Codemode", icon: <Code size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/sandbox", label: "Sandbox", icon: <Terminal size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/skills", label: "Skills", icon: <Sparkles size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/jobs", label: "Jobs", icon: <Timer size={iconSize} strokeWidth={iconStroke} /> },
+  { path: "/a2a", label: "A2A", icon: <Globe size={iconSize} strokeWidth={iconStroke} /> },
 ];
 
 const bottomNav: NavItem[] = [
+  { path: "/billing/pricing", label: "Billing", icon: <CreditCard size={iconSize} strokeWidth={iconStroke} /> },
   { path: "/settings", label: "Settings", icon: <Settings size={iconSize} strokeWidth={iconStroke} /> },
 ];
 
@@ -157,6 +163,9 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
               </span>
             </Link>
           ))}
+
+          {/* Quota usage indicator */}
+          <QuotaWidget />
 
           {/* User avatar / menu */}
           <div className="relative mt-1">

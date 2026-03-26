@@ -7,6 +7,7 @@ import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { ORCHESTRATOR_SYSTEM_PROMPT, ORCHESTRATOR_TOOLS } from "../templates/orchestrator";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const projectRoutes = new Hono<R>();
@@ -62,24 +63,55 @@ projectRoutes.post("/", requireScope("projects:write"), async (c) => {
     `;
   }
 
-  // Bootstrap meta-agent using AI binding
+  // Bootstrap meta-agent with full orchestrator prompt and tools
   let metaAgent: any = { name: "", created: false };
   try {
     const agentName = `${slug}-meta-agent` || `project-${projectId.slice(0, 8)}-meta-agent`;
     // Check if already exists
     const existing = await sql`SELECT name FROM agents WHERE name = ${agentName}`;
     if (existing.length === 0) {
-      const systemPrompt = `You are the project meta-agent for ${name}. Project ID: ${projectId}, Plan: ${plan}. ${description}`;
+      // Inject project context into the orchestrator system prompt
+      const projectContext = `\n\n## Project Context\n- Project: ${name}\n- Project ID: ${projectId}\n- Plan: ${plan}\n- Description: ${description || "N/A"}\n`;
+      const systemPrompt = ORCHESTRATOR_SYSTEM_PROMPT + projectContext;
+
+      const configJson = JSON.stringify({
+        name: agentName,
+        system_prompt: systemPrompt,
+        model: "anthropic/claude-sonnet-4-6",
+        tools: ORCHESTRATOR_TOOLS,
+        max_turns: 20,
+        governance: {
+          budget_limit_usd: 20.0,
+          require_confirmation_for_destructive: true,
+          blocked_tools: [],
+          allowed_domains: [],
+        },
+        memory: {
+          working: { max_items: 200 },
+          episodic: { max_episodes: 500, ttl_days: 30 },
+          procedural: { max_procedures: 100 },
+        },
+        tags: ["meta-agent", `project:${projectId}`],
+        plan: "standard",
+      });
+
+      const agentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      const now = Date.now() / 1000;
       await sql`
-        INSERT INTO agents (name, org_id, project_id, description, system_prompt, model, is_active, created_by, created_at)
-        VALUES (${agentName}, ${user.org_id}, ${projectId}, ${`Project Meta-Agent for ${name}`}, ${systemPrompt}, 'anthropic/claude-sonnet-4', true, ${user.user_id}, ${Date.now() / 1000})
+        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, version, is_active, created_by, created_at, updated_at)
+        VALUES (
+          ${agentId}, ${agentName}, ${user.org_id}, ${projectId}, ${configJson},
+          ${`Orchestrator meta-agent for ${name} — builds, tests, and continuously improves all agents`},
+          ${"0.1.0"}, 1, ${user.user_id}, ${now}, ${now}
+        )
       `;
-      metaAgent = { name: agentName, created: true };
+      metaAgent = { name: agentName, created: true, tools_count: ORCHESTRATOR_TOOLS.length };
     } else {
       metaAgent = { name: agentName, created: false };
     }
-  } catch {
-    metaAgent = { name: "", created: false, error: "bootstrap_failed" };
+  } catch (err: any) {
+    console.error("[projects] Meta-agent bootstrap failed:", err?.message || err);
+    metaAgent = { name: "", created: false, error: String(err?.message || "bootstrap_failed").slice(0, 200) };
   }
 
   // Audit

@@ -16,6 +16,10 @@ import {
   CreditCard,
   Plus,
   Upload,
+  Wrench,
+  Globe,
+  FileText,
+  ShieldAlert,
   Bot,
   Command,
   CornerDownLeft,
@@ -55,6 +59,13 @@ const PAGE_ITEMS: Omit<ResultItem, "action">[] = [
   { id: "p-voice", label: "Voice", description: "Voice interface", icon: <Phone size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
   { id: "p-settings", label: "Settings", description: "App settings", icon: <Settings size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
   { id: "p-billing", label: "Billing", description: "Billing & usage", icon: <CreditCard size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
+  { id: "p-tools", label: "Tool Registry", description: "Browse and manage tools", icon: <Wrench size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
+  { id: "p-a2a", label: "A2A Discovery", description: "Discover A2A agents", icon: <Globe size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
+  { id: "p-a2a-compose", label: "A2A Compose Task", description: "Compose an A2A task", icon: <Globe size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
+  { id: "p-pricing", label: "Pricing", description: "Plans and pricing", icon: <CreditCard size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
+  { id: "p-invoices", label: "Invoices", description: "Billing invoices", icon: <FileText size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
+  { id: "p-security-findings", label: "Security Findings", description: "View security findings", icon: <ShieldAlert size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
+  { id: "p-security-report", label: "Security Report", description: "Security audit report", icon: <Shield size={iconSize} strokeWidth={iconStroke} />, group: "pages" },
 ];
 
 const PAGE_ROUTES: Record<string, string> = {
@@ -70,16 +81,27 @@ const PAGE_ROUTES: Record<string, string> = {
   "p-voice": "/voice",
   "p-settings": "/settings",
   "p-billing": "/billing",
+  "p-tools": "/tools",
+  "p-a2a": "/a2a",
+  "p-a2a-compose": "/a2a/compose",
+  "p-pricing": "/billing/pricing",
+  "p-invoices": "/billing/invoices",
+  "p-security-findings": "/security/findings",
+  "p-security-report": "/security/report",
 };
 
 const ACTION_ITEMS: Omit<ResultItem, "action">[] = [
   { id: "a-create-agent", label: "Create Agent", description: "Configure a new agent", icon: <Plus size={iconSize} strokeWidth={iconStroke} />, group: "actions" },
   { id: "a-upload-doc", label: "Upload Document", description: "Add RAG document", icon: <Upload size={iconSize} strokeWidth={iconStroke} />, group: "actions" },
+  { id: "a-create-tool", label: "Create New Tool", description: "Register a new tool", icon: <Wrench size={iconSize} strokeWidth={iconStroke} />, group: "actions" },
+  { id: "a-compose-a2a", label: "Compose A2A Task", description: "Send a task to an A2A agent", icon: <Globe size={iconSize} strokeWidth={iconStroke} />, group: "actions" },
 ];
 
 const ACTION_ROUTES: Record<string, string> = {
   "a-create-agent": "/canvas",
   "a-upload-doc": "/canvas",
+  "a-create-tool": "/tools?action=create",
+  "a-compose-a2a": "/a2a/compose",
 };
 
 /* ── Group labels ──────────────────────────────────────────────── */

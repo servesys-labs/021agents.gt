@@ -234,7 +234,7 @@ agentRoutes.get("/", async (c) => {
   const rows = await sql`
     SELECT name, description, config_json, is_active, created_at, updated_at
     FROM agents
-    WHERE org_id = ${user.org_id} AND is_active = true
+    WHERE org_id = ${user.org_id} AND is_active = 1
     ORDER BY created_at DESC
   `;
 
@@ -323,7 +323,7 @@ agentRoutes.post(
         ${user.project_id || ""},
         ${JSON.stringify(configJson)},
         ${req.description},
-        true,
+        1,
         now(),
         now()
       )
@@ -513,7 +513,7 @@ agentRoutes.delete(
     } else {
       // Soft delete
       await sql`
-        UPDATE agents SET is_active = false, updated_at = now()
+        UPDATE agents SET is_active = 0, updated_at = now()
         WHERE name = ${name} AND org_id = ${user.org_id}
       `;
       counts.agent = 1;
@@ -718,7 +718,7 @@ agentRoutes.post(
         ${user.project_id || ""},
         ${JSON.stringify(config)},
         ${String(config.description || "")},
-        true,
+        1,
         now(),
         now()
       )
@@ -960,7 +960,7 @@ agentRoutes.post(
         ${user.project_id || ""},
         ${JSON.stringify(config)},
         ${String(config.description || "")},
-        true,
+        1,
         now(),
         now()
       )

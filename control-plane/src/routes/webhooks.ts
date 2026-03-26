@@ -100,7 +100,7 @@ webhookRoutes.put("/:webhook_id", requireScope("webhooks:write"), async (c) => {
     await sql`UPDATE webhooks SET events = ${eventsJson} WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}`;
   }
   if (isActive !== undefined) {
-    await sql`UPDATE webhooks SET is_active = ${isActive ? true : false} WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}`;
+    await sql`UPDATE webhooks SET is_active = ${isActive ? 1 : 0} WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}`;
   }
 
   return c.json({ updated: webhookId });
@@ -234,7 +234,7 @@ webhookRoutes.post("/:webhook_id/incoming", async (c) => {
   const sql = await getDb(c.env.HYPERDRIVE);
 
   const rows = await sql`
-    SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND is_active = true
+    SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND is_active = 1
   `;
   if (rows.length === 0) return c.json({ error: "Webhook not found or inactive" }, 404);
   const webhook = rows[0] as any;

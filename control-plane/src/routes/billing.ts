@@ -160,7 +160,7 @@ billingRoutes.get("/pricing", requireScope("billing:read"), async (c) => {
   const sql = await getDb(c.env.HYPERDRIVE);
 
   // Build query dynamically with filters
-  let query = "SELECT * FROM pricing_catalog WHERE is_active = true";
+  let query = "SELECT * FROM pricing_catalog WHERE is_active = 1";
   const params: (string | boolean)[] = [];
 
   if (resourceType) {
@@ -214,10 +214,10 @@ billingRoutes.post("/pricing", requireScope("billing:write"), async (c) => {
 
   // Deactivate existing active row for same key
   await sql`
-    UPDATE pricing_catalog SET is_active = false
+    UPDATE pricing_catalog SET is_active = 0
     WHERE provider = ${provider} AND model = ${model}
       AND resource_type = ${resourceType} AND operation = ${operation}
-      AND unit = ${unit} AND is_active = true
+      AND unit = ${unit} AND is_active = 1
   `;
 
   const [row] = await sql`

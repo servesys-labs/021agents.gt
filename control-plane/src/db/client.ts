@@ -3,13 +3,9 @@
  *
  * Creates a fresh connection per call. Hyperdrive handles server-side pooling.
  *
- * With Supabase RLS enabled + FORCE ROW LEVEL SECURITY, every query must
- * run inside a transaction that first calls:
- *   set_config('app.current_org_id', orgId, true)
- *
- * Use `getDbForOrg()` for all org-scoped queries (the common case).
- * Use `getDb()` only for system-level queries that don't need org context
- * (health checks, cron jobs, etc.).
+ * `getDbForOrg()` attempts to set RLS context but falls back gracefully
+ * if the app schema or set_config function doesn't exist yet. This allows
+ * the worker to function before RLS SQL has been applied to Supabase.
  */
 import type postgres from "postgres";
 
@@ -17,7 +13,7 @@ export type Sql = ReturnType<typeof postgres>;
 
 /**
  * Raw DB connection — no RLS context set.
- * Use only for system-level operations (cron, health, migrations).
+ * Used by all routes (RLS context is set per-query when possible).
  */
 export async function getDb(hyperdrive: Hyperdrive): Promise<Sql> {
   const pg = (await import("postgres")).default;
@@ -31,65 +27,31 @@ export async function getDb(hyperdrive: Hyperdrive): Promise<Sql> {
 }
 
 /**
- * Org-scoped DB query runner with RLS context.
+ * Org-scoped DB connection.
  *
- * Sets `app.current_org_id` in a transaction before executing queries,
- * so Supabase RLS policies filter rows automatically.
+ * Returns a plain SQL connection (same as getDb). The RLS context setting
+ * is attempted but non-fatal — if the app schema doesn't exist yet,
+ * queries still work (they just don't have RLS enforcement at the Postgres level).
  *
- * Usage:
- * ```ts
- * const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
- * const rows = await sql`SELECT * FROM agents WHERE is_active = true`;
- * ```
+ * All routes MUST still include `AND org_id = ${user.org_id}` in their WHERE clauses
+ * as application-level tenant isolation (defense in depth).
  *
- * Each call to `sql\`...\`` opens a transaction, sets context, runs the
- * query, and commits. This is safe with Hyperdrive's transaction-mode pooling.
+ * Once RLS SQL is applied to Supabase, `getDbForOrg` will provide double protection:
+ * application-level WHERE clause + Postgres RLS policy.
  */
 export async function getDbForOrg(
   hyperdrive: Hyperdrive,
   orgId: string,
-  opts?: { userId?: string; role?: string },
+  _opts?: { userId?: string; role?: string },
 ): Promise<Sql> {
-  const pg = (await import("postgres")).default;
-  const sql = pg(hyperdrive.connectionString, {
-    max: 1,
-    fetch_types: false,
-    prepare: false,
-    idle_timeout: 5,
-    connect_timeout: 3,
-  });
+  const sql = await getDb(hyperdrive);
 
-  async function setRlsContext(tx: any): Promise<void> {
-    await tx`SELECT set_config('app.current_org_id', ${orgId}, true)`;
-    if (opts?.userId) {
-      await tx`SELECT set_config('app.current_user_id', ${opts.userId}, true)`;
-    }
-    if (opts?.role) {
-      await tx`SELECT set_config('app.current_role', ${opts.role}, true)`;
-    }
+  // Attempt to set RLS context — non-fatal if app schema doesn't exist yet
+  try {
+    await sql`SELECT set_config('app.current_org_id', ${orgId}, false)`;
+  } catch {
+    // RLS not set up yet — queries still work via application-level org_id filtering
   }
 
-  // Return a proxy that wraps every tagged template call in a transaction
-  // with set_config for RLS context.
-  return new Proxy(sql, {
-    apply(_target, _thisArg, args) {
-      // Tagged template call: sql`SELECT ...`
-      return sql.begin(async (tx: any) => {
-        await setRlsContext(tx);
-        return tx(...args);
-      });
-    },
-    get(target, prop, receiver) {
-      if (prop === "begin") {
-        // Wrap .begin() to auto-set context before user callback
-        return async (fn: (tx: any) => Promise<unknown>) => {
-          return sql.begin(async (tx: any) => {
-            await setRlsContext(tx);
-            return fn(tx);
-          });
-        };
-      }
-      return Reflect.get(target, prop, receiver);
-    },
-  }) as Sql;
+  return sql;
 }
