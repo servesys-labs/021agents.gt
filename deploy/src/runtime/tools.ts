@@ -506,6 +506,57 @@ async function executeSingleTool(
     };
   }
 
+  // ── Governance: Domain allowlist check ────────────────────────
+  const config = (env as any).__agentConfig as
+    | { allowed_domains?: string[]; require_confirmation_for_destructive?: boolean; max_tokens_per_turn?: number }
+    | undefined;
+
+  if (config?.allowed_domains && config.allowed_domains.length > 0) {
+    const urlTools = new Set(["browse", "http-request", "web-crawl", "browser-render", "a2a-send"]);
+    if (urlTools.has(tc.name)) {
+      const targetUrl = String(args.url || args.endpoint || "");
+      if (targetUrl) {
+        try {
+          const hostname = new URL(targetUrl).hostname;
+          const allowed = config.allowed_domains.some(
+            (d) => hostname === d || hostname.endsWith(`.${d}`),
+          );
+          if (!allowed) {
+            return {
+              tool: tc.name, tool_call_id: tc.id, result: "",
+              error: `Domain '${hostname}' not in allowed domains: ${config.allowed_domains.join(", ")}`,
+              latency_ms: Date.now() - started,
+            };
+          }
+        } catch { /* invalid URL — SSRF check will catch it */ }
+      }
+    }
+  }
+
+  // ── Governance: Destructive action detection ──────────────────
+  if (config?.require_confirmation_for_destructive) {
+    const DESTRUCTIVE_KEYWORDS = /\b(delete|drop|remove|destroy|kill|force|truncate|wipe|purge)\b/i;
+    const toolArgs = JSON.stringify(args);
+    const destructiveTools = new Set(["delete-agent", "bash", "python-exec", "manage-secrets", "manage-retention"]);
+    if (destructiveTools.has(tc.name) || DESTRUCTIVE_KEYWORDS.test(toolArgs)) {
+      // Check if the tool call looks destructive
+      const isDestructive = destructiveTools.has(tc.name) || DESTRUCTIVE_KEYWORDS.test(toolArgs);
+      if (isDestructive) {
+        return {
+          tool: tc.name, tool_call_id: tc.id,
+          result: JSON.stringify({
+            blocked: true,
+            reason: "Destructive action requires human confirmation",
+            action: toolArgs.slice(0, 200),
+            tool: tc.name,
+          }),
+          error: "governance:destructive_blocked",
+          latency_ms: Date.now() - started,
+        };
+      }
+    }
+  }
+
   try {
     const result = await dispatch(env, tc.name, args, sessionId);
     const latencyMs = Date.now() - started;
@@ -1868,6 +1919,58 @@ async function dispatch(
         return `Unknown action: ${action}. Use list or register.`;
       } catch (err: any) {
         return `manage-mcp failed: ${err.message || err}`;
+      }
+    }
+
+    case "manage-voice": {
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "manage-voice requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const orgId = args.org_id || "";
+      const action = String(args.action || "list");
+      try {
+        if (action === "list") {
+          const rows = await sql`SELECT * FROM voice_calls WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`.catch(() => []);
+          return JSON.stringify({ calls: rows, count: rows.length });
+        }
+        return `Unknown action: ${action}. Use list.`;
+      } catch (err: any) {
+        return `manage-voice failed: ${err.message || err}`;
+      }
+    }
+
+    case "manage-gpu": {
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "manage-gpu requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const orgId = args.org_id || "";
+      const action = String(args.action || "list");
+      try {
+        if (action === "list") {
+          const rows = await sql`SELECT * FROM gpu_endpoints WHERE org_id = ${orgId} ORDER BY created_at DESC`.catch(() => []);
+          return JSON.stringify({ endpoints: rows, count: rows.length });
+        }
+        if (action === "provision") {
+          const gpuType = String(args.gpu_type || "h100");
+          const modelId = String(args.model_id || "");
+          const gpuId = crypto.randomUUID().slice(0, 12);
+          await sql`
+            INSERT INTO gpu_endpoints (id, org_id, model_id, gpu_type, status, created_at)
+            VALUES (${gpuId}, ${orgId}, ${modelId}, ${gpuType}, 'provisioning', ${Date.now() / 1000})
+          `;
+          return JSON.stringify({ provisioned: true, gpu_id: gpuId, gpu_type: gpuType });
+        }
+        if (action === "terminate") {
+          const gpuId = String(args.gpu_id || "");
+          if (!gpuId) return "terminate requires gpu_id";
+          await sql`UPDATE gpu_endpoints SET status = 'terminated' WHERE id = ${gpuId} AND org_id = ${orgId}`;
+          return JSON.stringify({ terminated: true, gpu_id: gpuId });
+        }
+        return `Unknown action: ${action}. Use list, provision, or terminate.`;
+      } catch (err: any) {
+        return `manage-gpu failed: ${err.message || err}`;
       }
     }
 
