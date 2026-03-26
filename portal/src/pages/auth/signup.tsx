@@ -44,7 +44,7 @@ function ClerkSignupPage() {
               formFieldInput:
                 "bg-surface-overlay/80 border-border-default text-text-primary rounded-lg",
               formButtonPrimary:
-                "bg-accent hover:bg-accent-hover text-white rounded-lg min-h-[var(--touch-target-min)]",
+                "!bg-accent hover:!bg-accent-hover !text-white !shadow-none rounded-lg min-h-[var(--touch-target-min)]",
               footerActionLink: "text-accent hover:text-accent-hover",
               socialButtonsBlockButton:
                 "bg-surface-overlay/70 border-border-default text-text-primary hover:bg-surface-hover rounded-lg",

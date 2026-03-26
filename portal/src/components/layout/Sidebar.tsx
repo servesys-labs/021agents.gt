@@ -27,10 +27,8 @@ import {
   Globe,
   ChevronRight,
   Activity,
-  BarChart3,
   Eye,
   Lock,
-  Cog,
 } from "lucide-react";
 import { QuotaWidget } from "../common/QuotaWidget";
 
@@ -156,7 +154,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
 
   const isActive = (path: string) => {
     if (path === "/") return pathname === "/" || pathname === "/canvas";
-    return pathname.startsWith(path);
+    return pathname === path || pathname.startsWith(path + "/");
   };
 
   // Check if any item in a group is active
@@ -230,30 +228,33 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                   />
                 </button>
 
-                {/* Group items — animated expand/collapse */}
+                {/* Group items — animated expand/collapse via grid-template-rows */}
                 <div
-                  className="flex flex-col gap-0.5 mt-0.5 overflow-hidden transition-all duration-200 ease-out"
+                  className="grid mt-0.5"
                   style={{
-                    maxHeight: expanded ? `${group.items.length * 40}px` : "0px",
+                    gridTemplateRows: expanded ? "1fr" : "0fr",
                     opacity: expanded ? 1 : 0,
+                    transition: `grid-template-rows var(--duration-normal) var(--ease-out), opacity var(--duration-fast) var(--ease-default)`,
                   }}
                 >
-                  {group.items.map((item) => (
-                    <Link
-                      key={item.path}
-                      to={item.path}
-                      aria-label={item.label}
-                      aria-current={isActive(item.path) ? "page" : undefined}
-                      className={`flex items-center gap-2.5 pl-5 pr-2.5 h-9 rounded-lg transition-colors text-xs font-medium ${
-                        isActive(item.path)
-                          ? "bg-accent-muted text-accent"
-                          : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
-                      }`}
-                    >
-                      {item.icon}
-                      {item.label}
-                    </Link>
-                  ))}
+                  <div className="flex flex-col gap-0.5 overflow-hidden">
+                    {group.items.map((item) => (
+                      <Link
+                        key={item.path}
+                        to={item.path}
+                        aria-label={item.label}
+                        aria-current={isActive(item.path) ? "page" : undefined}
+                        className={`flex items-center gap-2.5 pl-5 pr-2.5 h-9 rounded-lg transition-colors text-xs font-medium ${
+                          isActive(item.path)
+                            ? "bg-accent-muted text-accent"
+                            : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
+                        }`}
+                      >
+                        {item.icon}
+                        {item.label}
+                      </Link>
+                    ))}
+                  </div>
                 </div>
               </div>
             );

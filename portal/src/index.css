@@ -1111,7 +1111,12 @@ table tr:hover td {
   contain: layout paint;
 }
 
-/* Glass surfaces — isolated compositing layer for backdrop-filter */
+/*
+ * Glass surfaces — layout containment only (not paint).
+ * backdrop-filter creates its own stacking context; adding paint
+ * containment would double-isolate and potentially clip the ::before
+ * top-edge highlight pseudo-element at the element boundary.
+ */
 .glass-heavy,
 .glass-medium,
 .glass-light,

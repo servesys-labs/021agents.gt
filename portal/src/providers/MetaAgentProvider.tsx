@@ -67,6 +67,14 @@ export function useMetaAgent(): MetaAgentState {
 function getSuggestions(ctx: PageContext): Suggestion[] {
   const { page, agentName } = ctx;
 
+  /*
+   * Route matching order matters:
+   * 1. Exact matches first (/, /agents, /agents/new)
+   * 2. Parameterized matches (/agents/:name) — requires agentName
+   * 3. Prefix matches (/sessions/*, /issues/*, etc.)
+   * 4. Default fallback
+   */
+
   // Dashboard — general getting-started
   if (page === "/") {
     return [
@@ -76,8 +84,8 @@ function getSuggestions(ctx: PageContext): Suggestion[] {
     ];
   }
 
-  // Agent creation
-  if (page === "/agents/new" || page === "/agents") {
+  // Agent creation / list — exact matches before parameterized
+  if (page === "/agents" || page === "/agents/new") {
     return [
       { label: "Create from description", prompt: "Create an agent that handles customer support tickets with access to order lookup and refund tools", icon: "+" },
       { label: "Suggest tools", prompt: agentName ? `Suggest the best tools for ${agentName}` : "What tools should a support agent have?", icon: "W" },
@@ -85,8 +93,8 @@ function getSuggestions(ctx: PageContext): Suggestion[] {
     ];
   }
 
-  // Agent detail — config, testing, improvement
-  if (page.startsWith("/agents/") && agentName) {
+  // Agent detail — config, testing, improvement (parameterized, must come after exact /agents match)
+  if (agentName && (page === `/agents/${agentName}` || page.startsWith(`/agents/${agentName}/`))) {
     return [
       { label: "Analyze performance", prompt: `Analyze the recent performance of ${agentName} — quality scores, error rate, and latency trends`, icon: "~" },
       { label: "Suggest improvements", prompt: `Review ${agentName}'s config and suggest improvements to reduce errors and improve quality`, icon: "*" },
@@ -179,7 +187,7 @@ export function MetaAgentProvider({ children }: { children: ReactNode }) {
   const send = useCallback(
     async (prompt: string) => {
       const userMsg: ChatMessage = { role: "user", text: prompt, timestamp: Date.now() };
-      setMessages((prev) => [...prev, userMsg]);
+      setMessages((prev) => [...prev, userMsg].slice(-100));
       setProcessing(true);
 
       try {
@@ -236,14 +244,14 @@ export function MetaAgentProvider({ children }: { children: ReactNode }) {
           text: responseText,
           timestamp: Date.now(),
         };
-        setMessages((prev) => [...prev, assistantMsg]);
+        setMessages((prev) => [...prev, assistantMsg].slice(-100));
       } catch (err) {
         const errorMsg: ChatMessage = {
           role: "assistant",
           text: `Something went wrong: ${err instanceof Error ? err.message : "Unknown error"}. Try again or check the console.`,
           timestamp: Date.now(),
         };
-        setMessages((prev) => [...prev, errorMsg]);
+        setMessages((prev) => [...prev, errorMsg].slice(-100));
       } finally {
         setProcessing(false);
       }
