@@ -145,10 +145,11 @@ export const DashboardPage = () => {
 
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        {kpis.map((kpi) => (
+        {kpis.map((kpi, index) => (
           <div
             key={kpi.label}
-            className="card flex items-center gap-3 py-3 cursor-pointer hover:border-accent/40 transition-colors"
+            className="card flex items-center gap-3 py-3 cursor-pointer hover:border-accent/40 transition-colors stagger-item"
+            style={{ "--stagger-index": index } as CSSProperties}
             onClick={() => navigate(kpi.link)}
           >
             <div className={`p-2 rounded-lg ${kpi.color}`}>
@@ -182,12 +183,13 @@ export const DashboardPage = () => {
             </button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {agentCards.map((agent) => (
-              <AgentCard
-                key={agent.name}
-                agent={agent}
-                onSelect={(name) => navigate(`/agents?selected=${name}`)}
-              />
+            {agentCards.map((agent, index) => (
+              <div className="stagger-item" style={{ "--stagger-index": index } as CSSProperties} key={agent.name}>
+                <AgentCard
+                  agent={agent}
+                  onSelect={(name) => navigate(`/agents?selected=${name}`)}
+                />
+              </div>
             ))}
           </div>
         </div>
@@ -198,10 +200,11 @@ export const DashboardPage = () => {
         <div className="card">
           <h3 className="text-sm font-semibold text-text-primary mb-3">Quick Actions</h3>
           <div className="space-y-2">
-            {quickActions.map((action) => (
+            {quickActions.map((action, index) => (
               <button
                 key={action.label}
-                className="w-full flex items-center gap-3 p-3 bg-surface-base border border-border-default rounded-lg hover:border-accent/40 hover:bg-surface-overlay transition-all text-left group"
+                className="w-full flex items-center gap-3 p-3 bg-surface-base border border-border-default rounded-lg hover:border-accent/40 hover:bg-surface-overlay transition-all text-left group stagger-item"
+                style={{ "--stagger-index": index } as CSSProperties}
                 onClick={() => navigate(action.path)}
               >
                 <div className="p-2 rounded-lg bg-accent/10">
@@ -282,7 +285,7 @@ function SystemHealthCard() {
   ];
 
   return (
-    <div className="card mt-4">
+    <div className="card card-glass mt-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-text-primary">System Health</h3>
         {health.uptime_seconds != null && (
@@ -426,7 +429,7 @@ function CostOverviewCard() {
   const topAgents = Object.entries(byAgent).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
   return (
-    <div className="card mt-4">
+    <div className="card card-glass mt-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-text-primary">Cost Overview</h3>
         <span className="text-xs font-mono text-accent">${totalCost.toFixed(4)}</span>
