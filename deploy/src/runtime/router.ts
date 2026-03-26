@@ -15,15 +15,16 @@
 
 // ── Types ─────────────────────────────────────────────────────
 
-export type ComplexityTier = "simple" | "moderate" | "complex" | "tool_call";
+export type ComplexityTier = "simple" | "moderate" | "complex" | "tool_call" | "image_gen" | "vision" | "tts" | "stt";
 
-export type TaskCategory = "coding" | "research" | "creative" | "general";
+export type TaskCategory = "coding" | "research" | "creative" | "multimodal" | "general";
 
 export type TaskRole =
   | "planner" | "implementer" | "reviewer" | "debugger"  // coding
   | "search" | "analyze" | "synthesize"                    // research
   | "write" | "image" | "voice"                            // creative
-  | "simple" | "moderate" | "complex" | "tool_call";       // general
+  | "simple" | "moderate" | "complex" | "tool_call"        // general
+  | "image_gen" | "vision" | "tts" | "stt";               // multimodal
 
 export interface RouteDecision {
   model: string;
@@ -82,7 +83,19 @@ const CREATIVE_SIGNALS = [
 /**
  * Classify task complexity tier.
  */
+// Multimodal detection patterns
+const IMAGE_GEN_SIGNALS = [/\b(generate|create|draw|make)\b.*\b(image|picture|photo|illustration|art)\b/i, /\bimage.?gen/i, /\bdall-?e\b/i];
+const VISION_SIGNALS = [/\b(look at|describe|analyze)\b.*\b(image|picture|photo|screenshot)\b/i, /\bvision\b/i, /\bOCR\b/i];
+const TTS_SIGNALS = [/\b(read aloud|speak|say|text.?to.?speech|TTS)\b/i, /\bvoice\b.*\b(generate|output)\b/i];
+const STT_SIGNALS = [/\b(transcribe|speech.?to.?text|STT|listen to)\b/i, /\baudio\b.*\b(text|convert)\b/i];
+
 export function classifyComplexity(input: string): ComplexityTier {
+  // Check multimodal first — these are specialized tiers
+  if (IMAGE_GEN_SIGNALS.some((r) => r.test(input))) return "image_gen";
+  if (VISION_SIGNALS.some((r) => r.test(input))) return "vision";
+  if (TTS_SIGNALS.some((r) => r.test(input))) return "tts";
+  if (STT_SIGNALS.some((r) => r.test(input))) return "stt";
+
   const words = input.split(/\s+/).length;
   const complexScore = COMPLEX_SIGNALS.filter((r) => r.test(input)).length;
   const simpleScore = SIMPLE_SIGNALS.filter((r) => r.test(input)).length;
@@ -96,14 +109,20 @@ export function classifyComplexity(input: string): ComplexityTier {
  * Classify task category.
  */
 export function classifyCategory(input: string): TaskCategory {
+  // Check multimodal first
+  const multimodalScore = [...IMAGE_GEN_SIGNALS, ...VISION_SIGNALS, ...TTS_SIGNALS, ...STT_SIGNALS]
+    .filter((r) => r.test(input)).length;
+
   const scores = {
     coding: CODING_SIGNALS.filter((r) => r.test(input)).length,
     research: RESEARCH_SIGNALS.filter((r) => r.test(input)).length,
     creative: CREATIVE_SIGNALS.filter((r) => r.test(input)).length,
+    multimodal: multimodalScore,
   };
 
-  const max = Math.max(scores.coding, scores.research, scores.creative);
+  const max = Math.max(scores.coding, scores.research, scores.creative, scores.multimodal);
   if (max === 0) return "general";
+  if (scores.multimodal === max && scores.multimodal > 0) return "multimodal";
   if (scores.coding === max) return "coding";
   if (scores.research === max) return "research";
   return "creative";
