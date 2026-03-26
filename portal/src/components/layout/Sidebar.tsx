@@ -173,8 +173,8 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
         Skip to main content
       </a>
 
-      {/* Nav rail — 180px, grouped with labels */}
-      <aside className="flex flex-col w-[180px] flex-shrink-0 bg-surface-raised border-r border-border-subtle">
+      {/* Nav rail — 180px, grouped with labels, glass effect */}
+      <aside className="flex flex-col w-[180px] flex-shrink-0 border-r border-border-subtle glass-heavy relative">
         {/* Logo */}
         <Link
           to="/"
@@ -230,27 +230,31 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                   />
                 </button>
 
-                {/* Group items */}
-                {expanded && (
-                  <div className="flex flex-col gap-0.5 mt-0.5">
-                    {group.items.map((item) => (
-                      <Link
-                        key={item.path}
-                        to={item.path}
-                        aria-label={item.label}
-                        aria-current={isActive(item.path) ? "page" : undefined}
-                        className={`flex items-center gap-2.5 pl-5 pr-2.5 h-9 rounded-lg transition-colors text-xs font-medium ${
-                          isActive(item.path)
-                            ? "bg-accent-muted text-accent"
-                            : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
-                        }`}
-                      >
-                        {item.icon}
-                        {item.label}
-                      </Link>
-                    ))}
-                  </div>
-                )}
+                {/* Group items — animated expand/collapse */}
+                <div
+                  className="flex flex-col gap-0.5 mt-0.5 overflow-hidden transition-all duration-200 ease-out"
+                  style={{
+                    maxHeight: expanded ? `${group.items.length * 40}px` : "0px",
+                    opacity: expanded ? 1 : 0,
+                  }}
+                >
+                  {group.items.map((item) => (
+                    <Link
+                      key={item.path}
+                      to={item.path}
+                      aria-label={item.label}
+                      aria-current={isActive(item.path) ? "page" : undefined}
+                      className={`flex items-center gap-2.5 pl-5 pr-2.5 h-9 rounded-lg transition-colors text-xs font-medium ${
+                        isActive(item.path)
+                          ? "bg-accent-muted text-accent"
+                          : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
+                      }`}
+                    >
+                      {item.icon}
+                      {item.label}
+                    </Link>
+                  ))}
+                </div>
               </div>
             );
           })}
