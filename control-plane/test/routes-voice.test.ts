@@ -8,9 +8,10 @@ import { verifyWebhookHmac } from "../src/logic/voice-webhook";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -57,23 +58,27 @@ async function hmacHex(secret: string, message: string): Promise<string> {
 describe("voice routes", () => {
   beforeEach(() => {
     vi.mocked(getDb).mockReset();
+    vi.mocked(getDbForOrg).mockReset();
   });
 
   it("GET unknown platform calls returns 404", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp();
     const res = await app.request("/elevenlabs/calls", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);
   });
 
   it("GET vapi call detail is org-scoped (404 other org)", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const q = strings.join("?");
       if (q.includes("FROM voice_calls") && q.includes("org_id")) {
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp("org-a");
     const res = await app.request("/vapi/calls/call-1", { method: "GET" }, mockEnv());
@@ -81,13 +86,15 @@ describe("voice routes", () => {
   });
 
   it("GET vapi call detail returns row when org matches", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql2 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const q = strings.join("?");
       if (q.includes("FROM voice_calls") && q.includes("org_id")) {
         return [{ call_id: "call-1", org_id: "org-a", platform: "vapi" }];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql2);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
 
     const app = buildApp("org-a");
     const res = await app.request("/vapi/calls/call-1", { method: "GET" }, mockEnv());
@@ -97,12 +104,14 @@ describe("voice routes", () => {
   });
 
   it("GET vapi call events is org-scoped", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql3 = (async (strings: TemplateStringsArray) => {
       const q = strings.join("?");
       if (q.includes("SELECT 1 FROM voice_calls")) return [];
       if (q.includes("voice_call_events")) return [{ id: 1 }];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql3);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql3);
 
     const app = buildApp("org-a");
     const res = await app.request("/vapi/calls/x/events", { method: "GET" }, mockEnv());
@@ -111,18 +120,21 @@ describe("voice routes", () => {
 
   it("GET tavus call detail is org-scoped", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp("org-a");
     const res = await app.request("/tavus/calls/conv-1", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);
   });
 
   it("GET tavus call events includes platform and respects org", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql4 = (async (strings: TemplateStringsArray) => {
       const q = strings.join("?");
       if (q.includes("SELECT 1 FROM voice_calls")) return [{ "?": 1 }];
       if (q.includes("voice_call_events")) return [{ evt: 1 }];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql4);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql4);
 
     const app = buildApp("org-a");
     const res = await app.request("/tavus/calls/c1/events", { method: "GET" }, mockEnv());
@@ -134,6 +146,7 @@ describe("voice routes", () => {
 
   it("POST /vapi/webhook accepts when webhook secret unset", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp();
     const payload = { message: { type: "call.started", call: { id: "c1" } } };
     const res = await app.request("/vapi/webhook", {
@@ -149,6 +162,7 @@ describe("voice routes", () => {
 
   it("POST /vapi/webhook rejects bad signature when secret set", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp();
     const raw = JSON.stringify({ ok: true });
     const res = await app.request("/vapi/webhook", {
@@ -164,6 +178,7 @@ describe("voice routes", () => {
 
   it("POST /vapi/webhook accepts valid signature", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp();
     const raw = JSON.stringify({ message: { type: "hang", call: { id: "c9" } } });
     const sig = await hmacHex("whsec", raw);
@@ -190,6 +205,7 @@ describe("voice routes", () => {
 
   it("POST /tavus/webhook accepts payload without secret", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp();
     const res = await app.request("/tavus/webhook", {
       method: "POST",
@@ -201,6 +217,7 @@ describe("voice routes", () => {
 
   it("POST /vapi/calls returns 400 without API key", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp();
     const res = await app.request("/vapi/calls", {
       method: "POST",
@@ -226,6 +243,7 @@ describe("voice routes", () => {
       ) as any;
 
       vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
       const app = buildApp("org-x");
       const res = await app.request("/vapi/calls", {
         method: "POST",
@@ -246,6 +264,7 @@ describe("voice routes", () => {
     it("DELETE /vapi/calls/:id proxies end call", async () => {
       globalThis.fetch = vi.fn(async () => new Response(null, { status: 204 })) as any;
       vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
       const app = buildApp();
       const res = await app.request("/vapi/calls/abc", { method: "DELETE" }, mockEnv({ VAPI_API_KEY: "vk" }));
       expect(res.status).toBe(200);
@@ -261,6 +280,7 @@ describe("voice routes", () => {
         }),
       ) as any;
       vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
       const app = buildApp("org-z");
       const res = await app.request("/tavus/calls", {
         method: "POST",
@@ -274,6 +294,7 @@ describe("voice routes", () => {
 
     it("POST /tavus/calls returns 400 without Tavus key", async () => {
       vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
       const app = buildApp();
       const res = await app.request("/tavus/calls", {
         method: "POST",

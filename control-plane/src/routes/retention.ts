@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -23,7 +23,7 @@ const VALID_RESOURCE_TYPES = new Set([
 
 retentionRoutes.get("/", requireScope("retention:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM retention_policies WHERE org_id = ${user.org_id} OR org_id = '' ORDER BY resource_type
   `;
@@ -51,7 +51,7 @@ retentionRoutes.post("/", requireScope("retention:write"), async (c) => {
     );
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const policyId = genId();
 
   await sql`
@@ -65,14 +65,14 @@ retentionRoutes.post("/", requireScope("retention:write"), async (c) => {
 retentionRoutes.delete("/:policy_id", requireScope("retention:write"), async (c) => {
   const user = c.get("user");
   const policyId = c.req.param("policy_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM retention_policies WHERE policy_id = ${policyId} AND org_id = ${user.org_id}`;
   return c.json({ deleted: policyId });
 });
 
 retentionRoutes.post("/apply", requireScope("retention:write"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Get all active policies for the org
   const policies = await sql`

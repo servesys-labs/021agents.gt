@@ -8,7 +8,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import rawDefault from "../../../config/default.json";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -133,7 +133,7 @@ plansRoutes.post("/", async (c) => {
     tool_call: { provider, model: toolModel, max_tokens: 4096 },
   };
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = Date.now() / 1000;
 
   let existing: Record<string, unknown> = {};

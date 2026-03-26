@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { classifyIssue } from "../logic/issue-classifier";
 import { suggestFix, autoRemediate } from "../logic/issue-remediation";
 import { detectFromSession } from "../logic/issue-detector";
@@ -49,7 +49,7 @@ function randomId(): string {
 issueRoutes.get("/summary", requireScope("issues:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.query("agent_name") ?? "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -111,7 +111,7 @@ issueRoutes.get("/", requireScope("issues:read"), async (c) => {
   const category = c.req.query("category") ?? "";
   const severity = c.req.query("severity") ?? "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Build query based on filters present
   let rows;
@@ -192,7 +192,7 @@ issueRoutes.post("/", requireScope("issues:write"), async (c) => {
   }
 
   const req = parsed.data;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const issueId = randomId();
 
   // Auto-classify
@@ -238,7 +238,7 @@ issueRoutes.post("/", requireScope("issues:write"), async (c) => {
 issueRoutes.post("/detect/:session_id", requireScope("issues:write"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load session
   const sessionRows = await sql`
@@ -302,7 +302,7 @@ issueRoutes.post("/detect/:session_id", requireScope("issues:write"), async (c) 
 issueRoutes.get("/:issue_id", requireScope("issues:read"), async (c) => {
   const user = c.get("user");
   const issueId = c.req.param("issue_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1
   `;
@@ -323,7 +323,7 @@ issueRoutes.put("/:issue_id", requireScope("issues:write"), async (c) => {
     return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;
   if (!existing.length) {
     return c.json({ error: "Issue not found" }, 404);
@@ -366,7 +366,7 @@ issueRoutes.put("/:issue_id", requireScope("issues:write"), async (c) => {
 issueRoutes.post("/:issue_id/resolve", requireScope("issues:write"), async (c) => {
   const user = c.get("user");
   const issueId = c.req.param("issue_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;
   if (!existing.length) {
@@ -390,7 +390,7 @@ issueRoutes.post("/:issue_id/resolve", requireScope("issues:write"), async (c) =
 issueRoutes.post("/:issue_id/triage", requireScope("issues:write"), async (c) => {
   const user = c.get("user");
   const issueId = c.req.param("issue_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;
   if (!existing.length) {
@@ -431,7 +431,7 @@ issueRoutes.post("/:issue_id/triage", requireScope("issues:write"), async (c) =>
 issueRoutes.post("/:issue_id/auto-fix", requireScope("issues:write"), async (c) => {
   const user = c.get("user");
   const issueId = c.req.param("issue_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;
   if (!existing.length) {

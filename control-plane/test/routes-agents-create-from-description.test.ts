@@ -7,6 +7,7 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
 vi.mock("../src/logic/meta-agent", () => ({
@@ -37,7 +38,7 @@ vi.mock("../src/logic/gate-pack", () => ({
   lintSuggestionsFromErrors: () => [],
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -68,6 +69,7 @@ function buildApp(orgId = "org-a") {
 describe("agents create-from-description hold gate behavior", () => {
   it("returns 409 when rollout is hold and override is missing", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp("org-a");
 
     const res = await app.request(
@@ -90,6 +92,7 @@ describe("agents create-from-description hold gate behavior", () => {
 
   it("returns 422 when override is requested without reason", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp("org-a");
 
     const res = await app.request(

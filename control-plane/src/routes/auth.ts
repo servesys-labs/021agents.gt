@@ -151,37 +151,68 @@ authRoutes.post("/signup", async (c) => {
   }
   const { email, password, name } = parsed.data;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  let sql;
+  try {
+    sql = await getDb(c.env.HYPERDRIVE);
+  } catch (err: any) {
+    console.error("[auth/signup] DB connection failed:", err);
+    return c.json({ error: "Database unavailable", detail: err.message }, 503);
+  }
 
   // Check if user already exists
-  const existing = await sql`SELECT user_id FROM users WHERE email = ${email}`;
-  if (existing.length > 0) {
-    return c.json({ error: "Email already registered" }, 409);
+  try {
+    const existing = await sql`SELECT user_id FROM users WHERE email = ${email}`;
+    if (existing.length > 0) {
+      return c.json({ error: "Email already registered" }, 409);
+    }
+  } catch (err: any) {
+    console.error("[auth/signup] User lookup failed:", err);
+    return c.json({ error: "Database query failed", detail: err.message }, 500);
   }
 
   const userId = generateId();
-  const passwordHash = await hashPassword(password);
+  let passwordHash: string;
+  try {
+    passwordHash = await hashPassword(password);
+  } catch (err: any) {
+    console.error("[auth/signup] Password hashing failed:", err);
+    return c.json({ error: "Password processing failed", detail: err.message }, 500);
+  }
   const nowEpoch = Date.now() / 1000;
 
   // Create user
-  await sql`
-    INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
-    VALUES (${userId}, ${email}, ${name}, ${passwordHash}, ${"local"}, ${nowEpoch})
-  `;
+  try {
+    await sql`
+      INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
+      VALUES (${userId}, ${email}, ${name}, ${passwordHash}, ${"local"}, ${nowEpoch})
+    `;
+  } catch (err: any) {
+    console.error("[auth/signup] User insert failed:", err);
+    return c.json({ error: "Failed to create user", detail: err.message }, 500);
+  }
 
   // Create personal org
   const orgId = generateId();
   const orgSlug = email.split("@")[0].toLowerCase().replace(/\./g, "-");
   const orgName = `${name || orgSlug}'s Org`;
 
-  await sql`
-    INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
-    VALUES (${orgId}, ${orgName}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
-  `;
-  await sql`
-    INSERT INTO org_members (org_id, user_id, role, created_at)
-    VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
-  `;
+  try {
+    await sql`
+      INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
+      VALUES (${orgId}, ${orgName}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
+    `;
+  } catch (err: any) {
+    console.error("[auth/signup] Org creation failed:", err);
+    // User was created, continue with token even if org fails
+  }
+  try {
+    await sql`
+      INSERT INTO org_members (org_id, user_id, role, created_at)
+      VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
+    `;
+  } catch (err: any) {
+    console.error("[auth/signup] Org member insert failed:", err);
+  }
 
   // Create default project for the new org
   try {

@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { scoreSession } from "../logic/conversation-analytics";
 import { requireScope } from "../middleware/auth";
 
@@ -19,7 +19,7 @@ conversationIntelRoutes.get("/summary", requireScope("intelligence:read"), async
   const agentName = c.req.query("agent_name") ?? "";
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -74,7 +74,7 @@ conversationIntelRoutes.get("/scores", requireScope("intelligence:read"), async 
   const agentName = c.req.query("agent_name") ?? "";
   const sentiment = c.req.query("sentiment") ?? "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 100)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (sessionId && sentiment) {
@@ -126,7 +126,7 @@ conversationIntelRoutes.get("/analytics", requireScope("intelligence:read"), asy
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -151,7 +151,7 @@ conversationIntelRoutes.get("/analytics", requireScope("intelligence:read"), asy
 conversationIntelRoutes.post("/score/:session_id", requireScope("intelligence:write"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify session exists
   const sessionRows = await sql`
@@ -285,7 +285,7 @@ conversationIntelRoutes.get("/trends", requireScope("intelligence:read"), async 
   const agentName = c.req.query("agent_name") ?? "";
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Daily quality + sentiment averages
   let dailyRows;

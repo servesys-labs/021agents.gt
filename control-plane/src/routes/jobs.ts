@@ -7,7 +7,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -32,7 +32,7 @@ jobRoutes.post("/", requireScope("jobs:write"), async (c) => {
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
   if (!task) return c.json({ error: "task is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const jobId = genId();
   const now = Date.now() / 1000;
 
@@ -62,7 +62,7 @@ jobRoutes.get("/", requireScope("jobs:read"), async (c) => {
   const user = c.get("user");
   const status = c.req.query("status") || "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (status) {
@@ -82,7 +82,7 @@ jobRoutes.get("/", requireScope("jobs:read"), async (c) => {
 jobRoutes.get("/dlq", requireScope("jobs:read"), async (c) => {
   const user = c.get("user");
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM job_queue WHERE org_id = ${user.org_id} AND status = 'dead'
@@ -94,7 +94,7 @@ jobRoutes.get("/dlq", requireScope("jobs:read"), async (c) => {
 jobRoutes.get("/:job_id", requireScope("jobs:read"), async (c) => {
   const user = c.get("user");
   const jobId = c.req.param("job_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
@@ -106,7 +106,7 @@ jobRoutes.get("/:job_id", requireScope("jobs:read"), async (c) => {
 jobRoutes.post("/:job_id/retry", requireScope("jobs:write"), async (c) => {
   const user = c.get("user");
   const jobId = c.req.param("job_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT job_id FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
@@ -122,7 +122,7 @@ jobRoutes.post("/:job_id/retry", requireScope("jobs:write"), async (c) => {
 jobRoutes.post("/:job_id/cancel", requireScope("jobs:write"), async (c) => {
   const user = c.get("user");
   const jobId = c.req.param("job_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT status FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
@@ -141,7 +141,7 @@ jobRoutes.post("/:job_id/cancel", requireScope("jobs:write"), async (c) => {
 jobRoutes.post("/:job_id/pause", requireScope("jobs:write"), async (c) => {
   const user = c.get("user");
   const jobId = c.req.param("job_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT status FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}
@@ -160,7 +160,7 @@ jobRoutes.post("/:job_id/pause", requireScope("jobs:write"), async (c) => {
 jobRoutes.post("/:job_id/resume", requireScope("jobs:write"), async (c) => {
   const user = c.get("user");
   const jobId = c.req.param("job_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT status FROM job_queue WHERE job_id = ${jobId} AND org_id = ${user.org_id}

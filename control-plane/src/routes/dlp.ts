@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { detectPii, type PiiMatch } from "../logic/pii-detector";
 
@@ -33,7 +33,7 @@ type PiiHandling = (typeof PII_HANDLING_MODES)[number];
 
 dlpRoutes.get("/classifications", requireScope("dlp:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT id, name, level, description, patterns, created_at, updated_at
@@ -80,7 +80,7 @@ dlpRoutes.post("/classifications", requireScope("dlp:write"), async (c) => {
   const id = genId();
   const now = Date.now();
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     INSERT INTO dlp_classifications (id, org_id, name, level, description, patterns, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${level}, ${description}, ${JSON.stringify(patterns)}, ${now}, ${now})
@@ -94,7 +94,7 @@ dlpRoutes.post("/classifications", requireScope("dlp:write"), async (c) => {
 dlpRoutes.delete("/classifications/:id", requireScope("dlp:write"), async (c) => {
   const user = c.get("user");
   const classId = c.req.param("id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     DELETE FROM dlp_classifications
@@ -113,7 +113,7 @@ dlpRoutes.delete("/classifications/:id", requireScope("dlp:write"), async (c) =>
 dlpRoutes.get("/agents/:agent_name/policy", requireScope("dlp:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT policy_json FROM dlp_agent_policies
@@ -161,7 +161,7 @@ dlpRoutes.put("/agents/:agent_name/policy", requireScope("dlp:write"), async (c)
 
   const policyJson = JSON.stringify(parsed.data);
   const now = Date.now();
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Upsert
   await sql`
@@ -182,7 +182,7 @@ dlpRoutes.get("/exposure-report", requireScope("dlp:read"), async (c) => {
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
   const agentName = c.req.query("agent_name");
   const sinceMs = Date.now() - sinceDays * 86_400_000;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Pull guardrail events that had PII matches
   let rows;
@@ -250,7 +250,7 @@ dlpRoutes.get("/exposure-report", requireScope("dlp:read"), async (c) => {
 dlpRoutes.post("/scan-session/:session_id", requireScope("dlp:write"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load session turns from the sessions/turns table
   const turns = await sql`

@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -68,7 +68,7 @@ const ComponentUpdateSchema = z.object({
 // GET /components — list components
 componentRoutes.get("/", async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   
   const type = c.req.query("type");
   const search = c.req.query("search");
@@ -122,7 +122,7 @@ componentRoutes.get("/", async (c) => {
 componentRoutes.get("/:id", async (c) => {
   const { id } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   
   const [row] = await sql`
     SELECT component_id, type, name, description, content, tags, is_public,
@@ -170,7 +170,7 @@ componentRoutes.post(
     
     const req = parsed.data;
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     
     // Check for duplicate name in org
     const [existing] = await sql`
@@ -224,7 +224,7 @@ componentRoutes.put(
     
     const req = parsed.data;
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     
     // Check ownership
     const [existing] = await sql`
@@ -278,7 +278,7 @@ componentRoutes.delete(
   async (c) => {
     const { id } = c.req.param();
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     
     const [existing] = await sql`
       SELECT org_id FROM components WHERE component_id = ${id}
@@ -305,7 +305,7 @@ componentRoutes.delete(
 componentRoutes.post("/:id/fork", requireScope("components:write"), async (c) => {
   const { id } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   
   const [source] = await sql`
     SELECT type, name, description, content, tags, org_id, is_public
@@ -359,7 +359,7 @@ componentRoutes.post("/:id/fork", requireScope("components:write"), async (c) =>
 // GET /components/catalog — list built-in and popular components
 componentRoutes.get("/catalog/list", async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   
   // Built-in components (system org)
   const builtin = await sql`
@@ -392,7 +392,7 @@ componentRoutes.get("/catalog/list", async (c) => {
 componentRoutes.post("/:id/use", requireScope("components:write"), async (c) => {
   const { id } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = Date.now() / 1000;
   
   // Fire-and-forget usage tracking

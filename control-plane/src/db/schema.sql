@@ -266,3 +266,98 @@ CREATE INDEX IF NOT EXISTS idx_codemode_executions_org
 
 CREATE INDEX IF NOT EXISTS idx_codemode_executions_snippet
   ON codemode_executions(snippet_id, created_at DESC);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- COST LEDGER — persistent cost tracking per session
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS cost_ledger (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id text NOT NULL,
+  agent_id text NOT NULL DEFAULT '',
+  agent_name text NOT NULL DEFAULT '',
+  model text NOT NULL DEFAULT '',
+  input_tokens integer NOT NULL DEFAULT 0,
+  output_tokens integer NOT NULL DEFAULT 0,
+  cost_usd real NOT NULL DEFAULT 0.0,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_agent ON cost_ledger(agent_id);
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_created ON cost_ledger(created_at);
+CREATE INDEX IF NOT EXISTS idx_cost_ledger_session ON cost_ledger(session_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- BILLING — customer billing aggregation for charging
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS billing_records (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Who
+  org_id text NOT NULL DEFAULT '',
+  customer_id text NOT NULL DEFAULT '',
+  agent_name text NOT NULL DEFAULT '',
+  -- What
+  cost_type text NOT NULL DEFAULT 'inference',  -- inference / gpu_compute / tool / eval
+  description text NOT NULL DEFAULT '',
+  -- Inference costs
+  model text NOT NULL DEFAULT '',
+  provider text NOT NULL DEFAULT '',
+  input_tokens integer NOT NULL DEFAULT 0,
+  output_tokens integer NOT NULL DEFAULT 0,
+  inference_cost_usd real NOT NULL DEFAULT 0.0,
+  -- GPU compute costs (dedicated endpoints)
+  gpu_type text NOT NULL DEFAULT '',  -- h100 / h200 / '' for serverless
+  gpu_hours real NOT NULL DEFAULT 0.0,
+  gpu_cost_usd real NOT NULL DEFAULT 0.0,
+  -- Total
+  total_cost_usd real NOT NULL DEFAULT 0.0,
+  -- Trace
+  session_id text NOT NULL DEFAULT '',
+  trace_id text NOT NULL DEFAULT '',
+  -- Pricing snapshot for invoice-grade reproducibility
+  pricing_source text NOT NULL DEFAULT 'fallback_env',  -- catalog / fallback_env
+  pricing_key text NOT NULL DEFAULT '',                   -- e.g. llm:gmi:model or tool:web-search
+  unit text NOT NULL DEFAULT '',                          -- input_token / call / second
+  unit_price_usd real NOT NULL DEFAULT 0.0,
+  quantity real NOT NULL DEFAULT 0.0,
+  pricing_version text NOT NULL DEFAULT '',               -- catalog version hash/label
+  -- Time
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_billing_records_org ON billing_records(org_id);
+CREATE INDEX IF NOT EXISTS idx_billing_records_customer ON billing_records(customer_id);
+CREATE INDEX IF NOT EXISTS idx_billing_records_created ON billing_records(created_at);
+CREATE INDEX IF NOT EXISTS idx_billing_records_type ON billing_records(cost_type);
+CREATE INDEX IF NOT EXISTS idx_billing_records_agent ON billing_records(agent_name);
+CREATE INDEX IF NOT EXISTS idx_billing_records_session ON billing_records(session_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- PRICING CATALOG — pricing configuration for billing
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS pricing_catalog (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider text NOT NULL DEFAULT '',
+  model text NOT NULL DEFAULT '',
+  resource_type text NOT NULL DEFAULT '',      -- llm / tool / sandbox / connector
+  operation text NOT NULL DEFAULT '',          -- infer / web-search / exec
+  unit text NOT NULL DEFAULT '',               -- input_token / output_token / call / second
+  unit_price_usd real NOT NULL DEFAULT 0.0,
+  currency text NOT NULL DEFAULT 'USD',
+  source text NOT NULL DEFAULT 'manual',       -- manual / synced
+  pricing_version text NOT NULL DEFAULT '',
+  effective_from timestamptz NOT NULL DEFAULT now(),
+  effective_to timestamptz,
+  is_active boolean NOT NULL DEFAULT true,
+  metadata_json jsonb NOT NULL DEFAULT '{}',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_pricing_catalog_lookup ON pricing_catalog(resource_type, provider, model, operation, unit, is_active, effective_from);
+CREATE INDEX IF NOT EXISTS idx_pricing_catalog_effective ON pricing_catalog(effective_from, effective_to);
+
+CREATE TRIGGER update_pricing_catalog_updated_at BEFORE UPDATE ON pricing_catalog
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

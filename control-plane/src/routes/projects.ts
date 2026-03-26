@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -27,7 +27,7 @@ async function requireProjectOrg(sql: any, projectId: string, orgId: string): Pr
 
 projectRoutes.get("/", requireScope("projects:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM projects WHERE org_id = ${user.org_id} ORDER BY created_at DESC
   `;
@@ -45,7 +45,7 @@ projectRoutes.post("/", requireScope("projects:write"), async (c) => {
   const allowedPlans = new Set(["starter", "standard", "pro", "enterprise"]);
   if (!allowedPlans.has(plan)) return c.json({ error: "Invalid plan" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const projectId = genId();
   const slug = name.toLowerCase().replace(/\s+/g, "-");
 
@@ -102,7 +102,7 @@ projectRoutes.post("/", requireScope("projects:write"), async (c) => {
 projectRoutes.get("/:project_id", requireScope("projects:read"), async (c) => {
   const user = c.get("user");
   const projectId = c.req.param("project_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let project: any;
   try {
@@ -118,7 +118,7 @@ projectRoutes.get("/:project_id", requireScope("projects:read"), async (c) => {
 projectRoutes.get("/:project_id/envs", requireScope("projects:read"), async (c) => {
   const user = c.get("user");
   const projectId = c.req.param("project_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     await requireProjectOrg(sql, projectId, user.org_id);
@@ -138,7 +138,7 @@ projectRoutes.put("/:project_id/envs/:env_name", requireScope("projects:write"),
   const plan = String(body.plan || "");
   const providerConfig = body.provider_config;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await requireProjectOrg(sql, projectId, user.org_id);
   } catch (e: any) {
@@ -169,7 +169,7 @@ projectRoutes.put("/:project_id/envs/:env_name", requireScope("projects:write"),
 projectRoutes.get("/:project_id/canvas-layout", requireScope("projects:read"), async (c) => {
   const user = c.get("user");
   const projectId = c.req.param("project_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     await requireProjectOrg(sql, projectId, user.org_id);
@@ -211,7 +211,7 @@ projectRoutes.put("/:project_id/canvas-layout", requireScope("projects:write"), 
   const edges = Array.isArray(body.edges) ? body.edges : [];
   let assignments = body.assignments;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await requireProjectOrg(sql, projectId, user.org_id);
   } catch (e: any) {

@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -22,7 +22,7 @@ const HOURLY_RATES: Record<string, number> = { h100: 2.98, h200: 3.98 };
 gpuRoutes.get("/endpoints", requireScope("gpu:read"), async (c) => {
   const user = c.get("user");
   const status = c.req.query("status") || "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (status) {
@@ -47,7 +47,7 @@ gpuRoutes.post("/endpoints", requireScope("gpu:write"), async (c) => {
 
   if (!modelId) return c.json({ error: "model_id is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const endpointId = genId();
   const hourlyRate = HOURLY_RATES[gpuType] ?? 3.98;
   const now = Date.now() / 1000;
@@ -71,7 +71,7 @@ gpuRoutes.post("/endpoints", requireScope("gpu:write"), async (c) => {
 gpuRoutes.delete("/endpoints/:endpoint_id", requireScope("gpu:write"), async (c) => {
   const user = c.get("user");
   const endpointId = c.req.param("endpoint_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM gpu_endpoints WHERE endpoint_id = ${endpointId} AND org_id = ${user.org_id}

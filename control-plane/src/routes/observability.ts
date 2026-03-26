@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -33,7 +33,7 @@ observabilityRoutes.get("/summary", requireScope("observability:read"), async (c
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const [sessions] = await sql`
     SELECT COUNT(*) as total, COALESCE(SUM(cost_total_usd), 0) as cost,
@@ -64,7 +64,7 @@ observabilityRoutes.get("/daily-cost", requireScope("observability:read"), async
   const user = c.get("user");
   const days = Math.max(1, Math.min(365, Number(c.req.query("days")) || 30));
   const since = Date.now() / 1000 - days * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT created_at, total_cost_usd FROM billing_records
@@ -88,7 +88,7 @@ observabilityRoutes.get("/daily-cost", requireScope("observability:read"), async
 observabilityRoutes.get("/trace/:trace_id", requireScope("observability:read"), async (c) => {
   const user = c.get("user");
   const traceId = c.req.param("trace_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify org ownership
   const check = await sql`
@@ -122,7 +122,7 @@ observabilityRoutes.post("/annotations", requireScope("observability:write"), as
   if (!traceId) return c.json({ error: "trace_id is required" }, 400);
   if (!message) return c.json({ error: "message is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const annotationId = genId();
   const now = Date.now() / 1000;
 
@@ -148,7 +148,7 @@ observabilityRoutes.post("/feedback", requireScope("observability:write"), async
 
   if (!spanId) return c.json({ error: "span_id is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const feedbackId = genId();
   const now = Date.now() / 1000;
 
@@ -166,7 +166,7 @@ observabilityRoutes.post("/lineage", requireScope("observability:write"), async 
   const traceId = String(body.trace_id || "").trim();
   if (!traceId) return c.json({ error: "trace_id is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = Date.now() / 1000;
 
   await sql`
@@ -186,7 +186,7 @@ observabilityRoutes.post("/lineage", requireScope("observability:write"), async 
 observabilityRoutes.get("/agents/:agent_name/meta-control-plane", requireScope("observability:read"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Gather signals
   const since = Date.now() / 1000 - 7 * 86400;
@@ -370,7 +370,7 @@ async function agentIsOwned(sql: any, agentName: string, orgId: string): Promise
 observabilityRoutes.get("/agents/:agent_name/meta-proposals", requireScope("observability:read"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -390,7 +390,7 @@ observabilityRoutes.get("/agents/:agent_name/meta-proposals", requireScope("obse
 observabilityRoutes.post("/agents/:agent_name/meta-proposals/generate", requireScope("observability:write"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -456,7 +456,7 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/generate", requireS
 observabilityRoutes.get("/agents/:agent_name/meta-report", requireScope("observability:read"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -513,7 +513,7 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/:proposal_id/review
   const agentName = c.req.param("agent_name");
   const proposalId = c.req.param("proposal_id");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
@@ -540,7 +540,7 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/:proposal_id/review
 observabilityRoutes.get("/trace/:trace_id/replay", requireScope("observability:read"), async (c) => {
   const user = c.get("user");
   const traceId = c.req.param("trace_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify org ownership
   const check = await sql`
@@ -645,7 +645,7 @@ observabilityRoutes.get("/trace/:trace_id/replay", requireScope("observability:r
 observabilityRoutes.get("/trace/:trace_id/run-tree", requireScope("observability:read"), async (c) => {
   const user = c.get("user");
   const traceId = c.req.param("trace_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify org ownership
   const check = await sql`
@@ -692,7 +692,7 @@ observabilityRoutes.get("/trace/:trace_id/run-tree", requireScope("observability
 observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requireScope("observability:write"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Strict org ownership — no filesystem fallback
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {

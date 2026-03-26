@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -23,8 +23,9 @@ connectorRoutes.get("/providers", requireScope("integrations:read"), async (c) =
 });
 
 connectorRoutes.get("/tools", requireScope("integrations:read"), async (c) => {
+  const user = c.get("user");
   const app = c.req.query("app") || "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // List tools from connector_tools table if available, otherwise return placeholder
   try {
@@ -82,7 +83,7 @@ connectorRoutes.post("/tools/call", requireScope("integrations:write"), async (c
     }
 
     // Audit
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     const now = Date.now() / 1000;
     try {
       await sql`
@@ -102,7 +103,7 @@ connectorRoutes.get("/usage", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT model as tool_name, COUNT(*) as calls, COALESCE(SUM(total_cost_usd), 0) as cost

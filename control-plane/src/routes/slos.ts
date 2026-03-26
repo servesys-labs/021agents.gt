@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -23,7 +23,7 @@ const VALID_OPERATORS = new Set(["gte", "lte", "eq"]);
 sloRoutes.get("/", requireScope("slos:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.query("agent_name") || "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -49,7 +49,7 @@ sloRoutes.post("/", requireScope("slos:write"), async (c) => {
   if (!VALID_METRICS.has(metric)) return c.json({ error: `Unknown metric: ${metric}` }, 400);
   if (!VALID_OPERATORS.has(operator)) return c.json({ error: `Unknown operator: ${operator}` }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const sloId = genId();
 
   await sql`
@@ -63,14 +63,14 @@ sloRoutes.post("/", requireScope("slos:write"), async (c) => {
 sloRoutes.delete("/:slo_id", requireScope("slos:write"), async (c) => {
   const user = c.get("user");
   const sloId = c.req.param("slo_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM slo_definitions WHERE slo_id = ${sloId} AND org_id = ${user.org_id}`;
   return c.json({ deleted: sloId });
 });
 
 sloRoutes.get("/status", requireScope("slos:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const slos = await sql`SELECT * FROM slo_definitions WHERE org_id = ${user.org_id}`;
   const results: any[] = [];

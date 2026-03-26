@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -39,27 +40,27 @@ function buildApp() {
 
 describe("api-keys route contracts", () => {
   it("list returns array with key_prefix field", async () => {
-    vi.mocked(getDb).mockResolvedValue(
-      (async (strings: TemplateStringsArray) => {
-        const query = strings.join("?");
-        if (query.includes("FROM api_keys")) {
-          return [
-            {
-              key_id: "k1",
-              name: "prod",
-              key_prefix: "ak_12345678",
-              scopes: '["*"]',
-              project_id: "",
-              env: "",
-              created_at: 1700000000,
-              last_used_at: null,
-              is_active: 1,
-            },
-          ];
-        }
-        return [];
-      }) as any,
-    );
+    const mockSql = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("FROM api_keys")) {
+        return [
+          {
+            key_id: "k1",
+            name: "prod",
+            key_prefix: "ak_12345678",
+            scopes: '["*"]',
+            project_id: "",
+            env: "",
+            created_at: 1700000000,
+            last_used_at: null,
+            is_active: 1,
+          },
+        ];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp();
     const res = await app.request("/", { method: "GET" }, mockEnv());

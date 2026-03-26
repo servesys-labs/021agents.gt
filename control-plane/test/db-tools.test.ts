@@ -260,7 +260,8 @@ describe("DB Query Tools", () => {
         org_id: "org-1",
       });
       expect(calls[2].query).toContain("app.current_role");
-      expect(calls[2].params).toContain("agent");
+      // 'agent' is a literal in the SQL template, not a parameterized value
+      expect(calls[2].query).toContain("agent");
     });
 
     it("executes billing.usage with custom since_days", async () => {

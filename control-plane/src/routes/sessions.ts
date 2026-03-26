@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -16,7 +16,7 @@ sessionRoutes.get("/runtime/insights", requireScope("sessions:read"), async (c) 
   const sinceDays = Math.max(1, Math.min(90, Number(c.req.query("since_days")) || 30));
   const limitSessions = Math.max(10, Math.min(200, Number(c.req.query("limit_sessions")) || 200));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Aggregate runtime insights
   const [stats] = await sql`
@@ -42,7 +42,7 @@ sessionRoutes.get("/stats/summary", requireScope("sessions:read"), async (c) => 
   const agentName = c.req.query("agent_name") || "";
   const sinceDays = Math.max(1, Math.min(90, Number(c.req.query("since_days")) || 30));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let summaryRows;
   if (agentName) {
@@ -90,7 +90,7 @@ sessionRoutes.get("/", requireScope("sessions:read"), async (c) => {
   const status = c.req.query("status") || "";
   const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
   const offset = Math.max(0, Number(c.req.query("offset")) || 0);
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName && status) {
@@ -134,7 +134,7 @@ sessionRoutes.get("/", requireScope("sessions:read"), async (c) => {
 sessionRoutes.get("/:session_id", requireScope("sessions:read"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
   if (rows.length === 0) return c.json({ error: "Session not found" }, 404);
   const r = rows[0] as any;
@@ -155,7 +155,7 @@ sessionRoutes.get("/:session_id", requireScope("sessions:read"), async (c) => {
 sessionRoutes.get("/:session_id/turns", requireScope("sessions:read"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify session belongs to org before querying turns
   const ownerCheck = await sql`
@@ -198,7 +198,7 @@ sessionRoutes.get("/:session_id/turns", requireScope("sessions:read"), async (c)
 sessionRoutes.get("/:session_id/runtime", requireScope("sessions:read"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
   if (check.length === 0) return c.json({ error: "Session not found" }, 404);
 
@@ -224,7 +224,7 @@ sessionRoutes.get("/:session_id/runtime", requireScope("sessions:read"), async (
 sessionRoutes.get("/:session_id/trace", requireScope("sessions:read"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const sessionRows = await sql`SELECT trace_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
   if (sessionRows.length === 0 || !sessionRows[0].trace_id) {
@@ -265,7 +265,7 @@ sessionRoutes.post("/:session_id/feedback", requireScope("sessions:write"), asyn
   const comment = String(body.comment || "");
   const tags = String(body.tags || "");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
   if (check.length === 0) return c.json({ error: "Session not found" }, 404);
 
@@ -280,7 +280,7 @@ sessionRoutes.post("/:session_id/feedback", requireScope("sessions:write"), asyn
 sessionRoutes.get("/:session_id/feedback", requireScope("sessions:read"), async (c) => {
   const user = c.get("user");
   const sessionId = c.req.param("session_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify session belongs to org before returning feedback
   const ownerCheck = await sql`
@@ -298,7 +298,7 @@ sessionRoutes.delete("/", requireScope("sessions:write"), async (c) => {
   const user = c.get("user");
   const beforeDays = Math.max(7, Number(c.req.query("before_days")) || 90);
   const cutoff = Date.now() / 1000 - beforeDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Delete turns for the sessions we're about to delete (before deleting sessions)
   await sql`

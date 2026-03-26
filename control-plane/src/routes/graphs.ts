@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import {
   validateGraphDefinition,
   validateLinearDeclarativeGraph,
@@ -97,7 +97,7 @@ function resolvedTask(body: { task?: string | null; input?: string | null }): st
 }
 
 async function loadAgentGraph(
-  sql: Awaited<ReturnType<typeof getDb>>,
+  sql: Awaited<ReturnType<typeof getDbForOrg>>,
   agentName: string,
   orgId: string,
 ): Promise<Record<string, unknown> | null> {
@@ -217,7 +217,7 @@ graphRoutes.post("/gate-pack", requireScope("graphs:write"), async (c) => {
 
   const req = parsed.data;
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify org ownership when agent_name is provided (even with inline graph,
   // the eval gate query uses agent_name — prevent cross-org data leakage)
@@ -313,7 +313,7 @@ graphRoutes.post("/breakpoints", requireScope("graphs:write"), async (c) => {
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
   if (nodeIds.length === 0) return c.json({ error: "node_ids array is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load current config
   const rows = await sql`
@@ -373,7 +373,7 @@ graphRoutes.delete("/breakpoints", requireScope("graphs:write"), async (c) => {
 
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT config_json FROM agents

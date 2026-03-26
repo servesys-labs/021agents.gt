@@ -8,7 +8,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { normalizeSteps, validateWorkflow, deriveRunMetadata } from "../logic/workflow-validator";
 import { requireScope } from "../middleware/auth";
 
@@ -57,7 +57,7 @@ function parseEpochSeconds(raw: unknown): number | null {
   return null;
 }
 
-async function ensureApprovalTable(sql: Awaited<ReturnType<typeof getDb>>): Promise<void> {
+async function ensureApprovalTable(sql: Awaited<ReturnType<typeof getDbForOrg>>): Promise<void> {
   await sql`
     CREATE TABLE IF NOT EXISTS workflow_approvals (
       approval_id text PRIMARY KEY,
@@ -194,7 +194,7 @@ workflowRoutes.post("/approval/start", requireScope("workflows:write"), async (c
     return c.json({ error: "deadline_at must be in the future" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await ensureApprovalTable(sql);
 
   if (idempotencyKey) {
@@ -276,7 +276,7 @@ workflowRoutes.post("/approval/start", requireScope("workflows:write"), async (c
 workflowRoutes.get("/approval/:approval_id", requireScope("workflows:read"), async (c) => {
   const user = c.get("user");
   const approvalId = c.req.param("approval_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await ensureApprovalTable(sql);
   const rows = await sql`
     SELECT * FROM workflow_approvals WHERE approval_id = ${approvalId} AND org_id = ${user.org_id} LIMIT 1
@@ -297,7 +297,7 @@ workflowRoutes.post("/approval/:approval_id/decision", requireScope("workflows:w
     return c.json({ error: "decision must be 'approved' or 'rejected'" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await ensureApprovalTable(sql);
 
   const rows = await sql`
@@ -379,7 +379,7 @@ workflowRoutes.post("/approval/:approval_id/decision", requireScope("workflows:w
 
 workflowRoutes.get("/", requireScope("workflows:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM workflows WHERE org_id = ${user.org_id} ORDER BY created_at DESC
   `;
@@ -405,7 +405,7 @@ workflowRoutes.post("/", requireScope("workflows:write"), async (c) => {
 
   if (!name) return c.json({ error: "name is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const workflowId = genId();
   const normalizedSteps = normalizeSteps(steps);
   const stepsJson = JSON.stringify(normalizedSteps);
@@ -432,7 +432,7 @@ workflowRoutes.get("/:workflow_id/runs", requireScope("workflows:read"), async (
   const user = c.get("user");
   const workflowId = c.req.param("workflow_id");
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 20));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wf = await sql`
     SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}
@@ -450,7 +450,7 @@ workflowRoutes.get("/:workflow_id/runs/:run_id", requireScope("workflows:read"),
   const user = c.get("user");
   const workflowId = c.req.param("workflow_id");
   const runId = c.req.param("run_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wf = await sql`
     SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}
@@ -468,7 +468,7 @@ workflowRoutes.post("/:workflow_id/runs/:run_id/cancel", requireScope("workflows
   const user = c.get("user");
   const workflowId = c.req.param("workflow_id");
   const runId = c.req.param("run_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wf = await sql`
     SELECT workflow_id FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}
@@ -499,7 +499,7 @@ workflowRoutes.post("/validate", requireScope("workflows:read"), async (c) => {
 workflowRoutes.delete("/:workflow_id", requireScope("workflows:write"), async (c) => {
   const user = c.get("user");
   const workflowId = c.req.param("workflow_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     DELETE FROM workflows WHERE workflow_id = ${workflowId} AND org_id = ${user.org_id}

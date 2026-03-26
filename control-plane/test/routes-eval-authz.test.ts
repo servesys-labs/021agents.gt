@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -39,22 +40,26 @@ function buildApp(orgId = "org-a") {
 
 describe("eval routes authz checks", () => {
   it("returns 404 for run details outside caller org", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM eval_runs WHERE id")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
     const app = buildApp("org-a");
     const res = await app.request("/runs/123", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);
   });
 
   it("returns 404 for trials when run is not owned by caller org", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql2 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT id FROM eval_runs")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql2);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
     const app = buildApp("org-a");
     const res = await app.request("/runs/123/trials", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);

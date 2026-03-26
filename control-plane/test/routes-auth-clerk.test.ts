@@ -6,6 +6,7 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
 vi.mock("../src/auth/clerk", () => ({
@@ -13,7 +14,7 @@ vi.mock("../src/auth/clerk", () => ({
   verifyClerkToken: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 import { verifyClerkToken } from "../src/auth/clerk";
 import { authRoutes } from "../src/routes/auth";
 
@@ -40,7 +41,7 @@ describe("auth clerk exchange parity", () => {
       exp: 9999999999,
     });
 
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("SELECT user_id, email, name FROM users WHERE user_id")) return [];
       if (query.includes("SELECT user_id, email, name FROM users WHERE email")) return [];
@@ -52,7 +53,9 @@ describe("auth clerk exchange parity", () => {
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp();
     const env = mockEnv({

@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -37,7 +37,7 @@ function validateRemoteUrl(url: string): string | null {
 
 mcpControlRoutes.get("/servers", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT server_id, name, url, transport, status, last_health_at, created_at
     FROM mcp_servers WHERE org_id = ${user.org_id} ORDER BY name
@@ -60,7 +60,7 @@ mcpControlRoutes.post("/servers", requireScope("integrations:write"), async (c) 
   const urlError = validateRemoteUrl(url);
   if (urlError) return c.json({ error: urlError }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const serverId = genId();
   const now = Date.now() / 1000;
 
@@ -75,7 +75,7 @@ mcpControlRoutes.post("/servers", requireScope("integrations:write"), async (c) 
 mcpControlRoutes.get("/servers/:server_id/status", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
   const serverId = c.req.param("server_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM mcp_servers WHERE server_id = ${serverId} AND org_id = ${user.org_id}
@@ -111,7 +111,7 @@ mcpControlRoutes.get("/servers/:server_id/status", requireScope("integrations:re
 mcpControlRoutes.post("/servers/:server_id/sync", requireScope("integrations:write"), async (c) => {
   const user = c.get("user");
   const serverId = c.req.param("server_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM mcp_servers WHERE server_id = ${serverId} AND org_id = ${user.org_id}
@@ -149,7 +149,7 @@ mcpControlRoutes.post("/servers/:server_id/sync", requireScope("integrations:wri
 mcpControlRoutes.delete("/servers/:server_id", requireScope("integrations:write"), async (c) => {
   const user = c.get("user");
   const serverId = c.req.param("server_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     DELETE FROM mcp_servers WHERE server_id = ${serverId} AND org_id = ${user.org_id}

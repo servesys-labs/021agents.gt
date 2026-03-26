@@ -8,7 +8,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -95,7 +95,7 @@ codemodeRoutes.post("/snippets", requireScope("codemode:write"), async (c) => {
   if (!parsed.success) return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
 
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const req = parsed.data;
   const id = crypto.randomUUID().slice(0, 12);
   const now = Date.now() / 1000;
@@ -123,7 +123,7 @@ codemodeRoutes.post("/snippets", requireScope("codemode:write"), async (c) => {
 
 codemodeRoutes.get("/snippets", requireScope("codemode:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const scope = c.req.query("scope");
   const tag = c.req.query("tag");
   const search = c.req.query("q");
@@ -169,7 +169,7 @@ codemodeRoutes.get("/snippets", requireScope("codemode:read"), async (c) => {
 
 codemodeRoutes.get("/snippets/:id", requireScope("codemode:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const id = c.req.param("id");
 
   const rows = await sql`
@@ -190,7 +190,7 @@ codemodeRoutes.put("/snippets/:id", requireScope("codemode:write"), async (c) =>
   const parsed = UpdateSnippetSchema.safeParse(body);
   if (!parsed.success) return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const id = c.req.param("id");
   const req = parsed.data;
   const now = Date.now() / 1000;
@@ -231,7 +231,7 @@ codemodeRoutes.put("/snippets/:id", requireScope("codemode:write"), async (c) =>
 
 codemodeRoutes.delete("/snippets/:id", requireScope("codemode:write"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const id = c.req.param("id");
 
   const rows = await sql`
@@ -261,7 +261,7 @@ codemodeRoutes.post("/execute", requireScope("codemode:write"), async (c) => {
   let scopeConfig = req.scope_config;
 
   if (req.snippet_id && !code) {
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     const rows = await sql`
       SELECT code, scope, scope_config FROM codemode_snippets
       WHERE id = ${req.snippet_id} AND org_id = ${user.org_id}
@@ -384,7 +384,7 @@ codemodeRoutes.get("/stats", requireScope("codemode:read"), async (c) => {
   const user = c.get("user");
 
   try {
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     const countRows = await sql`
       SELECT COUNT(*) as total,
              COUNT(CASE WHEN scope = 'graph_node' THEN 1 END) as graph_nodes,
@@ -422,7 +422,7 @@ codemodeRoutes.get("/stats", requireScope("codemode:read"), async (c) => {
 
 codemodeRoutes.post("/snippets/:id/clone", requireScope("codemode:write"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const sourceId = c.req.param("id");
   const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
 

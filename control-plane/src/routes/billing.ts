@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDb, getDbForOrg } from "../db/client";
 import { hasRole } from "../auth/types";
 import { requireScope } from "../middleware/auth";
 
@@ -16,7 +16,7 @@ billingRoutes.get("/usage", requireScope("billing:read"), async (c) => {
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
   const since = Date.now() / 1000 - sinceDays * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Total summary
   const [summary] = await sql`
@@ -82,7 +82,7 @@ billingRoutes.get("/usage/daily", requireScope("billing:read"), async (c) => {
   const user = c.get("user");
   const days = Math.max(1, Math.min(365, Number(c.req.query("days")) || 30));
   const since = Date.now() / 1000 - days * 86400;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT created_at, total_cost_usd, input_tokens, output_tokens
@@ -112,7 +112,7 @@ billingRoutes.get("/usage/daily", requireScope("billing:read"), async (c) => {
 billingRoutes.get("/trace/:trace_id", requireScope("billing:read"), async (c) => {
   const user = c.get("user");
   const traceId = c.req.param("trace_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const records = await sql`
     SELECT * FROM billing_records
@@ -139,6 +139,19 @@ billingRoutes.get("/invoices", requireScope("billing:read"), async (c) => {
   return c.json({ invoices: [], note: "Stripe integration pending" });
 });
 
+billingRoutes.post("/checkout", requireScope("billing:write"), async (c) => {
+  const body = await c.req.json();
+  const plan = String(body.plan || "standard");
+  const allowed = new Set(["starter", "standard", "pro", "enterprise"]);
+  if (!allowed.has(plan)) {
+    return c.json({ error: "Invalid plan" }, 400);
+  }
+  return c.json({
+    checkout_url: `https://checkout.stripe.com/placeholder?plan=${encodeURIComponent(plan)}`,
+    note: "Stripe integration pending",
+  });
+});
+
 billingRoutes.get("/pricing", requireScope("billing:read"), async (c) => {
   const resourceType = c.req.query("resource_type") || "";
   const provider = c.req.query("provider") || "";
@@ -146,25 +159,29 @@ billingRoutes.get("/pricing", requireScope("billing:read"), async (c) => {
   const operation = c.req.query("operation") || "";
   const sql = await getDb(c.env.HYPERDRIVE);
 
-  let rows;
-  if (resourceType && provider && model && operation) {
-    rows = await sql`
-      SELECT * FROM pricing_catalog WHERE is_active = true
-      AND resource_type = ${resourceType} AND provider = ${provider}
-      AND model = ${model} AND operation = ${operation}
-      ORDER BY resource_type, provider, model, operation, unit, effective_from DESC
-    `;
-  } else if (resourceType) {
-    rows = await sql`
-      SELECT * FROM pricing_catalog WHERE is_active = true AND resource_type = ${resourceType}
-      ORDER BY resource_type, provider, model, operation, unit, effective_from DESC
-    `;
-  } else {
-    rows = await sql`
-      SELECT * FROM pricing_catalog WHERE is_active = true
-      ORDER BY resource_type, provider, model, operation, unit, effective_from DESC
-    `;
+  // Build query dynamically with filters
+  let query = "SELECT * FROM pricing_catalog WHERE is_active = true";
+  const params: (string | boolean)[] = [];
+
+  if (resourceType) {
+    params.push(resourceType);
+    query += ` AND resource_type = $${params.length}`;
   }
+  if (provider) {
+    params.push(provider);
+    query += ` AND provider = $${params.length}`;
+  }
+  if (model) {
+    params.push(model);
+    query += ` AND model = $${params.length}`;
+  }
+  if (operation) {
+    params.push(operation);
+    query += ` AND operation = $${params.length}`;
+  }
+  query += " ORDER BY resource_type, provider, model, operation, unit, effective_from DESC";
+
+  const rows = await sql.unsafe(query, params);
 
   return c.json({ pricing: rows, count: rows.length });
 });
@@ -183,19 +200,19 @@ billingRoutes.post("/pricing", requireScope("billing:write"), async (c) => {
     return c.json({ error: "resource_type, operation, and unit are required" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const provider = String(body.provider || "");
   const model = String(body.model || "");
   const unitPriceUsd = Number(body.unit_price_usd || 0);
   const currency = String(body.currency || "USD");
   const source = String(body.source || "manual");
   const pricingVersion = String(body.pricing_version || "");
-  const effectiveFrom = body.effective_from || null;
-  const effectiveTo = body.effective_to || null;
+  const effectiveFrom = body.effective_from ?? null;
+  const effectiveTo = body.effective_to ?? null;
   const isActive = body.is_active !== false;
   const metadataJson = String(body.metadata_json || "{}");
 
-  // Deactivate existing
+  // Deactivate existing active row for same key
   await sql`
     UPDATE pricing_catalog SET is_active = false
     WHERE provider = ${provider} AND model = ${model}

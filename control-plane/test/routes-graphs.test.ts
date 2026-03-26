@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -40,6 +41,7 @@ function buildApp(orgId = "org-a") {
 describe("graph gate-pack validation and ownership", () => {
   it("requires agent_name in request payload", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp("org-a");
     const res = await app.request(
       "/gate-pack",
@@ -54,11 +56,13 @@ describe("graph gate-pack validation and ownership", () => {
   });
 
   it("denies gate-pack when agent is not owned by org", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT 1 FROM agents")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -79,6 +83,7 @@ describe("graph gate-pack validation and ownership", () => {
 
   it("contracts validate returns summary with contracts", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp("org-a");
     const res = await app.request(
       "/contracts/validate",
