@@ -533,6 +533,20 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
           trace_id: traceId,
           cost_usd: summaryCost,
         });
+        // Emit middleware_event for summarization
+        if (ctx.telemetryQueue) {
+          ctx.telemetryQueue.send({
+            type: "middleware_event",
+            payload: {
+              org_id: ctx.config.org_id,
+              session_id: sessionId,
+              middleware_name: "summarization",
+              event_type: "context_summarized",
+              details: { cost_usd: summaryCost, turn },
+              created_at: Date.now() / 1000,
+            },
+          }).catch(() => {});
+        }
       }
       return FRESH_ROUTE_LLM;
     },
@@ -1056,10 +1070,38 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
           execution_mode: "sequential",
           latency_ms: 0,
         });
+        // Emit middleware_event for loop detection halt
+        if (ctx.telemetryQueue) {
+          ctx.telemetryQueue.send({
+            type: "middleware_event",
+            payload: {
+              org_id: ctx.config.org_id,
+              session_id: ctx.sessionId,
+              middleware_name: "loop_detection",
+              event_type: "loop_halt",
+              details: { message: loopResult.halt, turn: ctx.turn },
+              created_at: Date.now() / 1000,
+            },
+          }).catch(() => {});
+        }
         return GRAPH_HALT;
       }
       if (loopResult?.warn) {
         ctx.messages.push({ role: "system", content: loopResult.warn });
+        // Emit middleware_event for loop detection warning
+        if (ctx.telemetryQueue) {
+          ctx.telemetryQueue.send({
+            type: "middleware_event",
+            payload: {
+              org_id: ctx.config.org_id,
+              session_id: ctx.sessionId,
+              middleware_name: "loop_detection",
+              event_type: "loop_warn",
+              details: { message: loopResult.warn, turn: ctx.turn },
+              created_at: Date.now() / 1000,
+            },
+          }).catch(() => {});
+        }
       }
       return FRESH_AFTER_TOOLS;
     },

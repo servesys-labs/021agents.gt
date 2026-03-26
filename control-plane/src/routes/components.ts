@@ -68,6 +68,8 @@ const ComponentUpdateSchema = z.object({
 // GET /components — list components
 componentRoutes.get("/", async (c) => {
   const user = c.get("user");
+  const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") || 20)));
+  const offset = Math.max(0, Number(c.req.query("offset") || 0));
 
   let rows: any[];
   try {
@@ -77,8 +79,6 @@ componentRoutes.get("/", async (c) => {
     const search = c.req.query("search");
     const tags = c.req.query("tags")?.split(",").filter(Boolean);
     const includePublic = c.req.query("include_public") === "true";
-    const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") || 20)));
-    const offset = Math.max(0, Number(c.req.query("offset") || 0));
 
     let query = sql`
       SELECT component_id, type, name, description, tags, is_public,
@@ -364,6 +364,96 @@ componentRoutes.post("/:id/fork", requireScope("components:write"), async (c) =>
     created: true,
   }, 201);
 });
+
+// ── POST /components/subgraphs — create a reusable subgraph definition ──
+componentRoutes.post(
+  "/subgraphs",
+  requireScope("components:write"),
+  async (c) => {
+    const body = await c.req.json();
+    const name = String(body.name || "").trim();
+    const description = String(body.description || "");
+    const version = String(body.version || "1.0.0");
+    const graph = body.graph;
+    const inputSchema = body.input_schema || body.input_mapping || {};
+    const outputSchema = body.output_schema || body.output_mapping || {};
+    const isPublic = Boolean(body.is_public);
+
+    if (!name) return c.json({ error: "name is required" }, 400);
+    if (!graph || typeof graph !== "object") return c.json({ error: "graph object is required" }, 400);
+
+    const user = c.get("user");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+    const subgraphId = crypto.randomUUID();
+
+    try {
+      await sql`
+        INSERT INTO subgraph_definitions (
+          subgraph_id, name, version, description, graph_json,
+          input_schema, output_schema, org_id, is_public, created_at
+        ) VALUES (
+          ${subgraphId}, ${name}, ${version}, ${description},
+          ${JSON.stringify(graph)}, ${JSON.stringify(inputSchema)},
+          ${JSON.stringify(outputSchema)}, ${user.org_id}, ${isPublic},
+          ${new Date().toISOString()}
+        )
+      `;
+    } catch (err: any) {
+      if (err?.message?.includes("unique") || err?.message?.includes("duplicate")) {
+        return c.json({ error: `Subgraph '${name}' v${version} already exists` }, 409);
+      }
+      return c.json({ error: `Failed to create subgraph: ${err.message}` }, 500);
+    }
+
+    // Notify runtime to invalidate subgraph caches
+    notifyRuntimeOfCacheInvalidation(c.env, "subgraph", subgraphId).catch(() => {});
+
+    return c.json({
+      subgraph_id: subgraphId,
+      name,
+      version,
+      created: true,
+    }, 201);
+  }
+);
+
+// ── PUT /components/subgraphs/:id — update a subgraph definition ──
+componentRoutes.put(
+  "/subgraphs/:id",
+  requireScope("components:write"),
+  async (c) => {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const user = c.get("user");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const [existing] = await sql`
+      SELECT org_id, version FROM subgraph_definitions WHERE subgraph_id = ${id}
+    `;
+    if (!existing) return c.json({ error: "Subgraph not found" }, 404);
+    if (existing.org_id !== user.org_id) return c.json({ error: "Access denied" }, 403);
+
+    // Bump patch version
+    const versionParts = String(existing.version).split(".").map(Number);
+    versionParts[2] = (versionParts[2] || 0) + 1;
+    const newVersion = body.version || versionParts.join(".");
+
+    await sql`
+      UPDATE subgraph_definitions SET
+        description = COALESCE(${body.description ?? null}, description),
+        graph_json = COALESCE(${body.graph ? JSON.stringify(body.graph) : null}, graph_json),
+        input_schema = COALESCE(${body.input_schema ? JSON.stringify(body.input_schema) : null}, input_schema),
+        output_schema = COALESCE(${body.output_schema ? JSON.stringify(body.output_schema) : null}, output_schema),
+        is_public = COALESCE(${body.is_public ?? null}, is_public),
+        version = ${newVersion}
+      WHERE subgraph_id = ${id}
+    `;
+
+    notifyRuntimeOfCacheInvalidation(c.env, "subgraph", id).catch(() => {});
+
+    return c.json({ subgraph_id: id, updated: true, new_version: newVersion });
+  }
+);
 
 // GET /components/catalog — list built-in and popular components
 componentRoutes.get("/catalog/list", async (c) => {

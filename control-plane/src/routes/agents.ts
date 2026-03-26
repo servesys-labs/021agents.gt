@@ -316,8 +316,9 @@ agentRoutes.post(
 
     // Insert into DB
     await sql`
-      INSERT INTO agents (name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
+        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
         ${req.name},
         ${user.org_id},
         ${user.project_id || ""},
@@ -649,8 +650,9 @@ agentRoutes.post("/:name/clone", requireScope("agents:write"), async (c) => {
   config.version = "0.1.0";
 
   await sql`
-    INSERT INTO agents (name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+    INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
     VALUES (
+      ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
       ${newName.data},
       ${user.org_id},
       ${user.project_id || ""},
@@ -711,8 +713,9 @@ agentRoutes.post(
     const agentName = String(config.name || "imported_agent");
 
     await sql`
-      INSERT INTO agents (name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
+        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
         ${agentName},
         ${user.org_id},
         ${user.project_id || ""},
@@ -953,8 +956,9 @@ agentRoutes.post(
 
     // Save agent
     await sql`
-      INSERT INTO agents (name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+      INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
+        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
         ${String(config.name)},
         ${user.org_id},
         ${user.project_id || ""},

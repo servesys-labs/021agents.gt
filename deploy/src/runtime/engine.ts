@@ -246,6 +246,54 @@ export async function edgeRun(
     }
   }
 
+  // Emit cost_ledger entry via telemetry queue for per-session cost tracking
+  if (telemetryQueue && ctx.cumulativeCost > 0) {
+    persistenceTasks.push(
+      telemetryQueue.send({
+        type: "cost_ledger",
+        payload: {
+          session_id: sessionId,
+          org_id: config.org_id,
+          agent_name: config.agent_name,
+          model: ctx.lastModel,
+          input_tokens: ctx.totalInputTokens,
+          output_tokens: ctx.totalOutputTokens,
+          cost_usd: ctx.cumulativeCost,
+          plan: config.plan,
+          created_at: Date.now() / 1000,
+        },
+      }).catch(() => {}),
+    );
+  }
+
+  // Emit runtime_events for each turn result via telemetry queue
+  if (telemetryQueue) {
+    for (const result of ctx.results) {
+      persistenceTasks.push(
+        telemetryQueue.send({
+          type: "runtime_event",
+          payload: {
+            trace_id: traceId,
+            session_id: sessionId,
+            org_id: config.org_id,
+            event_type: "turn_completed",
+            node_id: "",
+            status: result.error ? "error" : "success",
+            duration_ms: result.latency_ms || 0,
+            details: {
+              model: result.model || ctx.lastModel,
+              turn_number: result.turn_number,
+              tool_calls: result.tool_results?.length || 0,
+              cost_usd: result.cost_usd,
+              error: result.error || null,
+            },
+            created_at: Date.now() / 1000,
+          },
+        }).catch(() => {}),
+      );
+    }
+  }
+
   // Events go via TELEMETRY_QUEUE only (Hyperdrive connection dies after response)
 
   if (ctx.pendingCheckpoint) {
