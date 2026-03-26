@@ -309,7 +309,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
               <>
                 <div className="fixed inset-0 z-50" onClick={() => setUserMenuOpen(false)} aria-hidden="true" />
                 <div
-                  className="absolute bottom-0 left-full ml-2 z-50 w-56 rounded-xl shadow-2xl overflow-hidden bg-surface-raised border border-border-default"
+                  className="absolute bottom-0 left-full ml-2 z-50 w-56 rounded-xl overflow-hidden glass-dropdown"
                   role="menu"
                   aria-label="User menu"
                 >
