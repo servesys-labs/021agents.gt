@@ -79,6 +79,99 @@ autoresearchRoutes.get("/results", requireScope("autoresearch:read"), async (c) 
 
 // ── Database-backed endpoints (for dashboard/UI) ────────────────────
 
+// POST /autoresearch/runs — create a new autoresearch run record
+autoresearchRoutes.post("/runs", requireScope("autoresearch:write"), async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json();
+  const agentName = String(body.agent_name || "").trim();
+  const status = String(body.status || "running");
+  const configJson = JSON.stringify(body.config || {});
+  const workspace = String(body.workspace || ".");
+
+  if (!agentName) return c.json({ error: "agent_name is required" }, 400);
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const runId = crypto.randomUUID();
+  const now = Date.now() / 1000;
+
+  try {
+    await sql`
+      INSERT INTO autoresearch_runs (
+        run_id, agent_name, status, config_json, workspace,
+        iteration, best_bpb, total_experiments, kept, discarded, crashed,
+        org_id, created_at, updated_at
+      ) VALUES (
+        ${runId}, ${agentName}, ${status}, ${configJson}, ${workspace},
+        ${0}, ${null}, ${0}, ${0}, ${0}, ${0},
+        ${user.org_id}, ${now}, ${now}
+      )
+    `;
+  } catch (err: any) {
+    return c.json({ error: `Failed to create run: ${err.message}` }, 500);
+  }
+
+  return c.json({ run_id: runId, agent_name: agentName, status, created: true }, 201);
+});
+
+// PUT /autoresearch/runs/:run_id — update run status/metrics
+autoresearchRoutes.put("/runs/:run_id", requireScope("autoresearch:write"), async (c) => {
+  const user = c.get("user");
+  const runId = c.req.param("run_id");
+  const body = await c.req.json();
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const now = Date.now() / 1000;
+
+  await sql`
+    UPDATE autoresearch_runs SET
+      status = COALESCE(${body.status ?? null}, status),
+      iteration = COALESCE(${body.iteration ?? null}, iteration),
+      best_bpb = COALESCE(${body.best_bpb ?? null}, best_bpb),
+      total_experiments = COALESCE(${body.total_experiments ?? null}, total_experiments),
+      kept = COALESCE(${body.kept ?? null}, kept),
+      discarded = COALESCE(${body.discarded ?? null}, discarded),
+      crashed = COALESCE(${body.crashed ?? null}, crashed),
+      updated_at = ${now}
+    WHERE run_id = ${runId}
+  `;
+
+  return c.json({ run_id: runId, updated: true });
+});
+
+// POST /autoresearch/runs/:run_id/experiments — record an experiment
+autoresearchRoutes.post("/runs/:run_id/experiments", requireScope("autoresearch:write"), async (c) => {
+  const user = c.get("user");
+  const runId = c.req.param("run_id");
+  const body = await c.req.json();
+  const agentName = String(body.agent_name || "").trim();
+  const experimentName = String(body.experiment_name || "").trim();
+  const status = String(body.status || "completed");
+  const bpb = body.bpb != null ? Number(body.bpb) : null;
+  const configJson = JSON.stringify(body.config || {});
+  const resultsJson = JSON.stringify(body.results || {});
+
+  if (!experimentName) return c.json({ error: "experiment_name is required" }, 400);
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const experimentId = crypto.randomUUID();
+  const now = Date.now() / 1000;
+
+  try {
+    await sql`
+      INSERT INTO autoresearch_experiments (
+        experiment_id, run_id, agent_name, experiment_name, status,
+        bpb, config_json, results_json, org_id, created_at
+      ) VALUES (
+        ${experimentId}, ${runId}, ${agentName}, ${experimentName}, ${status},
+        ${bpb}, ${configJson}, ${resultsJson}, ${user.org_id}, ${now}
+      )
+    `;
+  } catch (err: any) {
+    return c.json({ error: `Failed to create experiment: ${err.message}` }, 500);
+  }
+
+  return c.json({ experiment_id: experimentId, run_id: runId, created: true }, 201);
+});
+
 autoresearchRoutes.get("/runs", requireScope("autoresearch:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.query("agent_name") || "";

@@ -69,6 +69,15 @@ orgRoutes.post("/", requireScope("orgs:write"), async (c) => {
     INSERT INTO org_members (org_id, user_id, role) VALUES (${orgId}, ${user.user_id}, 'owner')
   `;
 
+  // Create default org_settings for the new org
+  const now = Date.now() / 1000;
+  try {
+    await sql`
+      INSERT INTO org_settings (org_id, plan_type, max_agents, max_runs_per_month, max_seats, features, created_at, updated_at)
+      VALUES (${orgId}, ${"free"}, ${3}, ${1000}, ${1}, ${JSON.stringify(["basic_agents", "basic_observability"])}, ${now}, ${now})
+    `;
+  } catch {}
+
   return c.json({ org_id: orgId, name, slug, plan: "free", member_count: 1 });
 });
 
@@ -152,6 +161,19 @@ orgRoutes.put("/:org_id", requireScope("orgs:write"), async (c) => {
     await sql`UPDATE orgs SET name = ${name}, updated_at = ${now} WHERE org_id = ${orgId}`;
   } else {
     await sql`UPDATE orgs SET plan = ${plan}, updated_at = ${now} WHERE org_id = ${orgId}`;
+  }
+
+  // Sync plan change to org_settings
+  if (plan) {
+    try {
+      await sql`
+        INSERT INTO org_settings (org_id, plan_type, created_at, updated_at)
+        VALUES (${orgId}, ${plan}, ${now}, ${now})
+        ON CONFLICT (org_id) DO UPDATE SET
+          plan_type = EXCLUDED.plan_type,
+          updated_at = EXCLUDED.updated_at
+      `;
+    } catch {}
   }
 
   return c.json({ updated: orgId });

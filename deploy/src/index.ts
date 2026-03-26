@@ -4421,6 +4421,37 @@ export default {
               ${p.status || ""}, ${p.latency_ms || 0}, ${JSON.stringify(p.details || {})},
               ${Number(p.created_at) || Date.now() / 1000}
             )`;
+          } else if (type === "cost_ledger") {
+            // Per-session cost breakdown written at session end
+            await sql`INSERT INTO cost_ledger (
+              session_id, org_id, agent_name, model,
+              input_tokens, output_tokens, cost_usd, plan, created_at
+            ) VALUES (
+              ${p.session_id}, ${p.org_id || ""}, ${p.agent_name || ""},
+              ${p.model || ""}, ${p.input_tokens || 0}, ${p.output_tokens || 0},
+              ${p.cost_usd || 0}, ${p.plan || ""}, ${Number(p.created_at) || Date.now() / 1000}
+            )`;
+          } else if (type === "runtime_event") {
+            // Runtime-level events (node executions, graph transitions, errors)
+            await sql`INSERT INTO runtime_events (
+              trace_id, session_id, org_id, event_type, node_id,
+              status, duration_ms, details_json, created_at
+            ) VALUES (
+              ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
+              ${p.event_type || ""}, ${p.node_id || ""},
+              ${p.status || ""}, ${p.duration_ms || 0}, ${JSON.stringify(p.details || {})},
+              ${Number(p.created_at) || Date.now() / 1000}
+            )`;
+          } else if (type === "middleware_event") {
+            // Middleware execution events (loop detection, summarization, etc.)
+            await sql`INSERT INTO middleware_events (
+              org_id, session_id, middleware_name, event_type,
+              details_json, created_at
+            ) VALUES (
+              ${p.org_id || ""}, ${p.session_id || ""}, ${p.middleware_name || ""},
+              ${p.event_type || ""}, ${JSON.stringify(p.details || {})},
+              ${Number(p.created_at) || Date.now() / 1000}
+            )`;
           }
           msg.ack();
         } catch (err) {

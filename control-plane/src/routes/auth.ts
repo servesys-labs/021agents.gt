@@ -213,6 +213,44 @@ authRoutes.post("/signup", async (c) => {
     console.error("[auth/signup] Org member insert failed:", err);
   }
 
+  // Create default org_settings
+  try {
+    await sql`
+      INSERT INTO org_settings (org_id, plan_type, limits_json, features_json, created_at, updated_at)
+      VALUES (${orgId}, ${"free"}, ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })}, ${JSON.stringify(["basic_agents", "basic_observability"])}, now(), now())
+      ON CONFLICT (org_id) DO NOTHING
+    `;
+  } catch (err) {
+    console.warn("[auth/signup] org_settings insert failed:", err);
+  }
+
+  // Seed default event_types for the org (best-effort, idempotent)
+  try {
+    const defaultEventTypes = [
+      { event_type: "agent.created", category: "agents", description: "Agent was created" },
+      { event_type: "agent.updated", category: "agents", description: "Agent config was updated" },
+      { event_type: "agent.deleted", category: "agents", description: "Agent was deleted" },
+      { event_type: "session.started", category: "sessions", description: "Agent session started" },
+      { event_type: "session.completed", category: "sessions", description: "Agent session completed" },
+      { event_type: "session.failed", category: "sessions", description: "Agent session failed" },
+      { event_type: "connector.token_stored", category: "connectors", description: "OAuth token stored" },
+      { event_type: "connector.tool_call", category: "connectors", description: "Connector tool invoked" },
+      { event_type: "retention.applied", category: "retention", description: "Retention policy applied" },
+      { event_type: "config.update", category: "config", description: "Configuration changed" },
+      { event_type: "member.invited", category: "orgs", description: "Member invited to org" },
+      { event_type: "member.removed", category: "orgs", description: "Member removed from org" },
+    ];
+    for (const et of defaultEventTypes) {
+      await sql`
+        INSERT INTO event_types (event_type, category, description)
+        VALUES (${et.event_type}, ${et.category}, ${et.description})
+        ON CONFLICT (event_type) DO NOTHING
+      `;
+    }
+  } catch (err) {
+    console.warn("[auth/signup] event_types seed failed:", err);
+  }
+
   // Create default project for the new org
   try {
     const projectId = generateId();
@@ -396,6 +434,13 @@ authRoutes.post("/cf-access/exchange", async (c) => {
       INSERT INTO org_members (org_id, user_id, role, created_at)
       VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
     `;
+    // Create default org_settings for CF Access provisioned org
+    try {
+      await sql`
+        INSERT INTO org_settings (org_id, plan_type, max_agents, max_runs_per_month, max_seats, features, created_at, updated_at)
+        VALUES (${orgId}, ${"free"}, ${3}, ${1000}, ${1}, ${JSON.stringify(["basic_agents", "basic_observability"])}, ${nowEpoch}, ${nowEpoch})
+      `;
+    } catch {}
     role = "owner";
   }
 
