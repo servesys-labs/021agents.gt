@@ -25,6 +25,7 @@ import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
 import { useApiQuery, apiPost, apiPut, apiDelete } from "../../lib/api";
 import { useToast } from "../../components/common/ToastProvider";
+import { Modal } from "../../components/common/Modal";
 
 /* ── Cron Preview Helper ─────────────────────────────────────────── */
 
@@ -968,24 +969,40 @@ export function JobsPage() {
       )}
 
       {/* ── Create / Edit Modal ─────────────────────────────────────── */}
-      {modalOpen && (
-        <div className="modal-overlay glass-backdrop" onClick={() => setModalOpen(false)}>
-          {/* Panel */}
-          <div className="relative z-10 w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            {/* Header */}
-            <div className="flex items-center justify-between mb-[var(--space-6)]">
-              <h2 className="text-[var(--text-md)] font-bold text-text-primary">
-                {editingJob ? "Edit Schedule" : "New Job"}
-              </h2>
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-ghost p-[var(--space-2)] min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)]"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={editingJob ? "Edit Schedule" : "New Job"}
+        maxWidth="2xl"
+        footer={
+          <>
+            <button
+              onClick={() => setModalOpen(false)}
+              className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              {saving ? (
+                <>
+                  <Loader2 size={12} className="animate-spin" />
+                  Saving...
+                </>
+              ) : formRunOnce ? (
+                "Run Now"
+              ) : editingJob ? (
+                "Update"
+              ) : (
+                "Create"
+              )}
+            </button>
+          </>
+        }
+      >
             {/* Form */}
             <div className="space-y-[var(--space-4)]">
               {/* Name */}
@@ -1125,36 +1142,7 @@ export function JobsPage() {
               )}
             </div>
 
-            {/* Actions */}
-            <div className="flex items-center justify-end gap-[var(--space-3)] mt-[var(--space-6)]">
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                {saving ? (
-                  <>
-                    <Loader2 size={12} className="animate-spin" />
-                    Saving...
-                  </>
-                ) : formRunOnce ? (
-                  "Run Now"
-                ) : editingJob ? (
-                  "Update"
-                ) : (
-                  "Create"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

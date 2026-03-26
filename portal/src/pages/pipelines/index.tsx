@@ -33,6 +33,7 @@ import {
 } from "../../lib/api";
 import { extractList } from "../../lib/normalize";
 import { useToast } from "../../components/common/ToastProvider";
+import { Modal } from "../../components/common/Modal";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -949,29 +950,62 @@ export function PipelinesPage() {
       )}
 
       {/* ── Create Pipeline modal (wizard) ─────────────────────────── */}
-      {showCreatePipeline && (
-        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowCreatePipeline(false)}>
-          <div className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-[var(--space-4)]">
-              <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
-                {wizardStep === 0
-                  ? "Choose a Template"
-                  : wizardStep === 1
-                    ? "Configure Stream"
-                    : wizardStep === 2
-                      ? "SQL Transform"
-                      : wizardStep === 3
-                        ? "Configure Sink"
-                        : "Review & Create"}
-              </h2>
+      <Modal
+        open={showCreatePipeline}
+        onClose={() => setShowCreatePipeline(false)}
+        title={
+          wizardStep === 0
+            ? "Choose a Template"
+            : wizardStep === 1
+              ? "Configure Stream"
+              : wizardStep === 2
+                ? "SQL Transform"
+                : wizardStep === 3
+                  ? "Configure Sink"
+                  : "Review & Create"
+        }
+        maxWidth="2xl"
+        footer={
+          <>
+            <button
+              onClick={() => {
+                if (wizardStep > 0) setWizardStep(wizardStep - 1);
+                else setShowCreatePipeline(false);
+              }}
+              className="btn btn-secondary min-h-[var(--touch-target-min)]"
+            >
+              {wizardStep === 0 ? "Cancel" : "Back"}
+            </button>
+            {wizardStep < 4 ? (
               <button
-                onClick={() => setShowCreatePipeline(false)}
-                className="p-2 rounded-lg hover:bg-surface-overlay transition-colors min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
-                aria-label="Close"
+                onClick={() => setWizardStep(wizardStep + 1)}
+                className="btn btn-primary min-h-[var(--touch-target-min)]"
               >
-                <X size={16} />
+                Next
+                <ArrowRight size={14} />
               </button>
-            </div>
+            ) : (
+              <button
+                onClick={handleCreatePipeline}
+                disabled={submitting}
+                className="btn btn-primary min-h-[var(--touch-target-min)]"
+              >
+                {submitting ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  <>
+                    <Plus size={14} />
+                    Create Pipeline
+                  </>
+                )}
+              </button>
+            )}
+          </>
+        }
+      >
 
             {/* Step indicators */}
             <div className="flex items-center gap-[var(--space-2)] mb-[var(--space-4)]">
@@ -1192,66 +1226,42 @@ export function PipelinesPage() {
               </div>
             )}
 
-            {/* Navigation buttons */}
-            <div className="flex items-center justify-between mt-[var(--space-6)]">
-              <button
-                onClick={() => {
-                  if (wizardStep > 0) setWizardStep(wizardStep - 1);
-                  else setShowCreatePipeline(false);
-                }}
-                className="btn btn-secondary min-h-[var(--touch-target-min)]"
-              >
-                {wizardStep === 0 ? "Cancel" : "Back"}
-              </button>
-              {wizardStep < 4 ? (
-                <button
-                  onClick={() => setWizardStep(wizardStep + 1)}
-                  className="btn btn-primary min-h-[var(--touch-target-min)]"
-                >
-                  Next
-                  <ArrowRight size={14} />
-                </button>
-              ) : (
-                <button
-                  onClick={handleCreatePipeline}
-                  disabled={submitting}
-                  className="btn btn-primary min-h-[var(--touch-target-min)]"
-                >
-                  {submitting ? (
-                    <>
-                      <Loader2 size={14} className="animate-spin" />
-                      Creating...
-                    </>
-                  ) : (
-                    <>
-                      <Plus size={14} />
-                      Create Pipeline
-                    </>
-                  )}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* ── Create Stream modal ────────────────────────────────────── */}
-      {showCreateStream && (
-        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowCreateStream(false)}>
-          <div className="relative w-full max-w-lg glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-[var(--space-4)]">
-              <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
-                Create Stream
-              </h2>
-              <button
-                onClick={() => setShowCreateStream(false)}
-                className="p-2 rounded-lg hover:bg-surface-overlay transition-colors min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
+      <Modal
+        open={showCreateStream}
+        onClose={() => setShowCreateStream(false)}
+        title="Create Stream"
+        maxWidth="lg"
+        footer={
+          <>
+            <button
+              onClick={() => setShowCreateStream(false)}
+              className="btn btn-secondary min-h-[var(--touch-target-min)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCreateStream}
+              disabled={submitting}
+              className="btn btn-primary min-h-[var(--touch-target-min)]"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                <>
+                  <Plus size={14} />
+                  Create Stream
+                </>
+              )}
+            </button>
+          </>
+        }
+      >
             <div className="space-y-[var(--space-4)]">
               <div>
                 <label className="block text-[var(--text-xs)] text-text-muted uppercase mb-[var(--space-1)]">
@@ -1313,53 +1323,42 @@ export function PipelinesPage() {
                 />
               </div>
             </div>
-
-            <div className="flex justify-end gap-[var(--space-2)] mt-[var(--space-6)]">
-              <button
-                onClick={() => setShowCreateStream(false)}
-                className="btn btn-secondary min-h-[var(--touch-target-min)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCreateStream}
-                disabled={submitting}
-                className="btn btn-primary min-h-[var(--touch-target-min)]"
-              >
-                {submitting ? (
-                  <>
-                    <Loader2 size={14} className="animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <Plus size={14} />
-                    Create Stream
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* ── Create Sink modal ──────────────────────────────────────── */}
-      {showCreateSink && (
-        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowCreateSink(false)}>
-          <div className="relative w-full max-w-lg glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-[var(--space-4)]">
-              <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
-                Create Sink
-              </h2>
-              <button
-                onClick={() => setShowCreateSink(false)}
-                className="p-2 rounded-lg hover:bg-surface-overlay transition-colors min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
+      <Modal
+        open={showCreateSink}
+        onClose={() => setShowCreateSink(false)}
+        title="Create Sink"
+        maxWidth="lg"
+        footer={
+          <>
+            <button
+              onClick={() => setShowCreateSink(false)}
+              className="btn btn-secondary min-h-[var(--touch-target-min)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCreateSink}
+              disabled={submitting}
+              className="btn btn-primary min-h-[var(--touch-target-min)]"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Creating...
+                </>
+              ) : (
+                <>
+                  <Plus size={14} />
+                  Create Sink
+                </>
+              )}
+            </button>
+          </>
+        }
+      >
             <div className="space-y-[var(--space-4)]">
               <div>
                 <label className="block text-[var(--text-xs)] text-text-muted uppercase mb-[var(--space-1)]">
@@ -1439,34 +1438,7 @@ export function PipelinesPage() {
               </div>
             </div>
 
-            <div className="flex justify-end gap-[var(--space-2)] mt-[var(--space-6)]">
-              <button
-                onClick={() => setShowCreateSink(false)}
-                className="btn btn-secondary min-h-[var(--touch-target-min)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCreateSink}
-                disabled={submitting}
-                className="btn btn-primary min-h-[var(--touch-target-min)]"
-              >
-                {submitting ? (
-                  <>
-                    <Loader2 size={14} className="animate-spin" />
-                    Creating...
-                  </>
-                ) : (
-                  <>
-                    <Plus size={14} />
-                    Create Sink
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
 
       {/* ── Query Panel (slide-over) ───────────────────────────────── */}
       {showQueryPanel && selectedPipeline && (
@@ -1608,28 +1580,13 @@ export function PipelinesPage() {
 
       {/* ── Edit SQL modal ─────────────────────────────────────────── */}
       {showEditSql && selectedPipeline && (
-        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowEditSql(false)}>
-          <div className="relative w-full max-w-xl glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-[var(--space-4)]">
-              <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
-                Edit SQL: {selectedPipeline.name}
-              </h2>
-              <button
-                onClick={() => setShowEditSql(false)}
-                className="p-2 rounded-lg hover:bg-surface-overlay transition-colors min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <textarea
-              value={editSqlValue}
-              onChange={(e) => setEditSqlValue(e.target.value)}
-              rows={10}
-              className="w-full font-mono text-[var(--text-sm)] bg-surface-base border border-border-default rounded-lg px-[var(--space-3)] py-[var(--space-3)] text-text-primary placeholder:text-text-muted resize-y focus:outline-none focus:ring-2 focus:ring-accent/40"
-              spellCheck={false}
-            />
-            <div className="flex justify-end gap-[var(--space-2)] mt-[var(--space-4)]">
+        <Modal
+          open
+          onClose={() => setShowEditSql(false)}
+          title={`Edit SQL: ${selectedPipeline.name}`}
+          maxWidth="xl"
+          footer={
+            <>
               <button
                 onClick={() => setShowEditSql(false)}
                 className="btn btn-secondary min-h-[var(--touch-target-min)]"
@@ -1650,9 +1607,17 @@ export function PipelinesPage() {
                   "Save SQL"
                 )}
               </button>
-            </div>
-          </div>
-        </div>
+            </>
+          }
+        >
+            <textarea
+              value={editSqlValue}
+              onChange={(e) => setEditSqlValue(e.target.value)}
+              rows={10}
+              className="w-full font-mono text-[var(--text-sm)] bg-surface-base border border-border-default rounded-lg px-[var(--space-3)] py-[var(--space-3)] text-text-primary placeholder:text-text-muted resize-y focus:outline-none focus:ring-2 focus:ring-accent/40"
+              spellCheck={false}
+            />
+        </Modal>
       )}
     </div>
   );

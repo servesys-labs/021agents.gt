@@ -11,7 +11,6 @@ import {
   Download,
   ChevronDown,
   ChevronRight,
-  X,
   Search,
   Filter,
 } from "lucide-react";
@@ -23,6 +22,7 @@ import { QueryState } from "../../components/common/QueryState";
 import { useApiQuery, apiPost, apiDelete, apiRequest } from "../../lib/api";
 import { extractList } from "../../lib/normalize";
 import { useToast } from "../../components/common/ToastProvider";
+import { Modal } from "../../components/common/Modal";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -263,38 +263,7 @@ function Toggle({
   );
 }
 
-/* ── Modal Backdrop ───────────────────────────────────────────── */
-
-function Modal({
-  open,
-  onClose,
-  title,
-  children,
-}: {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  children: React.ReactNode;
-}) {
-  if (!open) return null;
-  return (
-    <div className="modal-overlay glass-backdrop" onClick={onClose}>
-      <div className="relative z-10 glass-medium border border-border-default rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto shadow-overlay" onClick={(e) => e.stopPropagation()}>
-        <div className="flex items-center justify-between p-[var(--space-4)] border-b border-border-default">
-          <h3 className="text-[var(--text-md)] font-semibold text-text-primary">{title}</h3>
-          <button
-            onClick={onClose}
-            className="p-[var(--space-1)] rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary transition-colors min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
-            aria-label="Close"
-          >
-            <X size={16} />
-          </button>
-        </div>
-        <div className="p-[var(--space-4)]">{children}</div>
-      </div>
-    </div>
-  );
-}
+/* ── Modal is now imported from ../../components/common/Modal ── */
 
 /* ── Trend Sparkline (simple SVG) ─────────────────────────────── */
 
@@ -862,6 +831,7 @@ function PoliciesTab() {
         open={showCreate}
         onClose={() => setShowCreate(false)}
         title={editingPolicy ? "Edit Policy" : "Create Policy"}
+        maxWidth="lg"
       >
         <div className="space-y-[var(--space-4)]">
           {/* Name */}
@@ -1196,6 +1166,7 @@ function DlpTab() {
           open={showCreateClass}
           onClose={() => setShowCreateClass(false)}
           title="Create Classification"
+          maxWidth="lg"
         >
           <div className="space-y-[var(--space-4)]">
             <div>

@@ -23,7 +23,6 @@ import {
   Play,
   AlertTriangle,
   Check,
-  X,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -32,6 +31,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { useToast } from "../../components/common/ToastProvider";
 import { useAuth } from "../../lib/auth";
 import { apiGet, apiPost, apiPut, apiDelete, useApiQuery } from "../../lib/api";
+import { Modal } from "../../components/common/Modal";
 import { extractList } from "../../lib/normalize";
 
 /* ══════════════════════════════════════════════════════════════════
@@ -267,55 +267,8 @@ const WEBHOOK_EVENTS = [
 
 /* ══════════════════════════════════════════════════════════════════
    Shared inline components
+   (Modal is now imported from ../../components/common/Modal)
    ══════════════════════════════════════════════════════════════════ */
-
-function Modal({
-  open,
-  onClose,
-  title,
-  children,
-}: {
-  open: boolean;
-  onClose: () => void;
-  title: string;
-  children: React.ReactNode;
-}) {
-  useEffect(() => {
-    if (!open) return;
-    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
-    document.addEventListener("keydown", h);
-    return () => document.removeEventListener("keydown", h);
-  }, [open, onClose]);
-
-  if (!open) return null;
-
-  return (
-    <div
-      className="modal-overlay glass-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-label={title}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div
-        className="w-full max-w-[480px] glass-medium border border-border-default rounded-lg relative"
-        style={{ animation: "fadeIn 0.15s ease-out" }}
-      >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border-default">
-          <h2 className="text-sm font-semibold text-text-primary">{title}</h2>
-          <button
-            onClick={onClose}
-            className="p-2 min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-md text-text-muted hover:text-text-primary hover:bg-surface-overlay transition-colors flex items-center justify-center"
-            aria-label="Close"
-          >
-            <X size={16} />
-          </button>
-        </div>
-        <div className="px-5 py-4">{children}</div>
-      </div>
-    </div>
-  );
-}
 
 function Pill({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
@@ -544,7 +497,7 @@ export const SettingsPage = () => {
       )}
 
       {/* Invite modal */}
-      <Modal open={inviteOpen} onClose={() => setInviteOpen(false)} title="Invite Team Member">
+      <Modal open={inviteOpen} onClose={() => setInviteOpen(false)} title="Invite Team Member" maxWidth="md">
         <div className="mb-4">
           <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">
             Email <span className="text-accent">*</span>
@@ -766,7 +719,7 @@ export const SettingsPage = () => {
       )}
 
       {/* Create / Reveal modal */}
-      <Modal open={createKeyOpen} onClose={closeKeyModal} title={createdKeyValue ? "Key Created" : "Create API Key"}>
+      <Modal open={createKeyOpen} onClose={closeKeyModal} title={createdKeyValue ? "Key Created" : "Create API Key"} maxWidth="md">
         {createdKeyValue ? (
           <div>
             <div className="rounded-lg border border-status-warning/30 bg-status-warning/10 p-3 mb-4">
@@ -1267,7 +1220,7 @@ export const SettingsPage = () => {
       </div>
 
       {/* Telegram QR modal */}
-      <Modal open={!!telegramQr} onClose={() => setTelegramQr(null)} title="Telegram QR Code">
+      <Modal open={!!telegramQr} onClose={() => setTelegramQr(null)} title="Telegram QR Code" maxWidth="md">
         <div className="flex flex-col items-center gap-4">
           {telegramQr?.startsWith("http") ? (
             <img src={telegramQr} alt="Telegram QR code" className="w-48 h-48 rounded-lg border border-border-default" />
@@ -2131,7 +2084,7 @@ export const SettingsPage = () => {
       )}
 
       {/* Rotated secret reveal */}
-      <Modal open={!!rotatedSecretValue} onClose={() => setRotatedSecretValue(null)} title="Secret Rotated">
+      <Modal open={!!rotatedSecretValue} onClose={() => setRotatedSecretValue(null)} title="Secret Rotated" maxWidth="md">
         <div className="rounded-lg border border-status-warning/30 bg-status-warning/10 p-3 mb-4">
           <p className="text-xs text-status-warning font-medium flex items-center gap-1.5">
             <AlertTriangle size={12} /> Copy this value now — it won't be shown again
@@ -2262,7 +2215,7 @@ export const SettingsPage = () => {
       )}
 
       {/* Create project modal */}
-      <Modal open={projectModalOpen} onClose={() => setProjectModalOpen(false)} title="New Project">
+      <Modal open={projectModalOpen} onClose={() => setProjectModalOpen(false)} title="New Project" maxWidth="md">
         <div className="mb-4">
           <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">
             Name <span className="text-accent">*</span>

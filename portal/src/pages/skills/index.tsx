@@ -5,12 +5,12 @@ import {
   Plus,
   Edit3,
   Trash2,
-  X,
   Loader2,
   Users,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
+import { Modal } from "../../components/common/Modal";
 import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
 import { useApiQuery, apiPut, apiPost, apiDelete, apiGet } from "../../lib/api";
@@ -383,141 +383,75 @@ export function SkillsPage() {
       </QueryState>
 
       {/* ── Create / Edit Modal ─────────────────────────────────────── */}
-      {modalOpen && (
-        <div className="modal-overlay glass-backdrop" onClick={() => setModalOpen(false)}>
-          {/* Panel */}
-          <div className="relative z-10 w-full max-w-2xl rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            {/* Header */}
-            <div className="flex items-center justify-between mb-[var(--space-6)]">
-              <h2 className="text-[var(--text-md)] font-bold text-text-primary">
-                {editingSkill ? "Edit Skill" : "Create Skill"}
-              </h2>
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-ghost p-[var(--space-2)] min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)]"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            {/* Form */}
-            <div className="space-y-[var(--space-4)]">
-              {/* Name */}
-              <div>
-                <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-                  Name
-                </label>
-                <input
-                  type="text"
-                  value={formName}
-                  onChange={(e) => setFormName(e.target.value)}
-                  placeholder="e.g., customer-research"
-                  disabled={!!editingSkill}
-                />
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title={editingSkill ? "Edit Skill" : "Create Skill"}
+        maxWidth="2xl"
+        footer={
+          <>
+            <button
+              onClick={() => setModalOpen(false)}
+              className="btn btn-secondary text-xs min-h-[var(--touch-target-min)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="btn btn-primary text-xs min-h-[var(--touch-target-min)]"
+            >
+              {saving ? (
+                <>
+                  <Loader2 size={12} className="animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                "Save"
+              )}
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="block text-xs text-text-muted uppercase tracking-wide mb-1">Name</label>
+            <input type="text" value={formName} onChange={(e) => setFormName(e.target.value)} placeholder="e.g., customer-research" disabled={!!editingSkill} />
+          </div>
+          <div>
+            <label className="block text-xs text-text-muted uppercase tracking-wide mb-1">Description</label>
+            <textarea value={formDescription} onChange={(e) => setFormDescription(e.target.value)} placeholder="What does this skill do?" rows={2} />
+          </div>
+          <div>
+            <label className="block text-xs text-text-muted uppercase tracking-wide mb-1">Category</label>
+            <select value={formCategory} onChange={(e) => setFormCategory(e.target.value)}>
+              <option value="prompt">Prompt</option>
+              <option value="tool-chain">Tool Chain</option>
+              <option value="workflow">Workflow</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-text-muted uppercase tracking-wide mb-1">Content (Markdown / Prompt Template)</label>
+            <textarea value={formContent} onChange={(e) => setFormContent(e.target.value)} placeholder="Enter skill definition..." rows={10} className="font-mono text-xs" />
+          </div>
+          <div>
+            <label className="block text-xs text-text-muted uppercase tracking-wide mb-2">Assign to Agents</label>
+            {agents.length > 0 ? (
+              <div className="grid grid-cols-2 gap-2 max-h-40 overflow-y-auto">
+                {agents.map((agent) => (
+                  <label key={agent.name} className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-surface-overlay transition-colors cursor-pointer min-h-[var(--touch-target-min)]">
+                    <input type="checkbox" checked={formAgents.includes(agent.name)} onChange={() => toggleAgentAssignment(agent.name)} />
+                    <span className="text-xs text-text-secondary">{agent.name}</span>
+                  </label>
+                ))}
               </div>
-
-              {/* Description */}
-              <div>
-                <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-                  Description
-                </label>
-                <textarea
-                  value={formDescription}
-                  onChange={(e) => setFormDescription(e.target.value)}
-                  placeholder="What does this skill do?"
-                  rows={2}
-                />
-              </div>
-
-              {/* Category */}
-              <div>
-                <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-                  Category
-                </label>
-                <select
-                  value={formCategory}
-                  onChange={(e) => setFormCategory(e.target.value)}
-                >
-                  <option value="prompt">Prompt</option>
-                  <option value="tool-chain">Tool Chain</option>
-                  <option value="workflow">Workflow</option>
-                  <option value="custom">Custom</option>
-                </select>
-              </div>
-
-              {/* Content editor */}
-              <div>
-                <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-                  Content (Markdown / Prompt Template)
-                </label>
-                <textarea
-                  value={formContent}
-                  onChange={(e) => setFormContent(e.target.value)}
-                  placeholder="Enter skill definition..."
-                  rows={10}
-                  className="font-mono text-[var(--text-xs)]"
-                />
-              </div>
-
-              {/* Agent assignment */}
-              <div>
-                <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-2)]">
-                  Assign to Agents
-                </label>
-                {agents.length > 0 ? (
-                  <div className="grid grid-cols-2 gap-[var(--space-2)] max-h-40 overflow-y-auto">
-                    {agents.map((agent) => (
-                      <label
-                        key={agent.name}
-                        className="flex items-center gap-[var(--space-2)] px-[var(--space-2)] py-[var(--space-2)] rounded-lg hover:bg-surface-overlay transition-colors cursor-pointer min-h-[var(--touch-target-min)]"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={formAgents.includes(agent.name)}
-                          onChange={() => toggleAgentAssignment(agent.name)}
-                          className="w-4 h-4 rounded border-border-default accent-accent"
-                        />
-                        <span className="text-[var(--text-xs)] text-text-secondary">
-                          {agent.name}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-[var(--text-xs)] text-text-muted">
-                    No agents available.
-                  </p>
-                )}
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center justify-end gap-[var(--space-3)] mt-[var(--space-6)]">
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                {saving ? (
-                  <>
-                    <Loader2 size={12} className="animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  "Save"
-                )}
-              </button>
-            </div>
+            ) : (
+              <p className="text-xs text-text-muted">No agents available.</p>
+            )}
           </div>
         </div>
-      )}
+      </Modal>
     </div>
   );
 }
