@@ -1,0 +1,67 @@
+# AgentOS — Cross-Session Progress Log
+#
+# PURPOSE: This file tracks what was done across development sessions so that
+# the next AI agent session can orient quickly without archaeology.
+#
+# RULES:
+# - Append new entries at the bottom (never delete history).
+# - Each entry: date, what was done, what was left incomplete, what to do next.
+# - Update feature_list.json passes field after verifying features end-to-end.
+# - Commit this file at the end of every session.
+
+---
+
+## 2026-03-26 — Harness Infrastructure Bootstrap
+
+### What was done
+- Rewrote AGENTS.md to reflect the TypeScript codebase as source of truth
+  (control-plane, deploy, portal). Deprecated Python agentos/ references.
+- Created feature_list.json with 56 tracked features across control-plane (24),
+  runtime (20), and portal (12). All existing features marked as passes:true.
+- Created init.sh bootstrap script for dev environment setup.
+- Created this progress file (claude-progress.txt).
+- Added cross-session progress tracking module to deploy runtime (progress.ts).
+- Added startup sequence to deploy runtime engine for agent self-orientation.
+
+### What was left incomplete
+- rt-progress-tracking (feature_list.json): passes:false — needs integration
+  testing with a live Supabase instance.
+- rt-startup-sequence (feature_list.json): passes:false — needs integration
+  testing with a live Supabase instance.
+
+### What to do next
+- Integration test the progress tracking module against a real Supabase instance.
+- Consider adding a portal page for viewing cross-session progress history.
+- Review and potentially expand feature_list.json as new features are built.
+- Run the full control-plane test suite to verify no regressions.
+
+---
+
+## 2026-03-26 — SWE-Agent ACI Patterns for Deployed Agent Harness
+
+### What was done
+- Merged meta-agent sprint from main (64 tools, full orchestrator system prompt).
+- Implemented SWE-agent ACI patterns in deploy/src/runtime/tools.ts:
+  - Git tools: git-init, git-status, git-diff, git-commit, git-log, git-branch, git-stash
+  - Lint-on-edit: Python (ast.parse), JS/TS (node --check), JSON validation
+  - Edit diff output: unified diff shown after every edit
+  - Stateful file viewer (view-file): cursor-based, 100-line windows, line numbers
+  - read-file: now supports offset/limit pagination with total line count
+  - search-file and find-file: new SWE-agent ACI navigation tools
+  - Smart grep/glob: counts total matches first, forces query refinement when too many
+- Implemented reflection & retry in deploy/src/runtime/edge_graph.ts:
+  - FRESH_REFLECT node: confidence scoring (tool failures, warnings, short answers)
+  - Reflection retry: if confidence < 0.6, injects guidance and re-routes to LLM (max 1)
+  - Tool failure recovery: injects system message guiding agent to try different approach
+
+### What was left incomplete
+- Git tools need git to be pre-installed in sandbox images
+- Reflection gate needs tuning of confidence thresholds with real workloads
+- No end-to-end testing yet (requires live sandbox + Supabase)
+
+### What to do next
+- Ensure sandbox base images include git (required for git-* tools)
+- Add reasoning strategy injection to system prompts (step-back, tree-of-thought)
+- Port the evolution analyzer from Python (FailureAnalyzer, proposal generation)
+- Add a portal page for viewing agent harness telemetry (reflection events, tool failures)
+- Consider adding workspace isolation (git worktree per session) for parallel agents

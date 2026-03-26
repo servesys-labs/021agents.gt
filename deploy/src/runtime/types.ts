@@ -95,6 +95,9 @@ export interface AgentConfig {
   };
   // Codemode observability processor snippet ID
   codemode_observability?: string;
+  // Enable code mode: collapse all tools into a single codemode tool
+  // LLM writes code to chain tools instead of individual tool calls (~85% token savings)
+  use_code_mode?: boolean;
 }
 
 // ── Runtime Context (flows through graph nodes) ────────────────

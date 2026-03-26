@@ -361,3 +361,21 @@ CREATE INDEX IF NOT EXISTS idx_pricing_catalog_effective ON pricing_catalog(effe
 
 CREATE TRIGGER update_pricing_catalog_updated_at BEFORE UPDATE ON pricing_catalog
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SESSION PROGRESS — cross-session progress tracking (harness pattern)
+-- Enables agents to orient across context window boundaries by reading
+-- what prior sessions accomplished, failed at, and left incomplete.
+-- ═══════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE IF NOT EXISTS session_progress (
+  session_id text PRIMARY KEY,
+  trace_id text NOT NULL DEFAULT '',
+  agent_name text NOT NULL,
+  org_id text NOT NULL DEFAULT '',
+  summary jsonb NOT NULL DEFAULT '{}',
+  created_at real NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_progress_agent_org
+  ON session_progress(agent_name, org_id, created_at DESC);

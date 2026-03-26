@@ -311,6 +311,8 @@ export interface FreshGraphCtx {
   pendingCheckpoint: CheckpointPayload | null;
   /** Node IDs with active breakpoints — halts before executing that node. */
   breakpointNodeIds: Set<string>;
+  /** Whether the reflection gate has already retried once (max 1 retry). */
+  reflectionRetried: boolean;
 }
 
 const FRESH_BOOTSTRAP = "fresh_bootstrap";
@@ -319,20 +321,63 @@ const FRESH_SUMMARIZE = "fresh_summarize";
 const FRESH_ROUTE_LLM = "fresh_route_llm";
 const FRESH_POST_LLM = "fresh_post_llm";
 const FRESH_APPROVAL = "fresh_approval";
+const FRESH_REFLECT = "fresh_reflect";
 const FRESH_FINAL = "fresh_final_answer";
 const FRESH_TOOLS = "fresh_tools";
 const FRESH_LOOP = "fresh_loop_detect";
 const FRESH_AFTER_TOOLS = "fresh_after_tools";
 
+// ── Codemode Middleware Hook Helper ────────────────────────────────────
+
+/**
+ * Execute a codemode middleware hook if configured.
+ * Returns the middleware action (continue, halt, modify) or null if no hook configured.
+ */
+async function runMiddlewareHook(
+  ctx: FreshGraphCtx,
+  hookName: "pre_llm" | "post_llm" | "pre_tool" | "post_tool" | "pre_output",
+  context: unknown,
+): Promise<{ action: string; modified?: unknown } | null> {
+  const hooks = ctx.config.codemode_middleware;
+  if (!hooks) return null;
+  const snippetId = (hooks as Record<string, string | undefined>)[hookName];
+  if (!snippetId) return null;
+
+  try {
+    const { loadSnippetCached, executeScopedCode } = await import("./codemode");
+    const { getToolDefinitions } = await import("./tools");
+    const snippet = await loadSnippetCached(ctx.hyperdrive, snippetId, ctx.config.org_id);
+    if (!snippet) return null;
+
+    const allTools = getToolDefinitions([]);
+    const result = await executeScopedCode(ctx.env, snippet.code, allTools, ctx.sessionId, {
+      scope: "middleware",
+      input: context,
+      traceId: ctx.traceId,
+      orgId: ctx.config.org_id,
+      snippetId,
+    });
+
+    if (!result.success) return null;
+    const output = result.result as Record<string, unknown> | null;
+    if (output && typeof output === "object" && output.action) {
+      return output as { action: string; modified?: unknown };
+    }
+    return null;
+  } catch {
+    return null; // Middleware hooks are best-effort
+  }
+}
+
 /**
  * Adjacency (fresh run):
- * bootstrap → turn_budget ⇄ summarize → route_llm → post_llm → approval | final | tools → loop → after_tools → turn_budget
+ * bootstrap → turn_budget ⇄ summarize → route_llm → post_llm → reflect → final | approval | tools → loop → after_tools → turn_budget
  * post_llm → HALT on LLM error; final → HALT; loop → HALT on loop halt; after_tools → turn_budget or HALT
  */
 const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
   [FRESH_BOOTSTRAP]: {
     id: FRESH_BOOTSTRAP,
-    description: "Memory/context init + session_start",
+    description: "Memory/context init + codemode setup + session_start",
     async run(ctx) {
       const { env, hyperdrive, request, config, sessionId, traceId, rootGraphId, events } = ctx;
       ctx.workingMemory = createWorkingMemory(100);
@@ -355,6 +400,18 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         }
       } catch {
         /* best-effort */
+      }
+
+      // Code mode: collapse all tools into a single codemode tool if enabled
+      // This saves ~85% of tool tokens in the context window
+      if (config.use_code_mode) {
+        try {
+          const { getHarnessToolDefs } = await import("./codemode");
+          ctx.activeTools = await getHarnessToolDefs(env, ctx.activeTools, sessionId, true);
+        } catch (err) {
+          console.error("[edge_graph] code mode init failed, falling back to tool mode:", err);
+          // Fall back to regular tool mode
+        }
       }
 
       let task = request.task;
@@ -483,11 +540,26 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
 
   [FRESH_ROUTE_LLM]: {
     id: FRESH_ROUTE_LLM,
-    description: "Plan routing + LLM call",
+    description: "Plan routing + pre_llm middleware + LLM call",
     async run(ctx) {
       const { env, config, messages, activeTools, events, sessionId, traceId, rootGraphId, turn } =
         ctx;
       ctx.turnStartedMs = Date.now();
+
+      // Fire pre_llm middleware hook (can modify messages before LLM call)
+      const preLlmResult = await runMiddlewareHook(ctx, "pre_llm", {
+        messages: messages.map((m) => ({ role: m.role, content: m.content?.slice(0, 500) })),
+        turn,
+        cumulative_cost_usd: ctx.cumulativeCost,
+      });
+      if (preLlmResult?.action === "halt") {
+        ctx.stopReason = "middleware_halt";
+        ctx.output = String(preLlmResult.modified || "Halted by pre_llm middleware");
+        return GRAPH_HALT;
+      }
+      if (preLlmResult?.action === "inject" && typeof preLlmResult.modified === "string") {
+        messages.push({ role: "system", content: preLlmResult.modified });
+      }
       const planRouting = resolvePlanRouting(
         config.plan,
         config.routing as Record<string, unknown> | undefined,
@@ -579,13 +651,97 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
 
   [FRESH_POST_LLM]: {
     id: FRESH_POST_LLM,
-    description: "Branch: final answer vs tools",
+    description: "Branch: reflection → final answer vs tools",
     async run(ctx) {
       const llm = ctx.llmResponse;
       if (!llm) return GRAPH_HALT;
-      if (llm.tool_calls.length === 0) return FRESH_FINAL;
+      if (llm.tool_calls.length === 0) return FRESH_REFLECT;
       if (ctx.config.require_human_approval) return FRESH_APPROVAL;
       return FRESH_TOOLS;
+    },
+  },
+
+  [FRESH_REFLECT]: {
+    id: FRESH_REFLECT,
+    description: "Reflection gate: assess confidence before finalizing (harness pattern)",
+    async run(ctx) {
+      const llm = ctx.llmResponse!;
+      const { results, events, sessionId, traceId, turn } = ctx;
+
+      // Calculate confidence score (1.0 baseline, deducted for failures/warnings)
+      let confidence = 1.0;
+      const toolFailures: string[] = [];
+      const warnings: string[] = [];
+
+      for (const result of results) {
+        if (result.tool_results) {
+          for (const tr of result.tool_results) {
+            if (tr.error) {
+              confidence -= 0.15;
+              toolFailures.push(`${tr.tool}: ${(tr.error || "").slice(0, 80)}`);
+            }
+          }
+        }
+        if (result.error) {
+          confidence -= 0.2;
+          warnings.push(result.error.slice(0, 80));
+        }
+      }
+      // Penalize if answer is very short relative to task complexity
+      if (llm.content.length < 20 && ctx.task.length > 100) {
+        confidence -= 0.2;
+        warnings.push("Answer is very short relative to task complexity");
+      }
+      confidence = Math.max(0, Math.min(1, confidence));
+
+      // Record reflection artifact as telemetry event
+      pushRuntimeEvent(events, "governance_check" as any, turn, {
+        session_id: sessionId,
+        trace_id: traceId,
+        node_id: "reflection",
+        confidence,
+        tool_failures: toolFailures,
+        warnings,
+        action: confidence >= 0.6 ? "finalize" : "retry",
+      });
+
+      // If confidence is below threshold and we haven't retried yet, ask model to reconsider
+      if (confidence < 0.6 && !ctx.reflectionRetried) {
+        ctx.reflectionRetried = true;
+        const issues = [
+          ...toolFailures.map((f) => `Tool failure: ${f}`),
+          ...warnings.map((w) => `Warning: ${w}`),
+        ];
+        ctx.messages.push({
+          role: "system",
+          content:
+            `[Reflection gate] Confidence is ${confidence.toFixed(2)} (below 0.6 threshold). ` +
+            `Issues: ${issues.join("; ")}. ` +
+            `Please reconsider your answer and try again with a more thorough approach.`,
+        });
+        // Route back to LLM for another attempt
+        return FRESH_ROUTE_LLM;
+      }
+
+      // Fire pre_output middleware hook (can modify or reject the final answer)
+      const preOutputResult = await runMiddlewareHook(ctx, "pre_output", {
+        output: llm.content,
+        confidence,
+        tool_failures: toolFailures,
+        turn,
+      });
+      if (preOutputResult?.action === "reject" && typeof preOutputResult.modified === "string") {
+        if (!ctx.reflectionRetried) {
+          ctx.reflectionRetried = true;
+          ctx.messages.push({ role: "system", content: preOutputResult.modified });
+          return FRESH_ROUTE_LLM;
+        }
+      }
+      if (preOutputResult?.action === "modify" && typeof preOutputResult.modified === "string") {
+        ctx.llmResponse = { ...llm, content: preOutputResult.modified };
+      }
+
+      return FRESH_FINAL;
     },
   },
 
@@ -748,6 +904,7 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         llm.tool_calls,
         sessionId,
         config.parallel_tool_calls,
+        config.tools, // Pass agent's enabled tools to prevent codemode privilege escalation
       );
       ctx.totalToolCalls += toolResults.length;
       // Accumulate tool execution costs (search, crawl, etc.)
@@ -800,6 +957,23 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         status: "completed",
         latency_ms: Date.now() - toolStageStarted,
       });
+
+      // Tool failure recovery: inject guidance when tools fail (harness pattern)
+      // Instead of blind retry, we tell the agent what failed so it can try
+      // a different approach on the next turn.
+      const failedTools = toolResults.filter((tr) => tr.error);
+      if (failedTools.length > 0) {
+        const failureSummary = failedTools
+          .map((tr) => `- ${tr.tool}: ${(tr.error || "").slice(0, 150)}`)
+          .join("\n");
+        messages.push({
+          role: "system",
+          content:
+            `[Tool failure notice] ${failedTools.length} tool(s) failed this turn:\n${failureSummary}\n` +
+            `Consider an alternative approach — use different tools, different arguments, ` +
+            `or break the task into smaller steps.`,
+        });
+      }
 
       const executionMode =
         config.parallel_tool_calls && llm.tool_calls.length > 1 ? "parallel" : "sequential";
@@ -981,6 +1155,7 @@ export function buildFreshGraphCtx(
     route: null,
     pendingCheckpoint: null,
     breakpointNodeIds: extractBreakpointNodeIds(config),
+    reflectionRetried: false,
   };
 }
 
