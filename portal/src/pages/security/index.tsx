@@ -1,11 +1,13 @@
 import { useCallback, useMemo, useState } from "react";
 import {
   AlertTriangle,
+  BarChart3,
   RefreshCw,
   Scan,
   Shield,
   ShieldAlert,
 } from "lucide-react";
+import { Link } from "react-router-dom";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
@@ -285,6 +287,24 @@ export function SecurityPage() {
           scansQuery.refetch();
           profilesQuery.refetch();
         }}
+        actions={
+          <div className="flex items-center gap-[var(--space-2)]">
+            <Link
+              to="/security/findings"
+              className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              <ShieldAlert size={14} />
+              Findings
+            </Link>
+            <Link
+              to="/security/report"
+              className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              <BarChart3 size={14} />
+              Report
+            </Link>
+          </div>
+        }
       />
 
       {/* ── Scan History Table ────────────────────────────────────── */}
@@ -310,9 +330,14 @@ export function SecurityPage() {
                   </thead>
                   <tbody>
                     {scans.map((scan) => (
-                      <tr key={scan.scan_id}>
+                      <tr key={scan.scan_id} className="cursor-pointer">
                         <td className="text-text-primary font-medium">
-                          {scan.agent_name}
+                          <Link
+                            to={`/security/scans/${scan.scan_id}`}
+                            className="hover:text-accent transition-colors"
+                          >
+                            {scan.agent_name}
+                          </Link>
                         </td>
                         <td className="text-text-muted">
                           {formatDate(scan.created_at)}

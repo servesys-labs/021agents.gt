@@ -25,7 +25,7 @@ deployRoutes.post("/:agent_name", requireScope("deploy:write"), async (c) => {
 
   // Mark active
   const now = Date.now() / 1000;
-  await sql`UPDATE agents SET is_active = true, updated_at = ${now} WHERE name = ${agentName}`;
+  await sql`UPDATE agents SET is_active = 1, updated_at = ${now} WHERE name = ${agentName}`;
 
   return c.json({
     deployed: true,
@@ -43,7 +43,7 @@ deployRoutes.delete("/:agent_name", requireScope("deploy:write"), async (c) => {
 
   const now = Date.now() / 1000;
   try {
-    await sql`UPDATE agents SET is_active = false, updated_at = ${now} WHERE name = ${agentName}`;
+    await sql`UPDATE agents SET is_active = 0, updated_at = ${now} WHERE name = ${agentName}`;
   } catch {}
 
   return c.json({ removed: true, agent: agentName });

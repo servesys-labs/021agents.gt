@@ -13,6 +13,8 @@ import {
   Server,
   Sparkles,
   ThumbsUp,
+  Wrench,
+  Globe,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -20,6 +22,7 @@ import { StatusBadge } from "../../components/common/StatusBadge";
 import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
 import { useApiQuery } from "../../lib/api";
 import { safeArray, type AgentInfo } from "../../lib/adapters";
+import { QuotaWidget } from "../../components/common/QuotaWidget";
 
 type DashStats = {
   total_agents?: number;
@@ -51,6 +54,8 @@ export const DashboardPage = () => {
   const activityQuery = useApiQuery<{ activities: RecentActivity[] }>("/api/v1/dashboard/activity?limit=10");
   const intelQuery = useApiQuery<IntelSummary>("/api/v1/intelligence/summary?since_days=30");
   const agentsQuery = useApiQuery<AgentInfo[]>("/api/v1/agents?limit=6&offset=0");
+  const toolsQuery = useApiQuery<Array<{ name: string }>>("/api/v1/tools");
+  const toolCount = safeArray(toolsQuery.data).length;
   const stats = statsQuery.data ?? {};
   const intel = intelQuery.data ?? {};
   const activities = useMemo(() => activityQuery.data?.activities ?? [], [activityQuery.data]);
@@ -79,6 +84,7 @@ export const DashboardPage = () => {
     { label: "Error Rate", value: `${(stats.error_rate_pct ?? 0).toFixed(1)}%`, icon: AlertTriangle, color: "bg-status-error/10", iconColor: "text-status-error", link: "/sessions" },
     { label: "Avg Quality", value: `${Math.round((intel.avg_quality_score ?? 0) * 100)}%`, icon: Sparkles, color: "bg-chart-purple/10", iconColor: "text-chart-purple", link: "/intelligence" },
     { label: "Sentiment", value: `${(intel.avg_sentiment_score ?? 0) >= 0 ? "+" : ""}${(intel.avg_sentiment_score ?? 0).toFixed(2)}`, icon: ThumbsUp, color: "bg-chart-cyan/10", iconColor: "text-chart-cyan", link: "/intelligence" },
+    { label: "Tools", value: toolCount, icon: Wrench, color: "bg-chart-yellow/10", iconColor: "text-chart-yellow", link: "/tools" },
   ];
 
   const quickActions = [
@@ -86,6 +92,8 @@ export const DashboardPage = () => {
     { label: "Open Canvas", icon: Brain, path: "/canvas", desc: "Visual agent builder workspace" },
     { label: "Run Eval", icon: TrendingUp, path: "/eval", desc: "Evaluate agent performance" },
     { label: "Manage Integrations", icon: Server, path: "/integrations", desc: "Connect tools and MCP servers" },
+    { label: "Browse Tools", icon: Wrench, path: "/tools", desc: "Explore the tool registry" },
+    { label: "Discover Agents (A2A)", icon: Globe, path: "/a2a", desc: "Find and interact with A2A agents" },
   ];
 
   const getActivityIcon = (type: string) => {
@@ -102,7 +110,7 @@ export const DashboardPage = () => {
       <PageHeader
         title="Dashboard"
         subtitle="Control plane overview"
-        onRefresh={() => { void statsQuery.refetch(); void activityQuery.refetch(); void intelQuery.refetch(); void agentsQuery.refetch(); }}
+        onRefresh={() => { void statsQuery.refetch(); void activityQuery.refetch(); void intelQuery.refetch(); void agentsQuery.refetch(); void toolsQuery.refetch(); }}
       />
 
       {/* KPI grid */}
@@ -203,6 +211,12 @@ export const DashboardPage = () => {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Quota Usage */}
+      <div className="card mt-4">
+        <h3 className="text-sm font-semibold text-text-primary mb-3">Usage Quota</h3>
+        <QuotaWidget variant="card" />
       </div>
 
       {/* System Health — live from middleware + health endpoints */}

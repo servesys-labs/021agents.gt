@@ -122,6 +122,44 @@ const AuditPage = lazy(() =>
   import("./pages/audit").then((m) => ({ default: m.AuditPage })),
 );
 
+// Tool Registry
+const ToolRegistryPage = lazy(() =>
+  import("./pages/tools/index").then((m) => ({ default: m.ToolRegistryPage })),
+);
+const CreateToolPage = lazy(() =>
+  import("./pages/tools/create").then((m) => ({ default: m.CreateToolPage })),
+);
+const ToolDetailPage = lazy(() =>
+  import("./pages/tools/detail").then((m) => ({ default: m.ToolDetailPage })),
+);
+
+// Billing
+const PricingPage = lazy(() =>
+  import("./pages/billing/pricing").then((m) => ({ default: m.PricingPage })),
+);
+const InvoicesPage = lazy(() =>
+  import("./pages/billing/invoices").then((m) => ({ default: m.InvoicesPage })),
+);
+
+// A2A Protocol
+const A2ADiscoveryPage = lazy(() =>
+  import("./pages/a2a/index").then((m) => ({ default: m.A2ADiscoveryPage })),
+);
+const A2AComposePage = lazy(() =>
+  import("./pages/a2a/compose").then((m) => ({ default: m.A2AComposePage })),
+);
+
+// Security detail pages
+const SecurityFindingsPage = lazy(() =>
+  import("./pages/security/findings").then((m) => ({ default: m.SecurityFindingsPage })),
+);
+const SecurityReportPage = lazy(() =>
+  import("./pages/security/report").then((m) => ({ default: m.SecurityReportPage })),
+);
+const ScanDetailPage = lazy(() =>
+  import("./pages/security/scan-detail").then((m) => ({ default: m.ScanDetailPage })),
+);
+
 /* ── Loading fallback ───────────────────────────────────────────── */
 
 function LoadingFallback() {
@@ -214,6 +252,24 @@ function App() {
                 <Route path="/sessions" element={<SessionsPage />} />
                 <Route path="/autoresearch" element={<AutoResearchPage />} />
                 <Route path="/audit" element={<AuditPage />} />
+
+                {/* Tool Registry */}
+                <Route path="/tools" element={<ToolRegistryPage />} />
+                <Route path="/tools/new" element={<CreateToolPage />} />
+                <Route path="/tools/:toolName" element={<ToolDetailPage />} />
+
+                {/* Billing */}
+                <Route path="/billing/pricing" element={<PricingPage />} />
+                <Route path="/billing/invoices" element={<InvoicesPage />} />
+
+                {/* A2A Protocol */}
+                <Route path="/a2a" element={<A2ADiscoveryPage />} />
+                <Route path="/a2a/compose" element={<A2AComposePage />} />
+
+                {/* Security detail pages */}
+                <Route path="/security/findings" element={<SecurityFindingsPage />} />
+                <Route path="/security/report" element={<SecurityReportPage />} />
+                <Route path="/security/scans/:scanId" element={<ScanDetailPage />} />
 
                 {/* Settings */}
                 <Route path="/settings" element={<SettingsPage />} />
