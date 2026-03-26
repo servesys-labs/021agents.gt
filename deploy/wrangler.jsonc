@@ -9,13 +9,6 @@
     "head_sampling_rate": 1
   },
 
-  // Static frontend assets (portal SPA)
-  "assets": {
-    "directory": "./public/",
-    "not_found_handling": "single-page-application",
-    "binding": "ASSETS"
-  },
-
   // Durable Objects — AgentOS agents + MCP server
   "durable_objects": {
     "bindings": [
@@ -46,15 +39,16 @@
   // See: https://blog.cloudflare.com/dynamic-workers/
   "worker_loaders": [{ "binding": "LOADER" }],
 
-  // Sandbox SDK (Containers) — open beta for all paid Workers users
-  "containers": [
-    {
-      "class_name": "AgentSandbox",
-      "image": "./sandbox.Dockerfile",
-      "instance_type": "lite",
-      "max_instances": 10
-    }
-  ],
+  // Sandbox SDK (Containers) — requires Docker for image build
+  // Uncomment when Docker is available:
+  // "containers": [
+  //   {
+  //     "class_name": "AgentSandbox",
+  //     "image": "./sandbox.Dockerfile",
+  //     "instance_type": "lite",
+  //     "max_instances": 10
+  //   }
+  // ],
 
   // Queues — guaranteed delivery telemetry pipeline (DO → Queue → Supabase)
   "queues": {

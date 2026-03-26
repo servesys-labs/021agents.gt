@@ -27,10 +27,8 @@
 
 import {
   DynamicWorkerExecutor,
-  ToolDispatcher,
   generateTypesFromJsonSchema,
   normalizeCode,
-  resolveProvider,
   type JsonSchemaToolDescriptors,
   type ExecuteResult,
 } from "@cloudflare/codemode";
@@ -486,20 +484,6 @@ export async function executeScopedCode(
       };
     }
 
-    const descriptors: JsonSchemaToolDescriptors = {};
-    for (const def of filteredTools) {
-      descriptors[def.function.name] = {
-        description: def.function.description,
-        inputSchema: def.function.parameters as any,
-      };
-    }
-
-    const provider = resolveProvider({
-      name: "codemode",
-      tools: toolFns as unknown as Parameters<typeof resolveProvider>[0]["tools"],
-      types: generateTypesFromJsonSchema(descriptors),
-    });
-
     // Code size guard — prevent memory exhaustion in V8 isolate
     const MAX_CODE_SIZE = 100_000; // 100KB
     if (code.length > MAX_CODE_SIZE) {
@@ -516,7 +500,7 @@ export async function executeScopedCode(
 
     let execResult: ExecuteResult;
     try {
-      execResult = await getExecutor(env, scopeConfig.timeoutMs).execute(normalized, [provider]);
+      execResult = await getExecutor(env, scopeConfig.timeoutMs).execute(normalized, toolFns);
     } catch (err) {
       const latencyMs = Date.now() - started;
       emitCodemodeAuditEvent(options, false, latencyMs, toolCallCount, toolCostUsd, String(err));

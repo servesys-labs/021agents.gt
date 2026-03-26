@@ -19,51 +19,93 @@ Build, test, govern, deploy, and observe AI agents. The Vercel for agents.
 
 ## Quick Start
 
+### Prerequisites
+
+- **Node.js 18+** and **npm** (for TypeScript CLI and Portal)
+- **Python 3.11+** (for agent scaffolding and local tools)
+
 ```bash
+# Install TypeScript CLI (primary interface)
+npm install -g @agentos/cli
+
+# Or use npx (no install)
+npx @agentos/cli --help
+
+# Install Python CLI (for scaffolding only)
 pip install -e ".[dev]"
+```
 
-# Initialize a new project
-agentos init
+### Create and Run an Agent
 
-# Set your LLM provider (GMI Cloud recommended — 41+ models, single API)
+```bash
+# Step 1: Initialize project (Python CLI)
+agentos init my-project --template research
+cd my-project
+
+# Step 2: Set your LLM provider
 export GMI_API_KEY=gmi-...
 
-# Create an agent via conversation with the meta-agent
+# Step 3: Create an agent via conversation (Python CLI)
 agentos create
 
 # Or create one in a single command
 agentos create --one-shot "a research assistant that finds and summarizes papers"
 
-# Run an agent
+# Step 4: Deploy to Cloudflare (Python CLI)
+agentos deploy research-assistant
+
+# Step 5: Run the agent (TypeScript CLI) ✨ NEW
 agentos run research-assistant "What are the latest advances in RLHF?"
 
-# Interactive chat
+# Interactive chat (TypeScript CLI) ✨ NEW
 agentos chat research-assistant
 
-# Start the API server (240+ endpoints)
-agentos serve
+# Evaluate performance (TypeScript CLI) ✨ NEW
+agentos eval run research-assistant --trials 5
 
-# Generate codebase dependency graph
-agentos codemap
+# View traces (TypeScript CLI) ✨ NEW
+agentos sessions
 
 # Start the portal UI
 cd portal && npm install --legacy-peer-deps && npm run dev
 ```
 
+### CLI Migration Notice
+
+The **TypeScript CLI** (`npm install -g @agentos/cli`) is now the primary interface for:
+- `run`, `chat` — Agent execution
+- `eval`, `evolve` — Quality assurance
+- `sessions`, `traces` — Observability
+- `issues`, `security` — Operations
+- `billing` — Cost management
+
+The **Python CLI** (`pip install agentos`) remains for:
+- `init` — Project scaffolding
+- `create` — LLM-assisted agent creation
+- `deploy` — Cloudflare deployment
+- `sandbox` — Local sandbox management
+
+See [CLI Reference](#cli-reference) for full details.
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Portal (React)                           │
+│                        Portal (React + Vite)                    │
 │  Dashboard · Canvas · Sessions · Intelligence · Compliance      │
 │  Issues · Security · Voice · Eval · Billing · Governance · ...  │
 ├─────────────────────────────────────────────────────────────────┤
-│                     API Layer (FastAPI)                          │
-│  40 routers · 240+ endpoints · RBAC · Rate limiting · A2A/MCP   │
+│                  TypeScript Control-Plane                       │
+│  (Cloudflare Worker — 52 routers, 240+ endpoints)               │
+│  Hono · RBAC · Rate limiting · A2A/MCP · Queue + Cron           │
 ├─────────────────────────────────────────────────────────────────┤
-│                      Core Engine                                │
-│  Harness · LLM Router · Middleware · Memory · Tools · Skills    │
-│  Identity · Tracing · Governance · Events · Evolution           │
+│                    TypeScript Runtime                           │
+│  (Cloudflare Worker — Edge-deployed graph execution)            │
+│  Graph Engine · Tool Orchestration · Middleware · Streaming     │
+├─────────────────────────────────────────────────────────────────┤
+│                     Python Libraries                            │
+│  (Local development & CLI tooling)                              │
+│  Agent Config · Graph Validation · Memory · Tools · Eval        │
 ├─────────────────────────────────────────────────────────────────┤
 │               Intelligence & Security Layer                     │
 │  Sentiment · Quality · OWASP Probes · MAESTRO · AIVSS Scoring  │
@@ -77,9 +119,67 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 │  + Anthropic · OpenAI · Cloudflare Workers AI · Local           │
 ├─────────────────────────────────────────────────────────────────┤
 │                     Storage                                     │
-│  SQLite (WAL) · 52 tables · Migrations v1-v12 · Postgres       │
+│  Postgres · SQLite (WAL) · 52 tables · Migrations v1-v12       │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Key Change**: The API layer and runtime have been migrated from Python/FastAPI to TypeScript/Cloudflare Workers for better edge performance and unified language across the stack.
+
+## CLI Reference
+
+AgentOS provides two CLIs optimized for different workflows:
+
+### TypeScript CLI (Primary)
+
+Install: `npm install -g @agentos/cli`
+
+| Command | Description |
+|---------|-------------|
+| `agentos init [dir]` | Scaffold new project |
+| `agentos create` | Create agent (conversational) |
+| `agentos create -1 DESC` | Create from description |
+| `agentos run <agent> <task>` | **Run an agent** ✨ |
+| `agentos chat <agent>` | **Interactive chat** ✨ |
+| `agentos list` | List agents |
+| `agentos deploy <agent>` | Deploy to Cloudflare |
+| `agentos eval <cmd>` | **Evaluations** (list/run/status) ✨ |
+| `agentos evolve <cmd>` | **Evolution** (analyze/proposals) ✨ |
+| `agentos issues <cmd>` | **Issue management** ✨ |
+| `agentos security <cmd>` | **Security scans** ✨ |
+| `agentos sessions` | **View sessions** ✨ |
+| `agentos traces <id>` | **View traces** ✨ |
+| `agentos skills <cmd>` | **Skill management** ✨ |
+| `agentos tools <cmd>` | **Tool registry** ✨ |
+| `agentos graph <cmd>` | **Graph operations** ✨ |
+| `agentos memory <cmd>` | **Memory inspection** ✨ |
+| `agentos releases <cmd>` | **Release management** ✨ |
+| `agentos workflow <cmd>` | **Workflow management** ✨ |
+| `agentos schedule <cmd>` | **Cron schedules** ✨ |
+| `agentos jobs <cmd>` | **Background jobs** ✨ |
+| `agentos research <cmd>` | **Autoresearch** ✨ |
+| `agentos connectors <cmd>` | **Integrations** ✨ |
+| `agentos billing <cmd>` | **Usage & costs** ✨ |
+| `agentos sandbox <cmd>` | Sandbox management |
+| `agentos login/logout` | Authentication |
+| `agentos codemap` | Generate code graphs |
+
+Commands marked ✨ are new in the TypeScript CLI and offer better performance.
+
+### Python CLI (Legacy - Scaffolding Only)
+
+Install: `pip install agentos`
+
+The Python CLI is maintained for backward compatibility with existing workflows. For runtime operations, use the TypeScript CLI.
+
+| Command | Status | Notes |
+|---------|--------|-------|
+| `agentos init` | ✅ Active | Project scaffolding |
+| `agentos create` | ✅ Active | LLM-assisted agent creation |
+| `agentos deploy` | ✅ Active | Cloudflare deployment |
+| `agentos run` | ⚠️ Deprecated | Use TypeScript CLI |
+| `agentos chat` | ⚠️ Deprecated | Use TypeScript CLI |
+| `agentos sandbox` | ✅ Active | Local sandbox management |
+| `agentos codemap` | ✅ Active | Code graph generation |
 
 ### Subsystems
 
@@ -87,9 +187,10 @@ cd portal && npm install --legacy-peer-deps && npm run dev
 |-----------|--------|-------------|
 | **Agent** | `agentos.agent` | Agent definition, loading, execution, plan-based routing |
 | **Builder** | `agentos.builder` | Meta-agent that builds agents via LLM conversation |
-| **CLI** | `agentos.cli` | 22 commands (intel, security, issues, gold-image, voice, ...) |
-| **API** | `agentos.api` | 40 routers, 240+ endpoints, RBAC + scoped API keys |
-| **Harness** | `agentos.core.harness` | Orchestration engine, middleware chain, turn lifecycle |
+| **CLI (TS)** | `cli/` | TypeScript CLI — primary interface for runtime operations |
+| **CLI (Py)** | `agentos.cli` | Python CLI — scaffolding and local tools |
+| **API** | `control-plane/src/routes/` | TypeScript/Hono — 52 routers, 240+ endpoints, RBAC |
+| **Runtime** | `deploy/src/runtime/` | TypeScript/Workers — graph execution engine |
 | **Governance** | `agentos.core.governance` | Budget enforcement, policy checks, cost tracking |
 | **Identity** | `agentos.core.identity` | Cryptographic agent IDs + optional signing keypairs |
 | **Tracing** | `agentos.core.tracing` | Span-based observability (session → turn → tool → sub-agent) |
@@ -219,15 +320,19 @@ Plus **3,000+ app integrations** (Slack, GitHub, Jira, Gmail, Stripe, ...) via t
 
 ## API Server
 
-```bash
-# CLI shorthand
-agentos serve --port 8340
+The API is implemented in TypeScript using [Hono](https://hono.dev/) and deployed to Cloudflare Workers.
 
-# Or directly
-uvicorn agentos.api.app:create_app --factory --host 0.0.0.0 --port 8340
+```bash
+# Local development (control-plane)
+cd control-plane
+npm install
+npm run dev  # wrangler dev
+
+# Deploy to Cloudflare
+npm run deploy  # wrangler deploy
 ```
 
-### Key Endpoint Groups (40 routers, 240+ endpoints)
+### Key Endpoint Groups (52 routers, 240+ endpoints)
 
 | Group | Prefix | Endpoints |
 |-------|--------|-----------|
