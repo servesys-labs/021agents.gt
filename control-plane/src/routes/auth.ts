@@ -1,5 +1,5 @@
 /**
- * Auth routes — signup, login, providers, me, logout, password change, clerk exchange.
+ * Auth routes — signup, login, providers, me, logout, password change, CF Access exchange.
  * Ported from agentos/api/routers/auth.py.
  *
  * Note: The auth middleware skips all /api/v1/auth/* paths, so public routes
@@ -12,7 +12,7 @@ import type { Env } from "../env";
 import type { CurrentUser, TokenClaims } from "../auth/types";
 import { createToken, verifyToken } from "../auth/jwt";
 import { hashPassword, verifyPassword } from "../auth/password";
-import { verifyClerkToken, clerkEnabled } from "../auth/clerk";
+import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { getDb } from "../db/client";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -36,8 +36,8 @@ const ChangePasswordRequest = z.object({
   new_password: z.string().min(8).max(128),
 });
 
-const ClerkExchangeRequest = z.object({
-  clerk_token: z.string().min(1),
+const CfAccessExchangeRequest = z.object({
+  cf_access_token: z.string().min(1),
 });
 
 const TokenVerifyRequest = z.object({
@@ -64,11 +64,10 @@ async function resolveUser(c: { req: { header(name: string): string | undefined 
   // Try local JWT
   let claims = await verifyToken(c.env.AUTH_JWT_SECRET, token);
 
-  // Fallback to Clerk
-  if (!claims && clerkEnabled(c.env.CLERK_ISSUER)) {
-    claims = await verifyClerkToken(token, c.env.CLERK_ISSUER!, {
-      audience: c.env.CLERK_AUDIENCE,
-      jwksUrl: c.env.CLERK_JWKS_URL,
+  // Fallback to CF Access
+  if (!claims && cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
+    claims = await verifyCfAccessToken(token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
+      aud: c.env.CF_ACCESS_AUD,
     });
   }
 
@@ -310,58 +309,82 @@ authRoutes.post("/login", async (c) => {
 // ── GET /providers ───────────────────────────────────────────────────────
 
 authRoutes.get("/providers", (c) => {
-  const clerkIsEnabled = clerkEnabled(c.env.CLERK_ISSUER);
+  const cfAccessIsEnabled = cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN);
   return c.json({
-    active_provider: clerkIsEnabled ? "clerk" : "local",
-    clerk_enabled: clerkIsEnabled,
+    active_provider: cfAccessIsEnabled ? "cf_access" : "local",
+    cf_access_enabled: cfAccessIsEnabled,
+    cf_access_team_domain: cfAccessIsEnabled ? c.env.CF_ACCESS_TEAM_DOMAIN : undefined,
     password_enabled: !passwordAuthDisabled(c.env),
   });
 });
 
-// ── POST /clerk/exchange ─────────────────────────────────────────────────
+// ── POST /cf-access/exchange ─────────────────────────────────────────────
 
-authRoutes.post("/clerk/exchange", async (c) => {
-  if (!clerkEnabled(c.env.CLERK_ISSUER)) {
-    return c.json({ error: "Clerk auth is not enabled" }, 400);
+authRoutes.post("/cf-access/exchange", async (c) => {
+  if (!cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
+    return c.json({ error: "Cloudflare Access auth is not enabled" }, 400);
   }
 
   const body = await c.req.json().catch(() => ({}));
-  const parsed = ClerkExchangeRequest.safeParse(body);
+  const parsed = CfAccessExchangeRequest.safeParse(body);
   if (!parsed.success) {
-    return c.json({ error: "clerk_token is required" }, 400);
+    return c.json({ error: "cf_access_token is required" }, 400);
   }
 
-  const clerkClaims = await verifyClerkToken(parsed.data.clerk_token, c.env.CLERK_ISSUER!, {
-    audience: c.env.CLERK_AUDIENCE,
-    jwksUrl: c.env.CLERK_JWKS_URL,
-  });
+  let cfClaims: TokenClaims | null = null;
+  let verifyError = "";
+  try {
+    cfClaims = await verifyCfAccessToken(parsed.data.cf_access_token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
+      aud: c.env.CF_ACCESS_AUD,
+    });
+  } catch (err) {
+    verifyError = err instanceof Error ? err.message : String(err);
+  }
 
-  if (!clerkClaims || !clerkClaims.sub || !clerkClaims.email) {
-    return c.json({ error: "Invalid Clerk token" }, 401);
+  if (!cfClaims || !cfClaims.sub || !cfClaims.email) {
+    // Debug info — remove once auth is working
+    const parts = parsed.data.cf_access_token.split(".");
+    let debugPayload: Record<string, unknown> = {};
+    try {
+      debugPayload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+    } catch {}
+    return c.json({
+      error: "Invalid CF Access token",
+      debug: {
+        verifyError,
+        hasClaims: !!cfClaims,
+        sub: cfClaims?.sub ?? "",
+        email: cfClaims?.email ?? "",
+        tokenAud: debugPayload.aud,
+        expectedAud: c.env.CF_ACCESS_AUD ? `${c.env.CF_ACCESS_AUD.slice(0, 8)}...` : "NOT_SET",
+        teamDomain: c.env.CF_ACCESS_TEAM_DOMAIN,
+        tokenIss: debugPayload.iss,
+        tokenExp: debugPayload.exp,
+        now: Math.floor(Date.now() / 1000),
+      },
+    }, 401);
   }
 
   const sql = await getDb(c.env.HYPERDRIVE);
   const nowEpoch = Date.now() / 1000;
 
-  // Provision user from Clerk identity (upsert pattern)
-  // C1: prefix user_id with "clerk:" to match Python provisioning
-  const clerkUserId = `clerk:${clerkClaims.sub}`;
+  // Provision user from CF Access identity (upsert by email)
+  const cfAccessUserId = `cfaccess:${cfClaims.sub}`;
   let userId: string;
   let orgId: string = "";
   let role: string = "member";
-  let userName = clerkClaims.name || "";
+  let userName = cfClaims.name || "";
 
-  // Check if user exists by clerk-prefixed ID first, then by email
-  const existingById = await sql`SELECT user_id, email, name FROM users WHERE user_id = ${clerkUserId}`;
+  // Check if user exists by cfaccess-prefixed ID first, then by email
+  const existingById = await sql`SELECT user_id, email, name FROM users WHERE user_id = ${cfAccessUserId}`;
   const existingByEmail = existingById.length > 0
     ? []
-    : await sql`SELECT user_id, email, name FROM users WHERE email = ${clerkClaims.email}`;
+    : await sql`SELECT user_id, email, name FROM users WHERE email = ${cfClaims.email}`;
 
   if (existingById.length > 0) {
     userId = existingById[0].user_id;
     userName = userName || existingById[0].name || "";
 
-    // Update name if provided
     if (userName) {
       await sql`UPDATE users SET name = ${userName} WHERE user_id = ${userId}`;
     }
@@ -369,112 +392,54 @@ authRoutes.post("/clerk/exchange", async (c) => {
     userId = existingByEmail[0].user_id;
     userName = userName || existingByEmail[0].name || "";
 
-    // Update name if provided
     if (userName) {
       await sql`UPDATE users SET name = ${userName} WHERE user_id = ${userId}`;
     }
   } else {
-    // Create new user with clerk-prefixed ID
-    userId = clerkUserId;
+    // Create new user with cfaccess-prefixed ID
+    userId = cfAccessUserId;
     await sql`
       INSERT INTO users (user_id, email, name, password_hash, provider, created_at)
-      VALUES (${userId}, ${clerkClaims.email}, ${userName}, ${""}, ${"clerk"}, ${nowEpoch})
+      VALUES (${userId}, ${cfClaims.email}, ${userName}, ${""}, ${"cf_access"}, ${nowEpoch})
     `;
   }
 
-  // C2: Handle Clerk org_id — shared org provisioning
-  // Map Clerk role to internal role (matching Python's map_clerk_role)
-  const clerkOrgRole = clerkClaims.role || "";
-  const roleMap: Record<string, string> = {
-    "org:owner": "owner", "owner": "owner",
-    "org:admin": "admin", "admin": "admin",
-    "org:member": "member", "basic_member": "member", "member": "member",
-    "org:viewer": "viewer", "viewer": "viewer", "read_only": "viewer",
-  };
-  const mappedRole = (clerkOrgRole ? roleMap[clerkOrgRole.toLowerCase()] : undefined) || "member";
-
-  const clerkOrgId = clerkClaims.org_id || "";
-
-  if (clerkOrgId) {
-    // Shared org: ensure org exists, then upsert membership
-    const orgSlug = `clerk-${clerkOrgId}`.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-|-$/g, "") || "org";
-    const existingOrg = await sql`SELECT org_id FROM orgs WHERE slug = ${orgSlug}`;
-
-    if (existingOrg.length > 0) {
-      orgId = existingOrg[0].org_id;
-    } else {
-      orgId = generateId();
-      const orgName = `Clerk Org ${clerkOrgId}`;
-      await sql`
-        INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
-        VALUES (${orgId}, ${orgName}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
-      `;
-    }
-
-    // Upsert membership
-    const existingMember = await sql`
-      SELECT role FROM org_members WHERE org_id = ${orgId} AND user_id = ${userId}
-    `;
-    if (existingMember.length === 0) {
-      await sql`
-        INSERT INTO org_members (org_id, user_id, role, created_at)
-        VALUES (${orgId}, ${userId}, ${mappedRole}, ${nowEpoch})
-      `;
-    } else if (existingMember[0].role !== mappedRole) {
-      await sql`
-        UPDATE org_members SET role = ${mappedRole} WHERE org_id = ${orgId} AND user_id = ${userId}
-      `;
-    }
-    role = mappedRole;
+  // CF Access JWTs have no org_id — always take personal-org path
+  const orgRows = await sql`
+    SELECT org_id, role FROM org_members WHERE user_id = ${userId} ORDER BY created_at ASC LIMIT 1
+  `;
+  if (orgRows.length > 0) {
+    orgId = orgRows[0].org_id;
+    role = orgRows[0].role;
   } else {
-    // Personal org: check if user already has one, otherwise create
-    const orgRows = await sql`
-      SELECT org_id, role FROM org_members WHERE user_id = ${userId} ORDER BY created_at ASC LIMIT 1
+    orgId = generateId();
+    const orgSlug = cfClaims.email.split("@")[0].toLowerCase().replace(/\./g, "-");
+    await sql`
+      INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
+      VALUES (${orgId}, ${`${userName || orgSlug}'s Org`}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
     `;
-    if (orgRows.length > 0) {
-      orgId = orgRows[0].org_id;
-      role = orgRows[0].role;
-    } else {
-      orgId = generateId();
-      const orgSlug = clerkClaims.email.split("@")[0].toLowerCase().replace(/\./g, "-");
-      await sql`
-        INSERT INTO orgs (org_id, name, slug, owner_user_id, plan, created_at)
-        VALUES (${orgId}, ${`${userName || orgSlug}'s Org`}, ${orgSlug}, ${userId}, ${"free"}, ${nowEpoch})
-      `;
-      await sql`
-        INSERT INTO org_members (org_id, user_id, role, created_at)
-        VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
-      `;
-      role = "owner";
-    }
-    // If mapped role differs from default, upsert
-    if (mappedRole !== "member") {
-      const existingMember = await sql`
-        SELECT role FROM org_members WHERE org_id = ${orgId} AND user_id = ${userId}
-      `;
-      if (existingMember.length > 0 && existingMember[0].role !== mappedRole) {
-        await sql`
-          UPDATE org_members SET role = ${mappedRole} WHERE org_id = ${orgId} AND user_id = ${userId}
-        `;
-      }
-      role = mappedRole;
-    }
+    await sql`
+      INSERT INTO org_members (org_id, user_id, role, created_at)
+      VALUES (${orgId}, ${userId}, ${"owner"}, ${nowEpoch})
+    `;
+    role = "owner";
   }
 
   const token = await createToken(c.env.AUTH_JWT_SECRET, userId, {
-    email: clerkClaims.email,
+    email: cfClaims.email,
     name: userName,
     org_id: orgId,
-    provider: "clerk",
+    provider: "cf_access",
     extra: { role },
   });
 
   return c.json({
     token,
     user_id: userId,
-    email: clerkClaims.email,
+    email: cfClaims.email,
     org_id: orgId,
-    provider: "clerk",
+    provider: "cf_access",
+    name: userName,
   });
 });
 
@@ -489,11 +454,10 @@ authRoutes.post("/token/verify", async (c) => {
 
   let claims = await verifyToken(c.env.AUTH_JWT_SECRET, parsed.data.token);
 
-  // Fallback to Clerk
-  if (!claims && clerkEnabled(c.env.CLERK_ISSUER)) {
-    claims = await verifyClerkToken(parsed.data.token, c.env.CLERK_ISSUER!, {
-      audience: c.env.CLERK_AUDIENCE,
-      jwksUrl: c.env.CLERK_JWKS_URL,
+  // Fallback to CF Access
+  if (!claims && cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
+    claims = await verifyCfAccessToken(parsed.data.token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
+      aud: c.env.CF_ACCESS_AUD,
     });
   }
 

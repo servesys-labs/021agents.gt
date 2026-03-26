@@ -1,6 +1,5 @@
 export const TOKEN_KEY = "token";
 export const USER_KEY = "user";
-export const CLERK_LOGOUT_FLAG = "clerk:logout";
 export const AUTH_EXPIRED_FLAG = "auth:expired";
 
 export function getAuthToken(): string {

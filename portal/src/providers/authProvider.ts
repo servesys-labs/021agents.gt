@@ -1,17 +1,19 @@
 import type { AuthProvider } from "@refinedev/core";
 
-import { isClerkMode } from "../auth/config";
+import { isCfAccessMode, CF_ACCESS_TEAM_DOMAIN } from "../auth/config";
 import { getTokenSecondsRemaining } from "../auth/jwt";
-import { AUTH_EXPIRED_FLAG, CLERK_LOGOUT_FLAG, clearAuthSession, getAuthToken, setAuthSession } from "../auth/tokens";
+import { AUTH_EXPIRED_FLAG, clearAuthSession, getAuthToken, setAuthSession } from "../auth/tokens";
 
 const API_URL = "/api/v1";
 
 export const authProvider: AuthProvider = {
   login: async ({ email, password }) => {
-    if (isClerkMode()) {
+    if (isCfAccessMode()) {
+      // CF Access handles login — redirect to root where CF Access intercepts
+      window.location.href = "/";
       return {
         success: false,
-        error: { name: "Clerk Enabled", message: "Use Clerk sign-in on this page." },
+        error: { name: "CF Access Enabled", message: "Authentication is handled by Cloudflare Access." },
       };
     }
     try {
@@ -34,10 +36,12 @@ export const authProvider: AuthProvider = {
   },
 
   register: async ({ email, password, name }) => {
-    if (isClerkMode()) {
+    if (isCfAccessMode()) {
+      // CF Access handles user registration via the IdP
+      window.location.href = "/";
       return {
         success: false,
-        error: { name: "Clerk Enabled", message: "Use Clerk sign-up on this page." },
+        error: { name: "CF Access Enabled", message: "Registration is handled by Cloudflare Access." },
       };
     }
     try {
@@ -61,8 +65,8 @@ export const authProvider: AuthProvider = {
 
   logout: async () => {
     clearAuthSession();
-    if (isClerkMode()) {
-      sessionStorage.setItem(CLERK_LOGOUT_FLAG, "1");
+    if (isCfAccessMode() && CF_ACCESS_TEAM_DOMAIN) {
+      return { success: true, redirectTo: `https://${CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/logout` };
     }
     return { success: true, redirectTo: "/login" };
   },

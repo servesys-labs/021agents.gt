@@ -1,0 +1,11 @@
+// wrangler.jsonc — AgentOS Portal (SPA + auth token endpoint)
+{
+  "name": "agentos-portal",
+  "main": "worker.ts",
+  "compatibility_date": "2026-03-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS"
+  }
+}

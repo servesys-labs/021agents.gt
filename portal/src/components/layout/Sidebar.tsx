@@ -1,8 +1,7 @@
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
-import { isClerkMode } from "../../auth/config";
 import {
   Home,
   Bot,
@@ -31,32 +30,6 @@ import {
   Lock,
 } from "lucide-react";
 import { QuotaWidget } from "../common/QuotaWidget";
-
-/* ── Clerk UserButton (lazy-loaded) ────────────────────────────── */
-
-const isClerk = isClerkMode();
-
-function ClerkUserButton() {
-  const [Btn, setBtn] = useState<React.ComponentType<any> | null>(null);
-  useEffect(() => {
-    if (!isClerk) return;
-    import("@clerk/clerk-react").then((mod) => {
-      setBtn(() => mod.UserButton);
-    });
-  }, []);
-  if (!Btn) return null;
-  return (
-    <Btn
-      appearance={{
-        elements: {
-          avatarBox: "w-8 h-8 rounded-lg",
-          userButtonPopoverCard: "bg-surface-raised border border-border-default shadow-panel",
-        },
-      }}
-      afterSignOutUrl="/login"
-    />
-  );
-}
 
 /* ── Nav config ─────────────────────────────────────────────────── */
 
@@ -284,10 +257,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
 
           {/* User avatar / menu */}
           <div className="relative mt-1">
-            {isClerk ? (
-              <ClerkUserButton />
-            ) : (
-              <button
+            <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
                 className="flex items-center gap-2.5 w-full px-2.5 h-10 rounded-lg bg-accent/10 hover:bg-accent/15 transition-colors"
                 aria-label={`Account menu for ${user?.email || "user"}`}
@@ -303,10 +273,9 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
                   </p>
                 </div>
               </button>
-            )}
 
-            {/* User popover (local auth only) */}
-            {!isClerk && userMenuOpen && (
+            {/* User popover */}
+            {userMenuOpen && (
               <>
                 <div className="fixed inset-0 z-50" onClick={() => setUserMenuOpen(false)} aria-hidden="true" />
                 <div

@@ -38,10 +38,9 @@ export interface Env {
   TAVUS_API_KEY?: string;
   TAVUS_WEBHOOK_SECRET?: string;
 
-  // Optional
-  CLERK_ISSUER?: string;
-  CLERK_AUDIENCE?: string;
-  CLERK_JWKS_URL?: string;
+  // Cloudflare Access (optional)
+  CF_ACCESS_TEAM_DOMAIN?: string; // e.g. "crucial-lemur-88.cloudflareaccess.com"
+  CF_ACCESS_AUD?: string;         // Application AUD tag
 
   // Vars
   RUNTIME_WORKER_URL: string;

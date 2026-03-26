@@ -6,7 +6,7 @@ import { createMiddleware } from "hono/factory";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { verifyToken } from "../auth/jwt";
-import { verifyClerkToken, clerkEnabled } from "../auth/clerk";
+import { verifyCfAccessToken, cfAccessEnabled } from "../auth/cf-access";
 import { hashApiKey } from "../auth/api-keys";
 import { hasScope, hasRole } from "../auth/types";
 import { getDb } from "../db/client";
@@ -137,11 +137,10 @@ async function resolveJwt(token: string, env: Env): Promise<CurrentUser> {
   // Try local JWT first
   let claims = await verifyToken(env.AUTH_JWT_SECRET, token);
 
-  // Fallback to Clerk
-  if (!claims && clerkEnabled(env.CLERK_ISSUER)) {
-    claims = await verifyClerkToken(token, env.CLERK_ISSUER!, {
-      audience: env.CLERK_AUDIENCE,
-      jwksUrl: env.CLERK_JWKS_URL,
+  // Fallback to CF Access
+  if (!claims && cfAccessEnabled(env.CF_ACCESS_TEAM_DOMAIN)) {
+    claims = await verifyCfAccessToken(token, env.CF_ACCESS_TEAM_DOMAIN!, {
+      aud: env.CF_ACCESS_AUD,
     });
   }
 

@@ -3,8 +3,8 @@ import { BrowserRouter, Routes, Route, Outlet, Navigate, useLocation } from "rea
 
 import { AuthProvider, RequireAuth } from "./lib/auth";
 import { Sidebar } from "./components/layout/Sidebar";
-import { ClerkSessionManager } from "./auth/ClerkSessionManager";
-import { CLERK_PUBLISHABLE_KEY, isClerkMode } from "./auth/config";
+import { CfAccessSessionManager } from "./auth/CfAccessSessionManager";
+import { isCfAccessMode } from "./auth/config";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { CommandPalette } from "./components/common/CommandPalette";
 import { MetaAgentProvider } from "./providers/MetaAgentProvider";
@@ -126,7 +126,7 @@ const AuditPage = lazy(() =>
 
 // Tool Registry
 const ToolRegistryPage = lazy(() =>
-  import("./pages/tools/index").then((m) => ({ default: m.ToolRegistryPage })),
+  import("./pages/tools/index").then((m) => ({ default: m.ToolsPage })),
 );
 const CreateToolPage = lazy(() =>
   import("./pages/tools/create").then((m) => ({ default: m.CreateToolPage })),
@@ -145,7 +145,7 @@ const InvoicesPage = lazy(() =>
 
 // A2A Protocol
 const A2ADiscoveryPage = lazy(() =>
-  import("./pages/a2a/index").then((m) => ({ default: m.A2ADiscoveryPage })),
+  import("./pages/a2a/index").then((m) => ({ default: m.A2APage })),
 );
 const A2AComposePage = lazy(() =>
   import("./pages/a2a/compose").then((m) => ({ default: m.A2AComposePage })),
@@ -153,7 +153,7 @@ const A2AComposePage = lazy(() =>
 
 // Security detail pages
 const SecurityFindingsPage = lazy(() =>
-  import("./pages/security/findings").then((m) => ({ default: m.SecurityFindingsPage })),
+  import("./pages/security/findings").then((m) => ({ default: m.FindingsPage })),
 );
 const SecurityReportPage = lazy(() =>
   import("./pages/security/report").then((m) => ({ default: m.SecurityReportPage })),
@@ -209,10 +209,9 @@ function AppContent() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [handleKeyDown]);
 
-  return (
+  const content = (
     <AuthProvider>
       <ToastProvider>
-        {isClerkMode() && CLERK_PUBLISHABLE_KEY ? <ClerkSessionManager /> : null}
         <CommandPalette
           isOpen={commandPaletteOpen}
           onClose={() => setCommandPaletteOpen(false)}
@@ -286,6 +285,13 @@ function AppContent() {
       </ToastProvider>
     </AuthProvider>
   );
+
+  // Wrap with CfAccessSessionManager when in CF Access mode
+  if (isCfAccessMode()) {
+    return <CfAccessSessionManager>{content}</CfAccessSessionManager>;
+  }
+
+  return content;
 }
 
 function App() {

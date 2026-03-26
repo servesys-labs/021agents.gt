@@ -68,38 +68,47 @@ const ComponentUpdateSchema = z.object({
 // GET /components — list components
 componentRoutes.get("/", async (c) => {
   const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  
-  const type = c.req.query("type");
-  const search = c.req.query("search");
-  const tags = c.req.query("tags")?.split(",").filter(Boolean);
-  const includePublic = c.req.query("include_public") === "true";
-  const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") || 20)));
-  const offset = Math.max(0, Number(c.req.query("offset") || 0));
-  
-  let query = sql`
-    SELECT component_id, type, name, description, tags, is_public, 
-           created_by, created_at, updated_at, version
-    FROM components
-    WHERE (org_id = ${user.org_id}${includePublic ? sql` OR is_public = true` : sql``})
-  `;
-  
-  if (type) {
-    query = sql`${query} AND type = ${type}`;
+
+  let rows: any[];
+  try {
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const type = c.req.query("type");
+    const search = c.req.query("search");
+    const tags = c.req.query("tags")?.split(",").filter(Boolean);
+    const includePublic = c.req.query("include_public") === "true";
+    const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") || 20)));
+    const offset = Math.max(0, Number(c.req.query("offset") || 0));
+
+    let query = sql`
+      SELECT component_id, type, name, description, tags, is_public,
+             created_by, created_at, updated_at, version
+      FROM components
+      WHERE (org_id = ${user.org_id}${includePublic ? sql` OR is_public = true` : sql``})
+    `;
+
+    if (type) {
+      query = sql`${query} AND type = ${type}`;
+    }
+
+    if (tags && tags.length > 0) {
+      query = sql`${query} AND tags && ${tags}`;
+    }
+
+    if (search) {
+      query = sql`${query} AND (name ILIKE ${`%${search}%`} OR description ILIKE ${`%${search}%`})`;
+    }
+
+    query = sql`${query} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+
+    rows = await query;
+  } catch (err: any) {
+    // Table may not exist yet — return empty
+    if (err?.message?.includes("does not exist") || err?.message?.includes("relation")) {
+      return c.json({ components: [], count: 0 });
+    }
+    throw err;
   }
-  
-  if (tags && tags.length > 0) {
-    // Array overlap check
-    query = sql`${query} AND tags && ${tags}`;
-  }
-  
-  if (search) {
-    query = sql`${query} AND (name ILIKE ${`%${search}%`} OR description ILIKE ${`%${search}%`})`;
-  }
-  
-  query = sql`${query} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
-  
-  const rows = await query;
   
   return c.json({
     components: rows.map((r: any) => ({

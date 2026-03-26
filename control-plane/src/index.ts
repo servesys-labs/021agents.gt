@@ -76,7 +76,7 @@ const app = new Hono<AppType>();
 // ── Global middleware ────────────────────────────────────────────────────
 app.use("*", cors({
   origin: (origin) => {
-    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173").split(",");
+    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://agentos-portal.servesys.workers.dev").split(",");
     if (!origin || allowed.includes(origin) || allowed.includes("*")) return origin;
     return null;
   },
@@ -91,6 +91,13 @@ app.use("*", authMiddleware);
 // Hono-level error handler (catches errors that bypass middleware)
 app.onError((err, c) => {
   const message = err instanceof Error ? err.message : "Internal server error";
+
+  // Missing DB tables — return empty results instead of 500
+  if (message.includes("does not exist") || message.includes("relation")) {
+    console.warn(`[onError] Missing table: ${c.req.method} ${c.req.path}: ${message}`);
+    return c.json({ data: [], items: [], components: [], count: 0, total: 0 }, 200);
+  }
+
   console.error(`[onError] ${c.req.method} ${c.req.path}: ${message}`);
   if (err instanceof Error && err.stack) console.error(err.stack);
   return c.json({ error: message }, 500);

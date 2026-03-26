@@ -1,63 +1,17 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { apiPost, setStoredToken } from "../../lib/api";
-import { isClerkMode } from "../../auth/config";
+import { isCfAccessMode } from "../../auth/config";
 
-function ClerkSignupPage() {
-  const [ClerkSignUp, setClerkSignUp] = useState<React.ComponentType<any> | null>(null);
-
-  if (!ClerkSignUp) {
-    import("@clerk/clerk-react").then((mod) => {
-      setClerkSignUp(() => mod.SignUp);
-    });
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-surface-base">
-        <div className="text-text-muted text-sm">Loading authentication...</div>
-      </div>
-    );
-  }
+function CfAccessSignupPage() {
+  useEffect(() => {
+    // CF Access handles user registration via the IdP — redirect to root
+    window.location.href = "/";
+  }, []);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-surface-base bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.06),transparent_55%)] p-[var(--space-6)]">
-      <div className="flex flex-col items-center gap-[var(--space-6)]">
-        <div className="text-center">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-accent-muted mb-[var(--space-4)]">
-            <span className="text-accent font-bold text-[var(--text-xl)]">O</span>
-          </div>
-          <h1 className="text-[var(--text-xl)] font-bold text-text-primary">
-            Create your account
-          </h1>
-          <p className="mt-[var(--space-2)] text-[var(--text-sm)] text-text-muted">
-            Get started with AgentOS
-          </p>
-        </div>
-
-        <ClerkSignUp
-          appearance={{
-            elements: {
-              rootBox: "w-full max-w-md",
-              card: "bg-surface-raised/65 border border-border-subtle/70 shadow-[0_16px_48px_rgba(0,0,0,0.5)] backdrop-blur-xl rounded-2xl",
-              headerTitle: "hidden",
-              headerSubtitle: "hidden",
-              header: "hidden",
-              formFieldLabel: "text-text-secondary text-sm",
-              formFieldInput:
-                "bg-surface-overlay/80 border-border-default text-text-primary rounded-lg",
-              formButtonPrimary:
-                "!bg-accent hover:!bg-accent-hover !text-white !shadow-none rounded-lg min-h-[var(--touch-target-min)]",
-              footerActionLink: "text-accent hover:text-accent-hover",
-              socialButtonsBlockButton:
-                "bg-surface-overlay/70 border-border-default text-text-primary hover:bg-surface-hover rounded-lg",
-              dividerLine: "bg-border-default",
-              dividerText: "text-text-muted",
-            },
-          }}
-          routing="path"
-          path="/signup"
-          signInUrl="/login"
-          fallbackRedirectUrl="/"
-        />
-      </div>
+    <div className="min-h-screen flex items-center justify-center bg-surface-base">
+      <div className="text-text-muted text-sm">Redirecting to sign-up...</div>
     </div>
   );
 }
@@ -175,5 +129,5 @@ function LocalSignupPage() {
 }
 
 export function SignupPage() {
-  return isClerkMode() ? <ClerkSignupPage /> : <LocalSignupPage />;
+  return isCfAccessMode() ? <CfAccessSignupPage /> : <LocalSignupPage />;
 }

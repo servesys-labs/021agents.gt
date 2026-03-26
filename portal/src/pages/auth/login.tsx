@@ -1,68 +1,17 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../../lib/auth";
-import { isClerkMode } from "../../auth/config";
+import { isCfAccessMode } from "../../auth/config";
 
-function ClerkLoginPage() {
-  // Dynamic import to avoid bundling Clerk when not in Clerk mode
-  const [ClerkSignIn, setClerkSignIn] = useState<React.ComponentType<any> | null>(null);
-
-  // Lazy load Clerk SignIn component
-  if (!ClerkSignIn) {
-    import("@clerk/clerk-react").then((mod) => {
-      setClerkSignIn(() => mod.SignIn);
-    });
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-surface-base">
-        <div className="text-text-muted text-sm">Loading authentication...</div>
-      </div>
-    );
-  }
+function CfAccessLoginPage() {
+  useEffect(() => {
+    // CF Access handles the login UI — redirect to root so CF Access can intercept
+    window.location.href = "/";
+  }, []);
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-surface-base bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.06),transparent_55%)] p-[var(--space-6)]">
-      <div className="flex flex-col items-center gap-[var(--space-6)]">
-        {/* Brand */}
-        <div className="text-center">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-accent-muted mb-[var(--space-4)]">
-            <span className="text-accent font-bold text-[var(--text-xl)]">O</span>
-          </div>
-          <h1 className="text-[var(--text-xl)] font-bold text-text-primary">
-            Sign in to AgentOS
-          </h1>
-          <p className="mt-[var(--space-2)] text-[var(--text-sm)] text-text-muted">
-            Agent infrastructure platform
-          </p>
-        </div>
-
-        {/* Clerk SignIn component — handles all auth flows */}
-        <ClerkSignIn
-          appearance={{
-            elements: {
-              rootBox: "w-full max-w-md",
-              card: "bg-surface-raised/65 border border-border-subtle/70 shadow-[0_16px_48px_rgba(0,0,0,0.5)] backdrop-blur-xl rounded-2xl",
-              headerTitle: "hidden",
-              headerSubtitle: "hidden",
-              header: "hidden",
-              formFieldLabel: "text-text-secondary text-sm",
-              formFieldInput:
-                "bg-surface-overlay/80 border-border-default text-text-primary rounded-lg",
-              formButtonPrimary:
-                "!bg-accent hover:!bg-accent-hover !text-white !shadow-none rounded-lg min-h-[var(--touch-target-min)]",
-              footerActionLink: "text-accent hover:text-accent-hover",
-              identityPreviewEditButton: "text-accent",
-              socialButtonsBlockButton:
-                "bg-surface-overlay/70 border-border-default text-text-primary hover:bg-surface-hover rounded-lg",
-              dividerLine: "bg-border-default",
-              dividerText: "text-text-muted",
-            },
-          }}
-          routing="path"
-          path="/login"
-          signUpUrl="/signup"
-          fallbackRedirectUrl="/"
-        />
-      </div>
+    <div className="min-h-screen flex items-center justify-center bg-surface-base">
+      <div className="text-text-muted text-sm">Redirecting to sign-in...</div>
     </div>
   );
 }
@@ -179,5 +128,5 @@ function LocalLoginPage() {
 }
 
 export function LoginPage() {
-  return isClerkMode() ? <ClerkLoginPage /> : <LocalLoginPage />;
+  return isCfAccessMode() ? <CfAccessLoginPage /> : <LocalLoginPage />;
 }

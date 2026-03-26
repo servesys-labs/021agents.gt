@@ -1,6 +1,6 @@
 /**
- * Clerk RS256 JWKS verification — ported from agentos/auth/clerk.py.
- * Fetches JWKS from Clerk's well-known endpoint, verifies RS256 signatures.
+ * Cloudflare Access RS256 JWKS verification.
+ * Fetches JWKS from CF Access's certs endpoint, verifies RS256 signatures.
  */
 import type { TokenClaims } from "./types";
 
@@ -9,20 +9,20 @@ interface JWKSCache {
   fetchedAt: number;
 }
 
-let jwksCache: JWKSCache | null = null;
+let cfAccessJwksCache: JWKSCache | null = null;
 const JWKS_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
-async function fetchJwks(issuer: string, jwksUrl?: string): Promise<JsonWebKey[]> {
-  if (jwksCache && Date.now() - jwksCache.fetchedAt < JWKS_TTL_MS) {
-    return jwksCache.keys;
+async function fetchJwks(teamDomain: string): Promise<JsonWebKey[]> {
+  if (cfAccessJwksCache && Date.now() - cfAccessJwksCache.fetchedAt < JWKS_TTL_MS) {
+    return cfAccessJwksCache.keys;
   }
 
-  const url = jwksUrl || `${issuer.replace(/\/$/, "")}/.well-known/jwks.json`;
+  const url = `https://${teamDomain}/cdn-cgi/access/certs`;
   const resp = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!resp.ok) throw new Error(`JWKS fetch failed: ${resp.status}`);
+  if (!resp.ok) throw new Error(`CF Access JWKS fetch failed: ${resp.status}`);
 
   const data = (await resp.json()) as { keys: JsonWebKey[] };
-  jwksCache = { keys: data.keys, fetchedAt: Date.now() };
+  cfAccessJwksCache = { keys: data.keys, fetchedAt: Date.now() };
   return data.keys;
 }
 
@@ -46,10 +46,14 @@ function b64urlDecode(s: string): Uint8Array {
   return bytes;
 }
 
-export function clerkEnabled(issuer?: string): boolean {
-  return !!issuer;
+export function cfAccessEnabled(teamDomain?: string): boolean {
+  return !!teamDomain;
 }
 
+/**
+ * Derive a display name from JWT payload fields.
+ * CF Access JWTs typically only have email, so we extract from that.
+ */
 export function deriveDisplayName(payload: Record<string, unknown>): string {
   const explicitName = String(payload.name ?? "").trim();
   if (explicitName) return explicitName;
@@ -67,10 +71,10 @@ export function deriveDisplayName(payload: Record<string, unknown>): string {
   return "";
 }
 
-export async function verifyClerkToken(
+export async function verifyCfAccessToken(
   token: string,
-  issuer: string,
-  opts?: { audience?: string; jwksUrl?: string },
+  teamDomain: string,
+  opts?: { aud?: string },
 ): Promise<TokenClaims | null> {
   try {
     const parts = token.split(".");
@@ -83,7 +87,7 @@ export async function verifyClerkToken(
     if (header.alg !== "RS256") return null;
 
     // Find matching JWK
-    const keys = await fetchJwks(issuer, opts?.jwksUrl);
+    const keys = await fetchJwks(teamDomain);
     const jwk = header.kid ? keys.find((k) => (k as any).kid === header.kid) : keys[0];
     if (!jwk) return null;
 
@@ -97,19 +101,12 @@ export async function verifyClerkToken(
     // Parse payload
     const payload = JSON.parse(new TextDecoder().decode(b64urlDecode(payloadB64)));
 
-    // Verify issuer (strip trailing slashes from both sides)
-    if (payload.iss) {
-      const normalizedIss = String(payload.iss).replace(/\/+$/, "");
-      const normalizedIssuer = issuer.replace(/\/+$/, "");
-      if (normalizedIss !== normalizedIssuer) return null;
-    }
-
-    // Verify audience (handle both string and array)
-    if (opts?.audience) {
+    // Verify audience (the Application AUD tag)
+    if (opts?.aud) {
       const aud = payload.aud;
       if (Array.isArray(aud)) {
-        if (!aud.includes(opts.audience)) return null;
-      } else if (aud !== opts.audience) {
+        if (!aud.includes(opts.aud)) return null;
+      } else if (aud !== opts.aud) {
         return null;
       }
     }
@@ -123,13 +120,12 @@ export async function verifyClerkToken(
 
     return {
       sub: payload.sub ?? "",
-      email: payload.email ?? payload.primary_email_address ?? "",
+      email: payload.email ?? "",
       name: deriveDisplayName(payload),
-      provider: "clerk",
-      org_id: payload.org_id ?? payload.organization_id ?? "",
+      provider: "cf_access",
+      org_id: "", // CF Access JWTs have no org_id
       iat: payload.iat ?? 0,
       exp: payload.exp ?? 0,
-      role: payload.org_role ?? payload.organization_role ?? "",
     };
   } catch {
     return null;
