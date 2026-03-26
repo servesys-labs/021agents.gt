@@ -24,6 +24,7 @@ export const Healthy: Story = { args: { status: "healthy" } };
 export const Unknown: Story = { args: { status: "unknown" } };
 
 export const AllStatuses: Story = {
+  args: { status: "live" },
   render: () => (
     <div className="flex flex-wrap gap-2 p-4">
       {["live", "online", "success", "error", "warning", "draft", "running", "active", "cancelled", "unknown", "healthy", "degraded"].map((s) => (
