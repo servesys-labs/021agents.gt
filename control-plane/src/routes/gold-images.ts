@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
   detectDrift,
@@ -49,7 +49,7 @@ const updateGoldImageSchema = z.object({
 goldImageRoutes.get("/", requireScope("gold_images:read"), async (c) => {
   const user = c.get("user");
   const activeOnly = c.req.query("active_only") !== "false";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (activeOnly) {
@@ -84,7 +84,7 @@ goldImageRoutes.post("/", requireScope("gold_images:write"), async (c) => {
   }
 
   const req = parsed.data;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const imageId = randomId();
   const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
   const hash = await configHashAsync(req.config);
@@ -127,7 +127,7 @@ goldImageRoutes.get("/audit", requireScope("gold_images:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.query("agent_name") ?? "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 100)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -152,7 +152,7 @@ goldImageRoutes.get("/audit", requireScope("gold_images:read"), async (c) => {
 goldImageRoutes.post("/from-agent/:agent_name", requireScope("gold_images:write"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config
   const agentRows = await sql`
@@ -211,7 +211,7 @@ goldImageRoutes.post("/from-agent/:agent_name", requireScope("gold_images:write"
 
 goldImageRoutes.get("/compliance/summary", requireScope("gold_images:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM compliance_checks
@@ -231,7 +231,7 @@ goldImageRoutes.get("/compliance/checks", requireScope("gold_images:read"), asyn
   const user = c.get("user");
   const agentName = c.req.query("agent_name") ?? "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -257,7 +257,7 @@ goldImageRoutes.post("/compliance/check/:agent_name", requireScope("gold_images:
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
   const imageId = c.req.query("image_id") ?? "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config
   const agentRows = await sql`
@@ -392,7 +392,7 @@ goldImageRoutes.post("/compliance/check/:agent_name", requireScope("gold_images:
 });
 
 async function persistComplianceCheck(
-  sql: Awaited<ReturnType<typeof getDb>>,
+  sql: Awaited<ReturnType<typeof getDbForOrg>>,
   user: CurrentUser,
   agentName: string,
   gold: Record<string, unknown>,
@@ -423,7 +423,7 @@ goldImageRoutes.post("/drift/:agent_name/:image_id", requireScope("gold_images:w
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
   const imageId = c.req.param("image_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config
   const agentRows = await sql`
@@ -468,8 +468,9 @@ goldImageRoutes.post("/drift/:agent_name/:image_id", requireScope("gold_images:w
 // ── GET /:image_id ───────────────────────────────────────────────
 
 goldImageRoutes.get("/:image_id", requireScope("gold_images:read"), async (c) => {
+  const user = c.get("user");
   const imageId = c.req.param("image_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
@@ -502,7 +503,7 @@ goldImageRoutes.put("/:image_id", requireScope("gold_images:write"), async (c) =
     return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existingRows = await sql`
     SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
@@ -571,7 +572,7 @@ goldImageRoutes.put("/:image_id", requireScope("gold_images:write"), async (c) =
 goldImageRoutes.post("/:image_id/approve", requireScope("gold_images:write"), async (c) => {
   const user = c.get("user");
   const imageId = c.req.param("image_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existingRows = await sql`
     SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1
@@ -606,7 +607,7 @@ goldImageRoutes.post("/:image_id/approve", requireScope("gold_images:write"), as
 goldImageRoutes.delete("/:image_id", requireScope("gold_images:write"), async (c) => {
   const user = c.get("user");
   const imageId = c.req.param("image_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existingRows = await sql`
     SELECT * FROM gold_images WHERE image_id = ${imageId} AND deleted_at IS NULL LIMIT 1

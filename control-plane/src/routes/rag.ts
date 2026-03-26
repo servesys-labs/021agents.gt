@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };

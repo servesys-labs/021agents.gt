@@ -1,0 +1,386 @@
+/**
+ * Red Team security routes — scans, findings, AIVSS risk profiles.
+ *
+ * Routes:
+ *   POST /redteam/scan        - Start security scan
+ *   GET  /redteam/scans/:id   - Get scan results
+ *   GET  /redteam/scans       - List scans
+ *   POST /redteam/scans/:id/cancel - Cancel scan
+ *
+ * Ported from agentos/api/routers/redteam.py.
+ */
+
+import { Hono } from "hono";
+import { z } from "zod";
+import type { Env } from "../env";
+import type { CurrentUser } from "../auth/types";
+import { getDbForOrg } from "../db/client";
+import { RedTeamRunner, ScanResult } from "../lib/security";
+import { parseAgentConfigJson } from "../schemas/common";
+import { requireScope } from "../middleware/auth";
+
+type R = { Bindings: Env; Variables: { user: CurrentUser } };
+export const redteamRoutes = new Hono<R>();
+
+// In-memory store for scan results (until persisted to DB)
+const scanResultsCache = new Map<string, ScanResult>();
+const activeRunners = new Map<string, RedTeamRunner>();
+
+// ── Request/Response schemas ───────────────────────────────────────
+
+const scanRequestSchema = z.object({
+  agent_name: z.string().optional(),
+  scan_type: z.enum(["config", "runtime", "full"]).default("config"),
+  agent_config: z.record(z.unknown()).optional(),
+});
+
+// ── POST /redteam/scan ─────────────────────────────────────────────
+
+redteamRoutes.post("/scan", requireScope("security:write"), async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const body = await c.req.json();
+  const parsed = scanRequestSchema.safeParse(body);
+
+  if (!parsed.success) {
+    return c.json(
+      {
+        error: "Invalid request",
+        details: parsed.error.flatten(),
+      },
+      400,
+    );
+  }
+
+  const { scan_type, agent_config } = parsed.data;
+
+  // Get agent name from body, query param, or return error
+  const agentName =
+    parsed.data.agent_name ?? c.req.query("agent_name") ?? "";
+
+  if (!agentName) {
+    return c.json({ error: "agent_name is required" }, 400);
+  }
+
+  // Load agent config if not provided
+  let agentConfig = agent_config;
+  if (!agentConfig) {
+    const agentRows = await sql`
+      SELECT config_json FROM agents
+      WHERE name = ${agentName} AND org_id = ${user.org_id}
+      LIMIT 1
+    `;
+    if (!agentRows.length) {
+      return c.json({ error: `Agent '${agentName}' not found` }, 404);
+    }
+    agentConfig = parseAgentConfigJson(
+      (agentRows[0] as Record<string, unknown>).config_json,
+    );
+  }
+
+  // Create runner and store reference
+  const runner = new RedTeamRunner(null); // No direct DB - use existing security routes for persistence
+  const scanId = generateScanId();
+
+  // Run the appropriate scan type
+  let result: ScanResult;
+
+  try {
+    switch (scan_type) {
+      case "runtime":
+        result = await runner.scanRuntime(
+          agentName,
+          agentConfig,
+          null, // No runtime function in control plane
+          user.org_id,
+          30.0,
+        );
+        break;
+
+      case "full":
+        result = await runner.scanFull(
+          agentName,
+          agentConfig,
+          null, // No runtime function in control plane
+          user.org_id,
+          30.0,
+        );
+        break;
+
+      case "config":
+      default:
+        result = await runner.scanConfig(
+          agentName,
+          agentConfig,
+          user.org_id,
+          scan_type,
+        );
+        break;
+    }
+
+    // Persist to database using existing schema
+    try {
+      await sql`
+        INSERT INTO security_scans (
+          scan_id, org_id, agent_name, scan_type, status,
+          total_probes, passed, failed, risk_score, risk_level,
+          started_at, completed_at
+        ) VALUES (
+          ${result.scan_id}, ${user.org_id}, ${agentName}, ${scan_type}, ${result.status},
+          ${result.total_probes}, ${result.passed}, ${result.failed},
+          ${result.risk_score}, ${result.risk_level},
+          ${result.started_at}, ${result.completed_at}
+        )
+      `;
+
+      // Persist findings
+      for (const finding of result.findings) {
+        await sql`
+          INSERT INTO security_findings (
+            scan_id, org_id, agent_name, probe_id, probe_name,
+            category, layer, severity, title, description, evidence,
+            aivss_vector, aivss_score
+          ) VALUES (
+            ${result.scan_id}, ${user.org_id}, ${agentName},
+            ${String(finding.probe_id ?? "")}, ${String(finding.probe_name ?? "")},
+            ${String(finding.category ?? "")}, ${String(finding.layer ?? "")},
+            ${String(finding.severity ?? "info")},
+            ${String(finding.probe_name ?? "")},
+            ${String(finding.evidence ?? "").slice(0, 500)},
+            ${String(finding.evidence ?? "")},
+            ${String(finding.aivss_vector ?? "")}, ${Number(finding.aivss_score ?? 0)}
+          )
+        `;
+      }
+
+      // Update risk profile
+      await sql`
+        INSERT INTO risk_profiles (agent_name, org_id, risk_score, risk_level, last_scan_id, findings_summary, updated_at)
+        VALUES (
+          ${agentName}, ${user.org_id}, ${result.risk_score}, ${result.risk_level},
+          ${result.scan_id}, ${JSON.stringify({
+            total: result.findings.length,
+            by_severity: countBy(result.findings, "severity"),
+            by_category: countBy(result.findings, "category"),
+          })}, ${Date.now() / 1000}
+        )
+        ON CONFLICT (agent_name) DO UPDATE SET
+          risk_score = EXCLUDED.risk_score,
+          risk_level = EXCLUDED.risk_level,
+          last_scan_id = EXCLUDED.last_scan_id,
+          findings_summary = EXCLUDED.findings_summary,
+          updated_at = EXCLUDED.updated_at
+      `;
+    } catch (dbError) {
+      console.error("Failed to persist scan results:", dbError);
+      // Continue - return result even if persistence fails
+    }
+
+    // Cache result for quick retrieval
+    scanResultsCache.set(result.scan_id, result);
+    activeRunners.set(result.scan_id, runner);
+
+    return c.json(
+      {
+        scan_id: result.scan_id,
+        agent_name: agentName,
+        scan_type: scan_type,
+        status: result.status,
+        risk_score: result.risk_score,
+        risk_level: result.risk_level,
+        total_probes: result.total_probes,
+        passed: result.passed,
+        failed: result.failed,
+        findings_count: result.findings.length,
+        started_at: result.started_at,
+        completed_at: result.completed_at,
+      },
+      201,
+    );
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    return c.json({ error: "Scan failed", message: errorMessage }, 500);
+  }
+});
+
+// ── GET /redteam/scans ─────────────────────────────────────────────
+
+redteamRoutes.get("/scans", requireScope("security:read"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.query("agent_name") ?? "";
+  const limit = Math.min(
+    200,
+    Math.max(1, Number(c.req.query("limit") ?? 50)),
+  );
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  let rows;
+  if (agentName) {
+    rows = await sql`
+      SELECT 
+        scan_id, agent_name, scan_type, status,
+        total_probes, passed, failed, risk_score, risk_level,
+        started_at, completed_at
+      FROM security_scans
+      WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
+      ORDER BY started_at DESC LIMIT ${limit}
+    `;
+  } else {
+    rows = await sql`
+      SELECT 
+        scan_id, agent_name, scan_type, status,
+        total_probes, passed, failed, risk_score, risk_level,
+        started_at, completed_at
+      FROM security_scans
+      WHERE org_id = ${user.org_id}
+      ORDER BY started_at DESC LIMIT ${limit}
+    `;
+  }
+
+  return c.json({
+    scans: rows,
+    total: rows.length,
+  });
+});
+
+// ── GET /redteam/scans/:id ─────────────────────────────────────────
+
+redteamRoutes.get("/scans/:id", requireScope("security:read"), async (c) => {
+  const user = c.get("user");
+  const scanId = c.req.param("id");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // First check cache for active/running scans with full details
+  const cachedResult = scanResultsCache.get(scanId);
+  if (cachedResult) {
+    return c.json(cachedResult);
+  }
+
+  // Get scan from database
+  const scanRows = await sql`
+    SELECT * FROM security_scans
+    WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
+    LIMIT 1
+  `;
+
+  if (!scanRows.length) {
+    return c.json({ error: "Scan not found" }, 404);
+  }
+
+  const scan = scanRows[0] as Record<string, unknown>;
+
+  // Get findings for this scan
+  const findingRows = await sql`
+    SELECT * FROM security_findings
+    WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
+    ORDER BY aivss_score DESC
+  `;
+
+  // Get MAESTRO layers (stored in scan metadata if available)
+  let maestroLayers: Record<string, unknown>[] = [];
+  try {
+    const metadata = scan.metadata
+      ? JSON.parse(String(scan.metadata))
+      : null;
+    maestroLayers = metadata?.maestro_layers ?? [];
+  } catch {
+    // Ignore parse errors
+  }
+
+  const result: ScanResult = {
+    scan_id: String(scan.scan_id),
+    agent_name: String(scan.agent_name ?? ""),
+    scan_type: String(scan.scan_type ?? ""),
+    status: String(scan.status ?? ""),
+    total_probes: Number(scan.total_probes ?? 0),
+    passed: Number(scan.passed ?? 0),
+    failed: Number(scan.failed ?? 0),
+    risk_score: Number(scan.risk_score ?? 0),
+    risk_level: String(scan.risk_level ?? "unknown"),
+    findings: findingRows as Record<string, unknown>[],
+    maestro_layers: maestroLayers,
+    aivss_summary: {
+      overall_score: Number(scan.risk_score ?? 0),
+      risk_level: String(scan.risk_level ?? "unknown"),
+    },
+    probe_results: [],
+    started_at: Number(scan.started_at ?? 0),
+    completed_at: Number(scan.completed_at ?? 0),
+  };
+
+  return c.json(result);
+});
+
+// ── POST /redteam/scans/:id/cancel ─────────────────────────────────
+
+redteamRoutes.post(
+  "/scans/:id/cancel",
+  requireScope("security:write"),
+  async (c) => {
+    const scanId = c.req.param("id");
+
+    // Get the runner for this scan
+    const runner = activeRunners.get(scanId);
+
+    if (!runner) {
+      return c.json(
+        {
+          error: "Scan not found or already completed",
+          scan_id: scanId,
+        },
+        404,
+      );
+    }
+
+    const cancelled = runner.cancelScan(scanId);
+
+    if (cancelled) {
+      return c.json({
+        success: true,
+        message: "Scan cancellation requested",
+        scan_id: scanId,
+      });
+    } else {
+      return c.json(
+        {
+          error: "Scan cannot be cancelled",
+          scan_id: scanId,
+        },
+        409,
+      );
+    }
+  },
+);
+
+// ── GET /redteam/probes ────────────────────────────────────────────
+
+redteamRoutes.get("/probes", requireScope("security:read"), (c) => {
+  const { OwaspProbeLibrary, probeToDict } = require("../lib/security");
+  const lib = new OwaspProbeLibrary();
+  return c.json({ probes: lib.getAll().map(probeToDict) });
+});
+
+// ── Helper functions ───────────────────────────────────────────────
+
+function generateScanId(): string {
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("")
+    .slice(0, 16);
+}
+
+function countBy(
+  items: Record<string, unknown>[],
+  key: string,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of items) {
+    const val = String(item[key] ?? "unknown");
+    counts[val] = (counts[val] ?? 0) + 1;
+  }
+  return counts;
+}

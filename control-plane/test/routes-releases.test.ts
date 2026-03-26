@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -39,7 +40,7 @@ function buildApp(orgId = "org-a") {
 
 describe("release routes org scoping", () => {
   it("channels are org-scoped", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("ORDER BY channel")) {
         const [, orgId] = values;
@@ -49,7 +50,9 @@ describe("release routes org scoping", () => {
         return [{ org_id: "org-b", agent_name: "agent-x", channel: "staging" }];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp("org-a");
     const res = await app.request("/agent-x/channels", { method: "GET" }, mockEnv());
@@ -60,7 +63,7 @@ describe("release routes org scoping", () => {
   });
 
   it("promote returns 404 when agent is not owned by org", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql2 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("channel")) return [];
       if (query.includes("FROM agents")) {
@@ -69,7 +72,9 @@ describe("release routes org scoping", () => {
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql2);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -86,6 +91,7 @@ describe("release routes org scoping", () => {
 
   it("rejects invalid canary weight", async () => {
     vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
     const app = buildApp("org-a");
     const res = await app.request(
       "/agent-x/canary",
@@ -104,7 +110,7 @@ describe("release routes org scoping", () => {
   });
 
   it("canary lookup returns null when no record in caller org", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql3 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("FROM canary_splits")) {
         const [, orgId] = values;
@@ -112,7 +118,9 @@ describe("release routes org scoping", () => {
         return [{ org_id: "org-b", agent_name: "agent-x", is_active: true }];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql3);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql3);
 
     const app = buildApp("org-a");
     const res = await app.request("/agent-x/canary", { method: "GET" }, mockEnv());
@@ -123,7 +131,7 @@ describe("release routes org scoping", () => {
 
   it("promote upserts with org-scoped UPDATE then INSERT (no ON CONFLICT)", async () => {
     const queries: string[] = [];
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql4 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       queries.push(query);
       if (query.includes("FROM release_channels") && query.includes("channel")) {
@@ -140,7 +148,9 @@ describe("release routes org scoping", () => {
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql4);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql4);
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -159,7 +169,7 @@ describe("release routes org scoping", () => {
 
   it("promote skips INSERT when org-scoped UPDATE touches a row", async () => {
     const inserts: string[] = [];
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql5 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("channel")) {
         return [{ config_json: "{}", version: "2.0.0" }];
@@ -171,7 +181,9 @@ describe("release routes org scoping", () => {
       }
       if (query.includes("INSERT INTO audit_log")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql5);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql5);
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -188,7 +200,7 @@ describe("release routes org scoping", () => {
   });
 
   it("promote success returns expected contract fields", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql6 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("channel")) {
         return [{ config_json: "{\"name\":\"agent-x\"}", version: "1.2.3" }];
@@ -197,7 +209,9 @@ describe("release routes org scoping", () => {
       if (query.includes("INSERT INTO release_channels")) return [];
       if (query.includes("INSERT INTO audit_log")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql6);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql6);
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -218,12 +232,14 @@ describe("release routes org scoping", () => {
   });
 
   it("canary set/remove returns expected contracts", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql7 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("UPDATE canary_splits SET is_active = false")) return [];
       if (query.includes("INSERT INTO canary_splits")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql7);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql7);
 
     const app = buildApp("org-a");
     const setRes = await app.request(

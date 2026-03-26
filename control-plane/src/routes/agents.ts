@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { requireScope } from "../middleware/auth";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from "../logic/graph-lint";
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
@@ -177,7 +177,7 @@ function lintGraphOrThrow(
 }
 
 async function snapshotVersion(
-  sql: Awaited<ReturnType<typeof getDb>>,
+  sql: Awaited<ReturnType<typeof getDbForOrg>>,
   agentName: string,
   version: string,
   configJson: Record<string, unknown>,
@@ -229,7 +229,7 @@ agentRoutes.get("/", async (c) => {
     return c.json(proxied.map((r) => agentResponse(r as Record<string, unknown>)));
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT name, description, config_json, is_active, created_at, updated_at
@@ -245,7 +245,7 @@ agentRoutes.get("/", async (c) => {
 agentRoutes.get("/:name", async (c) => {
   const { name } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT name, description, config_json, is_active, created_at, updated_at
@@ -274,7 +274,7 @@ agentRoutes.post(
 
     const req = parsed.data;
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     // Check for existing agent with same name in org
     const existing = await sql`
@@ -357,7 +357,7 @@ agentRoutes.put(
 
     const req = parsed.data;
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     // Fetch existing
     const rows = await sql`
@@ -443,7 +443,7 @@ agentRoutes.delete(
     const { name } = c.req.param();
     const hardDelete = c.req.query("hard_delete") === "true";
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     // Check existence
     const rows = await sql`
@@ -544,7 +544,7 @@ agentRoutes.delete(
 agentRoutes.get("/:name/versions", async (c) => {
   const { name } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let versions: Record<string, unknown>[] = [];
   try {
@@ -581,7 +581,7 @@ agentRoutes.get("/:name/versions", async (c) => {
 agentRoutes.get("/:name/tools", async (c) => {
   const { name } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT config_json FROM agents
@@ -600,7 +600,7 @@ agentRoutes.get("/:name/tools", async (c) => {
 agentRoutes.get("/:name/config", async (c) => {
   const { name } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT config_json FROM agents
@@ -624,7 +624,7 @@ agentRoutes.post("/:name/clone", requireScope("agents:write"), async (c) => {
   }
 
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Fetch source agent
   const rows = await sql`
@@ -685,7 +685,7 @@ agentRoutes.post(
 
     const config = parsed.data.config;
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     // Extract graph for linting
     let graph: Record<string, unknown> | null = null;
@@ -741,7 +741,7 @@ agentRoutes.post(
 agentRoutes.get("/:name/export", async (c) => {
   const { name } = c.req.param();
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT config_json FROM agents
@@ -768,7 +768,7 @@ agentRoutes.post(
 
     const req = parsed.data;
     const user = c.get("user");
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     // Generate config via Workers AI
     const config = await buildFromDescription(c.env.AI, req.description, {

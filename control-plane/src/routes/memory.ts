@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -24,7 +24,7 @@ memoryRoutes.get("/:agent_name/episodes", requireScope("memory:read"), async (c)
   const user = c.get("user");
   const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
   const query = c.req.query("query") || "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -58,7 +58,7 @@ memoryRoutes.post("/:agent_name/episodes", requireScope("memory:write"), async (
   const now = Date.now() / 1000;
   const episodeId = genId();
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -78,7 +78,7 @@ memoryRoutes.post("/:agent_name/episodes", requireScope("memory:write"), async (
 memoryRoutes.delete("/:agent_name/episodes", requireScope("memory:write"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -96,7 +96,7 @@ memoryRoutes.get("/:agent_name/facts", requireScope("memory:read"), async (c) =>
   const user = c.get("user");
   const query = c.req.query("query") || "";
   const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -133,7 +133,7 @@ memoryRoutes.post("/:agent_name/facts", requireScope("memory:write"), async (c) 
   const value = String(body.value || "");
   if (!key) return c.json({ error: "key is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -154,7 +154,7 @@ memoryRoutes.delete("/:agent_name/facts/:key", requireScope("memory:write"), asy
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
   const key = c.req.param("key");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -168,7 +168,7 @@ memoryRoutes.delete("/:agent_name/facts/:key", requireScope("memory:write"), asy
 memoryRoutes.delete("/:agent_name/facts", requireScope("memory:write"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -185,7 +185,7 @@ memoryRoutes.get("/:agent_name/procedures", requireScope("memory:read"), async (
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
   const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -213,7 +213,7 @@ memoryRoutes.get("/:agent_name/procedures", requireScope("memory:read"), async (
 memoryRoutes.delete("/:agent_name/procedures", requireScope("memory:write"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
@@ -229,7 +229,7 @@ memoryRoutes.delete("/:agent_name/procedures", requireScope("memory:write"), asy
 memoryRoutes.get("/:agent_name/working", requireScope("memory:read"), async (c) => {
   const agentName = c.req.param("agent_name");
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
     SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}

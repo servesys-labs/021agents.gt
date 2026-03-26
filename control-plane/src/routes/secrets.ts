@@ -7,7 +7,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { fernetEncrypt } from "../logic/fernet";
 import { requireScope } from "../middleware/auth";
 
@@ -24,7 +24,7 @@ secretRoutes.get("/", requireScope("secrets:read"), async (c) => {
   const user = c.get("user");
   const projectId = c.req.query("project_id") || "";
   const envFilter = c.req.query("env") || "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (projectId && envFilter) {
@@ -66,7 +66,7 @@ secretRoutes.post("/", requireScope("secrets:write"), async (c) => {
   if (!name) return c.json({ error: "name is required" }, 400);
   if (!value) return c.json({ error: "value is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Check for duplicate
   const existing = await sql`
@@ -93,7 +93,7 @@ secretRoutes.delete("/:name", requireScope("secrets:write"), async (c) => {
   const name = c.req.param("name");
   const projectId = c.req.query("project_id") || "";
   const envFilter = c.req.query("env") || "";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     DELETE FROM secrets
@@ -115,7 +115,7 @@ secretRoutes.post("/:name/rotate", requireScope("secrets:write"), async (c) => {
 
   const encrypted = await fernetEncrypt(newValue, getKeySeed(c.env));
   const now = Date.now() / 1000;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     UPDATE secrets SET value_encrypted = ${encrypted}, updated_at = ${now}

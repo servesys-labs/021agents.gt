@@ -6,7 +6,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -27,7 +27,7 @@ evolveRoutes.get("/:agent_name/proposals", requireScope("evolve:read"), async (c
   const user = c.get("user");
   const orgId = user.org_id;
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify agent belongs to this org
   const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
@@ -53,7 +53,7 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/approve", requireScope("e
   const body = await c.req.json().catch(() => ({}));
   const note = String(body.note || "");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify agent belongs to this org
   const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
@@ -89,7 +89,7 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/reject", requireScope("ev
   const body = await c.req.json().catch(() => ({}));
   const note = String(body.note || "");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify agent belongs to this org
   const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
@@ -120,7 +120,7 @@ evolveRoutes.get("/:agent_name/ledger", requireScope("evolve:read"), async (c) =
   const user = c.get("user");
   const orgId = user.org_id;
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify agent belongs to this org
   const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;

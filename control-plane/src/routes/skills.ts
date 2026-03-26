@@ -7,13 +7,14 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const skillRoutes = new Hono<R>();
 
 skillRoutes.get("/", async (c) => {
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     const rows = await sql`SELECT * FROM skills ORDER BY name`;
     return c.json(rows);
@@ -23,8 +24,9 @@ skillRoutes.get("/", async (c) => {
 });
 
 skillRoutes.get("/:name", async (c) => {
+  const user = c.get("user");
   const name = c.req.param("name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`SELECT * FROM skills WHERE name = ${name}`;
   if (rows.length === 0) return c.json({ error: `Skill '${name}' not found` }, 404);
@@ -32,11 +34,12 @@ skillRoutes.get("/:name", async (c) => {
 });
 
 skillRoutes.put("/:name", async (c) => {
+  const user = c.get("user");
   const name = c.req.param("name");
   const body = await c.req.json();
   const enabled = Boolean(body.enabled);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT name FROM skills WHERE name = ${name}`;
   if (rows.length === 0) return c.json({ error: `Skill '${name}' not found` }, 404);
 
@@ -47,7 +50,8 @@ skillRoutes.put("/:name", async (c) => {
 });
 
 skillRoutes.post("/reload", async (c) => {
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     const rows = await sql`SELECT * FROM skills ORDER BY name`;

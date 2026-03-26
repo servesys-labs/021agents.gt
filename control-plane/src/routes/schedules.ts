@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { parseCron } from "../logic/cron-parser";
 import { requireScope } from "../middleware/auth";
 
@@ -20,7 +20,7 @@ function genId(): string {
 
 scheduleRoutes.get("/", requireScope("schedules:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM schedules WHERE org_id = ${user.org_id} ORDER BY created_at DESC
   `;
@@ -53,7 +53,7 @@ scheduleRoutes.post("/", requireScope("schedules:write"), async (c) => {
     return c.json({ error: e.message }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const scheduleId = genId();
   const now = Date.now() / 1000;
 
@@ -80,7 +80,7 @@ scheduleRoutes.put("/:schedule_id", requireScope("schedules:write"), async (c) =
     }
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
   `;
@@ -110,7 +110,7 @@ scheduleRoutes.put("/:schedule_id", requireScope("schedules:write"), async (c) =
 scheduleRoutes.get("/:schedule_id/history", requireScope("schedules:read"), async (c) => {
   const user = c.get("user");
   const scheduleId = c.req.param("schedule_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
@@ -130,7 +130,7 @@ scheduleRoutes.get("/:schedule_id/history", requireScope("schedules:read"), asyn
 scheduleRoutes.delete("/:schedule_id", requireScope("schedules:write"), async (c) => {
   const user = c.get("user");
   const scheduleId = c.req.param("schedule_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     DELETE FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
@@ -142,7 +142,7 @@ scheduleRoutes.delete("/:schedule_id", requireScope("schedules:write"), async (c
 scheduleRoutes.post("/:schedule_id/enable", requireScope("schedules:write"), async (c) => {
   const user = c.get("user");
   const scheduleId = c.req.param("schedule_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT schedule_id FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
@@ -156,7 +156,7 @@ scheduleRoutes.post("/:schedule_id/enable", requireScope("schedules:write"), asy
 scheduleRoutes.post("/:schedule_id/disable", requireScope("schedules:write"), async (c) => {
   const user = c.get("user");
   const scheduleId = c.req.param("schedule_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT schedule_id FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}

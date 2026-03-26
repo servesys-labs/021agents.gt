@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 import rawDefault from "../../config/default.json";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -99,7 +100,7 @@ describe("plans routes", () => {
   });
 
   it("POST / merges custom plan into project_configs", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("SELECT config_json FROM project_configs")) {
         return [{ config_json: '{"other":1,"plans":{"old":{"_description":"x"}}}' }];
@@ -119,7 +120,9 @@ describe("plans routes", () => {
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp("org-a");
     const res = await app.request(
@@ -144,7 +147,7 @@ describe("plans routes", () => {
   });
 
   it("POST / defaults tool_call tier to moderate when tool_call_model empty", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql2 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("SELECT config_json")) return [{ config_json: "{}" }];
       if (query.includes("INSERT INTO project_configs")) {
@@ -154,7 +157,9 @@ describe("plans routes", () => {
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql2);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
 
     const app = buildApp("org-a");
     const res = await app.request(

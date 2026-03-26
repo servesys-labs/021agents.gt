@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDb, getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -109,7 +109,7 @@ chatPlatformRoutes.post("/telegram/connect", requireScope("integrations:write"),
   const botToken = String(body.bot_token || "").trim();
   if (!botToken) return c.json({ error: "bot_token is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = Date.now() / 1000;
 
   // Store in secrets
@@ -157,11 +157,12 @@ chatPlatformRoutes.post("/telegram/connect", requireScope("integrations:write"),
 // ── Telegram Setup (manual webhook override) ────────────────────────
 
 chatPlatformRoutes.post("/telegram/setup", requireScope("integrations:write"), async (c) => {
+  const user = c.get("user");
   const body = await c.req.json();
   const webhookUrl = String(body.webhook_url || "").trim();
   if (!webhookUrl) return c.json({ error: "webhook_url is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const botToken = await getTelegramToken(sql);
   if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
 
@@ -180,7 +181,8 @@ chatPlatformRoutes.post("/telegram/setup", requireScope("integrations:write"), a
 // ── Telegram QR ─────────────────────────────────────────────────────
 
 chatPlatformRoutes.get("/telegram/qr", requireScope("integrations:read"), async (c) => {
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const botToken = await getTelegramToken(sql);
   if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
 
@@ -207,7 +209,8 @@ chatPlatformRoutes.get("/telegram/qr", requireScope("integrations:read"), async 
 // ── Telegram Delete Webhook ─────────────────────────────────────────
 
 chatPlatformRoutes.delete("/telegram/webhook", requireScope("integrations:write"), async (c) => {
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const botToken = await getTelegramToken(sql);
   if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
 

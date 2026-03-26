@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import type { Sql } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
@@ -32,7 +32,7 @@ function genId(): string {
 
 orgRoutes.get("/", requireScope("orgs:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT o.*, COUNT(m2.user_id) as member_count
     FROM orgs o
@@ -59,7 +59,7 @@ orgRoutes.post("/", requireScope("orgs:write"), async (c) => {
   if (!name) return c.json({ error: "name is required" }, 400);
   const slug = String(body.slug || "").trim() || name.toLowerCase().replace(/\s+/g, "-");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const orgId = genId();
 
   await sql`
@@ -75,7 +75,7 @@ orgRoutes.post("/", requireScope("orgs:write"), async (c) => {
 orgRoutes.get("/:org_id/members", requireScope("orgs:read"), async (c) => {
   const user = c.get("user");
   const orgId = c.req.param("org_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     await requireOrgMember(sql, user, orgId, "viewer");
@@ -103,7 +103,7 @@ orgRoutes.post("/:org_id/members", requireScope("orgs:write"), async (c) => {
     return c.json({ error: "Invalid role" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await requireOrgMember(sql, user, orgId, "admin");
   } catch (e: any) {
@@ -136,7 +136,7 @@ orgRoutes.put("/:org_id", requireScope("orgs:write"), async (c) => {
   const name = String(body.name || "").trim();
   const plan = String(body.plan || "").trim();
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await requireOrgMember(sql, user, orgId, "admin");
   } catch (e: any) {
@@ -160,7 +160,7 @@ orgRoutes.put("/:org_id", requireScope("orgs:write"), async (c) => {
 orgRoutes.delete("/:org_id", requireScope("orgs:write"), async (c) => {
   const user = c.get("user");
   const orgId = c.req.param("org_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     await requireOrgMember(sql, user, orgId, "owner");
@@ -184,7 +184,7 @@ orgRoutes.put("/:org_id/members/:member_user_id", requireScope("orgs:write"), as
     return c.json({ error: "Invalid role" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await requireOrgMember(sql, user, orgId, "admin");
   } catch (e: any) {
@@ -201,7 +201,7 @@ orgRoutes.delete("/:org_id/members/:member_user_id", requireScope("orgs:write"),
   const user = c.get("user");
   const orgId = c.req.param("org_id");
   const memberUserId = c.req.param("member_user_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     await requireOrgMember(sql, user, orgId, "admin");

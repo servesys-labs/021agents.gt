@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -40,14 +41,16 @@ function buildApp(orgId = "org-a") {
 describe("security routes contracts", () => {
   it("POST scan selects config_json from agents", async () => {
     let agentsSql = "";
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM agents") && query.includes("LIMIT 1")) {
         agentsSql = query;
         return [{ config_json: JSON.stringify({ model: "m", tools: ["web-search"] }) }];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp("org-a");
     const res = await app.request("/scan/agent-a?scan_type=config", { method: "POST" }, mockEnv());
@@ -70,14 +73,16 @@ describe("security routes contracts", () => {
 
   it("findings query remains org-scoped for severity filter", async () => {
     let capturedOrgId: string | null = null;
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql2 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("FROM security_findings") && query.includes("severity")) {
         capturedOrgId = String(values[0]);
         return [{ org_id: values[0], severity: values[2], title: "finding" }];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql2);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
     const app = buildApp("org-a");
     const res = await app.request("/findings?severity=high&limit=10", { method: "GET" }, mockEnv());
     expect(res.status).toBe(200);
@@ -87,11 +92,13 @@ describe("security routes contracts", () => {
   });
 
   it("returns 404 for scan report outside org scope", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql3 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM security_scans WHERE scan_id")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql3);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql3);
     const app = buildApp("org-a");
     const res = await app.request("/scan/scan-x/report", { method: "GET" }, mockEnv());
     expect(res.status).toBe(404);
@@ -135,7 +142,7 @@ describe("security routes contracts", () => {
   });
 
   it("scan report returns contract for owned scan", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql4 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM security_scans WHERE scan_id")) {
         return [
@@ -165,7 +172,9 @@ describe("security routes contracts", () => {
         ];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql4);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql4);
 
     const app = buildApp("org-a");
     const res = await app.request("/scan/scan-1/report", { method: "GET" }, mockEnv());
@@ -185,7 +194,7 @@ describe("security routes contracts", () => {
   });
 
   it("risk trends returns chronological trend entries", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql5 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM security_scans") && query.includes("ORDER BY started_at DESC")) {
         return [
@@ -194,7 +203,9 @@ describe("security routes contracts", () => {
         ];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql5);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql5);
 
     const app = buildApp("org-a");
     const res = await app.request("/risk-trends/agent-a?limit=2", { method: "GET" }, mockEnv());

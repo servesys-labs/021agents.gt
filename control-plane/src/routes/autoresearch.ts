@@ -8,7 +8,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -80,9 +80,10 @@ autoresearchRoutes.get("/results", requireScope("autoresearch:read"), async (c) 
 // ── Database-backed endpoints (for dashboard/UI) ────────────────────
 
 autoresearchRoutes.get("/runs", requireScope("autoresearch:read"), async (c) => {
+  const user = c.get("user");
   const agentName = c.req.query("agent_name") || "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -99,8 +100,9 @@ autoresearchRoutes.get("/runs", requireScope("autoresearch:read"), async (c) => 
 });
 
 autoresearchRoutes.get("/runs/:run_id", requireScope("autoresearch:read"), async (c) => {
+  const user = c.get("user");
   const runId = c.req.param("run_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const runs = await sql`SELECT * FROM autoresearch_runs WHERE run_id = ${runId}`;
   if (runs.length === 0) return c.json({ error: "Autoresearch run not found" }, 404);
@@ -114,9 +116,10 @@ autoresearchRoutes.get("/runs/:run_id", requireScope("autoresearch:read"), async
 });
 
 autoresearchRoutes.get("/runs/:run_id/experiments", requireScope("autoresearch:read"), async (c) => {
+  const user = c.get("user");
   const runId = c.req.param("run_id");
   const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 100));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM autoresearch_experiments WHERE run_id = ${runId}
@@ -126,9 +129,10 @@ autoresearchRoutes.get("/runs/:run_id/experiments", requireScope("autoresearch:r
 });
 
 autoresearchRoutes.get("/agent/:agent_name/history", requireScope("autoresearch:read"), async (c) => {
+  const user = c.get("user");
   const agentName = c.req.param("agent_name");
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 20));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const runs = await sql`
     SELECT * FROM autoresearch_runs WHERE agent_name = ${agentName}

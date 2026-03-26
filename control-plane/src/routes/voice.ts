@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDb, getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
   isVoiceGenericPlatform,
@@ -26,7 +26,7 @@ function nowSec(): number {
 
 voiceRoutes.get("/all/summary", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let vapiSummary: any = { total_calls: 0, total_cost_usd: 0, total_duration_seconds: 0 };
   try {
@@ -98,7 +98,7 @@ voiceRoutes.get("/vapi/calls", requireScope("integrations:read"), async (c) => {
   const agentName = c.req.query("agent_name") || "";
   const status = c.req.query("status") || "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName && status) {
@@ -130,7 +130,7 @@ voiceRoutes.get("/vapi/calls", requireScope("integrations:read"), async (c) => {
 
 voiceRoutes.get("/vapi/calls/summary", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     const [summary] = await sql`
       SELECT COUNT(*) as total_calls,
@@ -186,7 +186,7 @@ voiceRoutes.post("/vapi/calls", requireScope("integrations:write"), async (c) =>
     return c.json({ error: "Vapi API response missing call id" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await sql`
       INSERT INTO voice_calls (
@@ -211,6 +211,7 @@ voiceRoutes.post("/vapi/calls", requireScope("integrations:write"), async (c) =>
 });
 
 voiceRoutes.delete("/vapi/calls/:call_id", requireScope("integrations:write"), async (c) => {
+  const user = c.get("user");
   const callId = c.req.param("call_id");
   const apiKey = c.env.VAPI_API_KEY ?? "";
   if (!apiKey) {
@@ -223,7 +224,7 @@ voiceRoutes.delete("/vapi/calls/:call_id", requireScope("integrations:write"), a
   if (![200, 204].includes(res.status)) {
     return c.json({ error: `Vapi API error: ${res.status}` }, 400);
   }
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await sql`
       UPDATE voice_calls SET status = 'ended', ended_at = ${nowSec()}
@@ -238,7 +239,7 @@ voiceRoutes.delete("/vapi/calls/:call_id", requireScope("integrations:write"), a
 voiceRoutes.get("/vapi/calls/:call_id", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
   const callId = c.req.param("call_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM voice_calls
     WHERE call_id = ${callId} AND platform = 'vapi' AND org_id = ${user.org_id}
@@ -250,7 +251,7 @@ voiceRoutes.get("/vapi/calls/:call_id", requireScope("integrations:read"), async
 voiceRoutes.get("/vapi/calls/:call_id/events", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
   const callId = c.req.param("call_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const own = await sql`
     SELECT 1 FROM voice_calls
     WHERE call_id = ${callId} AND platform = 'vapi' AND org_id = ${user.org_id}
@@ -303,7 +304,7 @@ voiceRoutes.get("/:platform/calls/summary", requireScope("integrations:read"), a
     return c.json({ error: `Unknown platform: ${platform}` }, 404);
   }
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     const [summary] = await sql`
       SELECT COUNT(*) as total_calls,
@@ -326,7 +327,7 @@ voiceRoutes.get("/:platform/calls", requireScope("integrations:read"), async (c)
   const agentName = c.req.query("agent_name") || "";
   const status = c.req.query("status") || "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName && status) {
@@ -403,7 +404,7 @@ voiceRoutes.post("/:platform/calls", requireScope("integrations:write"), async (
     return c.json({ error: "Tavus API response missing conversation id" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
     await sql`
       INSERT INTO voice_calls (
@@ -437,7 +438,7 @@ voiceRoutes.get("/:platform/calls/:call_id", requireScope("integrations:read"), 
   }
   const user = c.get("user");
   const callId = c.req.param("call_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM voice_calls
     WHERE call_id = ${callId} AND platform = ${platform} AND org_id = ${user.org_id}
@@ -453,7 +454,7 @@ voiceRoutes.get("/:platform/calls/:call_id/events", requireScope("integrations:r
   }
   const user = c.get("user");
   const callId = c.req.param("call_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const own = await sql`
     SELECT 1 FROM voice_calls
     WHERE call_id = ${callId} AND platform = ${platform} AND org_id = ${user.org_id}

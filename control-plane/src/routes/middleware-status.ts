@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const middlewareStatusRoutes = new Hono<R>();
@@ -36,7 +36,7 @@ middlewareStatusRoutes.get("/events", async (c) => {
   const sessionId = c.req.query("session_id") || "";
   const middlewareName = c.req.query("middleware_name") || "";
   const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 100));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     let rows;

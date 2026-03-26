@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDb, getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -38,7 +38,7 @@ function validateCallbackUrl(url: string): string | null {
 
 webhookRoutes.get("/", requireScope("webhooks:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM webhooks WHERE org_id = ${user.org_id} ORDER BY created_at DESC
   `;
@@ -67,7 +67,7 @@ webhookRoutes.post("/", requireScope("webhooks:write"), async (c) => {
     if (urlError) return c.json({ error: urlError }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const webhookId = genId();
   const secret = genId() + genId();
   const eventsJson = JSON.stringify(events);
@@ -88,7 +88,7 @@ webhookRoutes.put("/:webhook_id", requireScope("webhooks:write"), async (c) => {
   const events = body.events;
   const isActive = body.is_active;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   if (url) {
     const urlError = validateCallbackUrl(url);
@@ -109,7 +109,7 @@ webhookRoutes.put("/:webhook_id", requireScope("webhooks:write"), async (c) => {
 webhookRoutes.delete("/:webhook_id", requireScope("webhooks:write"), async (c) => {
   const user = c.get("user");
   const webhookId = c.req.param("webhook_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     DELETE FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
@@ -121,7 +121,7 @@ webhookRoutes.delete("/:webhook_id", requireScope("webhooks:write"), async (c) =
 webhookRoutes.post("/:webhook_id/test", requireScope("webhooks:write"), async (c) => {
   const user = c.get("user");
   const webhookId = c.req.param("webhook_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
@@ -164,7 +164,7 @@ webhookRoutes.get("/:webhook_id/deliveries", requireScope("webhooks:read"), asyn
   const user = c.get("user");
   const webhookId = c.req.param("webhook_id");
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wh = await sql`
     SELECT webhook_id FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
@@ -182,7 +182,7 @@ webhookRoutes.post("/:webhook_id/deliveries/:delivery_id/replay", requireScope("
   const user = c.get("user");
   const webhookId = c.req.param("webhook_id");
   const deliveryId = c.req.param("delivery_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wh = await sql`
     SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}
@@ -311,7 +311,7 @@ webhookRoutes.post("/:webhook_id/incoming", async (c) => {
 webhookRoutes.post("/:webhook_id/rotate-secret", requireScope("webhooks:write"), async (c) => {
   const user = c.get("user");
   const webhookId = c.req.param("webhook_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT webhook_id FROM webhooks WHERE webhook_id = ${webhookId} AND org_id = ${user.org_id}

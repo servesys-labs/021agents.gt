@@ -9,7 +9,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -41,7 +41,7 @@ evalRoutes.get("/runs", requireScope("eval:read"), async (c) => {
   const orgId = user.org_id;
   const agentName = c.req.query("agent_name") || "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 20));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = agentName
     ? await sql`SELECT * FROM eval_runs WHERE org_id = ${orgId} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit}`
@@ -65,7 +65,7 @@ evalRoutes.get("/runs/:run_id", requireScope("eval:read"), async (c) => {
   const user = c.get("user");
   const orgId = user.org_id;
   const runId = Number(c.req.param("run_id"));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT * FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
   if (rows.length === 0) return c.json({ error: "Eval run not found" }, 404);
   const data: any = { ...rows[0] };
@@ -92,7 +92,7 @@ evalRoutes.get("/runs/:run_id/trials", requireScope("eval:read"), async (c) => {
   const user = c.get("user");
   const orgId = user.org_id;
   const runId = Number(c.req.param("run_id"));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const check = await sql`SELECT id FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
   if (check.length === 0) return c.json({ error: "Eval run not found" }, 404);
 
@@ -194,7 +194,7 @@ evalRoutes.delete("/runs/:run_id", requireScope("eval:run"), async (c) => {
   const user = c.get("user");
   const orgId = user.org_id;
   const runId = Number(c.req.param("run_id"));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
   return c.json({ deleted: runId });
 });

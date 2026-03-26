@@ -6,7 +6,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import {
   allProbesDicts,
   scanConfig,
@@ -36,7 +36,7 @@ securityRoutes.get("/scans", requireScope("security:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.query("agent_name") ?? "";
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
@@ -63,7 +63,7 @@ securityRoutes.get("/findings", requireScope("security:read"), async (c) => {
   const agentName = c.req.query("agent_name") ?? "";
   const severity = c.req.query("severity") ?? "";
   const limit = Math.min(500, Math.max(1, Number(c.req.query("limit") ?? 100)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Use separate queries to avoid SQL injection with dynamic WHERE
   let rows;
@@ -124,7 +124,7 @@ securityRoutes.get("/findings", requireScope("security:read"), async (c) => {
 
 securityRoutes.get("/risk-profiles", requireScope("security:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM risk_profiles WHERE org_id = ${user.org_id}
     ORDER BY risk_score DESC
@@ -137,7 +137,7 @@ securityRoutes.get("/risk-profiles", requireScope("security:read"), async (c) =>
 securityRoutes.get("/risk-profiles/:agent_name", requireScope("security:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM risk_profiles WHERE agent_name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
   `;
@@ -153,7 +153,7 @@ securityRoutes.post("/scan/:agent_name", requireScope("security:write"), async (
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
   const scanType = c.req.query("scan_type") ?? "config";
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config from DB (config_json is canonical; same column as agents router)
   const agentRows = await sql`
@@ -260,7 +260,7 @@ securityRoutes.post("/scan/:agent_name/runtime", requireScope("security:write"),
 securityRoutes.get("/scan/:scan_id/report", requireScope("security:read"), async (c) => {
   const user = c.get("user");
   const scanId = c.req.param("scan_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const scanRows = await sql`
     SELECT * FROM security_scans WHERE scan_id = ${scanId} AND org_id = ${user.org_id} LIMIT 1
@@ -333,7 +333,7 @@ securityRoutes.get("/risk-trends/:agent_name", requireScope("security:read"), as
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
   const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 20)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT scan_id, risk_score, risk_level, passed, failed, started_at as created_at

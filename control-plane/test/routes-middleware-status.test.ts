@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -40,7 +41,7 @@ function buildApp(orgId = "org-a") {
 describe("middleware status routes", () => {
   it("events list is org-scoped", async () => {
     let firstBinding: unknown;
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("FROM middleware_events")) {
         expect(query).toContain("org_id");
@@ -48,7 +49,9 @@ describe("middleware status routes", () => {
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp("org-a");
     const res = await app.request("/events?limit=10", { method: "GET" }, mockEnv());
@@ -58,14 +61,16 @@ describe("middleware status routes", () => {
 
   it("events with session_id and middleware_name binds org_id first", async () => {
     const bindings: unknown[] = [];
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const mockSql2 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("FROM middleware_events")) {
         bindings.push(...values);
         return [];
       }
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql2);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
 
     const app = buildApp("org-b");
     const res = await app.request(

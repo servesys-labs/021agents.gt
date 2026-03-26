@@ -7,9 +7,10 @@ import { mockEnv, mockFetcher } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -162,6 +163,7 @@ function createMockSql() {
 describe("workflows: approval orchestration routes", () => {
   it("creates pending approval and returns idempotent replay", async () => {
     vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
+    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
     const app = buildApp("org-a");
 
     const startRes = await app.request(
@@ -208,6 +210,7 @@ describe("workflows: approval orchestration routes", () => {
 
   it("uses workflows binding when enabled", async () => {
     vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
+    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
     const app = buildApp("org-a");
     const env = mockEnv({
       APPROVAL_WORKFLOWS_ENABLED: "true",
@@ -240,6 +243,7 @@ describe("workflows: approval orchestration routes", () => {
 
   it("approves pending decision and is idempotent on repeat", async () => {
     vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
+    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
     const app = buildApp("org-a");
 
     const start = await app.request(
@@ -288,6 +292,7 @@ describe("workflows: approval orchestration routes", () => {
 
   it("expires stale approvals on decision attempt", async () => {
     vi.mocked(getDb).mockResolvedValue(createMockSql() as any);
+    vi.mocked(getDbForOrg).mockResolvedValue(createMockSql() as any);
     const app = buildApp("org-a");
 
     const start = await app.request(

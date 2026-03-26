@@ -8,7 +8,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -61,7 +61,7 @@ async function cfApi(
 
 pipelineRoutes.get("/streams", requireScope("pipelines:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
     FROM pipelines
@@ -85,7 +85,7 @@ pipelineRoutes.post("/streams", requireScope("pipelines:write"), async (c) => {
     http_auth: body.http_auth !== false,
   };
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     INSERT INTO pipelines (id, org_id, name, description, type, config_json, status, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'stream',
@@ -98,7 +98,7 @@ pipelineRoutes.post("/streams", requireScope("pipelines:write"), async (c) => {
 pipelineRoutes.get("/streams/:stream_id", requireScope("pipelines:read"), async (c) => {
   const user = c.get("user");
   const streamId = c.req.param("stream_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
     FROM pipelines
@@ -112,7 +112,7 @@ pipelineRoutes.get("/streams/:stream_id", requireScope("pipelines:read"), async 
 pipelineRoutes.delete("/streams/:stream_id", requireScope("pipelines:write"), async (c) => {
   const user = c.get("user");
   const streamId = c.req.param("stream_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
     WHERE id = ${streamId} AND org_id = ${user.org_id} AND type = 'stream'
@@ -129,7 +129,7 @@ pipelineRoutes.post("/streams/:stream_id/send", requireScope("pipelines:write"),
     return c.json({ error: "events array is required" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT cf_resource_id, config_json, status FROM pipelines
     WHERE id = ${streamId} AND org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
@@ -171,7 +171,7 @@ pipelineRoutes.post("/streams/:stream_id/send", requireScope("pipelines:write"),
 
 pipelineRoutes.get("/sinks", requireScope("pipelines:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
     FROM pipelines
@@ -220,7 +220,7 @@ pipelineRoutes.post("/sinks", requireScope("pipelines:write"), async (c) => {
     config.r2_path = body.path || "";
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     INSERT INTO pipelines (id, org_id, name, description, type, config_json, status, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'sink',
@@ -233,7 +233,7 @@ pipelineRoutes.post("/sinks", requireScope("pipelines:write"), async (c) => {
 pipelineRoutes.get("/sinks/:sink_id", requireScope("pipelines:read"), async (c) => {
   const user = c.get("user");
   const sinkId = c.req.param("sink_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
     FROM pipelines
@@ -247,7 +247,7 @@ pipelineRoutes.get("/sinks/:sink_id", requireScope("pipelines:read"), async (c) 
 pipelineRoutes.delete("/sinks/:sink_id", requireScope("pipelines:write"), async (c) => {
   const user = c.get("user");
   const sinkId = c.req.param("sink_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
     WHERE id = ${sinkId} AND org_id = ${user.org_id} AND type = 'sink'
@@ -259,7 +259,7 @@ pipelineRoutes.delete("/sinks/:sink_id", requireScope("pipelines:write"), async 
 
 pipelineRoutes.get("/", requireScope("pipelines:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
     FROM pipelines
@@ -286,7 +286,7 @@ pipelineRoutes.post("/", requireScope("pipelines:write"), async (c) => {
     sql: body.sql,
   };
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Validate stream and sink exist
   const streamRows = await sql`
@@ -329,7 +329,7 @@ pipelineRoutes.get("/:pipeline_id", requireScope("pipelines:read"), async (c) =>
     return c.notFound();
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
     FROM pipelines
@@ -365,7 +365,7 @@ pipelineRoutes.put("/:pipeline_id", requireScope("pipelines:write"), async (c) =
   const user = c.get("user");
   const pipelineId = c.req.param("pipeline_id");
   const body = await c.req.json();
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT config_json FROM pipelines
@@ -398,7 +398,7 @@ pipelineRoutes.put("/:pipeline_id", requireScope("pipelines:write"), async (c) =
 pipelineRoutes.delete("/:pipeline_id", requireScope("pipelines:write"), async (c) => {
   const user = c.get("user");
   const pipelineId = c.req.param("pipeline_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
     WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline'
@@ -476,7 +476,7 @@ pipelineRoutes.post("/:pipeline_id/query", requireScope("pipelines:read"), async
 
   if (!querySql) return c.json({ error: "sql query is required" }, 400);
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT name, config_json, status FROM pipelines
     WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
@@ -533,7 +533,7 @@ pipelineRoutes.post("/:pipeline_id/query", requireScope("pipelines:read"), async
 pipelineRoutes.post("/:pipeline_id/deploy", requireScope("pipelines:write"), async (c) => {
   const user = c.get("user");
   const pipelineId = c.req.param("pipeline_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT id, name, type, config_json, status FROM pipelines

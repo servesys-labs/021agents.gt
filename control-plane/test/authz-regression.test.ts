@@ -20,9 +20,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 const SECRET = "authz-test-secret";
 
@@ -45,12 +46,14 @@ function makeUser(orgId: string, role = "admin"): CurrentUser {
 
 describe("Finding 1: Meta-proposals IDOR", () => {
   it("rejects cross-org proposal listing", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("COUNT(*) as cnt FROM sessions")) return [{ cnt: 0 }];
       if (query.includes("COUNT(*) as cnt FROM agents")) return [{ cnt: 0 }];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     // Import the observability routes
     const { observabilityRoutes } = await import("../src/routes/observability");
@@ -74,11 +77,13 @@ describe("Finding 1: Meta-proposals IDOR", () => {
 
 describe("Finding 3: gate-pack org scoping", () => {
   it("rejects cross-org gate-pack even with inline graph", async () => {
-    vi.mocked(getDb).mockResolvedValue((async (strings: TemplateStringsArray) => {
+    const mockSql2 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("SELECT 1 FROM agents")) return [];
       return [];
-    }) as any);
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql2);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
 
     const { graphRoutes } = await import("../src/routes/graphs");
 

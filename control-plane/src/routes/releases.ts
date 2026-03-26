@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -14,7 +14,7 @@ export const releaseRoutes = new Hono<R>();
 releaseRoutes.get("/:agent_name/channels", requireScope("releases:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM release_channels WHERE agent_name = ${agentName} AND org_id = ${user.org_id} ORDER BY channel
   `;
@@ -28,7 +28,7 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
   const fromChannel = String(body.from_channel || c.req.query("from_channel") || "draft");
   const toChannel = String(body.to_channel || c.req.query("to_channel") || "staging");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Get source channel config
   const source = await sql`
@@ -89,7 +89,7 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
 releaseRoutes.get("/:agent_name/canary", requireScope("releases:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM canary_splits
     WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
@@ -110,7 +110,7 @@ releaseRoutes.post("/:agent_name/canary", requireScope("releases:write"), async 
     return c.json({ error: "canary_weight must be 0.0-1.0" }, 400);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE canary_splits
     SET is_active = false
@@ -132,7 +132,7 @@ releaseRoutes.post("/:agent_name/canary", requireScope("releases:write"), async 
 releaseRoutes.delete("/:agent_name/canary", requireScope("releases:write"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.param("agent_name");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE canary_splits
     SET is_active = false

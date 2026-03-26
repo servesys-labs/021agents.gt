@@ -7,9 +7,10 @@ import { mockEnv } from "./helpers/test-env";
 
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -39,23 +40,23 @@ function buildApp() {
 
 describe("issues route contracts", () => {
   it("GET /:issue_id returns issue_id in payload", async () => {
-    vi.mocked(getDb).mockResolvedValue(
-      (async (strings: TemplateStringsArray) => {
-        const query = strings.join("?");
-        if (query.includes("SELECT * FROM issues WHERE issue_id")) {
-          return [
-            {
-              issue_id: "iss-123",
-              org_id: "org-a",
-              agent_name: "agent-a",
-              title: "Example issue",
-              status: "open",
-            },
-          ];
-        }
-        return [];
-      }) as any,
-    );
+    const mockSql = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT * FROM issues WHERE issue_id")) {
+        return [
+          {
+            issue_id: "iss-123",
+            org_id: "org-a",
+            agent_name: "agent-a",
+            title: "Example issue",
+            status: "open",
+          },
+        ];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
 
     const app = buildApp();
     const res = await app.request("/iss-123", { method: "GET" }, mockEnv());

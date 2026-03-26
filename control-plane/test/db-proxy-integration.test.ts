@@ -14,9 +14,10 @@ import { mockEnv, mockFetcher } from "./helpers/test-env";
 // Mock the DB client so direct-DB paths return predictable data
 vi.mock("../src/db/client", () => ({
   getDb: vi.fn(),
+  getDbForOrg: vi.fn(),
 }));
 
-import { getDb } from "../src/db/client";
+import { getDb, getDbForOrg } from "../src/db/client";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
 
@@ -52,18 +53,31 @@ function createCapturingRuntime(
   },
 ) {
   const runtimeCalls: RuntimeCall[] = [];
-  const fetcher = mockFetcher(async (req: Request) => {
-    const url = new URL(req.url);
-    const body = await req.json();
-    const headers: Record<string, string> = {};
-    req.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    runtimeCalls.push({ url: url.pathname, body: body as Record<string, unknown>, headers });
-    return new Response(JSON.stringify(responseData), {
-      headers: { "Content-Type": "application/json" },
-    });
-  });
+  // Service binding .fetch() can be called with (url, init) or (Request).
+  // In production CF code, env.RUNTIME.fetch(url, init) passes string + init.
+  // Our mock must handle both calling conventions.
+  const fetcher: Fetcher = {
+    fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(
+        // CF-style URLs like "https://runtime/..." are invalid in Node,
+        // so normalize to a parseable URL for test purposes.
+        String(input).replace("https://runtime", "https://localhost"),
+        init,
+      );
+      const urlStr = String(input);
+      const pathname = urlStr.replace(/^https?:\/\/[^/]+/, "") || "/";
+      const body = await req.json();
+      const headers: Record<string, string> = {};
+      req.headers.forEach((v, k) => {
+        headers[k] = v;
+      });
+      runtimeCalls.push({ url: pathname, body: body as Record<string, unknown>, headers });
+      return new Response(JSON.stringify(responseData), {
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+    connect: () => { throw new Error("connect not implemented"); },
+  } as any;
   return { fetcher, runtimeCalls };
 }
 
@@ -132,6 +146,7 @@ describe("Control-Plane DB Proxy Integration", () => {
   it("uses proxy path when DB_PROXY_ENABLED=true", async () => {
     const { fetcher, runtimeCalls } = createCapturingRuntime();
     const env = mockEnv({ DB_PROXY_ENABLED: "true", RUNTIME: fetcher });
+
     const user = makeUser("org-a");
     const result = await listAgentsViaDataProxy(env, user);
     expect(result).not.toBeNull();
@@ -141,9 +156,10 @@ describe("Control-Plane DB Proxy Integration", () => {
   });
 
   it("falls back to null (direct DB) when proxy returns non-200", async () => {
-    const fetcher = mockFetcher(async () => {
-      return new Response(JSON.stringify({ error: "internal" }), { status: 500 });
-    });
+    const fetcher = {
+      fetch: async () => new Response(JSON.stringify({ error: "internal" }), { status: 500 }),
+      connect: () => { throw new Error("not implemented"); },
+    } as any;
     const env = mockEnv({ DB_PROXY_ENABLED: "true", RUNTIME: fetcher });
     const user = makeUser("org-a");
     const result = await listAgentsViaDataProxy(env, user);
@@ -151,9 +167,10 @@ describe("Control-Plane DB Proxy Integration", () => {
   });
 
   it("falls back to null when proxy throws a network error", async () => {
-    const fetcher = mockFetcher(async () => {
-      throw new Error("network failure");
-    });
+    const fetcher = {
+      fetch: async () => { throw new Error("network failure"); },
+      connect: () => { throw new Error("not implemented"); },
+    } as any;
     const env = mockEnv({ DB_PROXY_ENABLED: "true", RUNTIME: fetcher });
     const user = makeUser("org-a");
     const result = await listAgentsViaDataProxy(env, user);

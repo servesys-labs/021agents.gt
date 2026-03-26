@@ -21,6 +21,7 @@ import { evalRoutes } from "./routes/eval";
 import { evolveRoutes } from "./routes/evolve";
 import { workflowRoutes } from "./routes/workflows";
 import { securityRoutes } from "./routes/security";
+import { redteamRoutes } from "./routes/redteam";
 import { issueRoutes } from "./routes/issues";
 import { conversationIntelRoutes } from "./routes/conversation-intel";
 import { billingRoutes } from "./routes/billing";
@@ -63,6 +64,7 @@ import { dlpRoutes } from "./routes/dlp";
 import { pipelineRoutes } from "./routes/pipelines";
 import { feedbackRoutes } from "./routes/feedback";
 import { codemodeRoutes } from "./routes/codemode";
+import { a2aRoutes } from "./routes/a2a";
 
 type AppType = {
   Bindings: Env;
@@ -107,6 +109,7 @@ app.route("/api/v1/workflows", workflowRoutes);
 
 // Governance, security, compliance
 app.route("/api/v1/security", securityRoutes);
+app.route("/api/v1/redteam", redteamRoutes);
 app.route("/api/v1/issues", issueRoutes);
 app.route("/api/v1/intelligence", conversationIntelRoutes);
 app.route("/api/v1/gold-images", goldImageRoutes);
@@ -189,6 +192,9 @@ app.route("/api/v1/feedback", feedbackRoutes);
 
 // Codemode (snippets, execution, templates)
 app.route("/api/v1/codemode", codemodeRoutes);
+
+// A2A (Agent-to-Agent) protocol endpoints
+app.route("/", a2aRoutes);
 
 // ── Export ────────────────────────────────────────────────────────────────
 export default {

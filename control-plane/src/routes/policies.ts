@@ -5,7 +5,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -19,7 +19,7 @@ function genId(): string {
 
 policyRoutes.get("/", requireScope("policies:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM policy_templates WHERE org_id = ${user.org_id} OR org_id = '' ORDER BY name
   `;
@@ -46,7 +46,7 @@ policyRoutes.post("/", requireScope("policies:write"), async (c) => {
     max_turns: maxTurns,
   };
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const policyId = genId();
   const policyJson = JSON.stringify(policy);
 
@@ -68,8 +68,9 @@ policyRoutes.post("/", requireScope("policies:write"), async (c) => {
 });
 
 policyRoutes.get("/:policy_id", requireScope("policies:read"), async (c) => {
+  const user = c.get("user");
   const policyId = c.req.param("policy_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT * FROM policy_templates WHERE policy_id = ${policyId}`;
   if (rows.length === 0) return c.json({ error: "Policy not found" }, 404);
   const d: any = { ...rows[0] };
@@ -85,7 +86,7 @@ policyRoutes.get("/:policy_id", requireScope("policies:read"), async (c) => {
 policyRoutes.delete("/:policy_id", requireScope("policies:write"), async (c) => {
   const user = c.get("user");
   const policyId = c.req.param("policy_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM policy_templates WHERE policy_id = ${policyId} AND org_id = ${user.org_id}`;
   return c.json({ deleted: policyId });
 });

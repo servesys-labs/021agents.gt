@@ -10,7 +10,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -27,7 +27,7 @@ feedbackRoutes.get("/", requireScope("sessions:read"), async (c) => {
   const offset = Math.max(0, Number(c.req.query("offset")) || 0);
   const since = Date.now() / 1000 - sinceDays * 86400;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName && rating) {
@@ -76,7 +76,7 @@ feedbackRoutes.get("/stats", requireScope("sessions:read"), async (c) => {
   const since = Date.now() / 1000 - sinceDays * 86400;
   const prevSince = since - sinceDays * 86400;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Current period counts
   const countQuery = agentName
@@ -175,7 +175,7 @@ feedbackRoutes.get("/:id", requireScope("sessions:read"), async (c) => {
   const user = c.get("user");
   const id = c.req.param("id");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, session_id, turn_number, rating, comment, message_preview, agent_name, channel, created_at, org_id
     FROM user_feedback
@@ -193,7 +193,7 @@ feedbackRoutes.delete("/:id", requireScope("sessions:write"), async (c) => {
   const user = c.get("user");
   const id = c.req.param("id");
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     DELETE FROM user_feedback
     WHERE id = ${id} AND org_id = ${user.org_id}

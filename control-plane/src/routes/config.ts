@@ -7,14 +7,14 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const configRoutes = new Hono<R>();
 
 configRoutes.get("/yaml", async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     const rows = await sql`
@@ -33,7 +33,7 @@ configRoutes.put("/yaml", async (c) => {
   const body = await c.req.json();
   const updates = body.updates || body;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = Date.now() / 1000;
 
   // Get existing config
@@ -60,7 +60,7 @@ configRoutes.put("/yaml", async (c) => {
 
 configRoutes.get("/a2a/remotes", async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
     const rows = await sql`

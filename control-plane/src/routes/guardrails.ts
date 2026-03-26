@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { detectPii, redactPii, scanAndRedact, PII_CATEGORIES } from "../logic/pii-detector";
 import { detectInjection } from "../logic/prompt-injection";
@@ -58,7 +58,7 @@ guardrailRoutes.post("/scan", requireScope("guardrails:write"), async (c) => {
   let policy = DEFAULT_GUARDRAIL_POLICY;
   if (agent_name) {
     try {
-      const sql = await getDb(c.env.HYPERDRIVE);
+      const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
       const rows = await sql`
         SELECT policy_json FROM guardrail_policies
         WHERE org_id = ${user.org_id}
@@ -91,7 +91,7 @@ guardrailRoutes.post("/scan", requireScope("guardrails:write"), async (c) => {
 
   // Log event asynchronously (best-effort)
   try {
-    const sql = await getDb(c.env.HYPERDRIVE);
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
     await sql`
       INSERT INTO guardrail_events (
         id, org_id, agent_name, event_type, action,
@@ -158,7 +158,7 @@ guardrailRoutes.post("/redact", requireScope("guardrails:write"), async (c) => {
 
 guardrailRoutes.get("/policies", requireScope("guardrails:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT id, name, agent_name, policy_json, created_at, updated_at
@@ -210,7 +210,7 @@ guardrailRoutes.post("/policies", requireScope("guardrails:write"), async (c) =>
     allowed_pii_categories: [],
   });
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy_json, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${agent_name ?? null}, ${policyJson}, ${now}, ${now})
@@ -237,7 +237,7 @@ guardrailRoutes.put("/policies/:policy_id", requireScope("guardrails:write"), as
     allowed_pii_categories: [],
   });
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const result = await sql`
     UPDATE guardrail_policies
     SET name = ${name}, agent_name = ${agent_name ?? null},
@@ -257,7 +257,7 @@ guardrailRoutes.put("/policies/:policy_id", requireScope("guardrails:write"), as
 guardrailRoutes.delete("/policies/:policy_id", requireScope("guardrails:write"), async (c) => {
   const user = c.get("user");
   const policyId = c.req.param("policy_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     DELETE FROM guardrail_policies
@@ -280,7 +280,7 @@ guardrailRoutes.get("/events", requireScope("guardrails:read"), async (c) => {
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 7)));
   const sinceMs = Date.now() - sinceDays * 86_400_000;
   const limit = Math.min(500, Math.max(1, Number(c.req.query("limit") ?? 100)));
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName && eventType) {
@@ -319,7 +319,7 @@ guardrailRoutes.get("/events", requireScope("guardrails:read"), async (c) => {
 
 guardrailRoutes.get("/stats", requireScope("guardrails:read"), async (c) => {
   const user = c.get("user");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const totals = await sql`
     SELECT
@@ -383,7 +383,7 @@ guardrailRoutes.post("/test", requireScope("guardrails:write"), async (c) => {
   }
 
   const { text, policy_id } = parsed.data;
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT policy_json FROM guardrail_policies

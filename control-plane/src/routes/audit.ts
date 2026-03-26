@@ -7,7 +7,7 @@
 import { Hono } from "hono";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
-import { getDb } from "../db/client";
+import { getDb, getDbForOrg } from "../db/client";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const auditRoutes = new Hono<R>();
@@ -25,7 +25,7 @@ auditRoutes.get("/log", async (c) => {
   const limit = Math.min(10000, Math.max(1, Number(c.req.query("limit")) || 100));
   const since = Date.now() / 1000 - sinceDays * 86400;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (action && userId) {
@@ -63,7 +63,7 @@ auditRoutes.get("/export", async (c) => {
   const limit = Math.min(10000, Math.max(1, Number(c.req.query("limit")) || 10000));
   const since = Date.now() / 1000 - sinceDays * 86400;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const entries = await sql`
     SELECT * FROM audit_log
     WHERE org_id = ${user.org_id} AND created_at >= ${since}

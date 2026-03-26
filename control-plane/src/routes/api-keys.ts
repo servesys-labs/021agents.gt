@@ -9,7 +9,7 @@ import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { generateApiKey, hashApiKey } from "../auth/api-keys";
-import { getDb } from "../db/client";
+import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -43,7 +43,7 @@ apiKeyRoutes.get("/", requireScope("api_keys:read"), async (c) => {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
     SELECT key_id, name, key_prefix, scopes, project_id, env, created_at, last_used_at, is_active
@@ -91,7 +91,7 @@ apiKeyRoutes.post("/", requireScope("api_keys:write"), async (c) => {
   }
   const req = parsed.data;
 
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const { key, prefix } = generateApiKey();
   const keyHash = await hashApiKey(key);
@@ -149,7 +149,7 @@ apiKeyRoutes.delete("/:key_id", requireScope("api_keys:write"), async (c) => {
   }
 
   const keyId = c.req.param("key_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
     UPDATE api_keys SET is_active = ${false}
@@ -173,7 +173,7 @@ apiKeyRoutes.post("/:key_id/rotate", requireScope("api_keys:write"), async (c) =
   }
 
   const keyId = c.req.param("key_id");
-  const sql = await getDb(c.env.HYPERDRIVE);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Fetch the existing key
   const rows = await sql`
