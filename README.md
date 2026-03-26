@@ -796,6 +796,21 @@ scripts/prod_check.sh --quick
 scripts/prod_check.sh --smoke-url "https://<your-domain>" --token "$TOKEN"
 ```
 
+Quick preflight includes targeted auth/tenant regression coverage via `tests/test_authz_regression.py`.
+TypeScript control-plane bug-catch parity tracking lives in `control-plane/PARITY_SCORECARD.md`.
+
+For control-plane cutovers from legacy filesystem storage:
+
+```bash
+cd control-plane
+
+# Filesystem eval artifacts -> org-scoped eval APIs/R2
+npm run migrate:eval:filesystem -- --base-url "http://127.0.0.1:8787" --token "$TOKEN" --root "../data/eval"
+
+# Filesystem evolve artifacts -> Postgres (schema-aware import)
+DATABASE_URL="$DATABASE_URL" npm run migrate:evolve:filesystem -- --root "../data/evolution" --agent "<agent-name>" --org-id "<org-id>" --dry-run true
+```
+
 ## Programmatic Usage
 
 ```python

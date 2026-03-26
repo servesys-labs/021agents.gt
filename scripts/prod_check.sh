@@ -107,7 +107,11 @@ if [[ "$RUN_TESTS" -eq 1 ]]; then
   fi
 
   if [[ "$QUICK" -eq 1 ]]; then
-    $PYTEST_BIN tests/test_security_auth_tenant_regressions.py tests/test_recent_commit_regressions.py -q
+    $PYTEST_BIN \
+      tests/test_security_auth_tenant_regressions.py \
+      tests/test_recent_commit_regressions.py \
+      tests/test_authz_regression.py \
+      -q
     ok "Quick security/regression tests passed."
   else
     $PYTEST_BIN -q

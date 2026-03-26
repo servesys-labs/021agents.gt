@@ -247,6 +247,12 @@ class TestAgentsRouter:
         data = draft.json()
         assert data["created"] is False
         assert data["graph_lint"]["valid"] is True
+        assert "graph_autofix" in data
+        assert "gate_pack" in data
+        assert "contracts_validate" in data
+        assert data["contracts_validate"]["valid"] is True
+        assert data["contracts_validate"]["summary"]["contracts"]["state_contract_present"] is False
+        assert data["gate_pack"]["rollout"]["decision"] == "hold"
         harness = data["draft"].get("harness", {})
         assert "declarative_graph" in harness
         assert data["graph_lint"]["summary"]["lint"]["strict"] is True
@@ -304,6 +310,69 @@ class TestAgentsRouter:
         assert draft.status_code == 200
         tools = set(draft.json().get("tools", []))
         assert {"create-agent", "run-agent", "eval-agent", "evolve-agent", "autoresearch", "todo"}.issubset(tools)
+
+    def test_create_from_description_requires_explicit_override_when_gate_hold(self, api_client):
+        headers = self._auth_header(api_client, "hold-gate-block@test.com")
+        resp = api_client.post(
+            "/api/v1/agents/create-from-description",
+            params={
+                "description": "Create a support agent with telemetry and eval visibility",
+                "name": "hold-gate-agent",
+                "draft_only": "false",
+                "auto_graph": "true",
+                "strict_graph_lint": "true",
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 409
+        detail = resp.json().get("detail", {})
+        assert detail.get("override_required") is True
+        assert detail.get("gate_pack", {}).get("rollout", {}).get("decision") == "hold"
+
+    def test_create_from_description_hold_override_is_audited(self, api_client, monkeypatch):
+        from agentos.api.routers import agents as agents_router
+        from agentos.core.database import create_database
+
+        real_db = create_database(Path("data/agent.db"))
+        audit_calls: list[dict[str, object]] = []
+        config_audit_calls: list[dict[str, object]] = []
+
+        class _SpyDb:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+                self.conn = wrapped.conn
+
+            def audit(self, **kwargs):
+                audit_calls.append(kwargs)
+
+            def insert_config_audit(self, **kwargs):
+                config_audit_calls.append(kwargs)
+
+        spy_db = _SpyDb(real_db)
+        monkeypatch.setattr(agents_router, "_get_db", lambda: spy_db)
+        headers = self._auth_header(api_client, "hold-gate-override@test.com")
+        resp = api_client.post(
+            "/api/v1/agents/create-from-description",
+            params={
+                "description": "Create a support agent with telemetry and eval visibility",
+                "name": "hold-gate-agent-override",
+                "draft_only": "false",
+                "auto_graph": "true",
+                "strict_graph_lint": "true",
+                "override_hold": "true",
+                "override_reason": "test_override",
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["created"] is True
+        assert body["hold_override_applied"] is True
+        assert any(c.get("action") == "agent.create.hold_override" for c in audit_calls)
+        assert any(c.get("action") == "hold_override" for c in config_audit_calls)
+        assert any(c.get("agent_name") == "hold-gate-agent-override" for c in config_audit_calls)
+        assert any(c.get("change_reason") == "test_override" for c in config_audit_calls)
+        real_db.close()
 
     def test_run_agent_omitted_runtime_mode_preserves_saved_graph_config(self, api_client, monkeypatch):
         from agentos.core.harness import TurnResult
@@ -405,8 +474,7 @@ class TestToolsRouter:
 
 
 class TestObservabilityRouter:
-    def _auth_header(self, api_client):
-        email = "obs@test.com"
+    def _auth_header(self, api_client, email: str = "obs@test.com"):
         password = "pass12345"
         signup_resp = api_client.post("/api/v1/auth/signup", json={"email": email, "password": password})
         if signup_resp.status_code == 200:
@@ -433,8 +501,9 @@ class TestObservabilityRouter:
         assert resp.status_code == 200
         assert "entries" in resp.json()
 
-    def test_meta_control_plane(self, api_client):
-        headers = self._auth_header(api_client)
+    def test_meta_control_plane(self, api_client, monkeypatch):
+        monkeypatch.setattr("agentos.api.routers.observability._agent_is_owned", lambda *_args, **_kwargs: True)
+        headers = self._auth_header(api_client, "obs-meta-control-plane@test.com")
         me = api_client.get("/api/v1/auth/me", headers=headers)
         assert me.status_code == 200
         org_id = me.json().get("org_id", "")
@@ -487,8 +556,43 @@ class TestObservabilityRouter:
         assert "suggested_eval_plan" in data
         assert isinstance(data["meta_proposals"]["items"], list)
         assert data["control_plane_entrypoints"]["agent_crud"]["create"] == "/api/v1/agents"
+        assert data["control_plane_entrypoints"]["graph_design"]["autofix"] == "/api/v1/graphs/autofix"
+        assert data["control_plane_entrypoints"]["graph_design"]["contracts_validate"] == "/api/v1/graphs/contracts/validate"
+        assert data["control_plane_entrypoints"]["graph_design"]["gate_pack"] == "/api/v1/graphs/gate-pack"
+        assert data["control_plane_entrypoints"]["improvement_loops"]["autonomous_maintenance_run"] == "/api/v1/observability/agents/test-agent/autonomous-maintenance-run"
         assert "pipe" in data["langchain_equivalent_runtime"]["runnable_composition"]["primitives"]
         assert data["multi_agent_blueprint"]["pattern"] == "supervisor_specialists"
+
+    def test_autonomous_maintenance_run_returns_approval_packet(self, api_client, monkeypatch):
+        monkeypatch.setattr("agentos.api.routers.observability._agent_is_owned", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr("agentos.api.routers.observability._agent_exists", lambda *_args, **_kwargs: True)
+        monkeypatch.setattr("agentos.api.routers.observability._load_agent_graph", lambda *_args, **_kwargs: {
+            "state_contract": {"reducers": {"memory.facts": "append"}},
+            "nodes": [
+                {"id": "n1", "kind": "bootstrap"},
+                {"id": "n2", "kind": "tools", "state_writes": ["memory.facts"]},
+                {"id": "n3", "kind": "final"},
+            ],
+            "edges": [
+                {"source": "n1", "target": "n2"},
+                {"source": "n2", "target": "n3"},
+            ],
+        })
+        headers = self._auth_header(api_client, "obs-maintenance@test.com")
+        resp = api_client.post(
+            "/api/v1/observability/agents/test-agent/autonomous-maintenance-run",
+            json={"dry_run": True, "persist_proposals": False, "max_proposals": 5},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["agent_name"] == "test-agent"
+        assert "graph_checks" in data
+        assert data["graph_checks"]["available"] is True
+        assert "contracts_validate" in data["graph_checks"]
+        assert "approval_packet" in data
+        assert "requires_human_approval" in data["approval_packet"]
+        assert isinstance(data["suggested_actions"], list)
 
     def test_trace_events_support_server_side_filters(self, api_client):
         headers = self._auth_header(api_client)
