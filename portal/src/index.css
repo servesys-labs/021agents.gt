@@ -1003,8 +1003,33 @@ textarea::placeholder {
 }
 
 .command-palette-input:focus {
-  outline: none !important;
-  box-shadow: none !important;
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+/* Respect user's motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  
+  .skeleton-shimmer {
+    animation: none !important;
+    background: var(--color-surface-overlay);
+  }
+  
+  .empty-state-icon {
+    animation: none !important;
+  }
+  
+  .chat-typing-indicator span {
+    animation: none !important;
+  }
 }
 
 .command-palette-kbd {

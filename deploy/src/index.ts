@@ -3077,6 +3077,7 @@ export default {
             await tx`SELECT set_config('app.current_user_id', ${userId || "system"}, true)`;
             await tx`SELECT set_config('app.current_role', ${role || "service"}, true)`;
 
+            // ── Agent queries ──────────────────────────────────────
             if (queryId === "agents.list_active_by_org") {
               return await tx`
                 SELECT name, description, config_json, is_active, created_at, updated_at
@@ -3084,6 +3085,136 @@ export default {
                 WHERE org_id = ${orgId} AND is_active = true
                 ORDER BY created_at DESC
               `;
+            }
+            if (queryId === "agents.config") {
+              const agentName = String(body.params?.agent_name || "");
+              if (!agentName) throw new Error("params.agent_name required");
+              return await tx`
+                SELECT name, config_json, description FROM agents
+                WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
+              `;
+            }
+            if (queryId === "agents.versions") {
+              const agentName = String(body.params?.agent_name || "");
+              const limit = Math.min(Number(body.params?.limit) || 20, 100);
+              return await tx`
+                SELECT version_number, created_by, created_at FROM agent_versions
+                WHERE agent_name = ${agentName}
+                ORDER BY created_at DESC LIMIT ${limit}
+              `;
+            }
+
+            // ── Session queries ───────────────────────────────────
+            if (queryId === "sessions.list") {
+              const limit = Math.min(Number(body.params?.limit) || 50, 500);
+              const offset = Math.max(Number(body.params?.offset) || 0, 0);
+              const agentName = body.params?.agent_name ? String(body.params.agent_name) : null;
+              const status = body.params?.status ? String(body.params.status) : null;
+              return agentName && status
+                ? await tx`SELECT session_id, agent_name, status, input_text, output_text, cost_total_usd, wall_clock_seconds, step_count, trace_id, created_at FROM sessions WHERE org_id = ${orgId} AND agent_name = ${agentName} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
+                : agentName
+                  ? await tx`SELECT session_id, agent_name, status, input_text, output_text, cost_total_usd, wall_clock_seconds, step_count, trace_id, created_at FROM sessions WHERE org_id = ${orgId} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
+                  : status
+                    ? await tx`SELECT session_id, agent_name, status, input_text, output_text, cost_total_usd, wall_clock_seconds, step_count, trace_id, created_at FROM sessions WHERE org_id = ${orgId} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
+                    : await tx`SELECT session_id, agent_name, status, input_text, output_text, cost_total_usd, wall_clock_seconds, step_count, trace_id, created_at FROM sessions WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+            }
+            if (queryId === "sessions.detail") {
+              const sessionId = String(body.params?.session_id || "");
+              if (!sessionId) throw new Error("params.session_id required");
+              return await tx`SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${orgId} LIMIT 1`;
+            }
+            if (queryId === "sessions.turns") {
+              const sessionId = String(body.params?.session_id || "");
+              if (!sessionId) throw new Error("params.session_id required");
+              // Verify session belongs to org first
+              const check = await tx`SELECT 1 FROM sessions WHERE session_id = ${sessionId} AND org_id = ${orgId}`;
+              if (check.length === 0) return [];
+              return await tx`SELECT * FROM turns WHERE session_id = ${sessionId} ORDER BY turn_number`;
+            }
+            if (queryId === "sessions.stats") {
+              const agentName = body.params?.agent_name ? String(body.params.agent_name) : null;
+              const sinceDays = Math.min(Number(body.params?.since_days) || 7, 90);
+              const since = Date.now() / 1000 - sinceDays * 86400;
+              return agentName
+                ? await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND agent_name = ${agentName} AND created_at >= ${since}`
+                : await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND created_at >= ${since}`;
+            }
+
+            // ── Issue queries ─────────────────────────────────────
+            if (queryId === "issues.open") {
+              const limit = Math.min(Number(body.params?.limit) || 50, 200);
+              const agentName = body.params?.agent_name ? String(body.params.agent_name) : null;
+              return agentName
+                ? await tx`SELECT * FROM issues WHERE org_id = ${orgId} AND agent_name = ${agentName} AND status = 'open' ORDER BY severity DESC, created_at DESC LIMIT ${limit}`
+                : await tx`SELECT * FROM issues WHERE org_id = ${orgId} AND status = 'open' ORDER BY severity DESC, created_at DESC LIMIT ${limit}`;
+            }
+            if (queryId === "issues.summary") {
+              return await tx`SELECT status, severity, COUNT(*) as count FROM issues WHERE org_id = ${orgId} GROUP BY status, severity`;
+            }
+
+            // ── Eval queries ──────────────────────────────────────
+            if (queryId === "eval.runs") {
+              const agentName = String(body.params?.agent_name || "");
+              const limit = Math.min(Number(body.params?.limit) || 20, 100);
+              return agentName
+                ? await tx`SELECT * FROM eval_runs WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`
+                : await tx`SELECT * FROM eval_runs WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`;
+            }
+            if (queryId === "eval.latest_run") {
+              const agentName = String(body.params?.agent_name || "");
+              if (!agentName) throw new Error("params.agent_name required");
+              return await tx`SELECT * FROM eval_runs WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`;
+            }
+            if (queryId === "eval.trials") {
+              const runId = Number(body.params?.run_id);
+              if (!runId) throw new Error("params.run_id required");
+              return await tx`SELECT * FROM eval_trials WHERE eval_run_id = ${runId} ORDER BY trial_index`;
+            }
+
+            // ── Billing queries ───────────────────────────────────
+            if (queryId === "billing.usage") {
+              const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
+              const since = Date.now() / 1000 - sinceDays * 86400;
+              return await tx`SELECT COALESCE(SUM(total_cost_usd),0) as total, COALESCE(SUM(input_tokens),0) as input_tokens, COALESCE(SUM(output_tokens),0) as output_tokens FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since}`;
+            }
+            if (queryId === "billing.by_agent") {
+              const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
+              const since = Date.now() / 1000 - sinceDays * 86400;
+              return await tx`SELECT agent_name, SUM(total_cost_usd) as cost, COUNT(*) as sessions FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY agent_name ORDER BY cost DESC`;
+            }
+            if (queryId === "billing.by_model") {
+              const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
+              const since = Date.now() / 1000 - sinceDays * 86400;
+              return await tx`SELECT model, SUM(total_cost_usd) as cost, COUNT(*) as calls FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY model ORDER BY cost DESC`;
+            }
+
+            // ── Feedback queries ──────────────────────────────────
+            if (queryId === "feedback.recent") {
+              const limit = Math.min(Number(body.params?.limit) || 50, 200);
+              return await tx`SELECT * FROM user_feedback WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`;
+            }
+            if (queryId === "feedback.stats") {
+              const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
+              const since = Date.now() / 1000 - sinceDays * 86400;
+              return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
+            }
+
+            // ── Security queries ──────────────────────────────────
+            if (queryId === "security.scans") {
+              const limit = Math.min(Number(body.params?.limit) || 20, 100);
+              return await tx`SELECT * FROM security_scans WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`;
+            }
+
+            // ── Memory queries ────────────────────────────────────
+            if (queryId === "memory.facts") {
+              const agentName = String(body.params?.agent_name || "");
+              const limit = Math.min(Number(body.params?.limit) || 50, 200);
+              return await tx`SELECT * FROM facts WHERE agent_name = ${agentName} AND org_id = ${orgId} LIMIT ${limit}`;
+            }
+            if (queryId === "memory.episodes") {
+              const agentName = String(body.params?.agent_name || "");
+              const limit = Math.min(Number(body.params?.limit) || 50, 200);
+              return await tx`SELECT * FROM episodes WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`;
             }
 
             throw new Error(`unsupported query_id: ${queryId}`);
