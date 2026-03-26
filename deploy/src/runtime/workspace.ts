@@ -1,0 +1,202 @@
+/**
+ * Edge Runtime — Workspace Persistence (R2-backed).
+ *
+ * Per-file sync with manifest — not tar snapshots.
+ *
+ * Storage layout in R2:
+ *   workspaces/{org}/{agent}/manifest.json       — file list, hashes, timestamps
+ *   workspaces/{org}/{agent}/files/{path}        — individual files
+ *
+ * Write flow:
+ *   write-file → sandbox + R2 file + update manifest (non-blocking)
+ *
+ * Restore flow (cold start):
+ *   load manifest → diff against sandbox → download missing files
+ *
+ * Benefits over tar:
+ *   - No extract step on restore
+ *   - Incremental sync (only changed files)
+ *   - Random access reads from R2
+ *   - Agent can work continuously without explicit save/load
+ */
+
+import type { RuntimeEnv } from "./types";
+
+export interface FileEntry {
+  path: string;
+  size: number;
+  hash: string;
+  updated_at: string;
+}
+
+export interface WorkspaceManifest {
+  org_id: string;
+  agent_name: string;
+  files: FileEntry[];
+  last_sync: string;
+  session_id: string;
+}
+
+function manifestKey(org: string, agent: string): string {
+  return `workspaces/${org}/${agent}/manifest.json`;
+}
+
+function fileKey(org: string, agent: string, filePath: string): string {
+  // Normalize: strip leading /workspace/ to get relative path
+  const relative = filePath.replace(/^\/workspace\//, "").replace(/^\/+/, "");
+  return `workspaces/${org}/${agent}/files/${relative}`;
+}
+
+/**
+ * Sync a single file to R2 and update the manifest.
+ * Called after every write-file/edit-file in the tool layer.
+ */
+export async function syncFileToR2(
+  storage: R2Bucket,
+  org: string,
+  agent: string,
+  filePath: string,
+  content: string,
+  sessionId: string,
+): Promise<void> {
+  const key = fileKey(org, agent, filePath);
+  const hash = await quickHash(content);
+  const now = new Date().toISOString();
+
+  // Write file to R2
+  await storage.put(key, content, {
+    customMetadata: {
+      original_path: filePath,
+      hash,
+      session_id: sessionId,
+      updated_at: now,
+    },
+  });
+
+  // Update manifest (read-modify-write)
+  const mKey = manifestKey(org, agent);
+  let manifest = await loadManifest(storage, org, agent);
+  if (!manifest) {
+    manifest = { org_id: org, agent_name: agent, files: [], last_sync: now, session_id: sessionId };
+  }
+
+  // Upsert file entry
+  const relative = filePath.replace(/^\/workspace\//, "").replace(/^\/+/, "");
+  const idx = manifest.files.findIndex((f) => f.path === relative);
+  const entry: FileEntry = { path: relative, size: content.length, hash, updated_at: now };
+  if (idx >= 0) {
+    manifest.files[idx] = entry;
+  } else {
+    manifest.files.push(entry);
+  }
+  manifest.last_sync = now;
+  manifest.session_id = sessionId;
+
+  await storage.put(mKey, JSON.stringify(manifest, null, 2), {
+    customMetadata: { updated_at: now },
+  });
+}
+
+/**
+ * Load the workspace manifest from R2.
+ */
+export async function loadManifest(
+  storage: R2Bucket,
+  org: string,
+  agent: string,
+): Promise<WorkspaceManifest | null> {
+  const obj = await storage.get(manifestKey(org, agent));
+  if (!obj) return null;
+  try {
+    return JSON.parse(await obj.text()) as WorkspaceManifest;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Hydrate the sandbox workspace from R2 manifest.
+ * Downloads only files that don't exist locally or have changed.
+ * Called on cold start / session restore.
+ */
+export async function hydrateWorkspace(
+  storage: R2Bucket,
+  sandbox: {
+    exec: (cmd: string, opts?: { timeout?: number }) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
+    writeFile: (path: string, content: string) => Promise<unknown>;
+  },
+  org: string,
+  agent: string,
+): Promise<{ restored: number; skipped: number }> {
+  const manifest = await loadManifest(storage, org, agent);
+  if (!manifest || manifest.files.length === 0) return { restored: 0, skipped: 0 };
+
+  await sandbox.exec("mkdir -p /workspace", { timeout: 5 }).catch(() => {});
+
+  let restored = 0;
+  let skipped = 0;
+
+  for (const entry of manifest.files) {
+    const localPath = `/workspace/${entry.path}`;
+
+    // Check if file exists locally with same content
+    const localResult = await sandbox.exec(`sha256sum "${localPath}" 2>/dev/null | cut -d' ' -f1`, { timeout: 5 }).catch(() => ({ stdout: "", stderr: "", exitCode: 1 }));
+    const localHash = localResult.stdout?.trim() || "";
+
+    if (localHash === entry.hash) {
+      skipped++;
+      continue;
+    }
+
+    // Download from R2 and write to sandbox
+    const key = fileKey(org, agent, localPath);
+    const obj = await storage.get(key);
+    if (!obj) continue;
+
+    const content = await obj.text();
+    const dir = localPath.substring(0, localPath.lastIndexOf("/"));
+    if (dir) await sandbox.exec(`mkdir -p "${dir}"`, { timeout: 5 }).catch(() => {});
+    await sandbox.writeFile(localPath, content);
+    restored++;
+  }
+
+  return { restored, skipped };
+}
+
+/**
+ * List all files in the workspace from the manifest (no sandbox access needed).
+ */
+export async function listWorkspaceFiles(
+  storage: R2Bucket,
+  org: string,
+  agent: string,
+): Promise<FileEntry[]> {
+  const manifest = await loadManifest(storage, org, agent);
+  return manifest?.files || [];
+}
+
+/**
+ * Read a file directly from R2 (no sandbox needed).
+ */
+export async function readFileFromR2(
+  storage: R2Bucket,
+  org: string,
+  agent: string,
+  filePath: string,
+): Promise<string | null> {
+  const key = fileKey(org, agent, filePath);
+  const obj = await storage.get(key);
+  if (!obj) return null;
+  return obj.text();
+}
+
+// ── Helpers ───────────────────────────────────────────────────
+
+async function quickHash(content: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(content);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
