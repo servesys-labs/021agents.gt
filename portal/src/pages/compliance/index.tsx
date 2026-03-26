@@ -1190,12 +1190,8 @@ function RetentionTab() {
 
       {/* Create modal */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 glass-backdrop"
-            onClick={() => setModalOpen(false)}
-          />
-          <div className="relative z-10 w-full max-w-md rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]">
+        <div className="modal-overlay glass-backdrop" onClick={() => setModalOpen(false)}>
+          <div className="relative z-10 w-full max-w-md rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-[var(--space-6)]">
               <h2 className="text-[var(--text-md)] font-bold text-text-primary">
                 Create Retention Policy
@@ -1527,12 +1523,8 @@ function PoliciesTab() {
 
       {/* Create modal */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 glass-backdrop"
-            onClick={() => setModalOpen(false)}
-          />
-          <div className="relative z-10 w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]">
+        <div className="modal-overlay glass-backdrop" onClick={() => setModalOpen(false)}>
+          <div className="relative z-10 w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-[var(--space-6)]">
               <h2 className="text-[var(--text-md)] font-bold text-text-primary">
                 Create Governance Policy

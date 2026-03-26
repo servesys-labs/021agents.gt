@@ -278,9 +278,8 @@ function Modal({
 }) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      <div className="glass-backdrop fixed inset-0" onClick={onClose} />
-      <div className="relative z-10 glass-medium border border-border-default rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto shadow-overlay">
+    <div className="modal-overlay glass-backdrop" onClick={onClose}>
+      <div className="relative z-10 glass-medium border border-border-default rounded-xl w-full max-w-lg max-h-[85vh] overflow-y-auto shadow-overlay" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between p-[var(--space-4)] border-b border-border-default">
           <h3 className="text-[var(--text-md)] font-semibold text-text-primary">{title}</h3>
           <button

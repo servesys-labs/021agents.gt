@@ -445,10 +445,8 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
   };
 
   return (
-    <>
-      <div className="fixed inset-0 z-40 glass-backdrop" onClick={onClose} />
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-[var(--space-4)]">
-        <div className="w-full max-w-3xl max-h-[85vh] overflow-y-auto rounded-2xl glass-medium border border-glass-border p-[var(--space-6)]" style={{ boxShadow: "var(--shadow-panel)" }}>
+    <div className="modal-overlay glass-backdrop" onClick={onClose}>
+        <div className="w-full max-w-3xl max-h-[85vh] overflow-y-auto rounded-2xl glass-medium border border-glass-border p-[var(--space-6)]" onClick={(e) => e.stopPropagation()} style={{ boxShadow: "var(--shadow-panel)" }}>
           {/* Header */}
           <div className="flex items-center justify-between mb-[var(--space-6)]">
             <h2 className="text-[var(--text-lg)] font-bold text-text-primary">Create Workflow</h2>
@@ -644,8 +642,7 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
             </button>
           </div>
         </div>
-      </div>
-    </>
+    </div>
   );
 }
 

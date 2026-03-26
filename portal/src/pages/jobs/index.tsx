@@ -969,15 +969,9 @@ export function JobsPage() {
 
       {/* ── Create / Edit Modal ─────────────────────────────────────── */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 glass-backdrop"
-            onClick={() => setModalOpen(false)}
-          />
-
+        <div className="modal-overlay glass-backdrop" onClick={() => setModalOpen(false)}>
           {/* Panel */}
-          <div className="relative z-10 w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]">
+          <div className="relative z-10 w-full max-w-2xl max-h-[85vh] overflow-y-auto rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
             {/* Header */}
             <div className="flex items-center justify-between mb-[var(--space-6)]">
               <h2 className="text-[var(--text-md)] font-bold text-text-primary">

@@ -500,12 +500,7 @@ export const ReleasesTab = ({ agentName }: { agentName: string }) => {
 
       {/* Canary Setup Modal */}
       {canaryModalOpen && (
-        <>
-          <div
-            className="fixed inset-0 z-50 bg-black/50"
-            onClick={() => setCanaryModalOpen(false)}
-          />
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-[var(--space-4)]">
+        <div className="modal-overlay bg-black/50" onClick={() => setCanaryModalOpen(false)}>
             <div
               className="glass-dropdown border border-border-default rounded-2xl shadow-2xl w-full max-w-md"
               onClick={(e) => e.stopPropagation()}
@@ -607,8 +602,7 @@ export const ReleasesTab = ({ agentName }: { agentName: string }) => {
                 </button>
               </div>
             </div>
-          </div>
-        </>
+        </div>
       )}
     </div>
   );

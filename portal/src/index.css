@@ -1125,6 +1125,24 @@ table tr:hover td {
   contain: layout;
 }
 
+/* ============================================
+   Modal Overlay — safe centering that scrolls
+   Replaces the broken "fixed inset-0 flex items-center justify-center"
+   pattern which clips tall modals at the viewport top.
+   ============================================ */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  overflow-y: auto;
+  display: flex;
+  min-height: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-6);
+}
+
 .progress-bar-gradient {
   background: linear-gradient(
     90deg,

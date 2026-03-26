@@ -291,7 +291,7 @@ function Modal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 glass-backdrop"
+      className="modal-overlay glass-backdrop"
       role="dialog"
       aria-modal="true"
       aria-label={title}

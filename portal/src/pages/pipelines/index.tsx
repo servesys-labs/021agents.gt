@@ -950,12 +950,8 @@ export function PipelinesPage() {
 
       {/* ── Create Pipeline modal (wizard) ─────────────────────────── */}
       {showCreatePipeline && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-surface-base/80"
-            onClick={() => setShowCreatePipeline(false)}
-          />
-          <div className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]">
+        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowCreatePipeline(false)}>
+          <div className="relative w-full max-w-2xl max-h-[85vh] overflow-y-auto glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-[var(--space-4)]">
               <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
                 {wizardStep === 0
@@ -1241,12 +1237,8 @@ export function PipelinesPage() {
 
       {/* ── Create Stream modal ────────────────────────────────────── */}
       {showCreateStream && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-surface-base/80"
-            onClick={() => setShowCreateStream(false)}
-          />
-          <div className="relative w-full max-w-lg glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]">
+        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowCreateStream(false)}>
+          <div className="relative w-full max-w-lg glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-[var(--space-4)]">
               <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
                 Create Stream
@@ -1353,12 +1345,8 @@ export function PipelinesPage() {
 
       {/* ── Create Sink modal ──────────────────────────────────────── */}
       {showCreateSink && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-surface-base/80"
-            onClick={() => setShowCreateSink(false)}
-          />
-          <div className="relative w-full max-w-lg glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]">
+        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowCreateSink(false)}>
+          <div className="relative w-full max-w-lg glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-[var(--space-4)]">
               <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
                 Create Sink
@@ -1620,12 +1608,8 @@ export function PipelinesPage() {
 
       {/* ── Edit SQL modal ─────────────────────────────────────────── */}
       {showEditSql && selectedPipeline && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-surface-base/80"
-            onClick={() => setShowEditSql(false)}
-          />
-          <div className="relative w-full max-w-xl glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]">
+        <div className="modal-overlay bg-surface-base/80" onClick={() => setShowEditSql(false)}>
+          <div className="relative w-full max-w-xl glass-dropdown rounded-2xl border border-border-default shadow-2xl p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-[var(--space-4)]">
               <h2 className="text-[var(--text-lg)] font-bold text-text-primary">
                 Edit SQL: {selectedPipeline.name}
