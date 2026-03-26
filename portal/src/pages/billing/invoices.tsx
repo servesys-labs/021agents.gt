@@ -1,258 +1,196 @@
 import { useState, useMemo } from "react";
 import {
-  Receipt,
-  Download,
-  Calendar,
-  DollarSign,
-  TrendingUp,
   Search,
+  FileText,
+  Download,
+  ExternalLink,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
+import { QueryState } from "../../components/common/QueryState";
+import { EmptyState } from "../../components/common/EmptyState";
 import { StatusBadge } from "../../components/common/StatusBadge";
+import { useApiQuery } from "../../lib/api";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
-type InvoiceStatus = "paid" | "pending" | "failed";
-
-interface Invoice {
+type Invoice = {
   id: string;
-  number: string;
-  date: string;
+  number?: string;
   amount: number;
-  status: InvoiceStatus;
-  pdfUrl: string;
-  description: string;
-}
+  currency?: string;
+  status: string;
+  period_start?: string;
+  period_end?: string;
+  created_at?: string;
+  due_date?: string;
+  pdf_url?: string;
+  hosted_url?: string;
+  description?: string;
+};
 
-/* ── Mock data ──────────────────────────────────────────────────── */
-
-const MOCK_INVOICES: Invoice[] = [
-  { id: "inv_001", number: "INV-2026-0312", date: "2026-03-01", amount: 49.0, status: "paid", pdfUrl: "#", description: "Pro Plan - March 2026" },
-  { id: "inv_002", number: "INV-2026-0211", date: "2026-02-01", amount: 49.0, status: "paid", pdfUrl: "#", description: "Pro Plan - February 2026" },
-  { id: "inv_003", number: "INV-2026-0110", date: "2026-01-01", amount: 49.0, status: "paid", pdfUrl: "#", description: "Pro Plan - January 2026" },
-  { id: "inv_004", number: "INV-2025-1209", date: "2025-12-01", amount: 49.0, status: "paid", pdfUrl: "#", description: "Pro Plan - December 2025" },
-  { id: "inv_005", number: "INV-2025-1108", date: "2025-11-01", amount: 49.0, status: "paid", pdfUrl: "#", description: "Pro Plan - November 2025" },
-  { id: "inv_006", number: "INV-2025-1007", date: "2025-10-01", amount: 29.0, status: "paid", pdfUrl: "#", description: "Starter Plan - October 2025" },
-  { id: "inv_007", number: "INV-2025-0906", date: "2025-09-01", amount: 29.0, status: "failed", pdfUrl: "#", description: "Starter Plan - September 2025" },
-  { id: "inv_008", number: "INV-2025-0805", date: "2025-08-01", amount: 29.0, status: "paid", pdfUrl: "#", description: "Starter Plan - August 2025" },
-];
-
-/* ── Helpers ─────────────────────────────────────────────────────── */
-
-function formatCurrency(amount: number): string {
-  return `$${amount.toFixed(2)}`;
-}
-
-function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
-
-/* ── Component ──────────────────────────────────────────────────── */
+/* ── Invoices Page ──────────────────────────────────────────────── */
 
 export function InvoicesPage() {
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [search, setSearch] = useState("");
+
+  const { data, loading, error, refetch } = useApiQuery<Invoice[]>(
+    "/api/v1/billing/invoices",
+  );
+
+  const invoices = useMemo(() => data ?? [], [data]);
 
   const filtered = useMemo(() => {
-    let list = MOCK_INVOICES;
+    if (!search) return invoices;
+    const q = search.toLowerCase();
+    return invoices.filter(
+      (inv) =>
+        inv.id.toLowerCase().includes(q) ||
+        inv.number?.toLowerCase().includes(q) ||
+        inv.status.toLowerCase().includes(q) ||
+        inv.description?.toLowerCase().includes(q),
+    );
+  }, [invoices, search]);
 
-    if (dateFrom) {
-      list = list.filter((inv) => inv.date >= dateFrom);
-    }
-    if (dateTo) {
-      list = list.filter((inv) => inv.date <= dateTo);
-    }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      list = list.filter(
-        (inv) =>
-          inv.number.toLowerCase().includes(q) ||
-          inv.description.toLowerCase().includes(q),
-      );
-    }
+  const formatCurrency = (amount: number, currency = "usd") => {
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency.toUpperCase(),
+    }).format(amount / 100); // assume amounts in cents
+  };
 
-    return list;
-  }, [dateFrom, dateTo, searchQuery]);
-
-  const totalSpent = useMemo(
-    () => filtered.filter((i) => i.status === "paid").reduce((sum, i) => sum + i.amount, 0),
-    [filtered],
-  );
-
-  const averageMonthly = useMemo(() => {
-    const paidInvoices = filtered.filter((i) => i.status === "paid");
-    if (paidInvoices.length === 0) return 0;
-    return paidInvoices.reduce((sum, i) => sum + i.amount, 0) / paidInvoices.length;
-  }, [filtered]);
-
-  const pendingCount = useMemo(
-    () => filtered.filter((i) => i.status === "pending").length,
-    [filtered],
-  );
+  const formatDate = (dateStr?: string) => {
+    if (!dateStr) return "--";
+    return new Date(dateStr).toLocaleDateString(undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  };
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Invoices"
-        subtitle="View and download your billing history"
-        icon={<Receipt size={20} />}
+        subtitle={`${invoices.length} invoices`}
+        onRefresh={() => void refetch()}
       />
 
-      {/* Summary stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-[var(--space-3)] mb-[var(--space-6)]">
-        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
-          <div className="p-2 rounded-lg bg-chart-green/10">
-            <DollarSign size={16} className="text-chart-green" />
-          </div>
-          <div>
-            <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
-              {formatCurrency(totalSpent)}
-            </p>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide">
-              Total Spent
-            </p>
-          </div>
-        </div>
-
-        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
-          <div className="p-2 rounded-lg bg-chart-blue/10">
-            <TrendingUp size={16} className="text-chart-blue" />
-          </div>
-          <div>
-            <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
-              {formatCurrency(averageMonthly)}
-            </p>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide">
-              Avg Monthly
-            </p>
-          </div>
-        </div>
-
-        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
-          <div className="p-2 rounded-lg bg-status-warning/10">
-            <Receipt size={16} className="text-status-warning" />
-          </div>
-          <div>
-            <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
-              {pendingCount}
-            </p>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide">
-              Pending
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Filters */}
-      <div className="flex flex-wrap items-end gap-[var(--space-3)] mb-[var(--space-6)]">
-        <div className="flex-1 min-w-[200px]">
-          <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-            Search
-          </label>
-          <div className="relative">
-            <Search
-              size={14}
-              className="absolute left-[var(--space-3)] top-1/2 -translate-y-1/2 text-text-muted pointer-events-none"
-            />
-            <input
-              type="text"
-              placeholder="Search invoices..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 bg-surface-overlay min-h-[var(--touch-target-min)]"
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-            <Calendar size={10} className="inline mr-1" />
-            From
-          </label>
-          <input
-            type="date"
-            value={dateFrom}
-            onChange={(e) => setDateFrom(e.target.value)}
-            className="bg-surface-overlay min-h-[var(--touch-target-min)] w-[160px]"
+      {/* Search bar */}
+      <div className="flex items-center gap-3 mb-4">
+        <div className="relative flex-1 max-w-xs">
+          <Search
+            size={14}
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted"
           />
-        </div>
-
-        <div>
-          <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-            <Calendar size={10} className="inline mr-1" />
-            To
-          </label>
           <input
-            type="date"
-            value={dateTo}
-            onChange={(e) => setDateTo(e.target.value)}
-            className="bg-surface-overlay min-h-[var(--touch-target-min)] w-[160px]"
+            type="text"
+            placeholder="Search invoices..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="pl-8 text-xs"
           />
         </div>
       </div>
 
-      {/* Invoice table */}
-      <div className="card overflow-hidden p-0">
-        <div className="overflow-x-auto">
-          <table className="w-full">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Invoice #</th>
-                <th>Description</th>
-                <th className="text-right">Amount</th>
-                <th className="text-center">Status</th>
-                <th className="text-center">PDF</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length > 0 ? (
-                filtered.map((invoice) => (
-                  <tr key={invoice.id}>
-                    <td className="text-[var(--text-sm)] text-text-secondary whitespace-nowrap">
-                      {formatDate(invoice.date)}
-                    </td>
-                    <td className="text-[var(--text-sm)] text-text-primary font-mono font-medium">
-                      {invoice.number}
-                    </td>
-                    <td className="text-[var(--text-sm)] text-text-secondary">
-                      {invoice.description}
-                    </td>
-                    <td className="text-[var(--text-sm)] text-text-primary font-mono font-semibold text-right">
-                      {formatCurrency(invoice.amount)}
-                    </td>
-                    <td className="text-center">
-                      <StatusBadge status={invoice.status} size="sm" />
-                    </td>
-                    <td className="text-center">
-                      <a
-                        href={invoice.pdfUrl}
-                        className="inline-flex items-center justify-center w-[var(--touch-target-min)] h-[var(--touch-target-min)] rounded-md text-text-muted hover:text-accent hover:bg-accent-muted transition-colors"
-                        title={`Download ${invoice.number}`}
-                        aria-label={`Download PDF for invoice ${invoice.number}`}
-                      >
-                        <Download size={14} />
-                      </a>
-                    </td>
+      <QueryState
+        loading={loading}
+        error={error}
+        isEmpty={invoices.length === 0}
+        emptyMessage=""
+        onRetry={() => void refetch()}
+      >
+        {filtered.length === 0 ? (
+          <EmptyState
+            icon={<FileText size={40} />}
+            title="No invoices found"
+            description={
+              search
+                ? "Try a different search term"
+                : "No invoices to display yet"
+            }
+          />
+        ) : (
+          <div className="card p-0">
+            <div className="overflow-x-auto">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Invoice</th>
+                    <th>Date</th>
+                    <th>Period</th>
+                    <th className="text-right">Amount</th>
+                    <th>Status</th>
+                    <th>Due Date</th>
+                    <th style={{ width: "80px" }}></th>
                   </tr>
-                ))
-              ) : (
-                <tr>
-                  <td colSpan={6} className="text-center py-12 text-text-muted text-sm">
-                    No invoices found for the selected filters.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+                </thead>
+                <tbody>
+                  {filtered.map((invoice) => (
+                    <tr key={invoice.id}>
+                      <td>
+                        <div>
+                          <span className="font-medium text-text-primary text-xs">
+                            {invoice.number || invoice.id}
+                          </span>
+                          {invoice.description && (
+                            <p className="text-[10px] text-text-muted mt-0.5 truncate max-w-[200px]">
+                              {invoice.description}
+                            </p>
+                          )}
+                        </div>
+                      </td>
+                      <td className="text-xs text-text-muted">
+                        {formatDate(invoice.created_at)}
+                      </td>
+                      <td className="text-[10px] text-text-muted">
+                        {invoice.period_start && invoice.period_end
+                          ? `${formatDate(invoice.period_start)} - ${formatDate(invoice.period_end)}`
+                          : "--"}
+                      </td>
+                      <td className="text-right font-mono text-xs text-text-primary">
+                        {formatCurrency(invoice.amount, invoice.currency)}
+                      </td>
+                      <td>
+                        <StatusBadge status={invoice.status} />
+                      </td>
+                      <td className="text-xs text-text-muted">
+                        {formatDate(invoice.due_date)}
+                      </td>
+                      <td>
+                        <div className="flex items-center gap-1">
+                          {invoice.pdf_url && (
+                            <a
+                              href={invoice.pdf_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-1.5 rounded hover:bg-surface-overlay transition-colors"
+                              title="Download PDF"
+                            >
+                              <Download size={12} className="text-text-muted" />
+                            </a>
+                          )}
+                          {invoice.hosted_url && (
+                            <a
+                              href={invoice.hosted_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="p-1.5 rounded hover:bg-surface-overlay transition-colors"
+                              title="View invoice"
+                            >
+                              <ExternalLink size={12} className="text-text-muted" />
+                            </a>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </QueryState>
     </div>
   );
 }
