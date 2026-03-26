@@ -1,92 +1,108 @@
 import { useAuth } from "@clerk/clerk-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef } from "react";
 
 import { isClerkMode } from "./config";
-import { getTokenSecondsRemaining } from "./jwt";
 import { getAuthToken, setAuthSession } from "./tokens";
 
-const REFRESH_THRESHOLD_SECONDS = 5 * 60;
-
+/**
+ * ClerkSessionManager — bridges Clerk auth with AgentOS JWT.
+ *
+ * On every Clerk session change (sign-in, token refresh):
+ * 1. Gets Clerk session JWT via getToken()
+ * 2. Exchanges it for an AgentOS JWT via POST /api/v1/auth/clerk/exchange
+ * 3. Stores the AgentOS JWT in localStorage (where AuthProvider picks it up)
+ *
+ * This runs as an invisible component mounted when Clerk mode is active.
+ */
 export function ClerkSessionManager() {
-  const { getToken } = useAuth();
-  const [status, setStatus] = useState<string>("");
+  const { getToken, isSignedIn, isLoaded } = useAuth();
+  const exchanging = useRef(false);
 
   useEffect(() => {
-    if (!isClerkMode()) {
-      return;
-    }
+    if (!isClerkMode() || !isLoaded) return;
 
     let cancelled = false;
 
-    const refreshIfNeeded = async () => {
-      const current = getAuthToken();
-      const remaining = current ? getTokenSecondsRemaining(current) : null;
-      if (remaining === null || remaining > REFRESH_THRESHOLD_SECONDS) {
-        if (remaining !== null && !cancelled) {
-          setStatus(`Session valid (${Math.floor(remaining / 60)}m remaining)`);
-        }
-        return;
-      }
+    async function exchangeToken() {
+      if (exchanging.current || cancelled) return;
+      exchanging.current = true;
+
       try {
+        // Get Clerk JWT
         const clerkToken = await getToken();
-        if (!clerkToken) {
+        if (!clerkToken || cancelled) {
+          exchanging.current = false;
           return;
         }
+
+        // Exchange for AgentOS JWT
         const response = await fetch("/api/v1/auth/clerk/exchange", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ clerk_token: clerkToken }),
         });
+
         if (!response.ok) {
-          if (!cancelled) {
-            setStatus("Session refresh failed. Please sign in again.");
-          }
+          console.warn("[ClerkSessionManager] Token exchange failed:", response.status);
+          exchanging.current = false;
           return;
         }
+
         const payload = (await response.json()) as {
           token: string;
           user_id: string;
           email: string;
           org_id: string;
           provider: string;
+          name?: string;
         };
-        setAuthSession(payload.token, {
-          user_id: payload.user_id,
-          email: payload.email,
-          org_id: payload.org_id,
-          provider: payload.provider,
-        });
+
         if (!cancelled) {
-          const nextRemaining = getTokenSecondsRemaining(payload.token);
-          setStatus(
-            nextRemaining ? `Session refreshed (${Math.floor(nextRemaining / 60)}m remaining)` : "Session refreshed",
-          );
+          setAuthSession(payload.token, {
+            user_id: payload.user_id,
+            email: payload.email,
+            name: payload.name || "",
+            org_id: payload.org_id,
+            provider: payload.provider,
+          });
         }
-      } catch {
-        if (!cancelled) {
-          setStatus("Session refresh failed. Please sign in again.");
-        }
+      } catch (err) {
+        console.warn("[ClerkSessionManager] Exchange error:", err);
+      } finally {
+        exchanging.current = false;
       }
-    };
+    }
 
-    void refreshIfNeeded();
-    const timer = window.setInterval(() => {
-      void refreshIfNeeded();
-    }, 60 * 1000);
+    if (isSignedIn) {
+      // Exchange immediately on sign-in
+      const existing = getAuthToken();
+      if (!existing) {
+        void exchangeToken();
+      }
 
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [getToken]);
+      // Periodic refresh (every 4 minutes — tokens expire in 7 days but we refresh aggressively)
+      const interval = setInterval(() => {
+        void exchangeToken();
+      }, 4 * 60 * 1000);
 
-  if (!isClerkMode() || !status) {
-    return null;
-  }
+      return () => {
+        cancelled = true;
+        clearInterval(interval);
+      };
+    } else if (isLoaded && !isSignedIn) {
+      // User signed out of Clerk — clear AgentOS session
+      const existing = getAuthToken();
+      if (existing) {
+        import("./tokens").then(({ clearAuthSession }) => {
+          clearAuthSession();
+          window.location.href = "/login";
+        });
+      }
+    }
 
-  return (
-    <div className="fixed bottom-4 right-4 z-50 rounded bg-surface-raised px-3 py-2 text-xs text-text-primary shadow-lg">
-      {status}
-    </div>
-  );
+    return () => { cancelled = true; };
+  }, [getToken, isSignedIn, isLoaded]);
+
+  // Invisible component — no UI
+  return null;
 }
