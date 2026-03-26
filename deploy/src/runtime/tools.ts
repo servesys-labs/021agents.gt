@@ -1522,6 +1522,9 @@ async function dispatch(
     }
 
     case "evolve-agent": {
+      // Runs the full evolution analyzer on recent sessions and returns
+      // a report + ranked proposals. This is the same logic as POST /evolve/:agent/analyze
+      // but callable directly as a meta-agent tool.
       const hyperdrive = (env as any).HYPERDRIVE;
       if (!hyperdrive) return "evolve-agent requires database access";
       const { getDb } = await import("./db");
@@ -1529,20 +1532,52 @@ async function dispatch(
       const orgId = args.org_id || "";
       const agentName = String(args.agent_name || "");
       if (!agentName) return "evolve-agent requires agent_name";
-      const maxProposals = Number(args.max_proposals) || 3;
+      const days = Math.min(90, Number(args.days) || 7);
       try {
-        // Query recent session stats for this agent
-        const since = Date.now() / 1000 - 7 * 86400;
+        // Call the control-plane analyze endpoint which runs the full FailureAnalyzer.
+        // The control-plane is a separate CF Worker — call via service binding if available,
+        // otherwise fall back to basic stats from direct DB queries.
+        const controlPlane = (env as any).CONTROL_PLANE;
+        if (controlPlane) {
+          const resp = await controlPlane.fetch(
+            `https://internal/api/v1/evolve/${agentName}/analyze`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": "Bearer service-token" },
+              body: JSON.stringify({ days }),
+            },
+          );
+          if (resp.ok) {
+            const result = await resp.json() as Record<string, unknown>;
+            return JSON.stringify({
+              agent_name: agentName,
+              sessions_analyzed: result.sessions_analyzed || 0,
+              report_summary: {
+                success_rate: (result.report as any)?.success_rate,
+                avg_cost_usd: (result.report as any)?.avg_cost_usd,
+                avg_turns: (result.report as any)?.avg_turns,
+                recommendations: (result.report as any)?.recommendations,
+                failure_clusters: ((result.report as any)?.failure_clusters || []).slice(0, 5),
+                unused_tools: (result.report as any)?.unused_tools,
+              },
+              proposals: ((result.proposals || []) as any[]).map((p: any) => ({
+                title: p.title, category: p.category, priority: p.priority,
+              })),
+              message: "Analysis complete. Proposals stored — review them in the Evolve tab.",
+            });
+          }
+        }
+
+        // Fallback: basic stats from direct DB query
+        const since = Date.now() / 1000 - days * 86400;
         const stats = await sql`
           SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost,
                  COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate
           FROM sessions WHERE org_id = ${orgId} AND agent_name = ${agentName} AND created_at >= ${since}
         `;
         return JSON.stringify({
-          agent_name: agentName,
-          stats: stats[0] || {},
-          max_proposals: maxProposals,
-          message: "Use session stats to generate improvement proposals. Apply via create-agent with updated config.",
+          agent_name: agentName, stats: stats[0] || {}, days,
+          message: `Basic stats for ${stats[0]?.total || 0} sessions. For full analysis with proposals, use POST /api/v1/evolve/${agentName}/analyze from the portal or control-plane API.`,
         });
       } catch (err: any) {
         return `Failed to analyze agent: ${err.message || err}`;
@@ -2109,9 +2144,12 @@ async function dispatch(
     }
 
     // ── Git Tools (SWE-agent ACI pattern: version control for deployed agents) ──
+    // All git tools check for git availability first and return a helpful error if not installed.
 
     case "git-init": {
       const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const gitCheck = await sandbox.exec("which git 2>/dev/null", { timeout: 5 }).catch(() => ({ stdout: "" }));
+      if (!gitCheck.stdout?.trim()) return "Error: git is not installed in this sandbox. Ask your admin to add git to the sandbox base image.";
       const workDir = args.path || "/workspace";
       const r = await sandbox.exec(
         `cd "${workDir}" && git init && git add -A && git commit -m "initial commit" --allow-empty 2>&1`,
@@ -3479,13 +3517,15 @@ const TOOL_CATALOG: ToolDefinition[] = [
     function: {
       name: "evolve-agent",
       description:
-        "Analyze agent sessions and generate improvement proposals. " +
-        "Returns session stats and guidance for config changes.",
+        "Run the evolution analyzer on an agent's recent sessions. " +
+        "Discovers failure patterns, cost anomalies, tool performance issues, " +
+        "and generates ranked improvement proposals with evidence. " +
+        "Proposals are stored and visible in the Evolve tab for human review.",
       parameters: {
         type: "object",
         properties: {
-          agent_name: { type: "string", description: "Agent to evolve" },
-          max_proposals: { type: "number", description: "Max proposals to generate (default 3)" },
+          agent_name: { type: "string", description: "Agent to analyze" },
+          days: { type: "number", description: "Analysis window in days (default 7, max 90)" },
         },
         required: ["agent_name"],
       },
