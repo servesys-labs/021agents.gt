@@ -455,20 +455,26 @@ export function calculateInfraCost(session: {
 /**
  * Execute tool calls — parallel when safe, sequential for sandbox-stateful ops.
  */
+/**
+ * Execute tool calls — parallel when safe, sequential for sandbox-stateful ops.
+ * @param enabledTools - agent's configured tool list; passed to codemode to prevent privilege escalation.
+ *   If empty/undefined, codemode tools will only see their scope-filtered subset.
+ */
 export async function executeTools(
   env: RuntimeEnv,
   toolCalls: ToolCall[],
   sessionId: string,
   parallel: boolean = true,
+  enabledTools?: string[],
 ): Promise<ToolResult[]> {
   if (parallel && toolCalls.length > 1) {
     return Promise.all(
-      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId)),
+      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId, enabledTools)),
     );
   }
   const results: ToolResult[] = [];
   for (const tc of toolCalls) {
-    results.push(await executeSingleTool(env, tc, sessionId));
+    results.push(await executeSingleTool(env, tc, sessionId, enabledTools));
   }
   return results;
 }
@@ -477,6 +483,7 @@ async function executeSingleTool(
   env: RuntimeEnv,
   tc: ToolCall,
   sessionId: string,
+  enabledTools?: string[],
 ): Promise<ToolResult> {
   const started = Date.now();
   
@@ -507,7 +514,7 @@ async function executeSingleTool(
   }
 
   try {
-    const result = await dispatch(env, tc.name, args, sessionId);
+    const result = await dispatch(env, tc.name, args, sessionId, enabledTools);
     const latencyMs = Date.now() - started;
     
     // Record success for circuit breaker
@@ -558,7 +565,11 @@ async function dispatch(
   tool: string,
   args: Record<string, any>,
   sessionId: string,
+  enabledTools?: string[],
 ): Promise<string> {
+  // Resolve the effective tool list for codemode — uses agent's enabled tools,
+  // NOT all tools. This prevents privilege escalation through execute-code.
+  const effectiveToolDefs = () => getToolDefinitions(enabledTools || []);
   switch (tool) {
     case "web-search":
       return braveSearch(env, args);
@@ -870,14 +881,14 @@ async function dispatch(
     case "discover-api": {
       // Returns TypeScript type definitions for all available tools
       const { getToolTypeDefinitions } = await import("./codemode");
-      const allTools = getToolDefinitions([]);
+      const allTools = effectiveToolDefs();
       return getToolTypeDefinitions(allTools);
     }
 
     case "execute-code": {
       // Run LLM-generated JS in sandboxed Dynamic Worker with tool access via RPC
       const { executeCode } = await import("./codemode");
-      const allTools = getToolDefinitions([]);
+      const allTools = effectiveToolDefs();
       // Filter out discover-api and execute-code to prevent recursion
       const executableTools = allTools.filter(
         (t) => t.function.name !== "discover-api" && t.function.name !== "execute-code",
@@ -896,7 +907,7 @@ async function dispatch(
       if (!snippetId) return "run-codemode requires snippet_id";
       const snippet = await loadSnippetCached((env as any).HYPERDRIVE, snippetId, args.org_id || "");
       if (!snippet) return JSON.stringify({ error: "Snippet not found" });
-      const allToolsForSnippet = getToolDefinitions([]);
+      const allToolsForSnippet = effectiveToolDefs();
       const cmResult = await executeScopedCode(env, snippet.code, allToolsForSnippet, sessionId, {
         scope: snippet.scope || "agent",
         scopeOverrides: args.scope_config || snippet.scope_config,
@@ -908,35 +919,35 @@ async function dispatch(
 
     case "codemode-transform": {
       const { executeTransform } = await import("./codemode");
-      const allToolsForTransform = getToolDefinitions([]);
+      const allToolsForTransform = effectiveToolDefs();
       const transformResult = await executeTransform(env, args.code || "", args.data, allToolsForTransform, sessionId);
       return JSON.stringify({ success: transformResult.success, result: transformResult.result, error: transformResult.error, logs: transformResult.logs });
     }
 
     case "codemode-validate": {
       const { executeValidator } = await import("./codemode");
-      const allToolsForValidate = getToolDefinitions([]);
+      const allToolsForValidate = effectiveToolDefs();
       const valResult = await executeValidator(env, args.code || "", args.data, allToolsForValidate, sessionId);
       return JSON.stringify(valResult);
     }
 
     case "codemode-orchestrate": {
       const { executeOrchestrator } = await import("./codemode");
-      const allToolsForOrch = getToolDefinitions([]);
+      const allToolsForOrch = effectiveToolDefs();
       const orchResult = await executeOrchestrator(env, args.code || "", args.message || "", args.context || {}, allToolsForOrch, sessionId);
       return JSON.stringify(orchResult);
     }
 
     case "codemode-test": {
       const { executeTestRunner } = await import("./codemode");
-      const allToolsForTest = getToolDefinitions([]);
+      const allToolsForTest = effectiveToolDefs();
       const testResult = await executeTestRunner(env, args.code || "", args.test_context || {}, allToolsForTest, sessionId);
       return JSON.stringify(testResult);
     }
 
     case "codemode-generate-mcp": {
       const { executeMcpGenerator } = await import("./codemode");
-      const allToolsForMcp = getToolDefinitions([]);
+      const allToolsForMcp = effectiveToolDefs();
       const mcpResult = await executeMcpGenerator(env, args.code || "", args.api_spec, allToolsForMcp, sessionId);
       return JSON.stringify({ tools: mcpResult, count: mcpResult.length });
     }
@@ -1528,7 +1539,7 @@ async function dispatch(
     }
 
     case "list-tools": {
-      const allTools = getToolDefinitions([]);
+      const allTools = effectiveToolDefs();
       const summary = allTools.map((t) => ({
         name: t.function.name,
         description: t.function.description,
@@ -2598,8 +2609,14 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
 
 // ── Tool Definitions (for LLM function calling) ───────────────
 
-/** Meta-tools always available regardless of agent config. */
-const ALWAYS_AVAILABLE = new Set(["discover-api", "execute-code"]);
+/**
+ * Meta-tools always available regardless of agent config.
+ * NOTE: execute-code was removed from this set — it must be explicitly enabled
+ * per-agent to prevent privilege escalation (execute-code previously granted
+ * access to ALL tools regardless of agent config).
+ * discover-api is safe to always expose (read-only type info).
+ */
+const ALWAYS_AVAILABLE = new Set(["discover-api"]);
 
 export function getToolDefinitions(enabledTools: string[]): ToolDefinition[] {
   const all = TOOL_CATALOG;

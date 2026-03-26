@@ -361,20 +361,59 @@ export function getCodeModeStats(): {
   };
 }
 
-const executorPool = new Map<number, DynamicWorkerExecutor>();
+const executorPool = new Map<string, DynamicWorkerExecutor>();
 
 function getExecutor(env: RuntimeEnv, timeoutMs: number): DynamicWorkerExecutor {
-  let executor = executorPool.get(timeoutMs);
+  const key = `${timeoutMs}`;
+  let executor = executorPool.get(key);
   if (!executor) {
     executor = new DynamicWorkerExecutor({
       loader: env.LOADER,
       timeout: timeoutMs,
       globalOutbound: null,
+      // Inject SANDBOX_HELPERS as an ES module via v0.2.1 `modules` option.
+      // LLM code can: `import { sleep, retry, percentile } from "helpers"`
+      modules: { helpers: SANDBOX_HELPERS_MODULE },
     });
-    executorPool.set(timeoutMs, executor);
+    executorPool.set(key, executor);
   }
   return executor;
 }
+
+/**
+ * SANDBOX_HELPERS as an ES module (v0.2.1 modules injection).
+ * Available via `import { sleep, retry, percentile } from "helpers"` inside sandbox.
+ */
+const SANDBOX_HELPERS_MODULE = `
+export function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+export function percentile(arr, p) {
+  if (!arr.length) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = Math.ceil(p * sorted.length) - 1;
+  return sorted[Math.max(0, idx)];
+}
+export function sum(arr) { return arr.reduce((a, b) => a + (Number(b) || 0), 0); }
+export function unique(arr) { return [...new Set(arr)]; }
+export function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
+export function simpleHash(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); hash = ((hash << 5) - hash) + c; hash = hash & hash; }
+  return Math.abs(hash).toString(36);
+}
+export function formatDuration(ms) {
+  if (ms < 1000) return ms + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+  return (ms / 60000).toFixed(1) + "m";
+}
+export async function retry(fn, maxRetries, baseDelay) {
+  maxRetries = maxRetries || 3; baseDelay = baseDelay || 100;
+  let lastError;
+  for (let i = 0; i <= maxRetries; i++) {
+    try { return await fn(); } catch (err) { lastError = err; if (i < maxRetries) await sleep(baseDelay * Math.pow(2, i)); }
+  }
+  throw lastError;
+}
+`;
 
 // == Core Execution ==
 
@@ -859,6 +898,8 @@ function filterToolsByScope(allTools: ToolDefinition[], config: CodemodeScopeCon
 const VALID_JS_IDENTIFIER = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
 
 function buildWrappedCode(code: string, input?: unknown, globals?: Record<string, unknown>): string {
+  // SANDBOX_HELPERS are now injected as an ES module ("helpers") via DynamicWorkerExecutor.modules.
+  // We still inline them here for backward compatibility with code that uses them as globals.
   const parts: string[] = [SANDBOX_HELPERS];
   if (input !== undefined) parts.push(`const input = ${JSON.stringify(input)};`);
   if (globals) {

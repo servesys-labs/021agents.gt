@@ -892,6 +892,7 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         llm.tool_calls,
         sessionId,
         config.parallel_tool_calls,
+        config.tools, // Pass agent's enabled tools to prevent codemode privilege escalation
       );
       ctx.totalToolCalls += toolResults.length;
       // Accumulate tool execution costs (search, crawl, etc.)
