@@ -468,22 +468,137 @@ class TestRuntimeEventPersistence:
         assert rows[0]["payload"]["turn"] == 1
         db.close()
 
+    def test_query_runtime_events_supports_status_time_and_tool_filters(self, tmp_path):
+        db = create_database(tmp_path / "test.db")
+        base = time.time()
+        db.insert_runtime_event({
+            "event_id": "evt-f-1",
+            "event_type": "tool_result",
+            "event_source": "graph_runtime",
+            "event_ts": base + 1.0,
+            "trace_id": "trace-f",
+            "session_id": "sess-f",
+            "status": "ok",
+            "payload": {"tool_name": "web-search"},
+        })
+        db.insert_runtime_event({
+            "event_id": "evt-f-2",
+            "event_type": "tool_result",
+            "event_source": "graph_runtime",
+            "event_ts": base + 2.0,
+            "trace_id": "trace-f",
+            "session_id": "sess-f",
+            "status": "error",
+            "payload": {"tool_name": "connector"},
+        })
+        db.insert_runtime_event({
+            "event_id": "evt-f-3",
+            "event_type": "llm_response",
+            "event_source": "graph_runtime",
+            "event_ts": base + 3.0,
+            "trace_id": "trace-f",
+            "session_id": "sess-f",
+            "status": "ok",
+            "payload": {"model": "stub-model"},
+        })
+        rows = db.query_runtime_events(
+            trace_id="trace-f",
+            event_types=["tool_result"],
+            status="error",
+            tool_name="connector",
+            from_ts=base + 1.5,
+            to_ts=base + 2.5,
+            limit=50,
+        )
+        assert [r["event_id"] for r in rows] == ["evt-f-2"]
+        db.close()
+
+    def test_replay_runtime_events_at_cursor_state_snapshot(self, tmp_path):
+        db = create_database(tmp_path / "replay.db")
+        t0 = 1_701_000_000.0
+        db.insert_runtime_event({
+            "event_id": "r1",
+            "event_type": "node_start",
+            "event_source": "graph",
+            "event_ts": t0,
+            "trace_id": "tr-replay",
+            "session_id": "s-replay",
+            "payload": {"step": 1},
+        })
+        db.insert_runtime_event({
+            "event_id": "r2",
+            "event_type": "node_end",
+            "event_source": "graph",
+            "event_ts": t0 + 1.0,
+            "trace_id": "tr-replay",
+            "session_id": "s-replay",
+            "payload": {"state_snapshot": {"phase": "a", "n": 1}},
+        })
+        db.insert_runtime_event({
+            "event_id": "r3",
+            "event_type": "node_end",
+            "event_source": "graph",
+            "event_ts": t0 + 2.0,
+            "trace_id": "tr-replay",
+            "session_id": "s-replay",
+            "payload": {"state_snapshot": {"phase": "b", "n": 2}},
+        })
+        mid = db.query_runtime_events(trace_id="tr-replay", limit=10)
+        assert len(mid) == 3
+        row2_id = int(mid[1]["id"])
+
+        at0 = db.replay_runtime_events_at_cursor(trace_id="tr-replay", cursor_index=0)
+        assert at0["event_count"] == 1
+        assert at0["state_snapshot"] == {}
+        assert at0["event_at_cursor"]["event_id"] == "r1"
+
+        at1 = db.replay_runtime_events_at_cursor(trace_id="tr-replay", cursor_index=1)
+        assert at1["state_snapshot"] == {"phase": "a", "n": 1}
+
+        at_row = db.replay_runtime_events_at_cursor(trace_id="tr-replay", up_to_row_id=row2_id)
+        assert at_row["cursor_row_id"] == row2_id
+        assert at_row["state_snapshot"] == {"phase": "a", "n": 1}
+
+        at_ev = db.replay_runtime_events_at_cursor(trace_id="tr-replay", event_id="r3")
+        assert at_ev["state_snapshot"] == {"phase": "b", "n": 2}
+        assert at_ev["event_at_cursor"]["event_id"] == "r3"
+
+        full = db.replay_runtime_events_at_cursor(trace_id="tr-replay", include_events=True)
+        assert len(full["events"]) == 3
+        db.close()
+
     def test_trace_annotations_crud_and_run_tree(self, tmp_path):
         db = create_database(tmp_path / "test.db")
-        # Seed one span and one runtime event so run-tree has data.
-        db.insert_spans([{
-            "span_id": "s-root",
-            "trace_id": "trace-tree-1",
-            "parent_span_id": "",
-            "name": "session",
-            "kind": "session",
-            "status": "ok",
-            "start_time": time.time(),
-            "end_time": time.time() + 0.1,
-            "duration_ms": 100.0,
-            "attributes": {"turn": 1},
-            "events": [],
-        }], session_id="sess-tree-1")
+        # Seed nested spans and one runtime event so run-tree has hierarchy.
+        now = time.time()
+        db.insert_spans([
+            {
+                "span_id": "s-root",
+                "trace_id": "trace-tree-1",
+                "parent_span_id": "",
+                "name": "session",
+                "kind": "session",
+                "status": "ok",
+                "start_time": now,
+                "end_time": now + 0.1,
+                "duration_ms": 100.0,
+                "attributes": {"turn": 1, "graph_id": "root", "parent_graph_id": ""},
+                "events": [],
+            },
+            {
+                "span_id": "s-child",
+                "trace_id": "trace-tree-1",
+                "parent_span_id": "s-root",
+                "name": "subgraph_main",
+                "kind": "graph_node",
+                "status": "ok",
+                "start_time": now + 0.01,
+                "end_time": now + 0.09,
+                "duration_ms": 80.0,
+                "attributes": {"turn": 1, "graph_id": "subgraph_main:1", "parent_graph_id": "root"},
+                "events": [],
+            },
+        ], session_id="sess-tree-1")
         db.insert_runtime_event({
             "event_id": "evt-tree-1",
             "event_type": "node_start",
@@ -511,6 +626,14 @@ class TestRuntimeEventPersistence:
         assert tree["trace_id"] == "trace-tree-1"
         assert tree["counts"]["annotations"] == 1
         assert tree["root"]["span_id"] == "s-root"
+        child_ids = [c.get("span_id", "") for c in tree["root"].get("children", [])]
+        assert "s-child" in child_ids
+        lineage = tree.get("graph_lineage", [])
+        assert any(item.get("graph_id") == "root" for item in lineage)
+        assert any(
+            item.get("graph_id") == "subgraph_main:1" and item.get("parent_graph_id") == "root"
+            for item in lineage
+        )
         deleted = db.delete_trace_annotation(aid)
         assert deleted is True
         assert db.list_trace_annotations("trace-tree-1") == []

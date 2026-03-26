@@ -7,7 +7,7 @@ these test actual user journeys:
 2. run with tools → observer → DB → evolution analysis
 3. ingest → run → RAG context flows into agent memory
 4. eval → evolve → apply → re-eval (continuous improvement loop)
-5. API server: /agents/{name}/run + /run with full harness
+5. API server: legacy runtime endpoints return edge-only deprecation
 6. cmd_run: --json output, --input-file, --quiet, --output
 """
 
@@ -294,7 +294,7 @@ class TestAPIServerIntegration:
         from agentos.auth import jwt
         jwt._jwt_secret = None
 
-    def test_run_endpoint_produces_output(self):
+    def test_run_endpoint_is_edge_only(self):
         from agentos.api.app import create_app
         from agentos.core.harness import AgentHarness
         from fastapi.testclient import TestClient
@@ -303,14 +303,10 @@ class TestAPIServerIntegration:
         client = TestClient(app)
 
         resp = client.post("/run", json={"input": "Say hello"}, headers=self._auth)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "turns" in data
-        assert "final_output" in data
-        assert len(data["turns"]) >= 1
-        assert data["final_output"]  # non-empty
+        assert resp.status_code == 410
+        assert "edge-first architecture" in resp.json().get("detail", "")
 
-    def test_run_named_agent(self, tmp_path, monkeypatch):
+    def test_run_named_agent_is_edge_only(self, tmp_path, monkeypatch):
         from agentos.api.app import create_app
         from agentos.core.harness import AgentHarness
         from fastapi.testclient import TestClient
@@ -322,9 +318,8 @@ class TestAPIServerIntegration:
         client = TestClient(app)
 
         resp = client.post("/agents/api-bot/run", json={"input": "hello"}, headers=self._auth)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["final_output"]
+        assert resp.status_code == 410
+        assert "edge-first architecture" in resp.json().get("detail", "")
 
     def test_agent_tools_endpoint(self, tmp_path, monkeypatch):
         from agentos.api.app import create_app

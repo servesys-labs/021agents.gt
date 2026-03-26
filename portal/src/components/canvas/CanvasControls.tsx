@@ -193,32 +193,6 @@ function ControlButton({
   );
 }
 
-/* ── Layer flyout item ─────────────────────────────────────── */
-function LayerItem({
-  icon,
-  label,
-  description,
-  onClick,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  description: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-3 w-full px-3.5 py-3 text-left hover:bg-surface-overlay/40 transition-colors"
-    >
-      <span className="text-text-muted flex-shrink-0">{icon}</span>
-      <div className="min-w-0">
-        <p className="text-[12px] font-medium text-text-primary">{label}</p>
-        <p className="text-[10px] text-text-muted">{description}</p>
-      </div>
-    </button>
-  );
-}
-
 /* ── Layer toggle item (with active state indicator) ──────── */
 function LayerToggleItem({
   icon,

@@ -1,14 +1,14 @@
 import { useState } from "react";
 import {
   Workflow, Clock, Webhook, ShieldCheck, FolderKanban, Tag, Cpu,
-  Play, Pause, Trash2, Plus, RotateCcw, CheckCircle2, XCircle,
-  AlertTriangle, Search, Eye, Send, Upload, Settings, Globe,
-  MoreVertical, ChevronRight, Zap, Activity, Code, Lock, Unlock,
+  Play, Pause, Trash2, Plus, RotateCcw, XCircle,
+  AlertTriangle, Search, Eye, Send, Settings,
+  ChevronRight, Activity,
   KeyRound, RefreshCw, Download,
 } from "lucide-react";
 import { CanvasOverlayPanel } from "./CanvasOverlayPanel";
 import { apiRequest, useApiQuery } from "../../lib/api";
-import { StatusPill, SectionTitle, InlineInput, InlineSelect, InlineTextarea, ToggleRow, ReadOnlyNotice } from "./primitives";
+import { StatusPill, SectionTitle, InlineInput, InlineSelect, InlineTextarea, ReadOnlyNotice } from "./primitives";
 
 /* ═══════════════════════════════════════════════════════════════════
    WORKFLOWS & JOBS PANEL
@@ -368,7 +368,7 @@ export function SchedulesPanel({ open, onClose, editable = true }: { open: boole
     cron: String(s.cron ?? ""),
     agent: String(s.agent_name ?? ""),
     task: String(s.task ?? ""),
-    status: Boolean(s.is_enabled) ? "enabled" : "disabled",
+    status: s.is_enabled ? "enabled" : "disabled",
     runCount: Number(s.run_count ?? 0),
     lastRun: Number(s.last_run_at ?? 0),
   }));
@@ -567,7 +567,7 @@ export function WebhooksPanel({ open, onClose, editable = true }: { open: boolea
     id: String(wh.webhook_id ?? ""),
     url: String(wh.url ?? ""),
     events: Array.isArray(wh.events) ? wh.events.map((e) => String(e)) : [],
-    status: Boolean(wh.is_active) ? "active" : "disabled",
+    status: wh.is_active ? "active" : "disabled",
     failureCount: Number(wh.failure_count ?? 0),
     lastTriggeredAt: Number(wh.last_triggered_at ?? 0),
   }));
@@ -1258,7 +1258,7 @@ export function InfrastructurePanel({ open, onClose, editable = true }: { open: 
     id: String(rp.policy_id ?? ""),
     type: String(rp.resource_type ?? ""),
     retention: Number(rp.retention_days ?? 0),
-    status: Boolean(rp.is_active ?? true) ? "active" : "disabled",
+    status: rp.is_active ?? true ? "active" : "disabled",
   }));
 
   return (

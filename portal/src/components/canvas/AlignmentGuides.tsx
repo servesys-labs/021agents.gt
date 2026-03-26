@@ -1,4 +1,3 @@
-import { useCallback, useState } from "react";
 import { useStore, type Node } from "@xyflow/react";
 
 /**

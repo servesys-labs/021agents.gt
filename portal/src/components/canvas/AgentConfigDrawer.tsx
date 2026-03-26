@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { X, Bot, Zap, Shield, Brain, Save, Loader2 } from "lucide-react";
+import { X, Bot, Zap, Shield, Save, Loader2 } from "lucide-react";
 
 type AgentConfig = {
   name: string;

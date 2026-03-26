@@ -7,7 +7,6 @@ import {
   DollarSign,
   Layers,
   Filter,
-  Brain,
   ThumbsUp,
   ThumbsDown,
   Minus,

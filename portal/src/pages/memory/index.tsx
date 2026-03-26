@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  Brain,
   Plus,
   Trash2,
   Search,
@@ -13,10 +12,8 @@ import {
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
-import { QueryState } from "../../components/common/QueryState";
 import { FormField } from "../../components/common/FormField";
 import { SlidePanel } from "../../components/common/SlidePanel";
-import { StatusBadge } from "../../components/common/StatusBadge";
 import { EmptyState } from "../../components/common/EmptyState";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { Tabs } from "../../components/common/Tabs";

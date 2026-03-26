@@ -17,10 +17,6 @@ import {
   Activity,
   Settings,
   CreditCard,
-  MessageSquare,
-  Brain,
-  FlaskConical,
-  Command,
   KeyRound,
 } from "lucide-react";
 

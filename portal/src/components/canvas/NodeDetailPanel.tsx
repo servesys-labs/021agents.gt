@@ -1,13 +1,13 @@
-import { useState, useRef, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useRef, useEffect, type ReactNode } from "react";
 import {
   X, Bot, Database, BookOpen, Plug, Server, Rocket, Settings, Activity, Code,
   ShieldCheck, FileText, Layers, Zap, Key, BarChart3, Play, Trash2, Copy,
   MoreVertical, MessageSquare, Brain, FlaskConical, Tag, Send, Clock,
-  CheckCircle2, XCircle, AlertTriangle, Pause, RotateCcw, Upload, Search,
-  ChevronRight, Cpu,
+  AlertTriangle, Pause, RotateCcw, Upload, Search,
+  Cpu,
 } from "lucide-react";
 import type { Node } from "@xyflow/react";
-import { apiRequest, useApiQuery, getToken } from "../../lib/api";
+import { apiRequest, apiUpload, useApiQuery, getToken } from "../../lib/api";
 import { SectionTitle, InlineInput, InlineTextarea, InlineSelect, ToggleRow, StatusPill, InfoRow, EmptyTab } from "./primitives";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -429,7 +429,7 @@ export function NodeDetailPanel({
         ) : (
           /* Other tabs: full-width scrollable content */
           <div className="flex-1 overflow-y-auto p-6">
-            <TabContent nodeType={nodeType} tabId={activeTab} data={data} nodeId={node.id} onUpdateNode={onUpdateNode} />
+            <TabContent nodeType={nodeType} tabId={activeTab} data={data} />
           </div>
         )}
       </div>
@@ -439,16 +439,15 @@ export function NodeDetailPanel({
 /* ═══════════════════════════════════════════════════════════════════
    TAB CONTENT ROUTER (non-settings tabs)
    ═══════════════════════════════════════════════════════════════════ */
-function TabContent({ nodeType, tabId, data, nodeId, onUpdateNode }: {
-  nodeType: string; tabId: string; data: NodeData; nodeId: string;
-  onUpdateNode?: (nodeId: string, data: NodeData) => void;
+function TabContent({ nodeType, tabId, data }: {
+  nodeType: string; tabId: string; data: NodeData;
 }) {
   switch (nodeType) {
-    case "agent": return <AgentTabContent tabId={tabId} data={data as AgentNodeData} nodeId={nodeId} onUpdateNode={onUpdateNode} />;
-    case "knowledge": return <KnowledgeTabContent tabId={tabId} data={data as KnowledgeNodeData} nodeId={nodeId} />;
-    case "datasource": return <DataSourceTabContent tabId={tabId} data={data as DataSourceNodeData} nodeId={nodeId} />;
-    case "connector": return <ConnectorTabContent tabId={tabId} data={data as ConnectorNodeData} nodeId={nodeId} />;
-    case "mcpServer": return <McpServerTabContent tabId={tabId} data={data as McpServerNodeData} nodeId={nodeId} />;
+    case "agent": return <AgentTabContent tabId={tabId} data={data as AgentNodeData} />;
+    case "knowledge": return <KnowledgeTabContent tabId={tabId} data={data as KnowledgeNodeData} />;
+    case "datasource": return <DataSourceTabContent tabId={tabId} data={data as DataSourceNodeData} />;
+    case "connector": return <ConnectorTabContent tabId={tabId} data={data as ConnectorNodeData} />;
+    case "mcpServer": return <McpServerTabContent tabId={tabId} data={data as McpServerNodeData} />;
     default: return <EmptyTab message="Unknown node type" />;
   }
 }
@@ -519,9 +518,8 @@ function DeployStatusSection({ agentName }: { agentName: string }) {
   );
 }
 
-function AgentTabContent({ tabId, data, nodeId, onUpdateNode }: {
-  tabId: string; data: AgentNodeData; nodeId: string;
-  onUpdateNode?: (nodeId: string, data: NodeData) => void;
+function AgentTabContent({ tabId, data }: {
+  tabId: string; data: AgentNodeData;
 }) {
   const [vars, setVars] = useState<{ key: string; value: string }[]>(
     data.variables || [],
@@ -1428,7 +1426,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
 /* ═══════════════════════════════════════════════════════════════════
    KNOWLEDGE TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: KnowledgeNodeData; nodeId: string }) {
+function KnowledgeTabContent({ tabId, data }: { tabId: string; data: KnowledgeNodeData }) {
   switch (tabId) {
     case "overview":
       return (
@@ -1526,7 +1524,7 @@ function KnowledgeTabContent({ tabId, data, nodeId }: { tabId: string; data: Kno
 /* ═══════════════════════════════════════════════════════════════════
    DATA SOURCE TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: DataSourceNodeData; nodeId: string }) {
+function DataSourceTabContent({ tabId, data }: { tabId: string; data: DataSourceNodeData }) {
   switch (tabId) {
     case "overview":
       return (
@@ -1608,7 +1606,7 @@ function DataSourceTabContent({ tabId, data, nodeId }: { tabId: string; data: Da
 /* ═══════════════════════════════════════════════════════════════════
    CONNECTOR TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: ConnectorNodeData; nodeId: string }) {
+function ConnectorTabContent({ tabId, data }: { tabId: string; data: ConnectorNodeData }) {
   switch (tabId) {
     case "overview":
       return (
@@ -1678,7 +1676,7 @@ function ConnectorTabContent({ tabId, data, nodeId }: { tabId: string; data: Con
 /* ═══════════════════════════════════════════════════════════════════
    MCP SERVER TAB CONTENT
    ═══════════════════════════════════════════════════════════════════ */
-function McpServerTabContent({ tabId, data, nodeId }: { tabId: string; data: McpServerNodeData; nodeId: string }) {
+function McpServerTabContent({ tabId, data }: { tabId: string; data: McpServerNodeData }) {
   switch (tabId) {
     case "overview":
       return (

@@ -490,6 +490,122 @@ async def test_graph_adapter_tool_event_payload_parity_parallel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_graph_adapter_parallel_join_uses_configured_reducer_policy() -> None:
+    provider = _TwoToolsThenFinalizeProvider()
+    harness = AgentHarness(
+        config=HarnessConfig(
+            max_turns=3,
+            parallel_tool_calls=True,
+            enable_reflection_stage=False,
+            state_reducers={"tool_calls_count": "max_numeric"},
+        ),
+        llm_router=_router_with_provider(provider),
+        tool_executor=_tool_executor(),
+    )
+    turn_end_events = []
+
+    async def _on_turn_end(event):
+        if event.type == EventType.TURN_END:
+            turn_end_events.append(event)
+
+    harness.event_bus.on_all(_on_turn_end)
+    harness._execute_tools = AsyncMock(return_value=[
+        {"tool": "tool_b", "tool_call_id": "t2", "result": 2},
+        {"tool": "tool_a", "tool_call_id": "t1", "result": 1},
+    ])
+    results = await run_with_graph_runtime(harness, "parallel join policy")
+    assert results[-1].stop_reason == "completed"
+    parallel_turn_end = next(e for e in turn_end_events if e.data.get("execution_mode") == "parallel")
+    snapshot = parallel_turn_end.data.get("state_snapshot", {})
+    assert snapshot.get("tool_calls_count") == 1
+    assert snapshot.get("tool_result_ids") == ["t1", "t2"]
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_parallel_join_reducer_policy_for_cost_and_latency() -> None:
+    provider = _TwoToolsThenFinalizeProvider()
+    harness = AgentHarness(
+        config=HarnessConfig(
+            max_turns=3,
+            parallel_tool_calls=True,
+            enable_reflection_stage=False,
+            state_reducers={"cost_usd": "sum_numeric", "tool_latency_ms": "sum_numeric"},
+        ),
+        llm_router=_router_with_provider(provider),
+        tool_executor=_tool_executor(),
+    )
+    turn_end_events = []
+
+    async def _on_turn_end(event):
+        if event.type == EventType.TURN_END:
+            turn_end_events.append(event)
+
+    harness.event_bus.on_all(_on_turn_end)
+    harness._execute_tools = AsyncMock(return_value=[
+        {"tool": "tool_b", "tool_call_id": "t2", "result": 2, "latency_ms": 20.0},
+        {"tool": "tool_a", "tool_call_id": "t1", "result": 1, "latency_ms": 10.0},
+    ])
+    results = await run_with_graph_runtime(harness, "parallel join policy costs")
+    assert results[-1].stop_reason == "completed"
+    parallel_turn_end = next(e for e in turn_end_events if e.data.get("execution_mode") == "parallel")
+    snapshot = parallel_turn_end.data.get("state_snapshot", {})
+    assert float(snapshot.get("cost_usd", 0.0)) == pytest.approx(0.002, abs=1e-9)
+    assert float(snapshot.get("tool_latency_ms", 0.0)) == pytest.approx(30.0, abs=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_turn_end_state_snapshot_golden_parallel_vs_sequential() -> None:
+    async def _run_case(parallel: bool):
+        provider = _TwoToolsThenFinalizeProvider()
+        harness = AgentHarness(
+            config=HarnessConfig(
+                max_turns=3,
+                parallel_tool_calls=parallel,
+                enable_reflection_stage=False,
+            ),
+            llm_router=_router_with_provider(provider),
+            tool_executor=_tool_executor(),
+        )
+        turn_end_events = []
+
+        async def _on_turn_end(event):
+            if event.type == EventType.TURN_END:
+                turn_end_events.append(event)
+
+        harness.event_bus.on_all(_on_turn_end)
+        harness._execute_tools = AsyncMock(return_value=[
+            {"tool": "tool_b", "tool_call_id": "t2", "result": 2, "latency_ms": 20.0},
+            {"tool": "tool_a", "tool_call_id": "t1", "result": 1, "latency_ms": 10.0},
+        ])
+        results = await run_with_graph_runtime(harness, "state snapshot golden")
+        assert results[-1].stop_reason == "completed"
+        tool_turn_end = next(e for e in turn_end_events if e.data.get("execution_mode") in {"parallel", "sequential"})
+        return tool_turn_end.data.get("state_snapshot", {}), tool_turn_end.data.get("execution_mode")
+
+    par_snapshot, par_mode = await _run_case(parallel=True)
+    seq_snapshot, seq_mode = await _run_case(parallel=False)
+
+    assert par_mode == "parallel"
+    assert seq_mode == "sequential"
+
+    # Golden contract for snapshot keys and deterministic values.
+    expected_parallel = {
+        "tool_calls_count": 2,
+        "tool_result_ids": ["t1", "t2"],
+        "cost_usd": 0.001,
+        "tool_latency_ms": 20.0,
+    }
+    expected_sequential = {
+        "tool_calls_count": 2,
+        "tool_result_ids": ["t2", "t1"],
+        "cost_usd": 0.001,
+        "tool_latency_ms": 20.0,
+    }
+    assert par_snapshot == expected_parallel
+    assert seq_snapshot == expected_sequential
+
+
+@pytest.mark.asyncio
 async def test_graph_adapter_human_approval_gate_blocks_tool_execution() -> None:
     provider = _ToolThenFinalizeProvider()
     harness = AgentHarness(
@@ -556,3 +672,36 @@ async def test_graph_adapter_checkpoint_nodes_emit_node_spans() -> None:
     span_names = {s.get("name", "") for s in node_spans if isinstance(s, dict)}
     assert "checkpoint_pre_llm" in span_names
     assert "checkpoint_post_tools" in span_names
+
+
+@pytest.mark.asyncio
+async def test_graph_adapter_subgraph_tools_span_lineage() -> None:
+    provider = _TwoToolsThenFinalizeProvider()
+    harness = AgentHarness(
+        config=HarnessConfig(
+            max_turns=3,
+            enable_reflection_stage=False,
+            parallel_tool_calls=True,
+        ),
+        llm_router=_router_with_provider(provider),
+        tool_executor=_tool_executor(),
+    )
+    turn_end_events = []
+
+    async def _on_turn_end(event):
+        if event.type == EventType.TURN_END:
+            turn_end_events.append(event)
+
+    harness.event_bus.on_all(_on_turn_end)
+    results = await run_with_graph_runtime(harness, "subgraph tool lineage")
+    assert results[-1].stop_reason == "completed"
+    assert turn_end_events
+    found_lineage = False
+    for event in turn_end_events:
+        node_spans = event.data.get("node_spans", [])
+        by_name = {str(s.get("name", "")): s for s in node_spans if isinstance(s, dict)}
+        if "subgraph_tools" in by_name and "tools" in by_name:
+            assert by_name["tools"].get("parent_span_id", "") == by_name["subgraph_tools"].get("span_id", "")
+            found_lineage = True
+            break
+    assert found_lineage

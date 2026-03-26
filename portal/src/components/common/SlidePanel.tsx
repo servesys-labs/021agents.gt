@@ -2,7 +2,8 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
 
 interface SlidePanelProps {
-  isOpen: boolean;
+  isOpen?: boolean;
+  open?: boolean;
   onClose: () => void;
   title: string;
   subtitle?: string;
@@ -13,6 +14,7 @@ interface SlidePanelProps {
 
 export function SlidePanel({
   isOpen,
+  open,
   onClose,
   title,
   subtitle,
@@ -20,11 +22,12 @@ export function SlidePanel({
   children,
   footer,
 }: SlidePanelProps) {
+  const resolvedOpen = isOpen ?? open ?? false;
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!resolvedOpen) return;
 
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -43,9 +46,9 @@ export function SlidePanel({
       document.removeEventListener("keydown", handleEsc);
       document.body.style.overflow = prevOverflow;
     };
-  }, [isOpen, onClose]);
+  }, [resolvedOpen, onClose]);
 
-  if (!isOpen) return null;
+  if (!resolvedOpen) return null;
 
   return (
     <>

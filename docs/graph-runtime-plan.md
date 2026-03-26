@@ -73,9 +73,9 @@ GraphRuntime
 - Deliverable: graph path active in production
 
 ### Week 4 — API Unification
-- `/runtime-proxy/agent/run` routes through graph runtime
+- `/runtime-proxy/agent/run` routes through graph runtime (edge worker)
 - `/runtime-proxy/chat` becomes just a graph with fewer nodes (not a separate endpoint)
-- Workflows API uses same graph model
+- Workflows runtime executes on edge; backend workflow API remains control-plane/read surfaces
 - Normalize cancellation/timeouts/metadata
 - Deliverable: one execution model across all API surfaces
 
@@ -119,7 +119,7 @@ GraphRuntime
 
 ### Modified
 - `agentos/agent.py` — Agent.run() delegates to graph
-- `agentos/api/routers/runtime_proxy.py` — routes through graph
+- `agentos/api/routers/runtime_proxy.py` — compatibility shim (edge execution moved to worker)
 - `agentos/core/database.py` — schema V17 for node-level observability
 - `agentos/core/events.py` — new event types
 - `config/default.json` — graph execution mode settings

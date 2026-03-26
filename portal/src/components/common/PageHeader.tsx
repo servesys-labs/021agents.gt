@@ -4,6 +4,8 @@ import { RefreshCw } from "lucide-react";
 interface PageHeaderProps {
   title: string;
   subtitle?: string;
+  description?: string;
+  icon?: ReactNode;
   actions?: ReactNode;
   liveCount?: number;
   liveLabel?: string;
@@ -13,19 +15,23 @@ interface PageHeaderProps {
 export function PageHeader({
   title,
   subtitle,
+  description,
+  icon,
   actions,
   liveCount,
   liveLabel,
   onRefresh,
 }: PageHeaderProps) {
+  const subtitleText = subtitle ?? description;
   return (
     <div className="flex items-start justify-between mb-6">
       <div>
-        <h1 className="text-lg font-bold text-text-primary uppercase tracking-wide">
+        <h1 className="text-lg font-bold text-text-primary uppercase tracking-wide flex items-center gap-2">
+          {icon && <span className="text-text-muted">{icon}</span>}
           {title}
         </h1>
-        {subtitle && (
-          <p className="mt-1 text-sm text-text-muted">{subtitle}</p>
+        {subtitleText && (
+          <p className="mt-1 text-sm text-text-muted">{subtitleText}</p>
         )}
       </div>
       <div className="flex items-center gap-3">

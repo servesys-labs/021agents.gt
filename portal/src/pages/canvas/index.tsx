@@ -29,7 +29,6 @@ import { WelcomeOverlay } from "../../components/canvas/WelcomeOverlay";
 import { AlignmentGuides } from "../../components/canvas/AlignmentGuides";
 import { NodeDetailPanel } from "../../components/canvas/NodeDetailPanel";
 import { CommandPalette, type CommandAction } from "../../components/canvas/CommandPalette";
-import { CanvasOverlayPanel } from "../../components/canvas/CanvasOverlayPanel";
 import {
   WorkflowsPanel,
   SchedulesPanel,
@@ -41,6 +40,7 @@ import {
   SecretsPanel,
 } from "../../components/canvas/OverlayPanels";
 import { apiRequest } from "../../lib/api";
+import { useApiQuery } from "../../lib/api";
 import { useUndoRedo } from "../../hooks/useUndoRedo";
 import { getStoredUserRole } from "../../auth/tokens";
 import {
@@ -49,7 +49,6 @@ import {
   Globe,
   GitBranch,
   Bell,
-  Sparkles,
   Plus,
   Search,
   MessageSquare,
@@ -98,7 +97,9 @@ function saveLayout(nodes: Node[], edges: Edge[]) {
         edges,
       }),
     );
-  } catch {}
+  } catch {
+    // Ignore storage write failures in restricted environments.
+  }
 }
 
 /* ── Edge helpers ────────────────────────────────────────────── */
@@ -143,6 +144,20 @@ type CanvasLayoutResponse = {
   nodes?: Node[];
   edges?: Edge[];
   assignments?: Array<Record<string, unknown>>;
+};
+
+type MetaControlPlaneResponse = {
+  control_plane_entrypoints?: Record<string, Record<string, string>>;
+  langchain_equivalent_runtime?: {
+    runnable_composition?: { primitives?: string[]; module?: string };
+    graph_execution?: Record<string, string>;
+    observability_eval?: Record<string, string>;
+  };
+  multi_agent_blueprint?: {
+    pattern?: string;
+    roles?: Array<{ role?: string; responsibility?: string }>;
+    workflow?: string[];
+  };
 };
 
 function inferResourcesFromPromptAndTools(prompt: string, tools: string[]): MetaResource[] {
@@ -297,6 +312,24 @@ function CanvasWorkspaceInner() {
       return edges;
     },
     [edges, agentsOnly, hiddenLayers],
+  );
+
+  const playbookAgentName = useMemo(() => {
+    if (detailNode?.type === "agent") {
+      const n = String(detailNode.data?.name || "").trim();
+      if (n) return n;
+    }
+    if (metaDraft?.agentName) return metaDraft.agentName;
+    const firstAgent = nodes.find((n) => n.type === "agent");
+    const firstName = String(firstAgent?.data?.name || "").trim();
+    return firstName || "";
+  }, [detailNode, metaDraft, nodes]);
+
+  const playbookQuery = useApiQuery<MetaControlPlaneResponse>(
+    playbookAgentName
+      ? `/api/v1/observability/agents/${encodeURIComponent(playbookAgentName)}/meta-control-plane?generate_proposals=false&persist_generated=false`
+      : "",
+    Boolean(playbookAgentName),
   );
 
   /* ── Sync detailNode when nodes change (e.g., after deploy) ── */
@@ -1415,6 +1448,10 @@ function CanvasWorkspaceInner() {
               onSubmit={handleMetaSubmit}
               isProcessing={metaProcessing}
               lastResult={metaResult}
+              playbookAgentName={playbookAgentName || null}
+              playbookLoading={playbookQuery.loading}
+              playbookError={playbookQuery.error}
+              playbook={playbookQuery.data}
               latestDraft={metaDraft ? {
                 agentName: metaDraft.agentName,
                 model: metaDraft.model,

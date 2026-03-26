@@ -229,6 +229,82 @@ class TestAgentsRouter:
         assert list_after_create.status_code == 200
         assert any(a["name"] == "canvas-draft-agent" for a in list_after_create.json())
 
+    def test_create_from_description_draft_auto_graph_includes_lint_report(self, api_client):
+        headers = self._auth_header(api_client, "draft-graph@test.com")
+
+        draft = api_client.post(
+            "/api/v1/agents/create-from-description",
+            params={
+                "description": "Create a support agent with telemetry and eval visibility",
+                "name": "auto-graph-agent",
+                "draft_only": "true",
+                "auto_graph": "true",
+                "strict_graph_lint": "true",
+            },
+            headers=headers,
+        )
+        assert draft.status_code == 200
+        data = draft.json()
+        assert data["created"] is False
+        assert data["graph_lint"]["valid"] is True
+        harness = data["draft"].get("harness", {})
+        assert "declarative_graph" in harness
+        assert data["graph_lint"]["summary"]["lint"]["strict"] is True
+
+    def test_create_from_description_blocks_invalid_graph_with_suggestions(self, api_client):
+        signup = api_client.post(
+            "/api/v1/auth/signup",
+            json={"email": "bad-graph@test.com", "password": "pass12345"},
+        )
+        token = signup.json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        bad_graph = {
+            "nodes": [
+                {"id": "n1", "kind": "bootstrap"},
+                {"id": "n2", "kind": "telemetry_emit"},
+                {"id": "n3", "kind": "final"},
+            ],
+            "edges": [
+                {"source": "n1", "target": "n2"},
+                {"source": "n2", "target": "n3"},
+            ],
+        }
+        resp = api_client.post(
+            "/api/v1/agents/create-from-description",
+            params={
+                "description": "Create a support agent",
+                "name": "bad-graph-agent",
+                "draft_only": "false",
+                "strict_graph_lint": "true",
+                "graph_json": json.dumps(bad_graph),
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        detail = resp.json().get("detail", {})
+        assert detail.get("source") == "agents.create-from-description"
+        assert any(e.get("code") == "BACKGROUND_ON_CRITICAL_PATH" for e in detail.get("errors", []))
+        assert detail.get("suggestions")
+
+    def test_create_from_description_meta_intent_keeps_hardened_tools(self, api_client):
+        headers = self._auth_header(api_client, "meta-tools@test.com")
+
+        draft = api_client.post(
+            "/api/v1/agents/create-from-description",
+            params={
+                "description": "Create a meta agent for CRUD, telemetry, eval experiments, and rollouts",
+                "name": "meta-tools-agent",
+                "draft_only": "true",
+                "auto_graph": "true",
+                "strict_graph_lint": "true",
+            },
+            headers=headers,
+        )
+        assert draft.status_code == 200
+        tools = set(draft.json().get("tools", []))
+        assert {"create-agent", "run-agent", "eval-agent", "evolve-agent", "autoresearch", "todo"}.issubset(tools)
+
     def test_run_agent_omitted_runtime_mode_preserves_saved_graph_config(self, api_client, monkeypatch):
         from agentos.core.harness import TurnResult
         from agentos.llm.provider import LLMResponse
@@ -265,10 +341,8 @@ class TestAgentsRouter:
             json={"task": "hello"},  # runtime_mode intentionally omitted
             headers=headers,
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["success"] is True
-        assert data["output"] == "graph path"
+        assert resp.status_code == 410
+        assert "edge-only" in resp.json().get("detail", "")
 
 
 class TestSessionsRouter:
@@ -361,12 +435,15 @@ class TestObservabilityRouter:
 
     def test_meta_control_plane(self, api_client):
         headers = self._auth_header(api_client)
+        me = api_client.get("/api/v1/auth/me", headers=headers)
+        assert me.status_code == 200
+        org_id = me.json().get("org_id", "")
         # Seed one scoped session so ownership + telemetry lookup works.
         from agentos.core.database import create_database
         db = create_database(Path("data/agent.db"))
         db.insert_session({
             "session_id": "sess-meta-cp-1",
-            "org_id": "",
+            "org_id": org_id,
             "agent_name": "test-agent",
             "timestamp": 1.0,
             "status": "success",
@@ -383,7 +460,7 @@ class TestObservabilityRouter:
             "event_type": "node_start",
             "event_source": "graph_runtime",
             "event_ts": 1.0,
-            "org_id": "",
+            "org_id": org_id,
             "agent_name": "test-agent",
             "session_id": "sess-meta-cp-1",
             "trace_id": "trace-meta-cp-1",
@@ -402,10 +479,233 @@ class TestObservabilityRouter:
         data = resp.json()
         assert data["agent_name"] == "test-agent"
         assert "meta_report" in data
+        assert "control_plane_entrypoints" in data
+        assert "langchain_equivalent_runtime" in data
+        assert "multi_agent_blueprint" in data
         assert "meta_proposals" in data
         assert "pending_approvals" in data
         assert "suggested_eval_plan" in data
         assert isinstance(data["meta_proposals"]["items"], list)
+        assert data["control_plane_entrypoints"]["agent_crud"]["create"] == "/api/v1/agents"
+        assert "pipe" in data["langchain_equivalent_runtime"]["runnable_composition"]["primitives"]
+        assert data["multi_agent_blueprint"]["pattern"] == "supervisor_specialists"
+
+    def test_trace_events_support_server_side_filters(self, api_client):
+        headers = self._auth_header(api_client)
+        me = api_client.get("/api/v1/auth/me", headers=headers)
+        assert me.status_code == 200
+        org_id = me.json().get("org_id", "")
+        from agentos.core.database import create_database
+
+        db = create_database(Path("data/agent.db"))
+        base = 1_700_000_000.0
+        db.insert_runtime_event({
+            "event_id": "evt-f-1",
+            "event_type": "tool_result",
+            "event_source": "graph_runtime",
+            "event_ts": base + 1.0,
+            "org_id": org_id,
+            "agent_name": "test-agent",
+            "session_id": "sess-f-1",
+            "trace_id": "trace-f-1",
+            "turn": 1,
+            "status": "ok",
+            "payload": {"tool_name": "web-search", "status": "ok", "timestamp": base + 1.0},
+        })
+        db.insert_runtime_event({
+            "event_id": "evt-f-2",
+            "event_type": "tool_result",
+            "event_source": "graph_runtime",
+            "event_ts": base + 2.0,
+            "org_id": org_id,
+            "agent_name": "test-agent",
+            "session_id": "sess-f-1",
+            "trace_id": "trace-f-1",
+            "turn": 1,
+            "status": "error",
+            "payload": {"tool_name": "connector", "status": "error", "timestamp": base + 2.0},
+        })
+        db.insert_runtime_event({
+            "event_id": "evt-f-3",
+            "event_type": "llm_response",
+            "event_source": "graph_runtime",
+            "event_ts": base + 3.0,
+            "org_id": org_id,
+            "agent_name": "test-agent",
+            "session_id": "sess-f-1",
+            "trace_id": "trace-f-1",
+            "turn": 1,
+            "status": "ok",
+            "payload": {"model": "test-model", "timestamp": base + 3.0},
+        })
+        db.close()
+
+        resp = api_client.get(
+            "/api/v1/observability/traces/trace-f-1/events"
+            "?event_type=tool_result&tool_name=connector&status=error"
+            f"&from_ts={base + 1.5}&to_ts={base + 2.5}",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        events = body["events"]
+        assert len(events) == 1
+        assert events[0]["event_id"] == "evt-f-2"
+        assert body["filters"]["event_type"] == "tool_result"
+        assert body["filters"]["tool_name"] == "connector"
+        assert body["filters"]["status"] == "error"
+
+    def test_trace_replay_at_cursor(self, api_client, monkeypatch):
+        monkeypatch.setattr("agentos.api.routers.observability._trace_is_owned", lambda *_args, **_kwargs: True)
+        headers = self._auth_header(api_client)
+        class _FakeDb:
+            conn = None
+
+            def replay_runtime_events_at_cursor(self, **kwargs):
+                assert kwargs["trace_id"] == "trace-rep-1"
+                assert kwargs["up_to_row_id"] == 0
+                assert kwargs["event_id"] == ""
+                if kwargs["cursor_index"] == 0:
+                    return {
+                        "trace_id": "trace-rep-1",
+                        "session_id": "sess-rep-1",
+                        "cursor_row_id": 1,
+                        "cursor_index": 0,
+                        "event_count": 1,
+                        "state_snapshot": {},
+                        "event_at_cursor": {"event_id": "evt-rep-1"},
+                        "events": [],
+                        "has_more": True,
+                        "next_row_id": 2,
+                        "next_cursor_index": 1,
+                        "watermark_row_id": 2,
+                        "watermark_event_count": 2,
+                    }
+                return {
+                    "trace_id": "trace-rep-1",
+                    "session_id": "sess-rep-1",
+                    "cursor_row_id": 2,
+                    "cursor_index": 1,
+                    "event_count": 2,
+                    "state_snapshot": {"k": 1},
+                    "event_at_cursor": {"event_id": "evt-rep-2"},
+                    "events": [],
+                    "has_more": False,
+                    "next_row_id": None,
+                    "next_cursor_index": None,
+                    "watermark_row_id": 2,
+                    "watermark_event_count": 2,
+                }
+
+        monkeypatch.setattr("agentos.api.routers.observability._get_db", lambda: _FakeDb())
+
+        resp = api_client.get(
+            "/api/v1/observability/traces/trace-rep-1/replay?cursor_index=0",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["trace_id"] == "trace-rep-1"
+        assert body["event_count"] == 1
+        assert body["state_snapshot"] == {}
+        assert body["event_at_cursor"]["event_id"] == "evt-rep-1"
+        assert body["events"] == []
+
+        resp2 = api_client.get(
+            "/api/v1/observability/traces/trace-rep-1/replay?cursor_index=1",
+            headers=headers,
+        )
+        assert resp2.status_code == 200
+        assert resp2.json()["state_snapshot"] == {"k": 1}
+        assert resp2.json()["has_more"] is False
+
+    def test_trace_events_time_window_filtering(self, api_client, monkeypatch):
+        monkeypatch.setattr("agentos.api.routers.observability._trace_is_owned", lambda *_args, **_kwargs: True)
+        headers = self._auth_header(api_client)
+        base = 1_700_100_000.0
+
+        class _FakeDb:
+            conn = None
+
+            def query_runtime_events(self, **_kwargs):
+                return [
+                    {"event_id": "evt-t-1", "event_ts": base + 1.0, "status": "ok", "payload": {"timestamp": base + 1.0}},
+                    {"event_id": "evt-t-2", "event_ts": base + 2.0, "status": "ok", "payload": {"timestamp": base + 2.0}},
+                    {"event_id": "evt-t-3", "event_ts": base + 3.0, "status": "ok", "payload": {"timestamp": base + 3.0}},
+                ]
+
+        monkeypatch.setattr("agentos.api.routers.observability._get_db", lambda: _FakeDb())
+
+        resp = api_client.get(
+            "/api/v1/observability/traces/trace-t-1/events"
+            f"?from_ts={base + 1.5}&to_ts={base + 2.5}",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        events = body["events"]
+        assert [e["event_id"] for e in events] == ["evt-t-2"]
+        assert float(body["filters"]["from_ts"]) == pytest.approx(base + 1.5)
+        assert float(body["filters"]["to_ts"]) == pytest.approx(base + 2.5)
+
+    def test_trace_bundle_supports_runtime_event_filters(self, api_client, monkeypatch):
+        monkeypatch.setattr("agentos.api.routers.observability._trace_is_owned", lambda *_args, **_kwargs: True)
+        headers = self._auth_header(api_client)
+        base = 1_700_200_000.0
+
+        class _FakeDb:
+            conn = None
+
+            def query_trace(self, trace_id):
+                return [{"trace_id": trace_id, "session_id": "sess-bundle-1"}]
+
+            def trace_cost_rollup(self, _trace_id):
+                return {"total_cost_usd": 0.0}
+
+            def query_trace_spans(self, _trace_id):
+                return []
+
+            def list_graph_checkpoints(self, trace_id, limit=500):
+                _ = (trace_id, limit)
+                return []
+
+            def list_eval_trials_by_trace(self, trace_id, limit=500):
+                _ = (trace_id, limit)
+                return []
+
+            def list_trace_annotations(self, trace_id, limit=500):
+                _ = (trace_id, limit)
+                return []
+
+            def query_runtime_events(self, **kwargs):
+                assert kwargs["trace_id"] == "trace-bundle-1"
+                assert kwargs["event_types"] == ["tool_result"]
+                assert kwargs["status"] == "error"
+                assert kwargs["tool_name"] == "connector"
+                assert kwargs["from_ts"] == pytest.approx(base + 1.5)
+                assert kwargs["to_ts"] == pytest.approx(base + 2.5)
+                assert kwargs["limit"] == 25
+                return [
+                    {"event_id": "evt-b-2", "event_type": "tool_result", "event_ts": base + 2.0, "payload": {"tool_name": "connector", "status": "error"}},
+                ]
+
+        monkeypatch.setattr("agentos.api.routers.observability._get_db", lambda: _FakeDb())
+        resp = api_client.get(
+            "/api/v1/observability/traces/trace-bundle-1"
+            "?event_type=tool_result&tool_name=connector&status=error"
+            f"&from_ts={base + 1.5}&to_ts={base + 2.5}&event_limit=25",
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["trace_id"] == "trace-bundle-1"
+        assert [e["event_id"] for e in body["runtime_events"]] == ["evt-b-2"]
+        assert body["runtime_event_filters"]["event_type"] == "tool_result"
+        assert body["runtime_event_filters"]["tool_name"] == "connector"
+        assert body["runtime_event_filters"]["status"] == "error"
+        assert float(body["runtime_event_filters"]["from_ts"]) == pytest.approx(base + 1.5)
+        assert float(body["runtime_event_filters"]["to_ts"]) == pytest.approx(base + 2.5)
+        assert int(body["runtime_event_filters"]["limit"]) == 25
 
 
 class TestOrgsRouter:
@@ -1122,14 +1422,8 @@ class TestEdgeIngestBridge:
             json={"input_text": "hello from canvas"},
             headers=headers,
         )
-        assert run.status_code == 200
-        run_data = run.json()
-        assert run_data["status"] in {"completed", "failed"}
-        run_id = run_data["run_id"]
-
-        runs = api_client.get(f"/api/v1/workflows/{workflow_id}/runs", headers=headers)
-        assert runs.status_code == 200
-        assert any(r["run_id"] == run_id for r in runs.json()["runs"])
+        assert run.status_code == 410
+        assert "edge-only" in run.json().get("detail", "")
 
         delete = api_client.delete(f"/api/v1/workflows/{workflow_id}", headers=headers)
         assert delete.status_code == 200
@@ -1167,9 +1461,8 @@ class TestEdgeIngestBridge:
             json={"input_text": "hello", "runtime_mode": "graph"},
             headers=headers,
         )
-        assert run.status_code == 200
-        assert run.json()["status"] == "completed"
-        assert run.json()["final_output"] == "workflow graph path"
+        assert run.status_code == 410
+        assert "edge-only" in run.json().get("detail", "")
 
     def test_workflow_validate_rejects_bad_dependency(self, api_client):
         headers = self._auth_header(api_client, "canvas-workflow-validate@test.com")

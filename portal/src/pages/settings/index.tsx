@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Plus, Settings, Users, Key, Trash2, Copy, Eye, EyeOff, RefreshCw, UserPlus, Building2, Puzzle, ToggleLeft, ToggleRight, Pencil, Check, X } from "lucide-react";
+import { Plus, Users, Key, Trash2, Copy, Eye, EyeOff, RefreshCw, UserPlus, Building2, Puzzle, ToggleLeft, ToggleRight, Pencil, Check, X } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";

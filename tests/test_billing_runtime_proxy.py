@@ -10,6 +10,25 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+REQUIRED_RUNNABLE_METADATA_KEYS = {
+    "success",
+    "turns",
+    "tool_calls",
+    "cost_usd",
+    "latency_ms",
+    "session_id",
+    "trace_id",
+    "run_id",
+    "stop_reason",
+    "checkpoint_id",
+    "parent_session_id",
+    "resumed_from_checkpoint",
+    "run_name",
+    "tags",
+    "metadata",
+    "input_raw",
+}
+
 
 @pytest.fixture
 def isolated_db(tmp_path, monkeypatch):
@@ -136,6 +155,12 @@ def test_pricing_catalog_resolution_order(isolated_db):
     db.close()
 
 
+_RUNTIME_PROXY_REMOVED = pytest.mark.skip(
+    reason="Backend runtime-proxy endpoints removed; runtime is edge-only.",
+)
+
+
+@_RUNTIME_PROXY_REMOVED
 def test_runtime_proxy_llm_uses_catalog_rate(isolated_db, monkeypatch):
     from agentos.core.database import create_database
     import agentos.api.routers.runtime_proxy as rp
@@ -209,6 +234,7 @@ def test_runtime_proxy_llm_uses_catalog_rate(isolated_db, monkeypatch):
     db2.close()
 
 
+@_RUNTIME_PROXY_REMOVED
 def test_runtime_proxy_tool_and_sandbox_billing_shapes(isolated_db, monkeypatch):
     from agentos.core.database import create_database
 
@@ -285,6 +311,7 @@ def test_runtime_proxy_tool_and_sandbox_billing_shapes(isolated_db, monkeypatch)
     db2.close()
 
 
+@_RUNTIME_PROXY_REMOVED
 def test_runtime_proxy_agent_run_uses_request_scoped_override_without_mutating_cache(isolated_db, monkeypatch):
     import agentos.api.routers.runtime_proxy as rp
     from agentos.core.harness import TurnResult
@@ -330,6 +357,7 @@ def test_runtime_proxy_agent_run_uses_request_scoped_override_without_mutating_c
     assert cached_agent.config.harness["runtime_mode"] == "graph"
 
 
+@_RUNTIME_PROXY_REMOVED
 def test_runtime_proxy_agent_resume_from_checkpoint(isolated_db, monkeypatch):
     import agentos.api.routers.runtime_proxy as rp
     from agentos.core.database import create_database
@@ -415,6 +443,7 @@ def test_runtime_proxy_agent_resume_from_checkpoint(isolated_db, monkeypatch):
     db2.close()
 
 
+@_RUNTIME_PROXY_REMOVED
 def test_runtime_proxy_runnable_invoke_batch_and_events(isolated_db, monkeypatch):
     import agentos.api.routers.runtime_proxy as rp
     from agentos.core.harness import TurnResult
@@ -456,6 +485,7 @@ def test_runtime_proxy_runnable_invoke_batch_and_events(isolated_db, monkeypatch
     assert body["metadata"]["run_name"] == "r1"
     assert body["metadata"]["tags"] == ["a"]
     assert body["metadata"]["metadata"] == {"k": "v"}
+    assert REQUIRED_RUNNABLE_METADATA_KEYS.issubset(set(body["metadata"].keys()))
 
     bat = client.post(
         "/api/v1/runtime-proxy/runnable/batch",
@@ -473,6 +503,8 @@ def test_runtime_proxy_runnable_invoke_batch_and_events(isolated_db, monkeypatch
     assert b["outputs"][0]["ok"] is True
     assert b["outputs"][0]["output"] == "ok:one"
     assert b["outputs"][1]["output"] == "ok:two"
+    assert REQUIRED_RUNNABLE_METADATA_KEYS.issubset(set(b["outputs"][0]["metadata"].keys()))
+    assert REQUIRED_RUNNABLE_METADATA_KEYS.issubset(set(b["outputs"][1]["metadata"].keys()))
 
     evt = client.post(
         "/api/v1/runtime-proxy/runnable/stream-events",
@@ -485,6 +517,7 @@ def test_runtime_proxy_runnable_invoke_batch_and_events(isolated_db, monkeypatch
     assert events[-1]["event"] == "on_chain_end"
 
 
+@_RUNTIME_PROXY_REMOVED
 def test_runtime_proxy_runnable_stream_events_uses_runtime_event_log(isolated_db, monkeypatch):
     import agentos.api.routers.runtime_proxy as rp
     from agentos.core.database import create_database
@@ -548,6 +581,7 @@ def test_runtime_proxy_runnable_stream_events_uses_runtime_event_log(isolated_db
     assert "on_llm_end" in names
 
 
+@_RUNTIME_PROXY_REMOVED
 def test_runtime_proxy_runnable_latency_breakdown(isolated_db, monkeypatch):
     from agentos.core.database import create_database
 
@@ -626,4 +660,174 @@ def test_runtime_proxy_runnable_latency_breakdown(isolated_db, monkeypatch):
     assert float(body["node_reported_ms"]) == pytest.approx(410.0, abs=2.0)
     assert body["diagnosis"] == "tool_bound"
     assert any("Tool execution dominates runtime" in r for r in body["diagnosis_reasons"])
+
+
+@_RUNTIME_PROXY_REMOVED
+def test_runtime_proxy_runnable_events_pagination_and_watermark(isolated_db, monkeypatch):
+    from agentos.core.database import create_database
+
+    db = create_database(Path("data/agent.db"))
+    db.initialize()
+    base = time.time()
+    db.insert_runtime_event(
+        {
+            "event_id": "evt-page-1",
+            "event_type": "session_start",
+            "trace_id": "trace-page",
+            "session_id": "sess-page",
+            "event_ts": base,
+            "payload": {
+                "run_name": "page_run",
+                "tags": ["p0"],
+                "metadata": {"source": "test"},
+                "input_raw": {"q": "hello"},
+            },
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "evt-page-2",
+            "event_type": "llm_request",
+            "trace_id": "trace-page",
+            "session_id": "sess-page",
+            "event_ts": base + 0.01,
+            "payload": {"turn": 1},
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "evt-page-3",
+            "event_type": "llm_response",
+            "trace_id": "trace-page",
+            "session_id": "sess-page",
+            "event_ts": base + 0.02,
+            "payload": {"turn": 1},
+        }
+    )
+    db.close()
+
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
+    first = client.post(
+        "/api/v1/runtime-proxy/runnable/events",
+        headers=headers,
+        json={"session_id": "sess-page", "limit": 1},
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+    assert len(first_body["events"]) == 1
+    assert first_body["has_more"] is True
+    assert first_body["metadata"]["run_name"] == "page_run"
+    assert first_body["metadata"]["tags"] == ["p0"]
+    assert first_body["metadata"]["metadata"] == {"source": "test"}
+    assert REQUIRED_RUNNABLE_METADATA_KEYS.issubset(set(first_body["metadata"].keys()))
+    watermark = first_body["watermark_cursor"]
+    cursor = first_body["next_cursor"]
+
+    second = client.post(
+        "/api/v1/runtime-proxy/runnable/events",
+        headers=headers,
+        json={"session_id": "sess-page", "limit": 2, "cursor": cursor, "watermark_cursor": watermark},
+    )
+    assert second.status_code == 200
+    second_body = second.json()
+    assert len(second_body["events"]) >= 1
+    ids_first = {e["event_id"] for e in first_body["events"]}
+    ids_second = {e["event_id"] for e in second_body["events"]}
+    assert ids_first.isdisjoint(ids_second)
+
+    final = client.post(
+        "/api/v1/runtime-proxy/runnable/events",
+        headers=headers,
+        json={"session_id": "sess-page", "cursor": watermark, "watermark_cursor": watermark},
+    )
+    assert final.status_code == 200
+    final_body = final.json()
+    assert final_body["events"] == []
+    assert final_body["has_more"] is False
+
+
+@_RUNTIME_PROXY_REMOVED
+def test_runtime_proxy_runnable_runs_tree_bundle(isolated_db, monkeypatch):
+    from agentos.core.database import create_database
+
+    db = create_database(Path("data/agent.db"))
+    db.initialize()
+    base = time.time()
+    db.insert_runtime_event(
+        {
+            "event_id": "evt-tree-1",
+            "event_type": "session_start",
+            "trace_id": "trace-tree",
+            "session_id": "sess-tree",
+            "event_ts": base,
+            "payload": {
+                "run_name": "tree_run",
+                "tags": ["edge", "tree"],
+                "metadata": {"k": "v"},
+            },
+        }
+    )
+    db.insert_runtime_event(
+        {
+            "event_id": "evt-tree-2",
+            "event_type": "node_end",
+            "trace_id": "trace-tree",
+            "session_id": "sess-tree",
+            "event_ts": base + 0.01,
+            "node_id": "llm",
+            "latency_ms": 20.0,
+            "payload": {"node_id": "llm", "latency_ms": 20.0},
+        }
+    )
+    db.upsert_graph_checkpoint(
+        checkpoint_id="cp-tree-1",
+        agent_name="test-agent",
+        session_id="sess-tree",
+        trace_id="trace-tree",
+        status="pending_approval",
+        payload={"checkpoint_id": "cp-tree-1"},
+        metadata={"source": "test"},
+    )
+    db.insert_eval_trials(
+        eval_run_id=1,
+        trials=[
+            {
+                "task_name": "tree-eval",
+                "trial": 1,
+                "score": 1.0,
+                "passed": True,
+                "latency_ms": 10.0,
+                "cost_usd": 0.001,
+                "tool_calls_count": 0,
+                "session_id": "sess-tree",
+                "trace_id": "trace-tree",
+            }
+        ],
+    )
+    db.insert_trace_annotation(
+        trace_id="trace-tree",
+        author="tester",
+        annotation_type="note",
+        message="tree annotation",
+    )
+    db.close()
+
+    client = _client(monkeypatch)
+    headers = {"Authorization": "Bearer edge-test-token", "X-Edge-Token": "edge-test-token"}
+    resp = client.post(
+        "/api/v1/runtime-proxy/runnable/runs/tree",
+        headers=headers,
+        json={"trace_id": "trace-tree"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trace_id"] == "trace-tree"
+    assert int(body["counts"]["runtime_events"]) >= 2
+    assert int(body["counts"]["checkpoints"]) >= 1
+    assert int(body["counts"]["eval_trials"]) >= 1
+    assert int(body["counts"]["annotations"]) >= 1
+    assert body["metadata"]["run_name"] == "tree_run"
+    assert body["metadata"]["tags"] == ["edge", "tree"]
+    assert REQUIRED_RUNNABLE_METADATA_KEYS.issubset(set(body["metadata"].keys()))
 

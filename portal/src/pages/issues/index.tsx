@@ -11,16 +11,13 @@ import {
   Clock,
   Settings,
   RefreshCw,
-  Plus,
   Wrench,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
-import { Tabs } from "../../components/common/Tabs";
 import { EmptyState } from "../../components/common/EmptyState";
 import { SlidePanel } from "../../components/common/SlidePanel";
-import { StatusBadge } from "../../components/common/StatusBadge";
 import { useApiQuery, apiRequest } from "../../lib/api";
 import { useToast } from "../../components/common/ToastProvider";
 
@@ -94,7 +91,6 @@ const statusColor = (s: string) => {
 
 export const IssuesPage = () => {
   const { showToast } = useToast();
-  const [activeTab, setActiveTab] = useState(0);
   const [statusFilter, setStatusFilter] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("");
   const [selectedIssue, setSelectedIssue] = useState<string | null>(null);

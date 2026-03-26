@@ -894,8 +894,8 @@ class TestRuntimeScanAPI:
         """POST /security/scan/nonexistent/runtime should return 404 when agent not found."""
         headers = self._auth_headers(api_client)
         resp = api_client.post("/api/v1/security/scan/nonexistent/runtime", headers=headers)
-        # Should be 404 (agent not found) or 500 (could not load agent)
-        assert resp.status_code in (404, 500)
+        # Backend runtime scans are edge-only; legacy behavior may still surface 404/500.
+        assert resp.status_code in (404, 410, 500)
 
     @pytest.mark.asyncio
     async def test_runtime_scan_timeout_handling(self):

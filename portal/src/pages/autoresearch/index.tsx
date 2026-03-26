@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { FlaskConical, TrendingUp, CheckCircle, XCircle, AlertTriangle, Play } from "lucide-react";
+import { FlaskConical, TrendingUp, CheckCircle, XCircle, AlertTriangle } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";

@@ -1,15 +1,7 @@
 import { useMemo, useState } from "react";
 import {
-  Shield,
-  ShieldAlert,
-  ShieldCheck,
-  ShieldX,
   Scan,
   RefreshCw,
-  AlertTriangle,
-  CheckCircle,
-  XCircle,
-  Target,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";

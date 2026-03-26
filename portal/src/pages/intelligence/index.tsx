@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import {
-  Brain,
   TrendingUp,
   TrendingDown,
   Minus,
@@ -11,7 +10,6 @@ import {
   RefreshCw,
   Zap,
   Shield,
-  Target,
   Sparkles,
 } from "lucide-react";
 

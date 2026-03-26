@@ -3,11 +3,11 @@
 ## Changelog Entry (2026-03-24)
 
 - Hard-cut runtime to graph-first execution in `Agent.run()` and removed legacy harness fallback behavior.
-- Standardized runtime-mode API contracts to graph-only while preserving request-scoped override safety in runtime-proxy.
+- Standardized runtime-mode API contracts to graph-only on edge runtime endpoints.
 - Added node-level graph observability (`NODE_START`/`NODE_END`/`NODE_ERROR`) with persisted node spans linked by `trace_id` and `session_id`.
 - Linked eval persistence end-to-end with per-trial `session_id`/`trace_id` records for drill-down from eval runs to traces.
 - Added initial enterprise controls (`enable_checkpoints`, `require_human_approval`) in graph execution path and API request surfaces.
-- Added approval pause/resume contract with durable graph checkpoints and resume endpoints on both agent and runtime-proxy surfaces.
+- Added approval pause/resume contract with durable graph checkpoints and edge runtime resume endpoints.
 
 ## Scope
 
@@ -16,19 +16,15 @@ This release completes the graph runtime hard cut. `Agent.run()` now executes vi
 ## Implemented
 
 - Graph runtime is now the active execution path in `Agent.run()`.
-- Runtime-mode request fields are graph-only (`"graph"` when supplied) on:
-  - `POST /api/v1/agents/{name}/run`
-  - `POST /api/v1/agents/{name}/run/stream`
+- Runtime execution is edge-first on:
   - `POST /api/v1/runtime-proxy/agent/run`
-  - `POST /api/v1/workflows/{workflow_id}/run`
-- Runtime-proxy override safety:
-  - per-request overrides do not mutate shared cached agent config
-  - override requests use a request-scoped agent instance
+  - `POST /api/v1/runtime-proxy/runnable/invoke`
+  - `POST /api/v1/runtime-proxy/runnable/stream-events`
+- Backend runtime execution routes are blocked (`410`) and treated as control-plane only.
 - Approval-gated pause/resume:
   - run responses include `stop_reason` and `checkpoint_id`
   - paused runs persist checkpoint payloads to `graph_checkpoints`
-  - resume endpoints:
-    - `POST /api/v1/agents/{name}/run/checkpoints/{checkpoint_id}/resume`
+  - resume endpoint:
     - `POST /api/v1/runtime-proxy/agent/run/checkpoints/{checkpoint_id}/resume`
 - Node-level graph observability:
   - `NODE_START`, `NODE_END`, `NODE_ERROR` events emitted

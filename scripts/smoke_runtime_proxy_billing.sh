@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Live smoke: deployed backend health + runtime-proxy billing paths.
+# Live smoke: worker runtime execution + backend billing/observability paths.
 #
 # Required:
-#   AGENTOS_BACKEND_URL   e.g. https://your-app.up.railway.app
-#   EDGE_INGEST_TOKEN     same value as worker BACKEND_INGEST_TOKEN / EDGE_INGEST_TOKEN
+#   AGENTOS_BACKEND_URL   e.g. https://your-control-plane.example.com
+#   AGENTOS_WORKER_URL    e.g. https://your-worker.workers.dev
+#   EDGE_INGEST_TOKEN     same value as worker SERVICE token
 #
 # Optional:
 #   SMOKE_AUTH_EMAIL + SMOKE_AUTH_PASSWORD  — signup/login (password min 8 chars), then /auth/me org_id for billing + cost-ledger check
 #   SMOKE_JWT                               — skip signup/login; use this Bearer token for observability/billing GETs
-#   SMOKE_LLM=1                             — also POST /runtime-proxy/llm/infer (uses real GMI quota / spend)
+#   SMOKE_LLM=1                             — also POST worker /runtime-proxy/llm/infer (uses real GMI quota / spend)
 #   SMOKE_LLM_MODEL                         — default deepseek-ai/DeepSeek-V3.2
 #
 # Usage:
 #   export AGENTOS_BACKEND_URL=https://...
+#   export AGENTOS_WORKER_URL=https://...
 #   export EDGE_INGEST_TOKEN=...
 #   export SMOKE_AUTH_EMAIL=you@example.com SMOKE_AUTH_PASSWORD='your-password'
 #   bash scripts/smoke_runtime_proxy_billing.sh
@@ -23,6 +25,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 BASE_URL="${AGENTOS_BACKEND_URL:-}"
+WORKER_URL="${AGENTOS_WORKER_URL:-}"
 EDGE_TOKEN="${EDGE_INGEST_TOKEN:-}"
 SMOKE_LLM="${SMOKE_LLM:-0}"
 SMOKE_LLM_MODEL="${SMOKE_LLM_MODEL:-deepseek-ai/DeepSeek-V3.2}"
@@ -59,8 +62,10 @@ PY
 
 require_env() {
   [[ -n "$BASE_URL" ]] || fail "Set AGENTOS_BACKEND_URL"
+  [[ -n "$WORKER_URL" ]] || fail "Set AGENTOS_WORKER_URL"
   [[ -n "$EDGE_TOKEN" ]] || fail "Set EDGE_INGEST_TOKEN"
   BASE_URL="${BASE_URL%/}"
+  WORKER_URL="${WORKER_URL%/}"
 }
 
 http_get() {
@@ -141,8 +146,8 @@ print(json.dumps({
 PY
 )
 
-info "POST /api/v1/runtime-proxy/tool/call (session=${RUN_ID})"
-T_RAW=$(curl -sS -w "\n%{http_code}" -X POST "${BASE_URL}/api/v1/runtime-proxy/tool/call" \
+info "POST worker /api/v1/runtime-proxy/tool/call (session=${RUN_ID})"
+T_RAW=$(curl -sS -w "\n%{http_code}" -X POST "${WORKER_URL}/api/v1/runtime-proxy/tool/call" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${EDGE_TOKEN}" \
   -H "X-Edge-Token: ${EDGE_TOKEN}" \
@@ -166,8 +171,8 @@ print(json.dumps({
 PY
 )
 
-info "POST /api/v1/runtime-proxy/sandbox/exec"
-S_RAW=$(curl -sS -w "\n%{http_code}" -X POST "${BASE_URL}/api/v1/runtime-proxy/sandbox/exec" \
+info "POST worker /api/v1/runtime-proxy/sandbox/exec"
+S_RAW=$(curl -sS -w "\n%{http_code}" -X POST "${WORKER_URL}/api/v1/runtime-proxy/sandbox/exec" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${EDGE_TOKEN}" \
   -H "X-Edge-Token: ${EDGE_TOKEN}" \
@@ -193,8 +198,8 @@ print(json.dumps({
 }))
 PY
 )
-  info "POST /api/v1/runtime-proxy/llm/infer (SMOKE_LLM=1, model=${SMOKE_LLM_MODEL})"
-  L_RAW=$(curl -sS -w "\n%{http_code}" -X POST "${BASE_URL}/api/v1/runtime-proxy/llm/infer" \
+  info "POST worker /api/v1/runtime-proxy/llm/infer (SMOKE_LLM=1, model=${SMOKE_LLM_MODEL})"
+  L_RAW=$(curl -sS -w "\n%{http_code}" -X POST "${WORKER_URL}/api/v1/runtime-proxy/llm/infer" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${EDGE_TOKEN}" \
     -H "X-Edge-Token: ${EDGE_TOKEN}" \

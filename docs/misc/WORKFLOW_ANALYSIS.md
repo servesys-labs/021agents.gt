@@ -53,7 +53,7 @@ User/Client
 ### 7) Async Runtime (`/api/v1/jobs/*`, `/api/v1/workflows/*`)
 - Job queue supports retries/dead-letter semantics.
 - Workflow DAG execution with run status and trace references.
-- Background worker + scheduler start on API startup.
+- Runtime execution is edge-first; backend exposes control-plane and status/query surfaces.
 
 ### 8) Sandbox Operations (`/api/v1/sandbox/*`, builtin sandbox tools)
 - Create/exec/read/write/list/kill/keepalive flows.

@@ -19,7 +19,7 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { useToast } from "../../components/common/ToastProvider";
-import { safeArray, type AgentInfo } from "../../lib/adapters";
+import type { AgentInfo } from "../../lib/adapters";
 import { useApiQuery, apiRequest } from "../../lib/api";
 
 type RagStatus = {

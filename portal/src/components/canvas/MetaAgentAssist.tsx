@@ -15,6 +15,22 @@ type Props = {
   onReviewDraft?: () => void;
   onCenterDraft?: () => void;
   onDeployDraft?: () => void;
+  playbookAgentName?: string | null;
+  playbookLoading?: boolean;
+  playbookError?: string | null;
+  playbook?: {
+    control_plane_entrypoints?: Record<string, Record<string, string>>;
+    langchain_equivalent_runtime?: {
+      runnable_composition?: { primitives?: string[]; module?: string };
+      graph_execution?: Record<string, string>;
+      observability_eval?: Record<string, string>;
+    };
+    multi_agent_blueprint?: {
+      pattern?: string;
+      roles?: Array<{ role?: string; responsibility?: string }>;
+      workflow?: string[];
+    };
+  } | null;
 };
 
 /* ── Quick-action suggestion chips (like Railway) ──────────────── */
@@ -35,6 +51,10 @@ export function MetaAgentAssist({
   onReviewDraft,
   onCenterDraft,
   onDeployDraft,
+  playbookAgentName,
+  playbookLoading,
+  playbookError,
+  playbook,
 }: Props) {
   const [input, setInput] = useState("");
   type ChatMessage = { role: "user" | "assistant"; text: string };
@@ -55,6 +75,28 @@ export function MetaAgentAssist({
       setHistory((prev) => [...prev, { role: "assistant" as const, text: lastResult }].slice(-100));
     }
   }, [lastResult]);
+
+  const playbookPromptTemplates = (() => {
+    const agent = playbookAgentName || "my-agent";
+    const steps = playbook?.multi_agent_blueprint?.pattern || "supervisor_specialists";
+    return [
+      {
+        id: "create-agent",
+        label: "Create Agent",
+        prompt: `Create a new agent for this project with strict graph linting and include an async telemetry branch with idempotency_key.`,
+      },
+      {
+        id: "run-eval",
+        label: "Run Eval Loop",
+        prompt: `For ${agent}, run an eval loop: pick tasks, run trials, summarize failures, and propose top 3 improvements.`,
+      },
+      {
+        id: "multi-agent",
+        label: "Design Multi-Agent",
+        prompt: `Design a ${steps} architecture for ${agent} with supervisor routing, specialist delegation, and non-blocking background telemetry/eval lanes.`,
+      },
+    ];
+  })();
 
   const handleSubmit = (text?: string) => {
     const trimmed = (text || input).trim();
@@ -87,6 +129,84 @@ export function MetaAgentAssist({
 
       {/* ── Chat history ────────────────────────────────────── */}
       <div ref={historyRef} className="flex-1 overflow-y-auto min-h-0">
+        {(playbookLoading || playbook || playbookError) && (
+          <div className="p-4 border-b border-border-default">
+            <div className="rounded-xl border border-border-default bg-surface-base p-3">
+              <p className="text-[11px] font-semibold text-text-primary mb-2">
+                Meta Agent Playbook{playbookAgentName ? ` - ${playbookAgentName}` : ""}
+              </p>
+              {playbookLoading ? (
+                <p className="text-[11px] text-text-muted">Loading control-plane playbook...</p>
+              ) : playbookError ? (
+                <p className="text-[11px] text-text-muted">
+                  Playbook unavailable: {playbookError}
+                </p>
+              ) : (
+                <div className="space-y-3 text-[11px] text-text-secondary">
+                  <div>
+                    <p className="text-text-muted mb-1">Control Plane APIs</p>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(playbook?.control_plane_entrypoints || {}).map(([group, entries]) => (
+                        <span
+                          key={group}
+                          title={Object.values(entries || {}).slice(0, 4).join("\n")}
+                          className="px-2 py-1 rounded-md bg-surface-overlay border border-border-default text-[10px]"
+                        >
+                          {group}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-text-muted mb-1">Use In Prompt</p>
+                    <div className="flex flex-wrap gap-1">
+                      {playbookPromptTemplates.map((item) => (
+                        <button
+                          key={item.id}
+                          onClick={() => {
+                            setInput(item.prompt);
+                            setTimeout(() => inputRef.current?.focus(), 0);
+                          }}
+                          className="px-2 py-1 rounded-md bg-surface-overlay border border-border-default text-[10px] text-text-secondary hover:text-text-primary hover:border-accent/40"
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-text-muted mb-1">LangChain-Equivalent Runtime</p>
+                    <div className="flex flex-wrap gap-1">
+                      {(playbook?.langchain_equivalent_runtime?.runnable_composition?.primitives || []).map((p) => (
+                        <span
+                          key={p}
+                          className="px-2 py-1 rounded-md bg-accent/10 border border-accent/20 text-[10px] text-accent"
+                        >
+                          {p}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <p className="text-text-muted mb-1">Multi-Agent Pattern</p>
+                    <p className="text-[11px]">
+                      {playbook?.multi_agent_blueprint?.pattern || "n/a"}
+                    </p>
+                    {(playbook?.multi_agent_blueprint?.workflow || []).length > 0 && (
+                      <ul className="mt-1 space-y-1">
+                        {(playbook?.multi_agent_blueprint?.workflow || []).slice(0, 3).map((step) => (
+                          <li key={step} className="text-[10px] text-text-muted">
+                            {step}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         {latestDraft && (
           <div className="p-4 border-b border-border-default">
             <div className="rounded-xl border border-accent/30 bg-accent/5 p-3">

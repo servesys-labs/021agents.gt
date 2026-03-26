@@ -114,6 +114,21 @@ class TestAgentBuilder:
         assert builder.is_complete
 
     @pytest.mark.asyncio
+    async def test_meta_operator_fallback_is_hardened(self):
+        provider = FakeBuilderProvider(["I need more information..."])
+        builder = AgentBuilder(provider=provider)
+        config = await builder.build_from_description(
+            "Create a meta agent for CRUD, telemetry, eval experiments, and rollout decisions",
+        )
+        assert builder.is_complete
+        assert "meta-agent" in config.tags
+        assert "create-agent" in config.tools
+        assert "eval-agent" in config.tools
+        assert "run-agent" in config.tools
+        assert "strict graph lint" in (config.system_prompt or "").lower()
+        assert config.governance.get("budget_limit_usd", 0.0) >= 20.0
+
+    @pytest.mark.asyncio
     async def test_conversational_flow(self):
         provider = FakeBuilderProvider([
             "What kind of tasks should this agent handle?",

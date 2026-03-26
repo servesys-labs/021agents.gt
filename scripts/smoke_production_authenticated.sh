@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # smoke_production_authenticated.sh — production smoke test (edge token + JWT)
 #
-# Tests the full stack: backend API, worker proxy, CF bindings, telemetry,
-# agent execution, and auth. Uses both auth modes:
-#   - Edge token: for runtime-proxy, edge-ingest, /cf/* (worker↔backend)
+# Tests the full stack: backend control plane, worker runtime, CF bindings, telemetry,
+# and auth. Uses both auth modes:
+#   - Edge token: for worker runtime-proxy and /cf/* endpoints
 #   - JWT: for portal-facing endpoints (sessions, billing, settings)
 #
 # Usage:
@@ -55,15 +55,11 @@ skip_check() {
   printf "${YELLOW}  ○${RESET} %-45s %s\n" "$label" "$reason"
 }
 
-# Helpers for edge-token auth
-edge_get() {
-  curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer ${EDGE_TOKEN}" "${BACKEND}${1}"
-}
+# Helpers for edge-token auth (worker runtime only)
 edge_post() {
   local path="$1"; shift
   curl -s -o /dev/null -w "%{http_code}" \
-    -H "Authorization: Bearer ${EDGE_TOKEN}" -X POST "${BACKEND}${path}" "$@"
+    -H "Authorization: Bearer ${EDGE_TOKEN}" -X POST "${WORKER}${path}" "$@"
 }
 jwt_get() {
   curl -s -o /dev/null -w "%{http_code}" -H "$JWT_AUTH" "${BACKEND}${1}"
@@ -116,23 +112,23 @@ else
   skip_check "JWT auth" "Could not obtain JWT — portal endpoints will be skipped"
 fi
 
-check "Edge token auth (runtime-proxy)" "200" \
+check "Edge token auth (worker runtime-proxy)" "200" \
   "$(edge_post /api/v1/runtime-proxy/tool/call -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"echo ok"}}')"
 
-check "Edge token rejection (wrong token)" "401" \
-  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' -X POST "${BACKEND}/api/v1/runtime-proxy/tool/call" -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"echo"}}')"
+check "Worker runtime auth rejection (wrong token)" "401" \
+  "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' -X POST "${WORKER}/api/v1/runtime-proxy/tool/call" -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"echo"}}')"
 
 # ══════════════════════════════════════════════════════════════
-# SECTION 3: Runtime Proxy (edge token — worker↔backend path)
+# SECTION 3: Edge Runtime (worker)
 # ══════════════════════════════════════════════════════════════
-printf "\n${BOLD}Runtime Proxy (edge token)${RESET}\n"
-check "POST runtime-proxy/agent/run" "200" \
+printf "\n${BOLD}Edge Runtime (worker)${RESET}\n"
+check "POST worker runtime-proxy/agent/run" "200" \
   "$(edge_post /api/v1/runtime-proxy/agent/run -H 'Content-Type: application/json' -d '{"agent_name":"research-assistant","task":"Say hi.","channel":"smoke-test"}')"
-check "POST runtime-proxy/llm/infer" "200" \
+check "POST worker runtime-proxy/llm/infer" "200" \
   "$(edge_post /api/v1/runtime-proxy/llm/infer -H 'Content-Type: application/json' -d '{"provider":"gmi","model":"deepseek-ai/DeepSeek-V3.2","messages":[{"role":"user","content":"hi"}],"max_tokens":5}')"
-check "POST runtime-proxy/tool/call" "200" \
+check "POST worker runtime-proxy/tool/call" "200" \
   "$(edge_post /api/v1/runtime-proxy/tool/call -H 'Content-Type: application/json' -d '{"tool":"bash","args":{"command":"echo smoke"}}')"
-check "POST runtime-proxy/sandbox/exec" "200" \
+check "POST worker runtime-proxy/sandbox/exec" "200" \
   "$(edge_post /api/v1/runtime-proxy/sandbox/exec -H 'Content-Type: application/json' -d '{"command":"echo sandbox-ok"}')"
 
 # ══════════════════════════════════════════════════════════════

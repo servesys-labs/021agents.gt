@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
-import { QueryState } from "../../components/common/QueryState";
 import { FormField } from "../../components/common/FormField";
 import { SlidePanel } from "../../components/common/SlidePanel";
 import { StatusBadge } from "../../components/common/StatusBadge";
@@ -719,7 +718,7 @@ function ChatPlatformsTab() {
     qr_svg?: string;
     instructions?: string;
   } | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [botToken, setBotToken] = useState("");
@@ -729,23 +728,24 @@ function ChatPlatformsTab() {
     setError("");
     try {
       // One API call: saves token, pushes to worker, registers webhook, returns QR
-      const data = await apiRequest<any>("/api/v1/chat/telegram/connect", "POST", {
+      const data = await apiRequest<Record<string, unknown>>("/api/v1/chat/telegram/connect", "POST", {
         bot_token: botToken,
       });
       if (data.success) {
         setTelegramQR({
-          deep_link: data.deep_link,
-          bot_username: data.bot_username,
+          deep_link: typeof data.deep_link === "string" ? data.deep_link : undefined,
+          bot_username: typeof data.bot_username === "string" ? data.bot_username : undefined,
           qr_svg: "", // Will be generated on fetchQR
-          instructions: `Bot @${data.bot_username} connected! ${data.webhook_registered ? "Webhook active." : "Set webhook URL manually."}`,
+          instructions: `Bot @${String(data.bot_username || "")} connected! ${data.webhook_registered ? "Webhook active." : "Set webhook URL manually."}`,
         });
         // Fetch full QR
         await fetchQR();
       } else {
         setError("Connection failed");
       }
-    } catch (err: any) {
-      setError(err?.message || "Failed to connect bot");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to connect bot";
+      setError(message);
     } finally {
       setSaving(false);
     }
@@ -755,10 +755,18 @@ function ChatPlatformsTab() {
     setLoading(true);
     setError("");
     try {
-      const data = await apiRequest<any>("/api/v1/chat/telegram/qr");
-      setTelegramQR(data);
-    } catch (err: any) {
-      setError(err?.message || "Failed to generate QR code. Is TELEGRAM_BOT_TOKEN configured?");
+      const data = await apiRequest<Record<string, unknown>>("/api/v1/chat/telegram/qr");
+      setTelegramQR({
+        deep_link: typeof data.deep_link === "string" ? data.deep_link : undefined,
+        bot_username: typeof data.bot_username === "string" ? data.bot_username : undefined,
+        qr_svg: typeof data.qr_svg === "string" ? data.qr_svg : undefined,
+        instructions: typeof data.instructions === "string" ? data.instructions : undefined,
+      });
+    } catch (err: unknown) {
+      const message = err instanceof Error
+        ? err.message
+        : "Failed to generate QR code. Is TELEGRAM_BOT_TOKEN configured?";
+      setError(message);
     } finally {
       setLoading(false);
     }

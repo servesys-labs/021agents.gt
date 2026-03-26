@@ -5,13 +5,11 @@ import {
   Eye,
   BarChart3,
   CheckCircle2,
-  XCircle,
   Clock,
   Target,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
-import { QueryState } from "../../components/common/QueryState";
 import { FormField } from "../../components/common/FormField";
 import { SlidePanel } from "../../components/common/SlidePanel";
 import { StatusBadge } from "../../components/common/StatusBadge";
@@ -19,8 +17,51 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
 import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
-import { safeArray, type AgentInfo } from "../../lib/adapters";
-import { apiRequest, useApiQuery } from "../../lib/api";
+import type { AgentInfo } from "../../lib/adapters";
+import { ApiError, apiUpload, getToken, useApiQuery } from "../../lib/api";
+
+/** POST with query string only — matches FastAPI `run_eval` (no JSON body). */
+async function postEvalRun(path: string): Promise<void> {
+  const token = getToken();
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    try {
+      const payload = (await response.json()) as {
+        detail?: string;
+        message?: string;
+      };
+      message = payload.detail ?? payload.message ?? message;
+    } catch {
+      /* keep generic */
+    }
+    throw new ApiError(message, response.status);
+  }
+  if (response.status === 204) return;
+  try {
+    await response.json();
+  } catch {
+    throw new ApiError(
+      "Expected JSON response but received a non-JSON payload. Verify the API path/proxy.",
+      response.status || 500,
+    );
+  }
+}
+
+/** Control-plane eval router (`agentos/api/routers/eval.py`, prefix `/api/v1`). */
+const EVAL_API = {
+  tasks: "/api/v1/eval/tasks",
+  tasksUpload: "/api/v1/eval/tasks/upload",
+  runs: (limit: number) => `/api/v1/eval/runs?limit=${limit}`,
+  run: (agentName: string, evalFile: string, trials: number) =>
+    `/api/v1/eval/run?agent_name=${encodeURIComponent(agentName)}&eval_file=${encodeURIComponent(evalFile)}&trials=${trials}`,
+  runDetail: (runId: number) => `/api/v1/eval/runs/${runId}`,
+} as const;
 
 type EvalTaskInfo = { file: string; name: string; task_count: number };
 type EvalTasksResponse = { tasks: EvalTaskInfo[] };
@@ -44,8 +85,8 @@ export const EvalPage = () => {
 
   /* ── Queries ──────────────────────────────────────────────── */
   const agentsQuery = useApiQuery<AgentInfo[]>("/api/v1/agents");
-  const tasksQuery = useApiQuery<EvalTasksResponse>("/api/v1/eval/tasks");
-  const runsQuery = useApiQuery<EvalRun[]>("/api/v1/eval/runs?limit=50");
+  const tasksQuery = useApiQuery<EvalTasksResponse>(EVAL_API.tasks);
+  const runsQuery = useApiQuery<EvalRun[]>(EVAL_API.runs(50));
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data]);
   const runs = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
@@ -60,7 +101,7 @@ export const EvalPage = () => {
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const runDetailQuery = useApiQuery<Record<string, unknown>>(
-    `/api/v1/eval/runs/${selectedRunId ?? 0}`,
+    EVAL_API.runDetail(selectedRunId ?? 0),
     selectedRunId !== null,
   );
 
@@ -72,16 +113,10 @@ export const EvalPage = () => {
       for (const file of Array.from(files)) {
         formData.append("files", file);
       }
-      const token = localStorage.getItem("token");
-      const headers: Record<string, string> = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
-
-      const response = await fetch("/api/v1/eval/tasks/upload", {
-        method: "POST",
-        headers,
-        body: formData,
-      });
-      if (!response.ok) throw new Error(`Upload failed (${response.status})`);
+      await apiUpload<{ uploaded: unknown[]; count: number }>(
+        EVAL_API.tasksUpload,
+        formData,
+      );
       showToast("Task file uploaded", "success");
       void tasksQuery.refetch();
     } catch (err) {
@@ -104,8 +139,8 @@ export const EvalPage = () => {
     }
     setRunning(true);
     try {
-      const path = `/api/v1/eval/run?agent_name=${encodeURIComponent(selectedAgent)}&eval_file=${encodeURIComponent(selectedFile)}&trials=${trials}`;
-      await apiRequest(path, "POST");
+      const path = EVAL_API.run(selectedAgent, selectedFile, trials);
+      await postEvalRun(path);
       showToast("Eval run started", "success");
       void runsQuery.refetch();
     } catch (err) {

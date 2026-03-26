@@ -372,23 +372,22 @@ Graph mode is configured per agent:
 }
 ```
 
-API callers can request graph mode per request (without changing saved agent config):
+Edge runtime callers can execute graph runs per request:
 
-- `POST /api/v1/agents/{name}/run` with body field `"runtime_mode": "graph"`
-- `POST /api/v1/agents/{name}/run/stream` with body field `"runtime_mode": "graph"`
-- `POST /api/v1/runtime-proxy/agent/run` with body field `"runtime_mode": "graph"`
-- `POST /api/v1/workflows/{workflow_id}/run` with body field `"runtime_mode": "graph"`
-- Optional enterprise controls on agent run endpoints: `"enable_checkpoints": true` and `"require_human_approval": true`
+- `POST /api/v1/runtime-proxy/agent/run`
+- `POST /api/v1/runtime-proxy/runnable/invoke`
+- `POST /api/v1/runtime-proxy/runnable/stream-events`
+- `POST /api/v1/runtime-proxy/runnable/runs/tree`
+- Optional enterprise controls in runtime payloads: `"enable_checkpoints": true` and `"require_human_approval": true`
 - Approval-gated runs may return `stop_reason: "human_approval_required"` with a `checkpoint_id` for resume.
-- Resume endpoints:
-  - `POST /api/v1/agents/{name}/run/checkpoints/{checkpoint_id}/resume`
+- Resume endpoint:
   - `POST /api/v1/runtime-proxy/agent/run/checkpoints/{checkpoint_id}/resume`
 
 Graph runtime notes:
 
 - API request override is optional; if omitted, graph runtime still executes.
 - Legacy harness mode is no longer used by `Agent.run()`.
-- Runtime-proxy per-request overrides use a request-scoped agent instance to avoid cache races.
+- Backend runtime execution endpoints are deprecated/blocked (`410`) in edge-first mode.
 
 See `docs/graph-runtime-release-notes.md` for migration and verification details.
 
@@ -609,10 +608,10 @@ agentos/
   builder.py        # Meta-agent that builds agents
   cli.py            # 22 commands (intel, security, issues, gold-image, voice, ...)
   defaults.py       # Orchestrator prompt, templates, tool list
-  scheduler.py      # Cron scheduling (auto-started in API server)
+  scheduler.py      # Cron scheduling helper (edge-triggered or external orchestration)
   env.py            # .env loader
   api/
-    app.py          # FastAPI app, 40 routers, background scheduler + job worker
+    app.py          # FastAPI control plane app (CRUD, observability, governance)
     deps.py         # Auth, RBAC, scoped API keys (25+ scopes)
     ratelimit.py    # Sliding window rate limiter (120 RPM, 20 burst)
     routers/        # 40 router files (240+ endpoints total)
