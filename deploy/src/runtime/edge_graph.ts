@@ -311,6 +311,8 @@ export interface FreshGraphCtx {
   pendingCheckpoint: CheckpointPayload | null;
   /** Node IDs with active breakpoints — halts before executing that node. */
   breakpointNodeIds: Set<string>;
+  /** Whether the reflection gate has already retried once (max 1 retry). */
+  reflectionRetried: boolean;
 }
 
 const FRESH_BOOTSTRAP = "fresh_bootstrap";
@@ -319,6 +321,7 @@ const FRESH_SUMMARIZE = "fresh_summarize";
 const FRESH_ROUTE_LLM = "fresh_route_llm";
 const FRESH_POST_LLM = "fresh_post_llm";
 const FRESH_APPROVAL = "fresh_approval";
+const FRESH_REFLECT = "fresh_reflect";
 const FRESH_FINAL = "fresh_final_answer";
 const FRESH_TOOLS = "fresh_tools";
 const FRESH_LOOP = "fresh_loop_detect";
@@ -573,13 +576,79 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
 
   [FRESH_POST_LLM]: {
     id: FRESH_POST_LLM,
-    description: "Branch: final answer vs tools",
+    description: "Branch: reflection → final answer vs tools",
     async run(ctx) {
       const llm = ctx.llmResponse;
       if (!llm) return GRAPH_HALT;
-      if (llm.tool_calls.length === 0) return FRESH_FINAL;
+      if (llm.tool_calls.length === 0) return FRESH_REFLECT;
       if (ctx.config.require_human_approval) return FRESH_APPROVAL;
       return FRESH_TOOLS;
+    },
+  },
+
+  [FRESH_REFLECT]: {
+    id: FRESH_REFLECT,
+    description: "Reflection gate: assess confidence before finalizing (harness pattern)",
+    async run(ctx) {
+      const llm = ctx.llmResponse!;
+      const { results, events, sessionId, traceId, turn } = ctx;
+
+      // Calculate confidence score (1.0 baseline, deducted for failures/warnings)
+      let confidence = 1.0;
+      const toolFailures: string[] = [];
+      const warnings: string[] = [];
+
+      for (const result of results) {
+        if (result.tool_results) {
+          for (const tr of result.tool_results) {
+            if (tr.error) {
+              confidence -= 0.15;
+              toolFailures.push(`${tr.tool}: ${(tr.error || "").slice(0, 80)}`);
+            }
+          }
+        }
+        if (result.error) {
+          confidence -= 0.2;
+          warnings.push(result.error.slice(0, 80));
+        }
+      }
+      // Penalize if answer is very short relative to task complexity
+      if (llm.content.length < 20 && ctx.task.length > 100) {
+        confidence -= 0.2;
+        warnings.push("Answer is very short relative to task complexity");
+      }
+      confidence = Math.max(0, Math.min(1, confidence));
+
+      // Record reflection artifact as telemetry event
+      pushRuntimeEvent(events, "governance_check" as any, turn, {
+        session_id: sessionId,
+        trace_id: traceId,
+        node_id: "reflection",
+        confidence,
+        tool_failures: toolFailures,
+        warnings,
+        action: confidence >= 0.6 ? "finalize" : "retry",
+      });
+
+      // If confidence is below threshold and we haven't retried yet, ask model to reconsider
+      if (confidence < 0.6 && !ctx.reflectionRetried) {
+        ctx.reflectionRetried = true;
+        const issues = [
+          ...toolFailures.map((f) => `Tool failure: ${f}`),
+          ...warnings.map((w) => `Warning: ${w}`),
+        ];
+        ctx.messages.push({
+          role: "system",
+          content:
+            `[Reflection gate] Confidence is ${confidence.toFixed(2)} (below 0.6 threshold). ` +
+            `Issues: ${issues.join("; ")}. ` +
+            `Please reconsider your answer and try again with a more thorough approach.`,
+        });
+        // Route back to LLM for another attempt
+        return FRESH_ROUTE_LLM;
+      }
+
+      return FRESH_FINAL;
     },
   },
 
@@ -789,6 +858,23 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         latency_ms: Date.now() - toolStageStarted,
       });
 
+      // Tool failure recovery: inject guidance when tools fail (harness pattern)
+      // Instead of blind retry, we tell the agent what failed so it can try
+      // a different approach on the next turn.
+      const failedTools = toolResults.filter((tr) => tr.error);
+      if (failedTools.length > 0) {
+        const failureSummary = failedTools
+          .map((tr) => `- ${tr.tool}: ${(tr.error || "").slice(0, 150)}`)
+          .join("\n");
+        messages.push({
+          role: "system",
+          content:
+            `[Tool failure notice] ${failedTools.length} tool(s) failed this turn:\n${failureSummary}\n` +
+            `Consider an alternative approach — use different tools, different arguments, ` +
+            `or break the task into smaller steps.`,
+        });
+      }
+
       const executionMode =
         config.parallel_tool_calls && llm.tool_calls.length > 1 ? "parallel" : "sequential";
 
@@ -969,6 +1055,7 @@ export function buildFreshGraphCtx(
     route: null,
     pendingCheckpoint: null,
     breakpointNodeIds: extractBreakpointNodeIds(config),
+    reflectionRetried: false,
   };
 }
 

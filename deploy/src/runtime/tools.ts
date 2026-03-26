@@ -599,8 +599,34 @@ async function dispatch(
       const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
       let readPath = args.path || "";
       if (readPath && !readPath.startsWith("/")) readPath = `/workspace/${readPath}`;
-      const r = await sandbox.exec(`cat -n "${readPath}" 2>&1 | head -2000`, { timeout: 10 });
-      return r.stdout || r.stderr || "File not found or empty";
+      const offset = Math.max(1, Number(args.offset) || 1);
+      const limit = Math.min(200, Math.max(1, Number(args.limit) || 100));
+      const endLine = offset + limit - 1;
+      const r = await sandbox.exec(
+        `sed -n '${offset},${endLine}p' "${readPath}" 2>/dev/null | cat -n | sed 's/^ *\\([0-9]*\\)\\t/'"$((offset-1))"'+\\1\\t/' 2>/dev/null || cat -n "${readPath}" 2>&1 | sed -n '${offset},${endLine}p'`,
+        { timeout: 10 },
+      );
+      if (!r.stdout && r.stderr) return r.stderr;
+      // Report total line count so agent knows file size
+      const wcr = await sandbox.exec(`wc -l < "${readPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "?" }));
+      const totalLines = (wcr.stdout || "?").trim();
+      return `[Showing lines ${offset}-${Math.min(offset + limit - 1, Number(totalLines) || 99999)} of ${totalLines} total]\n${r.stdout || "File not found or empty"}`;
+    }
+
+    case "view-file": {
+      // Stateful file viewer (SWE-agent ACI pattern) — 100-line window with cursor
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      let viewPath = args.path || "";
+      if (viewPath && !viewPath.startsWith("/")) viewPath = `/workspace/${viewPath}`;
+      const line = Math.max(1, Number(args.line) || 1);
+      const window = Math.min(200, Math.max(10, Number(args.window) || 100));
+      const half = Math.floor(window / 2);
+      const startLine = Math.max(1, line - half);
+      const endLine = startLine + window - 1;
+      const r = await sandbox.exec(`awk 'NR>=${startLine} && NR<=${endLine} { printf "%6d\\t%s\\n", NR, $0 }' "${viewPath}" 2>&1`, { timeout: 10 });
+      const wcr = await sandbox.exec(`wc -l < "${viewPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "?" }));
+      const total = (wcr.stdout || "?").trim();
+      return `[${viewPath} | lines ${startLine}-${Math.min(endLine, Number(total) || endLine)} of ${total} | cursor at line ${line}]\n${r.stdout || "File not found or empty"}`;
     }
 
     case "write-file": {
@@ -626,40 +652,137 @@ async function dispatch(
 
     case "edit-file": {
       const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
-      const read = await sandbox.exec(`cat "${args.path}"`, { timeout: 10 });
+      const editPath = args.path || "";
+      const read = await sandbox.exec(`cat "${editPath}"`, { timeout: 10 });
       const content = read.stdout || "";
       const oldText = args.old_text || args.old_string || "";
-      if (!content.includes(oldText)) return `Error: old_text not found in ${args.path}`;
+      if (!content.includes(oldText)) return `Error: old_text not found in ${editPath}`;
       const newContent = content.replace(oldText, args.new_text || args.new_string || "");
-      await sandbox.writeFile(args.path, newContent);
+
+      // Lint-on-edit: run syntax validation BEFORE applying (SWE-agent ACI pattern)
+      // Detects language from file extension and runs appropriate linter
+      const ext = editPath.split(".").pop()?.toLowerCase() || "";
+      let lintError = "";
+      if (["py"].includes(ext)) {
+        const tmpLint = `/tmp/lint_${Date.now()}.py`;
+        await sandbox.writeFile(tmpLint, newContent);
+        const lint = await sandbox.exec(`python3 -c "import ast; ast.parse(open('${tmpLint}').read())" 2>&1`, { timeout: 10 }).catch(() => ({ stdout: "", stderr: "lint timeout", exitCode: 1 }));
+        await sandbox.exec(`rm -f ${tmpLint}`, { timeout: 5 }).catch(() => {});
+        if (lint.exitCode && lint.exitCode !== 0) lintError = (lint.stderr || lint.stdout || "").trim();
+      } else if (["js", "ts", "jsx", "tsx", "mjs"].includes(ext)) {
+        const tmpLint = `/tmp/lint_${Date.now()}.${ext}`;
+        await sandbox.writeFile(tmpLint, newContent);
+        const lint = await sandbox.exec(`node --check "${tmpLint}" 2>&1 || true`, { timeout: 10 }).catch(() => ({ stdout: "", stderr: "", exitCode: 0 }));
+        await sandbox.exec(`rm -f ${tmpLint}`, { timeout: 5 }).catch(() => {});
+        if (lint.stderr && lint.stderr.includes("SyntaxError")) lintError = lint.stderr.trim();
+      } else if (["json"].includes(ext)) {
+        try { JSON.parse(newContent); } catch (e: any) { lintError = `JSON syntax error: ${e.message}`; }
+      }
+
+      if (lintError) {
+        // Reject the edit — return error with original + failed edit context
+        const oldLines = oldText.split("\n").length;
+        const newLines = (args.new_text || args.new_string || "").split("\n").length;
+        return `Edit REJECTED — syntax error detected:\n${lintError}\n\nYour edit would have replaced ${oldLines} lines with ${newLines} lines in ${editPath}.\nFix the syntax and try again.`;
+      }
+
+      await sandbox.writeFile(editPath, newContent);
 
       // Sync edited file to R2 (non-blocking)
-      const editPath = args.path || "";
       if (editPath.startsWith("/workspace/") && env.STORAGE) {
         import("./workspace").then(({ syncFileToR2 }) =>
           syncFileToR2(env.STORAGE, args.org_id || "default", args.agent_name || "agent", editPath, newContent, sessionId),
         ).catch(() => {});
       }
 
-      return `Edited ${args.path}: replaced ${oldText.length} chars`;
+      // Return unified diff so agent sees exactly what changed (SWE-agent ACI pattern)
+      const oldLines = oldText.split("\n");
+      const newLines = (args.new_text || args.new_string || "").split("\n");
+      const diffPreview = oldLines.length <= 20 && newLines.length <= 20
+        ? `\n--- a/${editPath}\n+++ b/${editPath}\n` +
+          oldLines.map((l: string) => `- ${l}`).join("\n") + "\n" +
+          newLines.map((l: string) => `+ ${l}`).join("\n")
+        : "";
+      return `Edited ${editPath}: replaced ${oldText.length} chars with ${(args.new_text || args.new_string || "").length} chars (lint: ok)${diffPreview}`;
     }
 
     case "grep": {
+      // Smart search with refinement forcing (SWE-agent ACI pattern)
       const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const maxResults = Math.min(50, Number(args.max_results) || 20);
+      const escapedPattern = (args.pattern || "").replace(/"/g, '\\"');
+      const searchPath = args.path || ".";
+      // First check total match count
+      const countR = await sandbox.exec(
+        `grep -rn "${escapedPattern}" "${searchPath}" 2>/dev/null | wc -l`,
+        { timeout: 15 },
+      );
+      const totalMatches = Number((countR.stdout || "0").trim()) || 0;
+      if (totalMatches > maxResults) {
+        // Force refinement: tell the agent there are too many results
+        const preview = await sandbox.exec(
+          `grep -rn "${escapedPattern}" "${searchPath}" 2>/dev/null | head -${maxResults}`,
+          { timeout: 15 },
+        );
+        return `[${totalMatches} matches found — showing first ${maxResults}. Narrow your search pattern for better results.]\n${preview.stdout || ""}`;
+      }
       const r = await sandbox.exec(
-        `grep -rn "${(args.pattern || "").replace(/"/g, '\\"')}" "${args.path || "."}" | head -${args.max_results || 20}`,
+        `grep -rn "${escapedPattern}" "${searchPath}" 2>/dev/null | head -${maxResults}`,
         { timeout: 15 },
       );
       return r.stdout || "No matches found";
     }
 
     case "glob": {
+      // Smart file search with capping (SWE-agent ACI pattern)
       const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const searchPath = args.path || ".";
+      const escapedPattern = (args.pattern || "*").replace(/"/g, '\\"');
+      // Count total first
+      const countR = await sandbox.exec(
+        `find "${searchPath}" -name "${escapedPattern}" -type f 2>/dev/null | wc -l`,
+        { timeout: 10 },
+      );
+      const totalFiles = Number((countR.stdout || "0").trim()) || 0;
+      if (totalFiles > 50) {
+        const preview = await sandbox.exec(
+          `find "${searchPath}" -name "${escapedPattern}" -type f 2>/dev/null | head -50`,
+          { timeout: 10 },
+        );
+        return `[${totalFiles} files match — showing first 50. Use a more specific pattern or path to narrow results.]\n${preview.stdout || ""}`;
+      }
       const r = await sandbox.exec(
-        `find "${args.path || "."}" -name "${(args.pattern || "*").replace(/"/g, '\\"')}" -type f | head -50`,
+        `find "${searchPath}" -name "${escapedPattern}" -type f 2>/dev/null | head -50`,
         { timeout: 10 },
       );
       return r.stdout || "No files found";
+    }
+
+    case "search-file": {
+      // Search within a specific file (SWE-agent ACI pattern)
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      let filePath = args.path || "";
+      if (filePath && !filePath.startsWith("/")) filePath = `/workspace/${filePath}`;
+      const term = (args.term || args.pattern || "").replace(/"/g, '\\"');
+      const r = await sandbox.exec(
+        `grep -n "${term}" "${filePath}" 2>/dev/null | head -50`,
+        { timeout: 10 },
+      );
+      if (!r.stdout) return `No matches for "${args.term || args.pattern}" in ${filePath}`;
+      const lines = (r.stdout || "").split("\n").filter((l: string) => l.trim());
+      return `[${lines.length} matches in ${filePath}]\n${r.stdout}`;
+    }
+
+    case "find-file": {
+      // Find a file by name (SWE-agent ACI pattern)
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const name = (args.name || args.filename || "").replace(/"/g, '\\"');
+      const searchPath = args.path || "/workspace";
+      const r = await sandbox.exec(
+        `find "${searchPath}" -name "*${name}*" -type f 2>/dev/null | head -30`,
+        { timeout: 10 },
+      );
+      return r.stdout || `No files matching "${name}" found in ${searchPath}`;
     }
 
     case "knowledge-search":
@@ -1871,6 +1994,86 @@ async function dispatch(
       }
     }
 
+    // ── Git Tools (SWE-agent ACI pattern: version control for deployed agents) ──
+
+    case "git-init": {
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const workDir = args.path || "/workspace";
+      const r = await sandbox.exec(
+        `cd "${workDir}" && git init && git add -A && git commit -m "initial commit" --allow-empty 2>&1`,
+        { timeout: 15 },
+      );
+      return r.stdout || r.stderr || "Git initialized";
+    }
+
+    case "git-status": {
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const workDir = args.path || "/workspace";
+      const r = await sandbox.exec(`cd "${workDir}" && git status 2>&1`, { timeout: 10 });
+      return r.stdout || r.stderr || "Not a git repository";
+    }
+
+    case "git-diff": {
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const workDir = args.path || "/workspace";
+      const target = args.target || "";
+      const r = await sandbox.exec(
+        `cd "${workDir}" && git diff ${target} 2>&1 | head -500`,
+        { timeout: 15 },
+      );
+      if (!r.stdout?.trim()) return "No changes detected";
+      const lines = (r.stdout || "").split("\n");
+      if (lines.length >= 500) return `[Diff truncated at 500 lines — use a more specific path]\n${r.stdout}`;
+      return r.stdout;
+    }
+
+    case "git-commit": {
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const workDir = args.path || "/workspace";
+      const message = args.message || "checkpoint";
+      const r = await sandbox.exec(
+        `cd "${workDir}" && git add -A && git commit -m "${message.replace(/"/g, '\\"')}" 2>&1`,
+        { timeout: 15 },
+      );
+      return r.stdout || r.stderr || "Nothing to commit";
+    }
+
+    case "git-log": {
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const workDir = args.path || "/workspace";
+      const count = Math.min(30, Number(args.count) || 10);
+      const r = await sandbox.exec(
+        `cd "${workDir}" && git log --oneline -${count} 2>&1`,
+        { timeout: 10 },
+      );
+      return r.stdout || r.stderr || "No commits yet";
+    }
+
+    case "git-branch": {
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const workDir = args.path || "/workspace";
+      const action = args.action || "list";
+      const name = args.name || "";
+      if (action === "create" && name) {
+        const r = await sandbox.exec(`cd "${workDir}" && git checkout -b "${name.replace(/"/g, '\\"')}" 2>&1`, { timeout: 10 });
+        return r.stdout || r.stderr || `Created branch ${name}`;
+      }
+      if (action === "switch" && name) {
+        const r = await sandbox.exec(`cd "${workDir}" && git checkout "${name.replace(/"/g, '\\"')}" 2>&1`, { timeout: 10 });
+        return r.stdout || r.stderr || `Switched to ${name}`;
+      }
+      const r = await sandbox.exec(`cd "${workDir}" && git branch -a 2>&1`, { timeout: 10 });
+      return r.stdout || r.stderr || "No branches";
+    }
+
+    case "git-stash": {
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const workDir = args.path || "/workspace";
+      const action = args.action || "push";
+      const r = await sandbox.exec(`cd "${workDir}" && git stash ${action} 2>&1`, { timeout: 10 });
+      return r.stdout || r.stderr || "Stash operation complete";
+    }
+
     default:
       throw new Error(`Tool '${tool}' not available on edge runtime`);
   }
@@ -2488,11 +2691,15 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "read-file",
-      description: "Read a file from the sandbox filesystem",
+      description:
+        "Read a file from the sandbox filesystem. Returns a window of lines with line numbers. " +
+        "Use offset/limit to paginate through large files.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "File path to read" },
+          offset: { type: "number", description: "Start reading from this line number (default 1)" },
+          limit: { type: "number", description: "Max lines to return (default 100, max 200)" },
         },
         required: ["path"],
       },
@@ -3476,6 +3683,162 @@ const TOOL_CATALOG: ToolDefinition[] = [
           url: { type: "string", description: "MCP server URL (for register)" },
         },
         required: ["action"],
+      },
+    },
+  },
+
+  // ── ACI Tools (SWE-agent harness patterns) ─────────────────────
+
+  {
+    type: "function",
+    function: {
+      name: "view-file",
+      description:
+        "View a file with a scrollable window centered on a line number. " +
+        "Shows 100 lines by default with line numbers. Use this instead of read-file " +
+        "when you need to navigate a large file incrementally.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path" },
+          line: { type: "number", description: "Center the view on this line number (default 1)" },
+          window: { type: "number", description: "Number of lines to show (default 100, max 200)" },
+        },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search-file",
+      description: "Search for a pattern within a specific file. Returns matching lines with line numbers.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path to search" },
+          term: { type: "string", description: "Search term or regex pattern" },
+        },
+        required: ["path", "term"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "find-file",
+      description: "Find files by name (partial match). Use when you know the filename but not the path.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Filename or partial name to search for" },
+          path: { type: "string", description: "Directory to search in (default /workspace)" },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git-init",
+      description: "Initialize a git repository in the workspace and create an initial commit.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Directory path (default /workspace)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git-status",
+      description: "Show the working tree status — modified, staged, and untracked files.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Repository path (default /workspace)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git-diff",
+      description: "Show changes between commits, working tree, or staged files. Returns unified diff.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Repository path (default /workspace)" },
+          target: { type: "string", description: "Diff target: empty for unstaged, --staged, HEAD~1, or a commit hash" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git-commit",
+      description: "Stage all changes and create a commit with a descriptive message.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Repository path (default /workspace)" },
+          message: { type: "string", description: "Commit message" },
+        },
+        required: ["message"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git-log",
+      description: "Show recent commit history (one line per commit).",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Repository path (default /workspace)" },
+          count: { type: "number", description: "Number of commits to show (default 10, max 30)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git-branch",
+      description: "List, create, or switch branches. Actions: list (default), create, switch.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Repository path (default /workspace)" },
+          action: { type: "string", description: "Action: list, create, switch" },
+          name: { type: "string", description: "Branch name (for create/switch)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "git-stash",
+      description: "Stash or restore uncommitted changes. Actions: push (default), pop, list.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Repository path (default /workspace)" },
+          action: { type: "string", description: "Action: push, pop, list" },
+        },
+        required: [],
       },
     },
   },
