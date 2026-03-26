@@ -8,7 +8,7 @@
 
 import { callLLM } from "./llm";
 import { executeTools, getToolDefinitions } from "./tools";
-import { resolvePlanRouting, writeTurn } from "./db";
+import { resolvePlanRouting, writeTurn, writeSession } from "./db";
 import {
   createWorkingMemory,
   buildMemoryContext,
@@ -44,6 +44,10 @@ export interface EdgeGraphNode<TCtx> {
 /**
  * Deterministic executor: follows `next` pointers until HALT.
  * Bounded step count prevents accidental cycles.
+ *
+ * Breakpoint support: if the context has a `breakpointNodeIds` Set and the
+ * current node id is in it, the executor creates a checkpoint and halts
+ * with stop_reason="breakpoint" (same mechanism as approval gates).
  */
 export async function runEdgeGraph<TCtx>(
   ctx: TCtx,
@@ -58,6 +62,57 @@ export async function runEdgeGraph<TCtx>(
     if (!node) {
       throw new Error(`edge graph: unknown node ${cursor}`);
     }
+
+    // ── Breakpoint gate ──────────────────────────────────────────────
+    const bpSet = (ctx as Record<string, unknown>).breakpointNodeIds;
+    if (bpSet instanceof Set && bpSet.has(cursor)) {
+      const fctx = ctx as unknown as FreshGraphCtx;
+      const checkpointId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      fctx.pendingCheckpoint = {
+        checkpoint_id: checkpointId,
+        session_id: fctx.sessionId,
+        trace_id: fctx.traceId,
+        agent_name: fctx.config.agent_name,
+        messages: fctx.messages,
+        current_turn: fctx.turn,
+        cumulative_cost_usd: fctx.cumulativeCost,
+        status: "breakpoint",
+        created_at: Date.now(),
+      };
+      fctx.stopReason = "breakpoint";
+      fctx.output = "";
+      fctx.results.push({
+        turn_number: fctx.turn,
+        content: "",
+        tool_results: [],
+        done: true,
+        stop_reason: "breakpoint",
+        cost_usd: 0,
+        cumulative_cost_usd: fctx.cumulativeCost,
+        model: fctx.lastModel,
+        execution_mode: "sequential",
+        latency_ms: Date.now() - fctx.turnStartedMs,
+      });
+      pushRuntimeEvent(fctx.events, "governance_check", fctx.turn, {
+        session_id: fctx.sessionId,
+        trace_id: fctx.traceId,
+        breakpoint: true,
+        breakpoint_node_id: cursor,
+        checkpoint_id: checkpointId,
+      });
+      pushRuntimeEvent(fctx.events, "turn_end", fctx.turn, {
+        session_id: fctx.sessionId,
+        trace_id: fctx.traceId,
+        graph_id: fctx.rootGraphId,
+        parent_graph_id: "",
+        done: true,
+        stop_reason: "breakpoint",
+        checkpoint_id: checkpointId,
+      });
+      return; // halt — caller persists checkpoint for resume
+    }
+    // ── End breakpoint gate ──────────────────────────────────────────
+
     cursor = await node.run(ctx);
   }
   throw new Error("edge graph: exceeded maxSteps (possible cycle)");
@@ -65,7 +120,7 @@ export async function runEdgeGraph<TCtx>(
 
 // ── State snapshot merge (same semantics as former engine.ts) ───────────────
 
-type StateMergeStrategy =
+export type StateMergeStrategy =
   | "replace"
   | "sum_numeric"
   | "max_numeric"
@@ -254,6 +309,8 @@ export interface FreshGraphCtx {
   route: { model: string; provider: string; max_tokens: number } | null;
   /** If set, run halts and caller must persist for resume. */
   pendingCheckpoint: CheckpointPayload | null;
+  /** Node IDs with active breakpoints — halts before executing that node. */
+  breakpointNodeIds: Set<string>;
 }
 
 const FRESH_BOOTSTRAP = "fresh_bootstrap";
@@ -327,6 +384,25 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         tags: request.tags || [],
         metadata: request.metadata || {},
         channel: ctx.channel,
+      });
+
+      // Write placeholder session row so turns FK doesn't fail
+      writeSession(hyperdrive, {
+        session_id: sessionId,
+        org_id: config.org_id,
+        project_id: config.project_id,
+        agent_name: config.agent_name,
+        status: "running",
+        input_text: request.task,
+        output_text: "",
+        model: "",
+        trace_id: traceId,
+        step_count: 0,
+        action_count: 0,
+        wall_clock_seconds: 0,
+        cost_total_usd: 0,
+      }).catch((err) => {
+        console.error("[runtime] placeholder session write failed", err);
       });
 
       ctx.turn = 1;
@@ -892,7 +968,42 @@ export function buildFreshGraphCtx(
     llmResponse: null,
     route: null,
     pendingCheckpoint: null,
+    breakpointNodeIds: extractBreakpointNodeIds(config),
   };
+}
+
+/**
+ * Extract breakpoint node IDs from the agent config's declarative graph.
+ * Nodes with `breakpoint: true` cause the graph executor to halt before them.
+ */
+function extractBreakpointNodeIds(config: AgentConfig): Set<string> {
+  const ids = new Set<string>();
+  try {
+    const raw = config as unknown as Record<string, unknown>;
+    // Try harness.declarative_graph.nodes, harness.graph.nodes, or top-level graph.nodes
+    const candidates = [
+      (raw.harness as Record<string, unknown> | undefined)?.declarative_graph,
+      (raw.harness as Record<string, unknown> | undefined)?.graph,
+      raw.declarative_graph,
+      raw.graph,
+    ];
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+        const nodes = (candidate as Record<string, unknown>).nodes;
+        if (nodes && typeof nodes === "object" && !Array.isArray(nodes)) {
+          for (const [nodeId, nodeCfg] of Object.entries(nodes as Record<string, unknown>)) {
+            if (nodeCfg && typeof nodeCfg === "object" && (nodeCfg as Record<string, unknown>).breakpoint === true) {
+              ids.add(nodeId);
+            }
+          }
+          break; // found a valid graph, stop searching
+        }
+      }
+    }
+  } catch {
+    // best-effort
+  }
+  return ids;
 }
 
 // ── Resume graph ───────────────────────────────────────────────────────────

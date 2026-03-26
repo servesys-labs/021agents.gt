@@ -8,7 +8,6 @@
 import {
   loadAgentConfig,
   writeSession,
-  writeEvent,
   writeBillingRecord,
   writeEvalTrial,
 } from "./db";
@@ -46,6 +45,24 @@ export async function edgeRun(
 
   if (request.org_id) config.org_id = request.org_id;
   if (request.project_id) config.project_id = request.project_id;
+
+  // Hydrate sandbox workspace from R2 before execution so non-stream runs
+  // have the same persistent machine illusion as stream runs.
+  if (env.STORAGE && env.SANDBOX) {
+    try {
+      const { getSandbox } = await import("@cloudflare/sandbox");
+      const { hydrateWorkspace } = await import("./workspace");
+      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      await hydrateWorkspace(
+        env.STORAGE,
+        sandbox,
+        config.org_id || "default",
+        config.agent_name || request.agent_name,
+      );
+    } catch {
+      // Best-effort hydration; execution should continue on failures.
+    }
+  }
 
   const ctx = buildFreshGraphCtx(
     env,
@@ -133,6 +150,36 @@ export async function edgeRun(
     success: !hasError,
   });
 
+  // Run codemode observability processor if configured
+  if (config.codemode_observability) {
+    try {
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const snippetRows = await sql`
+        SELECT code FROM codemode_snippets WHERE id = ${config.codemode_observability} AND org_id = ${config.org_id} LIMIT 1
+      `;
+      if (snippetRows.length > 0) {
+        const { executeObservabilityProcessor } = await import("./codemode");
+        const { getToolDefinitions } = await import("./tools");
+        const code = String((snippetRows[0] as Record<string, unknown>).code || "");
+        const allTools = getToolDefinitions([]);
+        const obsResult = await executeObservabilityProcessor(
+          env, code, ctx.events, allTools, sessionId,
+        );
+        // Push alerts as additional events
+        for (const alert of obsResult.alerts) {
+          pushRuntimeEvent(ctx.events, "error", 0, {
+            session_id: sessionId, trace_id: traceId,
+            severity: alert.severity, message: alert.message,
+            source: "codemode_observability",
+          });
+        }
+      }
+    } catch {
+      // Observability processing is best-effort
+    }
+  }
+
   const persistenceTasks: Promise<unknown>[] = [];
 
   persistenceTasks.push(writeSessionAsync(hyperdrive, {
@@ -186,7 +233,7 @@ export async function edgeRun(
     }
   }
 
-  persistenceTasks.push(writeEventsAsync(hyperdrive, ctx.events));
+  // Events go via TELEMETRY_QUEUE only (Hyperdrive connection dies after response)
 
   if (ctx.pendingCheckpoint) {
     persistenceTasks.push(writeCheckpoint(hyperdrive, ctx.pendingCheckpoint));
@@ -274,35 +321,9 @@ function writeEvalTrialAsync(
 }
 
 /** Fire-and-forget runtime event persistence to Postgres. */
-function writeEventsAsync(
-  hyperdrive: Hyperdrive,
-  events: RuntimeEvent[],
-): Promise<void> {
-  const writes: Promise<unknown>[] = [];
-  for (const event of events) {
-    const data = event.data || {};
-    writes.push(writeEvent(hyperdrive, {
-      session_id: event.session_id,
-      turn: event.turn,
-      event_type: event.event_type,
-      action: String(data.action || data.node_id || ""),
-      plan: String(data.plan || ""),
-      provider: String(data.provider || ""),
-      model: String(data.model || ""),
-      tool_name: String(data.tool_name || data.tool || ""),
-      status: String(data.status || ""),
-      latency_ms: Number(data.latency_ms) || 0,
-      input_tokens: Number(data.input_tokens) || 0,
-      output_tokens: Number(data.output_tokens) || 0,
-      cost_usd: Number(data.cost_usd) || 0,
-      details_json: JSON.stringify(data),
-      created_at: Number(event.timestamp) > 0 ? Number(event.timestamp) / 1000 : Date.now() / 1000,
-    }).catch((err) => {
-      console.error("[runtime] writeEvent failed", err);
-    }));
-  }
-  return Promise.allSettled(writes).then(() => undefined);
-}
+// Events are written exclusively via TELEMETRY_QUEUE → queue consumer → Supabase.
+// No direct Hyperdrive event writes — those were failing with "Network connection lost"
+// because the connection dies when the Worker response lifecycle ends.
 
 /**
  * Session-end workspace sync — verify manifest is up to date.
@@ -538,7 +559,7 @@ export async function writeCheckpoint(
       ${checkpoint.checkpoint_id}, ${checkpoint.agent_name},
       ${checkpoint.session_id}, ${checkpoint.trace_id},
       ${checkpoint.status}, ${JSON.stringify(checkpoint)},
-      '{}', NOW()
+      '{}', ${Date.now() / 1000}
     ) ON CONFLICT (checkpoint_id) DO UPDATE SET
       status = EXCLUDED.status,
       payload = EXCLUDED.payload
@@ -681,7 +702,7 @@ export async function edgeResume(
     parent_session_id: checkpoint.session_id,
   });
 
-  await writeEventsAsync(hyperdrive, ctx.events);
+  // Events go via TELEMETRY_QUEUE only (Hyperdrive connection dies after response)
 
   await writeSessionAsync(hyperdrive, {
     session_id: resumedSessionId,

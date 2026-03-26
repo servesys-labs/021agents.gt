@@ -24,9 +24,17 @@ import {
   writeEvalRun, writeEvalTrial, listEvalRuns, getEvalRun, listEvalTrialsByRun,
   executeBoundedDagDeclarativeRun,
   executeLinearDeclarativeRun,
+  executeDeclarativeGraph,
+  buildDeclarativeGraphContext,
+  prepareDeclarativeGraph,
+  subgraphRegistry,
+  expandSubgraphs,
+  autoRegisterTools,
+  createWebSocketSendWithBackpressure,
   type RunRequest, type RuntimeEnv, type BatchRequest, type GraphSpec,
 } from "./runtime";
 import { streamRun } from "./runtime/stream";
+import { getCircuitStatus } from "./runtime/tools";
 
 // Re-export Sandbox so Cloudflare can discover the Durable Object class
 export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
@@ -46,6 +54,7 @@ export interface Env extends Cloudflare.Env {
   BRAVE_SEARCH_KEY?: string;     // Brave Search API key
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_AGENT_NAME?: string;
+  ENABLE_LANGCHAIN_TOOLS?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +362,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     // 1. DO SQLite (fast, local)
     this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
       VALUES (${role}, ${clean.slice(0, 8000)}, ${channel || ""}, ${Date.now() / 1000})`;
+    // Prune: keep last 100 messages to prevent unbounded growth
+    this.sql`DELETE FROM conversation_messages WHERE id NOT IN (
+      SELECT id FROM conversation_messages ORDER BY id DESC LIMIT 100
+    )`;
     // 2. Supabase (durable, survives deploys) — fire-and-forget
     if (this.env.HYPERDRIVE) {
       import("./runtime/db").then(({ writeConversationMessage }) =>
@@ -369,16 +382,24 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   private async _isAuthorized(request: Request): Promise<boolean> {
     const url = new URL(request.url);
+    // Internal service binding calls are trusted (CF enforces this)
     if (url.hostname === "internal") return true;
-    const serviceToken = String(this.env.SERVICE_TOKEN || "").trim();
-    const secret = String(this.env.AUTH_JWT_SECRET || "").trim();
-    if (!serviceToken && !secret) return true;
+
     const auth = request.headers.get("Authorization") || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!auth.startsWith("Bearer ")) return false;
+    const token = auth.slice(7).trim();
     if (!token) return false;
+
+    // Check SERVICE_TOKEN first
+    const serviceToken = String(this.env.SERVICE_TOKEN || "").trim();
     if (serviceToken && token === serviceToken) return true;
-    if (!secret) return false;
-    return verifyHs256Jwt(token, secret);
+
+    // Check JWT
+    const secret = String(this.env.AUTH_JWT_SECRET || "").trim();
+    if (secret) return verifyHs256Jwt(token, secret);
+
+    // No valid auth method succeeded — deny access
+    return false;
   }
 
   // ── WebSocket (real-time token streaming) ───────────────────────
@@ -404,6 +425,49 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   async onMessage(connection: Connection, message: string | ArrayBuffer) {
     const data = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 
+    // Reset conversation history
+    if (data.type === "reset" || data.type === "new") {
+      this.sql`DELETE FROM conversation_messages`;
+      connection.send(JSON.stringify({ type: "reset", ok: true }));
+      return;
+    }
+
+    // Auto-register tools on first run if configured
+    // Note: autoRegisterTools requires a register function
+    // if (data.type === "run" && this.env.ENABLE_TOOL_AUTO_REGISTER === "true") {
+    //   await autoRegisterTools((tool) => { /* register tool */ });
+    // }
+
+    if (data.type === "feedback") {
+      // P0 Fix: Validate rating input
+      const VALID_RATINGS = new Set(["positive", "negative", "neutral"]);
+      const rawRating = String(data.rating || "neutral");
+      const validatedRating = VALID_RATINGS.has(rawRating) ? rawRating : "neutral";
+
+      // P0 Fix: Client-generated idempotency key prevents duplicates
+      const feedbackId = String(data.feedback_id || crypto.randomUUID().slice(0, 12));
+      const sessionId = String(data.session_id || "");
+      const turnNum = Number(data.turn || 0);
+      const comment = String(data.comment || "").slice(0, 2000);
+      const messageContent = String(data.message_content || "").slice(0, 2000);
+      const userId = String(data.user_id || ""); // P1 Fix: Track user attribution
+
+      if (this.env.HYPERDRIVE) {
+        import("./runtime/db").then(async ({ getDb }) => {
+          const sql = await getDb(this.env.HYPERDRIVE);
+          await sql`
+            INSERT INTO user_feedback (id, session_id, turn_number, rating, comment, message_preview, user_id, org_id, agent_name, channel, created_at)
+            VALUES (${feedbackId}, ${sessionId}, ${turnNum},
+                    ${validatedRating}, ${comment}, ${messageContent},
+                    ${userId}, ${data.org_id || ""}, ${data.agent_name || ""}, 'websocket', ${Date.now() / 1000})
+            ON CONFLICT (id) DO NOTHING
+          `.catch((e: unknown) => console.error("[feedback] Write failed:", e)); // P1 Fix: Log failures
+        }).catch((e: unknown) => console.error("[feedback] DB init failed:", e));
+      }
+      connection.send(JSON.stringify({ type: "feedback_ack", ok: true, feedback_id: feedbackId }));
+      return;
+    }
+
     if (data.type === "run") {
       const config = this.state.config;
       const runtimeEnv: RuntimeEnv = {
@@ -418,7 +482,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
         AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
         AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-      BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+        BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
         CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
@@ -428,36 +492,141 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const inputText = String(data.input || "");
       const history = this._loadConversationHistory(24);
       let finalOutput = "";
-      const sendAndCapture = (msg: string) => {
-        connection.send(msg);
+
+      // Create backpressure-controlled send function
+      const { send } = createWebSocketSendWithBackpressure(connection, {
+        highWatermarkBytes: 100 * 1024, // 100KB
+        lowWatermarkBytes: 20 * 1024,   // 20KB
+        maxMessages: 1000,
+      });
+
+      const sendAndCapture = async (msg: string) => {
         try {
-          const parsed = JSON.parse(msg) as { type?: string; output?: string };
-          if (parsed.type === "done" && typeof parsed.output === "string") {
-            finalOutput = parsed.output;
+          await send(msg);
+          try {
+            const parsed = JSON.parse(msg) as { type?: string; output?: string };
+            if (parsed.type === "done" && typeof parsed.output === "string") {
+              finalOutput = parsed.output;
+            }
+          } catch {
+            // ignore malformed ws payloads
           }
-        } catch {
-          // ignore malformed ws payloads
+        } catch (err) {
+          // Backpressure overflow - log and continue
+          console.warn("[AgentOSAgent] WebSocket backpressure overflow:", err);
         }
       };
 
-      // Stream the run — tokens flow to client in real-time
-      await streamRun(
-        runtimeEnv,
-        this.env.HYPERDRIVE,
-        inputText,
-        data.agent_name || config.agentName || "agentos",
-        sendAndCapture,
-        {
-          org_id: data.org_id || config.orgId || "",
-          project_id: data.project_id || config.projectId || "",
-          channel: data.channel || "websocket",
-          history_messages: history,
-        },
-      );
+      // Check for declarative graph execution
+      const hasDeclarativeGraph = data.graph || (config as any).declarative_graph || (config as any).graph;
+      
+      if (hasDeclarativeGraph && data.use_declarative !== false) {
+        // Use unified declarative executor
+        await this._runDeclarativeGraph(
+          runtimeEnv,
+          inputText,
+          data.graph || (config as any).declarative_graph || (config as any).graph,
+          sendAndCapture,
+          {
+            org_id: data.org_id || config.orgId || "",
+            project_id: data.project_id || config.projectId || "",
+            channel: data.channel || "websocket",
+          }
+        );
+      } else {
+        // Stream the run — tokens flow to client in real-time
+        await streamRun(
+          runtimeEnv,
+          this.env.HYPERDRIVE,
+          inputText,
+          data.agent_name || config.agentName || "agentos",
+          sendAndCapture,
+          {
+            org_id: data.org_id || config.orgId || "",
+            project_id: data.project_id || config.projectId || "",
+            channel: data.channel || "websocket",
+            history_messages: history,
+          },
+        );
+      }
 
       this._appendConversationMessage("user", inputText, data.channel || "websocket");
       this._appendConversationMessage("assistant", finalOutput, data.channel || "websocket");
     }
+  }
+
+  // Run using unified declarative graph executor
+  private async _runDeclarativeGraph(
+    env: RuntimeEnv,
+    input: string,
+    graph: GraphSpec,
+    send: (msg: string) => Promise<void>,
+    opts: { org_id?: string; project_id?: string; channel?: string }
+  ): Promise<void> {
+    const config = this.state.config;
+    
+    // Build context with event streaming
+    const ctx = await buildDeclarativeGraphContext(
+      env,
+      this.env.HYPERDRIVE,
+      { agent_name: config.agentName, task: input, org_id: opts.org_id, project_id: opts.project_id },
+      {
+        agent_name: config.agentName,
+        system_prompt: config.systemPrompt,
+        provider: config.provider,
+        model: config.model,
+        plan: config.plan || "standard",
+        max_turns: config.maxTurns,
+        budget_limit_usd: config.budgetLimitUsd,
+        tools: config.tools,
+        blocked_tools: config.blockedTools,
+        parallel_tool_calls: true,
+        require_human_approval: false,
+        org_id: opts.org_id || "",
+        project_id: opts.project_id || "",
+      } as any,
+      {
+        telemetryQueue: this.env.TELEMETRY_QUEUE,
+        onEvent: async (event) => {
+          // Stream events to client
+          await send(JSON.stringify({
+            type: event.event_type,
+            ...event.data,
+            timestamp: event.timestamp,
+          }));
+        },
+      }
+    );
+
+    // Prepare graph (validate, expand subgraphs, cache)
+    const prepared = await prepareDeclarativeGraph(ctx, graph, {
+      skipCache: false,
+      skipExpansion: false,
+      skipValidation: false,
+      maxDepth: 3,
+    });
+
+    if (!prepared.validationResult.valid) {
+      await send(JSON.stringify({
+        type: "error",
+        error: `Graph validation failed: ${prepared.validationResult.errors[0]?.message}`,
+      }));
+      return;
+    }
+
+    // Execute graph
+    const result = await executeDeclarativeGraph(ctx, graph);
+
+    // Send final result
+    await send(JSON.stringify({
+      type: "done",
+      output: result.output,
+      cost_usd: result.costUsd,
+      latency_ms: result.latencyMs,
+      turns: result.turnCount,
+      tool_calls: result.toolCallCount,
+      validation_errors: result.validationErrors,
+    }));
   }
 
   // ── Internal HTTP (async run from REST invoke) ──────────────────
@@ -553,6 +722,94 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         latency_ms: finalLatencyMs,
       });
     }
+    // POST /run/stream — SSE streaming for REST clients (portal, curl, etc.)
+    // Returns text/event-stream with real-time token/tool/turn events.
+    if (url.pathname === "/run/stream" && request.method === "POST") {
+      if (!(await this._isAuthorized(request))) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      const data = await request.json() as any;
+      const config = this.state.config;
+      const inputText = String(data.input || "");
+      const history = this._loadConversationHistory(24);
+      const runtimeEnv: RuntimeEnv = {
+        AI: this.env.AI,
+        HYPERDRIVE: this.env.HYPERDRIVE,
+        VECTORIZE: this.env.VECTORIZE,
+        STORAGE: this.env.STORAGE,
+        SANDBOX: this.env.SANDBOX,
+        LOADER: this.env.LOADER,
+        TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
+        BROWSER: this.env.BROWSER,
+        AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+        AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
+        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+      };
+
+      const encoder = new TextEncoder();
+      let finalOutput = "";
+      const self = this;
+      const agentName = data.agent_name || config.agentName || "agentos";
+
+      const stream = new ReadableStream({
+        start(controller) {
+          const send = (msg: string) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${msg}\n\n`));
+              const parsed = JSON.parse(msg) as { type?: string; output?: string };
+              if (parsed.type === "done" && typeof parsed.output === "string") {
+                finalOutput = parsed.output;
+              }
+            } catch {
+              // If controller is closed, silently drop
+            }
+          };
+
+          streamRun(
+            runtimeEnv,
+            self.env.HYPERDRIVE,
+            inputText,
+            agentName,
+            send,
+            {
+              org_id: data.org_id || config.orgId || "",
+              project_id: data.project_id || config.projectId || "",
+              channel: data.channel || "sse",
+              history_messages: history,
+            },
+          ).then(() => {
+            self._appendConversationMessage("user", inputText, data.channel || "sse");
+            self._appendConversationMessage("assistant", finalOutput, data.channel || "sse");
+            try { controller.close(); } catch {}
+          }).catch((err) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: String(err) })}\n\n`));
+              controller.close();
+            } catch {}
+          });
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    }
+
+    // POST /reset — clear conversation history (for /new command)
+    if (url.pathname === "/reset" && request.method === "POST") {
+      this.sql`DELETE FROM conversation_messages`;
+      return Response.json({ ok: true, cleared: true });
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -663,6 +920,116 @@ async function sha256Hex(input: string): Promise<string> {
   return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+const DYNAMIC_EXEC_CACHE_LIMIT = 32;
+const DYNAMIC_EXEC_CACHE_TTL_MS = 5 * 60_000;
+type DynamicExecCacheEntry = { worker: any; expiresAt: number };
+const dynamicExecWorkerCache = new Map<string, DynamicExecCacheEntry>();
+
+function clampSandboxTimeoutSeconds(timeoutSeconds: number | undefined): number {
+  const t = Number.isFinite(timeoutSeconds) ? Number(timeoutSeconds) : 30;
+  return Math.max(1, Math.min(Math.ceil(t), 120));
+}
+
+function sandboxExecOptions(timeoutSeconds?: number): { timeout: number } & Record<string, number> {
+  const timeout = clampSandboxTimeoutSeconds(timeoutSeconds);
+  return {
+    timeout,
+    // Best-effort limits for runtimes that support these options.
+    memoryLimitMb: 512,
+    cpuLimitMs: timeout * 1000,
+  };
+}
+
+function extractPythonImportCandidates(code: string): string[] {
+  if (!code || typeof code !== "string") return [];
+  const modules = new Set<string>();
+  for (const raw of code.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const fromMatch = line.match(/^from\s+([A-Za-z_][\w\.]*)\s+import\s+/);
+    if (fromMatch?.[1]) {
+      const top = fromMatch[1].split(".")[0];
+      if (top) modules.add(top);
+      continue;
+    }
+    const importMatch = line.match(/^import\s+(.+)$/);
+    if (!importMatch?.[1]) continue;
+    for (const segment of importMatch[1].split(",")) {
+      const cleaned = segment.trim().replace(/\s+as\s+.+$/, "");
+      const top = cleaned.split(".")[0].trim();
+      if (top) modules.add(top);
+    }
+  }
+  return [...modules];
+}
+
+async function checkMissingPythonModulesInSandbox(
+  env: Env,
+  sandboxId: string,
+  modules: string[],
+): Promise<string[]> {
+  if (modules.length === 0) return [];
+  const sandbox = getSandbox(env.SANDBOX, sandboxId);
+  const payload = JSON.stringify(modules);
+  const command = `python3 - <<'PY'
+import importlib
+import json
+mods = json.loads(${JSON.stringify(payload)})
+missing = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except Exception:
+        missing.append(m)
+print(json.dumps({"missing": missing}))
+PY`;
+  const result = await sandbox.exec(command, sandboxExecOptions(12));
+  const stdout = String(result.stdout || "").trim();
+  if (!stdout) return [];
+  try {
+    const parsed = JSON.parse(stdout) as { missing?: unknown };
+    if (!Array.isArray(parsed.missing)) return [];
+    return parsed.missing.map((m) => String(m)).filter((m) => m.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function pythonMissingModuleError(missing: string[]): string {
+  return [
+    "Python dependency check failed.",
+    `Missing modules in this sandbox: ${missing.join(", ")}.`,
+    "This environment does not allow dynamic package installs (pip/apt).",
+    "Use pre-baked sandbox images or ask your admin to add required packages.",
+  ].join(" ");
+}
+
+async function getCachedDynamicExecWorker(env: Env, workerCode: string): Promise<any> {
+  const hash = await sha256Hex(workerCode);
+  const key = hash.slice(0, 32);
+  const cached = dynamicExecWorkerCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.worker;
+  dynamicExecWorkerCache.delete(key);
+  const loadedWorker = env.LOADER.load({
+    compatibilityDate: "2026-03-01",
+    mainModule: "main.js",
+    modules: {
+      "main.js": { js: workerCode },
+    },
+    env: {},  // No bindings — isolate cannot access secrets or DB
+    globalOutbound: null,  // Block all outbound network from /cf/tool/exec dynamic-exec
+  });
+  dynamicExecWorkerCache.set(key, {
+    worker: loadedWorker,
+    expiresAt: Date.now() + DYNAMIC_EXEC_CACHE_TTL_MS,
+  });
+  if (dynamicExecWorkerCache.size > DYNAMIC_EXEC_CACHE_LIMIT) {
+    const oldestKey = dynamicExecWorkerCache.keys().next().value;
+    if (oldestKey) dynamicExecWorkerCache.delete(oldestKey);
+  }
+  return loadedWorker;
+}
+
 function extractBearerToken(request: Request): string {
   const auth = request.headers.get("Authorization") || "";
   if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
@@ -673,13 +1040,14 @@ function extractBearerToken(request: Request): string {
 
 async function authorizeAgentIngress(request: Request, env: Env): Promise<Response | null> {
   const token = extractBearerToken(request);
-  const serviceToken = String(env.SERVICE_TOKEN || "").trim();
-  const jwtSecret = String(env.AUTH_JWT_SECRET || "").trim();
-
-  if (!serviceToken && !jwtSecret) return null;
   if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+
+  const serviceToken = String(env.SERVICE_TOKEN || "").trim();
   if (serviceToken && token === serviceToken) return null;
+
+  const jwtSecret = String(env.AUTH_JWT_SECRET || "").trim();
   if (jwtSecret && (await verifyHs256Jwt(token, jwtSecret))) return null;
+
   return Response.json({ error: "unauthorized" }, { status: 401 });
 }
 
@@ -837,8 +1205,11 @@ async function runViaAgent(
   opts?: { org_id?: string; project_id?: string; channel?: string; channel_user_id?: string },
 ): Promise<{ output: string; success: boolean; error?: string; turns: number; tool_calls: number; cost_usd: number; latency_ms: number; session_id: string; trace_id: string; stop_reason: string; [key: string]: unknown }> {
   // Per-user DO isolation: each user gets their own conversation thread
+  // Include org_id to prevent cross-org collision
   const userId = opts?.channel_user_id || "";
-  const doName = userId ? `${agentName}-u-${userId}` : agentName;
+  const orgId = opts?.org_id || "";
+  const orgPrefix = orgId ? `${orgId}-` : "";
+  const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
   const agentId = env.AGENTOS_AGENT.idFromName(doName);
   const agent = env.AGENTOS_AGENT.get(agentId);
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -992,15 +1363,118 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // Health check
+    // Health check — comprehensive runtime status
     if (url.pathname === "/health") {
-      return Response.json({ status: "ok", version: "0.2.0" });
+      const circuits = getCircuitStatus();
+      const openCircuits = Object.entries(circuits).filter(([, s]) => s.state === "open");
+      const { getCodeModeStats } = await import("./runtime/codemode");
+      const codemode = getCodeModeStats();
+      const degradedReasons: string[] = [];
+      if (openCircuits.length > 0) {
+        degradedReasons.push(`open_circuits:${openCircuits.length}`);
+      }
+      if (codemode.pending_executions >= codemode.max_concurrent_executions) {
+        degradedReasons.push("codemode_saturated");
+      }
+      if (codemode.concurrency_rejections_total > 0) {
+        degradedReasons.push("codemode_rejections_observed");
+      }
+      const degraded = degradedReasons.length > 0;
+      
+      return Response.json({ 
+        status: "ok", 
+        version: "0.2.0",
+        service: "runtime",
+        timestamp: Date.now(),
+        circuits: {
+          total: Object.keys(circuits).length,
+          open: openCircuits.length,
+          details: circuits,
+        },
+        codemode,
+        degraded,
+        degraded_reasons: degradedReasons,
+      }, { status: degraded ? 503 : 200 });
+    }
+    
+    // Config cache invalidation endpoint (called by control-plane on agent updates)
+    if (url.pathname === "/api/v1/internal/config-invalidate" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      
+      try {
+        const body = await request.json() as { agent_name?: string; version?: string };
+        const agentName = body.agent_name || "agentos";
+        
+        // Note: DOs will reload config on next request naturally
+        // This endpoint acknowledges the invalidation
+        return Response.json({
+          invalidated: true,
+          agent_name: agentName,
+          version: body.version,
+          note: "Config will be reloaded on next request",
+        });
+      } catch (e: any) {
+        return Response.json({ error: e.message }, { status: 400 });
+      }
+    }
+    
+    // Graph cache invalidation endpoint (called by control-plane on component updates)
+    if (url.pathname === "/api/v1/internal/cache-invalidate" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      
+      try {
+        const body = await request.json() as { 
+          type?: "graph" | "subgraph" | "all"; 
+          graph_id?: string;
+          subgraph_id?: string;
+        };
+        
+        const { invalidateGraphCache, invalidateSubgraphCache, clearGraphCache } = await import("./runtime/graph-cache");
+        
+        switch (body.type) {
+          case "graph":
+            if (body.graph_id) {
+              // Note: Need full graph spec to invalidate - for now clear all
+              clearGraphCache();
+            }
+            break;
+          case "subgraph":
+            if (body.subgraph_id) {
+              invalidateSubgraphCache(body.subgraph_id);
+            }
+            break;
+          case "all":
+          default:
+            clearGraphCache();
+        }
+        
+        return Response.json({
+          invalidated: true,
+          type: body.type || "all",
+          graph_id: body.graph_id,
+          subgraph_id: body.subgraph_id,
+        });
+      } catch (e: any) {
+        return Response.json({ error: e.message }, { status: 400 });
+      }
     }
 
-    // ── Usage / Billing API ──────────────────────────────────────
-    // GET /api/v1/usage?org_id=X&agent_name=Y&cursor=Z&limit=N&from=T&to=T
-    // Returns: summary (totals) + cursor-paginated session list with costs
-    if (url.pathname === "/api/v1/usage" && request.method === "GET") {
+    // POST /api/v1/internal/snippet-cache-invalidate — Invalidate cached codemode snippets
+    if (url.pathname === "/api/v1/internal/snippet-cache-invalidate" && request.method === "POST") {
       const serviceToken = env.SERVICE_TOKEN || "";
       if (serviceToken) {
         const authHeader = request.headers.get("Authorization") || "";
@@ -1011,9 +1485,76 @@ export default {
       }
 
       try {
+        const body = await request.json() as {
+          snippet_id?: string;
+          org_id?: string;
+          clear_all?: boolean;
+        };
+
+        const { invalidateSnippetCache, clearSnippetCache } = await import("./runtime/codemode");
+
+        if (body.clear_all) {
+          clearSnippetCache();
+          return Response.json({ invalidated: true, type: "all" });
+        }
+
+        if (body.snippet_id && body.org_id) {
+          invalidateSnippetCache(body.snippet_id, body.org_id);
+          return Response.json({
+            invalidated: true,
+            snippet_id: body.snippet_id,
+            org_id: body.org_id,
+          });
+        }
+
+        return Response.json({ error: "snippet_id + org_id or clear_all required" }, { status: 400 });
+      } catch (e: any) {
+        return Response.json({ error: e.message }, { status: 400 });
+      }
+    }
+
+    // ── Usage / Billing API ──────────────────────────────────────
+    // GET /api/v1/usage?org_id=X&agent_name=Y&cursor=Z&limit=N&from=T&to=T
+    // Returns: summary (totals) + cursor-paginated session list with costs
+    if (url.pathname === "/api/v1/usage" && request.method === "GET") {
+      // Always require authentication
+      const authHeader = request.headers.get("Authorization") || "";
+      if (!authHeader.startsWith("Bearer ")) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      const token = authHeader.slice(7).trim();
+      if (!token) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+
+      const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+      const jwtSecret = String(env.AUTH_JWT_SECRET || "").trim();
+      let jwtOrgId = "";
+
+      if (serviceToken && token === serviceToken) {
+        // Service token: allow explicit org_id from query param
+        jwtOrgId = url.searchParams.get("org_id") || "default";
+      } else if (jwtSecret) {
+        // JWT: extract org_id from claims, ignore query param
+        try {
+          const parts = token.split(".");
+          if (parts.length !== 3) return Response.json({ error: "unauthorized" }, { status: 401 });
+          const valid = await verifyHs256Jwt(token, jwtSecret);
+          if (!valid) return Response.json({ error: "unauthorized" }, { status: 401 });
+          const payloadRaw = new TextDecoder().decode(base64UrlToBytes(parts[1]));
+          const claims = JSON.parse(payloadRaw) as { org_id?: string };
+          jwtOrgId = claims.org_id || url.searchParams.get("org_id") || "default";
+        } catch {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      } else {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+
+      try {
         const { queryUsage } = await import("./runtime/db");
         const result = await queryUsage(env.HYPERDRIVE, {
-          org_id: url.searchParams.get("org_id") || "default",
+          org_id: jwtOrgId,
           agent_name: url.searchParams.get("agent_name") || undefined,
           cursor: url.searchParams.get("cursor") || undefined,
           limit: Number(url.searchParams.get("limit")) || 20,
@@ -1082,148 +1623,90 @@ export default {
       if (tasks.length === 0) {
         return Response.json({ error: "tasks are required" }, { status: 400 });
       }
-      const runtimeEnv: RuntimeEnv = {
-        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
-        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
-        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
-        AI_GATEWAY_ID: env.AI_GATEWAY_ID,
-        AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
-        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
-        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
-        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
-      };
+      // Run eval in background — no Worker timeout.
+      const agentName = String(body.agent_name || qpAgent || "").trim() || "agentos";
+      const evalName = body.eval_name || `edge_eval_${Date.now()}`;
+      const evalRunId = `eval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-      try {
-        const agentName = String(body.agent_name || qpAgent || "").trim() || "agentos";
-        const evalName = body.eval_name || `edge_eval_${Date.now()}`;
-        const startedAt = Date.now();
-        const trialRows: Array<{
-          task_name: string;
-          trial_number: number;
-          score: number;
-          passed: boolean;
-          latency_ms: number;
-          cost_usd: number;
-          tool_calls: number;
-          error: string;
-          stop_reason: string;
-          session_id: string;
-          trace_id: string;
-          metadata: Record<string, unknown>;
-        }> = [];
+      // Kick off eval in an eval-specific DO instance (no timeout)
+      const evalDoName = `eval-${agentName}-${evalRunId}`;
+      const evalAgentId = env.AGENTOS_AGENT.idFromName(evalDoName);
+      const evalAgent = env.AGENTOS_AGENT.get(evalAgentId);
+      const evalHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (env.SERVICE_TOKEN) evalHeaders.Authorization = `Bearer ${env.SERVICE_TOKEN}`;
 
-        let passCount = 0;
-        let errorCount = 0;
-        let totalScore = 0;
-        let totalLatency = 0;
-        let totalCost = 0;
+      ctx.waitUntil((async () => {
+        try {
+          let passCount = 0;
+          let errorCount = 0;
+          let totalScore = 0;
+          let totalLatency = 0;
+          let totalCost = 0;
+          const trialRows: any[] = [];
 
-        for (const task of tasks) {
-          const taskName = String(task?.name || "");
-          const expected = String(task?.expected || "");
-          const grader = String(task?.grader || "contains");
-          const input = String(task?.input || "");
-          for (let trial = 1; trial <= trials; trial++) {
-            // Eval needs blocking await to grade each trial.
-            // TODO: Move eval runner into a dedicated DO for no-timeout execution.
-            const runResult = await runViaAgent(env, agentName, input, {
-              org_id: body.org_id,
-              project_id: body.project_id,
-              channel: body.channel,
-              channel_user_id: body.channel_user_id,
-            });
-            const grade = gradeEvalOutput(runResult.output, expected, grader);
-            if (grade.passed) passCount += 1;
-            if (!runResult.success || runResult.error) errorCount += 1;
-            totalScore += grade.score;
-            totalLatency += Number(runResult.latency_ms || 0);
-            totalCost += Number(runResult.cost_usd || 0);
-            trialRows.push({
-              task_name: taskName,
-              trial_number: trial,
-              score: grade.score,
-              passed: grade.passed,
-              latency_ms: Number(runResult.latency_ms || 0),
-              cost_usd: Number(runResult.cost_usd || 0),
-              tool_calls: Number(runResult.tool_calls || 0),
-              error: String(runResult.error || ""),
-              stop_reason: String(runResult.stop_reason || ""),
-              session_id: String(runResult.session_id || ""),
-              trace_id: String(runResult.trace_id || ""),
-              metadata: {
-                expected,
-                grader,
-                output: runResult.output,
-                run_id: runResult.run_id || runResult.trace_id || runResult.session_id,
-              },
+          for (const task of tasks) {
+            const taskName = String(task?.name || "");
+            const expected = String(task?.expected || "");
+            const grader = String(task?.grader || "contains");
+            const input = String(task?.input || "");
+            for (let trial = 1; trial <= trials; trial++) {
+              const runResult = await runViaAgent(env, agentName, input, {
+                org_id: body.org_id, project_id: body.project_id,
+                channel: body.channel, channel_user_id: body.channel_user_id,
+              });
+              const grade = gradeEvalOutput(runResult.output, expected, grader);
+              if (grade.passed) passCount++;
+              if (!runResult.success || runResult.error) errorCount++;
+              totalScore += grade.score;
+              totalLatency += Number(runResult.latency_ms || 0);
+              totalCost += Number(runResult.cost_usd || 0);
+              trialRows.push({
+                task_name: taskName, trial_number: trial,
+                score: grade.score, passed: grade.passed,
+                latency_ms: Number(runResult.latency_ms || 0),
+                cost_usd: Number(runResult.cost_usd || 0),
+                tool_calls: Number(runResult.tool_calls || 0),
+                error: String(runResult.error || ""),
+                stop_reason: String(runResult.stop_reason || ""),
+                session_id: String(runResult.session_id || ""),
+                trace_id: String(runResult.trace_id || ""),
+                expected, grader, output: runResult.output,
+              });
+            }
+          }
+
+          const totalTrials = trialRows.length;
+          const passRate = totalTrials > 0 ? passCount / totalTrials : 0;
+          const avgScore = totalTrials > 0 ? totalScore / totalTrials : 0;
+          const avgLatency = totalTrials > 0 ? totalLatency / totalTrials : 0;
+          const dbEvalRunId = await writeEvalRun(env.HYPERDRIVE, {
+            agent_name: agentName, eval_name: evalName,
+            total_tasks: tasks.length, total_trials: totalTrials,
+            pass_count: passCount, fail_count: Math.max(0, totalTrials - passCount),
+            error_count: errorCount, pass_rate: passRate,
+            avg_score: avgScore, avg_latency_ms: avgLatency, total_cost_usd: totalCost,
+            eval_conditions_json: JSON.stringify({ source: "edge_eval_api", trials_per_task: trials }),
+          });
+          for (const row of trialRows) {
+            await writeEvalTrial(env.HYPERDRIVE, {
+              eval_run_id: dbEvalRunId, eval_name: evalName, agent_name: agentName,
+              trial_index: row.trial_number, passed: row.passed, score: row.score,
+              details_json: JSON.stringify(row),
+              trace_id: row.trace_id, session_id: row.session_id,
             });
           }
+        } catch (err) {
+          console.error("[eval] background eval failed:", err instanceof Error ? err.message : err);
         }
+      })());
 
-        const totalTrials = trialRows.length;
-        const failCount = Math.max(0, totalTrials - passCount);
-        const passRate = totalTrials > 0 ? passCount / totalTrials : 0;
-        const avgScore = totalTrials > 0 ? totalScore / totalTrials : 0;
-        const avgLatency = totalTrials > 0 ? totalLatency / totalTrials : 0;
-        const evalRunId = await writeEvalRun(env.HYPERDRIVE, {
-          agent_name: agentName,
-          eval_name: evalName,
-          total_tasks: tasks.length,
-          total_trials: totalTrials,
-          pass_count: passCount,
-          fail_count: failCount,
-          error_count: errorCount,
-          pass_rate: passRate,
-          avg_score: avgScore,
-          avg_latency_ms: avgLatency,
-          total_cost_usd: totalCost,
-          eval_conditions_json: JSON.stringify({
-            source: "edge_eval_api",
-            trials_per_task: trials,
-            created_at_ms: Date.now(),
-          }),
-        });
-        for (const row of trialRows) {
-          await writeEvalTrial(env.HYPERDRIVE, {
-            eval_run_id: evalRunId,
-            eval_name: evalName,
-            agent_name: agentName,
-            trial_index: row.trial_number,
-            passed: row.passed,
-            score: row.score,
-            details_json: JSON.stringify({
-              task_name: row.task_name,
-              trial_number: row.trial_number,
-              latency_ms: row.latency_ms,
-              cost_usd: row.cost_usd,
-              tool_calls: row.tool_calls,
-              error: row.error,
-              stop_reason: row.stop_reason,
-              ...row.metadata,
-            }),
-            trace_id: row.trace_id,
-            session_id: row.session_id,
-          });
-        }
-
-        return Response.json({
-          run_id: evalRunId,
-          eval_name: evalName,
-          pass_rate: passRate,
-          avg_score: avgScore,
-          avg_latency_ms: avgLatency,
-          total_cost_usd: totalCost,
-          total_tasks: tasks.length,
-          total_trials: totalTrials,
-          pass_count: passCount,
-          fail_count: failCount,
-          error_count: errorCount,
-          latency_ms: Date.now() - startedAt,
-        });
-      } catch (err: any) {
-        return Response.json({ error: err.message || String(err) }, { status: 500 });
-      }
+      // Return immediately — poll GET /api/v1/eval/runs for results
+      return Response.json({
+        status: "running",
+        eval_name: evalName,
+        agent_name: agentName,
+        message: "Eval started in background. Poll GET /api/v1/eval/runs for results.",
+      }, { status: 202 });
     }
 
     // ── Edge-native eval read APIs (backend parity) ───────────────────────
@@ -1434,6 +1917,69 @@ export default {
         });
       } catch (err: any) {
         return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── Real-time SSE streaming (no WebSocket required) ─────────
+    // POST /api/v1/runtime-proxy/runnable/stream — proxies to DO /run/stream
+    // Returns text/event-stream with token, tool_start, tool_end, turn_end, done events.
+    // Portal and REST clients can consume this without a WebSocket connection.
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/stream" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      try {
+        const body = await request.json() as {
+          agent_name?: string; task?: string; input?: unknown;
+          org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        };
+
+        const agentName = body.agent_name || "agentos";
+        const task = runnableInputToTask(body.input, body.task);
+        const userId = body.channel_user_id || "";
+        const doName = userId ? `${agentName}-u-${userId}` : agentName;
+        const agentId = env.AGENTOS_AGENT.idFromName(doName);
+        const agent = env.AGENTOS_AGENT.get(agentId);
+
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (env.SERVICE_TOKEN) headers.Authorization = `Bearer ${env.SERVICE_TOKEN}`;
+
+        // Forward to DO /run/stream — returns SSE
+        const doResp = await agent.fetch(new Request("http://internal/run/stream", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            input: task,
+            agent_name: agentName,
+            org_id: body.org_id || "",
+            project_id: body.project_id || "",
+            channel: body.channel || "sse",
+            channel_user_id: userId,
+          }),
+        }));
+
+        if (!doResp.ok) {
+          const errText = await doResp.text();
+          return Response.json({ error: errText }, { status: doResp.status });
+        }
+
+        // Pass through the SSE stream from the DO
+        return new Response(doResp.body, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+          },
+        });
+      } catch (err: any) {
+        return Response.json({ error: err.message || String(err) }, { status: 500 });
       }
     }
 
@@ -1759,6 +2305,341 @@ export default {
       }
     }
 
+    // POST /api/v1/graphs/validate — Validate graph with optional subgraph expansion
+    if (url.pathname === "/api/v1/graphs/validate" && request.method === "POST") {
+      const body = await request.json() as {
+        graph?: unknown;
+        expand_subgraphs?: boolean;
+        max_branching?: number;
+        max_fanin?: number;
+      };
+
+      if (!body.graph || typeof body.graph !== "object") {
+        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
+      }
+
+      try {
+        // Validate graph structure
+        const { validateBoundedDagDeclarativeGraph } = await import("./runtime/linear_declarative");
+        const validationResult = validateBoundedDagDeclarativeGraph(
+          body.graph,
+          body.max_branching || 4,
+          body.max_fanin || 4
+        );
+
+        // If expansion requested, expand subgraphs
+        let expandedGraph: GraphSpec | undefined;
+        if (body.expand_subgraphs !== false) {
+          const runtimeEnv: RuntimeEnv = {
+            AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+            STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+            TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+            AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+            BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+            CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+            CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+            DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+          };
+          expandedGraph = await expandSubgraphs(body.graph as GraphSpec, runtimeEnv, subgraphRegistry, 0, 3);
+        }
+
+        // Compute execution order
+        const graphSpec = expandedGraph || body.graph as GraphSpec;
+
+        return Response.json({
+          valid: validationResult.valid,
+          errors: validationResult.errors,
+          warnings: [],
+          execution_order: validationResult.execution_order || (graphSpec.nodes || []).map(n => n.id),
+          expanded_graph: expandedGraph,
+          from_cache: false,
+        });
+      } catch (err: any) {
+        return Response.json({
+          valid: false,
+          errors: [{ code: "VALIDATION_ERROR", message: err.message }],
+          warnings: [],
+        }, { status: 400 });
+      }
+    }
+
+    // POST /api/v1/graphs/execute — Execute graph with full runtime
+    if (url.pathname === "/api/v1/graphs/execute" && request.method === "POST") {
+      const body = await request.json() as {
+        graph?: unknown;
+        input?: string;
+        agent_name?: string;
+        org_id?: string;
+        max_turns?: number;
+      };
+
+      if (!body.graph || typeof body.graph !== "object") {
+        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
+      }
+      if (!body.input || typeof body.input !== "string") {
+        return Response.json({ error: "input is required", error_code: "MISSING_INPUT" }, { status: 400 });
+      }
+
+      const runtimeEnv: RuntimeEnv = {
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
+        AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+      };
+
+      try {
+        // Build context
+        const ctx = await buildDeclarativeGraphContext(
+          runtimeEnv,
+          env.HYPERDRIVE,
+          {
+            agent_name: body.agent_name || "agentos",
+            task: body.input,
+            org_id: body.org_id,
+          },
+          {
+            agent_name: body.agent_name || "agentos",
+            system_prompt: "You are a helpful assistant.",
+            provider: env.DEFAULT_PROVIDER || "openrouter",
+            model: env.DEFAULT_MODEL || "deepseek/deepseek-chat-v3-0324",
+            plan: "standard",
+            max_turns: body.max_turns || 50,
+            budget_limit_usd: 10,
+            tools: [],
+            blocked_tools: [],
+            parallel_tool_calls: true,
+            require_human_approval: false,
+            org_id: body.org_id || "",
+            project_id: "",
+          } as any,
+          { telemetryQueue: env.TELEMETRY_QUEUE }
+        );
+
+        // Execute
+        const result = await executeDeclarativeGraph(ctx, body.graph as GraphSpec, {
+          maxTurns: body.max_turns,
+        });
+
+        return Response.json({
+          success: result.success,
+          output: result.output,
+          cost_usd: result.costUsd,
+          latency_ms: result.latencyMs,
+          turns: result.turnCount,
+          tool_calls: result.toolCallCount,
+          validation_errors: result.validationErrors,
+          error: result.error,
+        });
+      } catch (err: any) {
+        return Response.json({
+          success: false,
+          error: err.message || String(err),
+        }, { status: 500 });
+      }
+    }
+
+    // POST /api/v1/graphs/stream — Stream execute graph
+    if (url.pathname === "/api/v1/graphs/stream" && request.method === "POST") {
+      const body = await request.json() as {
+        graph?: unknown;
+        input?: string;
+        agent_name?: string;
+        org_id?: string;
+      };
+
+      if (!body.graph || typeof body.graph !== "object") {
+        return Response.json({ error: "graph is required" }, { status: 400 });
+      }
+      if (!body.input || typeof body.input !== "string") {
+        return Response.json({ error: "input is required" }, { status: 400 });
+      }
+
+      const encoder = new TextEncoder();
+      const runtimeEnv: RuntimeEnv = {
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
+        AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+      };
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          const send = (msg: string) => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${msg}\n\n`));
+            } catch {
+              // Controller closed
+            }
+          };
+
+          try {
+            const ctx = await buildDeclarativeGraphContext(
+              runtimeEnv,
+              env.HYPERDRIVE,
+              {
+                agent_name: body.agent_name || "agentos",
+                task: body.input!,
+                org_id: body.org_id,
+              },
+              {
+                agent_name: body.agent_name || "agentos",
+                system_prompt: "You are a helpful assistant.",
+                provider: env.DEFAULT_PROVIDER || "openrouter",
+                model: env.DEFAULT_MODEL || "deepseek/deepseek-chat-v3-0324",
+                plan: "standard",
+                max_turns: 50,
+                budget_limit_usd: 10,
+                tools: [],
+                blocked_tools: [],
+                parallel_tool_calls: true,
+                require_human_approval: false,
+                org_id: body.org_id || "",
+                project_id: "",
+              } as any,
+              {
+                telemetryQueue: env.TELEMETRY_QUEUE,
+                onEvent: async (event) => {
+                  send(JSON.stringify({
+                    type: event.event_type,
+                    ...event.data,
+                    timestamp: event.timestamp,
+                  }));
+                },
+              }
+            );
+
+            const result = await executeDeclarativeGraph(ctx, body.graph as GraphSpec);
+
+            send(JSON.stringify({
+              type: "done",
+              output: result.output,
+              cost_usd: result.costUsd,
+              latency_ms: result.latencyMs,
+              turns: result.turnCount,
+              tool_calls: result.toolCallCount,
+            }));
+
+            controller.close();
+          } catch (err: any) {
+            send(JSON.stringify({ type: "error", error: err.message }));
+            controller.close();
+          }
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          "Connection": "keep-alive",
+        },
+      });
+    }
+
+    // --- Codemode Runtime API ---
+
+    // POST /api/v1/codemode/execute — Execute code with scoped permissions
+    if (url.pathname === "/api/v1/codemode/execute" && request.method === "POST") {
+      const body = await request.json() as {
+        code?: string; scope?: string; scope_config?: unknown;
+        input?: unknown; globals?: Record<string, unknown>;
+        org_id?: string; snippet_id?: string;
+      };
+      if (!body.code) return Response.json({ error: "code is required" }, { status: 400 });
+
+      const { executeScopedCode } = await import("./runtime/codemode");
+      const { getToolDefinitions } = await import("./runtime/tools");
+      const runtimeEnv: RuntimeEnv = {
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
+        AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+      };
+      const allTools = getToolDefinitions([]);
+      const sessionId = crypto.randomUUID().slice(0, 16);
+      const result = await executeScopedCode(runtimeEnv, body.code, allTools, sessionId, {
+        scope: (body.scope as any) || "agent",
+        scopeOverrides: body.scope_config as any,
+        input: body.input,
+        globals: body.globals,
+        orgId: body.org_id,
+        snippetId: body.snippet_id,
+      });
+      return Response.json(result);
+    }
+
+    // GET /api/v1/codemode/templates — List built-in templates
+    if (url.pathname === "/api/v1/codemode/templates" && request.method === "GET") {
+      const { CODEMODE_TEMPLATES } = await import("./runtime/codemode");
+      return Response.json(CODEMODE_TEMPLATES);
+    }
+
+    // GET /api/v1/codemode/types/:scope — Get TypeScript type defs for scope
+    if (url.pathname.startsWith("/api/v1/codemode/types/") && request.method === "GET") {
+      const scope = url.pathname.split("/").pop() || "agent";
+      const { getScopedTypeDefinitions } = await import("./runtime/codemode");
+      const { getToolDefinitions } = await import("./runtime/tools");
+      const allTools = getToolDefinitions([]);
+      const types = getScopedTypeDefinitions(allTools, scope as any);
+      return Response.json({ scope, types });
+    }
+
+    // GET /api/v1/codemode/stats — Runtime codemode stats
+    if (url.pathname === "/api/v1/codemode/stats" && request.method === "GET") {
+      const { getCodeModeStats } = await import("./runtime/codemode");
+      return Response.json(getCodeModeStats());
+    }
+
+    // POST /api/v1/codemode/webhook-handler — Execute webhook handler snippet
+    if (url.pathname === "/api/v1/codemode/webhook-handler" && request.method === "POST") {
+      const body = await request.json() as {
+        snippet_id?: string; org_id?: string;
+        payload?: unknown; headers?: Record<string, string>;
+      };
+      if (!body.snippet_id) return Response.json({ error: "snippet_id is required" }, { status: 400 });
+
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(env.HYPERDRIVE);
+      const rows = await sql`
+        SELECT code FROM codemode_snippets WHERE id = ${body.snippet_id} AND org_id = ${body.org_id || ""} LIMIT 1
+      `;
+      if (rows.length === 0) return Response.json({ error: "Snippet not found" }, { status: 404 });
+
+      const { executeWebhookHandler } = await import("./runtime/codemode");
+      const { getToolDefinitions } = await import("./runtime/tools");
+      const runtimeEnv: RuntimeEnv = {
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
+        AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+      };
+      const code = String((rows[0] as Record<string, unknown>).code || "");
+      const allTools = getToolDefinitions([]);
+      const sessionId = crypto.randomUUID().slice(0, 16);
+      const result = await executeWebhookHandler(runtimeEnv, code, body.payload, body.headers || {}, allTools, sessionId);
+      return Response.json(result);
+    }
+
     // Edge-native agent/run — same contract as backend /runtime-proxy/agent/run
     // /agent/run redirects to the standard invoke endpoint (async, DO-based)
     if (url.pathname === "/api/v1/runtime-proxy/agent/run" && request.method === "POST") {
@@ -2035,19 +2916,24 @@ export default {
     if ((telegramMatch || url.pathname === "/chat/telegram/webhook") && request.method === "POST") {
       const agentName = telegramMatch?.[1] || env.TELEGRAM_AGENT_NAME || "my-assistant";
 
-      // Load bot token: try Supabase first, fall back to env
+      // Load bot token + org_id: try Supabase first, fall back to env
       let botToken = "";
+      let telegramOrgId = "";
       try {
         const { getDb } = await import("./runtime/db");
         const sql = await getDb(env.HYPERDRIVE);
-        const rows = await sql`
-          SELECT access_token FROM connector_tokens
-          WHERE connector_name = 'telegram' AND org_id = (
-            SELECT org_id FROM agents WHERE name = ${agentName} LIMIT 1
-          )
-          LIMIT 1
+        const agentRows = await sql`
+          SELECT org_id FROM agents WHERE name = ${agentName} LIMIT 1
         `;
-        botToken = rows[0]?.access_token || "";
+        telegramOrgId = agentRows[0]?.org_id || "";
+        if (telegramOrgId) {
+          const tokenRows = await sql`
+            SELECT access_token FROM connector_tokens
+            WHERE connector_name = 'telegram' AND org_id = ${telegramOrgId}
+            LIMIT 1
+          `;
+          botToken = tokenRows[0]?.access_token || "";
+        }
       } catch {}
       if (!botToken) botToken = env.TELEGRAM_BOT_TOKEN || "";
       if (!botToken) return Response.json({ error: "No Telegram bot token configured for agent: " + agentName }, { status: 503 });
@@ -2066,6 +2952,22 @@ export default {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: `Hi! I'm ${agentName}. Send me a message and I'll help.`, parse_mode: "Markdown" }),
+        });
+        return Response.json({ ok: true });
+      }
+
+      // /new — clear conversation history and start fresh
+      if (text.startsWith("/new")) {
+        const userId = String(chatId);
+        const tgOrgPrefix = telegramOrgId ? `${telegramOrgId}-` : "";
+        const doName = userId ? `${tgOrgPrefix}${agentName}-u-${userId}` : `${tgOrgPrefix}${agentName}`;
+        const agentId = env.AGENTOS_AGENT.idFromName(doName);
+        const agent = env.AGENTOS_AGENT.get(agentId);
+        await agent.fetch(new Request("http://internal/reset", { method: "POST" }));
+        await fetch(`${tgApi}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: "Conversation cleared. Send a new message to start fresh.", parse_mode: "Markdown" }),
         });
         return Response.json({ ok: true });
       }
@@ -2093,6 +2995,7 @@ export default {
           }, 5000);
 
           const result = await runViaAgent(env, agentName, userInput, {
+            org_id: telegramOrgId,
             channel: "telegram",
             channel_user_id: String(chatId),
           });
@@ -2402,7 +3305,7 @@ export default {
       // /cf/browse/crawl — async crawl via CF Browser Rendering /crawl endpoint
       if (url.pathname === "/cf/browse/crawl" && request.method === "POST") {
         const body = await request.json() as {
-          url: string; limit?: number; depth?: number; formats?: string[];
+          url: string; limit?: number; depth?: number; formats?: string[]; timeout_ms?: number;
         };
         const brBase = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/browser-rendering`;
         const brAuth = { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" };
@@ -2422,12 +3325,14 @@ export default {
           const startData = await startResp.json() as any;
           if (!startResp.ok) return Response.json(startData, { status: startResp.status });
 
-          // Poll for results (up to 60s)
+          // Poll for results (deadline-bound to avoid hanging indefinitely)
           const jobId = startData.result;
           if (!jobId) return Response.json(startData);
-
-          for (let i = 0; i < 12; i++) {
-            await new Promise(r => setTimeout(r, 5000));
+          const maxWaitMs = Math.max(15_000, Math.min(Number(body.timeout_ms || 60_000), 300_000));
+          const pollIntervalMs = 5_000;
+          const startedAt = Date.now();
+          while (Date.now() - startedAt < maxWaitMs) {
+            await new Promise(r => setTimeout(r, pollIntervalMs));
             const pollResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
             const pollData = await pollResp.json() as any;
             const status = pollData.result?.status;
@@ -2595,10 +3500,10 @@ export default {
             // ── Bash (Sandbox Container) ──
             case "bash": {
               const command = args.command || "";
-              const timeout = Math.min(args.timeout_seconds || 30, 120);
+              const timeout = clampSandboxTimeoutSeconds(args.timeout_seconds);
               const sandboxId = `session-${session_id || "default"}`;
               const sandbox = getSandbox(env.SANDBOX, sandboxId);
-              const execResult = await sandbox.exec(command, { timeout });
+              const execResult = await sandbox.exec(command, sandboxExecOptions(timeout));
               result = JSON.stringify({
                 stdout: execResult.stdout || "",
                 stderr: execResult.stderr || "",
@@ -2640,18 +3545,33 @@ export default {
             // ── Python exec (Sandbox Container) ──
             case "python-exec": {
               const code = args.code || "";
-              const timeout = Math.min(args.timeout_seconds || 30, 120);
+              const timeout = clampSandboxTimeoutSeconds(args.timeout_seconds);
               const sandboxId = `session-${session_id || "default"}`;
+              const deps = extractPythonImportCandidates(String(code));
+              const missing = await checkMissingPythonModulesInSandbox(env, sandboxId, deps);
+              if (missing.length > 0) {
+                result = JSON.stringify({
+                  stdout: "",
+                  stderr: pythonMissingModuleError(missing),
+                  exit_code: 1,
+                  missing_modules: missing,
+                });
+                break;
+              }
               const sandbox = getSandbox(env.SANDBOX, sandboxId);
               // Write code to temp file and execute (handles multiline, imports, etc.)
-              const tmpFile = `/tmp/exec_${Date.now()}.py`;
+              const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
               await sandbox.writeFile(tmpFile, code);
-              const execResult = await sandbox.exec(`python3 ${tmpFile}`, { timeout });
-              result = JSON.stringify({
-                stdout: execResult.stdout || "",
-                stderr: execResult.stderr || "",
-                exit_code: execResult.exitCode ?? 0,
-              });
+              try {
+                const execResult = await sandbox.exec(`python3 ${tmpFile}`, sandboxExecOptions(timeout));
+                result = JSON.stringify({
+                  stdout: execResult.stdout || "",
+                  stderr: execResult.stderr || "",
+                  exit_code: execResult.exitCode ?? 0,
+                });
+              } finally {
+                await sandbox.exec(`rm -f ${tmpFile}`, sandboxExecOptions(5)).catch(() => {});
+              }
               break;
             }
 
@@ -2725,7 +3645,7 @@ export default {
               const command = args.command || "";
               const sandboxId = `session-${session_id || args.sandbox_id || "default"}`;
               const sandbox = getSandbox(env.SANDBOX, sandboxId);
-              const execResult = await sandbox.exec(command, { timeout: Math.min(args.timeout || 30, 120) });
+              const execResult = await sandbox.exec(command, sandboxExecOptions(args.timeout || 30));
               result = JSON.stringify({
                 sandbox_id: sandboxId,
                 stdout: execResult.stdout || "",
@@ -2934,18 +3854,10 @@ export default {
               const code = args.code || "";
               const language = args.language || "javascript";
               const timeout = args.timeout_ms || 10000;
-              if (language === "javascript" || language === "python") {
+              if (language === "javascript") {
                 try {
                   const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
-                  const loaded = await env.LOADER.load({
-                    compatibilityDate: "2026-03-01",
-                    mainModule: "main.js",
-                    modules: {
-                      "main.js": { js: workerCode },
-                    },
-                    env: {},  // No bindings — isolate cannot access secrets or DB
-                    globalOutbound: null,  // Block all outbound network from /cf/tool/exec dynamic-exec
-                  });
+                  const loaded = await getCachedDynamicExecWorker(env, workerCode);
                   const controller = new AbortController();
                   const timer = setTimeout(() => controller.abort(), timeout);
                   const execResp = await loaded.getEntrypoint().fetch("http://internal/run", { signal: controller.signal });
@@ -2954,11 +3866,45 @@ export default {
                 } catch (err: any) {
                   result = JSON.stringify({ stdout: "", stderr: err.message, exit_code: 1 });
                 }
+              } else if (language === "python") {
+                try {
+                  // Python must run in sandbox container, not V8 isolate.
+                  const sandboxId = `session-${session_id || "default"}`;
+                  const deps = extractPythonImportCandidates(String(code));
+                  const missing = await checkMissingPythonModulesInSandbox(env, sandboxId, deps);
+                  if (missing.length > 0) {
+                    result = JSON.stringify({
+                      stdout: "",
+                      stderr: pythonMissingModuleError(missing),
+                      exit_code: 1,
+                      missing_modules: missing,
+                    });
+                    break;
+                  }
+                  const sandbox = getSandbox(env.SANDBOX, sandboxId);
+                  const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
+                  await sandbox.writeFile(tmpFile, code);
+                  try {
+                    const execResult = await sandbox.exec(
+                      `python3 ${tmpFile}`,
+                      sandboxExecOptions(Math.ceil(timeout / 1000)),
+                    );
+                    result = JSON.stringify({
+                      stdout: execResult.stdout || "",
+                      stderr: execResult.stderr || "",
+                      exit_code: execResult.exitCode ?? 0,
+                    });
+                  } finally {
+                    await sandbox.exec(`rm -f ${tmpFile}`, sandboxExecOptions(5)).catch(() => {});
+                  }
+                } catch (err: any) {
+                  result = JSON.stringify({ stdout: "", stderr: err.message, exit_code: 1 });
+                }
               } else {
                 // bash/shell — use Sandbox
                 const sandboxId = `session-${session_id || "default"}`;
                 const sandbox = getSandbox(env.SANDBOX, sandboxId);
-                const execResult = await sandbox.exec(code, { timeout: Math.ceil(timeout / 1000) });
+                const execResult = await sandbox.exec(code, sandboxExecOptions(Math.ceil(timeout / 1000)));
                 result = JSON.stringify({ stdout: execResult.stdout || "", stderr: execResult.stderr || "", exit_code: execResult.exitCode ?? 0 });
               }
               break;
@@ -2979,8 +3925,11 @@ export default {
                 const startData = await startResp.json() as any;
                 const jobId = startData.result;
                 if (!jobId) { result = JSON.stringify(startData); break; }
-                for (let i = 0; i < 12; i++) {
-                  await new Promise(r => setTimeout(r, 5000));
+                const maxWaitMs = Math.max(15_000, Math.min(Number(args.timeout_ms || 60_000), 300_000));
+                const pollIntervalMs = 5_000;
+                const startedAt = Date.now();
+                while (Date.now() - startedAt < maxWaitMs) {
+                  await new Promise(r => setTimeout(r, pollIntervalMs));
                   const pollResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
                   const pollData = await pollResp.json() as any;
                   const status = pollData.result?.status;

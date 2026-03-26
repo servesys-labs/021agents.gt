@@ -296,7 +296,7 @@ export async function writeBillingRecord(
       ) VALUES (
         ${record.session_id}, ${record.org_id}, ${record.agent_name},
         ${record.model}, ${record.input_tokens}, ${record.output_tokens},
-        ${record.cost_usd}, ${record.plan}, NOW()
+        ${record.cost_usd}, ${record.plan}, ${Date.now() / 1000}
       )
     `;
   } catch {
@@ -336,7 +336,7 @@ export async function writeEvalRun(
         ${run.agent_name}, ${run.eval_name}, ${"edge_runtime"},
         ${run.total_tasks}, ${run.total_trials}, ${run.pass_count}, ${run.fail_count}, ${run.error_count},
         ${run.pass_rate}, ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd},
-        ${run.eval_conditions_json}, NOW()
+        ${run.eval_conditions_json}, ${Date.now() / 1000}
       )
       RETURNING id
     `;
@@ -349,7 +349,7 @@ export async function writeEvalRun(
           avg_score, avg_latency_ms, total_cost_usd, created_at
         ) VALUES (
           ${run.agent_name}, ${run.total_tasks}, ${run.total_trials}, ${run.pass_rate},
-          ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd}, NOW()
+          ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd}, ${Date.now() / 1000}
         )
         RETURNING id
       `;
@@ -384,7 +384,7 @@ export async function writeEvalTrial(
       ) VALUES (
         ${Number(trial.eval_run_id) || 0}, ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
         ${trial.passed}, ${trial.score}, ${trial.details_json},
-        ${trial.trace_id}, ${trial.session_id}, NOW()
+        ${trial.trace_id}, ${trial.session_id}, ${Date.now() / 1000}
       )
     `;
     return;
@@ -399,7 +399,7 @@ export async function writeEvalTrial(
       ) VALUES (
         ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
         ${trial.passed}, ${trial.score}, ${trial.details_json},
-        ${trial.trace_id}, ${trial.session_id}, NOW()
+        ${trial.trace_id}, ${trial.session_id}, ${Date.now() / 1000}
       )
     `;
   } catch {

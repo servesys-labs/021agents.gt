@@ -72,6 +72,7 @@ export interface AgentConfig {
   plan: string;
   max_turns: number;
   budget_limit_usd: number;
+  timeout_seconds?: number; // Default: 300 (5 minutes)
   tools: string[];
   blocked_tools: string[];
   parallel_tool_calls: boolean;
@@ -81,6 +82,16 @@ export interface AgentConfig {
   state_reducers?: Record<string, string>;
   // Routing overrides per complexity tier
   routing?: Record<string, { provider: string; model: string; max_tokens: number }>;
+  // Codemode middleware hooks — snippet IDs to run at each hook point
+  codemode_middleware?: {
+    pre_llm?: string;     // Run before LLM call (can modify messages)
+    post_llm?: string;    // Run after LLM response (can modify output)
+    pre_tool?: string;    // Run before tool execution (can block/modify)
+    post_tool?: string;   // Run after tool results (can filter/modify)
+    pre_output?: string;  // Run before final output (can transform)
+  };
+  // Codemode observability processor snippet ID
+  codemode_observability?: string;
 }
 
 // ── Runtime Context (flows through graph nodes) ────────────────
@@ -235,6 +246,6 @@ export interface CheckpointPayload {
   messages: LLMMessage[];
   current_turn: number;
   cumulative_cost_usd: number;
-  status: "pending_approval" | "approved" | "rejected" | "resumed";
+  status: "pending_approval" | "approved" | "rejected" | "resumed" | "breakpoint";
   created_at: number;
 }

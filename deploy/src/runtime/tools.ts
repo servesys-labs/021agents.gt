@@ -1,12 +1,277 @@
 /**
- * Edge Runtime — tool executor.
+ * Edge Runtime — tool executor with circuit breaker protection.
  *
  * Dispatches tool calls to CF bindings directly (no HTTP hop to /cf/tool/exec).
  * Same tool set as the worker's /cf/tool/exec switch, but callable in-process.
+ * 
+ * Circuit breaker pattern prevents cascading failures when external tools degrade.
  */
 
 import { getSandbox } from "@cloudflare/sandbox";
 import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
+
+const MAX_SANDBOX_TIMEOUT_SECONDS = 120;
+const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
+const DEFAULT_SANDBOX_MEMORY_LIMIT_MB = 512;
+const DYNAMIC_WORKER_CACHE_LIMIT = 32;
+const DYNAMIC_WORKER_CACHE_TTL_MS = 5 * 60_000;
+type DynamicWorkerCacheEntry = { worker: any; expiresAt: number };
+const dynamicWorkerCache = new Map<string, DynamicWorkerCacheEntry>();
+
+function extractPythonImportCandidates(code: string): string[] {
+  if (!code || typeof code !== "string") return [];
+  const modules = new Set<string>();
+  const lines = code.split("\n");
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+
+    const fromMatch = line.match(/^from\s+([A-Za-z_][\w\.]*)\s+import\s+/);
+    if (fromMatch?.[1]) {
+      const top = fromMatch[1].split(".")[0];
+      if (top) modules.add(top);
+      continue;
+    }
+
+    const importMatch = line.match(/^import\s+(.+)$/);
+    if (!importMatch?.[1]) continue;
+    for (const segment of importMatch[1].split(",")) {
+      const cleaned = segment.trim().replace(/\s+as\s+.+$/, "");
+      const top = cleaned.split(".")[0].trim();
+      if (top) modules.add(top);
+    }
+  }
+  return [...modules];
+}
+
+async function checkMissingPythonModules(
+  env: RuntimeEnv,
+  sessionId: string,
+  modules: string[],
+): Promise<string[]> {
+  if (modules.length === 0) return [];
+  const payload = JSON.stringify(modules);
+  const command = `python3 - <<'PY'
+import importlib
+import json
+mods = json.loads(${JSON.stringify(payload)})
+missing = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except Exception:
+        missing.append(m)
+print(json.dumps({"missing": missing}))
+PY`;
+  const result = await sandboxExecWithLimits(env, sessionId, command, 12);
+  const stdout = String(result.stdout || "").trim();
+  if (!stdout) return [];
+  try {
+    const parsed = JSON.parse(stdout) as { missing?: unknown };
+    if (!Array.isArray(parsed.missing)) return [];
+    return parsed.missing.map((m) => String(m)).filter((m) => m.length > 0);
+  } catch {
+    return [];
+  }
+}
+
+function pythonMissingModuleError(missing: string[]): string {
+  return [
+    "Python dependency check failed.",
+    `Missing modules in this sandbox: ${missing.join(", ")}.`,
+    "This environment does not allow dynamic package installs (pip/apt).",
+    "Use pre-baked sandbox images or ask your admin to add required packages.",
+  ].join(" ");
+}
+
+async function hashCode(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .slice(0, 16)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function clampSandboxTimeout(timeoutSeconds?: number): number {
+  const fallback = Number.isFinite(timeoutSeconds) ? Number(timeoutSeconds) : DEFAULT_SANDBOX_TIMEOUT_SECONDS;
+  return Math.max(1, Math.min(Math.ceil(fallback), MAX_SANDBOX_TIMEOUT_SECONDS));
+}
+
+async function sandboxExecWithLimits(
+  env: RuntimeEnv,
+  sessionId: string,
+  command: string,
+  timeoutSeconds?: number,
+): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> {
+  const timeout = clampSandboxTimeout(timeoutSeconds);
+  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+  const options: { timeout: number } & Record<string, number> = {
+    timeout,
+    // Best-effort resource hints; ignored by runtimes that do not support them.
+    memoryLimitMb: DEFAULT_SANDBOX_MEMORY_LIMIT_MB,
+    cpuLimitMs: timeout * 1000,
+  };
+  return sandbox.exec(command, options);
+}
+
+async function getCachedDynamicWorker(env: RuntimeEnv, workerCode: string): Promise<any> {
+  const key = await hashCode(workerCode);
+  const cached = dynamicWorkerCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.worker;
+  dynamicWorkerCache.delete(key);
+  const loadedWorker = env.LOADER.load({
+    compatibilityDate: "2026-03-01",
+    mainModule: "agent.js",
+    modules: { "agent.js": workerCode },
+    env: {},              // Zero bindings — no HYPERDRIVE, STORAGE, VECTORIZE, secrets
+    globalOutbound: null, // Fully blocked — fetch() and connect() throw in isolate
+  });
+  dynamicWorkerCache.set(key, {
+    worker: loadedWorker,
+    expiresAt: Date.now() + DYNAMIC_WORKER_CACHE_TTL_MS,
+  });
+  if (dynamicWorkerCache.size > DYNAMIC_WORKER_CACHE_LIMIT) {
+    const oldestKey = dynamicWorkerCache.keys().next().value;
+    if (oldestKey) dynamicWorkerCache.delete(oldestKey);
+  }
+  return loadedWorker;
+}
+
+// ── SSRF Protection ──────────────────────────────────────────────────────
+
+const BLOCKED_IP_RANGES = [
+  /^127\./,                          // loopback
+  /^10\./,                           // private class A
+  /^172\.(1[6-9]|2\d|3[01])\./,     // private class B
+  /^192\.168\./,                     // private class C
+  /^169\.254\./,                     // link-local / AWS metadata
+  /^0\./,                            // unspecified
+  /^fc00:/i, /^fd00:/i, /^fe80:/i,  // IPv6 private
+  /^::1$/,                           // IPv6 loopback
+];
+
+const BLOCKED_HOSTNAMES = new Set([
+  "localhost",
+  "metadata.google.internal",
+  "metadata.internal",
+  "169.254.169.254",
+  "metadata",
+]);
+
+function validateUrl(urlStr: string): { valid: boolean; reason?: string } {
+  try {
+    const url = new URL(urlStr);
+
+    // Block non-http(s) protocols
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return { valid: false, reason: `Blocked protocol: ${url.protocol}` };
+    }
+
+    // Block known dangerous hostnames
+    if (BLOCKED_HOSTNAMES.has(url.hostname.toLowerCase())) {
+      return { valid: false, reason: `Blocked hostname: ${url.hostname}` };
+    }
+
+    // Block private/internal IP ranges
+    for (const pattern of BLOCKED_IP_RANGES) {
+      if (pattern.test(url.hostname)) {
+        return { valid: false, reason: `Blocked IP range: ${url.hostname}` };
+      }
+    }
+
+    return { valid: true };
+  } catch {
+    return { valid: false, reason: "Invalid URL" };
+  }
+}
+
+// ── Circuit Breaker for Tool Calls ───────────────────────────────────
+
+interface CircuitState {
+  failures: number;
+  successes: number;
+  lastFailureTime: number;
+  state: "closed" | "open" | "half-open";
+}
+
+const circuitStates = new Map<string, CircuitState>();
+
+const CIRCUIT_CONFIG = {
+  failureThreshold: 5,        // Open after 5 failures
+  successThreshold: 3,        // Close after 3 successes in half-open
+  timeoutMs: 60_000,          // 1 minute cooldown
+  resetTimeoutMs: 30_000,     // Try half-open after 30s
+};
+
+function getCircuitState(toolName: string): CircuitState {
+  if (!circuitStates.has(toolName)) {
+    circuitStates.set(toolName, {
+      failures: 0,
+      successes: 0,
+      lastFailureTime: 0,
+      state: "closed",
+    });
+  }
+  return circuitStates.get(toolName)!;
+}
+
+function recordSuccess(toolName: string): void {
+  const state = getCircuitState(toolName);
+  state.successes++;
+  
+  if (state.state === "half-open" && state.successes >= CIRCUIT_CONFIG.successThreshold) {
+    state.state = "closed";
+    state.failures = 0;
+    state.successes = 0;
+    console.log(`[circuit-breaker] ${toolName}: CLOSED (healthy)`);
+  }
+}
+
+function recordFailure(toolName: string): void {
+  const state = getCircuitState(toolName);
+  state.failures++;
+  state.lastFailureTime = Date.now();
+  state.successes = 0;
+  
+  if (state.state === "closed" && state.failures >= CIRCUIT_CONFIG.failureThreshold) {
+    state.state = "open";
+    console.warn(`[circuit-breaker] ${toolName}: OPEN (too many failures)`);
+  }
+}
+
+function canExecute(toolName: string): { allowed: boolean; reason?: string } {
+  const state = getCircuitState(toolName);
+  const now = Date.now();
+  
+  if (state.state === "open") {
+    const timeSinceFailure = now - state.lastFailureTime;
+    
+    if (timeSinceFailure > CIRCUIT_CONFIG.resetTimeoutMs) {
+      // Transition to half-open
+      state.state = "half-open";
+      state.successes = 0;
+      console.log(`[circuit-breaker] ${toolName}: HALF-OPEN (testing)`);
+      return { allowed: true };
+    }
+    
+    return { 
+      allowed: false, 
+      reason: `Circuit breaker OPEN for ${toolName}. Retry after ${Math.ceil((CIRCUIT_CONFIG.resetTimeoutMs - timeSinceFailure) / 1000)}s` 
+    };
+  }
+  
+  return { allowed: true };
+}
+
+// Expose circuit status for observability
+export function getCircuitStatus(): Record<string, { state: string; failures: number; successes: number }> {
+  const status: Record<string, { state: string; failures: number; successes: number }> = {};
+  for (const [tool, state] of circuitStates.entries()) {
+    status[tool] = { state: state.state, failures: state.failures, successes: state.successes };
+  }
+  return status;
+}
 
 /**
  * Tool cost model — combines per-invocation fees + duration-based compute.
@@ -64,6 +329,18 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   "read-file":         { flat_usd: 0,         per_ms_usd: 0 },          // Sandbox only
   "grep":              { flat_usd: 0,         per_ms_usd: 0.0000125 },  // Container exec
   "glob":              { flat_usd: 0,         per_ms_usd: 0.0000125 },  // Container exec
+
+  // Pipelines (R2 reads/writes + Hyperdrive queries)
+  "query-pipeline":    { flat_usd: 0.00001,   per_ms_usd: 0 },          // DB query + R2 read
+  "send-to-pipeline":  { flat_usd: 0.00005, per_ms_usd: 0.0000001 },     // R2 PUT + Workers AI embed + Vectorize write
+
+  // Codemode extended tools (V8 isolate compute + tool call costs)
+  "run-codemode":          { flat_usd: 0.0001,  per_ms_usd: 0.000012 },  // Snippet load + isolate
+  "codemode-transform":    { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
+  "codemode-validate":     { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
+  "codemode-orchestrate":  { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
+  "codemode-test":         { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
+  "codemode-generate-mcp": { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
 };
 
 /** Calculate tool cost from flat fee + duration. */
@@ -202,6 +479,20 @@ async function executeSingleTool(
   sessionId: string,
 ): Promise<ToolResult> {
   const started = Date.now();
+  
+  // Check circuit breaker before executing
+  const circuitCheck = canExecute(tc.name);
+  if (!circuitCheck.allowed) {
+    return {
+      tool: tc.name,
+      tool_call_id: tc.id,
+      result: "",
+      error: circuitCheck.reason,
+      latency_ms: 0,
+      cost_usd: 0,
+    };
+  }
+  
   let args: Record<string, any>;
   try {
     args = JSON.parse(tc.arguments || "{}");
@@ -218,6 +509,10 @@ async function executeSingleTool(
   try {
     const result = await dispatch(env, tc.name, args, sessionId);
     const latencyMs = Date.now() - started;
+    
+    // Record success for circuit breaker
+    recordSuccess(tc.name);
+    
     return {
       tool: tc.name,
       tool_call_id: tc.id,
@@ -227,15 +522,35 @@ async function executeSingleTool(
     };
   } catch (err: any) {
     const latencyMs = Date.now() - started;
+    
+    // Record failure for circuit breaker (only for external service errors, not arg errors)
+    if (isExternalServiceError(err)) {
+      recordFailure(tc.name);
+    }
+    
     return {
       tool: tc.name,
       tool_call_id: tc.id,
       result: "",
       error: err.message || String(err),
       latency_ms: latencyMs,
-      cost_usd: calculateToolCost(tc.name, latencyMs), // Still charge for compute even on error
+      cost_usd: calculateToolCost(tc.name, latencyMs),
     };
   }
+}
+
+function isExternalServiceError(err: any): boolean {
+  // Network errors, timeouts, 5xx errors from external services
+  const msg = String(err.message || err).toLowerCase();
+  return (
+    msg.includes("timeout") ||
+    msg.includes("network") ||
+    msg.includes("econnrefused") ||
+    msg.includes("5") || // 5xx
+    msg.includes("503") ||
+    msg.includes("502") ||
+    msg.includes("504")
+  );
 }
 
 async function dispatch(
@@ -258,13 +573,26 @@ async function dispatch(
       return sandboxExec(env, args.command || "", sessionId, args.timeout_seconds);
 
     case "python-exec": {
+      const code = String(args.code || "");
+      const deps = extractPythonImportCandidates(code);
+      const missing = await checkMissingPythonModules(env, sessionId, deps);
+      if (missing.length > 0) {
+        return JSON.stringify({
+          stdout: "",
+          stderr: pythonMissingModuleError(missing),
+          exit_code: 1,
+          missing_modules: missing,
+        });
+      }
       const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
-      const tmpFile = `/tmp/exec_${Date.now()}.py`;
-      await sandbox.writeFile(tmpFile, args.code || "");
-      const r = await sandbox.exec(`python3 ${tmpFile}`, {
-        timeout: Math.min(args.timeout_seconds || 30, 120),
-      });
-      return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
+      const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
+      await sandbox.writeFile(tmpFile, code);
+      try {
+        const r = await sandboxExecWithLimits(env, sessionId, `python3 ${tmpFile}`, args.timeout_seconds);
+        return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
+      } finally {
+        await sandboxExecWithLimits(env, sessionId, `rm -f ${tmpFile}`, 5).catch(() => {});
+      }
     }
 
     case "read-file": {
@@ -378,6 +706,8 @@ async function dispatch(
 
     case "a2a-send": {
       const targetUrl = args.url || "";
+      const urlCheck = validateUrl(targetUrl);
+      if (!urlCheck.valid) return `Error: ${urlCheck.reason}`;
       const task = args.task || args.message || "";
       const resp = await fetch(`${targetUrl}/tasks/send`, {
         method: "POST",
@@ -434,6 +764,323 @@ async function dispatch(
       return typeof result.result === "string"
         ? result.result
         : JSON.stringify({ result: result.result, logs: result.logs });
+    }
+
+    // ── Codemode Extended Tools ─────────────────────────────────
+    case "run-codemode": {
+      const { executeScopedCode, loadSnippetCached } = await import("./codemode");
+      const snippetId = args.snippet_id || "";
+      if (!snippetId) return "run-codemode requires snippet_id";
+      const snippet = await loadSnippetCached((env as any).HYPERDRIVE, snippetId, args.org_id || "");
+      if (!snippet) return JSON.stringify({ error: "Snippet not found" });
+      const allToolsForSnippet = getToolDefinitions([]);
+      const cmResult = await executeScopedCode(env, snippet.code, allToolsForSnippet, sessionId, {
+        scope: snippet.scope || "agent",
+        scopeOverrides: args.scope_config || snippet.scope_config,
+        input: args.input,
+        snippetId,
+      });
+      return JSON.stringify({ success: cmResult.success, result: cmResult.result, error: cmResult.error, logs: cmResult.logs, toolCallCount: cmResult.toolCallCount, latencyMs: cmResult.latencyMs, costUsd: cmResult.costUsd });
+    }
+
+    case "codemode-transform": {
+      const { executeTransform } = await import("./codemode");
+      const allToolsForTransform = getToolDefinitions([]);
+      const transformResult = await executeTransform(env, args.code || "", args.data, allToolsForTransform, sessionId);
+      return JSON.stringify({ success: transformResult.success, result: transformResult.result, error: transformResult.error, logs: transformResult.logs });
+    }
+
+    case "codemode-validate": {
+      const { executeValidator } = await import("./codemode");
+      const allToolsForValidate = getToolDefinitions([]);
+      const valResult = await executeValidator(env, args.code || "", args.data, allToolsForValidate, sessionId);
+      return JSON.stringify(valResult);
+    }
+
+    case "codemode-orchestrate": {
+      const { executeOrchestrator } = await import("./codemode");
+      const allToolsForOrch = getToolDefinitions([]);
+      const orchResult = await executeOrchestrator(env, args.code || "", args.message || "", args.context || {}, allToolsForOrch, sessionId);
+      return JSON.stringify(orchResult);
+    }
+
+    case "codemode-test": {
+      const { executeTestRunner } = await import("./codemode");
+      const allToolsForTest = getToolDefinitions([]);
+      const testResult = await executeTestRunner(env, args.code || "", args.test_context || {}, allToolsForTest, sessionId);
+      return JSON.stringify(testResult);
+    }
+
+    case "codemode-generate-mcp": {
+      const { executeMcpGenerator } = await import("./codemode");
+      const allToolsForMcp = getToolDefinitions([]);
+      const mcpResult = await executeMcpGenerator(env, args.code || "", args.api_spec, allToolsForMcp, sessionId);
+      return JSON.stringify({ tools: mcpResult, count: mcpResult.length });
+    }
+
+    case "create-schedule": {
+      // Agent can schedule itself or another agent for recurring runs
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "Schedule creation requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const scheduleId = crypto.randomUUID().slice(0, 12);
+      const agentName = args.agent_name || args.self_agent_name || "";
+      const cronExpr = args.cron || args.schedule || "";
+      const taskDesc = args.task || args.description || "";
+      const orgId = args.org_id || "";
+      if (!agentName || !cronExpr || !taskDesc) {
+        return "create-schedule requires agent_name, cron (e.g. '0 9 * * *'), and task description";
+      }
+      try {
+        await sql`
+          INSERT INTO schedules (id, agent_name, org_id, task, cron_expression, enabled, run_count, created_at)
+          VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${Date.now() / 1000})
+        `;
+        return JSON.stringify({ created: true, schedule_id: scheduleId, agent_name: agentName, cron: cronExpr, task: taskDesc });
+      } catch (err: any) {
+        return `Failed to create schedule: ${err.message || err}`;
+      }
+    }
+
+    case "list-schedules": {
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "[]";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const agentName = args.agent_name || "";
+      const orgId = args.org_id || "";
+      try {
+        const rows = agentName
+          ? await sql`SELECT id, agent_name, task, cron_expression, enabled, run_count, last_run_at FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`
+          : await sql`SELECT id, agent_name, task, cron_expression, enabled, run_count, last_run_at FROM schedules WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
+        return JSON.stringify(rows);
+      } catch {
+        return "[]";
+      }
+    }
+
+    case "delete-schedule": {
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "Schedule deletion requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const scheduleId = args.schedule_id || args.id || "";
+      const orgId = args.org_id || "";
+      if (!scheduleId) return "delete-schedule requires schedule_id";
+      try {
+        await sql`DELETE FROM schedules WHERE id = ${scheduleId} AND org_id = ${orgId}`;
+        return JSON.stringify({ deleted: true, schedule_id: scheduleId });
+      } catch (err: any) {
+        return `Failed to delete schedule: ${err.message || err}`;
+      }
+    }
+
+    case "query-pipeline": {
+      // Read recent data from a pipeline's R2 sink.
+      // Supports: filter by field values, limit, and time range.
+      // NOTE: This reads JSONL files from R2, NOT SQL. For semantic search use knowledge-search.
+      const pipelineName = args.pipeline_name || "";
+      const limit = Math.min(args.limit || 100, 1000);
+      const filterField = args.filter_field || "";
+      const filterValue = args.filter_value ?? "";
+      const sinceMinutes = Number(args.since_minutes) || 0;
+      if (!pipelineName) return "query-pipeline requires pipeline_name";
+
+      const storage = (env as any).STORAGE as R2Bucket;
+      if (!storage) return "Pipeline query requires R2 storage access";
+
+      try {
+        // List recent data files (sorted by key = timestamp)
+        const listResult = await storage.list({
+          prefix: `pipelines/${pipelineName}/`,
+          limit: 50, // Read up to 50 recent files
+        });
+        if (!listResult.objects.length) return `No data found in pipeline '${pipelineName}'`;
+
+        // Read and merge records from recent files
+        let allRecords: Record<string, unknown>[] = [];
+        const cutoffTs = sinceMinutes > 0 ? Date.now() - sinceMinutes * 60 * 1000 : 0;
+
+        // Read from newest files first
+        const sortedObjects = [...listResult.objects].reverse();
+        for (const obj of sortedObjects) {
+          if (allRecords.length >= limit) break;
+
+          // Parse timestamp from filename: pipelines/{name}/{timestamp}.jsonl
+          const fileTs = Number(obj.key.split("/").pop()?.replace(".jsonl", "") || 0);
+          if (cutoffTs > 0 && fileTs < cutoffTs) continue;
+
+          const file = await storage.get(obj.key);
+          if (!file) continue;
+
+          const text = await file.text();
+          const lines = text.trim().split("\n");
+          for (const line of lines) {
+            if (allRecords.length >= limit) break;
+            try {
+              const record = JSON.parse(line) as Record<string, unknown>;
+              // Apply field filter if specified
+              if (filterField && String(record[filterField] ?? "") !== String(filterValue)) continue;
+              allRecords.push(record);
+            } catch { /* skip malformed lines */ }
+          }
+        }
+
+        return JSON.stringify({
+          pipeline: pipelineName,
+          records_count: allRecords.length,
+          files_scanned: Math.min(sortedObjects.length, 50),
+          filter: filterField ? { field: filterField, value: filterValue } : null,
+          data: allRecords,
+        });
+      } catch (err: any) {
+        return `Pipeline read failed: ${err.message || err}`;
+      }
+    }
+
+    case "send-to-pipeline": {
+      // Send events to a pipeline: R2 (structured) + optional Vectorize (semantic)
+      const pipelineName = args.pipeline_name || "";
+      const events = args.events;
+      const embedForRag = args.embed !== false; // Default: also embed for RAG search
+      const textField = args.text_field || "text"; // Which field to embed
+      if (!pipelineName) return "send-to-pipeline requires pipeline_name";
+      if (!Array.isArray(events) || events.length === 0) return "send-to-pipeline requires a non-empty events array";
+
+      const storage = (env as any).STORAGE as R2Bucket;
+      if (!storage) return "Pipeline ingest requires R2 storage access";
+
+      try {
+        // 1. Write to R2 (structured sink — always)
+        const key = `pipelines/${pipelineName}/${Date.now()}.jsonl`;
+        const data = events.map((e: unknown) => JSON.stringify(e)).join("\n");
+        await storage.put(key, data);
+
+        // 2. Embed into Vectorize (semantic sink — when enabled)
+        let embedded = 0;
+        if (embedForRag && env.VECTORIZE && env.AI) {
+          const textsToEmbed: { text: string; metadata: Record<string, unknown> }[] = [];
+          for (const event of events) {
+            const e = event as Record<string, unknown>;
+            // Extract text to embed: use text_field, fall back to content, then stringify
+            const raw = e[textField] ?? e.content ?? e.text ?? e.body ?? e.description ?? "";
+            const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+            if (text.length < 10) continue; // Skip tiny entries
+
+            textsToEmbed.push({
+              text: text.slice(0, 8000), // Embedding model max input
+              metadata: {
+                text: text.slice(0, 2000), // Store searchable snippet
+                source: `pipeline:${pipelineName}`,
+                pipeline: pipelineName,
+                agent_name: args.agent_name || e.agent_name || "",
+                org_id: args.org_id || e.org_id || "",
+                event_type: String(e.event_type || e.type || ""),
+                ingested_at: Date.now() / 1000,
+              },
+            });
+          }
+
+          if (textsToEmbed.length > 0) {
+            // Content-hash function for dedup: same text → same ID → upsert updates
+            async function contentHashId(pipeline: string, text: string): Promise<string> {
+              const data = new TextEncoder().encode(`${pipeline}:${text}`);
+              const hash = await crypto.subtle.digest("SHA-256", data);
+              const hex = [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
+              return `pipeline-${pipeline}-${hex.slice(0, 16)}`;
+            }
+
+            // Batch embed (up to 100 at a time)
+            for (let i = 0; i < textsToEmbed.length; i += 100) {
+              const batch = textsToEmbed.slice(i, i + 100);
+              try {
+                const embedResult = (await env.AI.run(
+                  "@cf/baai/bge-base-en-v1.5" as keyof AiModels,
+                  { text: batch.map((b) => b.text) },
+                )) as any;
+                const vectors = embedResult.data || [];
+                // Fix #3+#4: Content-based IDs for dedup (same content → same ID → upsert)
+                const upserts = await Promise.all(
+                  vectors.map(async (vec: number[], idx: number) => ({
+                    id: await contentHashId(pipelineName, batch[idx].text),
+                    values: vec,
+                    metadata: batch[idx].metadata,
+                  })),
+                );
+                if (upserts.length > 0) {
+                  await env.VECTORIZE.upsert(upserts);
+                  embedded += upserts.length;
+                }
+              } catch {
+                // Embedding failure is non-fatal — R2 write already succeeded
+              }
+            }
+          }
+        }
+
+        return JSON.stringify({
+          sent: true,
+          pipeline: pipelineName,
+          count: events.length,
+          r2_key: key,
+          embedded_for_rag: embedded,
+        });
+      } catch (err: any) {
+        return `Pipeline ingest failed: ${err.message || err}`;
+      }
+    }
+
+    case "submit-feedback": {
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "Feedback requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const feedbackId = crypto.randomUUID().slice(0, 12);
+      const rating = args.rating; // "positive" | "negative" | "neutral"
+      const comment = String(args.comment || "");
+      const sessionId2 = args.session_id || "";
+      const turn = Number(args.turn || 0);
+      const messageContent = String(args.message_content || "").slice(0, 2000);
+
+      try {
+        await sql`
+          INSERT INTO user_feedback (id, session_id, turn_number, rating, comment, message_preview, org_id, agent_name, channel, created_at)
+          VALUES (${feedbackId}, ${sessionId2}, ${turn}, ${rating}, ${comment}, ${messageContent},
+                  ${args.org_id || ""}, ${args.agent_name || ""}, ${args.channel || "api"}, ${Date.now() / 1000})
+        `;
+        return JSON.stringify({ submitted: true, feedback_id: feedbackId });
+      } catch (err: any) {
+        return `Feedback submission failed: ${err.message || err}`;
+      }
+    }
+
+    case "route-to-agent": {
+      // P1 Fix: Use cached agent capabilities instead of DB query per call
+      const { classifyIntent, decomposeIntents, getAgentCapabilitiesCached } = await import("./intent-router");
+      const routeInput = args.input || args.query || "";
+      if (!routeInput) return "route-to-agent requires input text";
+
+      const intents = decomposeIntents(routeInput);
+
+      // Load agent capabilities (cached for 60s)
+      const hyperdrive = (env as any).HYPERDRIVE;
+      const orgId = args.org_id || "";
+      const capabilities = hyperdrive
+        ? await getAgentCapabilitiesCached(hyperdrive, orgId)
+        : [];
+
+      const results = intents.map((i) => {
+        const cls = classifyIntent(i.subtask, capabilities);
+        return {
+          ...i,
+          suggested_agent: cls.suggested_agent,
+          all_intents: cls.all_intents,
+          reasoning: cls.reasoning,
+        };
+      });
+
+      return JSON.stringify({ routing: results, agent_count: capabilities.length });
     }
 
     default:
@@ -525,6 +1172,8 @@ async function duckDuckGoSearch(query: string, maxResults: number): Promise<stri
 // ── Browse (simple HTTP fetch) ────────────────────────────────
 
 async function browse(args: Record<string, any>): Promise<string> {
+  const urlCheck = validateUrl(args.url || "");
+  if (!urlCheck.valid) return `Error: ${urlCheck.reason}`;
   const resp = await fetch(args.url || "", {
     headers: { "User-Agent": "AgentOS/0.2.0" },
     redirect: "follow",
@@ -542,6 +1191,8 @@ async function browse(args: Record<string, any>): Promise<string> {
 // ── HTTP Request ──────────────────────────────────────────────
 
 async function httpRequest(args: Record<string, any>): Promise<string> {
+  const urlCheck = validateUrl(args.url || "");
+  if (!urlCheck.valid) return JSON.stringify({ error: urlCheck.reason });
   const method = (args.method || "GET").toUpperCase();
   const timeout = args.timeout_seconds || 30;
   const controller = new AbortController();
@@ -574,10 +1225,7 @@ async function sandboxExec(
   sessionId: string,
   timeoutSeconds?: number,
 ): Promise<string> {
-  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
-  const r = await sandbox.exec(command, {
-    timeout: Math.min(timeoutSeconds || 30, 120),
-  });
+  const r = await sandboxExecWithLimits(env, sessionId, command, timeoutSeconds);
   return JSON.stringify({
     stdout: r.stdout || "",
     stderr: r.stderr || "",
@@ -589,25 +1237,100 @@ async function sandboxExec(
 
 async function knowledgeSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const query = args.query || "";
-  const topK = args.top_k || 5;
+  const retrieveK = 20; // Retrieve more candidates for reranking
+  const finalK = args.top_k || 5;
+
+  // Step 1: Embed query
   const embedResult = (await env.AI.run("@cf/baai/bge-base-en-v1.5" as keyof AiModels, {
     text: [query],
   })) as any;
   const queryVec = embedResult.data?.[0];
   if (!queryVec) return "Embedding failed";
+
+  // Step 2: Retrieve top-20 candidates from Vectorize
+  const filter: Record<string, string> = {};
+  if (args.agent_name) filter.agent_name = args.agent_name;
+  if (args.org_id) filter.org_id = args.org_id;
   const matches = await env.VECTORIZE.query(queryVec, {
-    topK,
+    topK: retrieveK,
     returnMetadata: "all",
-    ...(args.agent_name ? { filter: { agent_name: args.agent_name } } : {}),
+    filter: Object.keys(filter).length > 0 ? filter : undefined,
   });
-  const results = (matches.matches || []).map((m: any) => ({
-    score: m.score,
-    text: m.metadata?.text || "",
-    source: m.metadata?.source || "",
+
+  // Fix #6: Include rich metadata from pipeline events
+  const candidates = (matches.matches || []).map((m: any) => ({
+    vector_score: m.score,
+    text: String(m.metadata?.text || ""),
+    source: String(m.metadata?.source || ""),
+    chunk_index: Number(m.metadata?.chunk_index ?? 0),
+    event_type: String(m.metadata?.event_type || ""),
+    pipeline: String(m.metadata?.pipeline || ""),
+    ingested_at: Number(m.metadata?.ingested_at ?? 0),
+    agent_name: String(m.metadata?.agent_name || ""),
   }));
-  return results.length > 0
-    ? results.map((r: any, i: number) => `${i + 1}. [${r.source}] ${r.text.slice(0, 200)}`).join("\n\n")
-    : `No relevant knowledge found for: ${query}`;
+
+  if (candidates.length === 0) {
+    return `No relevant knowledge found for: ${query}`;
+  }
+
+  // Step 3: Rerank with cross-encoder (Workers AI bge-reranker-base)
+  // Fix #1: Use correct API shape — query + texts[] for reranker models
+  let reranked = candidates;
+  try {
+    const rerankerResult = (await env.AI.run(
+      "@cf/baai/bge-reranker-base" as keyof AiModels,
+      {
+        query,
+        texts: candidates.map((c: any) => c.text.slice(0, 512)),
+      } as any,
+    )) as any;
+
+    // Workers AI reranker returns: { data: [{ index, score }] } or [{ score }]
+    let scores: number[] = [];
+    if (Array.isArray(rerankerResult?.data)) {
+      // Sorted by score — map back to original order via index
+      const scoreMap = new Map<number, number>();
+      for (const item of rerankerResult.data) {
+        scoreMap.set(Number(item.index ?? 0), Number(item.score ?? 0));
+      }
+      scores = candidates.map((_: any, i: number) => scoreMap.get(i) ?? 0);
+    } else if (Array.isArray(rerankerResult)) {
+      scores = rerankerResult.map((d: any) => Number(d.score ?? d ?? 0));
+    }
+
+    if (scores.length === candidates.length) {
+      reranked = candidates.map((c: any, i: number) => ({
+        ...c,
+        rerank_score: scores[i],
+        // Combine vector similarity + reranker relevance
+        final_score: 0.3 * c.vector_score + 0.7 * scores[i],
+      }));
+      reranked.sort((a: any, b: any) => b.final_score - a.final_score);
+    }
+  } catch {
+    // Reranker unavailable — fall back to vector score ordering
+    reranked.sort((a: any, b: any) => b.vector_score - a.vector_score);
+  }
+
+  // Step 4: Return top-K after reranking with metadata
+  const topResults = reranked.slice(0, finalK);
+  return topResults
+    .map((r: any, i: number) => {
+      const score = r.final_score !== undefined
+        ? `score=${r.final_score.toFixed(3)}`
+        : `score=${r.vector_score.toFixed(3)}`;
+      const meta: string[] = [];
+      if (r.source) meta.push(`source=${r.source}`);
+      if (r.pipeline) meta.push(`pipeline=${r.pipeline}`);
+      if (r.event_type) meta.push(`type=${r.event_type}`);
+      if (r.ingested_at > 0) {
+        const ago = Math.round((Date.now() / 1000 - r.ingested_at) / 60);
+        meta.push(ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`);
+      }
+      const metaStr = meta.length > 0 ? ` (${meta.join(", ")})` : "";
+      return `${i + 1}. [${score}]${metaStr} ${r.text.slice(0, 300)}`;
+    })
+    .join("\n\n");
 }
 
 // ── Store Knowledge (Vectorize + R2) ──────────────────────────
@@ -711,17 +1434,11 @@ async function dynamicExec(env: RuntimeEnv, args: Record<string, any>, sessionId
   const code = args.code || "";
   const language = args.language || "javascript";
   const timeout = args.timeout_ms || 10000;
-  if (language === "javascript" || language === "python") {
+  if (language === "javascript") {
     const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
 
-    // Sandboxed: no bindings, no network access
-    const loaded = await env.LOADER.load({
-      compatibilityDate: "2026-03-01",
-      mainModule: "agent.js",
-      modules: { "agent.js": workerCode },
-      env: {},              // Zero bindings — no HYPERDRIVE, STORAGE, VECTORIZE, secrets
-      globalOutbound: null, // Fully blocked — fetch() and connect() throw in isolate
-    });
+    // Sandboxed: no bindings, no network access; cache compiled workers by code hash.
+    const loaded = await getCachedDynamicWorker(env, workerCode);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
@@ -729,9 +1446,30 @@ async function dynamicExec(env: RuntimeEnv, args: Record<string, any>, sessionId
     clearTimeout(timer);
     return JSON.stringify(await execResp.json());
   }
+  if (language === "python") {
+    // Python must run in a sandbox container, not in V8 isolate.
+    const deps = extractPythonImportCandidates(String(code));
+    const missing = await checkMissingPythonModules(env, sessionId, deps);
+    if (missing.length > 0) {
+      return JSON.stringify({
+        stdout: "",
+        stderr: pythonMissingModuleError(missing),
+        exit_code: 1,
+        missing_modules: missing,
+      });
+    }
+    const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+    const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
+    await sandbox.writeFile(tmpFile, code);
+    try {
+      const r = await sandboxExecWithLimits(env, sessionId, `python3 ${tmpFile}`, Math.ceil(timeout / 1000));
+      return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
+    } finally {
+      await sandboxExecWithLimits(env, sessionId, `rm -f ${tmpFile}`, 5).catch(() => {});
+    }
+  }
   // bash/shell
-  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
-  const r = await sandbox.exec(code, { timeout: Math.ceil(timeout / 1000) });
+  const r = await sandboxExecWithLimits(env, sessionId, code, Math.ceil(timeout / 1000));
   return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
 }
 
@@ -754,8 +1492,11 @@ async function webCrawl(env: RuntimeEnv, args: Record<string, any>): Promise<str
   const startData = (await startResp.json()) as any;
   const jobId = startData.result;
   if (!jobId) return JSON.stringify(startData);
-  for (let i = 0; i < 12; i++) {
-    await new Promise((r) => setTimeout(r, 5000));
+  const maxWaitMs = Math.max(15_000, Math.min(Number(args.timeout_ms || 60_000), 300_000));
+  const pollIntervalMs = 5_000;
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < maxWaitMs) {
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
     const pollResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
     const pollData = (await pollResp.json()) as any;
     const status = pollData.result?.status;
@@ -943,7 +1684,8 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "python-exec",
-      description: "Execute Python code in a sandboxed container",
+      description:
+        "Execute Python code in a sandboxed container (dynamic package installation is disabled)",
       parameters: {
         type: "object",
         properties: {
@@ -1003,12 +1745,15 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "knowledge-search",
-      description: "Search the agent's knowledge base for relevant information",
+      description:
+        "Search the agent's knowledge base using semantic RAG. " +
+        "Retrieves top-20 candidates via vector similarity, then reranks with a cross-encoder " +
+        "model for higher relevance. Works with uploaded documents AND live pipeline data.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Search query" },
-          top_k: { type: "number", description: "Max results (default 5)" },
+          query: { type: "string", description: "Natural language search query" },
+          top_k: { type: "number", description: "Final results to return after reranking (default 5, max 20)" },
         },
         required: ["query"],
       },
@@ -1092,7 +1837,8 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "dynamic-exec",
-      description: "Execute code in a sandboxed V8 isolate (JS) or container (bash/python)",
+      description:
+        "Execute code in a sandboxed V8 isolate (JS) or container (bash/python); Python package installs are disabled",
       parameters: {
         type: "object",
         properties: {
@@ -1239,6 +1985,242 @@ const TOOL_CATALOG: ToolDefinition[] = [
           },
         },
         required: ["code"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create-schedule",
+      description:
+        "Schedule a recurring agent run. The agent (you or another) will be invoked " +
+        "on the specified cron schedule with the given task. Use standard 5-field cron " +
+        "syntax (minute hour day-of-month month day-of-week). " +
+        "Examples: '0 9 * * *' (daily 9am), '*/30 * * * *' (every 30 min), '0 0 * * 1' (weekly Monday).",
+      parameters: {
+        type: "object",
+        properties: {
+          agent_name: { type: "string", description: "Agent to schedule (use your own name for self-scheduling)" },
+          cron: { type: "string", description: "Cron expression (5-field: minute hour dom month dow)" },
+          task: { type: "string", description: "Task description — what the agent should do on each run" },
+        },
+        required: ["agent_name", "cron", "task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list-schedules",
+      description: "List active schedules for an agent. Shows cron expression, task, run count, and last run time.",
+      parameters: {
+        type: "object",
+        properties: {
+          agent_name: { type: "string", description: "Agent name to list schedules for (optional — lists all if omitted)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "delete-schedule",
+      description: "Delete a scheduled agent run by its schedule ID.",
+      parameters: {
+        type: "object",
+        properties: {
+          schedule_id: { type: "string", description: "Schedule ID to delete" },
+        },
+        required: ["schedule_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "query-pipeline",
+      description:
+        "Read recent data from a pipeline's R2 storage. Returns JSONL records with optional " +
+        "field filtering and time range. For semantic search, use knowledge-search instead.",
+      parameters: {
+        type: "object",
+        properties: {
+          pipeline_name: { type: "string", description: "Pipeline name to read from" },
+          filter_field: { type: "string", description: "Filter by field name (e.g., 'event_type', 'customer')" },
+          filter_value: { type: "string", description: "Value to match for filter_field" },
+          since_minutes: { type: "number", description: "Only return records from the last N minutes (default: all)" },
+          limit: { type: "number", description: "Max records to return (default 100, max 1000)" },
+        },
+        required: ["pipeline_name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "send-to-pipeline",
+      description:
+        "Send events/data to a pipeline. Data is stored in R2 (structured, queryable via SQL) " +
+        "AND automatically embedded into Vectorize for semantic RAG search. " +
+        "Both access patterns available: query-pipeline for SQL, knowledge-search for semantic.",
+      parameters: {
+        type: "object",
+        properties: {
+          pipeline_name: { type: "string", description: "Pipeline name" },
+          events: {
+            type: "array",
+            items: { type: "object" },
+            description: "Array of event objects to send",
+          },
+          embed: { type: "boolean", description: "Also embed into Vectorize for RAG search (default: true)" },
+          text_field: { type: "string", description: "Which field in each event to embed (default: 'text'). Falls back to content, body, description." },
+        },
+        required: ["pipeline_name", "events"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "submit-feedback",
+      description: "Submit user feedback (thumbs up/down) on an agent response",
+      parameters: {
+        type: "object",
+        properties: {
+          rating: { type: "string", description: "Feedback rating: positive, negative, or neutral" },
+          comment: { type: "string", description: "Optional comment from the user" },
+          session_id: { type: "string", description: "Session ID the feedback is for" },
+          turn: { type: "number", description: "Turn number being rated" },
+          message_content: { type: "string", description: "Preview of the message being rated (max 2000 chars)" },
+          org_id: { type: "string", description: "Organization ID" },
+          agent_name: { type: "string", description: "Agent name" },
+          channel: { type: "string", description: "Channel: api, websocket, portal, etc." },
+        },
+        required: ["rating"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "route-to-agent",
+      description:
+        "Classify user intent and route to the best-matching agent. " +
+        "Supports compound requests (e.g. 'deploy the API and show me the logs') " +
+        "by decomposing into sub-tasks with separate intent classifications.",
+      parameters: {
+        type: "object",
+        properties: {
+          input: { type: "string", description: "User input text to classify and route" },
+          org_id: { type: "string", description: "Organization ID (to look up available agents)" },
+        },
+        required: ["input"],
+      },
+    },
+  },
+  // ── Codemode Extended Tools ───────────────────────────────────
+  {
+    type: "function",
+    function: {
+      name: "run-codemode",
+      description:
+        "Execute a stored codemode snippet by ID with given input. " +
+        "Runs in sandboxed V8 isolate with scoped tool permissions.",
+      parameters: {
+        type: "object",
+        properties: {
+          snippet_id: { type: "string", description: "ID of the stored codemode snippet" },
+          input: { description: "Input data passed to the snippet as `input` variable" },
+          scope_config: { type: "object", description: "Override scope config (timeoutMs, maxToolCalls, etc.)" },
+        },
+        required: ["snippet_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "codemode-transform",
+      description:
+        "Run a data transformation using inline JavaScript code. " +
+        "Input data is available as `input` in the sandbox. Return the transformed data.",
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "JavaScript transform code" },
+          data: { description: "Input data to transform" },
+        },
+        required: ["code", "data"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "codemode-validate",
+      description:
+        "Run a custom validation on data using JavaScript code. " +
+        "Code should return {valid: boolean, error?: string}.",
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "JavaScript validation code" },
+          data: { description: "Data to validate" },
+        },
+        required: ["code", "data"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "codemode-orchestrate",
+      description:
+        "Run multi-agent orchestration code. Input includes a message and context. " +
+        "Code should return {targetAgent, input, context}.",
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "JavaScript orchestration code" },
+          message: { type: "string", description: "User message to route" },
+          context: { type: "object", description: "Additional routing context" },
+        },
+        required: ["code", "message"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "codemode-test",
+      description:
+        "Run self-test code against an agent configuration. " +
+        "Returns {passed, failed, total, results[]}.",
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "JavaScript test code" },
+          test_context: { type: "object", description: "Test context (agent config, test data, etc.)" },
+        },
+        required: ["code"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "codemode-generate-mcp",
+      description:
+        "Generate MCP tool definitions from an API specification. " +
+        "Returns array of {name, description, parameters, handlerCode}.",
+      parameters: {
+        type: "object",
+        properties: {
+          code: { type: "string", description: "JavaScript code that processes API spec into tool definitions" },
+          api_spec: { description: "API specification (OpenAPI, custom JSON, etc.)" },
+        },
+        required: ["code", "api_spec"],
       },
     },
   },

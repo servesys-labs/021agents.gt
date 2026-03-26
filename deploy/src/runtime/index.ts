@@ -42,9 +42,115 @@ export { buildMemoryContext, searchFacts, searchEpisodes, findBestProcedures, qu
 export { detectLoop, maybeSummarize } from "./middleware";
 export { pipe, mapInputs, branch, parseOutput } from "./runnable";
 export { getConnectorToken, executeConnector } from "./connectors";
-export { executeCode, getToolTypeDefinitions } from "./codemode";
+// Codemode — full execution system
+export {
+  executeCode,
+  getToolTypeDefinitions,
+  executeScopedCode,
+  getScopedTypeDefinitions,
+  executeSnippet,
+  executeTransform,
+  executeValidator,
+  executeWebhookHandler,
+  executeMiddleware,
+  executeObservabilityProcessor,
+  executeOrchestrator,
+  executeMcpGenerator,
+  executeTestRunner,
+  resolveScopeConfig,
+  getCodeModeStats,
+  loadSnippetCached,
+  invalidateSnippetCache,
+  clearSnippetCache,
+  CODEMODE_TEMPLATES,
+} from "./codemode";
+export type {
+  CodemodeScope,
+  CodemodeScopeConfig,
+  CodemodeExecuteOptions,
+  CodemodeResult,
+  CodemodeSnippet,
+  ValidationResult,
+  WebhookHandlerResult,
+  MiddlewareAction,
+  ObservabilityResult,
+  OrchestrationResult,
+  GeneratedMcpTool,
+  CodemodeTestResult,
+} from "./codemode";
 export { streamRun } from "./stream";
+export type { RuntimeEvent as ProtocolRuntimeEvent, TurnEndEvent, DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent } from "./protocol";
+export { validateEvent, serializeForSSE, serializeForWebSocket } from "./protocol";
 export { syncFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";
+
+// Sub-graph support
+export { 
+  subgraphRegistry, 
+  expandSubgraphs, 
+  resolveSubgraphInputs, 
+  mapSubgraphOutputs,
+  validateSubgraphNode,
+} from "./subgraph";
+export type { SubgraphDefinition, SubgraphNodeConfig, SubgraphRegistry } from "./subgraph";
+
+// Schema validation
+export {
+  schemaRegistry,
+  validateDataAgainstSchema,
+  validateGraphSchemas,
+  generateTypeScriptTypes,
+} from "./graph-schema";
+export type { JsonSchema, NodeSchema, SchemaValidationResult } from "./graph-schema";
+
+// Graph caching
+export {
+  graphCache,
+  getCachedValidation,
+  setCachedValidation,
+  getCachedExpansion,
+  setCachedExpansion,
+  getCachedLinearPath,
+  setCachedLinearPath,
+  validateGraphWithCache,
+  expandGraphWithCache,
+  getLinearPathWithCache,
+  invalidateGraphCache,
+  invalidateSubgraphCache,
+  clearGraphCache,
+  getCacheMetrics,
+} from "./graph-cache";
+
+// Node registry
+export {
+  nodeRegistry,
+  registerCustomNode,
+  createExternalServiceNode,
+  listAvailableNodes,
+  validateNodeConfig,
+} from "./node-registry";
+export type { NodeKindDefinition, NodeHandler, NodeHandlerContext } from "./node-registry";
+
+// Intent-based agent routing
+export { classifyIntent, decomposeIntents } from "./intent-router";
+export type { IntentClassification, AgentCapability } from "./intent-router";
+
+// Backpressure
+export {
+  createBackpressureController,
+  createWebSocketSendWithBackpressure,
+  AdaptiveRateLimiter,
+} from "./backpressure";
+export type { BackpressureController, BackpressureOptions, BackpressureStats } from "./backpressure";
+
+// Tool adapter
+export {
+  wrapExternalTool,
+  importPythonTool,
+  convertExternalTools,
+  exportToolToExternalFormat,
+  convertSequenceToGraph,
+  autoRegisterTools,
+} from "./tool-adapter";
 export {
   executeLinearDeclarativeRun,
   executeBoundedDagDeclarativeRun,
@@ -59,3 +165,20 @@ export type {
   GraphAgentContext,
   LinearTraceEntry,
 } from "./linear_declarative";
+
+// Unified declarative graph executor
+export {
+  executeDeclarativeGraph,
+  buildDeclarativeGraphContext,
+  prepareDeclarativeGraph,
+  executeDeclarativeNode,
+  subgraphRegistry as declarativeSubgraphRegistry,
+  schemaRegistry as declarativeSchemaRegistry,
+  nodeRegistry as declarativeNodeRegistry,
+} from "./declarative-executor";
+export type {
+  DeclarativeGraphContext,
+  DeclarativeGraphResult,
+  NodeExecutionResult,
+  PreparedGraph,
+} from "./declarative-executor";

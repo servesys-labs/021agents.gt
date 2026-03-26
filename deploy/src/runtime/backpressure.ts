@@ -1,0 +1,303 @@
+/**
+ * Streaming backpressure controller.
+ * 
+ * Prevents memory exhaustion when the consumer (WebSocket client) is slower
+ * than the producer (LLM stream).
+ * 
+ * Strategies:
+ * - Buffer with size limit (drops old messages if buffer full)
+ * - Pause/resume based on buffer watermarks
+ * - Adaptive batching for high-throughput scenarios
+ */
+
+export interface BackpressureOptions {
+  /** Maximum buffer size in bytes */
+  maxBufferBytes?: number;
+  /** High watermark - pause producer above this level */
+  highWatermarkBytes?: number;
+  /** Low watermark - resume producer below this level */
+  lowWatermarkBytes?: number;
+  /** Maximum messages in buffer */
+  maxMessages?: number;
+  /** Timeout for paused sends */
+  sendTimeoutMs?: number;
+  /** Whether to drop old messages when buffer full */
+  dropOldOnOverflow?: boolean;
+}
+
+export interface BackpressureController {
+  /** Send a message (may wait if backpressure active) */
+  send(data: string): Promise<void>;
+  /** Check if backpressure is active */
+  isBackpressureActive(): boolean;
+  /** Get current buffer stats */
+  getStats(): BackpressureStats;
+  /** Flush all pending messages */
+  flush(): Promise<void>;
+  /** Close and cleanup */
+  close(): void;
+}
+
+export interface BackpressureStats {
+  bufferedBytes: number;
+  bufferedMessages: number;
+  droppedMessages: number;
+  pausedTimeMs: number;
+  isPaused: boolean;
+}
+
+interface QueuedMessage {
+  data: string;
+  size: number;
+  timestamp: number;
+  resolve: () => void;
+  reject: (err: Error) => void;
+}
+
+/**
+ * Create a backpressure controller for WebSocket streaming.
+ */
+export function createBackpressureController(
+  underlyingSend: (data: string) => boolean | void,
+  options: BackpressureOptions = {}
+): BackpressureController {
+  const {
+    maxBufferBytes = 1024 * 1024, // 1MB default
+    highWatermarkBytes = maxBufferBytes * 0.8, // 80%
+    lowWatermarkBytes = maxBufferBytes * 0.3, // 30%
+    maxMessages = 1000,
+    sendTimeoutMs = 30000,
+    dropOldOnOverflow = true,
+  } = options;
+  
+  const queue: QueuedMessage[] = [];
+  let bufferedBytes = 0;
+  let droppedMessages = 0;
+  let isPaused = false;
+  let pausedTimeMs = 0;
+  let pauseStartTime: number | null = null;
+  let isClosed = false;
+  let flushInterval: ReturnType<typeof setInterval> | null = null;
+  
+  // Start flush loop
+  flushInterval = setInterval(processQueue, 5); // 5ms tick
+  
+  function processQueue(): void {
+    if (isClosed || queue.length === 0) return;
+    
+    // Process as many messages as the underlying transport can take
+    while (queue.length > 0) {
+      const msg = queue[0];
+      
+      // Try to send
+      const canAcceptMore = underlyingSend(msg.data);
+      
+      if (canAcceptMore === false) {
+        // Transport backpressure - stop for now
+        break;
+      }
+      
+      // Message sent
+      queue.shift();
+      bufferedBytes -= msg.size;
+      msg.resolve();
+      
+      // Check if we should resume
+      if (isPaused && bufferedBytes < lowWatermarkBytes) {
+        isPaused = false;
+        if (pauseStartTime) {
+          pausedTimeMs += Date.now() - pauseStartTime;
+          pauseStartTime = null;
+        }
+      }
+    }
+  }
+  
+  async function send(data: string): Promise<void> {
+    if (isClosed) {
+      throw new Error("Backpressure controller is closed");
+    }
+    
+    const size = new TextEncoder().encode(data).length;
+    
+    // Check if we need to drop old messages
+    if (bufferedBytes + size > maxBufferBytes || queue.length >= maxMessages) {
+      if (dropOldOnOverflow && queue.length > 0) {
+        // Drop oldest messages until we have room
+        while ((bufferedBytes + size > maxBufferBytes || queue.length >= maxMessages) && queue.length > 0) {
+          const dropped = queue.shift()!;
+          bufferedBytes -= dropped.size;
+          dropped.reject(new Error("Message dropped due to backpressure"));
+          droppedMessages++;
+        }
+      } else {
+        throw new Error("Buffer overflow - message rejected");
+      }
+    }
+    
+    // Create promise for this message
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        const idx = queue.findIndex(m => m.resolve === resolve);
+        if (idx !== -1) {
+          const msg = queue.splice(idx, 1)[0];
+          bufferedBytes -= msg.size;
+          reject(new Error("Send timeout"));
+        }
+      }, sendTimeoutMs);
+      
+      const wrappedResolve = () => {
+        clearTimeout(timeoutId);
+        resolve();
+      };
+      
+      const wrappedReject = (err: Error) => {
+        clearTimeout(timeoutId);
+        reject(err);
+      };
+      
+      queue.push({
+        data,
+        size,
+        timestamp: Date.now(),
+        resolve: wrappedResolve,
+        reject: wrappedReject,
+      });
+      
+      bufferedBytes += size;
+      
+      // Check for backpressure
+      if (bufferedBytes > highWatermarkBytes && !isPaused) {
+        isPaused = true;
+        pauseStartTime = Date.now();
+      }
+    });
+  }
+  
+  function isBackpressureActive(): boolean {
+    return isPaused || queue.length > maxMessages * 0.5;
+  }
+  
+  function getStats(): BackpressureStats {
+    return {
+      bufferedBytes,
+      bufferedMessages: queue.length,
+      droppedMessages,
+      pausedTimeMs: isPaused && pauseStartTime 
+        ? pausedTimeMs + (Date.now() - pauseStartTime) 
+        : pausedTimeMs,
+      isPaused,
+    };
+  }
+  
+  async function flush(): Promise<void> {
+    while (queue.length > 0 && !isClosed) {
+      processQueue();
+      if (queue.length > 0) {
+        await new Promise(r => setTimeout(r, 10));
+      }
+    }
+  }
+  
+  function close(): void {
+    isClosed = true;
+    if (flushInterval) {
+      clearInterval(flushInterval);
+      flushInterval = null;
+    }
+    
+    // Reject all pending messages
+    for (const msg of queue) {
+      msg.reject(new Error("Controller closed"));
+    }
+    queue.length = 0;
+    bufferedBytes = 0;
+  }
+  
+  return {
+    send,
+    isBackpressureActive,
+    getStats,
+    flush,
+    close,
+  };
+}
+
+/**
+ * Create a send function that applies backpressure for WebSocket connections.
+ */
+export function createWebSocketSendWithBackpressure(
+  ws: { 
+    send(data: string): void;
+    bufferedAmount?: number;
+    readyState: number;
+  },
+  options?: BackpressureOptions
+): { send: (data: string) => Promise<void>; controller: BackpressureController } {
+  const controller = createBackpressureController(
+    (data) => {
+      // Check WebSocket state
+      if (ws.readyState !== 1) { // 1 = OPEN
+        return false;
+      }
+      
+      // Check native bufferedAmount if available
+      if (ws.bufferedAmount !== undefined && ws.bufferedAmount > 1024 * 1024) {
+        return false;
+      }
+      
+      ws.send(data);
+      return true;
+    },
+    options
+  );
+  
+  return { send: controller.send, controller };
+}
+
+/**
+ * Adaptive rate limiter for high-throughput streaming.
+ * Adjusts batch size based on consumer capacity.
+ */
+export class AdaptiveRateLimiter {
+  private targetLatencyMs: number;
+  private currentBatchSize: number;
+  private measurements: number[] = [];
+  
+  constructor(targetLatencyMs = 50, initialBatchSize = 1) {
+    this.targetLatencyMs = targetLatencyMs;
+    this.currentBatchSize = initialBatchSize;
+  }
+  
+  recordLatency(latencyMs: number): void {
+    this.measurements.push(latencyMs);
+    
+    // Keep last 10 measurements
+    if (this.measurements.length > 10) {
+      this.measurements.shift();
+    }
+    
+    // Adjust batch size every 5 measurements
+    if (this.measurements.length >= 5) {
+      this.adjustBatchSize();
+    }
+  }
+  
+  private adjustBatchSize(): void {
+    const avg = this.measurements.reduce((a, b) => a + b, 0) / this.measurements.length;
+    
+    if (avg > this.targetLatencyMs * 1.5) {
+      // Too slow - reduce batch size
+      this.currentBatchSize = Math.max(1, Math.floor(this.currentBatchSize * 0.8));
+    } else if (avg < this.targetLatencyMs * 0.5 && this.currentBatchSize < 100) {
+      // Fast enough - increase batch size
+      this.currentBatchSize = Math.min(100, Math.ceil(this.currentBatchSize * 1.2));
+    }
+    
+    this.measurements = [];
+  }
+  
+  getBatchSize(): number {
+    return this.currentBatchSize;
+  }
+}

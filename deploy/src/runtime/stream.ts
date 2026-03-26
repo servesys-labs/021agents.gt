@@ -17,14 +17,44 @@
  * DB writes and telemetry are fire-and-forget (non-blocking).
  */
 
-import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv, RuntimeEvent } from "./types";
+import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv, ToolResult } from "./types";
+import type { RuntimeEvent, TurnEndEvent, DoneEvent } from "./protocol";
 import { executeTools, getToolDefinitions } from "./tools";
 import { loadAgentConfig, resolvePlanRouting, writeSession, writeTurn, writeBillingRecord } from "./db";
 import { createWorkingMemory, buildMemoryContext, queueFactExtraction } from "./memory";
 import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop } from "./middleware";
+import { serializeForWebSocket } from "./protocol";
+import { createBackpressureController } from "./backpressure";
 
 type WsSend = (data: string) => void;
+
+/**
+ * Helper for progress reporting on long-running tools.
+ * Sends periodic "tool_progress" events over the WebSocket while awaiting a tool result.
+ */
+function withProgress(
+  toolName: string,
+  promise: Promise<string>,
+  send?: WsSend,
+  intervalMs = 5000,
+): Promise<string> {
+  if (!send) return promise;
+
+  let elapsed = 0;
+  const timer = setInterval(() => {
+    elapsed += intervalMs;
+    send(JSON.stringify({
+      type: "tool_progress",
+      tool: toolName,
+      status: "running",
+      elapsed_ms: elapsed,
+      message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
+    }));
+  }, intervalMs);
+
+  return promise.finally(() => clearInterval(timer));
+}
 
 /**
  * Streaming LLM call — sends tokens to WebSocket as they arrive.
@@ -283,7 +313,7 @@ export async function streamRun(
     }
     messages.push({ role: "user", content: task });
 
-    send(JSON.stringify({
+    send(serializeForWebSocket({
       type: "session_start",
       session_id: sessionId,
       trace_id: traceId,
@@ -304,14 +334,14 @@ export async function streamRun(
     for (let turn = 1; turn <= config.max_turns; turn++) {
       // Budget check
       if (cumulativeCost >= config.budget_limit_usd) {
-        send(JSON.stringify({ type: "error", message: "Budget exhausted" }));
+        send(serializeForWebSocket({ type: "error", message: "Budget exhausted", code: "BUDGET_EXHAUSTED" }));
         break;
       }
 
       // Route model
       const route = selectModel(task, planRouting as PlanRouting | undefined, config.model, config.provider);
 
-      send(JSON.stringify({ type: "turn_start", turn, model: route.model }));
+      send(serializeForWebSocket({ type: "turn_start", turn, model: route.model }));
 
       // Stream LLM response
       let llmResponse: LLMResponse;
@@ -322,7 +352,7 @@ export async function streamRun(
           max_tokens: route.max_tokens,
         }, send);
       } catch (err: any) {
-        send(JSON.stringify({ type: "error", message: `LLM failed: ${err.message}` }));
+        send(serializeForWebSocket({ type: "error", message: `LLM failed: ${err.message}`, code: "LLM_ERROR" }));
         break;
       }
 
@@ -334,10 +364,12 @@ export async function streamRun(
       // No tool calls → final answer
       if (llmResponse.tool_calls.length === 0) {
         output = llmResponse.content;
-        send(JSON.stringify({
+        const turnTokens = llmResponse.usage.input_tokens + llmResponse.usage.output_tokens;
+        const turnEndEvent: TurnEndEvent = {
           type: "turn_end", turn, model: llmResponse.model,
-          cost_usd: llmResponse.cost_usd, done: true,
-        }));
+          cost_usd: llmResponse.cost_usd, tokens: turnTokens, done: true,
+        };
+        send(serializeForWebSocket(turnEndEvent));
 
         // DB write (fire-and-forget)
         writeTurn(hyperdrive, {
@@ -354,13 +386,56 @@ export async function streamRun(
       messages.push({ role: "assistant", content: llmResponse.content, tool_calls: llmResponse.tool_calls });
 
       for (const tc of llmResponse.tool_calls) {
-        send(JSON.stringify({ type: "tool_call", name: tc.name, tool_call_id: tc.id }));
+        send(serializeForWebSocket({ type: "tool_call", name: tc.name, tool_call_id: tc.id }));
       }
 
-      const toolResults = await executeTools(env, llmResponse.tool_calls, sessionId, config.parallel_tool_calls);
+      // P0 Fix: Report progress for ALL long-running tools, not just the first
+      const LONG_RUNNING_TOOLS = new Set(["python-exec", "bash", "web-crawl", "browser-render"]);
+      const longRunningNames = llmResponse.tool_calls
+        .filter((tc) => LONG_RUNNING_TOOLS.has(tc.name))
+        .map((tc) => tc.name);
+
+      // Send initial "Executing..." for each long-running tool
+      for (const name of longRunningNames) {
+        send(JSON.stringify({
+          type: "tool_progress",
+          tool: name,
+          status: "running",
+          elapsed_ms: 0,
+          message: "Executing...",
+        }));
+      }
+
+      // Progress timer reports ALL active long-running tools
+      const toolResultsPromise = executeTools(env, llmResponse.tool_calls, sessionId, config.parallel_tool_calls);
+      let toolProgressTimer: ReturnType<typeof setInterval> | null = null;
+      if (longRunningNames.length > 0) {
+        let elapsed = 0;
+        toolProgressTimer = setInterval(() => {
+          elapsed += 5000;
+          for (const name of longRunningNames) {
+            try {
+              send(JSON.stringify({
+                type: "tool_progress",
+                tool: name,
+                status: "running",
+                elapsed_ms: elapsed,
+                message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
+              }));
+            } catch { /* WebSocket may be closed */ }
+          }
+        }, 5000);
+      }
+
+      let toolResults: ToolResult[];
+      try {
+        toolResults = await toolResultsPromise;
+      } finally {
+        if (toolProgressTimer) clearInterval(toolProgressTimer);
+      }
       totalToolCalls += toolResults.length;
       // Accumulate tool execution costs (search, crawl, etc.)
-      cumulativeCost += toolResults.reduce((sum, tr) => sum + (tr.cost_usd || 0), 0);
+      cumulativeCost += toolResults.reduce((sum: number, tr: ToolResult) => sum + (tr.cost_usd || 0), 0);
 
       for (let i = 0; i < llmResponse.tool_calls.length; i++) {
         const tc = llmResponse.tool_calls[i];
@@ -369,7 +444,7 @@ export async function streamRun(
           role: "tool", tool_call_id: tc.id, name: tc.name,
           content: tr.error ? `Error: ${tr.error}` : tr.result,
         });
-        send(JSON.stringify({
+        send(serializeForWebSocket({
           type: "tool_result", name: tc.name, tool_call_id: tc.id,
           result: (tr.error || tr.result || "").slice(0, 500),
           error: tr.error || undefined,
@@ -377,10 +452,12 @@ export async function streamRun(
         }));
       }
 
-      send(JSON.stringify({
+      const turnTokens = llmResponse.usage.input_tokens + llmResponse.usage.output_tokens;
+      const turnEndEvent: TurnEndEvent = {
         type: "turn_end", turn, model: llmResponse.model,
-        cost_usd: llmResponse.cost_usd, tool_calls: toolResults.length, done: false,
-      }));
+        cost_usd: llmResponse.cost_usd, tokens: turnTokens, tool_calls: toolResults.length, done: false,
+      };
+      send(serializeForWebSocket(turnEndEvent));
 
       // DB write (fire-and-forget)
       writeTurn(hyperdrive, {
@@ -390,7 +467,7 @@ export async function streamRun(
         cost_total_usd: llmResponse.cost_usd,
         tool_calls_json: JSON.stringify(llmResponse.tool_calls),
         tool_results_json: JSON.stringify(toolResults),
-        errors_json: JSON.stringify(toolResults.filter((tr) => tr.error)),
+        errors_json: JSON.stringify(toolResults.filter((tr: ToolResult) => tr.error)),
         execution_mode: config.parallel_tool_calls && llmResponse.tool_calls.length > 1 ? "parallel" : "sequential",
       }).catch(() => {});
 
@@ -399,12 +476,12 @@ export async function streamRun(
         name: tc.name, arguments: tc.arguments,
       })));
       if (loopResult?.halt) {
-        send(JSON.stringify({ type: "error", message: loopResult.halt }));
+        send(serializeForWebSocket({ type: "error", message: loopResult.halt, code: "LOOP_DETECTED" }));
         break;
       }
       if (loopResult?.warn) {
         messages.push({ role: "system", content: loopResult.warn });
-        send(JSON.stringify({ type: "warning", message: loopResult.warn }));
+        send(serializeForWebSocket({ type: "warning", message: loopResult.warn }));
       }
 
       // Fact extraction (first turn only, non-blocking)
@@ -431,7 +508,7 @@ export async function streamRun(
       cost_usd: cumulativeCost, plan: config.plan,
     }).catch(() => {});
 
-    send(JSON.stringify({
+    const doneEvent: DoneEvent = {
       type: "done",
       session_id: sessionId,
       trace_id: traceId,
@@ -440,10 +517,11 @@ export async function streamRun(
       tool_calls: totalToolCalls,
       cost_usd: Math.round(cumulativeCost * 1_000_000) / 1_000_000,
       latency_ms: elapsedMs,
-    }));
+    };
+    send(serializeForWebSocket(doneEvent));
 
   } catch (err: any) {
-    send(JSON.stringify({ type: "error", message: err.message || String(err) }));
+    send(serializeForWebSocket({ type: "error", message: err.message || String(err), code: "INTERNAL_ERROR" }));
   }
 }
 
