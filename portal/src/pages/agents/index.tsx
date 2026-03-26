@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, type CSSProperties } from "react";
 import {
   Plus,
   Search,
@@ -15,7 +15,7 @@ import {
   Clock,
   Wrench,
 } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
@@ -26,6 +26,7 @@ import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionM
 import { StatusBadge } from "../../components/common/StatusBadge";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { EmptyState } from "../../components/common/EmptyState";
+import { SkeletonAgentGrid, SkeletonTable } from "../../components/common/Skeleton";
 import { useToast } from "../../components/common/ToastProvider";
 import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
 import { CopyIdButton } from "../../components/common/CopyIdButton";
@@ -86,14 +87,37 @@ const emptyForm: AgentCreateRequest = {
 export const AgentsPage = () => {
   const navigate = useNavigate();
   const { showToast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  /* ── View mode ──────────────────────────────────────────── */
-  const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
+  /* ── URL-persisted view/query state ─────────────────────── */
+  const viewMode = (searchParams.get("view") ?? "grid") as "grid" | "table";
+  const limit = Number(searchParams.get("limit")) || 25;
+  const offset = Number(searchParams.get("offset")) || 0;
+  const search = searchParams.get("q") ?? "";
 
-  /* ── Query state ──────────────────────────────────────────── */
-  const [limit, setLimit] = useState(25);
-  const [offset, setOffset] = useState(0);
-  const [search, setSearch] = useState("");
+  const updateParam = useCallback(
+    (key: string, value: string) => {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        if (!value || value === "0") next.delete(key);
+        else next.set(key, value);
+        return next;
+      }, { replace: true });
+    },
+    [setSearchParams],
+  );
+
+  const setViewMode = (v: "grid" | "table") => updateParam("view", v === "grid" ? "" : v);
+  const setSearch = (v: string) => updateParam("q", v);
+  const setLimit = (v: number) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("limit", String(v));
+      next.delete("offset");
+      return next;
+    }, { replace: true });
+  };
+  const setOffset = (v: number) => updateParam("offset", v > 0 ? String(v) : "");
 
   const agentsQuery = useApiQuery<AgentInfo[]>(
     `/api/v1/agents?limit=${limit}&offset=${offset}`,
@@ -400,6 +424,7 @@ export const AgentsPage = () => {
         isEmpty={agents.length === 0}
         emptyMessage=""
         onRetry={() => void agentsQuery.refetch()}
+        skeleton={viewMode === "grid" ? <SkeletonAgentGrid /> : <SkeletonTable rows={6} cols={7} />}
       >
         {filtered.length === 0 && !agentsQuery.loading ? (
           <EmptyState
@@ -425,22 +450,23 @@ export const AgentsPage = () => {
         ) : viewMode === "grid" ? (
           /* ── Grid View ──────────────────────────────────── */
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {filtered.map((agent) => (
-              <AgentCard
-                key={agent.name}
-                agent={{
-                  name: agent.name,
-                  description: agent.description,
-                  status: agent.status,
-                  model: agent.model,
-                  version: agent.version,
-                  tags: agent.tags,
-                  last_active: agent.updated_at,
-                } satisfies AgentCardData}
-                onSelect={(name) =>
-                  setSelectedAgent(selectedAgent === name ? null : name)
-                }
-              />
+            {filtered.map((agent, i) => (
+              <div key={agent.name} className="stagger-item" style={{ "--stagger-index": i } as CSSProperties}>
+                <AgentCard
+                  agent={{
+                    name: agent.name,
+                    description: agent.description,
+                    status: agent.status,
+                    model: agent.model,
+                    version: agent.version,
+                    tags: agent.tags,
+                    last_active: agent.updated_at,
+                  } satisfies AgentCardData}
+                  onSelect={(name) =>
+                    setSelectedAgent(selectedAgent === name ? null : name)
+                  }
+                />
+              </div>
             ))}
           </div>
         ) : (
@@ -461,8 +487,8 @@ export const AgentsPage = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((agent) => (
-                    <tr key={agent.name}>
+                  {filtered.map((agent, i) => (
+                    <tr key={agent.name} className="stagger-item" style={{ "--stagger-index": i } as CSSProperties}>
                       <td>
                         <button
                           className="text-left group"

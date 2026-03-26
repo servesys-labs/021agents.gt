@@ -17,6 +17,7 @@ import {
 
 import { useApiQuery } from "../../lib/api";
 import { type AgentConfig } from "../../lib/adapters";
+import { AssistInlineHint } from "../../components/common/AssistPanel";
 
 import {
   OverviewTab,
@@ -51,23 +52,57 @@ interface TabDef {
   icon: React.ReactNode;
 }
 
+/* Primary tabs — always visible, core workflow */
 const PRIMARY_TABS: TabDef[] = [
   { id: "overview", label: "Overview", icon: <LayoutDashboard size={14} /> },
   { id: "config", label: "Config", icon: <Settings2 size={14} /> },
-  { id: "knowledge", label: "Knowledge", icon: <BookOpen size={14} /> },
-  { id: "tools", label: "Tools", icon: <Wrench size={14} /> },
   { id: "playground", label: "Playground", icon: <Play size={14} /> },
   { id: "traces", label: "Traces", icon: <Activity size={14} /> },
 ];
 
+/* Secondary tabs — under "More" dropdown, organized by concern */
 const SECONDARY_TABS: TabDef[] = [
-  { id: "evolve", label: "Evolve", icon: <Sparkles size={14} /> },
+  /* Build */
+  { id: "knowledge", label: "Knowledge", icon: <BookOpen size={14} /> },
+  { id: "tools", label: "Tools", icon: <Wrench size={14} /> },
+  /* Assess */
   { id: "eval", label: "Eval", icon: <FlaskConical size={14} /> },
+  { id: "evolve", label: "Evolve", icon: <Sparkles size={14} /> },
   { id: "security", label: "Security", icon: <Shield size={14} /> },
+  /* Ship */
   { id: "releases", label: "Releases", icon: <Rocket size={14} /> },
 ];
 
 const SECONDARY_TAB_IDS = new Set(SECONDARY_TABS.map((t) => t.id));
+
+/* ── More menu item ────────────────────────────────────────────── */
+
+function MoreMenuItem({ tab, activeTab, onSelect }: { tab: TabDef; activeTab: TabId; onSelect: (id: TabId) => void }) {
+  return (
+    <button
+      role="menuitem"
+      onClick={() => onSelect(tab.id)}
+      className="flex items-center gap-2 w-full px-3 text-xs font-medium text-left transition-colors"
+      style={{
+        minHeight: "var(--touch-target-min)",
+        padding: "var(--space-2) var(--space-3)",
+        color: activeTab === tab.id ? "var(--color-accent)" : "var(--color-text-secondary)",
+        background: activeTab === tab.id ? "var(--color-accent-muted)" : "transparent",
+        border: "none",
+        cursor: "pointer",
+      }}
+      onMouseEnter={(e) => {
+        if (activeTab !== tab.id) e.currentTarget.style.background = "var(--color-white-alpha-5)";
+      }}
+      onMouseLeave={(e) => {
+        if (activeTab !== tab.id) e.currentTarget.style.background = "transparent";
+      }}
+    >
+      {tab.icon}
+      {tab.label}
+    </button>
+  );
+}
 
 /* ── Component ─────────────────────────────────────────────────── */
 
@@ -279,7 +314,7 @@ export const AgentDetailPage = () => {
             )}
           </button>
 
-          {/* Dropdown menu */}
+          {/* Dropdown menu with grouped sections */}
           {moreOpen && (
             <div
               className="glass-dropdown absolute top-full left-0 mt-2 rounded-lg border overflow-hidden z-50"
@@ -289,46 +324,64 @@ export const AgentDetailPage = () => {
               }}
               role="menu"
             >
-              {SECONDARY_TABS.map((tab) => (
-                <button
-                  key={tab.id}
-                  role="menuitem"
-                  onClick={() => selectTab(tab.id)}
-                  className="flex items-center gap-2 w-full px-3 text-xs font-medium text-left transition-colors"
-                  style={{
-                    minHeight: "var(--touch-target-min)",
-                    padding: "var(--space-2) var(--space-3)",
-                    color:
-                      activeTab === tab.id
-                        ? "var(--color-accent)"
-                        : "var(--color-text-secondary)",
-                    background:
-                      activeTab === tab.id
-                        ? "var(--color-accent-muted)"
-                        : "transparent",
-                    border: "none",
-                    cursor: "pointer",
-                  }}
-                  onMouseEnter={(e) => {
-                    if (activeTab !== tab.id) {
-                      e.currentTarget.style.background =
-                        "var(--color-white-alpha-5)";
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (activeTab !== tab.id) {
-                      e.currentTarget.style.background = "transparent";
-                    }
-                  }}
-                >
-                  {tab.icon}
-                  {tab.label}
-                </button>
+              {/* Build group */}
+              <div className="px-3 pt-2 pb-1">
+                <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Build</span>
+              </div>
+              {SECONDARY_TABS.filter((t) => t.id === "knowledge" || t.id === "tools").map((tab) => (
+                <MoreMenuItem key={tab.id} tab={tab} activeTab={activeTab} onSelect={selectTab} />
+              ))}
+
+              {/* Assess group */}
+              <div className="border-t border-border-default mx-2 my-1" />
+              <div className="px-3 pt-1 pb-1">
+                <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Assess</span>
+              </div>
+              {SECONDARY_TABS.filter((t) => t.id === "eval" || t.id === "evolve" || t.id === "security").map((tab) => (
+                <MoreMenuItem key={tab.id} tab={tab} activeTab={activeTab} onSelect={selectTab} />
+              ))}
+
+              {/* Ship group */}
+              <div className="border-t border-border-default mx-2 my-1" />
+              <div className="px-3 pt-1 pb-1">
+                <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Ship</span>
+              </div>
+              {SECONDARY_TABS.filter((t) => t.id === "releases").map((tab) => (
+                <MoreMenuItem key={tab.id} tab={tab} activeTab={activeTab} onSelect={selectTab} />
               ))}
             </div>
           )}
         </div>
       </div>
+
+      {/* ── Meta-agent contextual hint ──────────────────────────── */}
+      {activeTab === "traces" && agentName && (
+        <div className="mb-4">
+          <AssistInlineHint
+            message={`Meta-agent can analyze ${agentName}'s traces for patterns and failures`}
+            actionLabel="Analyze traces"
+            prompt={`Analyze the recent traces for ${agentName} — find failure patterns, slow tool calls, and suggest optimizations`}
+          />
+        </div>
+      )}
+      {activeTab === "eval" && agentName && (
+        <div className="mb-4">
+          <AssistInlineHint
+            message={`Run an eval loop to test ${agentName} and get improvement suggestions`}
+            actionLabel="Run eval"
+            prompt={`Run an eval loop for ${agentName}: pick tasks, run trials, summarize failures, and propose the top 3 improvements`}
+          />
+        </div>
+      )}
+      {activeTab === "security" && agentName && (
+        <div className="mb-4">
+          <AssistInlineHint
+            message={`Get a security risk assessment for ${agentName}`}
+            actionLabel="Assess risk"
+            prompt={`Analyze the security posture of ${agentName} — AIVSS risk score, open findings, and recommended mitigations`}
+          />
+        </div>
+      )}
 
       {/* ── Tab content ────────────────────────────────────────── */}
       <div role="tabpanel">{renderTabContent()}</div>
