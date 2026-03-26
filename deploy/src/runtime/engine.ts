@@ -64,6 +64,19 @@ export async function edgeRun(
     }
   }
 
+  // Startup sequence: load cross-session progress to orient the agent (harness pattern).
+  // The context block is injected into the system prompt so the agent knows what happened
+  // in prior sessions without burning tokens on archaeology.
+  try {
+    const { loadStartupContext } = await import("./progress");
+    const startup = await loadStartupContext(hyperdrive, config.agent_name, config.org_id);
+    if (startup.context_block) {
+      config.system_prompt = config.system_prompt + "\n\n" + startup.context_block;
+    }
+  } catch {
+    // Best-effort — startup context should never block execution
+  }
+
   const ctx = buildFreshGraphCtx(
     env,
     hyperdrive,
@@ -280,6 +293,24 @@ export async function edgeRun(
       trace_id: traceId,
       session_id: sessionId,
     }));
+  }
+
+  // Write cross-session progress entry (harness pattern: cognitive anchor)
+  try {
+    const { buildProgressSummary, writeProgress } = await import("./progress");
+    const summary = buildProgressSummary(ctx.results, ctx.events, elapsedMs / 1000, ctx.stopReason);
+    persistenceTasks.push(
+      writeProgress(hyperdrive, {
+        session_id: sessionId,
+        trace_id: traceId,
+        agent_name: config.agent_name,
+        org_id: config.org_id,
+        timestamp: Date.now(),
+        summary,
+      }),
+    );
+  } catch {
+    // Best-effort — progress tracking should never block execution
   }
 
   // Ensure writes are not dropped when request scope ends.

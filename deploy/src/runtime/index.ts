@@ -83,6 +83,10 @@ export type { RuntimeEvent as ProtocolRuntimeEvent, TurnEndEvent, DoneEvent, Err
 export { validateEvent, serializeForSSE, serializeForWebSocket } from "./protocol";
 export { syncFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";
 
+// Cross-session progress tracking (harness pattern: cognitive anchor)
+export { buildProgressSummary, writeProgress, loadStartupContext } from "./progress";
+export type { ProgressEntry, ProgressSummary, StartupContext } from "./progress";
+
 // Sub-graph support
 export { 
   subgraphRegistry, 

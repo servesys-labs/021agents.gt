@@ -1,0 +1,407 @@
+{
+  "_meta": {
+    "description": "Structured feature registry — the cognitive anchor for AI dev agents. Read this file at the start of every session to understand what exists, what works, and what remains.",
+    "format_version": "1.0.0",
+    "last_updated": "2026-03-26",
+    "instructions": "Do NOT remove or edit existing feature entries. Only update the 'passes' field after end-to-end verification. Add new entries when new features are built."
+  },
+  "categories": {
+    "control-plane": "API layer (Hono + Supabase on CF Workers)",
+    "runtime": "Edge agent execution (Durable Objects + Agents SDK)",
+    "portal": "Web dashboard (React + Refine + Tailwind)"
+  },
+  "features": [
+    {
+      "id": "cp-auth-jwt",
+      "category": "control-plane",
+      "description": "JWT authentication with token creation and verification",
+      "key_files": ["control-plane/src/auth/jwt.ts", "control-plane/src/middleware/auth.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-auth-clerk",
+      "category": "control-plane",
+      "description": "Clerk OAuth2 integration with JWKS verification",
+      "key_files": ["control-plane/src/auth/clerk.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-auth-apikeys",
+      "category": "control-plane",
+      "description": "API key authentication with hash-based lookup and scope enforcement",
+      "key_files": ["control-plane/src/auth/api-keys.ts", "control-plane/src/routes/api-keys.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-rbac",
+      "category": "control-plane",
+      "description": "Role-based access control with 50+ scopes, role hierarchy (owner > admin > member > viewer), and requireScope() guard",
+      "key_files": ["control-plane/src/auth/types.ts", "control-plane/src/middleware/auth.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-rls",
+      "category": "control-plane",
+      "description": "Row-level security via Supabase with org_id context injection on every query",
+      "key_files": ["control-plane/src/db/client.ts", "control-plane/src/db/rls.sql"],
+      "passes": true
+    },
+    {
+      "id": "cp-agents-crud",
+      "category": "control-plane",
+      "description": "Agent CRUD: create, read, update, delete, list, import/export, create-from-description",
+      "key_files": ["control-plane/src/routes/agents.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-graph-validate",
+      "category": "control-plane",
+      "description": "Graph structural validation: node IDs, edges, cycle detection",
+      "key_files": ["control-plane/src/logic/graph-validate.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-graph-lint",
+      "category": "control-plane",
+      "description": "Graph design-time linting: background node placement, idempotency keys, async fan-in warnings, skill state contracts",
+      "key_files": ["control-plane/src/logic/graph-lint.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-graph-autofix",
+      "category": "control-plane",
+      "description": "Auto-correct common graph issues with suggested fixes",
+      "key_files": ["control-plane/src/logic/graph-autofix.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-gate-pack",
+      "category": "control-plane",
+      "description": "Eval readiness gates: latest eval pass-rate check + rollout recommendation (hold vs promote)",
+      "key_files": ["control-plane/src/logic/gate-pack.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-releases",
+      "category": "control-plane",
+      "description": "Release channels (draft -> staging -> production) with canary splits and traffic weighting",
+      "key_files": ["control-plane/src/routes/releases.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-workflows",
+      "category": "control-plane",
+      "description": "Multi-agent DAG workflows with approval gates, topological sort, deadline enforcement",
+      "key_files": ["control-plane/src/routes/workflows.ts", "control-plane/src/logic/workflow-validator.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-eval",
+      "category": "control-plane",
+      "description": "Eval runs, datasets (R2 storage), evaluators, trial tracking with pass/fail scoring",
+      "key_files": ["control-plane/src/routes/eval.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-evolve",
+      "category": "control-plane",
+      "description": "Evolution proposals and ledger for agent self-improvement tracking",
+      "key_files": ["control-plane/src/routes/evolve.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-sessions",
+      "category": "control-plane",
+      "description": "Session listing, stats/summary, turns, traces, feedback submission, cleanup",
+      "key_files": ["control-plane/src/routes/sessions.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-observability",
+      "category": "control-plane",
+      "description": "Cost ledger, daily cost summaries, traces, meta-control-plane annotations",
+      "key_files": ["control-plane/src/routes/observability.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-security",
+      "category": "control-plane",
+      "description": "Security scanning, OWASP probes, AIVSS risk scoring, PII detection, prompt injection detection",
+      "key_files": ["control-plane/src/routes/security.ts", "control-plane/src/logic/security-scanner.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-meta-agent",
+      "category": "control-plane",
+      "description": "LLM-based agent config generation from natural language description with tool recommendations",
+      "key_files": ["control-plane/src/logic/meta-agent.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-memory-rag",
+      "category": "control-plane",
+      "description": "Memory and RAG management routes for knowledge bases",
+      "key_files": ["control-plane/src/routes/memory.ts", "control-plane/src/routes/rag.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-policies",
+      "category": "control-plane",
+      "description": "Governance policy templates for agent behavior enforcement",
+      "key_files": ["control-plane/src/routes/policies.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-guardrails",
+      "category": "control-plane",
+      "description": "Safety guardrails configuration and enforcement",
+      "key_files": ["control-plane/src/routes/guardrails.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-connectors",
+      "category": "control-plane",
+      "description": "External integration connectors (Pipedream MCP for 3K+ apps)",
+      "key_files": ["control-plane/src/routes/connectors.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-a2a",
+      "category": "control-plane",
+      "description": "Agent-to-Agent protocol (Google A2A) for inter-agent communication",
+      "key_files": ["control-plane/src/routes/a2a.ts"],
+      "passes": true
+    },
+    {
+      "id": "cp-codemode",
+      "category": "control-plane",
+      "description": "Codemode snippet management routes for custom code execution",
+      "key_files": ["control-plane/src/routes/codemode.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-graph-executor",
+      "category": "runtime",
+      "description": "Deterministic graph executor: bootstrap -> turn_budget -> summarize -> route_llm -> tools -> loop_detect -> after_tools",
+      "key_files": ["deploy/src/runtime/edge_graph.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-session-lifecycle",
+      "category": "runtime",
+      "description": "Full session lifecycle: edgeRun (fresh), edgeResume (checkpoint), edgeBatch (parallel)",
+      "key_files": ["deploy/src/runtime/engine.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-checkpoint-resume",
+      "category": "runtime",
+      "description": "Checkpoint creation at approval gates, full state serialization, cross-session resume with trace lineage",
+      "key_files": ["deploy/src/runtime/engine.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-memory-4tier",
+      "category": "runtime",
+      "description": "4-tier memory: working (DO RAM, 100 items LRU), episodic (Supabase), semantic (Vectorize 768-dim), procedural (success-scored)",
+      "key_files": ["deploy/src/runtime/memory.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-tools-circuit-breaker",
+      "category": "runtime",
+      "description": "Tool execution with circuit breaker (5-failure threshold, 30s cooldown), parallel/sequential modes",
+      "key_files": ["deploy/src/runtime/tools.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-cost-model",
+      "category": "runtime",
+      "description": "Per-tool cost tracking (flat + per-ms rates) plus infrastructure overhead (DO, Hyperdrive, Queue, Vectorize, R2)",
+      "key_files": ["deploy/src/runtime/tools.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-loop-detection",
+      "category": "runtime",
+      "description": "Tool call signature tracking: warn at 3 repeats, hard halt at 5. Prevents infinite loops.",
+      "key_files": ["deploy/src/runtime/middleware.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-context-summarization",
+      "category": "runtime",
+      "description": "Auto-compress long conversations via LLM-powered summarization when context exceeds threshold",
+      "key_files": ["deploy/src/runtime/middleware.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-codemode",
+      "category": "runtime",
+      "description": "10-scope sandboxed code execution in V8 isolates with capability-based tool ACLs, concurrency limits, recursion guards",
+      "key_files": ["deploy/src/runtime/codemode.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-streaming",
+      "category": "runtime",
+      "description": "WebSocket streaming: real-time tokens, tool_call/tool_result, tool_progress (5s heartbeats), turn_end, done events",
+      "key_files": ["deploy/src/runtime/stream.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-backpressure",
+      "category": "runtime",
+      "description": "Adaptive rate limiter for WebSocket send with backpressure control",
+      "key_files": ["deploy/src/runtime/backpressure.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-workspace",
+      "category": "runtime",
+      "description": "R2 file sync for persistent sandbox state: hydrate on session start, snapshot on session end",
+      "key_files": ["deploy/src/runtime/workspace.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-model-routing",
+      "category": "runtime",
+      "description": "Plan-based model routing (basic/standard/premium) with complexity classification and category detection",
+      "key_files": ["deploy/src/runtime/router.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-telemetry",
+      "category": "runtime",
+      "description": "Event telemetry pipeline: runtime events -> Queue -> Supabase otel_events table with time-travel replay",
+      "key_files": ["deploy/src/runtime/db.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-subgraphs",
+      "category": "runtime",
+      "description": "Nested graph support: subgraph registry, input resolution, output mapping",
+      "key_files": ["deploy/src/runtime/subgraph.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-schema-validation",
+      "category": "runtime",
+      "description": "JSON Schema validation for graph node inputs/outputs with TypeScript type generation",
+      "key_files": ["deploy/src/runtime/graph-schema.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-graph-cache",
+      "category": "runtime",
+      "description": "LRU cache for validated graphs, expanded subgraphs, and linear paths",
+      "key_files": ["deploy/src/runtime/graph-cache.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-intent-routing",
+      "category": "runtime",
+      "description": "Task complexity classification and intent decomposition for multi-agent routing",
+      "key_files": ["deploy/src/runtime/intent-router.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-fact-extraction",
+      "category": "runtime",
+      "description": "Pattern-based fact extraction from conversations: preferences, knowledge, goals, behaviors",
+      "key_files": ["deploy/src/runtime/memory.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-progress-tracking",
+      "category": "runtime",
+      "description": "Cross-session progress persistence: log what was done, what failed, what remains — survives context window boundaries",
+      "key_files": ["deploy/src/runtime/progress.ts"],
+      "passes": false
+    },
+    {
+      "id": "rt-startup-sequence",
+      "category": "runtime",
+      "description": "Standardized agent warm-up protocol: load progress -> read feature list -> verify environment -> orient before executing",
+      "key_files": ["deploy/src/runtime/progress.ts"],
+      "passes": false
+    },
+    {
+      "id": "portal-dashboard",
+      "category": "portal",
+      "description": "KPI dashboard: 8 metrics, agent cards with sparklines, quick actions, system health, cost overview",
+      "key_files": ["portal/src/pages/dashboard/index.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-agent-list",
+      "category": "portal",
+      "description": "Agent grid listing with status badges, sessions/7d, success rate, last active timestamp",
+      "key_files": ["portal/src/pages/agents/list.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-agent-detail",
+      "category": "portal",
+      "description": "Agent detail with 10 tabs: Overview, Config, Knowledge, Tools, Playground, Traces, Evolve, Eval, Security, Releases",
+      "key_files": ["portal/src/pages/agents/detail.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-agent-create",
+      "category": "portal",
+      "description": "Agent creation form with model selection, system prompt, tools, governance config",
+      "key_files": ["portal/src/pages/agents/create.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-agent-playground",
+      "category": "portal",
+      "description": "Interactive chat interface for testing agents with real-time responses",
+      "key_files": ["portal/src/pages/agents/playground.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-sessions",
+      "category": "portal",
+      "description": "Session listing with filters (status, agent name), pagination, stats row (total, avg duration, cost)",
+      "key_files": ["portal/src/pages/sessions/index.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-session-trace",
+      "category": "portal",
+      "description": "Turn-by-turn session trace viewer with step navigation, reflection confidence, DAG nodes, tool call tags",
+      "key_files": ["portal/src/pages/agents/session-trace.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-canvas",
+      "category": "portal",
+      "description": "Visual agent builder with XY Flow: agent nodes, MCP server nodes, data source nodes, knowledge nodes, connector nodes",
+      "key_files": ["portal/src/components/canvas/"],
+      "passes": true
+    },
+    {
+      "id": "portal-intelligence",
+      "category": "portal",
+      "description": "Analytics dashboard: quality scores, sentiment breakdown, trends, tool performance, feedback stats",
+      "key_files": ["portal/src/pages/intelligence/index.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-command-palette",
+      "category": "portal",
+      "description": "Global command palette (Cmd+K) for quick navigation and actions",
+      "key_files": ["portal/src/components/common/CommandPalette.tsx"],
+      "passes": true
+    },
+    {
+      "id": "portal-deploy",
+      "category": "portal",
+      "description": "Multi-step agent deployment workflow with success confirmation screen",
+      "key_files": ["portal/src/pages/agents/deploy.tsx", "portal/src/pages/agents/success.tsx"],
+      "passes": true
+    }
+  ]
+}
