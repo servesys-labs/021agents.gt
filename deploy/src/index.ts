@@ -2018,57 +2018,9 @@ export default {
       }
     }
 
-    // ── Dispatch Namespace — multi-tenant agent routing ──
-    // MUST run BEFORE routeAgentRequest() which would match /agents/* broadly
-    // URL: /agents/dispatch/{org_slug}/{agent_name}
-    // Routes to the customer's isolated worker in the dispatch namespace.
-    // Routes to the customer's isolated worker in the dispatch namespace.
-    // If worker not deployed: returns 503 with a clear error. No silent fallback.
-    const dispatchMatch = url.pathname.match(/^\/agents\/dispatch\/([a-z0-9-]+)\/([a-z0-9-]+)/);
-    if (dispatchMatch && env.DISPATCHER) {
-      const [, orgSlug, agentName] = dispatchMatch;
-      const workerName = `agentos-${orgSlug}-${agentName}`;
-      const hasBody = ["POST", "PUT", "PATCH"].includes(request.method);
-      const bodyText = hasBody ? await request.text().catch(() => "{}") : null;
-
-      try {
-        const userWorker = env.DISPATCHER.get(workerName);
-        const dispatchReq = new Request(request.url, {
-          method: request.method,
-          headers: request.headers,
-          ...(bodyText !== null ? { body: bodyText } : {}),
-        });
-        const dispatchResp = await userWorker.fetch(dispatchReq);
-
-        // CF returns 400 "Invalid request" when the script doesn't exist
-        if (dispatchResp.status === 400) {
-          const respText = await dispatchResp.text();
-          if (respText.includes("Invalid request")) {
-            return Response.json({
-              error: "agent_not_deployed",
-              message: `Agent '${agentName}' is not deployed to the edge. Deploy it first via POST /api/v1/deploy/${agentName}, or try again later.`,
-              worker_name: workerName,
-            }, { status: 503 });
-          }
-          // Real 400 from the customer worker — pass through
-          return new Response(respText, { status: 400, headers: { "Content-Type": "application/json" } });
-        }
-
-        return dispatchResp;
-      } catch (e: any) {
-        return Response.json({
-          error: "agent_not_deployed",
-          message: `Agent '${agentName}' is not deployed to the edge. Deploy it first via POST /api/v1/deploy/${agentName}, or try again later.`,
-          worker_name: workerName,
-          detail: e.message || "",
-        }, { status: 503 });
-      }
-    }
-
     // Route Agents SDK requests: /agents/:agent-name/:instance-name
-    // Guard before routing so guessed agent names cannot be accessed anonymously.
-    // Runs AFTER dispatch routing so /agents/dispatch/* is handled separately
-    if (url.pathname.startsWith("/agents/") && !url.pathname.startsWith("/agents/dispatch/")) {
+    // Each agent is a DO instance. Auth guard before routing.
+    if (url.pathname.startsWith("/agents/")) {
       const deny = await authorizeAgentIngress(request, env);
       if (deny) return deny;
     }
