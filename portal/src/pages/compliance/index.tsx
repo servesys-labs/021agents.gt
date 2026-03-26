@@ -19,7 +19,6 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
-  X,
 } from "lucide-react";
 
 import { Link } from "react-router-dom";
@@ -31,6 +30,7 @@ import { AssistPanel } from "../../components/common/AssistPanel";
 import { useApiQuery, apiGet, apiPost, apiDelete, apiRequest } from "../../lib/api";
 import { extractList } from "../../lib/normalize";
 import { useToast } from "../../components/common/ToastProvider";
+import { Modal } from "../../components/common/Modal";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -1189,22 +1189,36 @@ function RetentionTab() {
       </QueryState>
 
       {/* Create modal */}
-      {modalOpen && (
-        <div className="modal-overlay glass-backdrop" onClick={() => setModalOpen(false)}>
-          <div className="relative z-10 w-full max-w-md rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-[var(--space-6)]">
-              <h2 className="text-[var(--text-md)] font-bold text-text-primary">
-                Create Retention Policy
-              </h2>
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-ghost p-[var(--space-2)] min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)]"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title="Create Retention Policy"
+        maxWidth="md"
+        footer={
+          <>
+            <button
+              onClick={() => setModalOpen(false)}
+              className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCreate}
+              disabled={saving}
+              className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              {saving ? (
+                <>
+                  <Loader2 size={12} className="animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                "Create"
+              )}
+            </button>
+          </>
+        }
+      >
             <div className="space-y-[var(--space-4)]">
               <div>
                 <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
@@ -1274,32 +1288,7 @@ function RetentionTab() {
                 </button>
               </div>
             </div>
-
-            <div className="flex items-center justify-end gap-[var(--space-3)] mt-[var(--space-6)]">
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCreate}
-                disabled={saving}
-                className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                {saving ? (
-                  <>
-                    <Loader2 size={12} className="animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  "Create"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }
@@ -1522,22 +1511,36 @@ function PoliciesTab() {
       </QueryState>
 
       {/* Create modal */}
-      {modalOpen && (
-        <div className="modal-overlay glass-backdrop" onClick={() => setModalOpen(false)}>
-          <div className="relative z-10 w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-xl border border-border-default shadow-panel glass-medium p-[var(--space-6)]" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-[var(--space-6)]">
-              <h2 className="text-[var(--text-md)] font-bold text-text-primary">
-                Create Governance Policy
-              </h2>
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-ghost p-[var(--space-2)] min-h-[var(--touch-target-min)] min-w-[var(--touch-target-min)]"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
+      <Modal
+        open={modalOpen}
+        onClose={() => setModalOpen(false)}
+        title="Create Governance Policy"
+        maxWidth="lg"
+        footer={
+          <>
+            <button
+              onClick={() => setModalOpen(false)}
+              className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCreate}
+              disabled={saving}
+              className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              {saving ? (
+                <>
+                  <Loader2 size={12} className="animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                "Create"
+              )}
+            </button>
+          </>
+        }
+      >
             <div className="space-y-[var(--space-4)]">
               <div>
                 <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
@@ -1628,32 +1631,7 @@ function PoliciesTab() {
                 />
               </div>
             </div>
-
-            <div className="flex items-center justify-end gap-[var(--space-3)] mt-[var(--space-6)]">
-              <button
-                onClick={() => setModalOpen(false)}
-                className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCreate}
-                disabled={saving}
-                className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-              >
-                {saving ? (
-                  <>
-                    <Loader2 size={12} className="animate-spin" />
-                    Saving...
-                  </>
-                ) : (
-                  "Create"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

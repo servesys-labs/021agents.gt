@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { Modal } from "./Modal";
 
 type ConfirmDialogProps = {
   open?: boolean;
@@ -21,44 +21,15 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  const cancelRef = useRef<HTMLButtonElement>(null);
-
-  // Focus trap + Escape handler
-  useEffect(() => {
-    if (!open) return;
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onCancel();
-      }
-    };
-
-    document.addEventListener("keydown", handleKeyDown);
-    // Focus the cancel button on open
-    cancelRef.current?.focus();
-
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open, onCancel]);
-
-  if (!open) {
-    return null;
-  }
-
   return (
-    <div
-      className="modal-overlay glass-backdrop"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="confirm-dialog-title"
-      aria-describedby="confirm-dialog-desc"
-    >
-      <div className="card w-full max-w-md glass-medium relative border border-border-default">
-        <h3 id="confirm-dialog-title" className="text-base font-semibold text-text-primary">{title}</h3>
-        <p id="confirm-dialog-desc" className="mt-2 text-sm text-text-secondary">{description}</p>
-        <div className="mt-5 flex justify-end gap-2">
-          <button ref={cancelRef} onClick={onCancel} className="btn btn-secondary min-h-[var(--touch-target-min)]">
+    <Modal
+      open={open}
+      onClose={onCancel}
+      title={title}
+      maxWidth="md"
+      footer={
+        <>
+          <button onClick={onCancel} className="btn btn-secondary min-h-[var(--touch-target-min)]">
             {cancelLabel}
           </button>
           <button
@@ -71,8 +42,10 @@ export function ConfirmDialog({
           >
             {confirmLabel}
           </button>
-        </div>
-      </div>
-    </div>
+        </>
+      }
+    >
+      <p className="text-sm text-text-secondary">{description}</p>
+    </Modal>
   );
 }

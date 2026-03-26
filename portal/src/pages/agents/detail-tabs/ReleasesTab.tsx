@@ -8,10 +8,10 @@ import {
   Plus,
   Rocket,
   Trash2,
-  X,
 } from "lucide-react";
 
 import { useApiQuery, apiPost, apiDelete } from "../../../lib/api";
+import { Modal } from "../../../components/common/Modal";
 import { useToast } from "../../../components/common/ToastProvider";
 import { QueryState } from "../../../components/common/QueryState";
 import { EmptyState } from "../../../components/common/EmptyState";
@@ -499,111 +499,100 @@ export const ReleasesTab = ({ agentName }: { agentName: string }) => {
       </section>
 
       {/* Canary Setup Modal */}
-      {canaryModalOpen && (
-        <div className="modal-overlay bg-black/50" onClick={() => setCanaryModalOpen(false)}>
-            <div
-              className="glass-dropdown border border-border-default rounded-2xl shadow-2xl w-full max-w-md"
-              onClick={(e) => e.stopPropagation()}
+      <Modal
+        open={canaryModalOpen}
+        onClose={() => setCanaryModalOpen(false)}
+        title="Set Up Canary Deployment"
+        maxWidth="md"
+        footer={
+          <>
+            <button
+              onClick={() => setCanaryModalOpen(false)}
+              className="btn btn-ghost text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
             >
-              <div className="flex items-center justify-between p-[var(--space-4)] border-b border-border-default">
-                <h3 className="text-[var(--text-md)] font-semibold text-text-primary">
-                  Set Up Canary Deployment
-                </h3>
-                <button
-                  onClick={() => setCanaryModalOpen(false)}
-                  className="p-[var(--space-2)] rounded-lg hover:bg-surface-overlay transition-colors min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
-                >
-                  <X size={16} className="text-text-muted" />
-                </button>
-              </div>
-              <div className="p-[var(--space-4)] space-y-[var(--space-4)]">
-                <div>
-                  <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-                    Primary Version
-                  </label>
-                  <input
-                    type="text"
-                    value={canaryPrimary}
-                    onChange={(e) => setCanaryPrimary(e.target.value)}
-                    placeholder="e.g., v1.2.0"
-                    className="w-full"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
-                    Canary Version
-                  </label>
-                  <input
-                    type="text"
-                    value={canaryVersion}
-                    onChange={(e) => setCanaryVersion(e.target.value)}
-                    placeholder="e.g., v1.3.0-beta"
-                    className="w-full"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-2)]">
-                    Canary Traffic Weight: {canaryWeight}%
-                  </label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={canaryWeight}
-                    onChange={(e) => setCanaryWeight(Number(e.target.value))}
-                    className="w-full h-2 rounded-lg appearance-none cursor-pointer"
-                    style={{
-                      background: `linear-gradient(to right, var(--color-chart-orange) ${canaryWeight}%, var(--color-surface-overlay) ${canaryWeight}%)`,
-                    }}
-                  />
-                  <div className="flex justify-between text-[10px] text-text-muted mt-[var(--space-1)]">
-                    <span>0%</span>
-                    <span>100%</span>
-                  </div>
+              Cancel
+            </button>
+            <button
+              onClick={handleSetCanary}
+              disabled={canarySubmitting || !canaryPrimary || !canaryVersion}
+              className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+            >
+              {canarySubmitting ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Rocket size={14} />
+              )}
+              Deploy Canary
+            </button>
+          </>
+        }
+      >
+        <div className="space-y-[var(--space-4)]">
+          <div>
+            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+              Primary Version
+            </label>
+            <input
+              type="text"
+              value={canaryPrimary}
+              onChange={(e) => setCanaryPrimary(e.target.value)}
+              placeholder="e.g., v1.2.0"
+              className="w-full"
+            />
+          </div>
+          <div>
+            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+              Canary Version
+            </label>
+            <input
+              type="text"
+              value={canaryVersion}
+              onChange={(e) => setCanaryVersion(e.target.value)}
+              placeholder="e.g., v1.3.0-beta"
+              className="w-full"
+            />
+          </div>
+          <div>
+            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-2)]">
+              Canary Traffic Weight: {canaryWeight}%
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={canaryWeight}
+              onChange={(e) => setCanaryWeight(Number(e.target.value))}
+              className="w-full h-2 rounded-lg appearance-none cursor-pointer"
+              style={{
+                background: `linear-gradient(to right, var(--color-chart-orange) ${canaryWeight}%, var(--color-surface-overlay) ${canaryWeight}%)`,
+              }}
+            />
+            <div className="flex justify-between text-[10px] text-text-muted mt-[var(--space-1)]">
+              <span>0%</span>
+              <span>100%</span>
+            </div>
 
-                  {/* Preview bar */}
-                  <div className="h-4 rounded-lg overflow-hidden flex mt-[var(--space-2)]">
-                    <div
-                      className="bg-accent flex items-center justify-center text-[9px] font-semibold text-text-inverse"
-                      style={{ width: `${100 - canaryWeight}%` }}
-                    >
-                      {100 - canaryWeight > 10 ? `${100 - canaryWeight}%` : ""}
-                    </div>
-                    <div
-                      className="flex items-center justify-center text-[9px] font-semibold text-text-inverse"
-                      style={{
-                        width: `${canaryWeight}%`,
-                        backgroundColor: "var(--color-chart-orange)",
-                      }}
-                    >
-                      {canaryWeight > 10 ? `${canaryWeight}%` : ""}
-                    </div>
-                  </div>
-                </div>
+            {/* Preview bar */}
+            <div className="h-4 rounded-lg overflow-hidden flex mt-[var(--space-2)]">
+              <div
+                className="bg-accent flex items-center justify-center text-[9px] font-semibold text-text-inverse"
+                style={{ width: `${100 - canaryWeight}%` }}
+              >
+                {100 - canaryWeight > 10 ? `${100 - canaryWeight}%` : ""}
               </div>
-              <div className="flex justify-end gap-[var(--space-2)] p-[var(--space-4)] border-t border-border-default">
-                <button
-                  onClick={() => setCanaryModalOpen(false)}
-                  className="btn btn-ghost text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSetCanary}
-                  disabled={canarySubmitting || !canaryPrimary || !canaryVersion}
-                  className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-                >
-                  {canarySubmitting ? (
-                    <Loader2 size={14} className="animate-spin" />
-                  ) : (
-                    <Rocket size={14} />
-                  )}
-                  Deploy Canary
-                </button>
+              <div
+                className="flex items-center justify-center text-[9px] font-semibold text-text-inverse"
+                style={{
+                  width: `${canaryWeight}%`,
+                  backgroundColor: "var(--color-chart-orange)",
+                }}
+              >
+                {canaryWeight > 10 ? `${canaryWeight}%` : ""}
               </div>
             </div>
+          </div>
         </div>
-      )}
+      </Modal>
     </div>
   );
 };

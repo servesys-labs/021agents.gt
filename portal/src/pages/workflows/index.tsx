@@ -20,6 +20,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { useApiQuery, apiPost, apiGet } from "../../lib/api";
+import { Modal } from "../../components/common/Modal";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -445,20 +446,38 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
   };
 
   return (
-    <div className="modal-overlay glass-backdrop" onClick={onClose}>
-        <div className="w-full max-w-3xl max-h-[85vh] overflow-y-auto rounded-2xl glass-medium border border-glass-border p-[var(--space-6)]" onClick={(e) => e.stopPropagation()} style={{ boxShadow: "var(--shadow-panel)" }}>
-          {/* Header */}
-          <div className="flex items-center justify-between mb-[var(--space-6)]">
-            <h2 className="text-[var(--text-lg)] font-bold text-text-primary">Create Workflow</h2>
-            <button
-              onClick={onClose}
-              className="p-2 rounded-lg hover:bg-surface-overlay transition-colors min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] flex items-center justify-center"
-              aria-label="Close"
-            >
-              <X size={16} className="text-text-muted" />
-            </button>
-          </div>
-
+    <Modal
+      open
+      onClose={onClose}
+      title="Create Workflow"
+      maxWidth="3xl"
+      footer={
+        <>
+          <button
+            onClick={onClose}
+            className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={handleValidate}
+            disabled={validating || steps.length === 0}
+            className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+          >
+            {validating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+            {validating ? "Validating..." : "Validate"}
+          </button>
+          <button
+            onClick={handleCreate}
+            disabled={creating || !name.trim() || steps.length === 0}
+            className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+          >
+            {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+            {creating ? "Creating..." : "Create"}
+          </button>
+        </>
+      }
+    >
           {/* Name */}
           <div className="mb-[var(--space-4)]">
             <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
@@ -616,33 +635,7 @@ function CreateWorkflowModal({ onClose, onCreated }: { onClose: () => void; onCr
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex items-center gap-[var(--space-3)] justify-end">
-            <button
-              onClick={onClose}
-              className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleValidate}
-              disabled={validating || steps.length === 0}
-              className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-            >
-              {validating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
-              {validating ? "Validating..." : "Validate"}
-            </button>
-            <button
-              onClick={handleCreate}
-              disabled={creating || !name.trim() || steps.length === 0}
-              className="btn btn-primary text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
-            >
-              {creating ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
-              {creating ? "Creating..." : "Create"}
-            </button>
-          </div>
-        </div>
-    </div>
+    </Modal>
   );
 }
 
