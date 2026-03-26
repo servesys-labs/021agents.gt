@@ -38,7 +38,13 @@ export function A2APage() {
     "/api/v1/a2a/agents",
   );
 
-  const agents = useMemo(() => data ?? [], [data]);
+  const agents = useMemo(() => {
+    if (!data) return [];
+    if (Array.isArray(data)) return data;
+    // API may return { agents: [...] } wrapper
+    const wrapped = data as unknown as { agents?: A2AAgent[] };
+    return Array.isArray(wrapped.agents) ? wrapped.agents : [];
+  }, [data]);
 
   const filtered = useMemo(() => {
     let result = agents;
