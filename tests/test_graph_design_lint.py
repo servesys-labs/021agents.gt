@@ -190,3 +190,55 @@ def test_graph_gate_pack_promote_candidate_when_lint_and_eval_pass(tmp_path, mon
     assert body["graph_lint"]["valid"] is True
     assert body["eval_gate"]["passed"] is True
     assert body["rollout"]["decision"] == "promote_candidate"
+
+
+def test_lint_flags_async_state_write_without_idempotency() -> None:
+    spec = {
+        "state_contract": {"reducers": {"memory.facts": "append"}},
+        "nodes": [
+            {"id": "n1", "kind": "bootstrap"},
+            {"id": "n2", "kind": "tools", "async": True, "state_writes": ["memory.facts"]},
+            {"id": "n3", "kind": "final"},
+        ],
+        "edges": [
+            {"source": "n1", "target": "n3"},
+            {"source": "n1", "target": "n2"},
+        ],
+    }
+    r = lint_graph_design(spec, strict=True)
+    assert not r.valid
+    assert any(e.code == "ASYNC_STATE_WRITE_MISSING_IDEMPOTENCY" for e in r.errors)
+
+
+def test_lint_warns_for_state_write_without_reducer() -> None:
+    spec = {
+        "nodes": [
+            {"id": "n1", "kind": "bootstrap"},
+            {"id": "n2", "kind": "tools", "state_writes": ["plan.summary"]},
+            {"id": "n3", "kind": "final"},
+        ],
+        "edges": [
+            {"source": "n1", "target": "n2"},
+            {"source": "n2", "target": "n3"},
+        ],
+    }
+    r = lint_graph_design(spec, strict=False)
+    assert r.valid
+    assert any(w.code == "STATE_WRITE_WITHOUT_REDUCER" for w in r.warnings)
+
+
+def test_lint_flags_invalid_skill_manifest_shape() -> None:
+    spec = {
+        "nodes": [
+            {"id": "n1", "kind": "bootstrap"},
+            {"id": "n2", "kind": "tools", "skills": [{"description": "missing id"}]},
+            {"id": "n3", "kind": "final"},
+        ],
+        "edges": [
+            {"source": "n1", "target": "n2"},
+            {"source": "n2", "target": "n3"},
+        ],
+    }
+    r = lint_graph_design(spec, strict=True)
+    assert not r.valid
+    assert any(e.code == "MISSING_SKILL_ID" for e in r.errors)

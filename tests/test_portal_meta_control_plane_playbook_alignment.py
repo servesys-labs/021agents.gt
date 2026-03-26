@@ -31,3 +31,13 @@ def test_meta_agent_assist_renders_playbook_sections() -> None:
     assert "multi_agent_blueprint" in text
     assert "Use In Prompt" in text
     assert "playbookPromptTemplates" in text
+    assert "Auto-Fix + Gate Pack" in text
+    assert "Gate Decision:" in text
+    assert "I understand gate decision is hold" in text
+    assert "Type OVERRIDE to confirm" in text
+    assert "Override reason (required)" in text
+    assert "Run Maintenance Cycle" in text
+    assert "Approval Packet" in text
+    assert "Open proposals" in text
+    assert "Run gate-pack" in text
+    assert "Promote candidate" in text

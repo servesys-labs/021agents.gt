@@ -237,3 +237,47 @@ class TestGraphValidateApi:
         assert b2["valid"] is False
         assert any(e["code"] == "CYCLE" for e in b2["errors"])
         assert b2["summary"] is None
+
+    def test_contracts_validate_reports_contract_summary(self, graph_api_client):
+        password = "pass12345"
+        signup = graph_api_client.post(
+            "/api/v1/auth/signup",
+            json={"email": "graph-contracts@test.com", "password": password},
+        )
+        if signup.status_code == 200:
+            token = signup.json()["token"]
+        else:
+            assert signup.status_code == 409
+            login = graph_api_client.post(
+                "/api/v1/auth/login",
+                json={"email": "graph-contracts@test.com", "password": password},
+            )
+            assert login.status_code == 200
+            token = login.json()["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        spec = {
+            "state_contract": {"reducers": {"memory.facts": "append"}},
+            "nodes": [
+                {"id": "a", "kind": "bootstrap"},
+                {
+                    "id": "b",
+                    "kind": "tools",
+                    "skills": [{"id": "skill.memory.writer", "side_effects": "write", "state_writes": ["memory.facts"]}],
+                    "state_writes": ["memory.facts"],
+                },
+                {"id": "c", "kind": "final"},
+            ],
+            "edges": [{"source": "a", "target": "b"}, {"source": "b", "target": "c"}],
+        }
+        resp = graph_api_client.post(
+            "/api/v1/graphs/contracts/validate",
+            json={"graph": spec, "strict": True},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["valid"] is True
+        contracts = body["summary"]["contracts"]
+        assert contracts["state_contract_present"] is True
+        assert contracts["skill_manifest_count"] == 1
+        assert contracts["state_write_refs"] == 1
