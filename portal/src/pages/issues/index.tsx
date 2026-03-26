@@ -376,7 +376,8 @@ function IssueCard({
 
   return (
     <div
-      className="card card-hover flex items-center gap-[var(--space-3)] py-[var(--space-3)] cursor-pointer transition-all hover:border-accent/30"
+      className="card card-hover flex items-center gap-[var(--space-3)] py-[var(--space-3)] cursor-pointer transition-all hover:border-accent/30 stagger-item"
+      style={{ "--stagger-index": index } as CSSProperties}
       onClick={onNavigate}
     >
       {/* Severity badge */}
