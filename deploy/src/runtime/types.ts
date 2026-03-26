@@ -75,6 +75,9 @@ export interface AgentConfig {
   timeout_seconds?: number; // Default: 300 (5 minutes)
   tools: string[];
   blocked_tools: string[];
+  allowed_domains: string[];           // Domain allowlist for HTTP/browse tools
+  max_tokens_per_turn: number;         // Token cap per LLM call (0 = unlimited)
+  require_confirmation_for_destructive: boolean; // Halt on delete/drop/destroy
   parallel_tool_calls: boolean;
   require_human_approval?: boolean;
   org_id: string;

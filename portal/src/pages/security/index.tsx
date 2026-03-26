@@ -12,6 +12,7 @@ import { Link } from "react-router-dom";
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
+import { AssistPanel } from "../../components/common/AssistPanel";
 import { useApiQuery, apiRequest } from "../../lib/api";
 import { useToast } from "../../components/common/ToastProvider";
 
@@ -306,6 +307,11 @@ export function SecurityPage() {
           </div>
         }
       />
+
+      {/* Meta-agent assist */}
+      <div className="mb-[var(--space-4)]">
+        <AssistPanel compact />
+      </div>
 
       {/* ── Scan History Table ────────────────────────────────────── */}
       <section className="mb-[var(--space-8)]">

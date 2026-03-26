@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Bot,
@@ -20,6 +20,7 @@ import {
 import { PageHeader } from "../../components/common/PageHeader";
 import { StatusBadge } from "../../components/common/StatusBadge";
 import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
+import { AssistPanel } from "../../components/common/AssistPanel";
 import { useApiQuery } from "../../lib/api";
 import { safeArray, type AgentInfo } from "../../lib/adapters";
 import { QuotaWidget } from "../../components/common/QuotaWidget";
@@ -105,6 +106,35 @@ export const DashboardPage = () => {
     }
   };
 
+  /* ── Empty-state onboarding ──────────────────────────────────── */
+  const hasAgents = agents.length > 0;
+  const isLoading = agentsQuery.loading || statsQuery.loading;
+
+  if (!isLoading && !hasAgents) {
+    return (
+      <div>
+        <PageHeader
+          title="Dashboard"
+          subtitle="Control plane overview"
+          onRefresh={() => { void statsQuery.refetch(); void agentsQuery.refetch(); }}
+        />
+        <OnboardingHero onNavigate={navigate} />
+
+        {/* Meta-agent assist for NL agent creation */}
+        <div className="max-w-3xl mx-auto mt-6">
+          <AssistPanel
+            heading="Or ask the Meta-Agent"
+            customSuggestions={[
+              { label: "Create a support agent", prompt: "Create a customer support agent with tools for order lookup, refund processing, and FAQ search" },
+              { label: "Create a data analyst", prompt: "Create a data analysis agent that can query databases, generate reports, and send summaries via email" },
+              { label: "Create a code reviewer", prompt: "Create a code review agent that analyzes pull requests, checks for security issues, and suggests improvements" },
+            ]}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       <PageHeader
@@ -115,10 +145,11 @@ export const DashboardPage = () => {
 
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        {kpis.map((kpi) => (
+        {kpis.map((kpi, index) => (
           <div
             key={kpi.label}
-            className="card flex items-center gap-3 py-3 cursor-pointer hover:border-accent/40 transition-colors"
+            className="card flex items-center gap-3 py-3 cursor-pointer hover:border-accent/40 transition-colors stagger-item"
+            style={{ "--stagger-index": index } as CSSProperties}
             onClick={() => navigate(kpi.link)}
           >
             <div className={`p-2 rounded-lg ${kpi.color}`}>
@@ -134,6 +165,11 @@ export const DashboardPage = () => {
         ))}
       </div>
 
+      {/* Meta-agent assist — compact inline suggestions */}
+      <div className="mb-4">
+        <AssistPanel compact />
+      </div>
+
       {/* Agent Cards */}
       {agentCards.length > 0 && (
         <div className="mb-6">
@@ -147,12 +183,13 @@ export const DashboardPage = () => {
             </button>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-            {agentCards.map((agent) => (
-              <AgentCard
-                key={agent.name}
-                agent={agent}
-                onSelect={(name) => navigate(`/agents?selected=${name}`)}
-              />
+            {agentCards.map((agent, index) => (
+              <div className="stagger-item" style={{ "--stagger-index": index } as CSSProperties} key={agent.name}>
+                <AgentCard
+                  agent={agent}
+                  onSelect={(name) => navigate(`/agents?selected=${name}`)}
+                />
+              </div>
             ))}
           </div>
         </div>
@@ -163,10 +200,11 @@ export const DashboardPage = () => {
         <div className="card">
           <h3 className="text-sm font-semibold text-text-primary mb-3">Quick Actions</h3>
           <div className="space-y-2">
-            {quickActions.map((action) => (
+            {quickActions.map((action, index) => (
               <button
                 key={action.label}
-                className="w-full flex items-center gap-3 p-3 bg-surface-base border border-border-default rounded-lg hover:border-accent/40 hover:bg-surface-overlay transition-all text-left group"
+                className="w-full flex items-center gap-3 p-3 bg-surface-base border border-border-default rounded-lg hover:border-accent/40 hover:bg-surface-overlay transition-all text-left group stagger-item"
+                style={{ "--stagger-index": index } as CSSProperties}
                 onClick={() => navigate(action.path)}
               >
                 <div className="p-2 rounded-lg bg-accent/10">
@@ -247,7 +285,7 @@ function SystemHealthCard() {
   ];
 
   return (
-    <div className="card mt-4">
+    <div className="card card-glass mt-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-text-primary">System Health</h3>
         {health.uptime_seconds != null && (
@@ -263,6 +301,110 @@ function SystemHealthCard() {
             <span className="text-xs text-text-secondary">{s.label}</span>
             <StatusBadge status={s.status} />
           </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ── Onboarding Hero (no agents yet) ── */
+
+const onboardingSteps = [
+  {
+    step: 1,
+    title: "Create your first agent",
+    description: "Define an agent with a system prompt, model, and tools. Our wizard generates the config for you.",
+    action: "Create Agent",
+    path: "/agents/new",
+    icon: Bot,
+    color: "text-accent",
+    bg: "bg-accent/10",
+  },
+  {
+    step: 2,
+    title: "Test in the Playground",
+    description: "Chat with your agent interactively, inspect traces, and iterate on behavior before going live.",
+    action: "Open Playground",
+    path: "/agents",
+    icon: Play,
+    color: "text-chart-green",
+    bg: "bg-chart-green/10",
+  },
+  {
+    step: 3,
+    title: "Connect tools & integrations",
+    description: "Attach tools from the registry or connect external services via MCP servers and connectors.",
+    action: "Browse Tools",
+    path: "/tools",
+    icon: Wrench,
+    color: "text-chart-blue",
+    bg: "bg-chart-blue/10",
+  },
+  {
+    step: 4,
+    title: "Deploy & monitor",
+    description: "Deploy to a release channel, set up guardrails, and watch sessions, quality, and costs in real time.",
+    action: "View Sessions",
+    path: "/sessions",
+    icon: Activity,
+    color: "text-chart-purple",
+    bg: "bg-chart-purple/10",
+  },
+];
+
+function OnboardingHero({ onNavigate }: { onNavigate: (path: string) => void }) {
+  return (
+    <div className="max-w-3xl mx-auto py-8">
+      {/* Welcome card */}
+      <div className="card text-center py-10 mb-8">
+        <div className="w-14 h-14 rounded-2xl bg-accent/15 flex items-center justify-center mx-auto mb-4">
+          <Bot size={28} className="text-accent" />
+        </div>
+        <h2 className="text-xl font-bold text-text-primary mb-2">
+          Welcome to AgentOS
+        </h2>
+        <p className="text-sm text-text-secondary max-w-md mx-auto mb-6">
+          Build, deploy, and monitor AI agents with built-in security, compliance, and observability. Get started in 4 steps.
+        </p>
+        <button
+          className="btn btn-primary text-sm px-6"
+          onClick={() => onNavigate("/agents/new")}
+        >
+          <Bot size={16} />
+          Create Your First Agent
+        </button>
+      </div>
+
+      {/* Step cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        {onboardingSteps.map((s) => (
+          <button
+            key={s.step}
+            className="card card-hover text-left p-5 transition-all hover:border-accent/30 group"
+            onClick={() => onNavigate(s.path)}
+          >
+            <div className="flex items-start gap-3">
+              <div className={`p-2 rounded-lg ${s.bg} flex-shrink-0`}>
+                <s.icon size={18} className={s.color} />
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="text-[10px] font-bold text-text-muted bg-surface-overlay rounded-full w-5 h-5 flex items-center justify-center">
+                    {s.step}
+                  </span>
+                  <h3 className="text-sm font-semibold text-text-primary">
+                    {s.title}
+                  </h3>
+                </div>
+                <p className="text-xs text-text-muted leading-relaxed mb-3">
+                  {s.description}
+                </p>
+                <span className="text-xs text-accent font-medium group-hover:underline">
+                  {s.action} &rarr;
+                </span>
+              </div>
+            </div>
+          </button>
         ))}
       </div>
     </div>
@@ -287,7 +429,7 @@ function CostOverviewCard() {
   const topAgents = Object.entries(byAgent).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
   return (
-    <div className="card mt-4">
+    <div className="card card-glass mt-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-semibold text-text-primary">Cost Overview</h3>
         <span className="text-xs font-mono text-accent">${totalCost.toFixed(4)}</span>

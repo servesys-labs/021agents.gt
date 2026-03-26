@@ -66,6 +66,9 @@ export async function loadAgentConfig(
       budget_limit_usd: 10.0,
       tools: [],
       blocked_tools: [],
+      allowed_domains: [],
+      max_tokens_per_turn: 0,
+      require_confirmation_for_destructive: false,
       parallel_tool_calls: true,
       require_human_approval: false,
       org_id: "",
@@ -87,7 +90,12 @@ export async function loadAgentConfig(
     max_turns: Number(cfg.max_turns || cfg.maxTurns) || 50,
     budget_limit_usd: Number(cfg.budget_limit_usd || cfg.budgetLimitUsd) || 10.0,
     tools: parseJsonArray(cfg.tools),
-    blocked_tools: parseJsonArray(cfg.blocked_tools || cfg.blockedTools),
+    blocked_tools: parseJsonArray(cfg.blocked_tools || cfg.blockedTools || governance.blocked_tools),
+    allowed_domains: parseJsonArray(cfg.allowed_domains || cfg.allowedDomains || governance.allowed_domains),
+    max_tokens_per_turn: Number(cfg.max_tokens_per_turn || governance.max_tokens_per_turn) || 0,
+    require_confirmation_for_destructive:
+      cfg.require_confirmation_for_destructive === true
+      || governance.require_confirmation_for_destructive === true,
     parallel_tool_calls: cfg.parallel_tool_calls !== false && cfg.parallelToolCalls !== false,
     require_human_approval:
       cfg.require_human_approval === true

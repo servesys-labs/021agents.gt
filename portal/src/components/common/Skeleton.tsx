@@ -196,3 +196,51 @@ export function SkeletonDashboard() {
 export function SkeletonAgentList() {
   return <SkeletonTable rows={6} cols={5} />;
 }
+
+/* ── SkeletonKPIGrid ───────────────────────────────────────────── */
+/* Matches the KPI stat card row used on Sessions, Issues, etc. */
+
+export function SkeletonKPIGrid({ count = 3 }: { count?: number }) {
+  return (
+    <div className={`grid grid-cols-${count} gap-3 mb-4`} role="status" aria-label="Loading stats" aria-busy="true">
+      {Array.from({ length: count }).map((_, i) => (
+        <SkeletonCard
+          key={i}
+          className="skeleton-stagger"
+          style={{ "--stagger-index": i } as unknown as CSSProperties}
+        />
+      ))}
+    </div>
+  );
+}
+
+/* ── SkeletonAgentGrid ─────────────────────────────────────────── */
+/* Matches the agent card grid layout */
+
+export function SkeletonAgentGrid({ count = 6 }: { count?: number }) {
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3" role="status" aria-label="Loading agents" aria-busy="true">
+      {Array.from({ length: count }).map((_, i) => (
+        <div
+          key={i}
+          className="card skeleton-stagger"
+          style={{ "--stagger-index": i } as CSSProperties}
+        >
+          <div className="flex items-center gap-3 mb-3">
+            <SkeletonBase className="rounded-lg flex-shrink-0" style={{ width: 32, height: 32 }} />
+            <div className="flex-1">
+              <SkeletonBase className="h-3.5 rounded mb-1" style={{ width: "60%" }} />
+              <SkeletonBase className="h-2 rounded" style={{ width: "40%" }} />
+            </div>
+          </div>
+          <SkeletonBase className="h-2.5 rounded mb-1.5" style={{ width: "90%" }} />
+          <SkeletonBase className="h-2.5 rounded" style={{ width: "65%" }} />
+          <div className="flex gap-1.5 mt-3">
+            <SkeletonBase className="h-5 rounded-full" style={{ width: 48 }} />
+            <SkeletonBase className="h-5 rounded-full" style={{ width: 36 }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}

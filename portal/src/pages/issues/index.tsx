@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useMemo, useCallback, type CSSProperties } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   AlertTriangle,
@@ -15,6 +15,7 @@ import {
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
+import { AssistPanel } from "../../components/common/AssistPanel";
 import { useApiQuery } from "../../lib/api";
 
 /* ── Types ──────────────────────────────────────────────────────── */
@@ -104,11 +105,28 @@ function severityBadge(severity: string) {
 
 export function IssuesPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  /* Filters */
-  const [agentFilter, setAgentFilter] = useState("");
-  const [severityFilter, setSeverityFilter] = useState("");
-  const [statusToggle, setStatusToggle] = useState<"open" | "resolved">("open");
+  /* URL-persisted filters */
+  const agentFilter = searchParams.get("agent") ?? "";
+  const severityFilter = searchParams.get("severity") ?? "";
+  const statusToggle = (searchParams.get("status") ?? "open") as "open" | "resolved";
+
+  const updateParam = useCallback(
+    (key: string, value: string) => {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        if (!value) next.delete(key);
+        else next.set(key, value);
+        return next;
+      }, { replace: true });
+    },
+    [setSearchParams],
+  );
+
+  const setAgentFilter = (v: string) => updateParam("agent", v);
+  const setSeverityFilter = (v: string) => updateParam("severity", v);
+  const setStatusToggle = (v: "open" | "resolved") => updateParam("status", v === "open" ? "" : v);
 
   /* Queries */
   const summaryQuery = useApiQuery<IssueSummary>("/api/v1/issues/summary");
@@ -218,6 +236,11 @@ export function IssuesPage() {
         </div>
       </div>
 
+      {/* Meta-agent assist */}
+      <div className="mb-[var(--space-4)]">
+        <AssistPanel compact />
+      </div>
+
       {/* Filters */}
       <div className="flex items-center gap-[var(--space-3)] mb-[var(--space-4)] flex-wrap">
         {/* Agent dropdown */}
@@ -299,9 +322,10 @@ export function IssuesPage() {
 
                   {/* Issue cards */}
                   <div className="space-y-[var(--space-2)]">
-                    {group.items.map((issue) => (
+                    {group.items.map((issue, i) => (
                       <IssueCard
                         key={issue.issue_id}
+                        index={i}
                         issue={issue}
                         onNavigate={() =>
                           navigate(
@@ -328,10 +352,12 @@ export function IssuesPage() {
 
 function IssueCard({
   issue,
+  index,
   onNavigate,
   onAgentClick,
 }: {
   issue: Issue;
+  index: number;
   onNavigate: () => void;
   onAgentClick: () => void;
 }) {
@@ -350,7 +376,8 @@ function IssueCard({
 
   return (
     <div
-      className="card card-hover flex items-center gap-[var(--space-3)] py-[var(--space-3)] cursor-pointer transition-all hover:border-accent/30"
+      className="card card-hover flex items-center gap-[var(--space-3)] py-[var(--space-3)] cursor-pointer transition-all hover:border-accent/30 stagger-item"
+      style={{ "--stagger-index": index } as CSSProperties}
       onClick={onNavigate}
     >
       {/* Severity badge */}

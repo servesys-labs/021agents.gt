@@ -25,6 +25,12 @@ import {
   Terminal,
   Wrench,
   Globe,
+  ChevronRight,
+  Activity,
+  BarChart3,
+  Eye,
+  Lock,
+  Cog,
 } from "lucide-react";
 import { QuotaWidget } from "../common/QuotaWidget";
 
@@ -57,26 +63,58 @@ function ClerkUserButton() {
 /* ── Nav config ─────────────────────────────────────────────────── */
 
 type NavItem = { path: string; label: string; icon: ReactNode };
+type NavGroup = { id: string; label: string; icon: ReactNode; items: NavItem[] };
 
 const iconSize = 18;
 const iconStroke = 1.5;
 
-const topNav: NavItem[] = [
-  { path: "/", label: "Home", icon: <Home size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/agents", label: "Agents", icon: <Bot size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/intelligence", label: "Intelligence", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/issues", label: "Issues", icon: <Bug size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/workflows", label: "Workflows", icon: <GitBranch size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/compliance", label: "Compliance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/guardrails", label: "Guardrails", icon: <ShieldAlert size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/connectors", label: "Connectors", icon: <Plug size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/pipelines", label: "Pipelines", icon: <Database size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/tools", label: "Tools", icon: <Wrench size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/codemode", label: "Codemode", icon: <Code size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/sandbox", label: "Sandbox", icon: <Terminal size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/skills", label: "Skills", icon: <Sparkles size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/jobs", label: "Jobs", icon: <Timer size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/a2a", label: "A2A", icon: <Globe size={iconSize} strokeWidth={iconStroke} /> },
+const homeItem: NavItem = { path: "/", label: "Home", icon: <Home size={iconSize} strokeWidth={iconStroke} /> };
+
+const navGroups: NavGroup[] = [
+  {
+    id: "build",
+    label: "Build",
+    icon: <Bot size={14} strokeWidth={iconStroke} />,
+    items: [
+      { path: "/agents", label: "Agents", icon: <Bot size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/tools", label: "Tools", icon: <Wrench size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/skills", label: "Skills", icon: <Sparkles size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/codemode", label: "Codemode", icon: <Code size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/sandbox", label: "Sandbox", icon: <Terminal size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/a2a", label: "A2A", icon: <Globe size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    id: "operate",
+    label: "Operate",
+    icon: <Activity size={14} strokeWidth={iconStroke} />,
+    items: [
+      { path: "/sessions", label: "Sessions", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/workflows", label: "Workflows", icon: <GitBranch size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/pipelines", label: "Pipelines", icon: <Database size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/jobs", label: "Jobs", icon: <Timer size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/connectors", label: "Connectors", icon: <Plug size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    id: "observe",
+    label: "Observe",
+    icon: <Eye size={14} strokeWidth={iconStroke} />,
+    items: [
+      { path: "/intelligence", label: "Intelligence", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/issues", label: "Issues", icon: <Bug size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    id: "govern",
+    label: "Govern",
+    icon: <Lock size={14} strokeWidth={iconStroke} />,
+    items: [
+      { path: "/security", label: "Security", icon: <ShieldAlert size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/compliance", label: "Compliance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/guardrails", label: "Guardrails", icon: <ShieldAlert size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
 ];
 
 const bottomNav: NavItem[] = [
@@ -91,12 +129,39 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
   const { user, logout } = useAuth();
   const [userMenuOpen, setUserMenuOpen] = useState(false);
 
+  /* ── Collapsible group state ──────────────────────────────────── */
+  // Auto-expand the group that contains the current route
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => {
+    const initial = new Set<string>();
+    for (const group of navGroups) {
+      if (group.items.some((item) => pathname.startsWith(item.path) && item.path !== "/")) {
+        initial.add(group.id);
+      }
+    }
+    // Default: expand "build" if nothing else matches
+    if (initial.size === 0) initial.add("build");
+    return initial;
+  });
+
+  const toggleGroup = (groupId: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(groupId)) next.delete(groupId);
+      else next.add(groupId);
+      return next;
+    });
+  };
+
   const isCanvasPage = pathname === "/" || pathname === "/canvas";
 
   const isActive = (path: string) => {
     if (path === "/") return pathname === "/" || pathname === "/canvas";
     return pathname.startsWith(path);
   };
+
+  // Check if any item in a group is active
+  const isGroupActive = (group: NavGroup) =>
+    group.items.some((item) => isActive(item.path));
 
   return (
     <div className="flex h-screen bg-surface-base text-text-primary overflow-hidden">
@@ -108,59 +173,108 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
         Skip to main content
       </a>
 
-      {/* Icon rail — 52px, icon-only, tooltips on hover */}
-      <aside className="flex flex-col w-[52px] flex-shrink-0 bg-surface-raised border-r border-border-subtle">
+      {/* Nav rail — 180px, grouped with labels, glass effect */}
+      <aside className="flex flex-col w-[180px] flex-shrink-0 border-r border-border-subtle glass-heavy relative">
         {/* Logo */}
         <Link
           to="/"
-          className="flex items-center justify-center h-[52px] text-accent font-bold text-lg hover:bg-accent-muted transition-colors"
+          className="flex items-center gap-2 h-[52px] px-4 text-accent font-bold text-lg hover:bg-accent-muted transition-colors"
           aria-label="AgentOS Home"
         >
-          O
+          <span className="text-base">O</span>
+          <span className="text-sm font-semibold text-text-primary">AgentOS</span>
         </Link>
 
         {/* Top nav */}
-        <nav className="flex flex-col items-center gap-0.5 px-1.5 py-2 flex-1 overflow-y-auto" aria-label="Main navigation">
-          {topNav.map((item) => (
-            <Link
-              key={item.path}
-              to={item.path}
-              aria-label={item.label}
-              aria-current={isActive(item.path) ? "page" : undefined}
-              title={item.label}
-              className={`relative flex items-center justify-center w-11 h-11 rounded-lg transition-colors group ${
-                isActive(item.path)
-                  ? "bg-accent-muted text-accent"
-                  : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
-              }`}
-            >
-              {item.icon}
-              {/* Tooltip */}
-              <span className="absolute left-full ml-2 px-2 py-1 rounded-md bg-surface-overlay text-text-primary text-[11px] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-50 shadow-dropdown border border-border-default">
-                {item.label}
-              </span>
-            </Link>
-          ))}
+        <nav className="flex flex-col gap-0.5 px-2 py-2 flex-1 overflow-y-auto" aria-label="Main navigation">
+          {/* Home link */}
+          <Link
+            to={homeItem.path}
+            aria-label={homeItem.label}
+            aria-current={isActive(homeItem.path) ? "page" : undefined}
+            className={`flex items-center gap-2.5 px-2.5 h-9 rounded-lg transition-colors text-xs font-medium ${
+              isActive(homeItem.path)
+                ? "bg-accent-muted text-accent"
+                : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
+            }`}
+          >
+            {homeItem.icon}
+            {homeItem.label}
+          </Link>
+
+          {/* Grouped nav sections */}
+          {navGroups.map((group) => {
+            const expanded = expandedGroups.has(group.id);
+            const groupActive = isGroupActive(group);
+
+            return (
+              <div key={group.id} className="mt-2">
+                {/* Group header — clickable to expand/collapse */}
+                <button
+                  onClick={() => toggleGroup(group.id)}
+                  className={`flex items-center justify-between w-full px-2.5 h-7 rounded-md transition-colors text-[10px] font-semibold uppercase tracking-wider ${
+                    groupActive
+                      ? "text-accent"
+                      : "text-text-muted hover:text-text-secondary"
+                  }`}
+                  aria-expanded={expanded}
+                  aria-label={`${group.label} section`}
+                >
+                  <span className="flex items-center gap-1.5">
+                    {group.icon}
+                    {group.label}
+                  </span>
+                  <ChevronRight
+                    size={10}
+                    className={`transition-transform duration-150 ${expanded ? "rotate-90" : ""}`}
+                  />
+                </button>
+
+                {/* Group items — animated expand/collapse */}
+                <div
+                  className="flex flex-col gap-0.5 mt-0.5 overflow-hidden transition-all duration-200 ease-out"
+                  style={{
+                    maxHeight: expanded ? `${group.items.length * 40}px` : "0px",
+                    opacity: expanded ? 1 : 0,
+                  }}
+                >
+                  {group.items.map((item) => (
+                    <Link
+                      key={item.path}
+                      to={item.path}
+                      aria-label={item.label}
+                      aria-current={isActive(item.path) ? "page" : undefined}
+                      className={`flex items-center gap-2.5 pl-5 pr-2.5 h-9 rounded-lg transition-colors text-xs font-medium ${
+                        isActive(item.path)
+                          ? "bg-accent-muted text-accent"
+                          : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
+                      }`}
+                    >
+                      {item.icon}
+                      {item.label}
+                    </Link>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
         </nav>
 
         {/* Bottom nav + user */}
-        <div className="flex flex-col items-center gap-1 px-1.5 pb-2">
+        <div className="flex flex-col gap-1 px-2 pb-2">
           {bottomNav.map((item) => (
             <Link
               key={item.path}
               to={item.path}
               aria-label={item.label}
-              title={item.label}
-              className={`relative flex items-center justify-center w-11 h-11 rounded-lg transition-colors group ${
+              className={`flex items-center gap-2.5 px-2.5 h-9 rounded-lg transition-colors text-xs font-medium ${
                 isActive(item.path)
                   ? "bg-accent-muted text-accent"
                   : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
               }`}
             >
               {item.icon}
-              <span className="absolute left-full ml-2 px-2 py-1 rounded-md bg-surface-overlay text-text-primary text-[11px] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-50 shadow-dropdown border border-border-default">
-                {item.label}
-              </span>
+              {item.label}
             </Link>
           ))}
 
@@ -174,12 +288,19 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
             ) : (
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="flex items-center justify-center w-11 h-11 rounded-lg bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors"
+                className="flex items-center gap-2.5 w-full px-2.5 h-10 rounded-lg bg-accent/10 hover:bg-accent/15 transition-colors"
                 aria-label={`Account menu for ${user?.email || "user"}`}
                 aria-haspopup="menu"
                 aria-expanded={userMenuOpen}
               >
-                {(user?.name || user?.email || "U").charAt(0).toUpperCase()}
+                <div className="w-7 h-7 rounded-md bg-accent/20 flex items-center justify-center text-accent text-xs font-bold flex-shrink-0">
+                  {(user?.name || user?.email || "U").charAt(0).toUpperCase()}
+                </div>
+                <div className="min-w-0 text-left">
+                  <p className="text-[11px] font-medium text-text-primary truncate">
+                    {user?.name || "User"}
+                  </p>
+                </div>
               </button>
             )}
 
@@ -188,7 +309,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
               <>
                 <div className="fixed inset-0 z-50" onClick={() => setUserMenuOpen(false)} aria-hidden="true" />
                 <div
-                  className="absolute bottom-0 left-full ml-2 z-50 w-56 rounded-xl shadow-2xl overflow-hidden bg-surface-raised border border-border-default"
+                  className="absolute bottom-0 left-full ml-2 z-50 w-56 rounded-xl overflow-hidden glass-dropdown"
                   role="menu"
                   aria-label="User menu"
                 >

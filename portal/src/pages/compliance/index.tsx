@@ -27,6 +27,7 @@ import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
 import { DriftSlideOver } from "../../components/compliance/DriftSlideOver";
+import { AssistPanel } from "../../components/common/AssistPanel";
 import { useApiQuery, apiGet, apiPost, apiDelete, apiRequest } from "../../lib/api";
 import { extractList } from "../../lib/normalize";
 import { useToast } from "../../components/common/ToastProvider";
@@ -171,6 +172,11 @@ export function CompliancePage() {
           </Link>
         }
       />
+
+      {/* Meta-agent assist */}
+      <div className="mb-[var(--space-4)]">
+        <AssistPanel compact />
+      </div>
 
       {/* Tab bar */}
       <div className="flex items-center gap-0 border-b border-border-default mb-[var(--space-6)]">
