@@ -18,7 +18,7 @@ export function EmptyState({
   action,
 }: EmptyStateProps) {
   return (
-    <div className="flex flex-col items-center justify-center py-20 text-center">
+    <div className="flex flex-col items-center justify-center py-20 text-center empty-state-gradient rounded-xl">
       {icon && (
         <div className="empty-state-icon mb-6 p-5 rounded-2xl bg-surface-overlay/40 border border-border-default">
           <div className="text-text-muted">{icon}</div>

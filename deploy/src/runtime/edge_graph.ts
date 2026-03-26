@@ -472,6 +472,12 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
     description: "Governance budget gate + turn_start",
     async run(ctx) {
       if (ctx.turn > ctx.config.max_turns) return GRAPH_HALT;
+      // Token-per-turn limit (0 = unlimited)
+      const maxTpt = ctx.config.max_tokens_per_turn || 0;
+      if (maxTpt > 0 && ctx.totalInputTokens + ctx.totalOutputTokens > maxTpt * ctx.turn) {
+        ctx.stopReason = "token_limit";
+        return GRAPH_HALT;
+      }
       if (ctx.cumulativeCost >= ctx.config.budget_limit_usd) {
         ctx.stopReason = "budget";
         ctx.results.push({
@@ -887,6 +893,12 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         parent_node_id: `llm:${turn}`,
       });
 
+      // Attach governance config for domain allowlist + destructive detection
+      (env as any).__agentConfig = {
+        allowed_domains: config.allowed_domains || [],
+        require_confirmation_for_destructive: config.require_confirmation_for_destructive || false,
+        max_tokens_per_turn: config.max_tokens_per_turn || 0,
+      };
       const toolResults = await executeTools(
         env,
         llm.tool_calls,

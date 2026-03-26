@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useCallback, type CSSProperties } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Search,
   Play,
@@ -17,8 +18,10 @@ import { QueryState } from "../../components/common/QueryState";
 import { SlidePanel } from "../../components/common/SlidePanel";
 import { StatusBadge } from "../../components/common/StatusBadge";
 import { EmptyState } from "../../components/common/EmptyState";
+import { SkeletonKPIGrid, SkeletonTable } from "../../components/common/Skeleton";
 import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
+import { AssistPanel } from "../../components/common/AssistPanel";
 import { useToast } from "../../components/common/ToastProvider";
 import { safeArray, toNumber, type SessionInfo } from "../../lib/adapters";
 import { useApiQuery, apiRequest } from "../../lib/api";
@@ -72,11 +75,37 @@ type TraceSession = {
 
 export const SessionsPage = () => {
   const { showToast } = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
 
-  const [limit, setLimit] = useState(50);
-  const [offset, setOffset] = useState(0);
-  const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  /* ── URL-persisted filter state ──────────────────────────────── */
+  const search = searchParams.get("q") ?? "";
+  const statusFilter = searchParams.get("status") ?? "all";
+  const limit = Number(searchParams.get("limit")) || 50;
+  const offset = Number(searchParams.get("offset")) || 0;
+
+  const updateParam = useCallback(
+    (key: string, value: string) => {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        if (!value || value === "all" || value === "0") next.delete(key);
+        else next.set(key, value);
+        return next;
+      }, { replace: true });
+    },
+    [setSearchParams],
+  );
+
+  const setSearch = (v: string) => updateParam("q", v);
+  const setStatusFilter = (v: string) => updateParam("status", v);
+  const setLimit = (v: number) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set("limit", String(v));
+      next.delete("offset");
+      return next;
+    }, { replace: true });
+  };
+  const setOffset = (v: number) => updateParam("offset", v > 0 ? String(v) : "");
 
   /* ── Detail drawer ────────────────────────────────────────── */
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -249,6 +278,11 @@ export const SessionsPage = () => {
         </div>
       </div>
 
+      {/* Meta-agent assist */}
+      <div className="mb-4">
+        <AssistPanel compact />
+      </div>
+
       {/* Search & filter bar */}
       <div className="flex items-center justify-between mb-4 gap-3">
         <div className="flex items-center gap-3 flex-1">
@@ -316,6 +350,7 @@ export const SessionsPage = () => {
         error={sessionsQuery.error}
         isEmpty={sessions.length === 0}
         emptyMessage=""
+        skeleton={<><SkeletonKPIGrid count={3} /><SkeletonTable rows={6} cols={8} /></>}
         onRetry={() => void sessionsQuery.refetch()}
       >
         {filtered.length === 0 ? (
@@ -346,8 +381,8 @@ export const SessionsPage = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.map((s) => (
-                    <tr key={s.session_id}>
+                  {filtered.map((s, i) => (
+                    <tr key={s.session_id} className="stagger-item" style={{ "--stagger-index": i } as CSSProperties}>
                       <td>
                         <button
                           className="font-mono text-xs text-text-primary hover:text-accent transition-colors"

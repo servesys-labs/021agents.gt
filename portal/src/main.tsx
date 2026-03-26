@@ -1,4 +1,5 @@
 import { ClerkProvider } from "@clerk/clerk-react";
+import { dark } from "@clerk/themes";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
@@ -17,7 +18,12 @@ const app = (
 
 createRoot(document.getElementById("root")!).render(
   isClerkMode() && CLERK_PUBLISHABLE_KEY ? (
-    <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY}>
+    <ClerkProvider
+      publishableKey={CLERK_PUBLISHABLE_KEY}
+      appearance={{
+        baseTheme: dark,
+      }}
+    >
       {app}
     </ClerkProvider>
   ) : (
