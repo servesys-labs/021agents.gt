@@ -42,7 +42,7 @@ type GatePackResult = {
   lint: "pass" | "fail" | "pending";
   eval: "pass" | "fail" | "warning" | "pending";
   contracts: "pass" | "fail" | "pending";
-  rollout: "approve" | "reject" | "pending";
+  rollout: string | { decision?: string; reason?: string; [key: string]: unknown };
 };
 
 type GenerationStep = {
@@ -700,11 +700,16 @@ function GraphVisualization({ nodes }: { nodes: GraphNode[] }) {
 /* ── Gate Pack Display ───────────────────────────────────────────── */
 
 function GatePackDisplay({ gatePack }: { gatePack: GatePackResult }) {
+  // rollout may be a string or an object with a decision field
+  const rolloutStatus = typeof gatePack.rollout === "string"
+    ? gatePack.rollout
+    : (gatePack.rollout as { decision?: string })?.decision ?? "pending";
+
   const items: { label: string; status: string }[] = [
-    { label: "Lint", status: gatePack.lint },
-    { label: "Eval", status: gatePack.eval },
-    { label: "Contracts", status: gatePack.contracts },
-    { label: "Rollout Decision", status: gatePack.rollout },
+    { label: "Lint", status: String(gatePack.lint ?? "pending") },
+    { label: "Eval", status: String(gatePack.eval ?? "pending") },
+    { label: "Contracts", status: String(gatePack.contracts ?? "pending") },
+    { label: "Rollout Decision", status: rolloutStatus },
   ];
 
   const statusIcon = (status: string) => {
