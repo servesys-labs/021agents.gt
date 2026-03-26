@@ -234,3 +234,68 @@ orgRoutes.delete("/:org_id/members/:member_user_id", requireScope("orgs:write"),
   await sql`DELETE FROM org_members WHERE org_id = ${orgId} AND user_id = ${memberUserId}`;
   return c.json({ removed: memberUserId });
 });
+
+// ── GET /org/settings — read org settings + onboarding state ─────────────────
+
+orgRoutes.get("/settings", async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const rows = await sql`
+    SELECT settings_json, plan_type FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+  `;
+
+  if (rows.length === 0) {
+    // No org_settings row — user hasn't completed onboarding
+    return c.json({ onboarding_complete: false });
+  }
+
+  const settings = JSON.parse(String(rows[0].settings_json || "{}"));
+  return c.json({
+    onboarding_complete: settings.onboarding_complete ?? false,
+    default_connectors: settings.default_connectors ?? [],
+    org_name: settings.org_name ?? "",
+    plan_type: rows[0].plan_type ?? "free",
+  });
+});
+
+// ── POST /org/settings — save org settings (onboarding, connectors, name) ────
+
+orgRoutes.post("/settings", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json();
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Merge with existing settings
+  const existing = await sql`
+    SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+  `;
+  const current = existing.length > 0
+    ? JSON.parse(String(existing[0].settings_json || "{}"))
+    : {};
+
+  const merged = {
+    ...current,
+    ...body,
+  };
+
+  const settingsJson = JSON.stringify(merged);
+  const now = Date.now() / 1000;
+
+  await sql`
+    INSERT INTO org_settings (org_id, settings_json, plan_type, created_at, updated_at)
+    VALUES (${user.org_id}, ${settingsJson}, ${"free"}, ${now}, ${now})
+    ON CONFLICT (org_id) DO UPDATE SET
+      settings_json = ${settingsJson},
+      updated_at = ${now}
+  `;
+
+  // Also update org name if provided
+  if (body.org_name) {
+    await sql`
+      UPDATE orgs SET name = ${body.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
+    `.catch(() => {});
+  }
+
+  return c.json({ saved: true, settings: merged });
+});
