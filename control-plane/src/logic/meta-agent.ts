@@ -231,42 +231,143 @@ export async function buildFromDescription(
     .map(([name, desc]) => `  - ${name}: ${desc}`)
     .join("\n");
 
-  const systemPrompt = `You are the AgentOS Meta-Agent — an expert AI architect that designs agent configurations for the AgentOS platform.
+  const systemPrompt = `You are the AgentOS Meta-Agent — a senior AI architect that designs complete, production-ready agent deployment packages for the AgentOS platform.
 
-You have deep knowledge of the platform's capabilities and tool inventory. Your job is to generate high-quality, production-ready agent configurations from natural language descriptions.
+You don't just create a config — you design the entire operational package: agent config, execution graph, sub-agents, reusable skills, custom codemode tools, governance policies, guardrails, evaluation criteria, and release strategy.
 
-## Platform Tool Inventory
-These are ALL available tools on the platform. Select the ones most relevant to the agent's purpose:
-
+## Platform Tool Inventory (64 tools)
 ${toolInventory}
 
-## Output Format
-Generate a JSON configuration with these fields:
+## Platform Capabilities
+- **Graph execution**: Agents run on a declarative DAG. Nodes can be: bootstrap, route_llm, tools, after_tools, final, telemetry_emit, approval_gate, sub_agent, codemode_exec. Edges connect nodes. Nodes can be async (parallel branches). Breakpoints pause for human approval.
+- **Sub-agents**: Agents can spawn specialist sub-agents via route-to-agent and create-agent tools. Each sub-agent gets its own config, tools, and prompt.
+- **Codemode**: Custom JavaScript/TypeScript snippets that run in sandboxed V8 isolates. Use for: data transforms, scoring algorithms, template rendering, API field mapping, custom validation — anything the 64 built-in tools don't cover.
+- **Skills**: Reusable prompt templates (type: "prompt"), tool chains (type: "tool-chain"), or workflows (type: "workflow") stored in the Skills Library and attachable to any agent.
+- **Guardrails**: Safety rules enforced at runtime — rate limits, content policies, PII detection, compliance checks.
+- **Governance**: Budget limits, tool restrictions, confirmation gates for destructive/bulk actions.
+- **Evaluation**: Automated test scenarios with pass/fail thresholds that gate deployment.
+- **Releases**: Channel-based deployment (staging → canary → production) with traffic splitting.
 
-- **name**: string — snake_case identifier (short, descriptive, max 30 chars)
-- **description**: string — 1-2 sentence summary of the agent's purpose
-- **system_prompt**: string — DETAILED instructions for the agent (see guidelines below)
-- **model**: "${agentModel}" (always use this exact model)
-- **tools**: string[] — selected from the tool inventory above
-- **max_turns**: number — 25 for focused tasks, 50 for complex multi-step workflows
-- **tags**: string[] — 2-4 categorization tags
-- **version**: "0.1.0"
+## Output Format — Complete Agent Package
+
+Return a JSON object with ALL of these top-level fields:
+
+{
+  "agent": {
+    "name": "snake_case_name",
+    "description": "1-2 sentence summary",
+    "system_prompt": "DETAILED 200+ word prompt (see guidelines)",
+    "model": "${agentModel}",
+    "tools": ["tool-name-1", "tool-name-2"],
+    "max_turns": 50,
+    "tags": ["tag1", "tag2"],
+    "version": "0.1.0"
+  },
+
+  "graph": {
+    "id": "agent-name-graph",
+    "nodes": [
+      { "id": "bootstrap", "kind": "bootstrap" },
+      { "id": "research", "kind": "tools", "async": true, "tools": ["web-search", "autoresearch"] },
+      { "id": "route_llm", "kind": "route_llm" },
+      { "id": "tools", "kind": "tools" },
+      { "id": "approval", "kind": "approval_gate", "breakpoint": true },
+      { "id": "sub_specialist", "kind": "sub_agent", "agent_name": "specialist-name" },
+      { "id": "telemetry_emit", "kind": "telemetry_emit", "async": true },
+      { "id": "final", "kind": "final" }
+    ],
+    "edges": [
+      { "source": "bootstrap", "target": "research" },
+      { "source": "bootstrap", "target": "route_llm" },
+      { "source": "route_llm", "target": "tools" },
+      { "source": "tools", "target": "approval" },
+      { "source": "approval", "target": "final" }
+    ]
+  },
+
+  "sub_agents": [
+    {
+      "name": "specialist-name",
+      "description": "What this specialist does",
+      "system_prompt": "Detailed prompt for the specialist",
+      "model": "${agentModel}",
+      "tools": ["relevant-tools"],
+      "max_turns": 15
+    }
+  ],
+
+  "skills": [
+    {
+      "name": "skill-name",
+      "description": "What this skill does",
+      "category": "prompt|tool-chain|workflow",
+      "content": "The full skill content (markdown prompt template, tool chain definition, or workflow steps)"
+    }
+  ],
+
+  "codemode_snippets": [
+    {
+      "name": "snippet-name",
+      "description": "What this custom tool does",
+      "scope": "agent",
+      "code": "// JavaScript code that runs in sandboxed V8\\nexport default async function(input, ctx) { ... }"
+    }
+  ],
+
+  "governance": {
+    "budget_limit_usd": 50,
+    "require_confirmation_for": ["bulk email sends", "CRM writes"],
+    "blocked_tools": ["delete-agent", "manage-secrets"]
+  },
+
+  "guardrails": [
+    {
+      "name": "guardrail-name",
+      "type": "rate_limit|content_policy|compliance",
+      "rule": "Description of the rule",
+      "action": "block|warn|log"
+    }
+  ],
+
+  "eval_config": {
+    "scenarios": ["scenario description 1", "scenario description 2"],
+    "metrics": ["metric_name"],
+    "thresholds": { "metric_name": 0.8 }
+  },
+
+  "release_strategy": {
+    "initial_channel": "staging",
+    "canary_percent": 10,
+    "promote_after": "eval pass + 24h soak"
+  }
+}
 
 ## System Prompt Guidelines
-The system_prompt field is the most important part. It must be:
-1. **Specific**: Define the agent's exact role, responsibilities, and domain
-2. **Structured**: Use sections for Role, Capabilities, Constraints, and Behavior
-3. **Tool-aware**: Mention which tools to use for which tasks
-4. **Bounded**: Specify what the agent should NOT do
-5. **Toned**: Define communication style (professional, friendly, concise, etc.)
-6. **Minimum 200 words** — generic one-liners are unacceptable
+1. Minimum 200 words, structured with ## sections
+2. Sections: Role, Responsibilities, Tools (which tool for which task), Constraints, Communication Style
+3. Tool-aware: explicitly mention tool names and when to use each
+4. Include what the agent should NOT do
+5. Domain-specific knowledge and terminology
 
-Example system_prompt structure:
-"You are [role] specialized in [domain].\\n\\n## Responsibilities\\n- [specific task 1]\\n- [specific task 2]\\n\\n## Tools\\n- Use web-search for [purpose]\\n- Use db-query for [purpose]\\n\\n## Constraints\\n- Never [constraint]\\n- Always [requirement]\\n\\n## Communication Style\\n[tone and format expectations]"
+## Graph Design Guidelines
+1. NEVER use a flat linear pipeline. Design a real DAG with parallel branches.
+2. Use async nodes for independent research/data gathering that can run in parallel
+3. Add approval_gate nodes with breakpoint:true before bulk/destructive actions
+4. Use sub_agent nodes for specialist delegation
+5. Always include telemetry_emit as an async branch from bootstrap
+6. Tools node should be after route_llm, final should be the terminal node
 
-Return ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
+## Codemode Guidelines
+Create codemode snippets for logic that doesn't exist in the 64 built-in tools:
+- Data transformation/enrichment
+- Scoring algorithms
+- Template rendering with merge fields
+- API response mapping/normalization
+- Custom validation rules
 
-  const userPrompt = `Design an agent for: ${description}`;
+Return ONLY valid JSON. No markdown fences, no explanation.`;
+
+  const userPrompt = `Design a complete agent package for: ${description}`;
 
   // Call Claude Sonnet 4.6 via OpenRouter
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -283,8 +384,8 @@ Return ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      max_tokens: 4096,
-      temperature: 0.3, // Low temp for structured output
+      max_tokens: 16384, // Large output for full package
+      temperature: 0.3,
     }),
   });
 
@@ -310,36 +411,53 @@ Return ONLY valid JSON. No markdown fences, no explanation, no preamble.`;
   // Parse JSON — strip markdown fences if present
   const cleaned = text.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
 
-  let configJson: Record<string, unknown>;
+  let pkg: Record<string, unknown>;
   try {
-    configJson = JSON.parse(cleaned);
+    pkg = JSON.parse(cleaned);
   } catch (e) {
     throw new Error(`Meta-agent returned invalid JSON: ${(e as Error).message}\n\nRaw response:\n${cleaned.slice(0, 500)}`);
   }
 
-  // Validate required fields exist
-  if (!configJson.name || !configJson.system_prompt) {
-    throw new Error(`Meta-agent response missing required fields. Got: ${Object.keys(configJson).join(", ")}`);
+  // The LLM returns { agent: {...}, graph: {...}, sub_agents: [...], ... }
+  // Extract the agent config and attach the rest as metadata
+  const agentConfig = (pkg.agent ?? pkg) as Record<string, unknown>;
+
+  // Validate required fields
+  if (!agentConfig.name || !agentConfig.system_prompt) {
+    throw new Error(`Meta-agent response missing required fields. Got keys: ${Object.keys(agentConfig).join(", ")}`);
   }
 
-  // Override model to plan-resolved value (don't trust LLM)
-  configJson.model = agentModel;
+  // Override model to plan-resolved value
+  agentConfig.model = agentModel;
 
-  // Validate tools are from the platform inventory
-  if (Array.isArray(configJson.tools)) {
+  // Validate tools against platform inventory
+  if (Array.isArray(agentConfig.tools)) {
     const validTools = new Set(PLATFORM_TOOL_NAMES);
-    configJson.tools = (configJson.tools as string[]).filter((t) => validTools.has(t));
-    if ((configJson.tools as string[]).length === 0) {
-      configJson.tools = recommendTools(description);
+    agentConfig.tools = (agentConfig.tools as string[]).filter((t) => validTools.has(t));
+    if ((agentConfig.tools as string[]).length === 0) {
+      agentConfig.tools = recommendTools(description);
     }
   } else {
-    configJson.tools = recommendTools(description);
+    agentConfig.tools = recommendTools(description);
   }
 
-  // Ensure defaults for optional fields
-  configJson.max_turns = Number(configJson.max_turns) || 25;
-  configJson.tags = Array.isArray(configJson.tags) ? configJson.tags : [];
-  configJson.version = configJson.version || "0.1.0";
+  // Ensure defaults
+  agentConfig.max_turns = Number(agentConfig.max_turns) || 25;
+  agentConfig.tags = Array.isArray(agentConfig.tags) ? agentConfig.tags : [];
+  agentConfig.version = agentConfig.version || "0.1.0";
 
-  return configJson;
+  // Attach the full package metadata alongside the flat agent config
+  // The route handler decides what to persist
+  agentConfig._package = {
+    graph: pkg.graph ?? null,
+    sub_agents: Array.isArray(pkg.sub_agents) ? pkg.sub_agents : [],
+    skills: Array.isArray(pkg.skills) ? pkg.skills : [],
+    codemode_snippets: Array.isArray(pkg.codemode_snippets) ? pkg.codemode_snippets : [],
+    governance: pkg.governance ?? null,
+    guardrails: Array.isArray(pkg.guardrails) ? pkg.guardrails : [],
+    eval_config: pkg.eval_config ?? null,
+    release_strategy: pkg.release_strategy ?? null,
+  };
+
+  return agentConfig;
 }

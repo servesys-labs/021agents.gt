@@ -909,10 +909,15 @@ agentRoutes.post(
 
     // Draft-only response
     if (req.draft_only) {
+      // Extract the full package metadata if present
+      const pkg = (config as Record<string, unknown>)._package as Record<string, unknown> | undefined;
+      delete (config as Record<string, unknown>)._package;
+
       const payload: Record<string, unknown> = {
         created: false,
         name: config.name,
         description: config.description,
+        system_prompt: config.system_prompt,
         model: config.model,
         tools: config.tools,
         tags: config.tags,
@@ -920,6 +925,19 @@ agentRoutes.post(
         draft: config,
         graph_lint: lintReport,
       };
+
+      // Include the full agent package from the meta-agent
+      if (pkg) {
+        payload.agent_graph = pkg.graph;
+        payload.sub_agents = pkg.sub_agents;
+        payload.skills = pkg.skills;
+        payload.codemode_snippets = pkg.codemode_snippets;
+        payload.governance = pkg.governance ?? config.governance;
+        payload.guardrails = pkg.guardrails;
+        payload.eval_config = pkg.eval_config;
+        payload.release_strategy = pkg.release_strategy;
+      }
+
       if (req.include_autofix) payload.graph_autofix = graphAutofix;
       if (req.include_gate_pack) payload.gate_pack = gatePack;
       if (req.include_contracts_validate) payload.contracts_validate = contractsValidate;
