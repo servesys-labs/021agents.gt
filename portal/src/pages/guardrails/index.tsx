@@ -637,7 +637,8 @@ function OverviewTab() {
           ) : (
             <EmptyState
               icon={<ShieldAlert size={24} />}
-              message="No guardrail events recorded yet."
+              title="No guardrail events"
+              description="Guardrail events will appear here once recorded."
             />
           )}
         </QueryState>
@@ -846,7 +847,8 @@ function PoliciesTab() {
         ) : (
           <EmptyState
             icon={<ShieldAlert size={24} />}
-            message="No guardrail policies yet. Create one to get started."
+            title="No guardrail policies"
+            description="Create a policy to get started."
             action={
               <button onClick={openCreate} className="btn btn-primary text-[var(--text-xs)] mt-[var(--space-2)] min-h-[var(--touch-target-min)]">
                 <Plus size={14} /> Create Policy
@@ -1186,7 +1188,7 @@ function DlpTab() {
               ))}
             </div>
           ) : (
-            <EmptyState message="No data classifications defined yet." />
+            <EmptyState title="No data classifications" description="Data classifications will appear here once defined." />
           )}
         </QueryState>
 
@@ -1414,7 +1416,7 @@ function DlpTab() {
               )}
             </div>
           ) : (
-            <EmptyState message="No agent DLP policies configured." />
+            <EmptyState title="No DLP policies" description="Agent DLP policies will appear here once configured." />
           )}
         </QueryState>
       </section>
@@ -1526,7 +1528,7 @@ function DlpTab() {
               )}
             </div>
           ) : (
-            <EmptyState message="No PII exposure data available for the selected period." />
+            <EmptyState title="No PII exposure data" description="PII exposure data will appear here when available." />
           )}
         </QueryState>
       </section>
@@ -1807,7 +1809,8 @@ function EventLogTab() {
         ) : (
           <EmptyState
             icon={<Search size={24} />}
-            message="No events match the current filters."
+            title="No matching events"
+            description="Try adjusting your filters."
           />
         )}
       </QueryState>

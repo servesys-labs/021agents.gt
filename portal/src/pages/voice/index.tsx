@@ -287,7 +287,7 @@ export const VoicePage = () => {
               </div>
             </div>
           ) : (
-            <EmptyState message={`No ${platformLabel[activePlatform]} calls yet. Configure your webhook to start receiving calls.`} />
+            <EmptyState title={`No ${platformLabel[activePlatform]} calls`} description="Configure your webhook to start receiving calls." />
           )}
         </QueryState>
       )}
@@ -311,11 +311,11 @@ export const VoicePage = () => {
                   </div>
                 </div>
               ) : (
-                <EmptyState message="No events for this call." />
+                <EmptyState title="No events" description="This call has no recorded events." />
               )}
             </QueryState>
           ) : (
-            <EmptyState message="Select a call from the Calls tab to view events." />
+            <EmptyState title="No call selected" description="Select a call from the Calls tab to view events." />
           )}
         </div>
       )}

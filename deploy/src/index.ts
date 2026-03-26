@@ -3044,6 +3044,65 @@ export default {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
+      // /cf/db/query — service-to-service DB query endpoint with query allowlist.
+      // Intended for control-plane data-proxy usage (RLS-friendly session context).
+      if (url.pathname === "/cf/db/query" && request.method === "POST") {
+        const body = await request.json() as {
+          query_id?: string;
+          context?: { org_id?: string; user_id?: string; role?: string };
+          params?: Record<string, unknown>;
+        };
+
+        const queryId = String(body.query_id || "").trim();
+        const orgId = String(body.context?.org_id || "").trim();
+        const userId = String(body.context?.user_id || "").trim();
+        const role = String(body.context?.role || "").trim();
+
+        if (!queryId) {
+          return Response.json({ error: "query_id is required" }, { status: 400 });
+        }
+        if (!orgId) {
+          return Response.json({ error: "context.org_id is required" }, { status: 400 });
+        }
+        if (!env.HYPERDRIVE) {
+          return Response.json({ error: "hyperdrive_not_configured" }, { status: 503 });
+        }
+
+        try {
+          const { getDb } = await import("./runtime/db");
+          const sql = await getDb(env.HYPERDRIVE);
+
+          const rows = await sql.begin(async (tx: any) => {
+            await tx`SELECT set_config('app.current_org_id', ${orgId}, true)`;
+            await tx`SELECT set_config('app.current_user_id', ${userId || "system"}, true)`;
+            await tx`SELECT set_config('app.current_role', ${role || "service"}, true)`;
+
+            if (queryId === "agents.list_active_by_org") {
+              return await tx`
+                SELECT name, description, config_json, is_active, created_at, updated_at
+                FROM agents
+                WHERE org_id = ${orgId} AND is_active = true
+                ORDER BY created_at DESC
+              `;
+            }
+
+            throw new Error(`unsupported query_id: ${queryId}`);
+          });
+
+          return Response.json({
+            query_id: queryId,
+            row_count: Array.isArray(rows) ? rows.length : 0,
+            rows,
+          });
+        } catch (err: any) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message.startsWith("unsupported query_id:")) {
+            return Response.json({ error: message }, { status: 400 });
+          }
+          return Response.json({ error: message }, { status: 500 });
+        }
+      }
+
       // /cf/sandbox/exec — run code in Dynamic Worker or Container
       if (url.pathname === "/cf/sandbox/exec" && request.method === "POST") {
         const body = await request.json() as { code: string; language?: string; timeoutMs?: number };

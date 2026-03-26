@@ -50,4 +50,5 @@ export interface Env {
   ALLOWED_ORIGINS?: string;
   SECRETS_ENCRYPTION_KEY?: string;
   APPROVAL_WORKFLOWS_ENABLED?: string;
+  DB_PROXY_ENABLED?: string;
 }

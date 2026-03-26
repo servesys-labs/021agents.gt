@@ -78,12 +78,14 @@ type SkeletonCardProps = {
   /** Show an icon placeholder at top-left (default true) */
   showIcon?: boolean;
   className?: string;
+  style?: CSSProperties;
 };
 
-export function SkeletonCard({ showIcon = true, className = "" }: SkeletonCardProps) {
+export function SkeletonCard({ showIcon = true, className = "", style }: SkeletonCardProps) {
   return (
     <div
       className={`card flex items-center gap-3 py-3 ${className}`}
+      style={style}
       role="status"
       aria-label="Loading card"
       aria-busy="true"

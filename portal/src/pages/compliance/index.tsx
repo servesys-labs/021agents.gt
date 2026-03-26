@@ -490,7 +490,7 @@ function OverviewComplianceTab() {
               })}
             </div>
           ) : (
-            <EmptyState message="No compliance checks recorded yet." />
+            <EmptyState title="No compliance checks" description="Compliance checks will appear here once recorded." />
           )}
         </QueryState>
       </section>
@@ -568,7 +568,7 @@ function OverviewComplianceTab() {
               </div>
             </div>
           ) : (
-            <EmptyState message="No SLOs configured yet." />
+            <EmptyState title="No SLOs configured" description="Service Level Objectives will appear here once configured." />
           )}
         </QueryState>
       </section>
@@ -636,7 +636,7 @@ function OverviewComplianceTab() {
               </div>
             </div>
           ) : (
-            <EmptyState message="No security scans recorded yet." />
+            <EmptyState title="No security scans" description="Security scans will appear here once recorded." />
           )}
         </QueryState>
       </section>
@@ -751,7 +751,7 @@ function OverviewComplianceTab() {
             ))}
           </div>
         ) : (
-          <EmptyState message="No pending governance proposals." />
+          <EmptyState title="No pending proposals" description="Governance proposals will appear here when created." />
         )}
       </section>
 

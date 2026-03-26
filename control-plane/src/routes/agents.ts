@@ -43,6 +43,38 @@ async function notifyRuntimeOfConfigChange(
   }
 }
 
+async function listAgentsViaDataProxy(
+  env: Env,
+  user: CurrentUser,
+): Promise<Array<Record<string, unknown>> | null> {
+  const enabled = String(env.DB_PROXY_ENABLED || "").toLowerCase() === "true";
+  if (!enabled) return null;
+
+  try {
+    const resp = await env.RUNTIME.fetch("https://runtime/cf/db/query", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({
+        query_id: "agents.list_active_by_org",
+        context: {
+          org_id: user.org_id,
+          user_id: user.user_id,
+          role: user.role,
+        },
+      }),
+    });
+    if (!resp.ok) return null;
+
+    const payload = await resp.json() as { rows?: Array<Record<string, unknown>> };
+    return Array.isArray(payload.rows) ? payload.rows : [];
+  } catch {
+    return null;
+  }
+}
+
 // ── Zod schemas ──────────────────────────────────────────────────────
 
 const AgentCreateSchema = z.object({
@@ -192,6 +224,11 @@ function parseConfig(raw: unknown): Record<string, unknown> {
 // GET /agents — list all agents for the org
 agentRoutes.get("/", async (c) => {
   const user = c.get("user");
+  const proxied = await listAgentsViaDataProxy(c.env, user);
+  if (proxied) {
+    return c.json(proxied.map((r) => agentResponse(r as Record<string, unknown>)));
+  }
+
   const sql = await getDb(c.env.HYPERDRIVE);
 
   const rows = await sql`

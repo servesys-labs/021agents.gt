@@ -340,7 +340,7 @@ export function SecurityPage() {
               </div>
             </div>
           ) : (
-            <EmptyState message="No security scans yet. Run a scan to get started." />
+            <EmptyState title="No security scans" description="Run a security scan to get started." />
           )}
         </QueryState>
       </section>
@@ -387,7 +387,7 @@ export function SecurityPage() {
               ))}
             </div>
           ) : (
-            <EmptyState message="No risk profiles. Run a security scan to generate them." />
+            <EmptyState title="No risk profiles" description="Run a security scan to generate risk profiles." />
           )}
         </QueryState>
       </section>
@@ -493,7 +493,7 @@ export function SecurityPage() {
             </div>
           </div>
         ) : (
-          <EmptyState message="No risk data available for trends." />
+          <EmptyState title="No risk data" description="Risk trend data will appear here once available." />
         )}
       </section>
     </div>
