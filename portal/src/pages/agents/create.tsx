@@ -152,30 +152,31 @@ export function CreateAgentPage() {
       /* Clear timers and mark all done */
       setSteps((prev) => prev.map((s) => ({ ...s, status: "done" as const })));
 
-      /* Apply defaults for missing fields */
+      /* Use the API response directly — no client-side fallbacks.
+         If the API failed, the catch block below handles it. */
       const finalConfig: GeneratedConfig = {
-        name: result.name || prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 30),
-        description: result.description || prompt.trim(),
-        system_prompt: result.system_prompt || `You are a helpful assistant. ${prompt.trim()}`,
-        model: result.model || "gpt-4.1-mini",
-        tools: result.tools || ["web_search"],
-        governance: result.governance || {
+        name: result.name,
+        description: result.description,
+        system_prompt: result.system_prompt,
+        model: result.model,
+        tools: result.tools ?? [],
+        governance: result.governance ?? {
           budget_limit_usd: 10,
           blocked_tools: [],
           require_confirmation_for_destructive: true,
         },
-        graph: result.graph || [
+        graph: result.graph ?? [
           { id: "entry", label: "Entry", type: "input", next: ["router"] },
           { id: "router", label: "Router", type: "router", next: ["agent"] },
           { id: "agent", label: "Agent", type: "agent", next: ["tools"] },
           { id: "tools", label: "Tools", type: "tools", next: ["output"] },
           { id: "output", label: "Output", type: "output" },
         ],
-        gate_pack: result.gate_pack || {
-          lint: "pass",
-          eval: "warning",
-          contracts: "pass",
-          rollout: "approve",
+        gate_pack: result.gate_pack ?? {
+          lint: "pending",
+          eval: "pending",
+          contracts: "pending",
+          rollout: "pending",
         },
       };
 
@@ -276,6 +277,12 @@ export function CreateAgentPage() {
           onSaveAndTest={handleSaveAndTest}
           onDeploy={handleDeploy}
           onSaveConfig={handleSaveConfig}
+          onDiscard={() => {
+            setConfig(null);
+            setStage("description");
+            setPrompt("");
+            setError(null);
+          }}
           deployMenuOpen={deployMenuOpen}
           setDeployMenuOpen={setDeployMenuOpen}
         />
@@ -420,6 +427,7 @@ function ReviewStage({
   onSaveAndTest,
   onDeploy,
   onSaveConfig,
+  onDiscard,
   deployMenuOpen,
   setDeployMenuOpen,
 }: {
@@ -428,6 +436,7 @@ function ReviewStage({
   onSaveAndTest: () => void;
   onDeploy: () => void;
   onSaveConfig: () => void;
+  onDiscard: () => void;
   deployMenuOpen: boolean;
   setDeployMenuOpen: (v: boolean) => void;
 }) {
@@ -468,6 +477,13 @@ function ReviewStage({
           </p>
         </div>
         <div className="flex items-center gap-[var(--space-3)]">
+          <button
+            onClick={onDiscard}
+            className="btn btn-ghost min-h-[var(--touch-target-min)] text-text-muted hover:text-status-error"
+          >
+            <X size={16} />
+            Discard
+          </button>
           <button
             onClick={onSaveConfig}
             className="btn btn-secondary min-h-[var(--touch-target-min)]"

@@ -773,11 +773,12 @@ agentRoutes.post(
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-    // Generate config via Workers AI (plan-aware model selection)
+    // Generate config via Claude Sonnet 4.6 (plan-aware model selection)
     const config = await buildFromDescription(c.env.AI, req.description, {
       name: req.name || undefined,
       hyperdrive: c.env.HYPERDRIVE,
       orgId: user.org_id,
+      openrouterApiKey: c.env.OPENROUTER_API_KEY,
     });
 
     if (req.name) config.name = req.name;
