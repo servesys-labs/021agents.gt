@@ -18,7 +18,7 @@ function ClerkSignupPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-surface-base p-[var(--space-6)]">
+    <div className="min-h-screen flex items-center justify-center bg-surface-base bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.06),transparent_55%)] p-[var(--space-6)]">
       <div className="flex flex-col items-center gap-[var(--space-6)]">
         <div className="text-center">
           <div className="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-accent-muted mb-[var(--space-4)]">
@@ -36,17 +36,18 @@ function ClerkSignupPage() {
           appearance={{
             elements: {
               rootBox: "w-full max-w-md",
-              card: "bg-surface-raised border border-border-default shadow-panel rounded-xl",
-              headerTitle: "text-text-primary",
-              headerSubtitle: "text-text-secondary",
+              card: "bg-surface-raised/65 border border-border-subtle/70 shadow-[0_16px_48px_rgba(0,0,0,0.5)] backdrop-blur-xl rounded-2xl",
+              headerTitle: "hidden",
+              headerSubtitle: "hidden",
+              header: "hidden",
               formFieldLabel: "text-text-secondary text-sm",
               formFieldInput:
-                "bg-surface-overlay border-border-default text-text-primary rounded-lg",
+                "bg-surface-overlay/80 border-border-default text-text-primary rounded-lg",
               formButtonPrimary:
                 "bg-accent hover:bg-accent-hover text-white rounded-lg min-h-[var(--touch-target-min)]",
               footerActionLink: "text-accent hover:text-accent-hover",
               socialButtonsBlockButton:
-                "bg-surface-overlay border-border-default text-text-primary hover:bg-surface-hover rounded-lg",
+                "bg-surface-overlay/70 border-border-default text-text-primary hover:bg-surface-hover rounded-lg",
               dividerLine: "bg-border-default",
               dividerText: "text-text-muted",
             },
