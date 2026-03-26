@@ -30,8 +30,8 @@ conversationIntelRoutes.get("/summary", requireScope("intelligence:read"), async
         AVG(sentiment_score) as avg_sentiment,
         MIN(quality_overall) as min_quality,
         MAX(quality_overall) as max_quality,
-        SUM(CASE WHEN has_tool_failure THEN 1 ELSE 0 END) as tool_failures,
-        SUM(CASE WHEN has_hallucination_risk THEN 1 ELSE 0 END) as hallucination_risks,
+        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures,
+        SUM(CASE WHEN has_hallucination_risk = 1 THEN 1 ELSE 0 END) as hallucination_risks,
         COUNT(DISTINCT session_id) as sessions_scored
       FROM conversation_scores
       WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
@@ -44,8 +44,8 @@ conversationIntelRoutes.get("/summary", requireScope("intelligence:read"), async
         AVG(sentiment_score) as avg_sentiment,
         MIN(quality_overall) as min_quality,
         MAX(quality_overall) as max_quality,
-        SUM(CASE WHEN has_tool_failure THEN 1 ELSE 0 END) as tool_failures,
-        SUM(CASE WHEN has_hallucination_risk THEN 1 ELSE 0 END) as hallucination_risks,
+        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures,
+        SUM(CASE WHEN has_hallucination_risk = 1 THEN 1 ELSE 0 END) as hallucination_risks,
         COUNT(DISTINCT session_id) as sessions_scored
       FROM conversation_scores
       WHERE org_id = ${user.org_id} AND created_at >= ${since}
@@ -300,7 +300,7 @@ conversationIntelRoutes.get("/trends", requireScope("intelligence:read"), async 
         AVG(quality_overall) as avg_quality,
         AVG(sentiment_score) as avg_sentiment,
         COUNT(*) as turn_count,
-        SUM(CASE WHEN has_tool_failure THEN 1 ELSE 0 END) as tool_failures
+        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures
       FROM conversation_scores
       WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND created_at >= ${since}
       GROUP BY day ORDER BY day
@@ -331,7 +331,7 @@ conversationIntelRoutes.get("/trends", requireScope("intelligence:read"), async 
         AVG(quality_overall) as avg_quality,
         AVG(sentiment_score) as avg_sentiment,
         COUNT(*) as turn_count,
-        SUM(CASE WHEN has_tool_failure THEN 1 ELSE 0 END) as tool_failures
+        SUM(CASE WHEN has_tool_failure = 1 THEN 1 ELSE 0 END) as tool_failures
       FROM conversation_scores
       WHERE org_id = ${user.org_id} AND created_at >= ${since}
       GROUP BY day ORDER BY day
