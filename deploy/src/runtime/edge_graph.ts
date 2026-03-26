@@ -327,15 +327,57 @@ const FRESH_TOOLS = "fresh_tools";
 const FRESH_LOOP = "fresh_loop_detect";
 const FRESH_AFTER_TOOLS = "fresh_after_tools";
 
+// ── Codemode Middleware Hook Helper ────────────────────────────────────
+
+/**
+ * Execute a codemode middleware hook if configured.
+ * Returns the middleware action (continue, halt, modify) or null if no hook configured.
+ */
+async function runMiddlewareHook(
+  ctx: FreshGraphCtx,
+  hookName: "pre_llm" | "post_llm" | "pre_tool" | "post_tool" | "pre_output",
+  context: unknown,
+): Promise<{ action: string; modified?: unknown } | null> {
+  const hooks = ctx.config.codemode_middleware;
+  if (!hooks) return null;
+  const snippetId = (hooks as Record<string, string | undefined>)[hookName];
+  if (!snippetId) return null;
+
+  try {
+    const { loadSnippetCached, executeScopedCode } = await import("./codemode");
+    const { getToolDefinitions } = await import("./tools");
+    const snippet = await loadSnippetCached(ctx.hyperdrive, snippetId, ctx.config.org_id);
+    if (!snippet) return null;
+
+    const allTools = getToolDefinitions([]);
+    const result = await executeScopedCode(ctx.env, snippet.code, allTools, ctx.sessionId, {
+      scope: "middleware",
+      input: context,
+      traceId: ctx.traceId,
+      orgId: ctx.config.org_id,
+      snippetId,
+    });
+
+    if (!result.success) return null;
+    const output = result.result as Record<string, unknown> | null;
+    if (output && typeof output === "object" && output.action) {
+      return output as { action: string; modified?: unknown };
+    }
+    return null;
+  } catch {
+    return null; // Middleware hooks are best-effort
+  }
+}
+
 /**
  * Adjacency (fresh run):
- * bootstrap → turn_budget ⇄ summarize → route_llm → post_llm → approval | final | tools → loop → after_tools → turn_budget
+ * bootstrap → turn_budget ⇄ summarize → route_llm → post_llm → reflect → final | approval | tools → loop → after_tools → turn_budget
  * post_llm → HALT on LLM error; final → HALT; loop → HALT on loop halt; after_tools → turn_budget or HALT
  */
 const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
   [FRESH_BOOTSTRAP]: {
     id: FRESH_BOOTSTRAP,
-    description: "Memory/context init + session_start",
+    description: "Memory/context init + codemode setup + session_start",
     async run(ctx) {
       const { env, hyperdrive, request, config, sessionId, traceId, rootGraphId, events } = ctx;
       ctx.workingMemory = createWorkingMemory(100);
@@ -358,6 +400,18 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         }
       } catch {
         /* best-effort */
+      }
+
+      // Code mode: collapse all tools into a single codemode tool if enabled
+      // This saves ~85% of tool tokens in the context window
+      if (config.use_code_mode) {
+        try {
+          const { getHarnessToolDefs } = await import("./codemode");
+          ctx.activeTools = await getHarnessToolDefs(env, ctx.activeTools, sessionId, true);
+        } catch (err) {
+          console.error("[edge_graph] code mode init failed, falling back to tool mode:", err);
+          // Fall back to regular tool mode
+        }
       }
 
       let task = request.task;
@@ -480,11 +534,26 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
 
   [FRESH_ROUTE_LLM]: {
     id: FRESH_ROUTE_LLM,
-    description: "Plan routing + LLM call",
+    description: "Plan routing + pre_llm middleware + LLM call",
     async run(ctx) {
       const { env, config, messages, activeTools, events, sessionId, traceId, rootGraphId, turn } =
         ctx;
       ctx.turnStartedMs = Date.now();
+
+      // Fire pre_llm middleware hook (can modify messages before LLM call)
+      const preLlmResult = await runMiddlewareHook(ctx, "pre_llm", {
+        messages: messages.map((m) => ({ role: m.role, content: m.content?.slice(0, 500) })),
+        turn,
+        cumulative_cost_usd: ctx.cumulativeCost,
+      });
+      if (preLlmResult?.action === "halt") {
+        ctx.stopReason = "middleware_halt";
+        ctx.output = String(preLlmResult.modified || "Halted by pre_llm middleware");
+        return GRAPH_HALT;
+      }
+      if (preLlmResult?.action === "inject" && typeof preLlmResult.modified === "string") {
+        messages.push({ role: "system", content: preLlmResult.modified });
+      }
       const planRouting = resolvePlanRouting(
         config.plan,
         config.routing as Record<string, unknown> | undefined,
@@ -646,6 +715,24 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         });
         // Route back to LLM for another attempt
         return FRESH_ROUTE_LLM;
+      }
+
+      // Fire pre_output middleware hook (can modify or reject the final answer)
+      const preOutputResult = await runMiddlewareHook(ctx, "pre_output", {
+        output: llm.content,
+        confidence,
+        tool_failures: toolFailures,
+        turn,
+      });
+      if (preOutputResult?.action === "reject" && typeof preOutputResult.modified === "string") {
+        if (!ctx.reflectionRetried) {
+          ctx.reflectionRetried = true;
+          ctx.messages.push({ role: "system", content: preOutputResult.modified });
+          return FRESH_ROUTE_LLM;
+        }
+      }
+      if (preOutputResult?.action === "modify" && typeof preOutputResult.modified === "string") {
+        ctx.llmResponse = { ...llm, content: preOutputResult.modified };
       }
 
       return FRESH_FINAL;

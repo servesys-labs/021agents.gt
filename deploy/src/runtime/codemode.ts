@@ -905,3 +905,110 @@ function emitCodemodeAuditEvent(
     error: error || "",
   });
 }
+
+// ── Harness Code Tool (createCodeTool integration) ─────────────
+//
+// Uses the new @cloudflare/codemode v0.2.1 createCodeTool() API to collapse
+// all tools into a SINGLE code tool. The LLM writes code that chains tools
+// instead of making individual tool calls — saves ~85% of tool tokens.
+
+/**
+ * Create a single "harness" code tool that wraps all available tools.
+ * The LLM gets ONE tool that lets it write code calling any combination
+ * of the agent's tools, plus harness helpers (git, lint, search).
+ *
+ * Token savings: ~6,400 tokens (64 tools) → ~1,000 tokens (1 code tool + types)
+ */
+export async function createHarnessCodeTool(
+  env: RuntimeEnv,
+  toolDefs: ToolDefinition[],
+  sessionId: string,
+  scope: CodemodeScope = "agent",
+  scopeOverrides?: Partial<CodemodeScopeConfig>,
+): Promise<{
+  definition: ToolDefinition;
+  execute: (code: string) => Promise<CodemodeResult>;
+}> {
+  const scopeConfig = resolveScopeConfig(scope, scopeOverrides);
+  const filtered = filterToolsByScope(toolDefs, scopeConfig);
+
+  // Build type definitions for all available tools
+  const descriptors: JsonSchemaToolDescriptors = {};
+  for (const def of filtered) {
+    descriptors[def.function.name] = {
+      description: def.function.description,
+      inputSchema: def.function.parameters as any,
+    };
+  }
+  const toolTypes = generateTypesFromJsonSchema(descriptors);
+
+  // Import harness helper types
+  const { HARNESS_TYPE_DEFS, buildSandboxModules } = await import("./harness-modules");
+
+  // Build the codemode tool definition
+  const definition: ToolDefinition = {
+    type: "function",
+    function: {
+      name: "codemode",
+      description:
+        `Write and execute JavaScript code that orchestrates tools. ` +
+        `Your code runs in an isolated sandbox with access to all tools via \`codemode.*\` methods. ` +
+        `You can also import harness helpers: \`import { safeEdit, gitCheckpoint, findDefinition, navigateTo } from "harness"\`.\n\n` +
+        `Available tool methods:\n${toolTypes}\n\n` +
+        `Harness helpers:\n${HARNESS_TYPE_DEFS}\n\n` +
+        `Write an async arrow function: \`async (codemode) => { ... }\``,
+      parameters: {
+        type: "object",
+        properties: {
+          code: {
+            type: "string",
+            description: "JavaScript code to execute. Must be an async arrow function: async (codemode) => { ... }",
+          },
+        },
+        required: ["code"],
+      },
+    },
+  };
+
+  // Build executor with harness modules
+  const modules = buildSandboxModules();
+  const executor = new DynamicWorkerExecutor({
+    loader: env.LOADER,
+    timeout: scopeConfig.timeoutMs,
+    globalOutbound: null,
+    modules,
+  });
+
+  // Build the execute function
+  const execute = async (code: string): Promise<CodemodeResult> => {
+    return executeScopedCode(env, code, toolDefs, sessionId, {
+      scope,
+      scopeOverrides: {
+        ...scopeOverrides,
+        // Allow more tool calls in code mode since the LLM chains them
+        maxToolCalls: Math.max(scopeConfig.maxToolCalls, 100),
+      },
+    });
+  };
+
+  return { definition, execute };
+}
+
+/**
+ * Get the code mode tool definitions for an agent.
+ * Returns either the full tool catalog (tool mode) or a single codemode tool (code mode).
+ */
+export async function getHarnessToolDefs(
+  env: RuntimeEnv,
+  toolDefs: ToolDefinition[],
+  sessionId: string,
+  useCodeMode: boolean,
+): Promise<ToolDefinition[]> {
+  if (!useCodeMode) return toolDefs;
+
+  const { definition } = await createHarnessCodeTool(env, toolDefs, sessionId);
+  // In code mode, offer the codemode tool + discover-api for introspection
+  const discoverApi = toolDefs.find((t) => t.function.name === "discover-api");
+  return discoverApi ? [definition, discoverApi] : [definition];
+}
+

@@ -78,6 +78,11 @@ export type {
   GeneratedMcpTool,
   CodemodeTestResult,
 } from "./codemode";
+// Harness code tool (createCodeTool integration)
+export { createHarnessCodeTool, getHarnessToolDefs } from "./codemode";
+// Harness sandbox modules
+export { buildSandboxModules, HARNESS_MODULE_SOURCE, HARNESS_TYPE_DEFS } from "./harness-modules";
+
 export { streamRun } from "./stream";
 export type { RuntimeEvent as ProtocolRuntimeEvent, TurnEndEvent, DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent } from "./protocol";
 export { validateEvent, serializeForSSE, serializeForWebSocket } from "./protocol";

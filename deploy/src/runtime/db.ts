@@ -97,6 +97,9 @@ export async function loadAgentConfig(
     project_id: row.project_id || "",
     state_reducers: parseJson(cfg.state_reducers || cfg.stateReducers),
     routing: parseJson(cfg.routing),
+    codemode_middleware: parseJson(cfg.codemode_middleware || cfg.codemodeMiddleware),
+    codemode_observability: cfg.codemode_observability || cfg.codemodeObservability || undefined,
+    use_code_mode: cfg.use_code_mode === true || cfg.useCodeMode === true,
   };
 }
 
