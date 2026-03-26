@@ -388,24 +388,23 @@ def seed_agents_to_db() -> int:
 class Agent:
     """A runnable agent instance built from an AgentConfig.
 
-    This is the primary user-facing class. It wires up the harness,
-    tools, memory, governance, and observability from a single config.
+    This is the primary user-facing class. Config loading, identity,
+    and persistence are handled here. Execution is delegated to the
+    TypeScript control-plane runtime (deploy/src/runtime/).
 
-    Observability is automatic: every ``run()`` call is traced and
-    recorded to SQLite (if data/ exists). No manual setup needed.
+    The Python harness, LLM router, and graph adapter have been removed.
+    Use ``agentos deploy`` to push agents to the TS runtime, then call
+    the control-plane API to run them.
     """
 
     def __init__(self, config: AgentConfig) -> None:
         self.config = config
-        # Allow programmatic usage without manual shell exports.
         load_dotenv_if_present()
         self._apply_project_defaults()
         self._observer = None
         self._tracer = None
         self._runtime_context: dict[str, str] = {}
         self._init_db()
-        self._harness = self._build_harness()
-        self._attach_observability()
 
     def _apply_project_defaults(self) -> None:
         """Apply project-level defaults from agentos.yaml (if present).
@@ -435,256 +434,6 @@ class Agent:
         except Exception:
             pass
 
-    def _build_harness(self):
-        """Wire up all subsystems from the agent config."""
-        import os
-
-        from agentos.core.governance import GovernanceLayer, GovernancePolicy
-        from agentos.core.harness import AgentHarness, HarnessConfig
-        from agentos.llm.router import Complexity, LLMRouter
-        from agentos.llm.provider import HttpProvider, StubProvider
-        from agentos.memory.manager import MemoryManager
-        from agentos.memory.working import WorkingMemory
-        from agentos.memory.episodic import EpisodicMemory
-        from agentos.memory.procedural import ProceduralMemory
-        from agentos.tools.executor import ToolExecutor
-        from agentos.tools.mcp import MCPClient
-        from agentos.tools.registry import ToolRegistry
-
-        # Harness config — propagate ALL fields from agent config
-        h = self.config.harness if isinstance(self.config.harness, dict) else {}
-        harness_cfg = HarnessConfig(
-            max_turns=self.config.max_turns,
-            timeout_seconds=self.config.timeout_seconds,
-            enable_loop_detection=h.get("enable_loop_detection", True),
-            enable_summarization=h.get("enable_summarization", True),
-            enable_skills=h.get("enable_skills", True),
-            enable_async_memory=h.get("enable_async_memory", False),
-            enable_checkpoints=h.get("enable_checkpoints", False),
-            require_human_approval=h.get("require_human_approval", False),
-            max_context_tokens=h.get("max_context_tokens", 100_000),
-            retry_on_tool_failure=h.get("retry_on_tool_failure", True),
-            max_retries=h.get("max_retries", 3),
-        )
-
-        # LLM Router — configure per-tier models with mixed provider support
-        llm_router = LLMRouter()
-        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        openai_key = os.environ.get("OPENAI_API_KEY", "")
-        cf_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
-        cf_account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-        model = self.config.model
-
-        # Load per-tier routing config from config/default.json
-        # If agent specifies a plan, use plan-specific routing; else use default routing
-        routing_config: dict[str, dict[str, Any]] = {}
-        default_config_path = Path(__file__).resolve().parent.parent / "config" / "default.json"
-        if default_config_path.exists():
-            try:
-                import json as _json
-                raw = _json.loads(default_config_path.read_text())
-                llm_config = raw.get("llm", {})
-                # Check if agent has a plan and it exists in plans config
-                agent_plan = getattr(self.config, "plan", "")
-                plans = llm_config.get("plans", {})
-                if agent_plan and agent_plan in plans:
-                    plan_cfg = plans[agent_plan]
-                    # Filter out metadata keys (start with _)
-                    routing_config = {k: v for k, v in plan_cfg.items() if not k.startswith("_")}
-                    logger.info("Using plan '%s' for LLM routing", agent_plan)
-                else:
-                    routing_config = llm_config.get("routing", {})
-            except Exception:
-                pass
-
-        def _make_provider(tier_model: str, tier_provider: str) -> HttpProvider | None:
-            """Create an LLM provider — ALL calls go through the CF worker.
-
-            The worker's /cf/llm/infer handles routing:
-              @cf/* models → Workers AI (edge, sub-second)
-              Everything else → OpenRouter (BYOK, 400+ models)
-
-            Backend never calls LLM providers directly. No API keys needed
-            on the backend for LLM inference — the worker holds them all.
-            """
-            from agentos.llm.provider import WorkersAIProvider
-
-            # All providers route through the worker's /cf/llm/infer
-            if tier_provider in ("workers-ai", "openrouter", "cloudflare", ""):
-                return WorkersAIProvider(model_id=tier_model)
-
-            # Local dev fallback (no worker available)
-            if tier_provider == "local":
-                local_base = os.environ.get("LOCAL_LLM_BASE", "http://localhost:11434/v1")
-                return HttpProvider(
-                    model_id=tier_model,
-                    api_base=local_base,
-                    api_key=os.environ.get("LOCAL_LLM_KEY", "not-needed"),
-                )
-
-            # Unknown provider — try via worker anyway
-            return WorkersAIProvider(model_id=tier_model)
-
-        # Multimodal tiers — no text-model fallback for these
-        _multimodal_tiers = {Complexity.IMAGE_GEN, Complexity.TTS, Complexity.STT}
-
-        def _register_role(category: str, role: str, role_cfg: dict) -> None:
-            """Register a single category/role provider on the router."""
-            role_model = role_cfg.get("model", model)
-            role_provider_name = role_cfg.get("provider", "")
-            role_max_tokens = role_cfg.get("max_tokens", self.config.max_tokens)
-
-            prov = _make_provider(role_model, role_provider_name)
-            # Fallback chain for text models — all route through CF worker
-            if prov is None:
-                prov = _make_provider(role_model, "workers-ai")
-
-            if prov is not None:
-                llm_router.register_category(category, role, prov, max_tokens=role_max_tokens)
-
-        # Register category routes from plan config (new structure)
-        # Plan config has: { general: {...}, coding: {...}, research: {...}, ... }
-        for category, roles in routing_config.items():
-            if category.startswith("_") or not isinstance(roles, dict):
-                continue
-            # Check if this is a category (nested dict) or a flat tier (has "model" key)
-            first_val = next(iter(roles.values()), None)
-            if isinstance(first_val, dict) and "model" in first_val:
-                # Category with roles: { "planner": {"model": ...}, "implementer": {...} }
-                for role, role_cfg in roles.items():
-                    if isinstance(role_cfg, dict) and "model" in role_cfg:
-                        _register_role(category, role, role_cfg)
-            elif "model" in roles:
-                # Flat tier (backward compat): { "model": "...", "provider": "..." }
-                tier_name = category
-                tier_cfg = roles
-                tier_model = tier_cfg.get("model", model)
-                tier_provider_name = tier_cfg.get("provider", "")
-                tier_max_tokens = tier_cfg.get("max_tokens", self.config.max_tokens)
-
-                prov = _make_provider(tier_model, tier_provider_name)
-                if prov is None and tier_name not in ("image_gen", "tts", "stt"):
-                    prov = _make_provider(tier_model, "workers-ai")
-
-                # Map flat tier to Complexity enum for backward compat
-                tier_map = {t.value: t for t in Complexity}
-                if tier_name in tier_map and prov is not None:
-                    llm_router.register(tier_map[tier_name], prov, max_tokens=tier_max_tokens)
-                # Also register as general.{tier_name} for the new router
-                if prov is not None:
-                    llm_router.register_category("general", tier_name, prov, max_tokens=tier_max_tokens)
-
-        # Governance
-        gov_data = self.config.governance
-        gov_policy = GovernancePolicy(
-            budget_limit_usd=gov_data.get("budget_limit_usd", 10.0),
-            blocked_tools=gov_data.get("blocked_tools", []),
-            require_confirmation_for_destructive=gov_data.get(
-                "require_confirmation_for_destructive", True
-            ),
-        )
-
-        # Memory — pass DB for persistence when available
-        mem_cfg = self.config.memory
-        working = WorkingMemory(max_items=mem_cfg.get("working", {}).get("max_items", 100))
-        episodic = EpisodicMemory(
-            max_episodes=mem_cfg.get("episodic", {}).get("max_episodes", 10000),
-            ttl_days=mem_cfg.get("episodic", {}).get("ttl_days", 90),
-            db=self._db,
-        )
-        procedural = ProceduralMemory(
-            max_procedures=mem_cfg.get("procedural", {}).get("max_procedures", 500),
-            db=self._db,
-        )
-        # RAG — load pipeline from persisted chunks (fast) or re-index from source files (fallback)
-        rag_pipeline = None
-        rag_chunks_db = Path.cwd() / "data" / "rag_chunks.db"
-        rag_index_path = Path.cwd() / "data" / "rag_index.json"
-        try:
-            from agentos.rag.pipeline import RAGPipeline
-
-            # Try loading persisted chunks from SQLite first (fast path)
-            if rag_chunks_db.exists():
-                import json as _json
-                chunk_size = 512
-                if rag_index_path.exists():
-                    rag_data = _json.loads(rag_index_path.read_text())
-                    chunk_size = rag_data.get("chunk_size", 512)
-                rag_pipeline = RAGPipeline.load_from_db(rag_chunks_db, chunk_size=chunk_size)
-
-            # Fallback: re-index from source files listed in rag_index.json
-            if rag_pipeline is None and rag_index_path.exists():
-                import json as _json
-                rag_data = _json.loads(rag_index_path.read_text())
-                source_files = rag_data.get("source_files", [])
-                if source_files:
-                    rag_pipeline = RAGPipeline(
-                        chunk_size=rag_data.get("chunk_size", 512),
-                    )
-                    docs = []
-                    metas = []
-                    for src in source_files:
-                        p = Path(src)
-                        if p.exists():
-                            try:
-                                text = p.read_text(errors="replace")
-                                if text.strip():
-                                    docs.append(text)
-                                    metas.append({"source": src, "filename": p.name})
-                            except Exception:
-                                pass
-                    if docs:
-                        rag_pipeline.ingest(docs, metas)
-                    else:
-                        rag_pipeline = None
-        except Exception as exc:
-            logger.warning("Could not load RAG index: %s", exc)
-
-        memory_manager = MemoryManager(
-            working=working, episodic=episodic, procedural=procedural,
-            rag=rag_pipeline,
-        )
-
-        # Tools — load from registry + inline definitions
-        mcp_client = MCPClient()
-        registry = ToolRegistry()
-        for tool_ref in self.config.tools:
-            if isinstance(tool_ref, str):
-                # Load from plugin registry
-                plugin = registry.get(tool_ref)
-                if plugin:
-                    mcp_client.register_server(plugin.to_mcp_server())
-                    if plugin.handler:
-                        mcp_client.register_handler(plugin.name, plugin.handler)
-                else:
-                    logger.warning("Tool '%s' not found in registry — skipping", tool_ref)
-            elif isinstance(tool_ref, dict):
-                # Inline tool definition
-                from agentos.tools.mcp import MCPServer, MCPTool
-                tool = MCPTool(
-                    name=tool_ref["name"],
-                    description=tool_ref.get("description", ""),
-                    input_schema=tool_ref.get("input_schema", {}),
-                )
-                mcp_client.register_server(
-                    MCPServer(name=tool_ref["name"], tools=[tool])
-                )
-
-        harness = AgentHarness(
-            config=harness_cfg,
-            llm_router=llm_router,
-            tool_executor=ToolExecutor(mcp_client=mcp_client),
-            memory_manager=memory_manager,
-            governance=GovernanceLayer(gov_policy),
-        )
-
-        # Set the agent's system prompt (used as the LLM system message)
-        harness.system_prompt = self.config.system_prompt or ""
-        if self.config.personality:
-            harness.system_prompt += f"\n\nPersonality: {self.config.personality}"
-
-        return harness
-
     def _init_db(self) -> None:
         """Open the SQLite database if data/ dir exists.
 
@@ -699,184 +448,18 @@ class Agent:
             logger.warning("Could not open configured database backend: %s", exc)
             self._db = None
 
-    def _attach_observability(self) -> None:
-        """Auto-attach observer, tracer, and DB if data/ dir exists.
-
-        This makes every ``run()`` call automatically observed and
-        persisted — no manual setup in CLI commands needed.
-        """
-        from agentos.core.tracing import Tracer
-        from agentos.evolution.observer import Observer
-
-        self._tracer = Tracer()
-
-        # Attach observer to the harness event bus
-        self._observer = Observer(
-            event_bus=self._harness.event_bus,
-            db=self._db,
-        )
-        cfg_with_scope = {
-            **self.config.to_dict(),
-            "_org_id": self._runtime_context.get("org_id", ""),
-            "_project_id": self._runtime_context.get("project_id", ""),
-            "_user_id": self._runtime_context.get("user_id", ""),
-        }
-        self._observer.attach(
-            agent_name=self.config.name,
-            agent_config=cfg_with_scope,
-        )
-
-        # Auto-score sessions for conversation intelligence
-        self._attach_conversation_scoring()
-
-        # Run compliance check against gold images (non-blocking)
-        self._check_compliance_on_start()
-
-    def _attach_conversation_scoring(self) -> None:
-        """Auto-score sessions on SESSION_END for conversation intelligence."""
-        from agentos.core.events import EventType, Event
-
-        async def _on_session_end(event: Event) -> None:
-            try:
-                if not self._db or not self._observer:
-                    return
-                records = self._observer.records
-                if not records:
-                    return
-                last_record = records[-1]
-                session_id = getattr(last_record, "session_id", "")
-                if not session_id:
-                    return
-
-                # Load turns from DB
-                turns = self._db.get_turns(session_id)
-                if not turns:
-                    return
-
-                import os
-                from agentos.observability.analytics import ConversationAnalytics
-                use_llm = bool(os.environ.get("ANTHROPIC_API_KEY", ""))
-                analytics = ConversationAnalytics(use_llm=use_llm)
-                result = analytics.score_session(
-                    session_id=session_id,
-                    turns=turns,
-                    input_text=getattr(last_record, "input_text", ""),
-                    agent_name=self.config.name,
-                    db=self._db,
-                )
-
-                # Emit scored event
-                await self._harness.event_bus.emit(Event(
-                    type=EventType.CONVERSATION_SCORED,
-                    data={
-                        "session_id": session_id,
-                        "avg_quality": result.get("avg_quality", 0),
-                        "avg_sentiment": result.get("avg_sentiment_score", 0),
-                        "dominant_sentiment": result.get("dominant_sentiment", "neutral"),
-                        "topics": result.get("topics", []),
-                    },
-                    source="conversation_intelligence",
-                ))
-
-                # Auto-detect issues from scored session
-                try:
-                    session_data = last_record.to_dict() if hasattr(last_record, "to_dict") else {}
-                    scores = self._db.query_conversation_scores(session_id=session_id)
-                    from agentos.issues.detector import IssueDetector
-                    from agentos.issues.remediation import RemediationEngine
-                    detector = IssueDetector(db=self._db)
-                    issues = detector.detect_from_session(
-                        session_id=session_id,
-                        agent_name=self.config.name,
-                        org_id=self._runtime_context.get("org_id", ""),
-                        session_data=session_data,
-                        scores=scores,
-                    )
-                    if issues:
-                        engine = RemediationEngine()
-                        for issue in issues:
-                            fix = engine.suggest_fix(issue)
-                            self._db.update_issue(issue["issue_id"], suggested_fix=fix)
-                        await self._harness.event_bus.emit(Event(
-                            type=EventType.ISSUE_CREATED,
-                            data={"session_id": session_id, "count": len(issues)},
-                            source="issue_detector",
-                        ))
-                except Exception as exc:
-                    logger.debug("Issue detection failed for session %s: %s", session_id, exc)
-
-            except Exception:
-                pass  # Don't let scoring failures break the session
-
-        self._harness.event_bus.on(EventType.SESSION_END, _on_session_end)
-
-    def _check_compliance_on_start(self) -> None:
-        """Non-blocking compliance check at agent startup. Logs warnings for drift."""
-        if not self._db:
-            return
-        try:
-            from agentos.config.compliance import ComplianceChecker
-            checker = ComplianceChecker(self._db)
-            report = checker.check_agent(
-                agent_name=self.config.name,
-                agent_config=self.config.to_dict(),
-            )
-            # Only warn for agents that have a matching gold image
-            # Skip silently for: no_gold_images, no_matching_gold_image
-            if report.status == "critical":
-                logger.warning(
-                    "Compliance drift: Agent '%s' has %d critical drifts from gold image '%s'",
-                    self.config.name, report.total_drifts, report.image_name,
-                )
-            elif report.status == "drifted":
-                logger.debug(
-                    "Compliance drift: Agent '%s' has %d config drifts from gold image '%s'",
-                    self.config.name, report.total_drifts, report.image_name,
-                )
-            # no_gold_images, no_matching_gold_image, compliant — all silent
-        except Exception:
-            pass  # Compliance check is best-effort
-
     def set_runtime_context(self, *, org_id: str = "", project_id: str = "", user_id: str = "") -> None:
-        """Set per-request tenancy context used for observability persistence."""
+        """Set per-request tenancy context."""
         self._runtime_context = {
             "org_id": org_id or "",
             "project_id": project_id or "",
             "user_id": user_id or "",
         }
-        # Update observer config in-place for the current request lifecycle.
-        if self._observer is not None:
-            cfg_with_scope = {
-                **self.config.to_dict(),
-                "_org_id": self._runtime_context.get("org_id", ""),
-                "_project_id": self._runtime_context.get("project_id", ""),
-                "_user_id": self._runtime_context.get("user_id", ""),
-            }
-            self._observer.attach(agent_name=self.config.name, agent_config=cfg_with_scope)
 
     @property
     def db(self):
         """The agent's SQLite database (None if no data/ dir)."""
         return self._db
-
-    @property
-    def tracer(self):
-        """The agent's span tracer."""
-        return self._tracer
-
-    @property
-    def observer(self):
-        """The agent's session observer."""
-        return self._observer
-
-    @property
-    def uses_stub_provider(self) -> bool:
-        """True if any LLM route uses the stub provider (no API key)."""
-        from agentos.llm.provider import StubProvider
-        return any(
-            isinstance(route.provider, StubProvider)
-            for route in self._harness.llm_router._routes.values()
-        )
 
     def apply_overrides(
         self,
@@ -886,77 +469,27 @@ class Agent:
         budget: float | None = None,
         model: str | None = None,
     ) -> None:
-        """Apply runtime overrides and rebuild the harness.
-
-        This is the safe way to change agent settings at runtime —
-        modifies the config and rebuilds the harness so all subsystems
-        pick up the changes (governance budget, LLM router, etc.).
-        """
-        changed = False
+        """Apply runtime overrides to the agent config."""
         if turns is not None:
             self.config.max_turns = turns
-            changed = True
         if timeout is not None:
             self.config.timeout_seconds = timeout
-            changed = True
         if budget is not None:
             self.config.governance["budget_limit_usd"] = budget
-            changed = True
         if model is not None:
             self.config.model = model
-            changed = True
-        if changed:
-            self._harness = self._build_harness()
-            self._attach_observability()
 
     async def run(self, user_input: str) -> list:
         """Execute the agent on a user task.
 
-        Every run is automatically:
-        - Traced (span-based tracing with parent-child hierarchy)
-        - Observed (SessionRecord built from EventBus events)
-        - Persisted (to SQLite if data/ dir exists)
+        The Python harness runtime has been removed. Deploy the agent
+        via ``agentos deploy`` and call the TS control-plane API instead.
         """
-        from agentos.graph.adapter import run_with_graph_runtime
-        results = await run_with_graph_runtime(self._harness, user_input)
-
-        # Persist spans to DB if available (classic tracer + graph node spans).
-        if self._db:
-            try:
-                session_id = ""
-                if self._observer and self._observer.records:
-                    session_id = self._observer.records[-1].session_id
-                if self._tracer and self._tracer.span_count > 0:
-                    self._db.insert_spans(self._tracer.export(), session_id=session_id)
-                    self._tracer.clear()
-                graph_node_spans = getattr(self._harness, "_graph_node_spans", [])
-                if graph_node_spans:
-                    self._db.insert_spans(graph_node_spans, session_id=session_id)
-                    self._harness._graph_node_spans = []
-            except Exception as exc:
-                logger.warning("Failed to persist spans: %s", exc)
-
-        return results
-
-    async def resume_from_checkpoint(self, checkpoint_payload: dict[str, Any]) -> list:
-        """Resume a graph run from a persisted checkpoint payload."""
-        from agentos.graph.adapter import resume_with_graph_runtime
-
-        results = await resume_with_graph_runtime(self._harness, checkpoint_payload)
-
-        if self._db:
-            try:
-                session_id = ""
-                if self._observer and self._observer.records:
-                    session_id = self._observer.records[-1].session_id
-                graph_node_spans = getattr(self._harness, "_graph_node_spans", [])
-                if graph_node_spans:
-                    self._db.insert_spans(graph_node_spans, session_id=session_id)
-                    self._harness._graph_node_spans = []
-            except Exception as exc:
-                logger.warning("Failed to persist resumed graph spans: %s", exc)
-
-        return results
+        raise NotImplementedError(
+            "Python runtime removed. Use 'agentos deploy' to push this agent "
+            "to the TS control-plane, then call the API to run it.\n"
+            "See: deploy/src/runtime/engine.ts"
+        )
 
     @classmethod
     def from_file(cls, path: str | Path) -> Agent:

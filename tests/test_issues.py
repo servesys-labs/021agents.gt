@@ -1,10 +1,8 @@
 """Tests for Issue Tracking & Remediation — detector, classifier, remediation, API, CLI."""
 
 import json
-import uuid
 import pytest
 from pathlib import Path
-from fastapi.testclient import TestClient
 
 
 # ── Issue Detector ──────────────────────────────────────────────────
@@ -296,88 +294,6 @@ class TestIssueDB:
         assert db.get_issue("nonexistent") is None
 
 
-# ── API Router ──────────────────────────────────────────────────────
-
-
-class TestIssuesAPI:
-    @pytest.fixture
-    def api_client(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "data").mkdir()
-        (tmp_path / "agents").mkdir()
-        (tmp_path / "eval").mkdir()
-
-        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
-        db = create_database(tmp_path / "data" / "agent.db")
-        for migration in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
-            for stmt in migration.split(";"):
-                stmt = stmt.strip()
-                if stmt and not stmt.startswith("--"):
-                    try:
-                        db.conn.execute(stmt)
-                    except Exception:
-                        pass
-        db.conn.commit()
-        db.close()
-
-        (tmp_path / "agents" / "test-agent.json").write_text(json.dumps({
-            "name": "test-agent", "description": "test", "version": "0.1.0",
-            "system_prompt": "You are helpful.", "model": "stub",
-            "tools": [], "governance": {"budget_limit_usd": 10.0},
-            "memory": {"working": {"max_items": 50}},
-            "max_turns": 5, "tags": [],
-        }))
-
-        from agentos.api.app import create_app
-        from agentos.core.harness import AgentHarness
-        app = create_app(AgentHarness())
-        return TestClient(app)
-
-    def _auth_headers(self, api_client):
-        email = f"issues-{uuid.uuid4().hex[:8]}@test.com"
-        resp = api_client.post("/api/v1/auth/signup", json={
-            "email": email, "password": "testpass123", "name": "Issues Test",
-        })
-        return {"Authorization": f"Bearer {resp.json().get('token', '')}"}
-
-    def test_list_empty(self, api_client):
-        headers = self._auth_headers(api_client)
-        resp = api_client.get("/api/v1/issues", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["issues"] == []
-
-    def test_create_issue(self, api_client):
-        headers = self._auth_headers(api_client)
-        resp = api_client.post("/api/v1/issues", headers=headers, json={
-            "title": "Test issue",
-            "description": "Tool failed during search",
-            "agent_name": "test-agent",
-        })
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["issue_id"]
-        assert data["category"]  # should be auto-classified
-        assert data["suggested_fix"]  # should have a fix suggestion
-
-    def test_summary(self, api_client):
-        headers = self._auth_headers(api_client)
-        resp = api_client.get("/api/v1/issues/summary", headers=headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "total" in data
-        assert "by_status" in data
-
-    def test_get_nonexistent(self, api_client):
-        headers = self._auth_headers(api_client)
-        resp = api_client.get("/api/v1/issues/nonexistent", headers=headers)
-        assert resp.status_code == 404
-
-    def test_resolve_nonexistent(self, api_client):
-        headers = self._auth_headers(api_client)
-        resp = api_client.post("/api/v1/issues/nonexistent/resolve", headers=headers)
-        assert resp.status_code == 404
-
-
 # ── CLI Commands ────────────────────────────────────────────────────
 
 
@@ -464,120 +380,6 @@ class TestIssueMigration:
         }
         assert "issues" in tables
         db.close()
-
-
-# ── Missing Issues API Tests ────────────────────────────────────────
-
-
-class TestIssuesAPIExtended:
-    @pytest.fixture
-    def api_client(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "data").mkdir()
-        (tmp_path / "agents").mkdir()
-        (tmp_path / "eval").mkdir()
-
-        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
-        db = create_database(tmp_path / "data" / "agent.db")
-        for migration in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
-            for stmt in migration.split(";"):
-                stmt = stmt.strip()
-                if stmt and not stmt.startswith("--"):
-                    try:
-                        db.conn.execute(stmt)
-                    except Exception:
-                        pass
-        db.conn.commit()
-        db.close()
-
-        (tmp_path / "agents" / "test-agent.json").write_text(json.dumps({
-            "name": "test-agent", "description": "test", "version": "0.1.0",
-            "system_prompt": "You are helpful.", "model": "stub",
-            "tools": [], "governance": {"budget_limit_usd": 10.0},
-            "memory": {"working": {"max_items": 50}},
-            "max_turns": 5, "tags": [],
-        }))
-
-        from agentos.api.app import create_app
-        from agentos.core.harness import AgentHarness
-        app = create_app(AgentHarness())
-        return TestClient(app)
-
-    def _auth_headers(self, api_client):
-        email = f"issext-{uuid.uuid4().hex[:8]}@test.com"
-        resp = api_client.post("/api/v1/auth/signup", json={
-            "email": email, "password": "testpass123", "name": "Issue Ext",
-        })
-        return {"Authorization": f"Bearer {resp.json().get('token', '')}"}
-
-    def _create_issue(self, api_client, headers):
-        return api_client.post("/api/v1/issues", headers=headers, json={
-            "title": "Tool timeout in search",
-            "description": "Search tool failed with timeout error",
-            "agent_name": "test-agent",
-        }).json()
-
-    def test_triage_issue(self, api_client):
-        headers = self._auth_headers(api_client)
-        created = self._create_issue(api_client, headers)
-        resp = api_client.post(f"/api/v1/issues/{created['issue_id']}/triage", headers=headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "triaged"
-        assert data["suggested_fix"]
-
-    def test_update_issue(self, api_client):
-        headers = self._auth_headers(api_client)
-        created = self._create_issue(api_client, headers)
-        resp = api_client.put(f"/api/v1/issues/{created['issue_id']}", headers=headers, json={
-            "severity": "critical",
-            "assigned_to": "admin",
-        })
-        assert resp.status_code == 200
-
-    def test_get_issue(self, api_client):
-        headers = self._auth_headers(api_client)
-        created = self._create_issue(api_client, headers)
-        resp = api_client.get(f"/api/v1/issues/{created['issue_id']}", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["title"] == "Tool timeout in search"
-
-    def test_resolve_issue(self, api_client):
-        headers = self._auth_headers(api_client)
-        created = self._create_issue(api_client, headers)
-        resp = api_client.post(f"/api/v1/issues/{created['issue_id']}/resolve", headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["resolved"] is True
-
-    def test_auto_fix_issue(self, api_client):
-        headers = self._auth_headers(api_client)
-        # Create a performance issue (budget-related) that has an auto-fix
-        resp = api_client.post("/api/v1/issues", headers=headers, json={
-            "title": "Budget exceeded",
-            "description": "Session budget cost exceeded the limit",
-            "agent_name": "test-agent",
-            "category": "performance",
-        })
-        issue = resp.json()
-        resp = api_client.post(f"/api/v1/issues/{issue['issue_id']}/auto-fix", headers=headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["applied"] is True
-        assert len(data["changes_applied"]) > 0
-
-    def test_auto_fix_no_agent(self, api_client):
-        headers = self._auth_headers(api_client)
-        resp = api_client.post("/api/v1/issues", headers=headers, json={
-            "title": "Orphan issue", "description": "No agent",
-        })
-        issue = resp.json()
-        resp = api_client.post(f"/api/v1/issues/{issue['issue_id']}/auto-fix", headers=headers)
-        assert resp.status_code == 400
-
-    def test_auto_fix_nonexistent(self, api_client):
-        headers = self._auth_headers(api_client)
-        resp = api_client.post("/api/v1/issues/nonexistent/auto-fix", headers=headers)
-        assert resp.status_code == 404
 
 
 # ── Production-Readiness: Integration + Edge Cases ──────────────────
@@ -712,35 +514,6 @@ class TestAutoFixIntegration:
         assert new_config["governance"]["budget_limit_usd"] == 15.0  # 10.0 * 1.5
 
         db.close()
-
-
-class TestIssueAuthEnforcement:
-    @pytest.fixture
-    def api_client(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "data").mkdir()
-        (tmp_path / "agents").mkdir()
-        from agentos.core.database import create_database, MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4
-        db = create_database(tmp_path / "data" / "agent.db")
-        for m in [MIGRATION_V2_TO_V3, MIGRATION_V3_TO_V4]:
-            for s in m.split(";"):
-                s = s.strip()
-                if s and not s.startswith("--"):
-                    try: db.conn.execute(s)
-                    except: pass
-        db.conn.commit(); db.close()
-        from agentos.api.app import create_app
-        from agentos.core.harness import AgentHarness
-        return TestClient(create_app(AgentHarness()))
-
-    def test_list_requires_auth(self, api_client):
-        assert api_client.get("/api/v1/issues").status_code == 401
-
-    def test_create_requires_auth(self, api_client):
-        assert api_client.post("/api/v1/issues", json={"title": "test"}).status_code == 401
-
-    def test_summary_requires_auth(self, api_client):
-        assert api_client.get("/api/v1/issues/summary").status_code == 401
 
 
 # ── Auto-Detection on SESSION_END ────────────────────────────────────

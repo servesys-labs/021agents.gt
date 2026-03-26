@@ -403,8 +403,11 @@ def _write_stub_agent(agents_dir, name="test-agent"):
 
 
 class TestCmdRun:
+    """Tests for cmd_run — Python runtime is removed, so run exits with error."""
+
     @pytest.mark.asyncio
-    async def test_run_with_task_arg(self, tmp_path, capsys, monkeypatch):
+    async def test_run_exits_with_not_implemented(self, tmp_path, capsys, monkeypatch):
+        """cmd_run should exit 1 because Agent.run() raises NotImplementedError."""
         from agentos.cli import cmd_run
 
         agents_dir = tmp_path / "agents"
@@ -413,33 +416,12 @@ class TestCmdRun:
         monkeypatch.chdir(tmp_path)
 
         args = _make_run_args(str(agents_dir / "test-agent.json"), task="hello world")
-        await cmd_run(args)
+        with pytest.raises(SystemExit) as exc_info:
+            await cmd_run(args)
+        assert exc_info.value.code == 1
 
         captured = capsys.readouterr()
-        assert "Running agent" in captured.out
-        assert "test-agent" in captured.out
-
-    @pytest.mark.asyncio
-    async def test_run_reads_input_file(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        # Write task to a file
-        task_file = tmp_path / "task.txt"
-        task_file.write_text("Summarize this document")
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            input_file=str(task_file),
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        assert "Summarize this document" in captured.out
+        assert "Python runtime has been removed" in captured.err
 
     @pytest.mark.asyncio
     async def test_run_input_file_not_found(self, tmp_path, monkeypatch):
@@ -475,285 +457,6 @@ class TestCmdRun:
         with pytest.raises(SystemExit) as exc_info:
             await cmd_run(args)
         assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_run_quiet_mode(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            quiet=True,
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        # Quiet mode should NOT show "Running agent" or summary
-        assert "Running agent" not in captured.out
-        assert "turn" not in captured.out.lower().split("stub")[0]  # allow "stub" mentions
-
-    @pytest.mark.asyncio
-    async def test_run_json_output(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            json_output=True,
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["agent"] == "test-agent"
-        assert data["task"] == "hello"
-        assert "success" in data
-        assert "turns" in data
-        assert "cost_usd" in data
-        assert "latency_ms" in data
-
-    @pytest.mark.asyncio
-    async def test_run_json_verbose_includes_results(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            json_output=True,
-            verbose=True,
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert "results" in data
-        assert isinstance(data["results"], list)
-
-    @pytest.mark.asyncio
-    async def test_run_output_to_file(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        out_file = tmp_path / "output.txt"
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            output=str(out_file),
-        )
-        await cmd_run(args)
-
-        assert out_file.exists()
-
-    @pytest.mark.asyncio
-    async def test_run_shows_cost_summary(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        # Should show summary with turns, tool calls, latency, cost
-        assert "turn" in captured.out.lower()
-        assert "tool call" in captured.out.lower()
-        assert "ms" in captured.out
-        assert "$" in captured.out
-
-    @pytest.mark.asyncio
-    async def test_run_turns_override(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            turns=3,
-        )
-        await cmd_run(args)
-
-        # Just verify it doesn't crash — the agent uses stub so it runs fine
-        captured = capsys.readouterr()
-        assert "test-agent" in captured.out
-
-    @pytest.mark.asyncio
-    async def test_run_stub_provider_warning(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-        # Ensure no API keys so stub provider is used
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("GMI_API_KEY", raising=False)
-        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        assert "stub provider" in captured.out.lower()
-
-    @pytest.mark.asyncio
-    async def test_run_json_no_duplicate_output(self, tmp_path, capsys, monkeypatch):
-        """JSON mode should not print any non-JSON text."""
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            json_output=True,
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        # The entire stdout should be valid JSON
-        data = json.loads(captured.out)
-        assert isinstance(data, dict)
-
-
-    @pytest.mark.asyncio
-    async def test_run_model_override(self, tmp_path, capsys, monkeypatch):
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            model="gpt-4o",
-            json_output=True,
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        data = json.loads(captured.out)
-        assert data["success"]
-
-    @pytest.mark.asyncio
-    async def test_run_reads_project_defaults(self, tmp_path, capsys, monkeypatch):
-        """run should pick up budget from agentos.yaml."""
-        from agentos.cli import cmd_run
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        _write_stub_agent(agents_dir)
-        monkeypatch.chdir(tmp_path)
-
-        # Write agentos.yaml with a custom budget
-        (tmp_path / "agentos.yaml").write_text(
-            "defaults:\n  budget_limit_usd: 5.0\n"
-        )
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-            quiet=True,
-        )
-        await cmd_run(args)
-        # Doesn't crash — that's the test
-        captured = capsys.readouterr()
-        assert captured.out  # got some output
-
-    @pytest.mark.asyncio
-    async def test_run_warns_mismatched_agent_id(self, tmp_path, capsys, monkeypatch):
-        """run should warn if agent_id doesn't match project identity."""
-        from agentos.cli import cmd_run
-        from agentos.agent import AgentConfig, save_agent_config
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        monkeypatch.chdir(tmp_path)
-
-        # Create agent with one ID
-        config = AgentConfig(name="test-agent", agent_id="agent-AAA")
-        save_agent_config(config, agents_dir / "test-agent.json")
-
-        # Create project identity with different ID
-        identity = {"agent_id": "agent-BBB", "fingerprint": "xyz"}
-        (agents_dir / ".identity.json").write_text(json.dumps(identity))
-
-        args = _make_run_args(
-            str(agents_dir / "test-agent.json"),
-            task="hello",
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        assert "Warning" in captured.err
-        assert "agent-AAA" in captured.err
-        assert "agent-BBB" in captured.err
-
-    @pytest.mark.asyncio
-    async def test_run_stub_built_agent_warning(self, tmp_path, capsys, monkeypatch):
-        """run should warn that a stub-built agent should be re-created."""
-        from agentos.cli import cmd_run
-        from agentos.agent import AgentConfig, save_agent_config
-
-        agents_dir = tmp_path / "agents"
-        agents_dir.mkdir()
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-        monkeypatch.delenv("GMI_API_KEY", raising=False)
-        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
-
-        # Create agent marked as stub-built
-        config = AgentConfig(name="stub-agent", built_with="stub")
-        save_agent_config(config, agents_dir / "stub-agent.json")
-
-        args = _make_run_args(
-            str(agents_dir / "stub-agent.json"),
-            task="hello",
-        )
-        await cmd_run(args)
-
-        captured = capsys.readouterr()
-        assert "re-create" in captured.out.lower()
 
 
 class TestCrossCutting:
@@ -832,7 +535,8 @@ class TestCmdList:
         empty = tmp_path / "empty_agents"
         empty.mkdir()
 
-        with patch("agentos.agent._resolve_agents_dir", return_value=empty):
+        with patch("agentos.agent._resolve_agents_dir", return_value=empty), \
+             patch("agentos.agent._list_agents_from_db", return_value=None):
 
             class Args:
                 pass

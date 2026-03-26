@@ -2588,6 +2588,8 @@ class AgentDB:
             self.conn.commit()
         if from_version < 13:
             logger.info("Migrating database from v%d to v13 (pricing catalog + billing snapshots)", from_version)
+            # billing_records may not exist in very old databases (created by _ensure_runtime_tables later);
+            # PRAGMA table_info returns empty set for non-existent tables, which is fine.
             existing_billing_cols = {
                 row[1] for row in self.conn.execute("PRAGMA table_info(billing_records)").fetchall()
             }
@@ -2602,7 +2604,8 @@ class AgentDB:
                 try:
                     self.conn.execute(stmt)
                 except sqlite3.OperationalError as exc:
-                    if "duplicate column" not in str(exc).lower() and "already exists" not in str(exc).lower():
+                    msg = str(exc).lower()
+                    if "duplicate column" not in msg and "already exists" not in msg and "no such table" not in msg:
                         raise
             self.conn.commit()
         if from_version < 14:

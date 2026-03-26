@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 
 def _get_db():
-    from agentos.api.deps import _get_db
-    return _get_db()
+    from agentos.core.db_config import get_db
+    return get_db()
 
 
 def _agents_dir():

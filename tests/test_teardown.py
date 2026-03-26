@@ -304,28 +304,6 @@ class TestAuditTrail:
         assert details["hard_delete"] is True
 
 
-# ─── API Endpoint ──────────────────────────────────────────────────────────
-
-
-class TestAPIEndpoint:
-    """Verify DELETE /agents/{name} handler calls teardown correctly."""
-
-    def test_delete_endpoint_exists(self):
-        """The delete endpoint must exist and accept hard_delete param."""
-        import ast
-        source = open("agentos/api/routers/agents.py").read()
-        tree = ast.parse(source)
-        delete_funcs = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.AsyncFunctionDef) and node.name == "delete_agent"
-        ]
-        assert len(delete_funcs) == 1
-
-    def test_delete_calls_teardown_with_org_id(self):
-        """The endpoint must pass org_id for multi-tenant safety."""
-        source = open("agentos/api/routers/agents.py").read()
-        assert "org_id=user.org_id" in source
-        assert "teardown_agent" in source
 
 
 # ─── CLI Command ───────────────────────────────────────────────────────────

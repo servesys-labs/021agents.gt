@@ -1029,6 +1029,12 @@ async def cmd_run(args: argparse.Namespace) -> None:
     """Run an agent on a task."""
     import time as _time
 
+    # DEPRECATION WARNING
+    print("⚠️  DEPRECATION WARNING: 'agentos run' via Python CLI is deprecated.", file=sys.stderr)
+    print("   Use the TypeScript CLI for agent execution:", file=sys.stderr)
+    print("   npm install -g @agentos/cli", file=sys.stderr)
+    print("   agentos run <agent> <task>\n", file=sys.stderr)
+
     from agentos.agent import Agent
 
     # ── Validate numeric arguments ─────────────────────────────────────
@@ -1049,13 +1055,6 @@ async def cmd_run(args: argparse.Namespace) -> None:
         budget=args.budget,
         model=args.model,
     )
-
-    # ── Apply --plan override ─────────────────────────────────────────────
-    plan = getattr(args, "plan", None)
-    if plan:
-        _apply_plan_to_agent(agent, plan)
-        if not quiet:
-            print(f"  Plan: {plan}")
 
     # ── Validate agent_id against project identity ───────────────────────
     if not quiet:
@@ -1086,36 +1085,19 @@ async def cmd_run(args: argparse.Namespace) -> None:
         print("   or: agentos run <name> --input-file task.txt", file=sys.stderr)
         sys.exit(1)
 
-    # ── Warn about stub provider (unless --quiet or --json) ──────────────
-    if not quiet:
-        _warn_stub_provider(agent, show_recreate_hint=True)
-
     if not quiet:
         print(f"Running agent '{agent.config.name}' on: {task}")
         print("-" * 40)
 
-    # Set up streaming callback if requested
-    stream = getattr(args, "stream", False)
-    if stream and not quiet:
-        def _stream_turn(result):
-            if result.llm_response and result.llm_response.content:
-                content = result.llm_response.content
-                print(f"\n[Turn {result.turn_number}] {content}")
-            for tr in result.tool_results:
-                if "error" in tr:
-                    print(f"  Tool error: {tr.get('tool', '?')}: {tr['error']}")
-                else:
-                    preview = str(tr.get("result", ""))[:200]
-                    if len(str(tr.get("result", ""))) > 200:
-                        preview += "..."
-                    print(f"  Tool: {tr.get('tool', '?')}: {preview}")
-            if result.error:
-                print(f"  Error: {result.error}")
-            sys.stdout.flush()
-        agent._harness.on_turn_complete = _stream_turn
-
     start = _time.monotonic()
-    results = await agent.run(task)
+    try:
+        results = await agent.run(task)
+    except NotImplementedError as exc:
+        print(f"\nError: {exc}", file=sys.stderr)
+        print("\nThe Python runtime has been removed.", file=sys.stderr)
+        print("Deploy your agent and run via the TS control-plane:", file=sys.stderr)
+        print(f"  agentos deploy {agent.config.name}", file=sys.stderr)
+        sys.exit(1)
     elapsed_ms = (_time.monotonic() - start) * 1000
 
     # Compute summary metrics
@@ -1865,11 +1847,16 @@ def cmd_codemap(args: argparse.Namespace) -> None:
 
 async def cmd_chat(args: argparse.Namespace) -> None:
     """Interactive chat session with an agent."""
+    # DEPRECATION WARNING
+    print("⚠️  DEPRECATION WARNING: 'agentos chat' via Python CLI is deprecated.", file=sys.stderr)
+    print("   Use the TypeScript CLI for interactive chat:", file=sys.stderr)
+    print("   npm install -g @agentos/cli", file=sys.stderr)
+    print("   agentos chat <agent>\n", file=sys.stderr)
+
     from agentos.agent import Agent
 
     agent = _load_agent(args.name)
     _warn_identity_mismatch(agent)
-    _warn_stub_provider(agent)
 
     print(f"Chatting with '{agent.config.name}' — type 'quit' to exit")
     print(f"  {agent.config.description}")
@@ -3248,41 +3235,6 @@ def _list_plans() -> dict[str, str]:
     return plans
 
 
-def _apply_plan_to_agent(agent, plan_name: str) -> None:
-    """Override an agent's LLM router with a plan's routing config."""
-    plan = _load_plan(plan_name)
-    if not plan:
-        print(f"Warning: Plan '{plan_name}' not found, using default routing", file=sys.stderr)
-        return
-
-    from agentos.llm.router import Complexity
-    from agentos.llm.provider import HttpProvider
-
-    gmi_key = os.environ.get("GMI_API_KEY", "")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    openai_key = os.environ.get("OPENAI_API_KEY", "")
-
-    for tier in Complexity:
-        tier_cfg = plan.get(tier.value, {})
-        tier_model = tier_cfg.get("model", "")
-        tier_provider = tier_cfg.get("provider", "gmi")
-        tier_max_tokens = tier_cfg.get("max_tokens", 4096)
-
-        provider = None
-        if tier_provider == "gmi" and gmi_key:
-            provider = HttpProvider(model_id=tier_model, api_base="https://api.gmi-serving.com/v1", api_key=gmi_key)
-        elif tier_provider == "anthropic" and anthropic_key:
-            provider = HttpProvider(model_id=tier_model, api_base="https://api.anthropic.com", api_key=anthropic_key, headers={"anthropic-version": "2023-06-01"})
-        elif tier_provider == "openai" and openai_key:
-            provider = HttpProvider(model_id=tier_model, api_base="https://api.openai.com", api_key=openai_key)
-        # Fallback to GMI if available
-        if provider is None and gmi_key:
-            provider = HttpProvider(model_id=tier_model, api_base="https://api.gmi-serving.com/v1", api_key=gmi_key)
-
-        if provider is not None:
-            agent._harness.llm_router.register(tier, provider, max_tokens=tier_max_tokens)
-
-
 def _get_grader_provider():
     """Get an LLM provider for the LLMGrader — uses the cheapest available model."""
     from agentos.llm.provider import HttpProvider
@@ -3321,23 +3273,6 @@ def _warn_identity_mismatch(agent) -> None:
                   f"'{project_id}'.", file=sys.stderr)
     except (json.JSONDecodeError, OSError):
         pass
-
-
-def _warn_stub_provider(agent, *, show_recreate_hint: bool = False) -> None:
-    """Warn about stub provider usage.
-
-    Shared by cmd_run and cmd_chat. ``show_recreate_hint`` adds the
-    extra message about re-creating stub-built agents (cmd_run only).
-    """
-    if not agent.uses_stub_provider:
-        return
-    print("Note: No LLM API key found — using stub provider (responses will be placeholders).")
-    print("  Set ANTHROPIC_API_KEY or OPENAI_API_KEY for real responses.")
-    if show_recreate_hint and agent.config.built_with == "stub":
-        print("  This agent was also created with the stub provider —")
-        print("  re-create it with a real LLM for better results:")
-        print(f"    agentos create --one-shot \"{agent.config.description}\"")
-    print()
 
 
 def _oauth_device_flow(provider: str):

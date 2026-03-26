@@ -182,6 +182,8 @@ class TestListAgents:
     async def test_empty(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "agents").mkdir()
+        # Ensure DB-backed list returns None so we fall through to filesystem
+        monkeypatch.setattr("agentos.agent._list_agents_from_db", lambda *a, **kw: None)
 
         result = await list_agents_handler()
         assert "No agents" in result
@@ -191,6 +193,8 @@ class TestListAgents:
         monkeypatch.chdir(tmp_path)
         agents_dir = tmp_path / "agents"
         agents_dir.mkdir()
+        # Ensure DB-backed list returns None so we fall through to filesystem
+        monkeypatch.setattr("agentos.agent._list_agents_from_db", lambda *a, **kw: None)
 
         from agentos.agent import AgentConfig, save_agent_config
         save_agent_config(
