@@ -1,0 +1,23 @@
+# Source files
+src/
+tsconfig.json
+vitest.config.ts
+bunfig.toml
+
+# Build artifacts (keep dist/)
+esbuild.config.js
+
+# Tests
+*.test.ts
+coverage/
+
+# Development
+node_modules/
+.env
+.env.local
+*.log
+.DS_Store
+
+# Git
+.git/
+.gitignore

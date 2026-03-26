@@ -1,0 +1,13 @@
+# Bun configuration for AgentOS CLI
+
+[install]
+# Use the fastest registry
+registry = "https://registry.npmjs.org"
+
+[run]
+# Default runtime options
+bun = true
+
+[test]
+# Test configuration
+coverage = true
