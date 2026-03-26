@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import type { Node } from "@xyflow/react";
 import { apiRequest, apiUpload, useApiQuery, getToken } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 import { SectionTitle, InlineInput, InlineTextarea, InlineSelect, ToggleRow, StatusPill, InfoRow, EmptyTab } from "./primitives";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -173,7 +174,10 @@ function MemoryEpisodesList({ agentName }: { agentName: string }) {
     `/api/v1/memory/${encodeURIComponent(agentName)}/episodes?limit=20`,
     Boolean(agentName),
   );
-  const episodes = episodesQuery.data?.episodes ?? [];
+  const episodes = extractList<{ id: string; summary: string; turns?: number; created_at?: string }>(
+    episodesQuery.data,
+    "episodes",
+  );
 
   if (episodesQuery.loading) return <p className="text-xs text-text-muted">Loading episodes...</p>;
   if (episodes.length === 0) return <EmptyTab message="No episodes recorded yet." />;
@@ -201,7 +205,10 @@ function MemoryProceduresList({ agentName }: { agentName: string }) {
     `/api/v1/memory/${encodeURIComponent(agentName)}/procedures?limit=20`,
     Boolean(agentName),
   );
-  const procedures = proceduresQuery.data?.procedures ?? [];
+  const procedures = extractList<{ name: string; description: string; success_rate?: number }>(
+    proceduresQuery.data,
+    "procedures",
+  );
 
   if (proceduresQuery.loading) return <p className="text-xs text-text-muted">Loading procedures...</p>;
   if (procedures.length === 0) return <EmptyTab message="No learned procedures yet." />;
@@ -232,7 +239,7 @@ function MemoryFactsList({ agentName }: { agentName: string }) {
     `/api/v1/memory/${encodeURIComponent(agentName)}/facts?limit=20`,
     Boolean(agentName),
   );
-  const facts = factsQuery.data?.facts ?? [];
+  const facts = extractList<{ key: string; value: string }>(factsQuery.data, "facts");
 
   if (factsQuery.loading) return <p className="text-xs text-text-muted mb-4">Loading facts...</p>;
   if (facts.length === 0) return <div className="mb-4"><EmptyTab message="No facts stored — the agent will learn over time." /></div>;
@@ -258,9 +265,7 @@ function AvailableToolsList({ agentName }: { agentName: string }) {
     `/api/v1/agents/${encodeURIComponent(agentName)}/tools`,
     Boolean(agentName),
   );
-  const availableTools: string[] = Array.isArray(toolsQuery.data)
-    ? toolsQuery.data
-    : (toolsQuery.data?.tools ?? []);
+  const availableTools = extractList<string>(toolsQuery.data, "tools");
 
   if (toolsQuery.loading) return <p className="text-xs text-text-muted">Loading available tools...</p>;
   if (availableTools.length === 0) return <EmptyTab message="No additional tools available from the server." />;
@@ -737,7 +742,7 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           const res = await apiRequest<{ tools: string[] } | string[]>(
             `/api/v1/agents/${encodeURIComponent(data.name)}/tools`,
           );
-          const tools = Array.isArray(res) ? res : (res.tools || []);
+          const tools = extractList<string>(res, "tools");
           setRefreshedTools(tools);
           onUpdateNode?.(nodeId, { ...data, tools });
         } catch {
@@ -782,7 +787,15 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
         `/api/v1/sessions?agent_name=${encodeURIComponent(data.name || "")}&limit=10`,
         Boolean(data.name),
       );
-      const sessions = sessionsQuery.data?.sessions ?? [];
+      const sessions = extractList<{
+        session_id?: string;
+        id?: string;
+        status?: string;
+        turns?: number;
+        started_at?: string;
+        total_tokens?: number;
+        task?: string;
+      }>(sessionsQuery.data, "sessions");
       const filteredSessions = sessions.filter((s) => sessionFilter === "all" || s.status === sessionFilter);
 
       return (
@@ -1207,7 +1220,16 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
         `/api/v1/eval/runs?agent_name=${encodeURIComponent(data.name || "")}&limit=10`,
         Boolean(data.name),
       );
-      const evalRuns = evalQuery.data?.runs ?? [];
+      const evalRuns = extractList<{
+        id: string;
+        task_file?: string;
+        status?: string;
+        score?: number;
+        tasks?: number;
+        created_at?: string;
+        avg_latency_ms?: number;
+        cost_usd?: number;
+      }>(evalQuery.data, "runs");
 
       return (
         <div>
@@ -1270,17 +1292,23 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
     /* ── Releases ─────────────────────────────────────────── */
     case "releases": {
       const relAgentName = data.name || "";
-      const channelsQuery = useApiQuery<Array<{ name: string; version: string; traffic: number; status: string }>>(
+      const channelsQuery = useApiQuery<{ channels?: Array<{ name: string; version: string; traffic: number; status: string }> } | Array<{ name: string; version: string; traffic: number; status: string }>>(
         `/api/v1/releases/${encodeURIComponent(relAgentName)}/channels`,
         Boolean(relAgentName),
       );
-      const versionsQuery = useApiQuery<Array<{ version: string; created_at: string; status: string; changelog?: string }>>(
+      const versionsQuery = useApiQuery<{ versions?: Array<{ version: string; created_at: string; status: string; changelog?: string }> } | Array<{ version: string; created_at: string; status: string; changelog?: string }>>(
         `/api/v1/agents/${encodeURIComponent(relAgentName)}/versions`,
         Boolean(relAgentName),
       );
 
-      const channels = channelsQuery.data || [];
-      const versions = versionsQuery.data || [];
+      const channels = extractList<{ name: string; version: string; traffic: number; status: string }>(
+        channelsQuery.data,
+        "channels",
+      );
+      const versions = extractList<{ version: string; created_at: string; status: string; changelog?: string }>(
+        versionsQuery.data,
+        "versions",
+      );
 
       const handlePromote = async () => {
         setPromoteLoading(true);
@@ -1446,7 +1474,7 @@ function KnowledgeTabContent({ tabId, data }: { tabId: string; data: KnowledgeNo
         `/api/v1/knowledge/${encodeURIComponent(data.name || "")}/documents`,
         Boolean(data.name),
       );
-      const documents = docsQuery.data?.documents ?? [];
+      const documents = extractList<{ name: string; size?: string; chunks?: number }>(docsQuery.data, "documents");
 
       return (
         <div className="max-w-2xl">
@@ -1478,7 +1506,7 @@ function KnowledgeTabContent({ tabId, data }: { tabId: string; data: KnowledgeNo
         `/api/v1/knowledge/${encodeURIComponent(data.name || "")}/chunks?limit=20`,
         Boolean(data.name),
       );
-      const chunks = chunksQuery.data?.chunks ?? [];
+      const chunks = extractList<{ id: string; source?: string; text?: string }>(chunksQuery.data, "chunks");
 
       return (
         <div className="max-w-2xl">
@@ -1543,7 +1571,7 @@ function DataSourceTabContent({ tabId, data }: { tabId: string; data: DataSource
         `/api/v1/datasources/${encodeURIComponent(data.name || "")}/tables`,
         Boolean(data.name),
       );
-      const tables = tablesQuery.data?.tables ?? [];
+      const tables = extractList<string>(tablesQuery.data, "tables");
 
       return (
         <div className="max-w-2xl">
@@ -1568,7 +1596,7 @@ function DataSourceTabContent({ tabId, data }: { tabId: string; data: DataSource
         `/api/v1/datasources/${encodeURIComponent(data.name || "")}/queries`,
         Boolean(data.name),
       );
-      const savedQueries = queriesQuery.data?.queries ?? [];
+      const savedQueries = extractList<{ name: string; query: string }>(queriesQuery.data, "queries");
 
       return (
         <div className="max-w-2xl">

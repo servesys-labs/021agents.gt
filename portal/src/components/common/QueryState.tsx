@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
-import { AlertCircle, Inbox, RefreshCw, Loader2 } from "lucide-react";
+import { AlertCircle, Inbox, RefreshCw } from "lucide-react";
+import { SkeletonTable } from "./Skeleton";
 
 type QueryStateProps = {
   loading: boolean;
@@ -7,6 +8,8 @@ type QueryStateProps = {
   isEmpty?: boolean;
   emptyMessage?: string;
   onRetry?: () => void;
+  /** Custom skeleton to show while loading (defaults to SkeletonTable) */
+  skeleton?: ReactNode;
   children: ReactNode;
 };
 
@@ -16,17 +19,11 @@ export function QueryState({
   isEmpty = false,
   emptyMessage = "No data available.",
   onRetry,
+  skeleton,
   children,
 }: QueryStateProps) {
   if (loading) {
-    return (
-      <div className="card">
-        <div className="flex items-center gap-3 py-8 justify-center">
-          <Loader2 size={18} className="text-accent animate-spin" />
-          <span className="text-sm text-text-muted">Loading...</span>
-        </div>
-      </div>
-    );
+    return <>{skeleton ?? <SkeletonTable rows={4} cols={3} />}</>;
   }
 
   if (error) {

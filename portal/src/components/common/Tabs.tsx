@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 
-interface ContentTab {
+interface Tab {
   id: string;
   label: string;
   count?: number;
@@ -8,67 +8,40 @@ interface ContentTab {
 }
 
 interface TabsProps {
-  tabs: ContentTab[] | string[];
-  activeIndex?: number;
-  onChange?: (index: number) => void;
+  tabs: Tab[];
   defaultTab?: string;
 }
 
-export function Tabs({ tabs, activeIndex, onChange, defaultTab }: TabsProps) {
-  const isSimpleTabs = typeof tabs[0] === "string";
-  const contentTabs = (isSimpleTabs ? [] : tabs) as ContentTab[];
-  const stringTabs = (isSimpleTabs ? tabs : []) as string[];
+export function Tabs({ tabs, defaultTab }: TabsProps) {
+  const [active, setActive] = useState(defaultTab || tabs[0]?.id || "");
 
-  const [internalIndex, setInternalIndex] = useState(
-    activeIndex ?? Math.max(0, contentTabs.findIndex((t) => t.id === defaultTab)),
-  );
-  const resolvedIndex = activeIndex ?? internalIndex;
-
-  const [activeId, setActiveId] = useState(defaultTab || contentTabs[0]?.id || "");
-  const activeTab = contentTabs.find((t) => t.id === activeId);
-
-  const setIndex = (idx: number) => {
-    if (onChange) onChange(idx);
-    if (activeIndex === undefined) setInternalIndex(idx);
-  };
+  const activeTab = tabs.find((t) => t.id === active);
 
   return (
     <div>
       <div className="flex items-center gap-0 border-b border-border-default mb-4">
-        {isSimpleTabs
-          ? stringTabs.map((label, idx) => (
-              <button
-                key={`${label}-${idx}`}
-                onClick={() => setIndex(idx)}
-                className={`px-4 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
-                  resolvedIndex === idx
-                    ? "text-accent border-accent"
-                    : "text-text-muted border-transparent hover:text-text-secondary hover:border-border-strong"
-                }`}
-              >
-                {label}
-              </button>
-            ))
-          : contentTabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveId(tab.id)}
-                className={`px-4 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
-                  activeId === tab.id
-                    ? "text-accent border-accent"
-                    : "text-text-muted border-transparent hover:text-text-secondary hover:border-border-strong"
-                }`}
-              >
-                {tab.label}
-                {tab.count !== undefined && (
-                  <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded-full bg-surface-overlay text-text-muted">
-                    {tab.count}
-                  </span>
-                )}
-              </button>
-            ))}
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActive(tab.id)}
+            role="tab"
+            aria-selected={active === tab.id}
+            className={`tab-underline px-4 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
+              active === tab.id
+                ? "text-accent border-transparent"
+                : "text-text-muted border-transparent hover:text-text-secondary"
+            }`}
+          >
+            {tab.label}
+            {tab.count !== undefined && (
+              <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded-full bg-surface-overlay text-text-muted">
+                {tab.count}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
-      {!isSimpleTabs && activeTab?.content}
+      {activeTab?.content}
     </div>
   );
 }

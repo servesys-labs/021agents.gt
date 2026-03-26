@@ -1,6 +1,6 @@
 import { useGetIdentity, useLogout } from "@refinedev/core";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { getTokenSecondsRemaining } from "../../auth/jwt";
 import { getAuthToken } from "../../auth/tokens";
@@ -21,9 +21,10 @@ import {
   ExternalLink,
   BookOpen,
   Users,
+  Terminal,
 } from "lucide-react";
 
-/* ── Railway-style icon-only sidebar ────────────────────────────── */
+/* ── Expandable sidebar with grouped navigation ─────────────────── */
 
 type NavItem = {
   path: string;
@@ -31,24 +32,47 @@ type NavItem = {
   icon: ReactNode;
 };
 
+type NavGroup = {
+  label: string;
+  items: NavItem[];
+};
+
 const iconSize = 18;
 const iconStroke = 1.5;
 
-const topNav: NavItem[] = [
-  { path: "/", label: "Canvas", icon: <Layers size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/overview", label: "Overview", icon: <LayoutDashboard size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/observability", label: "Observability", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/metrics", label: "Metrics", icon: <BarChart3 size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/intelligence", label: "Intelligence", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/compliance", label: "Compliance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/issues", label: "Issues", icon: <Bug size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/security", label: "Security", icon: <Shield size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/autoresearch", label: "Autoresearch", icon: <FlaskConical size={iconSize} strokeWidth={iconStroke} /> },
-  { path: "/voice", label: "Voice", icon: <Phone size={iconSize} strokeWidth={iconStroke} /> },
-];
-
-const bottomNav: NavItem[] = [
-  { path: "/settings", label: "Settings", icon: <Settings size={iconSize} strokeWidth={iconStroke} /> },
+const navGroups: NavGroup[] = [
+  {
+    label: "Core",
+    items: [
+      { path: "/overview", label: "Dashboard", icon: <LayoutDashboard size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/", label: "Canvas", icon: <Layers size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/observability", label: "Observability", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    label: "Data",
+    items: [
+      { path: "/autoresearch", label: "Autoresearch", icon: <FlaskConical size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/intelligence", label: "Intelligence", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/metrics", label: "Metrics", icon: <BarChart3 size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    label: "Operations",
+    items: [
+      { path: "/issues", label: "Issues", icon: <Bug size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/voice", label: "Voice", icon: <Phone size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/sandbox", label: "Sandbox", icon: <Terminal size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
+    label: "Governance",
+    items: [
+      { path: "/compliance", label: "Compliance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/security", label: "Security", icon: <Shield size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/settings", label: "Settings", icon: <Settings size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
 ];
 
 export const Sidebar = ({ children }: { children: ReactNode }) => {
@@ -57,8 +81,28 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
   const { data: identity } = useGetIdentity<{ name: string; email: string }>();
   const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const collapseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const isCanvasPage = pathname === "/" || pathname === "/canvas";
+
+  const handleMouseEnter = useCallback(() => {
+    if (collapseTimer.current) {
+      clearTimeout(collapseTimer.current);
+      collapseTimer.current = null;
+    }
+    setExpanded(true);
+  }, []);
+
+  const handleMouseLeave = useCallback(() => {
+    collapseTimer.current = setTimeout(() => setExpanded(false), 150);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (collapseTimer.current) clearTimeout(collapseTimer.current);
+    };
+  }, []);
 
   useEffect(() => {
     const update = () => {
@@ -76,64 +120,108 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
   };
 
   return (
-    <div className="flex h-screen bg-surface-base text-text-primary overflow-hidden">
-      {/* Icon rail — always 52px, icon-only */}
-      <aside className="flex flex-col items-center w-[52px] border-r py-3 flex-shrink-0 z-40 glass-heavy relative">
+    <div className="sidebar-layout flex h-screen bg-surface-base text-text-primary overflow-hidden">
+      {/* Spacer - reserves space so content doesn't shift */}
+      <div className="w-[52px] flex-shrink-0" />
+
+      {/* Expandable sidebar - overlays content when expanded */}
+      <aside
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        className="sidebar-rail glass-heavy"
+        data-expanded={expanded}
+      >
         {/* Logo */}
         <Link
           to="/"
-          className="mb-5 flex items-center justify-center w-8 h-8 rounded-lg bg-accent/10 hover:bg-accent/20 transition-colors"
+          className="sidebar-logo"
         >
-          <span className="text-accent font-bold text-sm">O</span>
+          <span className="text-accent font-bold text-sm flex-shrink-0">O</span>
+          <span
+            className="sidebar-label text-accent font-bold text-sm"
+            data-expanded={expanded}
+          >
+            neShot
+          </span>
         </Link>
 
-        {/* Top nav icons */}
-        <nav className="flex flex-col items-center gap-1 flex-1" aria-label="Main navigation">
-          {topNav.map((item) => (
-            <Link
-              key={item.path}
-              to={item.path}
-              aria-label={item.label}
-              aria-current={isActive(item.path) ? "page" : undefined}
-              className={`flex items-center justify-center min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-lg transition-all ${
-                isActive(item.path)
-                  ? "bg-accent-muted text-accent"
-                  : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
-              }`}
-            >
-              {item.icon}
-            </Link>
+        {/* Grouped navigation */}
+        <nav className="flex flex-col flex-1 overflow-y-auto overflow-x-hidden sidebar-nav-scroll" aria-label="Main navigation">
+          {navGroups.map((group, groupIdx) => (
+            <div key={group.label} className="flex flex-col">
+              {/* Group divider (not before first group) */}
+              {groupIdx > 0 && (
+                <div className="sidebar-group-divider" />
+              )}
+
+              {/* Group label - visible when expanded */}
+              <div
+                className="sidebar-group-label"
+                data-expanded={expanded}
+              >
+                {group.label}
+              </div>
+
+              {/* Group items */}
+              <div className="flex flex-col items-stretch gap-0.5 px-2">
+                {group.items.map((item) => (
+                  <Link
+                    key={item.path}
+                    to={item.path}
+                    aria-label={item.label}
+                    aria-current={isActive(item.path) ? "page" : undefined}
+                    className={`sidebar-nav-item group ${
+                      isActive(item.path)
+                        ? "bg-accent-muted text-accent"
+                        : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
+                    }`}
+                  >
+                    <span className="flex-shrink-0 flex items-center justify-center w-5 h-5">
+                      {item.icon}
+                    </span>
+                    <span
+                      className="sidebar-label text-[length:var(--text-sm)]"
+                      data-expanded={expanded}
+                    >
+                      {item.label}
+                    </span>
+                    {/* Tooltip for collapsed state */}
+                    {!expanded && (
+                      <span className="sidebar-tooltip" role="tooltip">
+                        {item.label}
+                      </span>
+                    )}
+                  </Link>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
 
-        {/* Bottom nav icons */}
-        <div className="flex flex-col items-center gap-1 mt-auto">
-          {bottomNav.map((item) => (
-            <Link
-              key={item.path}
-              to={item.path}
-              aria-label={item.label}
-              aria-current={isActive(item.path) ? "page" : undefined}
-              className={`flex items-center justify-center min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-lg transition-all ${
-                isActive(item.path)
-                  ? "bg-accent-muted text-accent"
-                  : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
-              }`}
-            >
-              {item.icon}
-            </Link>
-          ))}
-
-          {/* User avatar / menu */}
-          <div className="relative mt-1">
+        {/* User avatar / menu — pinned to bottom */}
+        <div className="flex flex-col items-stretch gap-1 mt-auto px-2 pb-1">
+          <div className="relative">
             <button
               onClick={() => setUserMenuOpen(!userMenuOpen)}
-              className="flex items-center justify-center min-w-[var(--touch-target-min)] min-h-[var(--touch-target-min)] rounded-lg bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors"
+              className="sidebar-nav-item bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors w-full"
               aria-label={`Account menu for ${identity?.email || "user"}`}
               aria-haspopup="menu"
               aria-expanded={userMenuOpen}
             >
-              {(identity?.name || identity?.email || "U").charAt(0).toUpperCase()}
+              <span className="flex-shrink-0 flex items-center justify-center w-5 h-5">
+                {(identity?.name || identity?.email || "U").charAt(0).toUpperCase()}
+              </span>
+              <span
+                className="sidebar-label text-[length:var(--text-sm)] truncate"
+                data-expanded={expanded}
+              >
+                {identity?.name || identity?.email || "User"}
+              </span>
+              {!expanded && (
+                <span className="sidebar-tooltip" role="tooltip">
+                  Account
+                </span>
+              )}
             </button>
 
             {/* User popover */}
@@ -214,10 +302,26 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
       {/* Main content area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         <main className={`flex-1 ${isCanvasPage ? "overflow-hidden" : "overflow-auto"}`}>
-          <div className={isCanvasPage ? "h-full" : "p-6"}>
+          <div className={isCanvasPage ? "h-full" : "p-6 page-content"}>
             {children}
           </div>
         </main>
+
+        {/* Mobile bottom tab bar (visible only on mobile via CSS) */}
+        <nav className="bottom-tab-bar" aria-label="Mobile navigation">
+          {navGroups.slice(0, 2).flatMap(g => g.items).slice(0, 5).map((item) => (
+            <Link
+              key={item.path}
+              to={item.path}
+              aria-label={item.label}
+              aria-current={isActive(item.path) ? "page" : undefined}
+              className={`bottom-tab-item ${isActive(item.path) ? "bottom-tab-item-active" : ""}`}
+            >
+              {item.icon}
+              <span className="bottom-tab-label">{item.label}</span>
+            </Link>
+          ))}
+        </nav>
 
         {/* Status bar */}
         <div className="status-bar">

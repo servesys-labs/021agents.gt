@@ -11,10 +11,28 @@ type Props = {
     tools: string[];
     resources: Array<{ type: string; name: string }>;
     createdAt: number;
+    gateDecision?: string;
+    gateReason?: string;
+  } | null;
+  maintenance?: {
+    running: boolean;
+    lastRunAt?: number;
+    rolloutDecision?: string;
+    readyForApproval?: boolean;
+    blockingReasons?: string[];
+    proposalsGenerated?: number;
+    proposalCount?: number;
+    gatePackRanAt?: number;
+    promoting?: boolean;
+    lastPromotion?: string;
   } | null;
   onReviewDraft?: () => void;
   onCenterDraft?: () => void;
-  onDeployDraft?: () => void;
+  onDeployDraft?: (overrideHold?: boolean, overrideReason?: string) => void;
+  onRunMaintenance?: () => void;
+  onOpenProposals?: () => void;
+  onRunGatePack?: () => void;
+  onPromoteCandidate?: () => void;
   playbookAgentName?: string | null;
   playbookLoading?: boolean;
   playbookError?: string | null;
@@ -48,15 +66,26 @@ export function MetaAgentAssist({
   isProcessing,
   lastResult,
   latestDraft,
+  maintenance,
   onReviewDraft,
   onCenterDraft,
   onDeployDraft,
+  onRunMaintenance,
+  onOpenProposals,
+  onRunGatePack,
+  onPromoteCandidate,
   playbookAgentName,
   playbookLoading,
   playbookError,
   playbook,
 }: Props) {
+  const rollout = String(maintenance?.rolloutDecision || "").toLowerCase();
+  const readyForApproval = Boolean(maintenance?.readyForApproval);
+
   const [input, setInput] = useState("");
+  const [overrideHoldArmed, setOverrideHoldArmed] = useState(false);
+  const [overridePhrase, setOverridePhrase] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
   type ChatMessage = { role: "user" | "assistant"; text: string };
   const [history, setHistory] = useState<ChatMessage[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -95,6 +124,16 @@ export function MetaAgentAssist({
         label: "Design Multi-Agent",
         prompt: `Design a ${steps} architecture for ${agent} with supervisor routing, specialist delegation, and non-blocking background telemetry/eval lanes.`,
       },
+      {
+        id: "autofix-gates",
+        label: "Auto-Fix + Gate Pack",
+        prompt: `For ${agent}, run graph autofix, then gate-pack checks (strict lint + eval thresholds), summarize rollout decision, and list exact next API calls.`,
+      },
+      {
+        id: "maintenance-cycle",
+        label: "Run Maintenance Cycle",
+        prompt: `Run autonomous maintenance cycle for ${agent}: telemetry review, proposal generation, graph checks (lint/contracts/autofix), eval gate check, and return approval packet.`,
+      },
     ];
   })();
 
@@ -105,6 +144,12 @@ export function MetaAgentAssist({
     onSubmit(trimmed);
     setInput("");
   };
+
+  useEffect(() => {
+    setOverrideHoldArmed(false);
+    setOverridePhrase("");
+    setOverrideReason("");
+  }, [latestDraft?.createdAt, latestDraft?.agentName]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -175,6 +220,83 @@ export function MetaAgentAssist({
                     </div>
                   </div>
                   <div>
+                    <p className="text-text-muted mb-1">Maintenance</p>
+                    <button
+                      onClick={() => onRunMaintenance?.()}
+                      disabled={Boolean(maintenance?.running) || !playbookAgentName}
+                      className="px-2 py-1 rounded-md bg-surface-overlay border border-border-default text-[10px] text-text-secondary hover:text-text-primary hover:border-accent/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {maintenance?.running ? "Running..." : "Run Maintenance Cycle"}
+                    </button>
+                    {maintenance?.rolloutDecision && (
+                      <div className="mt-2 text-[10px] text-text-secondary space-y-1">
+                        <p>
+                          <span className="text-text-muted">Rollout:</span>{" "}
+                          <span className={maintenance.rolloutDecision === "hold" ? "text-status-danger" : "text-status-live"}>
+                            {maintenance.rolloutDecision}
+                          </span>
+                        </p>
+                        <p><span className="text-text-muted">Ready:</span> {maintenance.readyForApproval ? "yes" : "no"}</p>
+                        <p><span className="text-text-muted">Proposals:</span> {maintenance.proposalsGenerated ?? 0}</p>
+                        {(maintenance.blockingReasons || []).slice(0, 2).map((r) => (
+                          <p key={r} className="text-text-muted">- {r}</p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-text-muted mb-1">Approval Packet</p>
+                    <div className="rounded-md border border-border-default bg-surface-base p-2">
+                      <div className="text-[10px] text-text-secondary space-y-1">
+                        <p>
+                          <span className="text-text-muted">Status:</span>{" "}
+                          <span className={readyForApproval ? "text-status-live" : "text-status-danger"}>
+                            {readyForApproval ? "ready" : "blocked"}
+                          </span>
+                        </p>
+                        <p>
+                          <span className="text-text-muted">Rollout:</span>{" "}
+                          <span className={rollout === "hold" ? "text-status-danger" : "text-status-live"}>
+                            {maintenance?.rolloutDecision || "n/a"}
+                          </span>
+                        </p>
+                        <p>
+                          <span className="text-text-muted">Proposals:</span>{" "}
+                          {maintenance?.proposalCount ?? maintenance?.proposalsGenerated ?? 0}
+                        </p>
+                        {(maintenance?.blockingReasons || []).slice(0, 2).map((reason) => (
+                          <p key={reason} className="text-text-muted">- {reason}</p>
+                        ))}
+                      </div>
+                      <div className="mt-2 grid grid-cols-3 gap-1">
+                        <button
+                          onClick={() => onOpenProposals?.()}
+                          disabled={!playbookAgentName || Boolean(maintenance?.running)}
+                          className="px-2 py-1 rounded-md border border-border-default text-[10px] text-text-secondary hover:text-text-primary hover:border-accent/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Open proposals
+                        </button>
+                        <button
+                          onClick={() => onRunGatePack?.()}
+                          disabled={!playbookAgentName || Boolean(maintenance?.running)}
+                          className="px-2 py-1 rounded-md border border-border-default text-[10px] text-text-secondary hover:text-text-primary hover:border-accent/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          Run gate-pack
+                        </button>
+                        <button
+                          onClick={() => onPromoteCandidate?.()}
+                          disabled={!playbookAgentName || rollout !== "promote_candidate" || !readyForApproval || Boolean(maintenance?.promoting)}
+                          className="px-2 py-1 rounded-md bg-accent text-[10px] text-text-inverse hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          {maintenance?.promoting ? "Promoting..." : "Promote candidate"}
+                        </button>
+                      </div>
+                      {maintenance?.lastPromotion && (
+                        <p className="mt-2 text-[10px] text-text-muted">{maintenance.lastPromotion}</p>
+                      )}
+                    </div>
+                  </div>
+                  <div>
                     <p className="text-text-muted mb-1">LangChain-Equivalent Runtime</p>
                     <div className="flex flex-wrap gap-1">
                       {(playbook?.langchain_equivalent_runtime?.runnable_composition?.primitives || []).map((p) => (
@@ -216,6 +338,21 @@ export function MetaAgentAssist({
                 <p><span className="text-text-muted">Model:</span> {latestDraft.model}</p>
                 <p><span className="text-text-muted">Tools:</span> {latestDraft.tools.length}</p>
                 <p><span className="text-text-muted">Resources:</span> {latestDraft.resources.length}</p>
+                <p>
+                  <span className="text-text-muted">Gate Decision:</span>{" "}
+                  <span
+                    className={
+                      String(latestDraft.gateDecision || "").toLowerCase() === "hold"
+                        ? "text-status-danger"
+                        : "text-status-live"
+                    }
+                  >
+                    {latestDraft.gateDecision || "n/a"}
+                  </span>
+                </p>
+                {latestDraft.gateReason && (
+                  <p className="text-[10px] text-text-muted">{latestDraft.gateReason}</p>
+                )}
               </div>
               <div className="mt-2 flex flex-wrap gap-1">
                 {latestDraft.resources.slice(0, 6).map((r, idx) => (
@@ -224,6 +361,37 @@ export function MetaAgentAssist({
                   </span>
                 ))}
               </div>
+              {String(latestDraft.gateDecision || "").toLowerCase() === "hold" && (
+                <div className="mt-3 space-y-2">
+                  <label className="flex items-center gap-2 text-[10px] text-text-secondary">
+                    <input
+                      type="checkbox"
+                      checked={overrideHoldArmed}
+                      onChange={(e) => setOverrideHoldArmed(e.target.checked)}
+                      className="rounded border-border-default bg-surface-base"
+                    />
+                    I understand gate decision is hold, and I want to override.
+                  </label>
+                  <div>
+                    <p className="text-[10px] text-text-muted mb-1">Type OVERRIDE to confirm</p>
+                    <input
+                      value={overridePhrase}
+                      onChange={(e) => setOverridePhrase(e.target.value)}
+                      placeholder="OVERRIDE"
+                      className="w-full text-[10px] px-2 py-1 rounded-md bg-surface-base border border-border-default text-text-primary"
+                    />
+                  </div>
+                  <div>
+                    <p className="text-[10px] text-text-muted mb-1">Override reason (required)</p>
+                    <input
+                      value={overrideReason}
+                      onChange={(e) => setOverrideReason(e.target.value)}
+                      placeholder="Why are you overriding this hold gate?"
+                      className="w-full text-[10px] px-2 py-1 rounded-md bg-surface-base border border-border-default text-text-primary"
+                    />
+                  </div>
+                </div>
+              )}
               <div className="mt-3 grid grid-cols-3 gap-2">
                 <button
                   onClick={onReviewDraft}
@@ -238,10 +406,26 @@ export function MetaAgentAssist({
                   <LocateFixed size={11} /> Focus
                 </button>
                 <button
-                  onClick={onDeployDraft}
-                  className="flex items-center justify-center gap-1 text-[11px] py-1.5 rounded-md bg-accent text-text-inverse hover:bg-accent/90"
+                  onClick={() =>
+                    onDeployDraft?.(
+                      overrideHoldArmed && String(overridePhrase || "").trim().toUpperCase() === "OVERRIDE",
+                      String(overrideReason || "").trim(),
+                    )
+                  }
+                  disabled={
+                    String(latestDraft.gateDecision || "").toLowerCase() === "hold"
+                    && !(
+                      overrideHoldArmed
+                      && String(overridePhrase || "").trim().toUpperCase() === "OVERRIDE"
+                      && String(overrideReason || "").trim().length > 0
+                    )
+                  }
+                  className="flex items-center justify-center gap-1 text-[11px] py-1.5 rounded-md bg-accent text-text-inverse hover:bg-accent/90 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  <Rocket size={11} /> Approve & Create
+                  <Rocket size={11} />{" "}
+                  {String(latestDraft.gateDecision || "").toLowerCase() === "hold"
+                    ? "Override & Create"
+                    : "Approve & Create"}
                 </button>
               </div>
             </div>

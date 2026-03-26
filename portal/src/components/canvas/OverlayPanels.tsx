@@ -8,6 +8,7 @@ import {
 } from "lucide-react";
 import { CanvasOverlayPanel } from "./CanvasOverlayPanel";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 import { StatusPill, SectionTitle, InlineInput, InlineSelect, InlineTextarea, ReadOnlyNotice } from "./primitives";
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -33,7 +34,7 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
     "/api/v1/jobs/dlq",
     open && tab === "dlq",
   );
-  const workflows = (workflowsQuery.data?.workflows ?? []).map((wf) => ({
+  const workflows = extractList<Record<string, unknown>>(workflowsQuery.data, "workflows").map((wf) => ({
     id: String(wf.workflow_id ?? ""),
     name: String(wf.name ?? "Unnamed workflow"),
     description: String(wf.description ?? ""),
@@ -41,7 +42,7 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
     createdAt: Number(wf.created_at ?? 0),
     steps: Array.isArray(wf.steps) ? wf.steps.length : Number(wf.step_count ?? 0),
   }));
-  const jobs = (jobsQuery.data?.jobs ?? []).map((job) => ({
+  const jobs = extractList<Record<string, unknown>>(jobsQuery.data, "jobs").map((job) => ({
     id: String(job.job_id ?? ""),
     workflow: String(job.workflow_id ?? job.agent_name ?? "n/a"),
     status: String(job.status ?? "unknown"),
@@ -177,10 +178,10 @@ export function WorkflowsPanel({ open, onClose, editable = true }: { open: boole
         <div className="space-y-2">
           {dlqQuery.loading && <p className="text-xs text-text-muted">Loading dead letter queue...</p>}
           {dlqQuery.error && <p className="text-xs text-status-error">{dlqQuery.error}</p>}
-          {(dlqQuery.data?.entries ?? []).length === 0 && !dlqQuery.loading && (
+          {extractList<Record<string, unknown>>(dlqQuery.data, "entries").length === 0 && !dlqQuery.loading && (
             <p className="text-xs text-text-muted">Dead letter queue is empty</p>
           )}
-          {(dlqQuery.data?.entries ?? []).map((entry, idx) => (
+          {extractList<Record<string, unknown>>(dlqQuery.data, "entries").map((entry, idx) => (
             <div key={String(entry.job_id ?? idx)} className="bg-surface-base rounded-lg border border-border-default p-3">
               <div className="flex items-center gap-2 mb-1.5">
                 <AlertTriangle size={12} className="text-status-error" />
@@ -310,7 +311,7 @@ function ScheduleHistoryInline({ scheduleId }: { scheduleId: string }) {
     `/api/v1/schedules/${scheduleId}/history`,
     expanded,
   );
-  const executions = (historyQuery.data?.history ?? []).slice(0, 10);
+  const executions = extractList<Record<string, unknown>>(historyQuery.data, "history").slice(0, 10);
 
   return (
     <div className="mt-2">
@@ -363,7 +364,7 @@ export function SchedulesPanel({ open, onClose, editable = true }: { open: boole
     "/api/v1/schedules",
     open,
   );
-  const schedules = (schedulesQuery.data ?? []).map((s) => ({
+  const schedules = extractList<Record<string, unknown>>(schedulesQuery.data, "schedules").map((s) => ({
     id: String(s.schedule_id ?? ""),
     cron: String(s.cron ?? ""),
     agent: String(s.agent_name ?? ""),
@@ -499,7 +500,7 @@ function WebhookDeliveriesInline({ webhookId, editable }: { webhookId: string; e
     `/api/v1/webhooks/${webhookId}/deliveries`,
     expanded,
   );
-  const deliveries = (deliveriesQuery.data?.deliveries ?? []).slice(0, 10);
+  const deliveries = extractList<Record<string, unknown>>(deliveriesQuery.data, "deliveries").slice(0, 10);
 
   const handleReplay = async (deliveryId: string) => {
     if (!editable) return;
@@ -563,7 +564,7 @@ export function WebhooksPanel({ open, onClose, editable = true }: { open: boolea
     "/api/v1/webhooks",
     open,
   );
-  const webhooks = (webhooksQuery.data ?? []).map((wh) => ({
+  const webhooks = extractList<Record<string, unknown>>(webhooksQuery.data, "webhooks").map((wh) => ({
     id: String(wh.webhook_id ?? ""),
     url: String(wh.url ?? ""),
     events: Array.isArray(wh.events) ? wh.events.map((e) => String(e)) : [],
@@ -740,7 +741,7 @@ export function GovernancePanel({ open, onClose, editable = true }: { open: bool
     "/api/v1/audit/log?limit=30&since_days=30",
     open && tab === "approvals",
   );
-  const policies = (policiesQuery.data?.policies ?? []).map((p) => ({
+  const policies = extractList<Record<string, unknown>>(policiesQuery.data, "policies").map((p) => ({
     id: String(p.policy_id ?? ""),
     name: String(p.name ?? "Unnamed policy"),
     orgId: String(p.org_id ?? ""),
@@ -872,7 +873,7 @@ export function GovernancePanel({ open, onClose, editable = true }: { open: bool
         <div>
           <div className="flex items-center justify-between mb-3">
             <p className="text-xs text-text-muted">
-              {(auditQuery.data?.entries ?? []).length} recent events
+              {extractList<Record<string, unknown>>(auditQuery.data, "entries").length} recent events
             </p>
             <button
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-surface-overlay text-text-primary rounded-md hover:bg-surface-base transition-colors border border-border-default"
@@ -900,7 +901,7 @@ export function GovernancePanel({ open, onClose, editable = true }: { open: bool
           <div className="space-y-2">
             {auditQuery.loading && <p className="text-xs text-text-muted">Loading recent governance events...</p>}
             {auditQuery.error && <p className="text-xs text-status-error">{auditQuery.error}</p>}
-            {(auditQuery.data?.entries ?? []).slice(0, 20).map((entry, idx) => (
+            {extractList<Record<string, unknown>>(auditQuery.data, "entries").slice(0, 20).map((entry, idx) => (
               <div key={`${entry.id ?? entry.created_at ?? idx}`} className="bg-surface-base rounded-lg border border-border-default p-3">
                 <div className="flex items-center gap-2 mb-1">
                   <ShieldCheck size={12} className="text-accent" />
@@ -941,7 +942,7 @@ export function ProjectsPanel({ open, onClose, editable = true }: { open: boolea
     `/api/v1/projects/${selectedProject}/envs`,
     open && Boolean(selectedProject),
   );
-  const projects = (projectsQuery.data?.projects ?? []).map((p) => ({
+  const projects = extractList<Record<string, unknown>>(projectsQuery.data, "projects").map((p) => ({
     id: String(p.project_id ?? ""),
     name: String(p.name ?? "project"),
     description: String(p.description ?? ""),
@@ -949,7 +950,7 @@ export function ProjectsPanel({ open, onClose, editable = true }: { open: boolea
     plan: String(p.default_plan ?? "standard"),
     createdAt: Number(p.created_at ?? 0),
   }));
-  const envs = (envsQuery.data?.environments ?? []).map((e) => ({
+  const envs = extractList<Record<string, unknown>>(envsQuery.data, "environments").map((e) => ({
     id: String(e.env_id ?? ""),
     name: String(e.name ?? ""),
     plan: String(e.plan ?? "standard"),
@@ -1085,7 +1086,7 @@ export function ReleasesPanel({ open, onClose, editable = true }: { open: boolea
     `/api/v1/releases/${encodeURIComponent(agentName)}/canary`,
     open,
   );
-  const channels = (channelsQuery.data?.channels ?? []).map((c) => ({
+  const channels = extractList<Record<string, unknown>>(channelsQuery.data, "channels").map((c) => ({
     name: String(c.channel ?? ""),
     version: String(c.version ?? ""),
     status: "active",
@@ -1246,7 +1247,7 @@ export function InfrastructurePanel({ open, onClose, editable = true }: { open: 
     "/api/v1/retention",
     open && tab === "retention",
   );
-  const gpuEndpoints = (gpuQuery.data?.endpoints ?? []).map((gpu) => ({
+  const gpuEndpoints = extractList<Record<string, unknown>>(gpuQuery.data, "endpoints").map((gpu) => ({
     id: String(gpu.endpoint_id ?? ""),
     modelId: String(gpu.model_id ?? ""),
     type: String(gpu.gpu_type ?? ""),
@@ -1254,7 +1255,7 @@ export function InfrastructurePanel({ open, onClose, editable = true }: { open: 
     count: Number(gpu.gpu_count ?? 1),
     cost: Number(gpu.hourly_rate_usd ?? 0),
   }));
-  const retentionPolicies = (retentionQuery.data?.policies ?? []).map((rp) => ({
+  const retentionPolicies = extractList<Record<string, unknown>>(retentionQuery.data, "policies").map((rp) => ({
     id: String(rp.policy_id ?? ""),
     type: String(rp.resource_type ?? ""),
     retention: Number(rp.retention_days ?? 0),
@@ -1448,7 +1449,7 @@ export function SecretsPanel({ open, onClose, editable = true }: { open: boolean
     "/api/v1/secrets",
     open,
   );
-  const secrets = (secretsQuery.data?.secrets ?? (Array.isArray(secretsQuery.data) ? secretsQuery.data : [])).map((s: Record<string, unknown>) => ({
+  const secrets = extractList<Record<string, unknown>>(secretsQuery.data, "secrets").map((s) => ({
     id: String(s.secret_id ?? s.id ?? ""),
     name: String(s.name ?? ""),
     keyPrefix: String(s.key_prefix ?? ""),
