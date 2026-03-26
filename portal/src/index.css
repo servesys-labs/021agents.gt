@@ -1519,3 +1519,53 @@ textarea::placeholder {
   white-space: nowrap;
   z-index: 100;
 }
+
+/* High contrast mode support */
+@media (prefers-contrast: more) {
+  /* Stronger borders for better visibility */
+  .card,
+  .glass-panel,
+  .glass-medium,
+  .glass-heavy {
+    border-width: 2px;
+    border-color: var(--color-text-primary);
+  }
+  
+  /* Ensure focus indicators are highly visible */
+  :focus-visible {
+    outline: 3px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+  
+  /* Status indicators need stronger contrast */
+  .text-status-live,
+  .text-status-error,
+  .text-status-warning,
+  .text-status-info {
+    font-weight: 600;
+  }
+  
+  /* Button borders for better definition */
+  .btn {
+    border-width: 2px;
+  }
+  
+  /* Remove transparency that reduces contrast */
+  .glass-backdrop {
+    background-color: rgba(0, 0, 0, 0.8);
+  }
+}
+
+/* Reduced transparency preference (macOS accessibility) */
+@media (prefers-reduced-transparency: reduce) {
+  .glass-panel,
+  .glass-medium,
+  .glass-heavy,
+  .glass-backdrop,
+  .glass-light,
+  .glass-overlay {
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    background-color: var(--color-surface-raised);
+  }
+}
