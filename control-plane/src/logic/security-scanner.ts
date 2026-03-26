@@ -347,8 +347,8 @@ export interface ScanResult {
   maestro_layers: LayerAssessment[];
   aivss_summary: Record<string, unknown>;
   probe_results: ProbeResult[];
-  started_at: number;
-  completed_at: number;
+  started_at: string;
+  completed_at: string;
   findings_summary: Record<string, unknown>;
 }
 
@@ -357,7 +357,7 @@ export function scanConfig(
   agentConfig: Record<string, unknown>,
   scanId: string,
 ): ScanResult {
-  const startedAt = Date.now() / 1000;
+  const startedAt = new Date().toISOString();
 
   // Run config probes
   const results = runConfigProbes(agentConfig);
@@ -398,7 +398,7 @@ export function scanConfig(
     aivss_summary: aivssAggregate,
     probe_results: results,
     started_at: startedAt,
-    completed_at: Date.now() / 1000,
+    completed_at: new Date().toISOString(),
     findings_summary: {
       total: scoredFindings.length,
       by_severity: countBy(scoredFindings, "severity"),

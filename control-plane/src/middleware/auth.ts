@@ -207,7 +207,7 @@ async function resolveApiKey(key: string, env: Env): Promise<CurrentUser> {
 
   // Check active status and expiry even for null row (constant time)
   const isActive = row ? Boolean(row.is_active) : false;
-  const isExpired = row?.expires_at ? Number(row.expires_at) < Date.now() / 1000 : false;
+  const isExpired = row?.expires_at ? new Date(row.expires_at).getTime() < Date.now() : false;
 
   if (!row || !isActive || isExpired) {
     // Always do a dummy user lookup to normalize timing
@@ -217,7 +217,7 @@ async function resolveApiKey(key: string, env: Env): Promise<CurrentUser> {
 
   // Update last_used synchronously for parity with backend behavior.
   try {
-    await sql`UPDATE api_keys SET last_used_at = ${Date.now() / 1000} WHERE key_id = ${row.key_id}`;
+    await sql`UPDATE api_keys SET last_used_at = ${new Date().toISOString()} WHERE key_id = ${row.key_id}`;
   } catch {
     // Best-effort update only.
   }

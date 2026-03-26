@@ -774,7 +774,7 @@ async function persistAgentPackage(
   pkg: Record<string, unknown>,
 ): Promise<string[]> {
   const errors: string[] = [];
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   // Sub-agents (max 3)
   const subAgents = Array.isArray(pkg.sub_agents) ? pkg.sub_agents.slice(0, 3) : [];
@@ -883,19 +883,18 @@ agentRoutes.post(
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-    // Load org's default connectors for the meta-agent prompt
-    let orgDefaultConnectors: string[] = [];
+    // Load org profile for the meta-agent prompt context
+    let orgProfile: Record<string, unknown> | undefined;
     try {
       const settingsRows = await sql`
         SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
       `;
       if (settingsRows.length > 0) {
-        const settings = JSON.parse(String(settingsRows[0].settings_json || "{}"));
-        orgDefaultConnectors = Array.isArray(settings.default_connectors) ? settings.default_connectors : [];
+        orgProfile = JSON.parse(String(settingsRows[0].settings_json || "{}"));
       }
     } catch { /* ignore — preferences are optional */ }
 
-    // Generate config via Claude Sonnet 4.6 (plan-aware model selection)
+    // Generate config via Claude Sonnet 4.6 (plan + org-profile aware)
     const config = await buildFromDescription(c.env.AI, req.description, {
       name: req.name || undefined,
       hyperdrive: c.env.HYPERDRIVE,
@@ -906,7 +905,7 @@ agentRoutes.post(
         clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
         projectId: c.env.PIPEDREAM_PROJECT_ID ?? "",
       } : undefined,
-      orgDefaultConnectors,
+      orgProfile: orgProfile as any,
     });
 
     if (req.name) config.name = req.name;

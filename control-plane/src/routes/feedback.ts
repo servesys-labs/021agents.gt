@@ -25,7 +25,7 @@ feedbackRoutes.get("/", requireScope("sessions:read"), async (c) => {
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
   const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 50));
   const offset = Math.max(0, Number(c.req.query("offset")) || 0);
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -73,8 +73,8 @@ feedbackRoutes.get("/stats", requireScope("sessions:read"), async (c) => {
   const user = c.get("user");
   const agentName = c.req.query("agent_name") || "";
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
-  const since = Date.now() / 1000 - sinceDays * 86400;
-  const prevSince = since - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
+  const prevSince = new Date(Date.now() - sinceDays * 2 * 86400 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

@@ -366,7 +366,7 @@ toolRoutes.post("/:name/execute", requireScope("tools:execute"), async (c) => {
           ${name}, ${user.org_id}, ${user.user_id}, 
           ${JSON.stringify(body.arguments)}, ${JSON.stringify(result)},
           ${duration}, ${body.trace_id || null}, ${body.session_id || null}, 
-          ${Date.now() / 1000}
+          ${new Date().toISOString()}
         )
       `.catch(() => {});
     } catch {
@@ -491,7 +491,7 @@ toolRoutes.post("/", requireScope("tools:admin"), async (c) => {
         ${JSON.stringify(body.input_schema)}, 
         ${body.handler_code ? true : false},
         ${body.handler_code || null},
-        'user-defined', false, ${Date.now() / 1000}
+        'user-defined', false, ${new Date().toISOString()}
       )
     `;
   } catch (err) {

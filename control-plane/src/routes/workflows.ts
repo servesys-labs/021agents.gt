@@ -40,8 +40,8 @@ type ApprovalRow = {
   updated_at?: number;
 };
 
-function nowSec(): number {
-  return Math.floor(Date.now() / 1000);
+function nowSec(): string {
+  return new Date().toISOString();
 }
 
 function parseEpochSeconds(raw: unknown): number | null {
@@ -314,7 +314,7 @@ workflowRoutes.post("/approval/:approval_id/decision", requireScope("workflows:w
   }
 
   const now = nowSec();
-  if (Number(existing.deadline_at || 0) > 0 && Number(existing.deadline_at) <= now) {
+  if (existing.deadline_at && new Date(existing.deadline_at).getTime() <= Date.now()) {
     await sql`
       UPDATE workflow_approvals
       SET status = ${"expired"}, updated_at = ${now}
@@ -483,7 +483,7 @@ workflowRoutes.post("/:workflow_id/runs/:run_id/cancel", requireScope("workflows
     return c.json({ error: `Cannot cancel run with status '${rows[0].status}'` }, 409);
   }
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     UPDATE workflow_runs SET status = 'cancelled', completed_at = ${now} WHERE run_id = ${runId}
   `;

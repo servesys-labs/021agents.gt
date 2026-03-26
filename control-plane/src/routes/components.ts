@@ -195,7 +195,7 @@ componentRoutes.post(
     }
     
     const componentId = crypto.randomUUID();
-    const now = Date.now() / 1000;
+    const now = new Date().toISOString();
     
     await sql`
       INSERT INTO components (
@@ -253,7 +253,7 @@ componentRoutes.put(
     versionParts[2] = (versionParts[2] || 0) + 1;
     const newVersion = versionParts.join(".");
     
-    const now = Date.now() / 1000;
+    const now = new Date().toISOString();
     
     await sql`
       UPDATE components
@@ -344,7 +344,7 @@ componentRoutes.post("/:id/fork", requireScope("components:write"), async (c) =>
   }
   
   const componentId = crypto.randomUUID();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   
   await sql`
     INSERT INTO components (
@@ -492,7 +492,7 @@ componentRoutes.post("/:id/use", requireScope("components:write"), async (c) => 
   const { id } = c.req.param();
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   
   // Fire-and-forget usage tracking
   sql`

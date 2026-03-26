@@ -62,7 +62,7 @@ mcpControlRoutes.post("/servers", requireScope("integrations:write"), async (c) 
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const serverId = genId();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO mcp_servers (server_id, org_id, name, url, transport, auth_token, metadata_json, status, created_at)
@@ -96,7 +96,7 @@ mcpControlRoutes.get("/servers/:server_id/status", requireScope("integrations:re
   }
 
   const status = healthy ? "healthy" : "unhealthy";
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`UPDATE mcp_servers SET status = ${status}, last_health_at = ${now} WHERE server_id = ${serverId}`;
 
   return c.json({
@@ -133,7 +133,7 @@ mcpControlRoutes.post("/servers/:server_id/sync", requireScope("integrations:wri
     error = e.message || "Sync failed";
   }
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const newStatus = error ? "sync_failed" : "synced";
   await sql`UPDATE mcp_servers SET last_health_at = ${now}, status = ${newStatus} WHERE server_id = ${serverId}`;
 

@@ -70,7 +70,7 @@ orgRoutes.post("/", requireScope("orgs:write"), async (c) => {
   `;
 
   // Create default org_settings for the new org
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   try {
     await sql`
       INSERT INTO org_settings (org_id, plan_type, max_agents, max_runs_per_month, max_seats, features, created_at, updated_at)
@@ -154,7 +154,7 @@ orgRoutes.put("/:org_id", requireScope("orgs:write"), async (c) => {
 
   if (!name && !plan) return c.json({ error: "Nothing to update" }, 400);
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   if (name && plan) {
     await sql`UPDATE orgs SET name = ${name}, plan = ${plan}, updated_at = ${now} WHERE org_id = ${orgId}`;
   } else if (name) {
@@ -280,7 +280,7 @@ orgRoutes.post("/settings", async (c) => {
   };
 
   const settingsJson = JSON.stringify(merged);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO org_settings (org_id, settings_json, plan_type, created_at, updated_at)

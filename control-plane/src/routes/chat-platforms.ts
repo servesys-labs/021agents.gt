@@ -110,7 +110,7 @@ chatPlatformRoutes.post("/telegram/connect", requireScope("integrations:write"),
   if (!botToken) return c.json({ error: "bot_token is required" }, 400);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   // Store in secrets
   try {

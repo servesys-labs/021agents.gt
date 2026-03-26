@@ -96,11 +96,11 @@ apiKeyRoutes.post("/", requireScope("api_keys:write"), async (c) => {
   const { key, prefix } = generateApiKey();
   const keyHash = await hashApiKey(key);
   const keyId = generateId();
-  const nowEpoch = Date.now() / 1000;
+  const nowEpoch = new Date().toISOString();
 
-  let expiresAt: number | null = null;
+  let expiresAt: string | null = null;
   if (req.expires_in_days) {
-    expiresAt = nowEpoch + req.expires_in_days * 86400;
+    expiresAt = new Date(Date.now() + req.expires_in_days * 86400 * 1000).toISOString();
   }
 
   const scopesJson = JSON.stringify(req.scopes);
@@ -199,7 +199,7 @@ apiKeyRoutes.post("/:key_id/rotate", requireScope("api_keys:write"), async (c) =
   const { key, prefix } = generateApiKey();
   const keyHash = await hashApiKey(key);
   const newKeyId = generateId();
-  const nowEpoch = Date.now() / 1000;
+  const nowEpoch = new Date().toISOString();
   const scopesJson = JSON.stringify(scopes);
 
   // Revoke old + create new in sequence

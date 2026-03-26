@@ -55,7 +55,7 @@ memoryRoutes.post("/:agent_name/episodes", requireScope("memory:write"), async (
   const inputText = String(body.input_text || "");
   const outputText = String(body.output_text || "");
   const outcome = String(body.outcome || "");
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const episodeId = genId();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);

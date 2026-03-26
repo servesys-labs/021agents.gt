@@ -50,7 +50,7 @@ gpuRoutes.post("/endpoints", requireScope("gpu:write"), async (c) => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const endpointId = genId();
   const hourlyRate = HOURLY_RATES[gpuType] ?? 3.98;
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO gpu_endpoints (endpoint_id, org_id, model_id, api_base, gpu_type, gpu_count, hourly_rate_usd, status, created_at)
@@ -79,9 +79,10 @@ gpuRoutes.delete("/endpoints/:endpoint_id", requireScope("gpu:write"), async (c)
   if (rows.length === 0) return c.json({ error: "GPU endpoint not found" }, 404);
 
   const endpoint = rows[0] as any;
-  const now = Date.now() / 1000;
-  const createdAt = Number(endpoint.created_at || now);
-  const hours = Math.max(0, (now - createdAt) / 3600);
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const createdAtMs = endpoint.created_at ? new Date(endpoint.created_at).getTime() : nowMs;
+  const hours = Math.max(0, (nowMs - createdAtMs) / 3600000);
   const costUsd = Math.round(hours * Number(endpoint.hourly_rate_usd || 3.98) * 100) / 100;
 
   await sql`

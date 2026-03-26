@@ -55,7 +55,7 @@ scheduleRoutes.post("/", requireScope("schedules:write"), async (c) => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const scheduleId = genId();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO schedules (schedule_id, org_id, agent_name, task, cron, is_enabled, created_at)

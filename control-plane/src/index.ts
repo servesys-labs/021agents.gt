@@ -224,7 +224,7 @@ export default {
       const job = msg.body as { type: string; payload: Record<string, unknown> };
       try {
         const sql = await getDb(env.HYPERDRIVE);
-        const now = Date.now() / 1000;
+        const now = new Date().toISOString();
 
         if (job.type === "agent_run") {
           // Dispatch agent run to runtime worker
@@ -286,7 +286,7 @@ export default {
         try {
           const sql = await getDb(env.HYPERDRIVE);
           await sql`
-            UPDATE job_queue SET status = 'failed', error = ${String(err)}, completed_at = ${Date.now() / 1000}
+            UPDATE job_queue SET status = 'failed', error = ${String(err)}, completed_at = ${new Date().toISOString()}
             WHERE job_id = ${String(job.payload.job_id || "")}
           `;
         } catch {}
@@ -299,7 +299,7 @@ export default {
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     const { getDb } = await import("./db/client");
     const sql = await getDb(env.HYPERDRIVE);
-    const now = Date.now() / 1000;
+    const now = new Date().toISOString();
 
     // 1. Check for due schedules
     try {
@@ -353,7 +353,7 @@ export default {
       `;
 
       for (const policy of policies) {
-        const cutoff = now - Number(policy.retention_days) * 86400;
+        const cutoff = new Date(Date.now() - Number(policy.retention_days) * 86400 * 1000).toISOString();
         const orgId = String(policy.org_id || "");
         const resourceType = String(policy.resource_type);
 

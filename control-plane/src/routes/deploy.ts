@@ -24,7 +24,7 @@ deployRoutes.post("/:agent_name", requireScope("deploy:write"), async (c) => {
   if (rows.length === 0) return c.json({ error: `Agent '${agentName}' not found` }, 404);
 
   // Mark active
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`UPDATE agents SET is_active = 1, updated_at = ${now} WHERE name = ${agentName}`;
 
   return c.json({
@@ -41,7 +41,7 @@ deployRoutes.delete("/:agent_name", requireScope("deploy:write"), async (c) => {
   const agentName = c.req.param("agent_name");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   try {
     await sql`UPDATE agents SET is_active = 0, updated_at = ${now} WHERE name = ${agentName}`;
   } catch {}

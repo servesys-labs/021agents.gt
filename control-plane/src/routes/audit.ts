@@ -23,7 +23,7 @@ auditRoutes.get("/log", async (c) => {
   const userId = c.req.query("user_id") || "";
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
   const limit = Math.min(10000, Math.max(1, Number(c.req.query("limit")) || 100));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -61,7 +61,7 @@ auditRoutes.get("/export", async (c) => {
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
   const limit = Math.min(10000, Math.max(1, Number(c.req.query("limit")) || 10000));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const entries = await sql`

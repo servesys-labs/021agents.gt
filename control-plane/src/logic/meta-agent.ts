@@ -379,7 +379,15 @@ export async function buildFromDescription(
     orgId?: string;
     openrouterApiKey?: string;
     pipedream?: { clientId: string; clientSecret: string; projectId: string };
-    orgDefaultConnectors?: string[];
+    orgProfile?: {
+      org_name?: string;
+      industry?: string;
+      team_size?: string;
+      use_cases?: string[];
+      data_sensitivity?: string;
+      deploy_style?: string;
+      default_connectors?: string[];
+    };
   } = {},
 ): Promise<Record<string, unknown>> {
   if (!opts.openrouterApiKey) {
@@ -432,10 +440,20 @@ You have access to 3,000+ external apps via Pipedream's MCP connector infrastruc
 - Communication: Twilio (SMS/Voice/WhatsApp), Vonage
 
 Don't limit yourself to this list — propose any app that makes sense for the agent's purpose. The platform will validate each app against Pipedream's live API and pull real tool schemas.
-${opts.orgDefaultConnectors && opts.orgDefaultConnectors.length > 0 ? `
-## Organization's Preferred Tools
-This organization has already configured these apps as their defaults: ${opts.orgDefaultConnectors.join(", ")}
-ALWAYS include these in your mcp_connectors recommendations when relevant to the agent's purpose. These are pre-approved by the org.
+${opts.orgProfile ? `
+## Organization Context
+${opts.orgProfile.org_name ? `Company: ${opts.orgProfile.org_name}` : ""}
+${opts.orgProfile.industry ? `Industry: ${opts.orgProfile.industry}` : ""}
+${opts.orgProfile.team_size ? `Team size: ${opts.orgProfile.team_size}` : ""}
+${opts.orgProfile.use_cases?.length ? `Primary use cases: ${opts.orgProfile.use_cases.join(", ")}` : ""}
+${opts.orgProfile.data_sensitivity && opts.orgProfile.data_sensitivity !== "standard" ? `Data sensitivity: ${opts.orgProfile.data_sensitivity} — apply appropriate guardrails (PII redaction, compliance checks, audit logging)` : ""}
+${opts.orgProfile.deploy_style === "fast" ? "Deployment: Move fast — skip approval gates, deploy directly." : ""}
+${opts.orgProfile.deploy_style === "careful" ? "Deployment: Careful review — include approval gates, staging → canary → production with human review." : ""}
+${opts.orgProfile.default_connectors?.length ? `
+Pre-approved integrations: ${opts.orgProfile.default_connectors.join(", ")}
+ALWAYS include these in your mcp_connectors recommendations when relevant. These are already authorized by the organization.` : ""}
+
+Use this context to tailor the agent's system prompt, governance, guardrails, and tool selection to this organization's specific needs.
 ` : ""}
 Include a "mcp_connectors" array in your output with the apps you recommend, why each is needed, and suggested tool names.
 

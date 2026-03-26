@@ -18,8 +18,8 @@ import {
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const voiceRoutes = new Hono<R>();
 
-function nowSec(): number {
-  return Date.now() / 1000;
+function nowSec(): string {
+  return new Date().toISOString();
 }
 
 // ── Cross-platform Summary ──────────────────────────────────────────

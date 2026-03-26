@@ -77,7 +77,7 @@ sloRoutes.get("/status", requireScope("slos:read"), async (c) => {
 
   for (const slo of slos) {
     const s = slo as any;
-    const since = Date.now() / 1000 - s.window_hours * 3600;
+    const since = new Date(Date.now() - s.window_hours * 3600 * 1000).toISOString();
     let current: number | null = null;
 
     try {

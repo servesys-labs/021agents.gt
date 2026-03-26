@@ -32,7 +32,7 @@ function parseJsonSafe(raw: unknown): Record<string, unknown> {
 observabilityRoutes.get("/summary", requireScope("observability:read"), async (c) => {
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const [sessions] = await sql`
@@ -63,7 +63,7 @@ observabilityRoutes.get("/summary", requireScope("observability:read"), async (c
 observabilityRoutes.get("/daily-cost", requireScope("observability:read"), async (c) => {
   const user = c.get("user");
   const days = Math.max(1, Math.min(365, Number(c.req.query("days")) || 30));
-  const since = Date.now() / 1000 - days * 86400;
+  const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -165,7 +165,7 @@ observabilityRoutes.post("/annotations", requireScope("observability:write"), as
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const annotationId = genId();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO trace_annotations (annotation_id, trace_id, org_id, user_id, annotation_type, message, severity, span_id, node_id, turn, metadata_json, created_at)
@@ -191,7 +191,7 @@ observabilityRoutes.post("/feedback", requireScope("observability:write"), async
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const feedbackId = genId();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO span_feedback (feedback_id, span_id, org_id, user_id, rating, score, comment, labels_json, session_id, turn, source, created_at)
@@ -208,7 +208,7 @@ observabilityRoutes.post("/lineage", requireScope("observability:write"), async 
   if (!traceId) return c.json({ error: "trace_id is required" }, 400);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO trace_lineage (trace_id, org_id, session_id, agent_version, model, prompt_hash, eval_run_id, experiment_id, dataset_id, commit_sha, metadata_json, created_at)
@@ -230,7 +230,7 @@ observabilityRoutes.get("/agents/:agent_name/meta-control-plane", requireScope("
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Gather signals
-  const since = Date.now() / 1000 - 7 * 86400;
+  const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
 
   const [sessionStats] = await sql`
     SELECT COUNT(*) as total, COALESCE(AVG(step_count), 0) as avg_turns,
@@ -303,7 +303,7 @@ interface MetaProposal {
   modification: Record<string, unknown>;
   evidence: Record<string, unknown>;
   status: string;
-  created_at: number;
+  created_at: string;
 }
 
 function generateProposalsFromSignals(
@@ -312,7 +312,7 @@ function generateProposalsFromSignals(
   maxProposals: number,
 ): MetaProposal[] {
   const proposals: MetaProposal[] = [];
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const id = () => crypto.randomUUID().slice(0, 12);
 
   const nodeErrorRate = Number(signals.node_error_rate ?? 0);
@@ -442,7 +442,7 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/generate", requireS
   const maxProposals = Math.max(1, Math.min(20, Number(body.max_proposals) || 8));
 
   // Gather signals
-  const since = Date.now() / 1000 - 7 * 86400;
+  const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
   let signals: Record<string, unknown> = {};
   try {
     const [stats] = await sql`
@@ -503,7 +503,7 @@ observabilityRoutes.get("/agents/:agent_name/meta-report", requireScope("observa
     return c.json({ error: "Agent not found" }, 404);
   }
 
-  const since = Date.now() / 1000 - 7 * 86400;
+  const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
 
   const [summary] = await sql`
     SELECT COUNT(*) as total_sessions,
@@ -566,7 +566,7 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/:proposal_id/review
   const status = approved ? "approved" : "rejected";
 
   const rows = await sql`
-    UPDATE meta_proposals SET status = ${status}, review_note = ${note}, reviewed_at = ${Date.now() / 1000}
+    UPDATE meta_proposals SET status = ${status}, review_note = ${note}, reviewed_at = ${new Date().toISOString()}
     WHERE id = ${proposalId} AND agent_name = ${agentName}
     RETURNING id
   `.catch(() => []);
@@ -749,7 +749,7 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
   const targetChannel = String(body.target_channel || "staging");
 
   // ── 1. Gather telemetry signals ─────────────────────────────────
-  const since = Date.now() / 1000 - 7 * 86400; // last 7 days
+  const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString(); // last 7 days
   let signals: Record<string, unknown> = {};
   try {
     const [stats] = await sql`
@@ -793,7 +793,7 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
           INSERT INTO meta_proposals (id, agent_name, org_id, title, rationale, category, priority, modification_json, evidence_json, status, created_at)
           VALUES (${proposal.id}, ${agentName}, ${user.org_id}, ${proposal.title}, ${proposal.rationale},
                   ${proposal.category}, ${proposal.priority}, ${JSON.stringify(proposal.modification)},
-                  ${JSON.stringify(proposal.evidence)}, 'pending', ${Date.now() / 1000})
+                  ${JSON.stringify(proposal.evidence)}, 'pending', ${new Date().toISOString()})
           ON CONFLICT (id) DO UPDATE SET
             title = EXCLUDED.title,
             rationale = EXCLUDED.rationale,

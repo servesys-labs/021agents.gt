@@ -123,7 +123,7 @@ stripeRoutes.post("/webhook", async (c) => {
   const eventType = event.type || "";
   const data = event.data?.object || {};
   const sql = await getDb(c.env.HYPERDRIVE);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   if (eventType === "checkout.session.completed") {
     const orgId = data.metadata?.org_id || "";

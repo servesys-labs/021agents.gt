@@ -34,7 +34,7 @@ jobRoutes.post("/", requireScope("jobs:write"), async (c) => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const jobId = genId();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO job_queue (job_id, org_id, agent_name, task, idempotency_key, max_retries, priority, scheduled_at, status, created_at)

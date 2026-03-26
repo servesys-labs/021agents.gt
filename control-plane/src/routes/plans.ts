@@ -134,7 +134,7 @@ plansRoutes.post("/", async (c) => {
   };
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   let existing: Record<string, unknown> = {};
   try {

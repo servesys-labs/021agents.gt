@@ -46,7 +46,7 @@ evolveRoutes.post("/:agent_name/analyze", requireScope("evolve:write"), async (c
   if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
 
   const agentConfig = safeJsonParse(agentRows[0].config_json) || {};
-  const since = Date.now() / 1000 - days * 86400;
+  const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
 
   // Fetch sessions in the time window
   const sessions = await sql`
@@ -137,7 +137,7 @@ evolveRoutes.post("/:agent_name/analyze", requireScope("evolve:write"), async (c
   const proposals = generateProposals(report, agentConfig);
 
   // Store proposals in DB
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   for (const proposal of proposals) {
     await sql`
       INSERT INTO evolution_proposals (
@@ -233,7 +233,7 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
   const newConfig = deepMergeConfig(currentConfig, modification);
 
   // Update agent config
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     UPDATE agents SET config_json = ${JSON.stringify(newConfig)}
     WHERE name = ${agentName} AND org_id = ${orgId}
@@ -374,7 +374,7 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/approve", requireScope("e
   `;
   if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     UPDATE evolution_proposals
     SET status = 'approved', review_note = ${note}, reviewed_at = ${now}
@@ -410,7 +410,7 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/reject", requireScope("ev
   `;
   if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     UPDATE evolution_proposals
     SET status = 'rejected', review_note = ${note}, reviewed_at = ${now}

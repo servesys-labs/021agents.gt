@@ -16,8 +16,8 @@ export const pipelineRoutes = new Hono<R>();
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function nowEpoch(): number {
-  return Date.now() / 1000;
+function nowEpoch(): string {
+  return new Date().toISOString();
 }
 
 function shortId(): string {

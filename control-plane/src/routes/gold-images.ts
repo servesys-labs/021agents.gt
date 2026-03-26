@@ -88,7 +88,7 @@ goldImageRoutes.post("/", requireScope("gold_images:write"), async (c) => {
   const imageId = randomId();
   const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
   const hash = await configHashAsync(req.config);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO gold_images (
@@ -172,7 +172,7 @@ goldImageRoutes.post("/from-agent/:agent_name", requireScope("gold_images:write"
   const imageId = randomId();
   const configJson = JSON.stringify(config, Object.keys(config).sort());
   const hash = await configHashAsync(config);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const version = String(config.version ?? "1.0.0");
 
   await sql`
@@ -399,7 +399,7 @@ async function persistComplianceCheck(
   report: ReturnType<typeof detectDrift>,
 ): Promise<void> {
   try {
-    const now = Date.now() / 1000;
+    const now = new Date().toISOString();
     await sql`
       INSERT INTO compliance_checks (
         org_id, agent_name, image_id, image_name,
@@ -514,7 +514,7 @@ goldImageRoutes.put("/:image_id", requireScope("gold_images:write"), async (c) =
 
   const existing = existingRows[0] as Record<string, unknown>;
   const req = parsed.data;
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const changedFields: string[] = [];
 
   // Apply updates
@@ -581,7 +581,7 @@ goldImageRoutes.post("/:image_id/approve", requireScope("gold_images:write"), as
     return c.json({ error: "Gold image not found" }, 404);
   }
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     UPDATE gold_images SET approved_by = ${user.user_id}, approved_at = ${now}
     WHERE image_id = ${imageId}
@@ -617,7 +617,7 @@ goldImageRoutes.delete("/:image_id", requireScope("gold_images:write"), async (c
   }
 
   const existing = existingRows[0] as Record<string, unknown>;
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   // Soft delete
   await sql`

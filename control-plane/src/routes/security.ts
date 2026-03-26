@@ -219,7 +219,7 @@ securityRoutes.post("/scan/:agent_name", requireScope("security:write"), async (
       INSERT INTO risk_profiles (agent_name, org_id, risk_score, risk_level, last_scan_id, findings_summary, updated_at)
       VALUES (
         ${agentName}, ${user.org_id}, ${result.risk_score}, ${result.risk_level},
-        ${result.scan_id}, ${JSON.stringify(result.findings_summary)}, ${Date.now() / 1000}
+        ${result.scan_id}, ${JSON.stringify(result.findings_summary)}, ${new Date().toISOString()}
       )
       ON CONFLICT (agent_name) DO UPDATE SET
         risk_score = EXCLUDED.risk_score,
@@ -290,8 +290,8 @@ securityRoutes.get("/scan/:scan_id/report", requireScope("security:read"), async
     maestro_layers: [],
     aivss_summary: { overall_score: Number(scan.risk_score ?? 0) },
     probe_results: [],
-    started_at: Number(scan.started_at ?? 0),
-    completed_at: Number(scan.completed_at ?? 0),
+    started_at: String(scan.started_at ?? new Date().toISOString()),
+    completed_at: String(scan.completed_at ?? new Date().toISOString()),
     findings_summary: {},
   };
 

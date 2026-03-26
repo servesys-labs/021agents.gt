@@ -27,7 +27,7 @@ export interface SecurityDb {
     failed: number;
     risk_score: number;
     risk_level: string;
-    started_at: number;
+    started_at: string;
   }): Promise<void>;
 
   completeSecurityScan(
@@ -82,8 +82,8 @@ export interface ScanResult {
   maestro_layers: Record<string, unknown>[];
   aivss_summary: Record<string, unknown>;
   probe_results: Record<string, unknown>[];
-  started_at: number;
-  completed_at: number;
+  started_at: string;
+  completed_at: string;
 }
 
 /** Active scan for tracking in-progress scans. */
@@ -92,7 +92,7 @@ interface ActiveScan {
   agent_name: string;
   scan_type: string;
   status: "running" | "completed" | "cancelled" | "failed";
-  started_at: number;
+  started_at: string;
   cancelled?: boolean;
 }
 
@@ -121,7 +121,7 @@ export class RedTeamRunner {
     scanType: string = "config",
   ): Promise<ScanResult> {
     const scanId = this.generateScanId();
-    const startedAt = Date.now() / 1000;
+    const startedAt = new Date().toISOString();
 
     // Track active scan
     const activeScan: ActiveScan = {
@@ -169,7 +169,7 @@ export class RedTeamRunner {
     probeTimeout: number = 30.0,
   ): Promise<ScanResult> {
     const scanId = this.generateScanId();
-    const startedAt = Date.now() / 1000;
+    const startedAt = new Date().toISOString();
 
     if (!runFn) {
       return {
@@ -192,7 +192,7 @@ export class RedTeamRunner {
           },
         ],
         started_at: startedAt,
-        completed_at: Date.now() / 1000,
+        completed_at: new Date().toISOString(),
       };
     }
 
@@ -342,7 +342,7 @@ export class RedTeamRunner {
     scanId: string,
     agentName: string,
     scanType: string,
-    startedAt: number,
+    startedAt: string,
     results: ProbeResult[],
     orgId: string,
   ): Promise<ScanResult> {
@@ -394,7 +394,7 @@ export class RedTeamRunner {
       aivss_summary: aivssAggregate,
       probe_results: resultDicts,
       started_at: startedAt,
-      completed_at: Date.now() / 1000,
+      completed_at: new Date().toISOString(),
     };
 
     // Persist to database
@@ -477,7 +477,7 @@ export class RedTeamRunner {
     scanId: string,
     agentName: string,
     scanType: string,
-    startedAt: number,
+    startedAt: string,
   ): ScanResult {
     return {
       scan_id: scanId,
@@ -494,7 +494,7 @@ export class RedTeamRunner {
       aivss_summary: { overall_score: 0, risk_level: "none" },
       probe_results: [],
       started_at: startedAt,
-      completed_at: Date.now() / 1000,
+      completed_at: new Date().toISOString(),
     };
   }
 
@@ -569,7 +569,7 @@ export class RedTeamRunner {
       aivss_summary: aivssAggregate,
       probe_results: allProbeResults,
       started_at: configResult.started_at,
-      completed_at: Date.now() / 1000,
+      completed_at: new Date().toISOString(),
     };
   }
 

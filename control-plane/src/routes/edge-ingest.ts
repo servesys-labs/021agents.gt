@@ -59,8 +59,8 @@ edgeIngestRoutes.post("/sessions", async (c) => {
   const actionCount = Number(payload.action_count || 0) || 0;
   const wallClockSeconds = Number(payload.wall_clock_seconds || 0) || 0;
   const costTotalUsd = Number(payload.cost_total_usd || 0) || 0;
-  const now = Number(payload.created_at || 0) || Date.now() / 1000;
-  const endedAt = Date.now() / 1000;
+  const now = payload.created_at ? new Date(Number(payload.created_at) * 1000).toISOString() : new Date().toISOString();
+  const endedAt = new Date().toISOString();
 
   const sql = await getDb(c.env.HYPERDRIVE);
 
@@ -123,8 +123,8 @@ edgeIngestRoutes.post("/turns", async (c) => {
   const executionMode = String(payload.execution_mode || "sequential");
   const planJson = String(payload.plan_json || "{}");
   const reflectionJson = String(payload.reflection_json || "{}");
-  const startedAt = Number(payload.started_at || 0) || Date.now() / 1000;
-  const endedAt = Number(payload.ended_at || 0) || Date.now() / 1000;
+  const startedAt = payload.started_at ? new Date(Number(payload.started_at) * 1000).toISOString() : new Date().toISOString();
+  const endedAt = payload.ended_at ? new Date(Number(payload.ended_at) * 1000).toISOString() : new Date().toISOString();
 
   await sql`
     INSERT INTO turns (

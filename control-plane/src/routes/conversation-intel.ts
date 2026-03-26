@@ -18,7 +18,7 @@ conversationIntelRoutes.get("/summary", requireScope("intelligence:read"), async
   const user = c.get("user");
   const agentName = c.req.query("agent_name") ?? "";
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -125,7 +125,7 @@ conversationIntelRoutes.get("/analytics", requireScope("intelligence:read"), asy
   const agentName = c.req.query("agent_name") ?? "";
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
   const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -188,7 +188,7 @@ conversationIntelRoutes.post("/score/:session_id", requireScope("intelligence:wr
   );
 
   // Persist per-turn scores
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   for (const ts of result.turn_scores) {
     try {
       await sql`
@@ -284,7 +284,7 @@ conversationIntelRoutes.get("/trends", requireScope("intelligence:read"), async 
   const user = c.get("user");
   const agentName = c.req.query("agent_name") ?? "";
   const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Daily quality + sentiment averages
@@ -296,7 +296,7 @@ conversationIntelRoutes.get("/trends", requireScope("intelligence:read"), async 
   if (agentName) {
     dailyRows = await sql`
       SELECT
-        DATE(to_timestamp(created_at)) as day,
+        DATE(created_at) as day,
         AVG(quality_overall) as avg_quality,
         AVG(sentiment_score) as avg_sentiment,
         COUNT(*) as turn_count,
@@ -327,7 +327,7 @@ conversationIntelRoutes.get("/trends", requireScope("intelligence:read"), async 
   } else {
     dailyRows = await sql`
       SELECT
-        DATE(to_timestamp(created_at)) as day,
+        DATE(created_at) as day,
         AVG(quality_overall) as avg_quality,
         AVG(sentiment_score) as avg_sentiment,
         COUNT(*) as turn_count,

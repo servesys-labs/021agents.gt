@@ -80,10 +80,10 @@ retentionRoutes.post("/apply", requireScope("retention:write"), async (c) => {
   `;
 
   const results: Record<string, number> = {};
-  const now = Date.now() / 1000;
+  const nowMs = Date.now();
 
   // Explicit handler functions per table — no dynamic table names
-  const RETENTION_HANDLERS: Record<string, (sql: any, cutoff: number, orgId: string) => Promise<number>> = {
+  const RETENTION_HANDLERS: Record<string, (sql: any, cutoff: string, orgId: string) => Promise<number>> = {
     sessions: async (sql, cutoff, orgId) => {
       const r = orgId
         ? await sql`DELETE FROM sessions WHERE created_at < ${cutoff} AND org_id = ${orgId}`
@@ -124,7 +124,7 @@ retentionRoutes.post("/apply", requireScope("retention:write"), async (c) => {
 
   for (const policy of policies) {
     const p = policy as any;
-    const cutoff = now - p.retention_days * 86400;
+    const cutoff = new Date(nowMs - p.retention_days * 86400 * 1000).toISOString();
     const table = p.resource_type as string;
 
     // Only delete from known tables
@@ -144,7 +144,7 @@ retentionRoutes.post("/apply", requireScope("retention:write"), async (c) => {
   try {
     await sql`
       INSERT INTO audit_log (org_id, user_id, action, resource_type, changes_json, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'retention.applied', 'retention', ${JSON.stringify(results)}, ${now})
+      VALUES (${user.org_id}, ${user.user_id}, 'retention.applied', 'retention', ${JSON.stringify(results)}, ${new Date().toISOString()})
     `;
   } catch {}
 

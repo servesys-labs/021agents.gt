@@ -56,7 +56,7 @@ policyRoutes.post("/", requireScope("policies:write"), async (c) => {
   `;
 
   // Audit
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   try {
     await sql`
       INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)

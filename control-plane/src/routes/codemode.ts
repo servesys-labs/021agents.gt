@@ -98,7 +98,7 @@ codemodeRoutes.post("/snippets", requireScope("codemode:write"), async (c) => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const req = parsed.data;
   const id = crypto.randomUUID().slice(0, 12);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO codemode_snippets (
@@ -193,7 +193,7 @@ codemodeRoutes.put("/snippets/:id", requireScope("codemode:write"), async (c) =>
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const id = c.req.param("id");
   const req = parsed.data;
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   // Check ownership
   const existing = await sql`
@@ -433,7 +433,7 @@ codemodeRoutes.post("/snippets/:id/clone", requireScope("codemode:write"), async
 
   const src = source[0] as Record<string, unknown>;
   const newId = crypto.randomUUID().slice(0, 12);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const newName = String(body.name || `${src.name}-copy`);
 
   await sql`

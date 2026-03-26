@@ -96,7 +96,7 @@ projectRoutes.post("/", requireScope("projects:write"), async (c) => {
       });
 
       const agentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      const now = Date.now() / 1000;
+      const now = new Date().toISOString();
       await sql`
         INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, version, is_active, created_by, created_at, updated_at)
         VALUES (
@@ -118,7 +118,7 @@ projectRoutes.post("/", requireScope("projects:write"), async (c) => {
   try {
     await sql`
       INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'project.create', 'project', ${projectId}, ${JSON.stringify({ name })}, ${Date.now() / 1000})
+      VALUES (${user.org_id}, ${user.user_id}, 'project.create', 'project', ${projectId}, ${JSON.stringify({ name })}, ${new Date().toISOString()})
     `;
   } catch {}
 
@@ -250,7 +250,7 @@ projectRoutes.put("/:project_id/canvas-layout", requireScope("projects:write"), 
     return c.json({ error: e.message }, e.status || 400);
   }
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const layout = { nodes, edges, updated_at: now };
 
   if (assignments === undefined || assignments === null) {

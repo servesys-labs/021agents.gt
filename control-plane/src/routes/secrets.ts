@@ -78,7 +78,7 @@ secretRoutes.post("/", requireScope("secrets:write"), async (c) => {
   }
 
   const encrypted = await fernetEncrypt(value, getKeySeed(c.env));
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     INSERT INTO secrets (org_id, project_id, env, name, value_encrypted, created_by, created_at, updated_at)
@@ -114,7 +114,7 @@ secretRoutes.post("/:name/rotate", requireScope("secrets:write"), async (c) => {
   if (!newValue) return c.json({ error: "new_value is required" }, 400);
 
   const encrypted = await fernetEncrypt(newValue, getKeySeed(c.env));
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`

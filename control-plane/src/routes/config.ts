@@ -34,7 +34,7 @@ configRoutes.put("/yaml", async (c) => {
   const updates = body.updates || body;
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   // Get existing config
   let existing: any = {};

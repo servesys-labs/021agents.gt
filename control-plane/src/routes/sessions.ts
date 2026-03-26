@@ -15,7 +15,7 @@ sessionRoutes.get("/runtime/insights", requireScope("sessions:read"), async (c) 
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(90, Number(c.req.query("since_days")) || 30));
   const limitSessions = Math.max(10, Math.min(200, Number(c.req.query("limit_sessions")) || 200));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Aggregate runtime insights
@@ -41,7 +41,7 @@ sessionRoutes.get("/stats/summary", requireScope("sessions:read"), async (c) => 
   const user = c.get("user");
   const agentName = c.req.query("agent_name") || "";
   const sinceDays = Math.max(1, Math.min(90, Number(c.req.query("since_days")) || 30));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let summaryRows;
@@ -269,7 +269,7 @@ sessionRoutes.post("/:session_id/feedback", requireScope("sessions:write"), asyn
   const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
   if (check.length === 0) return c.json({ error: "Session not found" }, 404);
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     INSERT INTO session_feedback (session_id, rating, comment, tags, created_at)
     VALUES (${sessionId}, ${rating}, ${comment}, ${tags}, ${now})
@@ -297,7 +297,7 @@ sessionRoutes.get("/:session_id/feedback", requireScope("sessions:read"), async 
 sessionRoutes.delete("/", requireScope("sessions:write"), async (c) => {
   const user = c.get("user");
   const beforeDays = Math.max(7, Number(c.req.query("before_days")) || 90);
-  const cutoff = Date.now() / 1000 - beforeDays * 86400;
+  const cutoff = new Date(Date.now() - beforeDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Delete turns for the sessions we're about to delete (before deleting sessions)

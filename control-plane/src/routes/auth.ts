@@ -177,7 +177,7 @@ authRoutes.post("/signup", async (c) => {
     console.error("[auth/signup] Password hashing failed:", err);
     return c.json({ error: "Password processing failed", detail: err.message }, 500);
   }
-  const nowEpoch = Date.now() / 1000;
+  const nowEpoch = new Date().toISOString();
 
   // Create user
   try {
@@ -378,7 +378,7 @@ authRoutes.post("/cf-access/exchange", async (c) => {
   }
 
   const sql = await getDb(c.env.HYPERDRIVE);
-  const nowEpoch = Date.now() / 1000;
+  const nowEpoch = new Date().toISOString();
 
   // Provision user from CF Access identity (upsert by email)
   const cfAccessUserId = `cfaccess:${cfClaims.sub}`;
@@ -555,7 +555,7 @@ authRoutes.post("/password", async (c) => {
   }
 
   const newHash = await hashPassword(new_password);
-  const nowEpoch = Date.now() / 1000;
+  const nowEpoch = new Date().toISOString();
 
   await sql`
     UPDATE users SET password_hash = ${newHash}, updated_at = ${nowEpoch}

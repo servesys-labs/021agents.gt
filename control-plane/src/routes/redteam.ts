@@ -163,7 +163,7 @@ redteamRoutes.post("/scan", requireScope("security:write"), async (c) => {
             total: result.findings.length,
             by_severity: countBy(result.findings, "severity"),
             by_category: countBy(result.findings, "category"),
-          })}, ${Date.now() / 1000}
+          })}, ${new Date().toISOString()}
         )
         ON CONFLICT (agent_name) DO UPDATE SET
           risk_score = EXCLUDED.risk_score,
@@ -306,8 +306,8 @@ redteamRoutes.get("/scans/:id", requireScope("security:read"), async (c) => {
       risk_level: String(scan.risk_level ?? "unknown"),
     },
     probe_results: [],
-    started_at: Number(scan.started_at ?? 0),
-    completed_at: Number(scan.completed_at ?? 0),
+    started_at: String(scan.started_at ?? new Date().toISOString()),
+    completed_at: String(scan.completed_at ?? new Date().toISOString()),
   };
 
   return c.json(result);

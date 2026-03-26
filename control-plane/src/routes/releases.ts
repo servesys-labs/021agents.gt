@@ -52,7 +52,7 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
     version = source[0].version || "0.1.0";
   }
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   // Org-scoped upsert only: never use ON CONFLICT(agent_name, channel) when the unique
   // index may omit org_id (would cross-tenant overwrite). Update this org's row, then insert if missing.
   const updated = await sql`

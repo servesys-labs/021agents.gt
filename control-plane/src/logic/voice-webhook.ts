@@ -46,8 +46,8 @@ function timingSafeEqualHex(a: string, b: string): boolean {
   return x === 0;
 }
 
-function nowSec(): number {
-  return Date.now() / 1000;
+function nowSec(): string {
+  return new Date().toISOString();
 }
 
 function randomId(): string {

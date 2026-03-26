@@ -15,7 +15,7 @@ export const billingRoutes = new Hono<R>();
 billingRoutes.get("/usage", requireScope("billing:read"), async (c) => {
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Total summary
@@ -81,7 +81,7 @@ billingRoutes.get("/usage", requireScope("billing:read"), async (c) => {
 billingRoutes.get("/usage/daily", requireScope("billing:read"), async (c) => {
   const user = c.get("user");
   const days = Math.max(1, Math.min(365, Number(c.req.query("days")) || 30));
-  const since = Date.now() / 1000 - days * 86400;
+  const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

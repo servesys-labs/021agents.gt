@@ -84,7 +84,7 @@ connectorRoutes.post("/tools/call", requireScope("integrations:write"), async (c
 
     // Audit
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-    const now = Date.now() / 1000;
+    const now = new Date().toISOString();
     try {
       await sql`
         INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
@@ -102,7 +102,7 @@ connectorRoutes.post("/tools/call", requireScope("integrations:write"), async (c
 connectorRoutes.get("/usage", requireScope("integrations:read"), async (c) => {
   const user = c.get("user");
   const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
-  const since = Date.now() / 1000 - sinceDays * 86400;
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -165,7 +165,7 @@ connectorRoutes.post("/tokens", requireScope("integrations:write"), async (c) =>
 
   // Audit
   try {
-    const nowEpoch = Date.now() / 1000;
+    const nowEpoch = new Date().toISOString();
     await sql`
       INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
       VALUES (${user.org_id}, ${user.user_id}, 'connector.token_stored', 'connector', ${connectorName},

@@ -92,7 +92,7 @@ autoresearchRoutes.post("/runs", requireScope("autoresearch:write"), async (c) =
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const runId = crypto.randomUUID();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   try {
     await sql`
@@ -119,7 +119,7 @@ autoresearchRoutes.put("/runs/:run_id", requireScope("autoresearch:write"), asyn
   const runId = c.req.param("run_id");
   const body = await c.req.json();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   await sql`
     UPDATE autoresearch_runs SET
@@ -153,7 +153,7 @@ autoresearchRoutes.post("/runs/:run_id/experiments", requireScope("autoresearch:
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const experimentId = crypto.randomUUID();
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   try {
     await sql`

@@ -210,7 +210,7 @@ issueRoutes.post("/", requireScope("issues:write"), async (c) => {
     description: req.description,
   });
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     INSERT INTO issues (
       issue_id, org_id, agent_name, title, description,
@@ -266,7 +266,7 @@ issueRoutes.post("/detect/:session_id", requireScope("issues:write"), async (c) 
   );
 
   // Persist detected issues and generate fixes
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   for (const issue of issues) {
     const fix = suggestFix(issue as unknown as Record<string, unknown>);
     (issue as any).suggested_fix = fix;
@@ -330,7 +330,7 @@ issueRoutes.put("/:issue_id", requireScope("issues:write"), async (c) => {
   }
 
   const req = parsed.data;
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
 
   // Build update -- apply each field if provided
   if (req.status !== undefined && req.status === "resolved") {
@@ -373,7 +373,7 @@ issueRoutes.post("/:issue_id/resolve", requireScope("issues:write"), async (c) =
     return c.json({ error: "Issue not found" }, 404);
   }
 
-  const now = Date.now() / 1000;
+  const now = new Date().toISOString();
   await sql`
     UPDATE issues SET
       status = 'resolved',
@@ -493,7 +493,7 @@ issueRoutes.post("/:issue_id/auto-fix", requireScope("issues:write"), async (c) 
 
   // Audit the config change
   try {
-    const now = Date.now() / 1000;
+    const now = new Date().toISOString();
     await sql`
       INSERT INTO config_audit (
         org_id, agent_name, action, field_changed, change_reason, changed_by, created_at
