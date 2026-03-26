@@ -6,7 +6,7 @@
   "budgetLimitUsd": 10.0,
   "blockedTools": [],
   "requireConfirmationForDestructive": true,
-  "provider": "anthropic",
-  "model": "claude-sonnet-4-6-20250627",
+  "provider": "openrouter",
+  "model": "anthropic/claude-sonnet-4.6",
   "spentUsd": 0
 }

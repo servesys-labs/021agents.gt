@@ -18,8 +18,15 @@ import {
   getAgentByName,
   type StreamingResponse,
 } from "agents";
-import { McpAgent } from "agents/mcp";
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import {
+  edgeRun, edgeBatch, edgeResume, computeLatencyBreakdown, loadRuntimeEventsPage, replayOtelEventsAtCursor, buildRuntimeRunTree,
+  writeEvalRun, writeEvalTrial, listEvalRuns, getEvalRun, listEvalTrialsByRun,
+  executeBoundedDagDeclarativeRun,
+  executeLinearDeclarativeRun,
+  type RunRequest, type RuntimeEnv, type BatchRequest, type GraphSpec,
+} from "./runtime";
+import { streamRun } from "./runtime/stream";
 
 // Re-export Sandbox so Cloudflare can discover the Durable Object class
 export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
@@ -28,36 +35,17 @@ export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
 // Environment bindings
 // ---------------------------------------------------------------------------
 
-export interface Env {
-  AGENTOS_AGENT: AgentNamespace<AgentOSAgent>;
-  AGENTOS_MCP: AgentNamespace<AgentOSMcpServer>;
-  AI: Ai;
-  ASSETS: Fetcher;
-  VECTORIZE: VectorizeIndex;
-  LOADER: any; // Dynamic Worker Loader — V8 isolate sandbox (JS/TS)
-  SANDBOX: DurableObjectNamespace; // Sandbox SDK — full Linux container
-  TELEMETRY_QUEUE: Queue; // Queue — guaranteed delivery telemetry pipeline
-  HYPERDRIVE: Hyperdrive; // Hyperdrive — accelerated Supabase Postgres
-  STORAGE: R2Bucket; // R2 — org/project-scoped file storage
-  BROWSER: Fetcher; // Browser Rendering — headless Puppeteer on edge
-  DISPATCHER?: any; // Dispatch Namespace — multi-tenant agent isolation
-  ANTHROPIC_API_KEY?: string;
-  OPENAI_API_KEY?: string;
-  GMI_API_KEY?: string;
-  OPENROUTER_API_KEY?: string;
-  E2B_API_KEY?: string;
-  AUTH_JWT_SECRET?: string;
-  BACKEND_INGEST_URL?: string;
-  BACKEND_INGEST_TOKEN?: string;
-  EDGE_INGEST_TOKEN?: string;  // alias for BACKEND_INGEST_TOKEN (backend→worker direction)
-  BACKEND_PROXY_ONLY?: string;
-  WORKER_PROXY_MODE?: string;  // "true" → run() delegates to backend, worker becomes thin proxy
+export interface Env extends Cloudflare.Env {
+  OPENROUTER_API_KEY?: string;   // OpenRouter key (used via AI Gateway)
+  AUTH_JWT_SECRET?: string;      // End-user JWT auth (portal, API clients)
+  SERVICE_TOKEN?: string;        // Service-to-service auth (dispatch workers → main worker)
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
+  AI_GATEWAY_ID?: string;        // CF AI Gateway slug (e.g. "one-shots")
+  AI_GATEWAY_TOKEN?: string;     // Dedicated gateway token (least-privilege)
+  BRAVE_SEARCH_KEY?: string;     // Brave Search API key
   TELEGRAM_BOT_TOKEN?: string;
-  DEFAULT_PLAN?: string;
-  DEFAULT_PROVIDER: string;
-  DEFAULT_MODEL: string;
+  TELEGRAM_AGENT_NAME?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +131,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   initialState: AgentState = {
     config: {
       plan: "standard",
-      provider: "gmi",
-      model: "deepseek-ai/DeepSeek-V3.2",
+      provider: "openrouter",
+      model: "deepseek/deepseek-chat-v3-0324",
       orgId: "",
       projectId: "",
       maxTurns: 50,
@@ -162,123 +150,109 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   };
 
   async onStart() {
-    // Initialize SQL table for telemetry outbox
-    this.sql`CREATE TABLE IF NOT EXISTS ingest_outbox (
+    // DO SQLite: fast local conversation cache
+    this.sql`CREATE TABLE IF NOT EXISTS conversation_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      endpoint TEXT NOT NULL,
-      payload_json TEXT NOT NULL DEFAULT '{}',
-      attempts INTEGER DEFAULT 0,
-      next_retry_at REAL DEFAULT 0,
-      last_error TEXT DEFAULT '',
-      created_at TEXT DEFAULT (datetime('now')),
-      updated_at TEXT DEFAULT (datetime('now'))
+      role TEXT NOT NULL,
+      content TEXT NOT NULL,
+      channel TEXT NOT NULL DEFAULT '',
+      created_at REAL NOT NULL DEFAULT (unixepoch('now'))
     )`;
+
+    // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
+    const localCount = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
+    if ((localCount[0]?.cnt || 0) === 0 && this.env.HYPERDRIVE) {
+      try {
+        const { loadConversationHistory } = await import("./runtime/db");
+        const messages = await loadConversationHistory(this.env.HYPERDRIVE, this.name, 24);
+        for (const msg of messages) {
+          this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
+            VALUES (${msg.role}, ${msg.content.slice(0, 8000)}, ${msg.channel}, ${msg.created_at || Date.now() / 1000})`;
+        }
+      } catch {}
+    }
   }
 
   // ── Callable Methods (RPC from client) ──────────────────────────
 
-  private _isProxyMode(): boolean {
-    const raw = String(this.env.WORKER_PROXY_MODE ?? "").trim().toLowerCase();
-    return raw === "true" || raw === "1" || raw === "on" || raw === "yes";
+  @callable()
+  async run(input: string): Promise<TurnResult[]> {
+    // Always execute on edge runtime.
+    return this._runAtEdge(input);
   }
 
   /**
-   * Proxy run() to backend /runtime-proxy/agent/run.
-   * The backend runs the full harness (tools, memory, governance, compliance).
-   * The worker just relays the request and formats the response.
+   * Run the agent entirely at the edge using CF bindings.
+   * No backend hop — LLM, tools, DB all execute here.
+   * Errors surface directly; no silent fallback to backend.
    */
-  private async _runViaBackend(input: string): Promise<TurnResult[]> {
+  private async _runAtEdge(input: string): Promise<TurnResult[]> {
     const config = this.state.config;
-    const base = this._ingestBase();
     const started = Date.now();
 
-    // Timeout: budget-aware (5 min default, up to 10 min for large budgets)
-    const timeoutMs = Math.min((config.maxTurns || 50) * 15_000, 600_000);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const runtimeEnv: RuntimeEnv = {
+      AI: this.env.AI,
+      HYPERDRIVE: this.env.HYPERDRIVE,
+      VECTORIZE: this.env.VECTORIZE,
+      STORAGE: this.env.STORAGE,
+      SANDBOX: this.env.SANDBOX,
+      LOADER: this.env.LOADER,
+      TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
+      BROWSER: this.env.BROWSER,
+      AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+      AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+      BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+      CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+      CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+      DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
+      DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "deepseek/deepseek-chat-v3-0324",
+    };
 
-    let resp: Response;
-    try {
-      resp = await this._safeFetch(`${base}/api/v1/runtime-proxy/agent/run`, {
-        method: "POST",
-        headers: this._ingestHeaders(),
-        signal: controller.signal,
-        body: JSON.stringify({
-          agent_name: config.agentName || "agentos",
-          task: input,
-          org_id: config.orgId || "",
-          project_id: config.projectId || "",
-          channel: "worker",
-          channel_user_id: this.name || "",
-        }),
-      });
-    } catch (err: any) {
-      clearTimeout(timer);
-      const isTimeout = err.name === "AbortError";
-      return [{
-        turn: 1, content: "", toolResults: [], done: true,
-        error: isTimeout ? `Backend timeout after ${timeoutMs}ms` : `Backend fetch error: ${err.message}`,
-        costUsd: 0, model: config.model,
-      }];
-    }
-    clearTimeout(timer);
+    const request: RunRequest = {
+      agent_name: config.agentName || "agentos",
+      task: input,
+      org_id: config.orgId || "",
+      project_id: config.projectId || "",
+    };
 
-    const data = await resp.json() as any;
+    const result = await edgeRun(
+      runtimeEnv,
+      this.env.HYPERDRIVE,
+      request,
+      this.env.TELEMETRY_QUEUE,
+    );
+
     const elapsed = Date.now() - started;
 
-    if (!resp.ok) {
-      return [{
-        turn: 1,
-        content: "",
-        toolResults: [],
-        done: true,
-        error: `Backend error (${resp.status}): ${data.detail || "unknown"}`,
-        costUsd: 0,
-        model: config.model,
-      }];
-    }
-
-    // Record session locally for observability
-    const sessionId = data.session_id || crypto.randomUUID().slice(0, 16);
+    // Record locally for DO observability
     this._recordEvent({
-      sessionId,
+      sessionId: result.session_id,
       turn: 0,
       eventType: "session.complete",
-      action: "run_proxy",
+      action: "run_edge",
       plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
-      status: data.success ? "ok" : "error",
+      status: result.success ? "ok" : "error",
       latencyMs: elapsed,
-      costUsd: data.cost_usd || 0,
-      details: { turns: data.turns, tool_calls: data.tool_calls, source: "backend_proxy" },
+      costUsd: result.cost_usd,
+      details: {
+        turns: result.turns,
+        tool_calls: result.tool_calls,
+        source: "edge_runtime",
+        stop_reason: result.stop_reason,
+      },
     });
 
+    // Session data is written to Supabase directly by edgeRun via Hyperdrive.
+    // No backend mirroring — Supabase is the single source of truth.
+
     return [{
-      turn: data.turns || 1,
-      content: data.output || "",
+      turn: result.turns,
+      content: result.output,
       toolResults: [],
       done: true,
-      error: data.success ? undefined : "Backend reported failure",
-      costUsd: data.cost_usd || 0,
-      model: config.model,
-    }];
-  }
-
-  @callable()
-  async run(input: string): Promise<TurnResult[]> {
-    // Proxy mode: delegate entire run to backend
-    if (this._isProxyMode()) {
-      return this._runViaBackend(input);
-    }
-
-    // Local mode disabled — proxy mode is required in production
-    return [{
-      turn: 1,
-      content: "",
-      toolResults: [],
-      done: true,
-      error: "Local mode disabled",
-      costUsd: 0,
-      model: "",
+      error: result.success ? undefined : "Edge runtime reported failure",
+      costUsd: result.cost_usd,
+      model: runtimeEnv.DEFAULT_MODEL,
     }];
   }
 
@@ -297,20 +271,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const key = k as keyof AgentConfig;
       return JSON.stringify(before[key]) !== JSON.stringify(updated[key]);
     });
-    for (const key of changedKeys) {
-      const oldValue = JSON.stringify((before as Record<string, unknown>)[key] ?? "");
-      const newValue = JSON.stringify((updated as Record<string, unknown>)[key] ?? "");
-      void this._sendIngest("/api/v1/edge-ingest/config/audit", {
-        org_id: updated.orgId || "",
-        agent_name: updated.agentName || "agentos",
-        action: "config.update",
-        field_changed: key,
-        old_value: oldValue,
-        new_value: newValue,
-        change_reason: "worker_config_update",
-        changed_by: "worker",
-        created_at: Date.now() / 1000,
-      });
+    // Audit config changes via telemetry queue → Supabase
+    if (changedKeys.length > 0 && this.env.TELEMETRY_QUEUE) {
+      for (const key of changedKeys) {
+        this.env.TELEMETRY_QUEUE.send({
+          type: "event",
+          payload: {
+            event_type: "config.update",
+            agent_name: updated.agentName || "agentos",
+            field_changed: key,
+            old_value: JSON.stringify(before[key as keyof AgentConfig] ?? ""),
+            new_value: JSON.stringify(updated[key as keyof AgentConfig] ?? ""),
+            changed_by: "worker",
+            created_at: Date.now() / 1000,
+          },
+        }).catch(() => {});
+      }
     }
     return updated;
   }
@@ -344,34 +320,246 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     };
   }
 
+  private _loadConversationHistory(limit: number = 24): Array<{
+    role: "user" | "assistant";
+    content: string;
+  }> {
+    const rows = this.sql<{ role: string; content: string }>`
+      SELECT role, content
+      FROM conversation_messages
+      WHERE role IN ('user', 'assistant')
+      ORDER BY id DESC
+      LIMIT ${Math.max(1, Math.min(limit, 100))}
+    `;
+    return rows
+      .reverse()
+      .map((r) => {
+        const role: "user" | "assistant" = r.role === "assistant" ? "assistant" : "user";
+        return {
+          role,
+          content: String(r.content || ""),
+        };
+      })
+      .filter((r) => r.content.trim().length > 0);
+  }
+
+  private _appendConversationMessage(
+    role: "user" | "assistant",
+    content: string,
+    channel: string,
+  ): void {
+    const clean = String(content || "").trim();
+    if (!clean) return;
+    // 1. DO SQLite (fast, local)
+    this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
+      VALUES (${role}, ${clean.slice(0, 8000)}, ${channel || ""}, ${Date.now() / 1000})`;
+    // 2. Supabase (durable, survives deploys) — fire-and-forget
+    if (this.env.HYPERDRIVE) {
+      import("./runtime/db").then(({ writeConversationMessage }) =>
+        writeConversationMessage(this.env.HYPERDRIVE, {
+          agent_name: this.state.config.agentName || this.name,
+          instance_id: this.name,
+          role,
+          content: clean.slice(0, 8000),
+          channel: channel || "",
+        }),
+      ).catch(() => {});
+    }
+  }
+
   private async _isAuthorized(request: Request): Promise<boolean> {
-    const secret = this.env.AUTH_JWT_SECRET;
-    if (!secret) return true;
+    const url = new URL(request.url);
+    if (url.hostname === "internal") return true;
+    const serviceToken = String(this.env.SERVICE_TOKEN || "").trim();
+    const secret = String(this.env.AUTH_JWT_SECRET || "").trim();
+    if (!serviceToken && !secret) return true;
     const auth = request.headers.get("Authorization") || "";
-    if (!auth.startsWith("Bearer ")) return false;
-    const token = auth.slice(7).trim();
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!token) return false;
+    if (serviceToken && token === serviceToken) return true;
+    if (!secret) return false;
     return verifyHs256Jwt(token, secret);
   }
 
-  // ── WebSocket (real-time streaming) ─────────────────────────────
+  // ── WebSocket (real-time token streaming) ───────────────────────
+  //
+  // Protocol:
+  //   Client → { type: "run", input: "...", agent_name?: "...", org_id?: "...", project_id?: "..." }
+  //   Server → { type: "token", content: "..." }         — LLM token chunk (real-time)
+  //   Server → { type: "tool_call", name, tool_call_id }  — tool execution started
+  //   Server → { type: "tool_result", name, result }      — tool execution complete
+  //   Server → { type: "turn_start", turn, model }        — new turn
+  //   Server → { type: "turn_end", turn, cost_usd, done } — turn complete
+  //   Server → { type: "done", output, turns, cost_usd }  — run complete
+  //   Server → { type: "error", message }                 — error
 
   async onConnect(connection: Connection) {
-    connection.send(JSON.stringify({ type: "connected", agent: this.state.config.agentName }));
+    connection.send(JSON.stringify({
+      type: "connected",
+      agent: this.state.config.agentName,
+      session_affinity: true,
+    }));
   }
 
   async onMessage(connection: Connection, message: string | ArrayBuffer) {
     const data = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 
     if (data.type === "run") {
-      const results = await this.run(data.input);
-      for (const result of results) {
-        connection.send(JSON.stringify({ type: "turn", ...result }));
-      }
-      connection.send(JSON.stringify({ type: "done" }));
+      const config = this.state.config;
+      const runtimeEnv: RuntimeEnv = {
+        AI: this.env.AI,
+        HYPERDRIVE: this.env.HYPERDRIVE,
+        VECTORIZE: this.env.VECTORIZE,
+        STORAGE: this.env.STORAGE,
+        SANDBOX: this.env.SANDBOX,
+        LOADER: this.env.LOADER,
+        TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
+        BROWSER: this.env.BROWSER,
+        OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
+        AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+        AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+      BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
+        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+      };
+
+      const inputText = String(data.input || "");
+      const history = this._loadConversationHistory(24);
+      let finalOutput = "";
+      const sendAndCapture = (msg: string) => {
+        connection.send(msg);
+        try {
+          const parsed = JSON.parse(msg) as { type?: string; output?: string };
+          if (parsed.type === "done" && typeof parsed.output === "string") {
+            finalOutput = parsed.output;
+          }
+        } catch {
+          // ignore malformed ws payloads
+        }
+      };
+
+      // Stream the run — tokens flow to client in real-time
+      await streamRun(
+        runtimeEnv,
+        this.env.HYPERDRIVE,
+        inputText,
+        data.agent_name || config.agentName || "agentos",
+        sendAndCapture,
+        {
+          org_id: data.org_id || config.orgId || "",
+          project_id: data.project_id || config.projectId || "",
+          channel: data.channel || "websocket",
+          history_messages: history,
+        },
+      );
+
+      this._appendConversationMessage("user", inputText, data.channel || "websocket");
+      this._appendConversationMessage("assistant", finalOutput, data.channel || "websocket");
     }
   }
 
-  // ── Telemetry & Ingest ─────────────────────────────────────────
+  // ── Internal HTTP (async run from REST invoke) ──────────────────
+  // Called by the Worker fetch handler via ctx.waitUntil(agent.fetch(...))
+  // Runs the agent in the DO context (no timeout) and writes result to Supabase.
+
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/run" && request.method === "POST") {
+      if (!(await this._isAuthorized(request))) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      const data = await request.json() as any;
+      const config = this.state.config;
+      const inputText = String(data.input || "");
+      const history = this._loadConversationHistory(24);
+      let finalOutput = "";
+      let finalSessionId = "";
+      let finalTraceId = "";
+      let finalTurns = 0;
+      let finalToolCalls = 0;
+      let finalCostUsd = 0;
+      let finalLatencyMs = 0;
+      const runtimeEnv: RuntimeEnv = {
+        AI: this.env.AI,
+        HYPERDRIVE: this.env.HYPERDRIVE,
+        VECTORIZE: this.env.VECTORIZE,
+        STORAGE: this.env.STORAGE,
+        SANDBOX: this.env.SANDBOX,
+        LOADER: this.env.LOADER,
+        TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
+        BROWSER: this.env.BROWSER,
+        AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+        AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+      BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
+        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+      };
+
+      // Run in DO context (no Worker timeout) — result written to Supabase
+      await streamRun(
+        runtimeEnv,
+        this.env.HYPERDRIVE,
+        inputText,
+        data.agent_name || config.agentName || "agentos",
+        (msg) => {
+          try {
+            const parsed = JSON.parse(msg) as {
+              type?: string;
+              output?: string;
+              session_id?: string;
+              trace_id?: string;
+              turns?: number;
+              tool_calls?: number;
+              cost_usd?: number;
+              latency_ms?: number;
+            };
+            if (parsed.type === "done") {
+              if (typeof parsed.output === "string") finalOutput = parsed.output;
+              if (typeof parsed.session_id === "string") finalSessionId = parsed.session_id;
+              if (typeof parsed.trace_id === "string") finalTraceId = parsed.trace_id;
+              finalTurns = Number(parsed.turns) || 0;
+              finalToolCalls = Number(parsed.tool_calls) || 0;
+              finalCostUsd = Number(parsed.cost_usd) || 0;
+              finalLatencyMs = Number(parsed.latency_ms) || 0;
+            }
+          } catch {
+            // ignore malformed payload
+          }
+        },
+        {
+          org_id: data.org_id || config.orgId || "",
+          project_id: data.project_id || config.projectId || "",
+          channel: data.channel || "async_rest",
+          history_messages: history,
+        },
+      );
+
+      this._appendConversationMessage("user", inputText, data.channel || "async_rest");
+      this._appendConversationMessage("assistant", finalOutput, data.channel || "async_rest");
+
+      return Response.json({
+        status: "completed",
+        success: true,
+        output: finalOutput,
+        session_id: finalSessionId,
+        trace_id: finalTraceId,
+        turns: finalTurns,
+        tool_calls: finalToolCalls,
+        cost_usd: finalCostUsd,
+        latency_ms: finalLatencyMs,
+      });
+    }
+    return new Response("Not found", { status: 404 });
+  }
+
+  // ── Telemetry ────────────────────────────────────────────────────
+  // Events are written to DO-local SQLite for real-time queries,
+  // and queued to TELEMETRY_QUEUE → Supabase for durable storage.
+  // No backend HTTP calls — Supabase is the single source of truth.
 
   private _recordEvent(input: {
     sessionId: string;
@@ -403,6 +591,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const outputTokens = input.outputTokens || 0;
     const costUsd = input.costUsd || 0;
     const detailsJson = JSON.stringify(input.details || {});
+
+    // 1. DO-local SQLite (instant, queryable via RPC)
     this.sql`INSERT INTO otel_events (
       session_id, turn, event_type, action, plan, tier, provider, model, tool_name, status, latency_ms,
       input_tokens, output_tokens, cost_usd, details_json
@@ -411,165 +601,19 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       ${inputTokens}, ${outputTokens}, ${costUsd}, ${detailsJson}
     )`;
 
-    // Best-effort mirror of event telemetry to backend control plane.
-    void this._sendIngest(
-      "/api/v1/edge-ingest/events",
-      {
-        events: [{
-          session_id: input.sessionId,
-          turn,
-          event_type: input.eventType,
-          action,
-          plan,
-          tier,
-          provider,
-          model,
-          tool_name: toolName,
-          status,
-          latency_ms: latencyMs,
-          input_tokens: inputTokens,
-          output_tokens: outputTokens,
-          cost_usd: costUsd,
-          details_json: detailsJson,
-          created_at: Date.now() / 1000,
-        }],
-      },
-    );
-  }
-
-  private _ingestHeaders(): Record<string, string> {
-    const token = this.env.BACKEND_INGEST_TOKEN || "";
-    if (!token) return { "Content-Type": "application/json" };
-    return {
-      "Content-Type": "application/json",
-      "X-Edge-Token": token,
-      "Authorization": `Bearer ${token}`,
-    };
-  }
-
-  private _ingestBase(): string {
-    return (this.env.BACKEND_INGEST_URL || "").trim().replace(/\/+$/, "");
-  }
-
-  private async _safeFetch(input: string, init?: RequestInit): Promise<Response> {
-    return fetch(input, init);
-  }
-
-  private async _postIngest(endpoint: string, payload: Record<string, unknown>): Promise<void> {
-    const base = this._ingestBase();
-    if (!base || !this.env.BACKEND_INGEST_TOKEN) {
-      throw new Error("backend_ingest_not_configured");
-    }
-    const resp = await this._safeFetch(`${base}${endpoint}`, {
-      method: "POST",
-      headers: this._ingestHeaders(),
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      throw new Error(`backend_ingest_http_${resp.status}`);
-    }
-  }
-
-  private async _enqueueIngest(endpoint: string, payload: Record<string, unknown>, error: string): Promise<void> {
-    this.sql`INSERT INTO ingest_outbox (endpoint, payload_json, attempts, next_retry_at, last_error, updated_at)
-      VALUES (${endpoint}, ${JSON.stringify(payload)}, ${1}, ${Date.now() / 1000 + 5}, ${error.slice(0, 500)}, ${Date.now() / 1000})`;
-  }
-
-  private async _sendIngest(endpoint: string, payload: Record<string, unknown>): Promise<void> {
-    // Primary: Cloudflare Queue (guaranteed delivery, non-blocking)
+    // 2. Queue → Supabase (durable, async, non-blocking)
     if (this.env.TELEMETRY_QUEUE) {
-      const type = endpoint.includes("/session") ? "session"
-        : endpoint.includes("/turn") ? "turn"
-        : endpoint.includes("/episode") ? "episode"
-        : "event";
-      try {
-        await this.env.TELEMETRY_QUEUE.send({ type, payload });
-        return;
-      } catch {
-        // Queue send failed — fall through to HTTP backup
-      }
+      this.env.TELEMETRY_QUEUE.send({
+        type: "event",
+        payload: {
+          session_id: input.sessionId, turn, event_type: input.eventType,
+          action, plan, tier, provider, model, tool_name: toolName,
+          status, latency_ms: latencyMs, input_tokens: inputTokens,
+          output_tokens: outputTokens, cost_usd: costUsd,
+          details_json: detailsJson, created_at: Date.now() / 1000,
+        },
+      }).catch(() => {});
     }
-
-    // Fallback: HTTP POST to backend (legacy, fragile)
-    const base = this._ingestBase();
-    if (!base || !this.env.BACKEND_INGEST_TOKEN) return;
-    try {
-      await this._postIngest(endpoint, payload);
-    } catch (err: any) {
-      await this._enqueueIngest(endpoint, payload, String(err?.message || err));
-    }
-  }
-
-  private async _flushIngestOutbox(limit: number = 50): Promise<void> {
-    const base = this._ingestBase();
-    if (!base || !this.env.BACKEND_INGEST_TOKEN) return;
-    const now = Date.now() / 1000;
-    const rows = this.sql<{ id: number; endpoint: string; payload_json: string; attempts: number }>`
-      SELECT id, endpoint, payload_json, attempts
-      FROM ingest_outbox
-      WHERE next_retry_at <= ${now}
-      ORDER BY id ASC
-      LIMIT ${Math.max(1, Math.min(limit, 500))}
-    `;
-    for (const row of rows) {
-      let payload: Record<string, unknown> = {};
-      try {
-        payload = JSON.parse(row.payload_json || "{}");
-      } catch {
-        this.sql`DELETE FROM ingest_outbox WHERE id = ${row.id}`;
-        continue;
-      }
-      try {
-        await this._postIngest(row.endpoint, payload);
-        this.sql`DELETE FROM ingest_outbox WHERE id = ${row.id}`;
-      } catch (err: any) {
-        const attempts = Math.max(1, Number(row.attempts || 0) + 1);
-        const backoffSec = Math.min(300, 2 ** Math.min(attempts, 8));
-        this.sql`UPDATE ingest_outbox
-          SET attempts = ${attempts},
-              next_retry_at = ${now + backoffSec},
-              last_error = ${String(err?.message || err).slice(0, 500)},
-              updated_at = ${now}
-          WHERE id = ${row.id}`;
-      }
-    }
-  }
-
-  private async _mirrorEpisodeToBackend(episodePayload: Record<string, unknown>): Promise<void> {
-    await this._sendIngest("/api/v1/edge-ingest/episode", episodePayload);
-  }
-
-  private async _mirrorTurnToBackend(sessionId: string, turnPayload: Record<string, unknown>): Promise<void> {
-    await this._sendIngest("/api/v1/edge-ingest/turn", {
-      session_id: sessionId,
-      ...turnPayload,
-    });
-  }
-
-  private async _mirrorSessionToBackend(sessionId: string, input: string, results: TurnResult[]): Promise<void> {
-    const last = results[results.length - 1];
-    const output = last?.content || "";
-    const status = last?.error ? "error" : "success";
-    const totalCost = results.reduce((acc, r) => acc + (r.costUsd || 0), 0);
-    const model = last?.model || this.state.config.model || "";
-    await this._sendIngest("/api/v1/edge-ingest/session", {
-      session_id: sessionId,
-      org_id: this.state.config.orgId || "",
-      project_id: this.state.config.projectId || "",
-      agent_name: this.state.config.agentName || "agentos",
-      status,
-      input_text: input,
-      output_text: output,
-      model,
-      trace_id: sessionId,
-      parent_session_id: "",
-      depth: 0,
-      step_count: results.length,
-      action_count: results.reduce((acc, r) => acc + ((r.toolResults || []).length), 0),
-      wall_clock_seconds: 0,
-      cost_total_usd: totalCost,
-      created_at: Date.now() / 1000,
-    });
   }
 }
 
@@ -599,7 +643,8 @@ async function verifyHs256Jwt(token: string, secret: string): Promise<boolean> {
       ["verify"],
     );
     const signingInput = new TextEncoder().encode(`${headerB64}.${payloadB64}`);
-    const signature = base64UrlToBytes(signatureB64);
+    const rawSig = base64UrlToBytes(signatureB64);
+    const signature = new Uint8Array(rawSig);
     const valid = await crypto.subtle.verify("HMAC", key, signature, signingInput);
     if (!valid) return false;
     const payloadRaw = new TextDecoder().decode(base64UrlToBytes(payloadB64));
@@ -611,11 +656,38 @@ async function verifyHs256Jwt(token: string, secret: string): Promise<boolean> {
   }
 }
 
+async function sha256Hex(input: string): Promise<string> {
+  const bytes = new TextEncoder().encode(input);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const arr = Array.from(new Uint8Array(digest));
+  return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function extractBearerToken(request: Request): string {
+  const auth = request.headers.get("Authorization") || "";
+  if (auth.startsWith("Bearer ")) return auth.slice(7).trim();
+  const url = new URL(request.url);
+  const q = url.searchParams.get("token") || url.searchParams.get("api_key") || "";
+  return q.trim();
+}
+
+async function authorizeAgentIngress(request: Request, env: Env): Promise<Response | null> {
+  const token = extractBearerToken(request);
+  const serviceToken = String(env.SERVICE_TOKEN || "").trim();
+  const jwtSecret = String(env.AUTH_JWT_SECRET || "").trim();
+
+  if (!serviceToken && !jwtSecret) return null;
+  if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+  if (serviceToken && token === serviceToken) return null;
+  if (jwtSecret && (await verifyHs256Jwt(token, jwtSecret))) return null;
+  return Response.json({ error: "unauthorized" }, { status: 401 });
+}
+
 // ---------------------------------------------------------------------------
 // MCP Server Agent — exposes tools via Model Context Protocol
 // ---------------------------------------------------------------------------
 
-export class AgentOSMcpServer extends McpAgent<Env> {
+export class AgentOSMcpServer extends Agent<Env> {
   async onStart() {
     // MCP tools are registered here
   }
@@ -748,6 +820,174 @@ function detectLang(code: string): "javascript" | "python" | "bash" {
   return "bash";
 }
 
+/**
+ * Run an agent through its DO — the single authoritative execution path.
+ * All ingress (REST, WebSocket, Telegram) should use this.
+ * The DO handles: conversation persistence, streaming, tool execution, billing.
+ *
+ * DO instance naming: {agent_name}-{user_id}
+ *   - Each user gets their own DO instance → isolated conversation
+ *   - Same user across channels shares the same DO → conversation continuity
+ *   - If no user_id, falls back to agent_name only (shared instance)
+ */
+async function runViaAgent(
+  env: { AGENTOS_AGENT: any; SERVICE_TOKEN?: string },
+  agentName: string,
+  task: string,
+  opts?: { org_id?: string; project_id?: string; channel?: string; channel_user_id?: string },
+): Promise<{ output: string; success: boolean; error?: string; turns: number; tool_calls: number; cost_usd: number; latency_ms: number; session_id: string; trace_id: string; stop_reason: string; [key: string]: unknown }> {
+  // Per-user DO isolation: each user gets their own conversation thread
+  const userId = opts?.channel_user_id || "";
+  const doName = userId ? `${agentName}-u-${userId}` : agentName;
+  const agentId = env.AGENTOS_AGENT.idFromName(doName);
+  const agent = env.AGENTOS_AGENT.get(agentId);
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (env.SERVICE_TOKEN) headers.Authorization = `Bearer ${env.SERVICE_TOKEN}`;
+  const resp = await agent.fetch(new Request("http://internal/run", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      input: task,
+      agent_name: agentName,
+      org_id: opts?.org_id || "",
+      project_id: opts?.project_id || "",
+      channel: opts?.channel || "api",
+      channel_user_id: opts?.channel_user_id || "",
+    }),
+  }));
+  return resp.json() as any;
+}
+
+function runnableInputToTask(input: unknown, task?: string): string {
+  if (typeof task === "string" && task.trim().length > 0) return task;
+  if (typeof input === "string") return input;
+  if (input == null) return "";
+  try {
+    return JSON.stringify(input);
+  } catch {
+    return String(input);
+  }
+}
+
+function extractRunnableConfig(config?: Record<string, unknown>): {
+  run_name: string;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  input_raw?: unknown;
+} {
+  const runName = typeof config?.run_name === "string"
+    ? config.run_name
+    : (typeof config?.runName === "string" ? config.runName : "");
+  const tagsRaw = Array.isArray(config?.tags) ? config?.tags : [];
+  const tags = tagsRaw.map((t) => String(t)).filter((t) => t.length > 0);
+  const metadata = (config?.metadata && typeof config.metadata === "object" && !Array.isArray(config.metadata))
+    ? (config.metadata as Record<string, unknown>)
+    : {};
+  const inputRaw = config?.input_raw;
+  return { run_name: runName, tags, metadata, input_raw: inputRaw };
+}
+
+function extractRunnableMetadataFromEvents(
+  runtimeEvents: Array<{ event_type?: string; session_id?: string; trace_id?: string; data?: Record<string, unknown> }>,
+): {
+  run_id: string;
+  session_id: string;
+  trace_id: string;
+  run_name: string;
+  tags: string[];
+  metadata: Record<string, unknown>;
+  input_raw: unknown;
+} {
+  let sessionId = "";
+  let traceId = "";
+  let runName = "";
+  let tags: string[] = [];
+  let metadata: Record<string, unknown> = {};
+  let inputRaw: unknown = "";
+  for (const row of runtimeEvents) {
+    sessionId = sessionId || String(row.session_id || "");
+    traceId = traceId || String(row.trace_id || "");
+    const data = (row.data && typeof row.data === "object") ? row.data : {};
+    if (String(row.event_type || "") === "session_start") {
+      runName = String(data.run_name || runName);
+      tags = Array.isArray(data.tags) ? data.tags.map((t) => String(t)).filter((t) => t.length > 0) : tags;
+      metadata = (data.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata))
+        ? (data.metadata as Record<string, unknown>)
+        : metadata;
+      inputRaw = data.input_raw ?? inputRaw;
+      break;
+    }
+  }
+  return {
+    run_id: traceId || sessionId,
+    session_id: sessionId,
+    trace_id: traceId,
+    run_name: runName,
+    tags,
+    metadata,
+    input_raw: inputRaw,
+  };
+}
+
+function buildRunnableMetadata(input: {
+  success?: boolean;
+  turns?: number;
+  tool_calls?: number;
+  cost_usd?: number;
+  latency_ms?: number;
+  session_id?: string;
+  trace_id?: string;
+  run_id?: string;
+  stop_reason?: string;
+  checkpoint_id?: string;
+  parent_session_id?: string;
+  resumed_from_checkpoint?: string;
+  run_name?: string;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+  input_raw?: unknown;
+}): Record<string, unknown> {
+  const sessionId = String(input.session_id || "");
+  const traceId = String(input.trace_id || "");
+  return {
+    success: Boolean(input.success),
+    turns: Number(input.turns || 0),
+    tool_calls: Number(input.tool_calls || 0),
+    cost_usd: Number(input.cost_usd || 0),
+    latency_ms: Number(input.latency_ms || 0),
+    session_id: sessionId,
+    trace_id: traceId,
+    run_id: String(input.run_id || traceId || sessionId),
+    stop_reason: String(input.stop_reason || ""),
+    checkpoint_id: String(input.checkpoint_id || ""),
+    parent_session_id: String(input.parent_session_id || ""),
+    resumed_from_checkpoint: String(input.resumed_from_checkpoint || ""),
+    run_name: String(input.run_name || ""),
+    tags: Array.isArray(input.tags) ? input.tags : [],
+    metadata: (input.metadata && typeof input.metadata === "object" && !Array.isArray(input.metadata))
+      ? input.metadata
+      : {},
+    input_raw: input.input_raw ?? "",
+  };
+}
+
+function gradeEvalOutput(
+  output: string,
+  expected: string,
+  grader: string,
+): { score: number; passed: boolean } {
+  const actual = String(output || "");
+  const target = String(expected || "");
+  const mode = String(grader || "contains").trim().toLowerCase();
+  if (!target) return { score: 1, passed: true };
+  if (mode === "exact") {
+    const passed = actual.trim() === target.trim();
+    return { score: passed ? 1 : 0, passed };
+  }
+  const passed = actual.toLowerCase().includes(target.toLowerCase());
+  return { score: passed ? 1 : 0, passed };
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -755,6 +995,1027 @@ export default {
     // Health check
     if (url.pathname === "/health") {
       return Response.json({ status: "ok", version: "0.2.0" });
+    }
+
+    // ── Usage / Billing API ──────────────────────────────────────
+    // GET /api/v1/usage?org_id=X&agent_name=Y&cursor=Z&limit=N&from=T&to=T
+    // Returns: summary (totals) + cursor-paginated session list with costs
+    if (url.pathname === "/api/v1/usage" && request.method === "GET") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      try {
+        const { queryUsage } = await import("./runtime/db");
+        const result = await queryUsage(env.HYPERDRIVE, {
+          org_id: url.searchParams.get("org_id") || "default",
+          agent_name: url.searchParams.get("agent_name") || undefined,
+          cursor: url.searchParams.get("cursor") || undefined,
+          limit: Number(url.searchParams.get("limit")) || 20,
+          from_ts: Number(url.searchParams.get("from")) || 0,
+          to_ts: Number(url.searchParams.get("to")) || undefined,
+        });
+        return Response.json(result);
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── Edge-native eval run (persists eval_runs + eval_trials) ──────────
+    if (url.pathname === "/api/v1/eval/run" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      // Contract: JSON body with `tasks` (required). Optional query overrides for
+      // `agent_name` and `trials` so control-plane can mirror the portal query contract
+      // on direct worker calls, while normal path is a single JSON payload from the proxy.
+      type EvalRunBody = {
+        agent_name?: string;
+        eval_name?: string;
+        trials?: number;
+        tasks?: Array<{
+          name?: string;
+          input?: string;
+          expected?: string;
+          grader?: string;
+        }>;
+        org_id?: string;
+        project_id?: string;
+        channel?: string;
+        channel_user_id?: string;
+      };
+      let body: EvalRunBody = {};
+      const rawBody = await request.text();
+      if (rawBody.trim()) {
+        try {
+          const parsed: unknown = JSON.parse(rawBody);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return Response.json({ error: "JSON body must be an object" }, { status: 400 });
+          }
+          body = parsed as EvalRunBody;
+        } catch {
+          return Response.json({ error: "invalid JSON body" }, { status: 400 });
+        }
+      }
+      const qpAgent = String(url.searchParams.get("agent_name") || "").trim();
+      const qpTrialsRaw = url.searchParams.get("trials");
+      const qpTrials =
+        qpTrialsRaw !== null && qpTrialsRaw !== "" ? Number(qpTrialsRaw) : undefined;
+      const mergedTrials =
+        body.trials !== undefined && body.trials !== null && !Number.isNaN(Number(body.trials))
+          ? Number(body.trials)
+          : qpTrials !== undefined && !Number.isNaN(qpTrials)
+            ? qpTrials
+            : 1;
+      const tasks = Array.isArray(body.tasks) ? body.tasks : [];
+      const trials = Math.max(1, Math.min(mergedTrials || 1, 20));
+      if (tasks.length === 0) {
+        return Response.json({ error: "tasks are required" }, { status: 400 });
+      }
+      const runtimeEnv: RuntimeEnv = {
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+        AI_GATEWAY_ID: env.AI_GATEWAY_ID,
+        AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+      };
+
+      try {
+        const agentName = String(body.agent_name || qpAgent || "").trim() || "agentos";
+        const evalName = body.eval_name || `edge_eval_${Date.now()}`;
+        const startedAt = Date.now();
+        const trialRows: Array<{
+          task_name: string;
+          trial_number: number;
+          score: number;
+          passed: boolean;
+          latency_ms: number;
+          cost_usd: number;
+          tool_calls: number;
+          error: string;
+          stop_reason: string;
+          session_id: string;
+          trace_id: string;
+          metadata: Record<string, unknown>;
+        }> = [];
+
+        let passCount = 0;
+        let errorCount = 0;
+        let totalScore = 0;
+        let totalLatency = 0;
+        let totalCost = 0;
+
+        for (const task of tasks) {
+          const taskName = String(task?.name || "");
+          const expected = String(task?.expected || "");
+          const grader = String(task?.grader || "contains");
+          const input = String(task?.input || "");
+          for (let trial = 1; trial <= trials; trial++) {
+            // Eval needs blocking await to grade each trial.
+            // TODO: Move eval runner into a dedicated DO for no-timeout execution.
+            const runResult = await runViaAgent(env, agentName, input, {
+              org_id: body.org_id,
+              project_id: body.project_id,
+              channel: body.channel,
+              channel_user_id: body.channel_user_id,
+            });
+            const grade = gradeEvalOutput(runResult.output, expected, grader);
+            if (grade.passed) passCount += 1;
+            if (!runResult.success || runResult.error) errorCount += 1;
+            totalScore += grade.score;
+            totalLatency += Number(runResult.latency_ms || 0);
+            totalCost += Number(runResult.cost_usd || 0);
+            trialRows.push({
+              task_name: taskName,
+              trial_number: trial,
+              score: grade.score,
+              passed: grade.passed,
+              latency_ms: Number(runResult.latency_ms || 0),
+              cost_usd: Number(runResult.cost_usd || 0),
+              tool_calls: Number(runResult.tool_calls || 0),
+              error: String(runResult.error || ""),
+              stop_reason: String(runResult.stop_reason || ""),
+              session_id: String(runResult.session_id || ""),
+              trace_id: String(runResult.trace_id || ""),
+              metadata: {
+                expected,
+                grader,
+                output: runResult.output,
+                run_id: runResult.run_id || runResult.trace_id || runResult.session_id,
+              },
+            });
+          }
+        }
+
+        const totalTrials = trialRows.length;
+        const failCount = Math.max(0, totalTrials - passCount);
+        const passRate = totalTrials > 0 ? passCount / totalTrials : 0;
+        const avgScore = totalTrials > 0 ? totalScore / totalTrials : 0;
+        const avgLatency = totalTrials > 0 ? totalLatency / totalTrials : 0;
+        const evalRunId = await writeEvalRun(env.HYPERDRIVE, {
+          agent_name: agentName,
+          eval_name: evalName,
+          total_tasks: tasks.length,
+          total_trials: totalTrials,
+          pass_count: passCount,
+          fail_count: failCount,
+          error_count: errorCount,
+          pass_rate: passRate,
+          avg_score: avgScore,
+          avg_latency_ms: avgLatency,
+          total_cost_usd: totalCost,
+          eval_conditions_json: JSON.stringify({
+            source: "edge_eval_api",
+            trials_per_task: trials,
+            created_at_ms: Date.now(),
+          }),
+        });
+        for (const row of trialRows) {
+          await writeEvalTrial(env.HYPERDRIVE, {
+            eval_run_id: evalRunId,
+            eval_name: evalName,
+            agent_name: agentName,
+            trial_index: row.trial_number,
+            passed: row.passed,
+            score: row.score,
+            details_json: JSON.stringify({
+              task_name: row.task_name,
+              trial_number: row.trial_number,
+              latency_ms: row.latency_ms,
+              cost_usd: row.cost_usd,
+              tool_calls: row.tool_calls,
+              error: row.error,
+              stop_reason: row.stop_reason,
+              ...row.metadata,
+            }),
+            trace_id: row.trace_id,
+            session_id: row.session_id,
+          });
+        }
+
+        return Response.json({
+          run_id: evalRunId,
+          eval_name: evalName,
+          pass_rate: passRate,
+          avg_score: avgScore,
+          avg_latency_ms: avgLatency,
+          total_cost_usd: totalCost,
+          total_tasks: tasks.length,
+          total_trials: totalTrials,
+          pass_count: passCount,
+          fail_count: failCount,
+          error_count: errorCount,
+          latency_ms: Date.now() - startedAt,
+        });
+      } catch (err: any) {
+        return Response.json({ error: err.message || String(err) }, { status: 500 });
+      }
+    }
+
+    // ── Edge-native eval read APIs (backend parity) ───────────────────────
+    if (url.pathname === "/api/v1/eval/runs" && request.method === "GET") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      try {
+        const agentName = String(url.searchParams.get("agent_name") || "").trim();
+        const limit = Number(url.searchParams.get("limit") || 20);
+        const runs = await listEvalRuns(env.HYPERDRIVE, { agent_name: agentName, limit });
+        return Response.json(runs);
+      } catch (err: any) {
+        return Response.json({ error: err.message || String(err) }, { status: 500 });
+      }
+    }
+    const evalRunMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/(\d+)$/);
+    if (evalRunMatch && request.method === "GET") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      try {
+        const runId = Number(evalRunMatch[1] || 0);
+        const run = await getEvalRun(env.HYPERDRIVE, runId);
+        if (!run) return Response.json({ error: "Eval run not found" }, { status: 404 });
+        const trials = await listEvalTrialsByRun(env.HYPERDRIVE, runId);
+        return Response.json({ ...run, trials });
+      } catch (err: any) {
+        return Response.json({ error: err.message || String(err) }, { status: 500 });
+      }
+    }
+    const evalTrialsMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/(\d+)\/trials$/);
+    if (evalTrialsMatch && request.method === "GET") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      try {
+        const runId = Number(evalTrialsMatch[1] || 0);
+        const run = await getEvalRun(env.HYPERDRIVE, runId);
+        if (!run) return Response.json({ error: "Eval run not found" }, { status: 404 });
+        const trials = await listEvalTrialsByRun(env.HYPERDRIVE, runId);
+        return Response.json({ run_id: runId, trials });
+      } catch (err: any) {
+        return Response.json({ error: err.message || String(err) }, { status: 500 });
+      }
+    }
+
+    // ── Edge Runtime API — runtime contract endpoints ─────────
+    // These replace the backend runtime-proxy for edge-native execution.
+    // POST /api/v1/runtime-proxy/runnable/invoke
+    // POST /api/v1/runtime-proxy/runnable/stream-events
+    // POST /api/v1/runtime-proxy/runnable/replay
+    // POST /api/v1/runtime-proxy/agent/run (edge-native)
+
+    // ── REST invoke — always async, always through DO ──
+    // Agent execution happens in the DO (no timeout, conversation persistence).
+    // REST is just a kick-start — returns 202 immediately.
+    // For results: connect WebSocket or poll GET /api/v1/runs/{run_id}.
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/invoke" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const body = await request.json() as {
+        agent_name?: string; task?: string; input?: unknown;
+        org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+      };
+
+      const agentName = body.agent_name || "agentos";
+      const task = runnableInputToTask(body.input, body.task);
+      const userId = body.channel_user_id || "";
+
+      // Start run in DO (non-blocking)
+      ctx.waitUntil(
+        runViaAgent(env, agentName, task, {
+          org_id: body.org_id,
+          project_id: body.project_id,
+          channel: body.channel,
+          channel_user_id: userId,
+        }).catch(() => {}),
+      );
+
+      // DO name for WebSocket connection
+      const doName = userId ? `${agentName}-u-${userId}` : agentName;
+
+      return Response.json({
+        status: "running",
+        agent_name: agentName,
+        websocket_url: `/agents/agentos-agent/${doName}`,
+        message: "Run started. Connect via WebSocket for streaming, or poll GET /api/v1/runs/{run_id}.",
+      }, { status: 202 });
+    }
+
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/stream-events" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const body = await request.json() as {
+        agent_name?: string; task?: string; input?: unknown;
+        org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        session_id?: string; trace_id?: string; limit?: number; cursor?: string; watermark_cursor?: string;
+        event_type?: string; tool_name?: string; status?: string; from_ts_ms?: number; to_ts_ms?: number;
+        config?: Record<string, unknown>;
+      };
+      const runtimeCfg = extractRunnableConfig(body.config);
+
+      try {
+        let replayEvents: any[] = [];
+        let doneData: Record<string, unknown> = {
+          replay: true,
+          has_more: false,
+          next_cursor: String(body.cursor || "0"),
+          watermark_cursor: String(body.watermark_cursor || body.cursor || "0"),
+        };
+
+        const hasReplaySelector = Boolean(body.session_id || body.trace_id);
+        if (hasReplaySelector) {
+          const page = await loadRuntimeEventsPage(env.HYPERDRIVE, {
+            session_id: body.session_id,
+            trace_id: body.trace_id,
+            limit: body.limit,
+            cursor: body.cursor,
+            watermark_cursor: body.watermark_cursor,
+            event_type: body.event_type,
+            tool_name: body.tool_name,
+            status: body.status,
+            from_ts_ms: body.from_ts_ms,
+            to_ts_ms: body.to_ts_ms,
+          });
+          replayEvents = page.events;
+          doneData = {
+            ...doneData,
+            session_id: body.session_id || "",
+            trace_id: body.trace_id || "",
+            event_count: replayEvents.length,
+            has_more: page.has_more,
+            next_cursor: page.next_cursor,
+            watermark_cursor: page.watermark_cursor,
+          };
+        } else {
+          // No session_id — start run via DO (async), return WebSocket URL
+          const agentName = body.agent_name || "agentos";
+          const userId = body.channel_user_id || "";
+          const doName = userId ? `${agentName}-u-${userId}` : agentName;
+          ctx.waitUntil(
+            runViaAgent(env, agentName, runnableInputToTask(body.input, body.task), {
+              org_id: body.org_id,
+              project_id: body.project_id,
+              channel: body.channel,
+              channel_user_id: userId,
+            }).catch(() => {}),
+          );
+          return Response.json({
+            status: "running",
+            message: "Run started. Connect WebSocket for live events, or query /stream-events with session_id after completion.",
+            websocket_url: `/agents/agentos-agent/${doName}`,
+          }, { status: 202 });
+        }
+
+        // Return replayed events as SSE-style newline-delimited JSON
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            for (const event of replayEvents) {
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(event)}\n\n`),
+              );
+            }
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ event_type: "done", data: doneData })}\n\n`),
+            );
+            controller.close();
+          },
+        });
+
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            Connection: "keep-alive",
+          },
+        });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── JSON events replay (cursor/watermark paging) ──────────
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/events" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      const body = await request.json() as {
+        session_id?: string;
+        trace_id?: string;
+        limit?: number;
+        cursor?: string;
+        watermark_cursor?: string;
+        event_type?: string;
+        tool_name?: string;
+        status?: string;
+        from_ts_ms?: number;
+        to_ts_ms?: number;
+      };
+      try {
+        const page = await loadRuntimeEventsPage(env.HYPERDRIVE, {
+          session_id: body.session_id,
+          trace_id: body.trace_id,
+          limit: body.limit,
+          cursor: body.cursor,
+          watermark_cursor: body.watermark_cursor,
+          event_type: body.event_type,
+          tool_name: body.tool_name,
+          status: body.status,
+          from_ts_ms: body.from_ts_ms,
+          to_ts_ms: body.to_ts_ms,
+        });
+        return Response.json({
+          ...page,
+          metadata: buildRunnableMetadata(extractRunnableMetadataFromEvents(page.events)),
+        });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── Time-travel replay at cursor (otel_events) ─────────────
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/replay" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      const body = await request.json() as {
+        session_id?: string;
+        trace_id?: string;
+        up_to_id?: number;
+        cursor_index?: number;
+        event_id?: string;
+        include_events?: boolean;
+        max_scan?: number;
+      };
+      try {
+        const replay = await replayOtelEventsAtCursor(env.HYPERDRIVE, {
+          session_id: body.session_id,
+          trace_id: body.trace_id,
+          up_to_row_id: body.up_to_id,
+          cursor_index: body.cursor_index,
+          event_id: body.event_id,
+          include_events: body.include_events,
+          max_scan: body.max_scan,
+        });
+        return Response.json({
+          ...replay,
+          metadata: buildRunnableMetadata(extractRunnableMetadataFromEvents(
+            replay.event_at_cursor ? [replay.event_at_cursor] : [],
+          )),
+        });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── LangSmith-style run tree (JSON) ───────────────────────
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/runs/tree" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+      const body = await request.json() as {
+        trace_id?: string;
+        session_id?: string;
+        limit?: number;
+        event_type?: string;
+        tool_name?: string;
+        status?: string;
+        from_ts_ms?: number;
+        to_ts_ms?: number;
+      };
+      try {
+        const tree = await buildRuntimeRunTree(env.HYPERDRIVE, {
+          trace_id: body.trace_id,
+          session_id: body.session_id,
+          limit: body.limit,
+          event_type: body.event_type,
+          tool_name: body.tool_name,
+          status: body.status,
+          from_ts_ms: body.from_ts_ms,
+          to_ts_ms: body.to_ts_ms,
+        });
+        return Response.json({
+          ...tree,
+          metadata: buildRunnableMetadata(
+            extractRunnableMetadataFromEvents(Array.isArray(tree.runtime_events) ? tree.runtime_events : []),
+          ),
+        });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // POST /api/v1/graphs/linear-run — declarative linear graph (control-plane validated → edge execute)
+    if (url.pathname === "/api/v1/graphs/linear-run" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const body = await request.json() as {
+        graph?: unknown;
+        task?: string;
+        agent_context?: {
+          agent_name?: string;
+          org_id?: string;
+          project_id?: string;
+          channel?: string;
+          channel_user_id?: string;
+        };
+        initial_state?: Record<string, unknown>;
+        validation?: { linear_path?: string[]; graph_id?: string };
+      };
+
+      const task = typeof body.task === "string" ? body.task : "";
+      if (!task.trim()) {
+        return Response.json({ error: "task is required", error_code: "MISSING_TASK" }, { status: 400 });
+      }
+      const ctx = body.agent_context;
+      if (!ctx || typeof ctx.agent_name !== "string" || !ctx.agent_name.trim()) {
+        return Response.json(
+          { error: "agent_context.agent_name is required", error_code: "MISSING_AGENT" },
+          { status: 400 },
+        );
+      }
+      if (!body.graph || typeof body.graph !== "object") {
+        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
+      }
+
+      try {
+        const result = executeLinearDeclarativeRun({
+          graph: body.graph as GraphSpec,
+          task: task.trim(),
+          agent_context: {
+            agent_name: ctx.agent_name.trim(),
+            org_id: ctx.org_id,
+            project_id: ctx.project_id,
+            channel: ctx.channel,
+            channel_user_id: ctx.channel_user_id,
+          },
+          initial_state: body.initial_state,
+          validation: body.validation,
+        });
+        if (!result.success) {
+          const status =
+            result.error_code === "VALIDATION_MISMATCH"
+              ? 409
+              : result.error_code === "MISSING_NODE_KIND"
+                ? 422
+                : 400;
+          return Response.json(
+            {
+              success: false,
+              error: result.error,
+              error_code: result.error_code,
+              linear_path: result.linear_path,
+              linear_trace: result.linear_trace,
+            },
+            { status },
+          );
+        }
+        const traceDigestSha256 = await sha256Hex(JSON.stringify(result.linear_trace));
+        return Response.json({
+          success: true,
+          linear_path: result.linear_path,
+          linear_trace: result.linear_trace,
+          trace_digest_sha256: traceDigestSha256,
+          state: result.state,
+          task: task.trim(),
+          agent_context: {
+            agent_name: ctx.agent_name.trim(),
+            org_id: ctx.org_id ?? "",
+            project_id: ctx.project_id ?? "",
+            channel: ctx.channel ?? "",
+            channel_user_id: ctx.channel_user_id ?? "",
+          },
+        });
+      } catch (err: any) {
+        return Response.json(
+          { success: false, error: err.message || String(err), error_code: "INTERNAL" },
+          { status: 500 },
+        );
+      }
+    }
+
+    // POST /api/v1/graphs/dag-run — declarative bounded DAG graph (deterministic topo execution)
+    if (url.pathname === "/api/v1/graphs/dag-run" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const body = await request.json() as {
+        graph?: unknown;
+        task?: string;
+        agent_context?: {
+          agent_name?: string;
+          org_id?: string;
+          project_id?: string;
+          channel?: string;
+          channel_user_id?: string;
+        };
+        initial_state?: Record<string, unknown>;
+        max_branching?: number;
+        max_fanin?: number;
+        validation?: { execution_order?: string[]; graph_id?: string };
+      };
+
+      const task = typeof body.task === "string" ? body.task : "";
+      if (!task.trim()) {
+        return Response.json({ error: "task is required", error_code: "MISSING_TASK" }, { status: 400 });
+      }
+      const ctx = body.agent_context;
+      if (!ctx || typeof ctx.agent_name !== "string" || !ctx.agent_name.trim()) {
+        return Response.json(
+          { error: "agent_context.agent_name is required", error_code: "MISSING_AGENT" },
+          { status: 400 },
+        );
+      }
+      if (!body.graph || typeof body.graph !== "object") {
+        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
+      }
+
+      try {
+        const result = executeBoundedDagDeclarativeRun({
+          graph: body.graph as GraphSpec,
+          task: task.trim(),
+          agent_context: {
+            agent_name: ctx.agent_name.trim(),
+            org_id: ctx.org_id,
+            project_id: ctx.project_id,
+            channel: ctx.channel,
+            channel_user_id: ctx.channel_user_id,
+          },
+          initial_state: body.initial_state,
+          max_branching: body.max_branching,
+          max_fanin: body.max_fanin,
+          validation: body.validation,
+        });
+        if (!result.success) {
+          const status =
+            result.error_code === "VALIDATION_MISMATCH"
+              ? 409
+              : result.error_code === "MISSING_NODE_KIND"
+                ? 422
+                : 400;
+          return Response.json(
+            {
+              success: false,
+              error: result.error,
+              error_code: result.error_code,
+              execution_order: result.execution_order,
+              execution_trace: result.execution_trace,
+            },
+            { status },
+          );
+        }
+        const traceDigestSha256 = await sha256Hex(JSON.stringify(result.execution_trace));
+        return Response.json({
+          success: true,
+          execution_order: result.execution_order,
+          execution_trace: result.execution_trace,
+          trace_digest_sha256: traceDigestSha256,
+          state: result.state,
+          task: task.trim(),
+          agent_context: {
+            agent_name: ctx.agent_name.trim(),
+            org_id: ctx.org_id ?? "",
+            project_id: ctx.project_id ?? "",
+            channel: ctx.channel ?? "",
+            channel_user_id: ctx.channel_user_id ?? "",
+          },
+        });
+      } catch (err: any) {
+        return Response.json(
+          { success: false, error: err.message || String(err), error_code: "INTERNAL" },
+          { status: 500 },
+        );
+      }
+    }
+
+    // Edge-native agent/run — same contract as backend /runtime-proxy/agent/run
+    // /agent/run redirects to the standard invoke endpoint (async, DO-based)
+    if (url.pathname === "/api/v1/runtime-proxy/agent/run" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const body = await request.json() as {
+        agent_name?: string; task?: string;
+        org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+      };
+
+      const agentName = body.agent_name || "agentos";
+      const userId = body.channel_user_id || "";
+      const doName = userId ? `${agentName}-u-${userId}` : agentName;
+
+      ctx.waitUntil(
+        runViaAgent(env, agentName, body.task || "", {
+          org_id: body.org_id,
+          project_id: body.project_id,
+          channel: body.channel,
+          channel_user_id: userId,
+        }).catch(() => {}),
+      );
+
+      return Response.json({
+        status: "running",
+        agent_name: agentName,
+        websocket_url: `/agents/agentos-agent/${doName}`,
+      }, { status: 202 });
+    }
+
+    // ── Batch invoke ────────────────────────────────────────────
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/batch" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const body = await request.json() as { inputs: Array<{
+        agent_name?: string; task?: string; input?: unknown;
+        org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        config?: Record<string, unknown>;
+      }> };
+
+      const runtimeEnv: RuntimeEnv = {
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+        AI_GATEWAY_ID: env.AI_GATEWAY_ID,
+        AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+      };
+
+      try {
+        const batchReq: BatchRequest = {
+          inputs: (body.inputs || []).map((inp) => ({
+            ...(() => {
+              const cfg = extractRunnableConfig(inp.config);
+              return {
+                run_name: cfg.run_name,
+                tags: cfg.tags,
+                metadata: cfg.metadata,
+                input_raw: cfg.input_raw ?? inp.input ?? inp.task ?? "",
+              };
+            })(),
+            agent_name: inp.agent_name || "agentos",
+            task: runnableInputToTask(inp.input, inp.task),
+            org_id: inp.org_id,
+            project_id: inp.project_id,
+            channel: inp.channel,
+            channel_user_id: inp.channel_user_id,
+          })),
+        };
+        const result = await edgeBatch(runtimeEnv, env.HYPERDRIVE, batchReq, env.TELEMETRY_QUEUE);
+        return Response.json({
+          outputs: result.results.map((item) => ({
+            ok: item.success,
+            error: item.error || "",
+            output: item.output,
+            metadata: buildRunnableMetadata({
+              success: item.success,
+              turns: item.turns,
+              tool_calls: item.tool_calls,
+              cost_usd: item.cost_usd,
+              latency_ms: item.latency_ms,
+              session_id: item.session_id,
+              trace_id: item.trace_id,
+              run_id: item.run_id || item.trace_id || item.session_id,
+              stop_reason: item.stop_reason,
+              checkpoint_id: item.checkpoint_id || "",
+              parent_session_id: item.parent_session_id || "",
+              resumed_from_checkpoint: item.resumed_from_checkpoint || "",
+            }),
+          })),
+          batch_metadata: {
+            count: result.results.length,
+            max_concurrency: 1,
+            total_latency_ms: result.total_latency_ms,
+          },
+        });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── Latency breakdown ─────────────────────────────────────
+    // Latency breakdown — query from existing session events (no execution)
+    // POST with session_id to analyze, or omit to run + analyze
+    if (url.pathname === "/api/v1/runtime-proxy/runnable/latency-breakdown" && request.method === "POST") {
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const body = await request.json() as {
+        session_id?: string;
+        agent_name?: string; task?: string; input?: unknown;
+        org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+      };
+
+      // If session_id provided, compute breakdown from existing events
+      if (body.session_id) {
+        try {
+          const events = await loadRuntimeEventsPage(env.HYPERDRIVE, {
+            session_id: body.session_id, limit: 1000,
+          });
+          const breakdown = computeLatencyBreakdown(events.events);
+          return Response.json({ session_id: body.session_id, latency_breakdown: breakdown });
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // No session_id — kick off a run and return WebSocket URL for results
+      const agentName = body.agent_name || "agentos";
+      const userId = body.channel_user_id || "";
+      const doName = userId ? `${agentName}-u-${userId}` : agentName;
+
+      ctx.waitUntil(
+        runViaAgent(env, agentName, runnableInputToTask(body.input, body.task), {
+          org_id: body.org_id,
+          project_id: body.project_id,
+          channel: body.channel,
+          channel_user_id: userId,
+        }).catch(() => {}),
+      );
+
+      return Response.json({
+        status: "running",
+        message: "Run started. After completion, call this endpoint again with the session_id to get the breakdown.",
+        websocket_url: `/agents/agentos-agent/${doName}`,
+      }, { status: 202 });
+    }
+
+    // ── Checkpoint resume ─────────────────────────────────────
+    const checkpointResumeMatch = url.pathname.match(
+      /^\/api\/v1\/runtime-proxy\/agent\/run\/checkpoints\/([a-zA-Z0-9]+)\/resume$/,
+    );
+    if (checkpointResumeMatch && request.method === "POST") {
+      const checkpointId = checkpointResumeMatch[1];
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      const runtimeEnv: RuntimeEnv = {
+        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
+        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
+        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
+        AI_GATEWAY_ID: env.AI_GATEWAY_ID,
+        AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
+        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
+        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
+        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
+        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
+      };
+
+      try {
+        const result = await edgeResume(runtimeEnv, env.HYPERDRIVE, checkpointId, env.TELEMETRY_QUEUE);
+        return Response.json(result);
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    // ── Run status/result query (non-blocking polling) ──────
+    // GET /api/v1/runs/{run_id} — check status and get result for an async run
+    const runStatusMatch = url.pathname.match(/^\/api\/v1\/runs\/([a-zA-Z0-9-]+)$/);
+    if (runStatusMatch && request.method === "GET") {
+      const runId = runStatusMatch[1];
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (serviceToken) {
+        const authHeader = request.headers.get("Authorization") || "";
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+        if (token !== serviceToken) {
+          return Response.json({ error: "unauthorized" }, { status: 401 });
+        }
+      }
+
+      // Look up session by session_id (run_id = session_id)
+      try {
+        const { getDb } = await import("./runtime/db");
+        const sql = await getDb(env.HYPERDRIVE);
+        const rows = await sql`
+          SELECT session_id, agent_name, status, input_text, output_text,
+                 model, trace_id, step_count, action_count,
+                 wall_clock_seconds, cost_total_usd, created_at
+          FROM sessions
+          WHERE session_id = ${runId} OR trace_id = ${runId}
+          LIMIT 1
+        `;
+        if (rows.length === 0) {
+          return Response.json({
+            run_id: runId,
+            status: "running",
+            message: "Run in progress or not found. Try again shortly.",
+          });
+        }
+        const row = rows[0] as any;
+        return Response.json({
+          run_id: runId,
+          status: row.status === "success" ? "completed" : row.status === "error" ? "failed" : "running",
+          agent_name: row.agent_name,
+          output: row.output_text || "",
+          input: row.input_text || "",
+          model: row.model || "",
+          trace_id: row.trace_id || "",
+          turns: row.step_count || 0,
+          tool_calls: row.action_count || 0,
+          cost_usd: row.cost_total_usd || 0,
+          wall_clock_seconds: row.wall_clock_seconds || 0,
+          created_at: row.created_at,
+        });
+      } catch (err: any) {
+        return Response.json({ run_id: runId, status: "unknown", error: err.message }, { status: 500 });
+      }
     }
 
     // ── Dispatch Namespace — multi-tenant agent routing ──
@@ -805,14 +2066,39 @@ export default {
     }
 
     // Route Agents SDK requests: /agents/:agent-name/:instance-name
+    // Guard before routing so guessed agent names cannot be accessed anonymously.
     // Runs AFTER dispatch routing so /agents/dispatch/* is handled separately
+    if (url.pathname.startsWith("/agents/") && !url.pathname.startsWith("/agents/dispatch/")) {
+      const deny = await authorizeAgentIngress(request, env);
+      if (deny) return deny;
+    }
     const agentResponse = await routeAgentRequest(request, env);
     if (agentResponse) return agentResponse;
 
-    // ── Telegram Webhook (edge-native chat) ──
-    if (url.pathname === "/chat/telegram/webhook" && request.method === "POST") {
-      const botToken = env.TELEGRAM_BOT_TOKEN;
-      if (!botToken) return Response.json({ error: "TELEGRAM_BOT_TOKEN not set" }, { status: 503 });
+    // ── Telegram Webhook ──────────────────────────────────────
+    // URL: /chat/telegram/{agent_name}/webhook
+    // Bot token loaded from Supabase per-agent (channel_config table) or env fallback.
+    // Runs on main worker because dispatch workers can't call back to main (CF routing).
+    const telegramMatch = url.pathname.match(/^\/chat\/telegram\/([a-zA-Z0-9_-]+)\/webhook$/);
+    if ((telegramMatch || url.pathname === "/chat/telegram/webhook") && request.method === "POST") {
+      const agentName = telegramMatch?.[1] || env.TELEGRAM_AGENT_NAME || "my-assistant";
+
+      // Load bot token: try Supabase first, fall back to env
+      let botToken = "";
+      try {
+        const { getDb } = await import("./runtime/db");
+        const sql = await getDb(env.HYPERDRIVE);
+        const rows = await sql`
+          SELECT access_token FROM connector_tokens
+          WHERE connector_name = 'telegram' AND org_id = (
+            SELECT org_id FROM agents WHERE name = ${agentName} LIMIT 1
+          )
+          LIMIT 1
+        `;
+        botToken = rows[0]?.access_token || "";
+      } catch {}
+      if (!botToken) botToken = env.TELEGRAM_BOT_TOKEN || "";
+      if (!botToken) return Response.json({ error: "No Telegram bot token configured for agent: " + agentName }, { status: 503 });
 
       const payload = await request.json() as any;
       const msg = payload.message || payload.edited_message;
@@ -823,109 +2109,84 @@ export default {
       const messageId = msg.message_id;
       const tgApi = `https://api.telegram.org/bot${botToken}`;
 
-      // Handle commands
       if (text.startsWith("/start")) {
         await fetch(`${tgApi}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: `👋 Hi! Send me a message and I'll help.\n\nYour chat ID: \`${chatId}\``, parse_mode: "Markdown" }),
-        });
-        return Response.json({ ok: true });
-      }
-      if (text === "/myid") {
-        await fetch(`${tgApi}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: `Your chat ID: ${chatId}` }),
+          body: JSON.stringify({ chat_id: chatId, text: `Hi! I'm ${agentName}. Send me a message and I'll help.`, parse_mode: "Markdown" }),
         });
         return Response.json({ ok: true });
       }
 
-      // Send typing indicator
-      await fetch(`${tgApi}/sendChatAction`, {
+      // Typing indicator
+      fetch(`${tgApi}/sendChatAction`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chat_id: chatId, action: "typing" }),
-      });
+      }).catch(() => {});
 
-      // Route to backend — same agent, same tools, same memory.
-      // Telegram is just a channel, not a separate agent.
-      const agentName = env.TELEGRAM_AGENT_NAME || "my-assistant";
-      const backendUrl = env.BACKEND_INGEST_URL || "";
-      const edgeToken = env.BACKEND_INGEST_TOKEN || "";
-      try {
-        const userInput = text.startsWith("/ask ") ? text.slice(5) : text;
+      // Run agent in background — return 200 immediately to avoid Telegram 60s timeout.
+      // Uses runViaAgent which creates a per-user DO instance: {agent}-u-{chatId}
+      const userInput = text.startsWith("/ask ") ? text.slice(5) : text;
 
-        // Call runtime-proxy/agent/run — edge-token auth, full backend harness
-        const resp = await fetch(`${backendUrl}/api/v1/runtime-proxy/agent/run`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${edgeToken}`,
-          },
-          body: JSON.stringify({
-            agent_name: agentName,
-            task: userInput,
+      ctx.waitUntil((async () => {
+        try {
+          // Keep typing indicator alive while agent works
+          const typingInterval = setInterval(() => {
+            fetch(`${tgApi}/sendChatAction`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+            }).catch(() => {});
+          }, 5000);
+
+          const result = await runViaAgent(env, agentName, userInput, {
             channel: "telegram",
             channel_user_id: String(chatId),
-          }),
-        });
+          });
 
-        let output = "";
-        if (resp.ok) {
-          const data = await resp.json() as any;
-          output = data.output || data.content || "";
-          if (!output && data.turnResults) {
-            const last = data.turnResults[data.turnResults.length - 1];
-            output = last?.content || "";
-          }
-          // Agent returned success:false with empty output — LLM call likely failed
-          if (!output && data.success === false) {
-            output = "⚠️ Sorry, I'm having trouble processing your request right now. The AI service may be temporarily overloaded. Please try again in a moment.";
-          }
-        } else {
-          output = "⚠️ Something went wrong on my end. Please try again in a moment.";
-        }
-        if (!output) output = "⚠️ I couldn't generate a response. Please try again.";
+          clearInterval(typingInterval);
+          let output = result.output || "";
+          if (!output && result.error) output = "Sorry, I couldn't process that. Try again.";
+          if (!output) output = "No response generated.";
 
-        // Send reply (split if > 4096 chars)
-        for (let i = 0; i < output.length; i += 4000) {
+          for (let i = 0; i < output.length; i += 4000) {
+            await fetch(`${tgApi}/sendMessage`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                chat_id: chatId,
+                text: output.slice(i, i + 4000),
+                reply_to_message_id: i === 0 ? messageId : undefined,
+                parse_mode: "Markdown",
+              }),
+            });
+          }
+        } catch (err: any) {
           await fetch(`${tgApi}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              chat_id: chatId,
-              text: output.slice(i, i + 4000),
-              reply_to_message_id: i === 0 ? messageId : undefined,
-              parse_mode: "Markdown",
-            }),
-          });
+            body: JSON.stringify({ chat_id: chatId, text: `Error: ${(err.message || "unknown").slice(0, 200)}` }),
+          }).catch(() => {});
         }
-      } catch (err: any) {
-        await fetch(`${tgApi}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: `Sorry, error: ${err.message?.slice(0, 200)}` }),
-        });
-      }
+      })());
 
+      // Return immediately — Telegram gets 200 OK, agent runs in background
       return Response.json({ ok: true });
     }
 
-    // ── /cf/* — Cloudflare binding callbacks for backend ────────────
-    // The backend calls these when it needs CF-specific resources.
-    // Authenticated via edge token (same as backend ingest).
+    // ── /cf/* — Cloudflare binding endpoints ────────────────────────
+    // Authenticated via SERVICE_TOKEN (service-to-service).
 
     if (url.pathname.startsWith("/cf/")) {
-      const edgeToken = env.EDGE_INGEST_TOKEN || env.BACKEND_INGEST_TOKEN || "";
-      if (!edgeToken) {
-        return Response.json({ error: "edge_token_not_configured" }, { status: 503 });
+      const serviceToken = env.SERVICE_TOKEN || "";
+      if (!serviceToken) {
+        return Response.json({ error: "service_token_not_configured" }, { status: 503 });
       }
       const authHeader = request.headers.get("Authorization") || "";
-      const xEdge = request.headers.get("X-Edge-Token") || "";
-      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : xEdge;
-      if (token !== edgeToken) {
-        return Response.json({ error: "invalid_edge_token" }, { status: 401 });
+      const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+      if (token !== serviceToken) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
       // /cf/sandbox/exec — run code in Dynamic Worker or Container
@@ -938,10 +2199,18 @@ export default {
         if (language === "javascript" || language === "python") {
           try {
             const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
-            const loaded = await env.LOADER.load(workerCode);
+            const loaded = await env.LOADER.load({
+              compatibilityDate: "2026-03-01",
+              mainModule: "main.js",
+              modules: {
+                "main.js": { js: workerCode },
+              },
+              env: {},  // No bindings — isolate cannot access secrets or DB
+              globalOutbound: null,  // Block all outbound network from /cf/sandbox/exec
+            });
             const controller = new AbortController();
             const timer = setTimeout(() => controller.abort(), timeout);
-            const result = await loaded.fetch("http://internal/run", { signal: controller.signal });
+            const result = await loaded.getEntrypoint().fetch("http://internal/run", { signal: controller.signal });
             clearTimeout(timer);
             return Response.json(await result.json());
           } catch (err: any) {
@@ -998,7 +2267,7 @@ export default {
 
           if (isWorkersAI) {
             // ── Workers AI (edge inference, sub-second) ──
-            const aiResult = await env.AI.run(model, {
+            const aiResult = await env.AI.run(model as keyof AiModels, {
               messages: body.messages,
               max_tokens: body.max_tokens || 1024,
               temperature: body.temperature || 0,
@@ -1698,11 +2967,14 @@ export default {
             // ── Connector (Pipedream MCP) ──
             case "connector": {
               const toolName = args.tool_name || "";
-              const toolArgs = args.arguments || {};
-              // Pipedream connector — delegates to backend since it needs OAuth tokens
-              // For now, return instruction to use backend
-              result = `Connector '${toolName}' requires backend execution (OAuth tokens). Falling back.`;
-              break;
+              // Explicitly edge-only: no backend fallback path from worker runtime.
+              return Response.json(
+                {
+                  tool,
+                  error: `Connector '${toolName}' is not available on edge runtime (no backend fallback).`,
+                },
+                { status: 400 },
+              );
             }
 
             // ── Dynamic exec (JS in V8 isolate — already on CF) ──
@@ -1713,10 +2985,18 @@ export default {
               if (language === "javascript" || language === "python") {
                 try {
                   const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
-                  const loaded = await env.LOADER.load(workerCode);
+                  const loaded = await env.LOADER.load({
+                    compatibilityDate: "2026-03-01",
+                    mainModule: "main.js",
+                    modules: {
+                      "main.js": { js: workerCode },
+                    },
+                    env: {},  // No bindings — isolate cannot access secrets or DB
+                    globalOutbound: null,  // Block all outbound network from /cf/tool/exec dynamic-exec
+                  });
                   const controller = new AbortController();
                   const timer = setTimeout(() => controller.abort(), timeout);
-                  const execResp = await loaded.fetch("http://internal/run", { signal: controller.signal });
+                  const execResp = await loaded.getEntrypoint().fetch("http://internal/run", { signal: controller.signal });
                   clearTimeout(timer);
                   result = JSON.stringify(await execResp.json());
                 } catch (err: any) {
@@ -1841,7 +3121,7 @@ export default {
               try {
                 // Primary: Workers AI FLUX (free, edge)
                 const aiResult = await env.AI.run(
-                  "@cf/bfl/flux-2-klein-4b",
+                  "@cf/bfl/flux-2-klein-4b" as keyof AiModels,
                   { prompt }
                 ) as ReadableStream | ArrayBuffer;
                 const buf = aiResult instanceof ArrayBuffer
@@ -1882,12 +3162,21 @@ export default {
             case "text-to-speech": {
               const text = args.text || "";
               try {
-                const audioResult = await env.AI.run("@cf/deepgram/aura-2-en", { text }) as ArrayBuffer;
+                const audioRaw = await env.AI.run(
+                  "@cf/deepgram/aura-2-en" as keyof AiModels,
+                  { text },
+                ) as ArrayBuffer | Uint8Array | ReadableStream | string;
+                const audioResult = audioRaw instanceof ArrayBuffer
+                  ? audioRaw
+                  : audioRaw instanceof Uint8Array
+                    ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+                    : await new Response(audioRaw as BodyInit).arrayBuffer();
+                const audioBytes = new Uint8Array(audioResult);
                 // Store audio in R2
                 const key = `audio/${Date.now()}-${Math.random().toString(36).slice(2,8)}.mp3`;
-                await env.STORAGE.put(key, audioResult, { customMetadata: { text: text.slice(0, 200) } });
+                await env.STORAGE.put(key, audioBytes, { customMetadata: { text: text.slice(0, 200) } });
                 result = JSON.stringify({
-                  audio_key: key, size_bytes: audioResult.byteLength, model: "@cf/deepgram/aura-2-en",
+                  audio_key: key, size_bytes: audioBytes.byteLength, model: "@cf/deepgram/aura-2-en",
                 });
               } catch (err: any) {
                 result = `TTS failed: ${err.message}`;
@@ -1952,7 +3241,7 @@ export default {
 
             default:
               return Response.json({
-                tool, error: `Tool '${tool}' not available on worker. It may be a backend-only tool.`,
+                tool, error: `Tool '${tool}' not available on edge runtime.`,
               }, { status: 400 });
           }
 
@@ -1976,7 +3265,7 @@ export default {
   // ── Queue Consumer — writes telemetry to Supabase via Hyperdrive ──
   // Messages flow: Agent DO → TELEMETRY_QUEUE → this consumer → Supabase
   // Guaranteed delivery, batched writes, automatic retries.
-  async queue(batch: MessageBatch<{ type: string; payload: Record<string, unknown> }>, env: Env): Promise<void> {
+  async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     if (!env.HYPERDRIVE) {
       batch.retryAll();
       return;
@@ -1984,15 +3273,17 @@ export default {
 
     // Connect via Postgres.js + Hyperdrive (Worker-compatible driver)
     const postgres = (await import("postgres")).default;
-    const sql = postgres(env.HYPERDRIVE.connectionString, {
+    const sql: any = postgres(env.HYPERDRIVE.connectionString, {
       max: 5,
       fetch_types: false,
-      prepare: true,
+      prepare: false,  // Hyperdrive requires prepare:false (transaction-mode pooling)
     });
 
     try {
       for (const msg of batch.messages) {
-        const { type, payload: p } = msg.body;
+        const body = (msg.body || {}) as { type?: string; payload?: Record<string, unknown> };
+        const type = String(body.type || "");
+        const p = (body.payload || {}) as Record<string, any>;
         try {
           if (type === "session") {
             await sql`INSERT INTO sessions (
@@ -2007,7 +3298,7 @@ export default {
               ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
               ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
               ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
-              to_timestamp(${Number(p.created_at) || Date.now() / 1000})
+              ${Number(p.created_at) || Date.now() / 1000}
             ) ON CONFLICT (session_id) DO UPDATE SET
               status = EXCLUDED.status, output_text = EXCLUDED.output_text,
               cost_total_usd = EXCLUDED.cost_total_usd, step_count = EXCLUDED.step_count`;
@@ -2030,14 +3321,14 @@ export default {
               VALUES (${p.session_id}, ${p.input}, ${p.output})`;
           } else if (type === "event") {
             await sql`INSERT INTO otel_events (
-              session_id, turn_number, event_type, action, plan, tier,
-              provider, model, tool_name, status, latency_ms, details_json
+              session_id, turn, event_type, action, plan, tier,
+              provider, model, tool_name, status, latency_ms, details_json, created_at
             ) VALUES (
               ${p.session_id}, ${p.turn || 0}, ${p.event_type || ""},
               ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
               ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
-              ${p.status || ""}, ${p.latency_ms || 0},
-              ${JSON.stringify(p.details || {})}
+              ${p.status || ""}, ${p.latency_ms || 0}, ${JSON.stringify(p.details || {})},
+              ${Number(p.created_at) || Date.now() / 1000}
             )`;
           }
           msg.ack();
