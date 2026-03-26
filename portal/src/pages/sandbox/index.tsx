@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type SandboxListResponse = {
   sandboxes?: Array<{
@@ -27,8 +28,8 @@ export const SandboxPage = () => {
   const [output, setOutput] = useState<string>("");
   const [error, setError] = useState<string>("");
 
-  const sandboxesQuery = useApiQuery<SandboxListResponse>("/api/v1/sandbox/list");
-  const sandboxes = useMemo(() => sandboxesQuery.data?.sandboxes ?? [], [sandboxesQuery.data]);
+  const sandboxesQuery = useApiQuery<SandboxListResponse | SandboxListResponse["sandboxes"]>("/api/v1/sandbox/list");
+  const sandboxes = useMemo(() => extractList<NonNullable<SandboxListResponse["sandboxes"]>[number]>(sandboxesQuery.data, "sandboxes"), [sandboxesQuery.data]);
 
   const appendTimeline = (action: string, result: string) => {
     setTimeline((previous) => [

@@ -8,6 +8,7 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type UsageItem = { category: string; quantity: number; unit: string; cost_usd: number };
 type Invoice = { invoice_id: string; date: string; amount_usd: number; status: string; pdf_url?: string };
@@ -17,15 +18,15 @@ type StripeStatus = { subscription_id?: string; status?: string; current_period_
 
 export const BillingPage = () => {
   const { showToast } = useToast();
-  const usageQuery = useApiQuery<{ usage: UsageItem[]; total_usd?: number; period?: string }>("/api/v1/billing/usage");
-  const invoicesQuery = useApiQuery<{ invoices: Invoice[] }>("/api/v1/billing/invoices");
+  const usageQuery = useApiQuery<{ usage: UsageItem[]; total_usd?: number; period?: string } | UsageItem[]>("/api/v1/billing/usage");
+  const invoicesQuery = useApiQuery<{ invoices: Invoice[] } | Invoice[]>("/api/v1/billing/invoices");
   const planQuery = useApiQuery<{ plan: Plan }>("/api/v1/billing/plan");
-  const dailyUsageQuery = useApiQuery<{ daily: DailyUsage[] }>("/api/v1/billing/usage/daily");
+  const dailyUsageQuery = useApiQuery<{ daily: DailyUsage[] } | DailyUsage[]>("/api/v1/billing/usage/daily");
   const stripeStatusQuery = useApiQuery<StripeStatus>("/api/v1/stripe/status");
   const [checkoutLoading, setCheckoutLoading] = useState(false);
   const [portalLoading, setPortalLoading] = useState(false);
 
-  const dailyUsage = useMemo(() => dailyUsageQuery.data?.daily ?? [], [dailyUsageQuery.data]);
+  const dailyUsage = useMemo(() => extractList<DailyUsage>(dailyUsageQuery.data, "daily"), [dailyUsageQuery.data]);
   const stripeStatus = stripeStatusQuery.data;
 
   const handleUpgradePlan = async () => {
@@ -60,10 +61,16 @@ export const BillingPage = () => {
     }
   };
 
-  const usage = useMemo(() => usageQuery.data?.usage ?? [], [usageQuery.data]);
-  const invoices = useMemo(() => invoicesQuery.data?.invoices ?? [], [invoicesQuery.data]);
+  const usage = useMemo(() => extractList<UsageItem>(usageQuery.data, "usage"), [usageQuery.data]);
+  const invoices = useMemo(() => extractList<Invoice>(invoicesQuery.data, "invoices"), [invoicesQuery.data]);
   const plan = planQuery.data?.plan;
-  const totalUsd = usageQuery.data?.total_usd ?? usage.reduce((sum, u) => sum + u.cost_usd, 0);
+  const totalUsd = (
+    usageQuery.data &&
+    !Array.isArray(usageQuery.data) &&
+    typeof usageQuery.data.total_usd === "number"
+  )
+    ? usageQuery.data.total_usd
+    : usage.reduce((sum, u) => sum + u.cost_usd, 0);
 
   /* ── Overview tab ─────────────────────────────────────────── */
   const overviewTab = (

@@ -1,4 +1,4 @@
-import { useMemo, useState, useRef } from "react";
+import { useMemo, useState, useRef, useCallback, useEffect } from "react";
 import {
   Upload,
   FileText,
@@ -8,6 +8,12 @@ import {
   Search,
   RefreshCw,
   HardDrive,
+  RotateCcw,
+  FileType,
+  FileSpreadsheet,
+  FileCode,
+  File,
+  CheckSquare,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -19,7 +25,7 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { ActionMenu, type ActionMenuItem } from "../../components/common/ActionMenu";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { useToast } from "../../components/common/ToastProvider";
-import type { AgentInfo } from "../../lib/adapters";
+import { safeArray, type AgentInfo } from "../../lib/adapters";
 import { useApiQuery, apiRequest } from "../../lib/api";
 
 type RagStatus = {
@@ -48,6 +54,48 @@ type RagChunk = {
   score?: number;
 };
 
+/* ── File type helpers ─────────────────────────────────────── */
+
+function getFileExtension(filename: string): string {
+  const parts = filename.split(".");
+  return parts.length > 1 ? parts.pop()!.toLowerCase() : "";
+}
+
+function getFileTypeIcon(filename: string) {
+  const ext = getFileExtension(filename);
+  switch (ext) {
+    case "pdf":
+      return <FileType size={14} className="doc-icon-pdf" />;
+    case "txt":
+      return <FileText size={14} className="doc-icon-txt" />;
+    case "md":
+      return <FileText size={14} className="doc-icon-md" />;
+    case "csv":
+      return <FileSpreadsheet size={14} className="doc-icon-csv" />;
+    case "json":
+      return <FileCode size={14} className="doc-icon-json" />;
+    case "docx":
+    case "doc":
+      return <FileType size={14} className="doc-icon-docx" />;
+    default:
+      return <File size={14} className="doc-icon-default" />;
+  }
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatETA(secondsRemaining: number): string {
+  if (secondsRemaining < 1) return "finishing...";
+  if (secondsRemaining < 60) return `~${Math.ceil(secondsRemaining)}s remaining`;
+  const mins = Math.floor(secondsRemaining / 60);
+  const secs = Math.ceil(secondsRemaining % 60);
+  return `~${mins}m ${secs}s remaining`;
+}
+
 export const RagPage = () => {
   const { showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -58,12 +106,19 @@ export const RagPage = () => {
   const [agentName, setAgentName] = useState("");
   const selectedAgent = agentName || agents[0]?.name || "";
 
-  /* ── Upload settings ──────────────────────────────────────── */
+  /* ── Upload state ──────────────────────────────────────────── */
   const [chunkSize, setChunkSize] = useState("512");
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStartTime, setUploadStartTime] = useState<number | null>(null);
+  const [uploadETA, setUploadETA] = useState<string>("");
+  const [uploadFailed, setUploadFailed] = useState(false);
+  const [lastUploadFiles, setLastUploadFiles] = useState<FileList | null>(null);
 
-  /* ── Queries ──────────────────────────────────────────────── */
+  /* ── Bulk selection ────────────────────────────────────────── */
+  const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
+
+  /* ── Queries ───────────────────────────────────────────────── */
   const statusQuery = useApiQuery<RagStatus>(
     `/api/v1/rag/${encodeURIComponent(selectedAgent)}/status`,
     Boolean(selectedAgent),
@@ -74,7 +129,7 @@ export const RagPage = () => {
   );
   const documents = docsQuery.data?.documents ?? [];
 
-  /* ── Search ───────────────────────────────────────────────── */
+  /* ── Search ────────────────────────────────────────────────── */
   const [docSearch, setDocSearch] = useState("");
   const filteredDocs = docSearch
     ? documents.filter(
@@ -85,13 +140,13 @@ export const RagPage = () => {
       )
     : documents;
 
-  /* ── Chunk viewer ─────────────────────────────────────────── */
+  /* ── Chunk viewer ──────────────────────────────────────────── */
   const [chunkDrawerOpen, setChunkDrawerOpen] = useState(false);
   const [selectedDoc, setSelectedDoc] = useState<RagDocument | null>(null);
   const [chunks, setChunks] = useState<RagChunk[]>([]);
   const [chunksLoading, setChunksLoading] = useState(false);
 
-  /* ── Confirm dialog ───────────────────────────────────────── */
+  /* ── Confirm dialog ────────────────────────────────────────── */
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [confirmAction, setConfirmAction] = useState<{
     title: string;
@@ -99,57 +154,86 @@ export const RagPage = () => {
     action: () => Promise<void>;
   } | null>(null);
 
-  /* ── Upload handler ───────────────────────────────────────── */
-  const handleUpload = async (files: FileList | null) => {
-    if (!files || files.length === 0 || !selectedAgent) return;
-    setUploading(true);
-    setUploadProgress(0);
+  /* ── ETA calculation ───────────────────────────────────────── */
+  useEffect(() => {
+    if (!uploading || !uploadStartTime || uploadProgress <= 0) {
+      setUploadETA("");
+      return;
+    }
+    const elapsed = (Date.now() - uploadStartTime) / 1000;
+    const rate = uploadProgress / elapsed;
+    if (rate > 0) {
+      const remaining = (100 - uploadProgress) / rate;
+      setUploadETA(formatETA(remaining));
+    }
+  }, [uploading, uploadProgress, uploadStartTime]);
 
-    try {
-      const formData = new FormData();
-      for (const file of Array.from(files)) {
-        formData.append("files", file);
+  /* ── Upload handler ────────────────────────────────────────── */
+  const handleUpload = useCallback(
+    async (files: FileList | null) => {
+      if (!files || files.length === 0 || !selectedAgent) return;
+      setUploading(true);
+      setUploadProgress(0);
+      setUploadFailed(false);
+      setUploadStartTime(Date.now());
+      setLastUploadFiles(files);
+
+      try {
+        const formData = new FormData();
+        for (const file of Array.from(files)) {
+          formData.append("files", file);
+        }
+        formData.append("chunk_size", chunkSize);
+
+        const token = localStorage.getItem("token");
+        const headers: Record<string, string> = {};
+        if (token) headers.Authorization = `Bearer ${token}`;
+
+        const progressInterval = setInterval(() => {
+          setUploadProgress((p) => Math.min(p + 8, 90));
+        }, 300);
+
+        const response = await fetch(
+          `/api/v1/rag/${encodeURIComponent(selectedAgent)}/ingest`,
+          { method: "POST", headers, body: formData },
+        );
+
+        clearInterval(progressInterval);
+
+        if (!response.ok) throw new Error(`Ingest failed (${response.status})`);
+
+        setUploadProgress(100);
+        showToast(
+          `${files.length} document${files.length > 1 ? "s" : ""} ingested`,
+          "success",
+        );
+        void statusQuery.refetch();
+        void docsQuery.refetch();
+      } catch (err) {
+        setUploadFailed(true);
+        showToast(
+          err instanceof Error ? err.message : "Upload failed",
+          "error",
+        );
+      } finally {
+        setUploading(false);
+        setUploadStartTime(null);
+        if (!uploadFailed) {
+          setTimeout(() => setUploadProgress(0), 1500);
+        }
+        if (fileInputRef.current) fileInputRef.current.value = "";
       }
-      formData.append("chunk_size", chunkSize);
+    },
+    [selectedAgent, chunkSize, showToast, statusQuery, docsQuery, uploadFailed],
+  );
 
-      const token = localStorage.getItem("token");
-      const headers: Record<string, string> = {};
-      if (token) headers.Authorization = `Bearer ${token}`;
-
-      // Simulate progress
-      const progressInterval = setInterval(() => {
-        setUploadProgress((p) => Math.min(p + 10, 90));
-      }, 200);
-
-      const response = await fetch(
-        `/api/v1/rag/${encodeURIComponent(selectedAgent)}/ingest`,
-        { method: "POST", headers, body: formData },
-      );
-
-      clearInterval(progressInterval);
-
-      if (!response.ok) throw new Error(`Ingest failed (${response.status})`);
-
-      setUploadProgress(100);
-      showToast(
-        `${files.length} document${files.length > 1 ? "s" : ""} ingested`,
-        "success",
-      );
-      void statusQuery.refetch();
-      void docsQuery.refetch();
-    } catch (err) {
-      showToast(
-        err instanceof Error ? err.message : "Upload failed",
-        "error",
-      );
-    } finally {
-      setUploading(false);
-      setTimeout(() => setUploadProgress(0), 1500);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+  const handleRetryUpload = () => {
+    if (lastUploadFiles) {
+      void handleUpload(lastUploadFiles);
     }
   };
 
-  /* ── View chunks ──────────────────────────────────────────── */
+  /* ── View chunks ───────────────────────────────────────────── */
   const viewChunks = async (doc: RagDocument) => {
     setSelectedDoc(doc);
     setChunkDrawerOpen(true);
@@ -167,7 +251,7 @@ export const RagPage = () => {
     }
   };
 
-  /* ── Delete document ──────────────────────────────────────── */
+  /* ── Delete document ───────────────────────────────────────── */
   const handleDeleteDoc = (doc: RagDocument) => {
     const name = doc.filename || doc.metadata?.source || "this document";
     setConfirmAction({
@@ -187,12 +271,89 @@ export const RagPage = () => {
     setConfirmOpen(true);
   };
 
-  /* ── Row actions ──────────────────────────────────────────── */
+  /* ── Bulk actions ──────────────────────────────────────────── */
+  const getDocId = (doc: RagDocument) =>
+    doc.id || doc.filename || doc.metadata?.source || "";
+
+  const toggleDocSelection = (doc: RagDocument) => {
+    const id = getDocId(doc);
+    setSelectedDocs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const toggleAllDocs = () => {
+    if (selectedDocs.size === filteredDocs.length) {
+      setSelectedDocs(new Set());
+    } else {
+      setSelectedDocs(new Set(filteredDocs.map(getDocId)));
+    }
+  };
+
+  const handleBulkDelete = () => {
+    if (selectedDocs.size === 0) return;
+    setConfirmAction({
+      title: "Delete Selected Documents",
+      desc: `Remove ${selectedDocs.size} document${selectedDocs.size > 1 ? "s" : ""} and all their chunks? This cannot be undone.`,
+      action: async () => {
+        const promises = Array.from(selectedDocs).map((docId) =>
+          apiRequest(
+            `/api/v1/rag/${encodeURIComponent(selectedAgent)}/documents/${encodeURIComponent(docId)}`,
+            "DELETE",
+          ),
+        );
+        await Promise.allSettled(promises);
+        showToast(`${selectedDocs.size} documents deleted`, "success");
+        setSelectedDocs(new Set());
+        void docsQuery.refetch();
+        void statusQuery.refetch();
+      },
+    });
+    setConfirmOpen(true);
+  };
+
+  const handleBulkReprocess = async () => {
+    if (selectedDocs.size === 0) return;
+    try {
+      const promises = Array.from(selectedDocs).map((docId) =>
+        apiRequest(
+          `/api/v1/rag/${encodeURIComponent(selectedAgent)}/documents/${encodeURIComponent(docId)}/reprocess`,
+          "POST",
+        ),
+      );
+      await Promise.allSettled(promises);
+      showToast(`${selectedDocs.size} documents queued for re-processing`, "success");
+      setSelectedDocs(new Set());
+      void docsQuery.refetch();
+    } catch {
+      showToast("Re-process failed", "error");
+    }
+  };
+
+  /* ── Row actions ───────────────────────────────────────────── */
   const getDocActions = (doc: RagDocument): ActionMenuItem[] => [
     {
       label: "View Chunks",
       icon: <Eye size={12} />,
       onClick: () => void viewChunks(doc),
+    },
+    {
+      label: "Re-process",
+      icon: <RotateCcw size={12} />,
+      onClick: () =>
+        void apiRequest(
+          `/api/v1/rag/${encodeURIComponent(selectedAgent)}/documents/${encodeURIComponent(getDocId(doc))}/reprocess`,
+          "POST",
+        ).then(() => {
+          showToast("Re-processing started", "success");
+          void docsQuery.refetch();
+        }),
     },
     {
       label: "Delete",
@@ -201,12 +362,6 @@ export const RagPage = () => {
       danger: true,
     },
   ];
-
-  const formatBytes = (bytes: number) => {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  };
 
   return (
     <div>
@@ -295,7 +450,7 @@ export const RagPage = () => {
                   Click to upload or drag files here
                 </p>
                 <p className="text-[10px] text-text-muted mt-0.5">
-                  PDF, TXT, MD, DOCX, CSV
+                  PDF, TXT, MD, DOCX, CSV, JSON
                 </p>
                 <input
                   ref={fileInputRef}
@@ -310,24 +465,97 @@ export const RagPage = () => {
           </div>
         </div>
 
-        {/* Upload progress */}
-        {uploading && (
+        {/* Upload progress with ETA and retry */}
+        {(uploading || uploadProgress > 0 || uploadFailed) && (
           <div className="mt-3">
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-xs text-text-secondary">Uploading...</span>
-              <span className="text-xs text-text-muted font-mono">
-                {uploadProgress}%
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs text-text-secondary">
+                {uploadFailed
+                  ? "Upload failed"
+                  : uploadProgress >= 100
+                    ? "Processing complete"
+                    : "Uploading..."}
               </span>
+              <div className="flex items-center gap-3">
+                {uploading && uploadETA && (
+                  <span className="text-[10px] text-text-muted">
+                    {uploadETA}
+                  </span>
+                )}
+                <span
+                  className={`text-xs font-mono ${uploadFailed ? "text-status-error" : "text-text-muted"}`}
+                >
+                  {uploadProgress}%
+                </span>
+              </div>
             </div>
-            <div className="w-full h-1.5 bg-surface-overlay rounded-full overflow-hidden">
+            <div className="progress-track">
               <div
-                className="h-full bg-accent rounded-full transition-all duration-300"
+                className={`h-full rounded-full transition-all duration-300 ${
+                  uploadFailed
+                    ? "bg-status-error"
+                    : uploadProgress >= 100
+                      ? "bg-status-live"
+                      : "progress-bar-gradient"
+                }`}
                 style={{ width: `${uploadProgress}%` }}
               />
             </div>
+            {uploadFailed && (
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  className="btn btn-secondary text-xs"
+                  onClick={handleRetryUpload}
+                >
+                  <RotateCcw size={12} />
+                  Retry Upload
+                </button>
+                <button
+                  className="btn btn-ghost text-xs"
+                  onClick={() => {
+                    setUploadFailed(false);
+                    setUploadProgress(0);
+                    setLastUploadFiles(null);
+                  }}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Bulk action bar */}
+      {selectedDocs.size > 0 && (
+        <div className="bulk-action-bar flex items-center gap-3 px-4 py-2.5 mb-3">
+          <CheckSquare size={14} className="text-accent" />
+          <span className="text-xs text-text-secondary font-medium">
+            {selectedDocs.size} selected
+          </span>
+          <div className="flex-1" />
+          <button
+            className="btn btn-secondary text-xs"
+            onClick={() => void handleBulkReprocess()}
+          >
+            <RotateCcw size={12} />
+            Re-process
+          </button>
+          <button
+            className="btn btn-secondary text-xs text-status-error border-status-error/30 hover:bg-status-error/10"
+            onClick={handleBulkDelete}
+          >
+            <Trash2 size={12} />
+            Delete
+          </button>
+          <button
+            className="btn btn-ghost text-xs"
+            onClick={() => setSelectedDocs(new Set())}
+          >
+            Clear
+          </button>
+        </div>
+      )}
 
       {/* Documents table */}
       <div className="flex items-center justify-between mb-3">
@@ -366,8 +594,10 @@ export const RagPage = () => {
         {filteredDocs.length === 0 ? (
           <EmptyState
             icon={<FileText size={40} />}
-            title="No documents"
-            description="Upload documents above to build your knowledge base"
+            title="No documents yet"
+            description="Upload documents above to build your knowledge base. Supported formats include PDF, TXT, Markdown, DOCX, CSV, and JSON."
+            actionLabel="Upload Documents"
+            onAction={() => fileInputRef.current?.click()}
           />
         ) : (
           <div className="card p-0">
@@ -375,6 +605,18 @@ export const RagPage = () => {
               <table>
                 <thead>
                   <tr>
+                    <th style={{ width: "36px", paddingRight: 0 }}>
+                      <input
+                        type="checkbox"
+                        className="bulk-checkbox"
+                        checked={
+                          filteredDocs.length > 0 &&
+                          selectedDocs.size === filteredDocs.length
+                        }
+                        onChange={toggleAllDocs}
+                        aria-label="Select all documents"
+                      />
+                    </th>
                     <th>Document</th>
                     <th>Status</th>
                     <th>Chunks</th>
@@ -384,50 +626,75 @@ export const RagPage = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredDocs.map((doc, i) => (
-                    <tr key={doc.id ?? i}>
-                      <td>
-                        <div className="flex items-center gap-2">
-                          <FileText
-                            size={14}
-                            className="text-text-muted shrink-0"
+                  {filteredDocs.map((doc, i) => {
+                    const docId = getDocId(doc);
+                    const filename =
+                      doc.filename ??
+                      doc.metadata?.source ??
+                      `document-${i + 1}`;
+                    return (
+                      <tr
+                        key={doc.id ?? i}
+                        className={
+                          selectedDocs.has(docId)
+                            ? "bg-accent/5"
+                            : undefined
+                        }
+                      >
+                        <td style={{ paddingRight: 0 }}>
+                          <input
+                            type="checkbox"
+                            className="bulk-checkbox"
+                            checked={selectedDocs.has(docId)}
+                            onChange={() => toggleDocSelection(doc)}
+                            aria-label={`Select ${filename}`}
                           />
-                          <span className="text-text-primary text-sm">
-                            {doc.filename ??
-                              doc.metadata?.source ??
-                              `document-${i + 1}`}
+                        </td>
+                        <td>
+                          <div className="flex items-center gap-2">
+                            {getFileTypeIcon(filename)}
+                            <div>
+                              <span className="text-text-primary text-sm">
+                                {filename}
+                              </span>
+                              <span className="block text-[10px] text-text-muted uppercase">
+                                {getFileExtension(filename) || "file"}
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>
+                          <StatusBadge
+                            status={doc.status ?? "ready"}
+                          />
+                        </td>
+                        <td>
+                          <span className="text-text-muted text-xs font-mono">
+                            {doc.chunk_count ?? doc.length ?? 0}
                           </span>
-                        </div>
-                      </td>
-                      <td>
-                        <StatusBadge
-                          status={doc.status ?? "ready"}
-                        />
-                      </td>
-                      <td>
-                        <span className="text-text-muted text-xs font-mono">
-                          {doc.chunk_count ?? doc.length ?? 0}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="text-text-muted text-xs">
-                          {doc.size_bytes
-                            ? formatBytes(doc.size_bytes)
-                            : "--"}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="text-text-muted text-[10px]">
-                          {doc.ingested_at
-                            ? new Date(doc.ingested_at).toLocaleDateString()
-                            : "--"}
-                        </span>
-                      </td>
-                      <td>
-                        <ActionMenu items={getDocActions(doc)} />
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                        <td>
+                          <span className="text-text-muted text-xs">
+                            {doc.size_bytes
+                              ? formatBytes(doc.size_bytes)
+                              : "--"}
+                          </span>
+                        </td>
+                        <td>
+                          <span className="text-text-muted text-[10px]">
+                            {doc.ingested_at
+                              ? new Date(
+                                  doc.ingested_at,
+                                ).toLocaleDateString()
+                              : "--"}
+                          </span>
+                        </td>
+                        <td>
+                          <ActionMenu items={getDocActions(doc)} />
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

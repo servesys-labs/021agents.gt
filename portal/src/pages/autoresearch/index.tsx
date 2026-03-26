@@ -7,6 +7,7 @@ import { StatusBadge } from "../../components/common/StatusBadge";
 import { EmptyState } from "../../components/common/EmptyState";
 import { Tabs } from "../../components/common/Tabs";
 import { useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -72,8 +73,8 @@ const statusIcon = (status: string) => {
 /* ── Page ───────────────────────────────────────────────────────── */
 
 export const AutoResearchPage = () => {
-  const runsQuery = useApiQuery<AutoResearchRun[]>("/api/v1/autoresearch/runs?limit=50");
-  const runs = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
+  const runsQuery = useApiQuery<{ runs: AutoResearchRun[] } | AutoResearchRun[]>("/api/v1/autoresearch/runs?limit=50");
+  const runs = useMemo(() => extractList<AutoResearchRun>(runsQuery.data, "runs"), [runsQuery.data]);
 
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const detailQuery = useApiQuery<{ experiments?: AutoResearchExperiment[] } & AutoResearchRun>(
@@ -81,7 +82,10 @@ export const AutoResearchPage = () => {
     Boolean(selectedRunId),
   );
 
-  const experiments = useMemo(() => detailQuery.data?.experiments ?? [], [detailQuery.data]);
+  const experiments = useMemo(
+    () => extractList<AutoResearchExperiment>(detailQuery.data, "experiments"),
+    [detailQuery.data],
+  );
 
   /* ── Summary stats ──────────────────────────────────────── */
   const totalRuns = runs.length;

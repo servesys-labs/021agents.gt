@@ -11,16 +11,17 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type Channel = { channel_id: string; name: string; current_version?: string; traffic_pct?: number; status?: string };
 type Release = { release_id: string; version: string; agent_name?: string; channel?: string; status?: string; created_at?: string; promoted_at?: string };
 
 export const ReleasesPage = () => {
   const { showToast } = useToast();
-  const channelsQuery = useApiQuery<{ channels: Channel[] }>("/api/v1/releases/channels");
-  const releasesQuery = useApiQuery<{ releases: Release[] }>("/api/v1/releases?limit=50");
-  const channels = useMemo(() => channelsQuery.data?.channels ?? [], [channelsQuery.data]);
-  const releases = useMemo(() => releasesQuery.data?.releases ?? [], [releasesQuery.data]);
+  const channelsQuery = useApiQuery<{ channels: Channel[] } | Channel[]>("/api/v1/releases/channels");
+  const releasesQuery = useApiQuery<{ releases: Release[] } | Release[]>("/api/v1/releases?limit=50");
+  const channels = useMemo(() => extractList<Channel>(channelsQuery.data, "channels"), [channelsQuery.data]);
+  const releases = useMemo(() => extractList<Release>(releasesQuery.data, "releases"), [releasesQuery.data]);
 
   const [search, setSearch] = useState("");
   const filteredReleases = search ? releases.filter((r) => (r.version + (r.agent_name ?? "")).toLowerCase().includes(search.toLowerCase())) : releases;

@@ -12,6 +12,7 @@ import { Tabs } from "../../components/common/Tabs";
 import { TagInput } from "../../components/common/TagInput";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type Policy = { policy_id: string; name: string; type?: string; description?: string; rules?: string[]; is_active?: boolean };
 type Budget = { budget_id: string; agent_name?: string; limit_usd?: number; spent_usd?: number; period?: string; alert_threshold?: number };
@@ -19,12 +20,12 @@ type ApprovalRule = { rule_id: string; name?: string; trigger?: string; approver
 
 export const GovernancePage = () => {
   const { showToast } = useToast();
-  const policiesQuery = useApiQuery<{ policies: Policy[] }>("/api/v1/governance/policies");
-  const budgetsQuery = useApiQuery<{ budgets: Budget[] }>("/api/v1/governance/budgets");
-  const approvalsQuery = useApiQuery<{ rules: ApprovalRule[] }>("/api/v1/governance/approvals");
-  const policies = useMemo(() => policiesQuery.data?.policies ?? [], [policiesQuery.data]);
-  const budgets = useMemo(() => budgetsQuery.data?.budgets ?? [], [budgetsQuery.data]);
-  const approvalRules = useMemo(() => approvalsQuery.data?.rules ?? [], [approvalsQuery.data]);
+  const policiesQuery = useApiQuery<{ policies: Policy[] } | Policy[]>("/api/v1/governance/policies");
+  const budgetsQuery = useApiQuery<{ budgets: Budget[] } | Budget[]>("/api/v1/governance/budgets");
+  const approvalsQuery = useApiQuery<{ rules: ApprovalRule[] } | ApprovalRule[]>("/api/v1/governance/approvals");
+  const policies = useMemo(() => extractList<Policy>(policiesQuery.data, "policies"), [policiesQuery.data]);
+  const budgets = useMemo(() => extractList<Budget>(budgetsQuery.data, "budgets"), [budgetsQuery.data]);
+  const approvalRules = useMemo(() => extractList<ApprovalRule>(approvalsQuery.data, "rules"), [approvalsQuery.data]);
 
   const [search, setSearch] = useState("");
 

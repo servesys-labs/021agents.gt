@@ -8,6 +8,7 @@ import { EmptyState } from "../../components/common/EmptyState";
 import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { useApiQuery, apiRequest } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type EvolutionEntry = {
   version: string;
@@ -29,9 +30,9 @@ type Proposal = {
 
 export const EvolutionPage = () => {
   const { showToast } = useToast();
-  const evoQuery = useApiQuery<{ entries: EvolutionEntry[] }>("/api/v1/evolution?limit=50");
+  const evoQuery = useApiQuery<{ entries: EvolutionEntry[] } | EvolutionEntry[]>("/api/v1/evolution?limit=50");
   const agentsQuery = useApiQuery<Array<{ name: string }>>("/api/v1/agents");
-  const entries = useMemo(() => evoQuery.data?.entries ?? [], [evoQuery.data]);
+  const entries = useMemo(() => extractList<EvolutionEntry>(evoQuery.data, "entries"), [evoQuery.data]);
 
   const [compareA, setCompareA] = useState("");
   const [compareB, setCompareB] = useState("");
@@ -44,6 +45,7 @@ export const EvolutionPage = () => {
     `/api/v1/evolve/${operatorAgent}/ledger`,
     Boolean(operatorAgent),
   );
+  const proposals = useMemo(() => extractList<Proposal>(proposalsQuery.data, "proposals"), [proposalsQuery.data]);
 
   const agents = [...new Set(entries.map((e) => e.agent_name))];
   const allAgentNames = Array.from(
@@ -199,11 +201,11 @@ export const EvolutionPage = () => {
           <p className="text-xs text-text-muted">Loading proposals...</p>
         ) : proposalsQuery.error ? (
           <p className="text-xs text-status-error">{proposalsQuery.error}</p>
-        ) : (proposalsQuery.data?.proposals ?? []).length === 0 ? (
+        ) : proposals.length === 0 ? (
           <p className="text-xs text-text-muted">No pending proposals.</p>
         ) : (
           <div className="space-y-2">
-            {(proposalsQuery.data?.proposals ?? []).map((p, idx) => (
+            {proposals.map((p, idx) => (
               <div key={`${p.id ?? "proposal"}-${idx}`} className="border border-border-default rounded-lg p-3 bg-surface-base">
                 <div className="flex items-start justify-between gap-3">
                   <div>

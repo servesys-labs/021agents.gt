@@ -17,7 +17,9 @@ import {
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { StatusBadge } from "../../components/common/StatusBadge";
+import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
 import { useApiQuery } from "../../lib/api";
+import { safeArray, type AgentInfo } from "../../lib/adapters";
 
 type DashStats = {
   total_agents?: number;
@@ -48,9 +50,25 @@ export const DashboardPage = () => {
   const statsQuery = useApiQuery<DashStats>("/api/v1/dashboard/stats");
   const activityQuery = useApiQuery<{ activities: RecentActivity[] }>("/api/v1/dashboard/activity?limit=10");
   const intelQuery = useApiQuery<IntelSummary>("/api/v1/intelligence/summary?since_days=30");
+  const agentsQuery = useApiQuery<AgentInfo[]>("/api/v1/agents?limit=6&offset=0");
   const stats = statsQuery.data ?? {};
   const intel = intelQuery.data ?? {};
   const activities = useMemo(() => activityQuery.data?.activities ?? [], [activityQuery.data]);
+  const agents = useMemo(() => safeArray<AgentInfo>(agentsQuery.data), [agentsQuery.data]);
+
+  const agentCards: AgentCardData[] = useMemo(
+    () =>
+      agents.slice(0, 6).map((a) => ({
+        name: a.name,
+        description: a.description,
+        status: a.status,
+        model: a.model,
+        version: a.version,
+        tags: a.tags,
+        last_active: a.updated_at,
+      })),
+    [agents],
+  );
 
   const kpis = [
     { label: "Total Agents", value: stats.total_agents ?? 0, icon: Bot, color: "bg-chart-purple/10", iconColor: "text-chart-purple", link: "/agents" },
@@ -84,7 +102,7 @@ export const DashboardPage = () => {
       <PageHeader
         title="Dashboard"
         subtitle="Control plane overview"
-        onRefresh={() => { void statsQuery.refetch(); void activityQuery.refetch(); void intelQuery.refetch(); }}
+        onRefresh={() => { void statsQuery.refetch(); void activityQuery.refetch(); void intelQuery.refetch(); void agentsQuery.refetch(); }}
       />
 
       {/* KPI grid */}
@@ -107,6 +125,30 @@ export const DashboardPage = () => {
           </div>
         ))}
       </div>
+
+      {/* Agent Cards */}
+      {agentCards.length > 0 && (
+        <div className="mb-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-text-primary">Your Agents</h3>
+            <button
+              className="text-[10px] text-accent hover:underline"
+              onClick={() => navigate("/agents")}
+            >
+              View All
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {agentCards.map((agent) => (
+              <AgentCard
+                key={agent.name}
+                agent={agent}
+                onSelect={(name) => navigate(`/agents?selected=${name}`)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-2">
         {/* Quick Actions */}

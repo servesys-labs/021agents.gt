@@ -23,6 +23,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type Project = { project_id: string; name: string; slug: string; description?: string; default_plan?: string };
 type Env = { env_id: string; name: string; plan?: string };
@@ -32,16 +33,16 @@ export const ProjectsPage = () => {
   const { showToast } = useToast();
 
   /* ── Queries ──────────────────────────────────────────────── */
-  const projectsQuery = useApiQuery<{ projects: Project[] }>("/api/v1/projects");
-  const projects = useMemo(() => projectsQuery.data?.projects ?? [], [projectsQuery.data]);
+  const projectsQuery = useApiQuery<{ projects: Project[] } | Project[]>("/api/v1/projects");
+  const projects = useMemo(() => extractList<Project>(projectsQuery.data, "projects"), [projectsQuery.data]);
   const [selectedProject, setSelectedProject] = useState("");
   const activeProject = selectedProject || projects[0]?.project_id || "";
 
-  const envsQuery = useApiQuery<{ environments: Env[] }>(
+  const envsQuery = useApiQuery<{ environments: Env[] } | Env[]>(
     `/api/v1/projects/${activeProject}/environments`,
     Boolean(activeProject),
   );
-  const envs = useMemo(() => envsQuery.data?.environments ?? [], [envsQuery.data]);
+  const envs = useMemo(() => extractList<Env>(envsQuery.data, "environments"), [envsQuery.data]);
 
   /* ── Search ───────────────────────────────────────────────── */
   const [search, setSearch] = useState("");

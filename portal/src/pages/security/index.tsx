@@ -1,214 +1,337 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
-  Scan,
+  AlertTriangle,
   RefreshCw,
+  Scan,
+  Shield,
+  ShieldAlert,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
-import { Tabs } from "../../components/common/Tabs";
 import { EmptyState } from "../../components/common/EmptyState";
-import { SlidePanel } from "../../components/common/SlidePanel";
 import { useApiQuery, apiRequest } from "../../lib/api";
 import { useToast } from "../../components/common/ToastProvider";
 
-/* ── Types ─────────────────────────────────────────────────────── */
+/* ── Types ──────────────────────────────────────────────────────── */
 
 type SecurityScan = {
   scan_id: string;
   agent_name: string;
-  scan_type: string;
-  status: string;
-  total_probes: number;
+  scan_type?: string;
+  status?: string;
+  total_probes?: number;
   passed: number;
   failed: number;
   risk_score: number;
   risk_level: string;
-  created_at: number;
-};
-
-type SecurityFinding = {
-  id: number;
-  scan_id: string;
-  agent_name: string;
-  probe_name: string;
-  category: string;
-  layer: string;
-  severity: string;
-  title: string;
-  description: string;
-  evidence: string;
-  aivss_score: number;
-  aivss_vector: string;
+  created_at?: number | string;
 };
 
 type RiskProfile = {
   agent_name: string;
   risk_score: number;
   risk_level: string;
-  last_scan_id: string;
-  aivss_vector_json: string;
-  findings_summary: { total?: number; by_severity?: Record<string, number> };
+  last_scan_id?: string;
+  aivss_vector_json?: string;
+  findings_summary?: { total?: number; by_severity?: Record<string, number> };
 };
 
-/* ── Helpers ───────────────────────────────────────────────────── */
+type Probe = {
+  name: string;
+  category?: string;
+  description?: string;
+};
 
-const riskColor = (level: string) => {
-  switch (level) {
-    case "critical": return "text-status-error";
-    case "high": return "text-chart-orange";
-    case "medium": return "text-status-warning";
-    case "low": return "text-status-live";
-    default: return "text-text-muted";
+/* ── AIVSS Vector Components ─────────────────────────────────────── */
+
+const AIVSS_COMPONENTS = [
+  { key: "AV", label: "Attack Vector", options: ["Network", "Adjacent", "Local", "Physical"] },
+  { key: "AC", label: "Attack Complexity", options: ["Low", "High"] },
+  { key: "PR", label: "Privileges Required", options: ["None", "Low", "High"] },
+  { key: "UI", label: "User Interaction", options: ["None", "Required"] },
+  { key: "S", label: "Scope", options: ["Unchanged", "Changed"] },
+  { key: "C", label: "Confidentiality", options: ["None", "Low", "High"] },
+  { key: "I", label: "Integrity", options: ["None", "Low", "High"] },
+  { key: "A", label: "Availability", options: ["None", "Low", "High"] },
+] as const;
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
+
+function riskColor(level: string) {
+  switch (level?.toLowerCase()) {
+    case "critical":
+      return "text-status-error";
+    case "high":
+      return "text-chart-orange";
+    case "medium":
+      return "text-status-warning";
+    case "low":
+      return "text-status-live";
+    default:
+      return "text-text-muted";
   }
-};
+}
 
-const riskBg = (level: string) => {
-  switch (level) {
-    case "critical": return "bg-status-error";
-    case "high": return "bg-chart-orange";
-    case "medium": return "bg-status-warning";
-    case "low": return "bg-status-live";
-    default: return "bg-text-muted";
+function riskBg(level: string) {
+  switch (level?.toLowerCase()) {
+    case "critical":
+      return "bg-status-error";
+    case "high":
+      return "bg-chart-orange";
+    case "medium":
+      return "bg-status-warning";
+    case "low":
+      return "bg-status-live";
+    default:
+      return "bg-text-muted";
   }
-};
+}
 
-const ScoreGauge = ({ score, size = "lg" }: { score: number; size?: "sm" | "lg" }) => {
-  const level = score >= 9 ? "critical" : score >= 7 ? "high" : score >= 4 ? "medium" : score > 0 ? "low" : "none";
+function riskBadgeBg(level: string) {
+  switch (level?.toLowerCase()) {
+    case "critical":
+      return "bg-status-error/15 text-status-error border-status-error/20";
+    case "high":
+      return "bg-chart-orange/15 text-chart-orange border-chart-orange/20";
+    case "medium":
+      return "bg-status-warning/15 text-status-warning border-status-warning/20";
+    case "low":
+      return "bg-status-live/15 text-status-live border-status-live/20";
+    default:
+      return "bg-surface-overlay text-text-muted border-border-default";
+  }
+}
+
+function formatDate(ts?: number | string): string {
+  if (!ts) return "--";
+  const d = new Date(typeof ts === "number" && ts < 1e12 ? ts * 1000 : ts);
+  return d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function ScoreGauge({
+  score,
+  size = "lg",
+}: {
+  score: number;
+  size?: "sm" | "lg";
+}) {
+  const level =
+    score >= 9
+      ? "critical"
+      : score >= 7
+        ? "high"
+        : score >= 4
+          ? "medium"
+          : score > 0
+            ? "low"
+            : "none";
   const pct = Math.min(100, (score / 10) * 100);
   return (
-    <div className={`flex items-center gap-2 ${size === "sm" ? "" : ""}`}>
-      <div className={`${size === "lg" ? "w-20 h-2" : "w-12 h-1.5"} bg-surface-overlay rounded-full overflow-hidden`}>
-        <div className={`h-full rounded-full ${riskBg(level)}`} style={{ width: `${pct}%` }} />
+    <div className="flex items-center gap-[var(--space-2)]">
+      <div
+        className={`${size === "lg" ? "w-20 h-2" : "w-12 h-1.5"} bg-surface-overlay rounded-full overflow-hidden`}
+      >
+        <div
+          className={`h-full rounded-full ${riskBg(level)}`}
+          style={{ width: `${pct}%` }}
+        />
       </div>
-      <span className={`font-mono font-semibold ${riskColor(level)} ${size === "lg" ? "text-sm" : "text-[10px]"}`}>
+      <span
+        className={`font-mono font-semibold ${riskColor(level)} ${size === "lg" ? "text-[var(--text-sm)]" : "text-[10px]"}`}
+      >
         {score.toFixed(1)}
       </span>
     </div>
   );
-};
+}
 
-/* ── Main Page ─────────────────────────────────────────────────── */
+/* Compute a simple AIVSS-style base score from vector components */
+function computeAivssScore(vector: Record<string, string>): number {
+  /* Simplified CVSS-like calculation */
+  const avWeights: Record<string, number> = {
+    Network: 0.85,
+    Adjacent: 0.62,
+    Local: 0.55,
+    Physical: 0.2,
+  };
+  const acWeights: Record<string, number> = { Low: 0.77, High: 0.44 };
+  const prNoneWeights: Record<string, number> = {
+    None: 0.85,
+    Low: 0.62,
+    High: 0.27,
+  };
+  const uiWeights: Record<string, number> = { None: 0.85, Required: 0.62 };
+  const impactWeights: Record<string, number> = {
+    High: 0.56,
+    Low: 0.22,
+    None: 0,
+  };
 
-export const SecurityPage = () => {
+  const av = avWeights[vector.AV] ?? 0.85;
+  const ac = acWeights[vector.AC] ?? 0.77;
+  const pr = prNoneWeights[vector.PR] ?? 0.85;
+  const ui = uiWeights[vector.UI] ?? 0.85;
+
+  const exploitability = 8.22 * av * ac * pr * ui;
+
+  const c = impactWeights[vector.C] ?? 0;
+  const i = impactWeights[vector.I] ?? 0;
+  const a = impactWeights[vector.A] ?? 0;
+
+  const iss = 1 - (1 - c) * (1 - i) * (1 - a);
+  const scopeChanged = vector.S === "Changed";
+  const impact = scopeChanged
+    ? 7.52 * (iss - 0.029) - 3.25 * Math.pow(iss - 0.02, 15)
+    : 6.42 * iss;
+
+  if (impact <= 0) return 0;
+
+  const base = scopeChanged
+    ? Math.min(1.08 * (impact + exploitability), 10)
+    : Math.min(impact + exploitability, 10);
+
+  return Math.round(base * 10) / 10;
+}
+
+/* ── Security Page ───────────────────────────────────────────────── */
+
+export function SecurityPage() {
   const { showToast } = useToast();
-  const [activeTab, setActiveTab] = useState(0);
-  const [selectedScan, setSelectedScan] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [scanAgent, setScanAgent] = useState("");
 
-  const scansQuery = useApiQuery<{ scans: SecurityScan[] }>("/api/v1/security/scans");
-  const profilesQuery = useApiQuery<{ profiles: RiskProfile[] }>("/api/v1/security/risk-profiles");
-  const findingsQuery = useApiQuery<{ findings: SecurityFinding[] }>(
-    `/api/v1/security/findings?scan_id=${selectedScan ?? ""}`,
-    Boolean(selectedScan),
+  const scansQuery = useApiQuery<{ scans: SecurityScan[] } | SecurityScan[]>(
+    "/api/v1/security/scans?limit=50",
+  );
+  const profilesQuery = useApiQuery<
+    { profiles: RiskProfile[] } | RiskProfile[]
+  >("/api/v1/security/risk-profiles");
+  const probesQuery = useApiQuery<{ probes: Probe[] } | Probe[]>(
+    "/api/v1/security/probes",
   );
 
-  const scans = useMemo(() => scansQuery.data?.scans ?? [], [scansQuery.data]);
-  const profiles = useMemo(() => profilesQuery.data?.profiles ?? [], [profilesQuery.data]);
-  const findings = useMemo(() => findingsQuery.data?.findings ?? [], [findingsQuery.data]);
+  const scans: SecurityScan[] = useMemo(() => {
+    const raw = scansQuery.data;
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    return raw.scans ?? [];
+  }, [scansQuery.data]);
 
-  const handleRefresh = () => {
-    scansQuery.refetch();
-    profilesQuery.refetch();
-  };
+  const profiles: RiskProfile[] = useMemo(() => {
+    const raw = profilesQuery.data;
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    return raw.profiles ?? [];
+  }, [profilesQuery.data]);
 
-  const handleScan = async () => {
-    if (!scanAgent.trim()) return;
-    try {
-      const result = await apiRequest<{ scan_id: string; risk_score: number; risk_level: string }>(
-        `/api/v1/security/scan/${encodeURIComponent(scanAgent)}`, "POST",
-      );
-      showToast(`Scan complete: ${result.risk_level} (${result.risk_score}/10)`, "success");
-      setScanAgent("");
-      handleRefresh();
-    } catch {
-      showToast("Scan failed", "error");
-    }
-  };
+  /* AIVSS calculator state */
+  const [aivssVector, setAivssVector] = useState<Record<string, string>>({
+    AV: "Network",
+    AC: "Low",
+    PR: "None",
+    UI: "None",
+    S: "Unchanged",
+    C: "None",
+    I: "None",
+    A: "None",
+  });
+
+  const aivssScore = useMemo(() => computeAivssScore(aivssVector), [aivssVector]);
+  const aivssLevel =
+    aivssScore >= 9
+      ? "Critical"
+      : aivssScore >= 7
+        ? "High"
+        : aivssScore >= 4
+          ? "Medium"
+          : aivssScore > 0
+            ? "Low"
+            : "None";
+
+  const handleScanAgent = useCallback(
+    async (agentName: string) => {
+      try {
+        const result = await apiRequest<{
+          scan_id: string;
+          risk_score: number;
+          risk_level: string;
+        }>(
+          `/api/v1/security/scan/${encodeURIComponent(agentName)}`,
+          "POST",
+        );
+        showToast(
+          `Scan complete: ${result.risk_level} (${result.risk_score}/10)`,
+          "success",
+        );
+        scansQuery.refetch();
+        profilesQuery.refetch();
+      } catch {
+        showToast("Scan failed", "error");
+      }
+    },
+    [showToast, scansQuery, profilesQuery],
+  );
 
   return (
     <div className="max-w-[1400px] mx-auto">
       <PageHeader
         title="Security"
-        subtitle="Red-teaming, MAESTRO assessment, and AIVSS risk scoring"
-        actions={
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              placeholder="Agent name..."
-              value={scanAgent}
-              onChange={(e) => setScanAgent(e.target.value)}
-              className="px-2 py-1.5 text-xs rounded-lg bg-surface-raised border border-border-default text-text-primary w-36"
-            />
-            <button onClick={handleScan} className="btn btn-primary text-xs" disabled={!scanAgent.trim()}>
-              <Scan size={14} /> Scan
-            </button>
-            <button onClick={handleRefresh} className="btn btn-secondary">
-              <RefreshCw size={14} />
-            </button>
-          </div>
-        }
+        subtitle="Red-teaming, AIVSS risk scoring, and security scan history"
+        onRefresh={() => {
+          scansQuery.refetch();
+          profilesQuery.refetch();
+        }}
       />
 
-      {/* Risk Profile Cards */}
-      {profiles.length > 0 && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          {profiles.slice(0, 4).map((p) => (
-            <div key={p.agent_name} className="card">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-medium text-text-primary truncate">{p.agent_name}</span>
-                <span className={`text-[10px] font-semibold uppercase ${riskColor(p.risk_level)}`}>{p.risk_level}</span>
-              </div>
-              <ScoreGauge score={p.risk_score} />
-              <div className="flex items-center gap-2 mt-2 text-[10px] text-text-muted">
-                <span>{p.findings_summary?.total ?? 0} findings</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* ── Scan History Table ────────────────────────────────────── */}
+      <section className="mb-[var(--space-8)]">
+        <h2 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+          Scan History
+        </h2>
 
-      <Tabs
-        tabs={["Scans", "Risk Profiles", "Findings"]}
-        activeIndex={activeTab}
-        onChange={setActiveTab}
-      />
-
-      {/* Tab: Scans */}
-      {activeTab === 0 && (
         <QueryState loading={scansQuery.loading} error={scansQuery.error}>
           {scans.length > 0 ? (
-            <div className="card mt-4">
+            <div className="card">
               <div className="overflow-x-auto">
-                <table className="w-full text-xs">
+                <table>
                   <thead>
-                    <tr className="border-b border-border-default text-text-muted">
-                      <th className="text-left py-2 pr-4">Scan</th>
-                      <th className="text-left py-2 px-3">Agent</th>
-                      <th className="text-left py-2 px-3">Type</th>
-                      <th className="text-center py-2 px-3">Risk</th>
-                      <th className="text-right py-2 px-3">Passed</th>
-                      <th className="text-right py-2 px-3">Failed</th>
-                      <th className="text-center py-2 px-3">Actions</th>
+                    <tr>
+                      <th>Agent</th>
+                      <th>Date</th>
+                      <th className="text-right">Risk Score</th>
+                      <th className="text-center">Risk Level</th>
+                      <th className="text-right">Passed</th>
+                      <th className="text-right">Failed</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {scans.map((s) => (
-                      <tr key={s.scan_id} className="border-b border-border-default/50 hover:bg-surface-overlay/30">
-                        <td className="py-2 pr-4 font-mono text-text-secondary text-[10px]">{s.scan_id}</td>
-                        <td className="py-2 px-3 text-text-primary">{s.agent_name}</td>
-                        <td className="py-2 px-3 text-text-muted">{s.scan_type}</td>
-                        <td className="py-2 px-3 text-center"><ScoreGauge score={s.risk_score} size="sm" /></td>
-                        <td className="py-2 px-3 text-right text-status-live">{s.passed}</td>
-                        <td className="py-2 px-3 text-right text-status-error">{s.failed}</td>
-                        <td className="py-2 px-3 text-center">
-                          <button
-                            onClick={() => { setSelectedScan(s.scan_id); setDrawerOpen(true); }}
-                            className="text-accent hover:underline text-[10px]"
+                    {scans.map((scan) => (
+                      <tr key={scan.scan_id}>
+                        <td className="text-text-primary font-medium">
+                          {scan.agent_name}
+                        </td>
+                        <td className="text-text-muted">
+                          {formatDate(scan.created_at)}
+                        </td>
+                        <td className="text-right">
+                          <ScoreGauge score={scan.risk_score} size="sm" />
+                        </td>
+                        <td className="text-center">
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase border ${riskBadgeBg(scan.risk_level)}`}
                           >
-                            Findings
-                          </button>
+                            {scan.risk_level}
+                          </span>
+                        </td>
+                        <td className="text-right text-status-live font-mono">
+                          {scan.passed}
+                        </td>
+                        <td className="text-right text-status-error font-mono">
+                          {scan.failed}
                         </td>
                       </tr>
                     ))}
@@ -217,133 +340,188 @@ export const SecurityPage = () => {
               </div>
             </div>
           ) : (
-            <EmptyState message="No security scans yet. Enter an agent name and click Scan." />
+            <EmptyState message="No security scans yet. Run a scan to get started." />
           )}
         </QueryState>
-      )}
+      </section>
 
-      {/* Tab: Risk Profiles */}
-      {activeTab === 1 && (
+      {/* ── Risk Profiles ────────────────────────────────────────── */}
+      <section className="mb-[var(--space-8)]">
+        <h2 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+          Risk Profiles
+        </h2>
+
         <QueryState loading={profilesQuery.loading} error={profilesQuery.error}>
           {profiles.length > 0 ? (
-            <div className="card mt-4">
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-border-default text-text-muted">
-                      <th className="text-left py-2 pr-4">Agent</th>
-                      <th className="text-center py-2 px-3">AIVSS Score</th>
-                      <th className="text-center py-2 px-3">Risk Level</th>
-                      <th className="text-right py-2 px-3">Findings</th>
-                      <th className="text-left py-2 px-3">AIVSS Vector</th>
-                      <th className="text-left py-2 px-3">Last Scan</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {profiles.map((p) => (
-                      <tr key={p.agent_name} className="border-b border-border-default/50 hover:bg-surface-overlay/30">
-                        <td className="py-2 pr-4 text-text-primary font-medium">{p.agent_name}</td>
-                        <td className="py-2 px-3 text-center"><ScoreGauge score={p.risk_score} size="sm" /></td>
-                        <td className="py-2 px-3 text-center">
-                          <span className={`text-[10px] font-semibold uppercase ${riskColor(p.risk_level)}`}>{p.risk_level}</span>
-                        </td>
-                        <td className="py-2 px-3 text-right text-text-muted">{p.findings_summary?.total ?? 0}</td>
-                        <td className="py-2 px-3 font-mono text-text-muted text-[10px]">
-                          {(() => {
-                            try {
-                              const v = typeof p.aivss_vector_json === "string" ? JSON.parse(p.aivss_vector_json) : p.aivss_vector_json;
-                              return v?.vector_string || "—";
-                            } catch { return "—"; }
-                          })()}
-                        </td>
-                        <td className="py-2 px-3 font-mono text-text-muted text-[10px]">{p.last_scan_id?.slice(0, 12)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-[var(--space-3)]">
+              {profiles.map((profile) => (
+                <div key={profile.agent_name} className="card">
+                  <div className="flex items-center justify-between mb-[var(--space-2)]">
+                    <span className="text-[var(--text-sm)] font-medium text-text-primary truncate">
+                      {profile.agent_name}
+                    </span>
+                    <span
+                      className={`text-[10px] font-semibold uppercase ${riskColor(profile.risk_level)}`}
+                    >
+                      {profile.risk_level}
+                    </span>
+                  </div>
+                  <ScoreGauge score={profile.risk_score} />
+                  <div className="flex items-center gap-[var(--space-3)] mt-[var(--space-2)] text-[10px] text-text-muted">
+                    <span>
+                      {profile.findings_summary?.total ?? 0} findings
+                    </span>
+                  </div>
+
+                  {/* Sparkline for risk trend */}
+                  <div className="mt-[var(--space-3)]">
+                    <button
+                      onClick={() => handleScanAgent(profile.agent_name)}
+                      className="btn btn-secondary text-[var(--text-xs)] w-full min-h-[var(--touch-target-min)]"
+                    >
+                      <Scan size={14} />
+                      Run Scan
+                    </button>
+                  </div>
+                </div>
+              ))}
             </div>
           ) : (
             <EmptyState message="No risk profiles. Run a security scan to generate them." />
           )}
         </QueryState>
-      )}
+      </section>
 
-      {/* Tab: Findings */}
-      {activeTab === 2 && (
-        <div className="mt-4">
-          {selectedScan ? (
-            <QueryState loading={findingsQuery.loading} error={findingsQuery.error}>
-              {findings.length > 0 ? (
-                <div className="card">
-                  <h3 className="text-sm font-medium text-text-primary mb-3">Findings — Scan {selectedScan.slice(0, 12)}</h3>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-border-default text-text-muted">
-                          <th className="text-left py-2 pr-4">Probe</th>
-                          <th className="text-left py-2 px-3">Category</th>
-                          <th className="text-center py-2 px-3">Severity</th>
-                          <th className="text-center py-2 px-3">AIVSS</th>
-                          <th className="text-left py-2 px-3">Vector</th>
-                          <th className="text-left py-2 px-3">Evidence</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {findings.map((f) => (
-                          <tr key={f.id} className="border-b border-border-default/50">
-                            <td className="py-2 pr-4 text-text-primary">{f.probe_name || f.title}</td>
-                            <td className="py-2 px-3 text-text-secondary">{f.category}</td>
-                            <td className="py-2 px-3 text-center">
-                              <span className={`text-[10px] font-semibold uppercase ${riskColor(f.severity)}`}>{f.severity}</span>
-                            </td>
-                            <td className="py-2 px-3 text-center"><ScoreGauge score={f.aivss_score} size="sm" /></td>
-                            <td className="py-2 px-3 font-mono text-text-muted text-[10px] truncate max-w-[180px]">{f.aivss_vector || "—"}</td>
-                            <td className="py-2 px-3 text-text-muted truncate max-w-[200px]">{f.evidence}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : (
-                <EmptyState message="No findings for this scan (all probes passed)." />
-              )}
-            </QueryState>
-          ) : (
-            <EmptyState message="Select a scan from the Scans tab to view findings." />
-          )}
-        </div>
-      )}
+      {/* ── AIVSS Calculator ─────────────────────────────────────── */}
+      <section className="mb-[var(--space-8)]">
+        <h2 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+          AIVSS Calculator
+        </h2>
 
-      {/* Drawer */}
-      <SlidePanel
-        open={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedScan(null); }}
-        title={`Scan Findings — ${selectedScan?.slice(0, 12) ?? ""}`}
-      >
-        <QueryState loading={findingsQuery.loading} error={findingsQuery.error}>
-          <div className="space-y-3">
-            {findings.map((f) => (
-              <div key={f.id} className="p-3 rounded-lg bg-surface-overlay/30 border border-border-default/50">
-                <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs font-medium text-text-primary">{f.probe_name || f.title}</span>
-                  <span className={`text-[10px] font-semibold ${riskColor(f.severity)}`}>{f.severity}</span>
-                </div>
-                <div className="flex items-center gap-2 text-[10px] text-text-muted mb-2">
-                  <span>{f.category}</span>
-                  <span>AIVSS: {f.aivss_score.toFixed(1)}</span>
-                  {f.aivss_vector && (
-                    <span className="font-mono text-text-muted/70">{f.aivss_vector}</span>
-                  )}
-                </div>
-                <p className="text-[10px] text-text-secondary">{f.evidence}</p>
+        <div className="card">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-[var(--space-3)] mb-[var(--space-4)]">
+            {AIVSS_COMPONENTS.map((comp) => (
+              <div key={comp.key}>
+                <label className="block text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+                  {comp.label} ({comp.key})
+                </label>
+                <select
+                  value={aivssVector[comp.key]}
+                  onChange={(e) =>
+                    setAivssVector((prev) => ({
+                      ...prev,
+                      [comp.key]: e.target.value,
+                    }))
+                  }
+                  className="w-full px-[var(--space-2)] py-[var(--space-2)] text-[var(--text-xs)] min-h-[var(--touch-target-min)]"
+                >
+                  {comp.options.map((opt) => (
+                    <option key={opt} value={opt}>
+                      {opt}
+                    </option>
+                  ))}
+                </select>
               </div>
             ))}
-            {findings.length === 0 && <p className="text-xs text-text-muted text-center py-4">No findings</p>}
           </div>
-        </QueryState>
-      </SlidePanel>
+
+          {/* Score display */}
+          <div className="flex items-center gap-[var(--space-4)] p-[var(--space-4)] rounded-lg bg-surface-overlay">
+            <div>
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+                Computed Score
+              </p>
+              <p
+                className={`text-[var(--text-xl)] font-bold font-mono ${riskColor(aivssLevel.toLowerCase())}`}
+              >
+                {aivssScore.toFixed(1)}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+                Risk Level
+              </p>
+              <span
+                className={`inline-block px-2.5 py-1 rounded-full text-[var(--text-xs)] font-semibold uppercase border ${riskBadgeBg(aivssLevel.toLowerCase())}`}
+              >
+                {aivssLevel}
+              </span>
+            </div>
+            <div className="flex-1">
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+                Vector String
+              </p>
+              <p className="text-[var(--text-xs)] font-mono text-text-secondary">
+                AIVSS:1.0/AV:{aivssVector.AV?.charAt(0)}/AC:
+                {aivssVector.AC?.charAt(0)}/PR:{aivssVector.PR?.charAt(0)}/UI:
+                {aivssVector.UI?.charAt(0)}/S:{aivssVector.S?.charAt(0)}/C:
+                {aivssVector.C?.charAt(0)}/I:{aivssVector.I?.charAt(0)}/A:
+                {aivssVector.A?.charAt(0)}
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* ── Risk Trends (sparklines per agent) ───────────────────── */}
+      <section className="mb-[var(--space-8)]">
+        <h2 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+          Risk Trends
+        </h2>
+
+        {profiles.length > 0 ? (
+          <div className="card">
+            <div className="space-y-[var(--space-4)]">
+              {profiles.map((profile) => (
+                <div
+                  key={`trend-${profile.agent_name}`}
+                  className="flex items-center gap-[var(--space-4)]"
+                >
+                  <span className="text-[var(--text-xs)] text-text-primary w-32 truncate font-medium">
+                    {profile.agent_name}
+                  </span>
+                  <div className="flex-1">
+                    <RiskSparkline score={profile.risk_score} />
+                  </div>
+                  <span
+                    className={`text-[var(--text-xs)] font-mono font-semibold ${riskColor(profile.risk_level)}`}
+                  >
+                    {profile.risk_score.toFixed(1)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <EmptyState message="No risk data available for trends." />
+        )}
+      </section>
     </div>
   );
-};
+}
+
+/* ── Risk Sparkline (simple SVG bar showing relative risk) ────────── */
+
+function RiskSparkline({ score }: { score: number }) {
+  const pct = Math.min(100, (score / 10) * 100);
+  const level =
+    score >= 9
+      ? "critical"
+      : score >= 7
+        ? "high"
+        : score >= 4
+          ? "medium"
+          : score > 0
+            ? "low"
+            : "none";
+  return (
+    <div className="h-2 bg-surface-overlay rounded-full overflow-hidden">
+      <div
+        className={`h-full rounded-full ${riskBg(level)} transition-all`}
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  );
+}
+
+export { SecurityPage as default };

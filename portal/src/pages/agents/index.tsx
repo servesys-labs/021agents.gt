@@ -10,6 +10,9 @@ import {
   Rocket,
   Download,
   ChevronRight,
+  LayoutGrid,
+  List,
+  Clock,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -23,6 +26,9 @@ import { StatusBadge } from "../../components/common/StatusBadge";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { EmptyState } from "../../components/common/EmptyState";
 import { useToast } from "../../components/common/ToastProvider";
+import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
+import { CopyIdButton } from "../../components/common/CopyIdButton";
+import { VersionBadge } from "../../components/common/VersionBadge";
 import {
   safeArray,
   type AgentInfo,
@@ -30,6 +36,20 @@ import {
   type AgentConfig,
 } from "../../lib/adapters";
 import { useApiQuery, useApiMutation, apiRequest } from "../../lib/api";
+
+/* ── Time ago helper ─────────────────────────────────────────── */
+function timeAgo(dateStr?: string): string {
+  if (!dateStr) return "Never";
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const minutes = Math.floor(diff / 60_000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+}
 
 /* ── Models available ────────────────────────────────────────── */
 const MODELS = [
@@ -65,6 +85,9 @@ const emptyForm: AgentCreateRequest = {
 export const AgentsPage = () => {
   const navigate = useNavigate();
   const { showToast } = useToast();
+
+  /* ── View mode ──────────────────────────────────────────── */
+  const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
 
   /* ── Query state ──────────────────────────────────────────── */
   const [limit, setLimit] = useState(25);
@@ -315,6 +338,25 @@ export const AgentsPage = () => {
           />
         </div>
         <div className="flex items-center gap-2">
+          {/* View toggle */}
+          <div className="flex items-center border border-border-default rounded-md overflow-hidden">
+            <button
+              className={`p-1.5 ${viewMode === "grid" ? "bg-surface-overlay text-text-primary" : "bg-transparent text-text-muted"} transition-colors`}
+              onClick={() => setViewMode("grid")}
+              title="Grid view"
+              aria-label="Grid view"
+            >
+              <LayoutGrid size={14} />
+            </button>
+            <button
+              className={`p-1.5 ${viewMode === "table" ? "bg-surface-overlay text-text-primary" : "bg-transparent text-text-muted"} transition-colors`}
+              onClick={() => setViewMode("table")}
+              title="Table view"
+              aria-label="Table view"
+            >
+              <List size={14} />
+            </button>
+          </div>
           <button
             className="btn btn-secondary text-xs"
             disabled={offset === 0}
@@ -344,7 +386,7 @@ export const AgentsPage = () => {
         </div>
       </div>
 
-      {/* Agent table */}
+      {/* Agent list */}
       <QueryState
         loading={agentsQuery.loading}
         error={agentsQuery.error}
@@ -373,7 +415,29 @@ export const AgentsPage = () => {
               ) : undefined
             }
           />
+        ) : viewMode === "grid" ? (
+          /* ── Grid View ──────────────────────────────────── */
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {filtered.map((agent) => (
+              <AgentCard
+                key={agent.name}
+                agent={{
+                  name: agent.name,
+                  description: agent.description,
+                  status: agent.status,
+                  model: agent.model,
+                  version: agent.version,
+                  tags: agent.tags,
+                  last_active: agent.updated_at,
+                } satisfies AgentCardData}
+                onSelect={(name) =>
+                  setSelectedAgent(selectedAgent === name ? null : name)
+                }
+              />
+            ))}
+          </div>
         ) : (
+          /* ── Table View ─────────────────────────────────── */
           <div className="card p-0">
             <div className="overflow-x-auto">
               <table>
@@ -382,8 +446,10 @@ export const AgentsPage = () => {
                     <th>Agent</th>
                     <th>Model</th>
                     <th>Status</th>
+                    <th>Version</th>
                     <th>Tools</th>
                     <th>Tags</th>
+                    <th>Last Active</th>
                     <th style={{ width: "48px" }}></th>
                   </tr>
                 </thead>
@@ -402,17 +468,23 @@ export const AgentsPage = () => {
                           }
                         >
                           <span className="font-medium text-text-primary group-hover:text-accent transition-colors flex items-center gap-1">
-                            {agent.name}
+                            <span
+                              className="truncate max-w-[180px] inline-block align-bottom"
+                              title={agent.name}
+                            >
+                              {agent.name}
+                            </span>
+                            <CopyIdButton value={agent.name} label="name" />
                             <ChevronRight
                               size={12}
-                              className={`text-text-muted transition-transform ${
+                              className={`text-text-muted transition-transform flex-shrink-0 ${
                                 selectedAgent === agent.name
                                   ? "rotate-90"
                                   : ""
                               }`}
                             />
                           </span>
-                          <span className="block text-xs text-text-muted mt-0.5">
+                          <span className="block text-xs text-text-muted mt-0.5 truncate max-w-[200px]" title={agent.description || "No description"}>
                             {agent.description?.slice(0, 60) || "No description"}
                           </span>
                         </button>
@@ -426,6 +498,13 @@ export const AgentsPage = () => {
                         <StatusBadge status={agent.status || "draft"} />
                       </td>
                       <td>
+                        {agent.version ? (
+                          <VersionBadge label={agent.version} />
+                        ) : (
+                          <span className="text-[10px] text-text-muted">--</span>
+                        )}
+                      </td>
+                      <td>
                         <span className="text-xs text-text-muted">
                           {safeArray(agent.tools).length} tools
                         </span>
@@ -435,12 +514,7 @@ export const AgentsPage = () => {
                           {safeArray<string>(agent.tags)
                             .slice(0, 3)
                             .map((tag) => (
-                              <span
-                                key={tag}
-                                className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded border border-border-default"
-                              >
-                                {tag}
-                              </span>
+                              <VersionBadge key={tag} label={tag} />
                             ))}
                           {safeArray(agent.tags).length > 3 && (
                             <span className="text-[10px] text-text-muted">
@@ -448,6 +522,14 @@ export const AgentsPage = () => {
                             </span>
                           )}
                         </div>
+                      </td>
+                      <td>
+                        <span className="text-[10px] text-text-muted flex items-center gap-1">
+                          <Clock size={10} />
+                          {agent.updated_at
+                            ? timeAgo(agent.updated_at)
+                            : "--"}
+                        </span>
                       </td>
                       <td>
                         <ActionMenu items={getRowActions(agent)} />
@@ -465,9 +547,12 @@ export const AgentsPage = () => {
       {selectedAgent && (
         <div className="card mt-4">
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-text-primary">
-              Agent Config: {selectedAgent}
-            </h3>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-text-primary">
+                Agent Config: {selectedAgent}
+              </h3>
+              <CopyIdButton value={selectedAgent} label="agent name" />
+            </div>
             <div className="flex items-center gap-2">
               <button
                 className="btn btn-secondary text-xs"
@@ -491,10 +576,29 @@ export const AgentsPage = () => {
             <p className="text-sm text-status-error">{detailQuery.error}</p>
           )}
           {detailQuery.data && (
-            <pre className="text-xs font-mono bg-surface-base
- border border-border-default rounded-md p-4 overflow-x-auto max-h-80">
-              {JSON.stringify(detailQuery.data, null, 2)}
-            </pre>
+            <>
+              {/* Last edited + version info */}
+              <div className="flex items-center gap-4 mb-3 text-[10px] text-text-muted">
+                {detailQuery.data.version && (
+                  <VersionBadge label={detailQuery.data.version} />
+                )}
+                {detailQuery.data.agent_id && (
+                  <span className="flex items-center gap-1 font-mono">
+                    ID: {detailQuery.data.agent_id.slice(0, 12)}...
+                    <CopyIdButton value={detailQuery.data.agent_id} label="agent ID" />
+                  </span>
+                )}
+                <span className="flex items-center gap-1">
+                  <Clock size={10} />
+                  Last edited: {timeAgo(
+                    agents.find((a) => a.name === selectedAgent)?.updated_at
+                  )}
+                </span>
+              </div>
+              <pre className="text-xs font-mono bg-surface-base border border-border-default rounded-md p-4 overflow-x-auto max-h-80">
+                {JSON.stringify(detailQuery.data, null, 2)}
+              </pre>
+            </>
           )}
         </div>
       )}

@@ -178,7 +178,13 @@ export const SchedulesPage = () => {
 
       <QueryState loading={schedulesQuery.loading} error={schedulesQuery.error} isEmpty={schedules.length === 0} emptyMessage="" onRetry={() => void schedulesQuery.refetch()}>
         {filtered.length === 0 ? (
-          <EmptyState icon={<Clock size={40} />} title="No schedules" description="Create a schedule to run agents on a cron basis" action={<button className="btn btn-primary text-xs" onClick={() => { setForm({ name: "", agent_name: "", cron: "", task: "" }); setPanelMode("create"); setPanelOpen(true); }}><Plus size={14} /> New Schedule</button>} />
+          <EmptyState
+            icon={<Clock size={40} />}
+            title="No schedules yet"
+            description="Schedules let you run agents automatically on a cron basis. Create one to automate recurring tasks like reports, monitoring, or data processing."
+            actionLabel="New Schedule"
+            onAction={() => { setForm({ name: "", agent_name: "", cron: "", task: "" }); setPanelMode("create"); setPanelOpen(true); }}
+          />
         ) : (
           <div className="card p-0"><div className="overflow-x-auto">
             <table><thead><tr><th>Name</th><th>Agent</th><th>Cron</th><th>Status</th><th>Last Run</th><th>Next Run</th><th style={{ width: "48px" }}></th></tr></thead>

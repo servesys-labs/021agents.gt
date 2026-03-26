@@ -24,6 +24,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type ConnectorTool = { name: string; app?: string; description?: string };
 type McpServer = {
@@ -39,18 +40,18 @@ export const IntegrationsPage = () => {
   const { showToast } = useToast();
 
   /* ── Queries ──────────────────────────────────────────────── */
-  const toolsQuery = useApiQuery<{ tools: ConnectorTool[]; total?: number }>(
+  const toolsQuery = useApiQuery<{ tools: ConnectorTool[]; total?: number } | ConnectorTool[]>(
     "/api/v1/integrations/tools",
   );
-  const mcpQuery = useApiQuery<{ servers: McpServer[] }>(
+  const mcpQuery = useApiQuery<{ servers: McpServer[] } | McpServer[]>(
     "/api/v1/integrations/mcp/servers",
   );
   const tools = useMemo(
-    () => toolsQuery.data?.tools ?? [],
+    () => extractList<ConnectorTool>(toolsQuery.data, "tools"),
     [toolsQuery.data],
   );
   const mcpServers = useMemo(
-    () => mcpQuery.data?.servers ?? [],
+    () => extractList<McpServer>(mcpQuery.data, "servers"),
     [mcpQuery.data],
   );
 
@@ -830,10 +831,17 @@ function ChatPlatformsTab() {
             <div className="flex items-start gap-6">
               {/* QR Code */}
               <div className="flex-shrink-0 p-3 bg-white rounded-xl border border-border-default">
-                <div
-                  dangerouslySetInnerHTML={{ __html: telegramQR.qr_svg || "" }}
-                  className="w-[180px] h-[180px]"
-                />
+                {telegramQR?.qr_svg ? (
+                  <img
+                    src={`data:image/svg+xml;base64,${btoa(telegramQR.qr_svg)}`}
+                    alt="Telegram QR Code"
+                    className="w-[180px] h-[180px]"
+                  />
+                ) : (
+                  <div className="w-[180px] h-[180px] flex items-center justify-center text-text-muted text-sm">
+                    No QR available
+                  </div>
+                )}
               </div>
               {/* Instructions */}
               <div className="space-y-3">

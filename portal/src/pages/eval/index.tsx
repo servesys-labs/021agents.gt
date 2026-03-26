@@ -19,6 +19,7 @@ import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import type { AgentInfo } from "../../lib/adapters";
 import { ApiError, apiUpload, getToken, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 /** POST with query string only — matches FastAPI `run_eval` (no JSON body). */
 async function postEvalRun(path: string): Promise<void> {
@@ -85,10 +86,10 @@ export const EvalPage = () => {
 
   /* ── Queries ──────────────────────────────────────────────── */
   const agentsQuery = useApiQuery<AgentInfo[]>("/api/v1/agents");
-  const tasksQuery = useApiQuery<EvalTasksResponse>(EVAL_API.tasks);
+  const tasksQuery = useApiQuery<EvalTasksResponse | EvalTaskInfo[]>(EVAL_API.tasks);
   const runsQuery = useApiQuery<EvalRun[]>(EVAL_API.runs(50));
   const agents = useMemo(() => agentsQuery.data ?? [], [agentsQuery.data]);
-  const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data]);
+  const tasks = useMemo(() => extractList<EvalTaskInfo>(tasksQuery.data, "tasks"), [tasksQuery.data]);
   const runs = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
 
   /* ── Run form ─────────────────────────────────────────────── */

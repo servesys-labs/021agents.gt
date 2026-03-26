@@ -24,6 +24,7 @@ import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { TagInput } from "../../components/common/TagInput";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type WebhookInfo = {
   webhook_id: string;
@@ -46,11 +47,11 @@ export const WebhooksPage = () => {
   const { showToast } = useToast();
 
   /* ── Queries ──────────────────────────────────────────────── */
-  const webhooksQuery = useApiQuery<{ webhooks: WebhookInfo[] }>(
+  const webhooksQuery = useApiQuery<{ webhooks: WebhookInfo[] } | WebhookInfo[]>(
     "/api/v1/webhooks",
   );
   const webhooks = useMemo(
-    () => webhooksQuery.data?.webhooks ?? [],
+    () => extractList<WebhookInfo>(webhooksQuery.data, "webhooks"),
     [webhooksQuery.data],
   );
 
@@ -76,9 +77,13 @@ export const WebhooksPage = () => {
   const [selectedWebhookId, setSelectedWebhookId] = useState<string | null>(
     null,
   );
-  const deliveriesQuery = useApiQuery<{ deliveries: Delivery[] }>(
+  const deliveriesQuery = useApiQuery<{ deliveries: Delivery[] } | Delivery[]>(
     `/api/v1/webhooks/${selectedWebhookId}/deliveries`,
     selectedWebhookId !== null,
+  );
+  const deliveries = useMemo(
+    () => extractList<Delivery>(deliveriesQuery.data, "deliveries"),
+    [deliveriesQuery.data],
   );
 
   /* ── Confirm dialog ───────────────────────────────────────── */
@@ -467,12 +472,12 @@ export const WebhooksPage = () => {
           loading={deliveriesQuery.loading}
           error={deliveriesQuery.error}
           isEmpty={
-            (deliveriesQuery.data?.deliveries ?? []).length === 0
+            deliveries.length === 0
           }
           emptyMessage="No deliveries yet"
         >
           <div className="space-y-2">
-            {(deliveriesQuery.data?.deliveries ?? []).map((d, i) => {
+            {deliveries.map((d, i) => {
               const isFailed =
                 d.success === false ||
                 (d.response_status ?? 0) < 200 ||

@@ -1,677 +1,1332 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import {
-  TrendingUp,
-  TrendingDown,
-  Minus,
-  AlertTriangle,
-  ThumbsUp,
-  ThumbsDown,
+  Activity,
+  ArrowDownRight,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  Filter,
   MessageSquare,
-  RefreshCw,
-  Zap,
-  Shield,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
-import { Tabs } from "../../components/common/Tabs";
-import { EmptyState } from "../../components/common/EmptyState";
-import { SlidePanel } from "../../components/common/SlidePanel";
-import { useApiQuery, apiRequest } from "../../lib/api";
-import { useToast } from "../../components/common/ToastProvider";
+import { useApiQuery, apiGet } from "../../lib/api";
 
-/* ── Types ─────────────────────────────────────────────────────── */
+/* ── Types ──────────────────────────────────────────────────────── */
 
 type IntelSummary = {
-  total_scored_turns: number;
-  avg_sentiment_score: number;
-  avg_quality_score: number;
-  avg_relevance: number;
-  avg_coherence: number;
-  avg_helpfulness: number;
-  avg_safety: number;
-  tool_failure_count: number;
-  hallucination_risk_count: number;
-  sentiment_breakdown: Record<string, number>;
-  top_topics: Array<{ topic: string; count: number }>;
-  quality_trend: Array<{ day: string; avg_q: number; avg_s: number; cnt: number }>;
+  total_scored_turns?: number;
+  avg_sentiment_score?: number;
+  avg_quality_score?: number;
+  avg_relevance?: number;
+  avg_coherence?: number;
+  avg_helpfulness?: number;
+  avg_safety?: number;
+  tool_failure_count?: number;
+  hallucination_risk_count?: number;
+  sentiment_breakdown?: Record<string, number>;
+  top_topics?: Array<{ topic: string; count: number }>;
+  no_fail_rate?: number;
+  total_sessions?: number;
+};
+
+type TrendDay = {
+  day: string;
+  avg_quality: number;
+  avg_sentiment: number;
+  sessions?: number;
 };
 
 type TrendData = {
-  daily: Array<{
-    day: string;
-    avg_quality: number;
-    avg_sentiment: number;
-    turn_count: number;
-    tool_failures: number;
-  }>;
-  sentiment_distribution: Record<string, number>;
-  intent_distribution: Record<string, number>;
-  topic_distribution: Record<string, number>;
+  days: TrendDay[];
+  sentiment_distribution?: Record<string, number>;
+  topic_distribution?: Array<{ topic: string; count: number }>;
+  intent_distribution?: Array<{ intent: string; count: number }>;
 };
 
-type ConversationScore = {
-  id: number;
+type AnalyticsRow = {
+  session_id: string;
+  agent_name: string;
+  quality_overall: number;
+  sentiment_score: number;
+  topic?: string;
+  intent?: string;
+  created_at?: number;
+};
+
+type FeedbackItem = {
+  id: string;
   session_id: string;
   turn_number: number;
+  rating: "positive" | "negative" | "neutral";
+  comment: string;
+  message_preview: string;
   agent_name: string;
-  sentiment: string;
-  sentiment_score: number;
-  quality_overall: number;
-  relevance_score: number;
-  coherence_score: number;
-  helpfulness_score: number;
-  safety_score: number;
-  topic: string;
-  intent: string;
-  has_tool_failure: number;
-  has_hallucination_risk: number;
+  channel: string;
   created_at: number;
 };
 
-type SessionAnalytics = {
-  session_id: string;
-  agent_name: string;
-  avg_sentiment_score: number;
-  dominant_sentiment: string;
-  sentiment_trend: string;
-  avg_quality: number;
-  total_turns: number;
-  topics_json: string[];
-  tool_failure_count: number;
-  hallucination_risk_count: number;
-  created_at: number;
+type FeedbackStats = {
+  total: number;
+  positive: number;
+  negative: number;
+  neutral: number;
+  positive_pct: number;
+  negative_pct: number;
+  prev_total: number;
+  prev_positive: number;
+  prev_negative: number;
+  trend_direction: "up" | "down" | "flat";
+  by_agent: Array<{
+    agent_name: string;
+    positive: number;
+    negative: number;
+    neutral: number;
+    total: number;
+  }>;
 };
 
-/* ── Helpers ───────────────────────────────────────────────────── */
-
-const pct = (v: number) => `${Math.round(v * 100)}%`;
-const fmt3 = (v: number) => (v ?? 0).toFixed(3);
-const sentimentColor = (s: string) => {
-  switch (s) {
-    case "positive": return "text-status-live";
-    case "negative": return "text-status-error";
-    case "mixed": return "text-status-warning";
-    default: return "text-text-muted";
-  }
-};
-const sentimentIcon = (s: string) => {
-  switch (s) {
-    case "positive": return <ThumbsUp size={14} />;
-    case "negative": return <ThumbsDown size={14} />;
-    default: return <Minus size={14} />;
-  }
-};
-const trendIcon = (t: string) => {
-  switch (t) {
-    case "improving": return <TrendingUp size={14} className="text-status-live" />;
-    case "declining": return <TrendingDown size={14} className="text-status-error" />;
-    case "volatile": return <AlertTriangle size={14} className="text-status-warning" />;
-    default: return <Minus size={14} className="text-text-muted" />;
-  }
+type AgentBreakdown = {
+  name: string;
+  avgQuality: number;
+  prevAvgQuality: number;
+  avgSentiment: number;
+  sessionCount: number;
+  declining: boolean;
 };
 
-/* ── SparkBar ──────────────────────────────────────────────────── */
+/* ── Helpers ─────────────────────────────────────────────────────── */
 
-const SparkBar = ({ value, max, color }: { value: number; max: number; color: string }) => (
-  <div className="h-2 bg-surface-overlay rounded-full overflow-hidden">
-    <div
-      className={`h-full rounded-full ${color}`}
-      style={{ width: `${max > 0 ? (value / max) * 100 : 0}%` }}
-    />
-  </div>
-);
+const RANGE_OPTIONS = [
+  { label: "7d", value: 7 },
+  { label: "30d", value: 30 },
+  { label: "90d", value: 90 },
+] as const;
 
-/* ── Main Page ─────────────────────────────────────────────────── */
+const CHART_COLORS = [
+  "var(--color-chart-orange)",
+  "var(--color-chart-blue)",
+  "var(--color-chart-green)",
+  "var(--color-chart-purple)",
+  "var(--color-chart-cyan)",
+];
 
-export const IntelligencePage = () => {
-  const { showToast } = useToast();
-  const [sinceDays, setSinceDays] = useState(30);
-  const [agentFilter, setAgentFilter] = useState("");
-  const [selectedSession, setSelectedSession] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState(0);
+const CHART_COLOR_NAMES = [
+  "chart-orange",
+  "chart-blue",
+  "chart-green",
+  "chart-purple",
+  "chart-cyan",
+];
 
-  const agentParam = agentFilter ? `&agent_name=${encodeURIComponent(agentFilter)}` : "";
+function formatScore(v: number | undefined, decimals = 2): string {
+  if (v == null) return "--";
+  return v.toFixed(decimals);
+}
+
+function formatSentiment(v: number | undefined): string {
+  if (v == null) return "--";
+  return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+}
+
+function timeAgo(ts?: number): string {
+  if (!ts) return "--";
+  const d = new Date(typeof ts === "number" && ts < 1e12 ? ts * 1000 : ts);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/* ── Intelligence Dashboard ──────────────────────────────────────── */
+
+const TAB_OPTIONS = ["Quality", "Feedback"] as const;
+type Tab = (typeof TAB_OPTIONS)[number];
+
+export function IntelligencePage() {
+  const navigate = useNavigate();
+  const [sinceDays, setSinceDays] = useState(7);
+  const [activeTab, setActiveTab] = useState<Tab>("Quality");
 
   const summaryQuery = useApiQuery<IntelSummary>(
-    `/api/v1/intelligence/summary?since_days=${sinceDays}${agentParam}`,
+    `/api/v1/intelligence/summary?since_days=${sinceDays}`,
   );
   const trendsQuery = useApiQuery<TrendData>(
-    `/api/v1/intelligence/trends?since_days=${sinceDays}${agentParam}`,
+    `/api/v1/intelligence/trends?since_days=${sinceDays}`,
   );
-  const analyticsQuery = useApiQuery<SessionAnalytics[]>(
-    `/api/v1/intelligence/analytics?since_days=${sinceDays}&limit=50${agentParam}`,
-  );
-  const scoresQuery = useApiQuery<ConversationScore[]>(
-    `/api/v1/intelligence/scores?session_id=${selectedSession ?? ""}&limit=100`,
-    Boolean(selectedSession),
+  const analyticsQuery = useApiQuery<AnalyticsRow[]>(
+    `/api/v1/intelligence/analytics?limit=200`,
   );
 
   const summary = summaryQuery.data;
   const trends = trendsQuery.data;
   const analytics = useMemo(() => analyticsQuery.data ?? [], [analyticsQuery.data]);
-  const turnScores = useMemo(() => scoresQuery.data ?? [], [scoresQuery.data]);
 
-  const handleRefresh = () => {
-    summaryQuery.refetch();
-    trendsQuery.refetch();
-    analyticsQuery.refetch();
-  };
+  /* Build per-agent breakdown from analytics */
+  const agentBreakdown: AgentBreakdown[] = useMemo(() => {
+    if (analytics.length === 0) return [];
 
-  const handleScoreSession = async (sessionId: string) => {
-    try {
-      await apiRequest(`/api/v1/intelligence/score/${sessionId}`, "POST");
-      showToast("Session scored successfully", "success");
-      handleRefresh();
-    } catch {
-      showToast("Failed to score session", "error");
+    const byAgent = new Map<string, AnalyticsRow[]>();
+    for (const row of analytics) {
+      const name = row.agent_name || "unknown";
+      const existing = byAgent.get(name);
+      if (existing) existing.push(row);
+      else byAgent.set(name, [row]);
+    }
+
+    const midpoint = Math.floor(analytics.length / 2);
+    const result: AgentBreakdown[] = [];
+
+    for (const [name, rows] of byAgent) {
+      const avgQuality =
+        rows.reduce((s, r) => s + (r.quality_overall ?? 0), 0) / rows.length;
+      const avgSentiment =
+        rows.reduce((s, r) => s + (r.sentiment_score ?? 0), 0) / rows.length;
+
+      /* Split into first half / second half for trend */
+      const sorted = [...rows].sort(
+        (a, b) => (a.created_at ?? 0) - (b.created_at ?? 0),
+      );
+      const half = Math.max(1, Math.floor(sorted.length / 2));
+      const prevSlice = sorted.slice(0, half);
+      const currSlice = sorted.slice(half);
+      const prevAvg =
+        prevSlice.reduce((s, r) => s + (r.quality_overall ?? 0), 0) /
+        prevSlice.length;
+      const currAvg =
+        currSlice.length > 0
+          ? currSlice.reduce((s, r) => s + (r.quality_overall ?? 0), 0) /
+            currSlice.length
+          : prevAvg;
+      const declining = prevAvg > 0 && (prevAvg - currAvg) / prevAvg > 0.05;
+
+      result.push({
+        name,
+        avgQuality,
+        prevAvgQuality: prevAvg,
+        avgSentiment,
+        sessionCount: rows.length,
+        declining,
+      });
+    }
+
+    return result.sort((a, b) => b.sessionCount - a.sessionCount);
+  }, [analytics]);
+
+  /* Build per-agent chart lines from trends.days */
+  const agentNames = useMemo(
+    () => agentBreakdown.map((a) => a.name),
+    [agentBreakdown],
+  );
+
+  /* Sorting state for breakdown table */
+  const [sortField, setSortField] = useState<
+    "name" | "quality" | "sentiment" | "sessions"
+  >("sessions");
+  const [sortAsc, setSortAsc] = useState(false);
+
+  const sortedBreakdown = useMemo(() => {
+    const copy = [...agentBreakdown];
+    copy.sort((a, b) => {
+      let cmp = 0;
+      switch (sortField) {
+        case "name":
+          cmp = a.name.localeCompare(b.name);
+          break;
+        case "quality":
+          cmp = a.avgQuality - b.avgQuality;
+          break;
+        case "sentiment":
+          cmp = a.avgSentiment - b.avgSentiment;
+          break;
+        case "sessions":
+          cmp = a.sessionCount - b.sessionCount;
+          break;
+      }
+      return sortAsc ? cmp : -cmp;
+    });
+    return copy;
+  }, [agentBreakdown, sortField, sortAsc]);
+
+  const handleSort = (field: typeof sortField) => {
+    if (field === sortField) setSortAsc(!sortAsc);
+    else {
+      setSortField(field);
+      setSortAsc(false);
     }
   };
+
+  /* Sentiment distribution from trends */
+  const sentimentDist = trends?.sentiment_distribution ?? {};
+  const sentTotal = Object.values(sentimentDist).reduce(
+    (s, v) => s + v,
+    0,
+  );
+
+  /* Top topics */
+  const topTopics = useMemo(() => {
+    if (trends?.topic_distribution && Array.isArray(trends.topic_distribution)) {
+      return trends.topic_distribution.slice(0, 5);
+    }
+    if (summary?.top_topics) return summary.top_topics.slice(0, 5);
+    return [];
+  }, [trends, summary]);
+
+  /* Signal cards data */
+  const avgQuality = summary?.avg_quality_score ?? 0;
+  const avgSentiment = summary?.avg_sentiment_score ?? 0;
+  const totalSessions = summary?.total_sessions ?? analytics.length;
+  const noFailRate = summary?.no_fail_rate ?? (summary?.tool_failure_count != null && totalSessions > 0
+    ? ((totalSessions - summary.tool_failure_count) / totalSessions) * 100
+    : 100);
+
+  /* Chart data from trends.days */
+  const trendDays = trends?.days ?? [];
 
   return (
     <div className="max-w-[1400px] mx-auto">
       <PageHeader
-        title="Conversation Intelligence"
-        subtitle="Sentiment analysis, quality scoring, and conversation analytics"
+        title="Intelligence Dashboard"
+        subtitle="Quality trends, sentiment analysis, and agent health overview"
         actions={
-          <div className="flex items-center gap-2">
-            <select
-              value={sinceDays}
-              onChange={(e) => setSinceDays(Number(e.target.value))}
-              className="px-2 py-1.5 text-xs rounded-lg bg-surface-raised border border-border-default text-text-primary"
+          <div className="flex items-center gap-[var(--space-3)]">
+            {/* Tabs */}
+            <div className="flex items-center gap-[var(--space-1)] rounded-lg border border-border-default overflow-hidden">
+              {TAB_OPTIONS.map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={`px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] font-medium min-h-[var(--touch-target-min)] transition-colors ${
+                    activeTab === tab
+                      ? "bg-accent text-text-inverse"
+                      : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            {/* Range selector */}
+            <div className="flex items-center gap-[var(--space-1)] rounded-lg border border-border-default overflow-hidden">
+              {RANGE_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => setSinceDays(opt.value)}
+                  className={`px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] font-medium min-h-[var(--touch-target-min)] transition-colors ${
+                    sinceDays === opt.value
+                      ? "bg-accent text-text-inverse"
+                      : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <Link
+              to="/sessions"
+              className="text-[var(--text-xs)] text-accent hover:text-accent/80 transition-colors flex items-center gap-[var(--space-1)] min-h-[var(--touch-target-min)]"
             >
-              <option value={7}>Last 7 days</option>
-              <option value={30}>Last 30 days</option>
-              <option value={90}>Last 90 days</option>
-            </select>
-            <input
-              type="text"
-              placeholder="Filter by agent..."
-              value={agentFilter}
-              onChange={(e) => setAgentFilter(e.target.value)}
-              className="px-2 py-1.5 text-xs rounded-lg bg-surface-raised border border-border-default text-text-primary w-40"
-            />
-            <button onClick={handleRefresh} className="btn btn-secondary">
-              <RefreshCw size={14} />
-            </button>
+              View All Sessions <ChevronRight size={14} />
+            </Link>
           </div>
         }
       />
 
-      <Tabs
-        tabs={["Overview", "Trends", "Sessions", "Scores"]}
-        activeIndex={activeTab}
-        onChange={setActiveTab}
-      />
-
-      {/* ── Tab: Overview ──────────────────────────────────────── */}
-      {activeTab === 0 && (
-        <QueryState loading={summaryQuery.loading} error={summaryQuery.error}>
-          {summary && (
-            <div className="space-y-6 mt-4">
-              {/* KPI Cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <KpiCard
-                  icon={<MessageSquare size={16} />}
-                  label="Scored Turns"
-                  value={String(summary.total_scored_turns)}
-                  color="text-chart-blue"
-                />
-                <KpiCard
-                  icon={<Sparkles size={16} />}
-                  label="Avg Quality"
-                  value={pct(summary.avg_quality_score)}
-                  color="text-chart-purple"
-                />
-                <KpiCard
-                  icon={<ThumbsUp size={16} />}
-                  label="Avg Sentiment"
-                  value={`${summary.avg_sentiment_score >= 0 ? "+" : ""}${fmt3(summary.avg_sentiment_score)}`}
-                  color={summary.avg_sentiment_score >= 0 ? "text-status-live" : "text-status-error"}
-                />
-                <KpiCard
-                  icon={<Shield size={16} />}
-                  label="Avg Safety"
-                  value={pct(summary.avg_safety)}
-                  color="text-chart-green"
-                />
-              </div>
-
-              {/* Quality Breakdown */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="card">
-                  <h3 className="text-sm font-medium text-text-primary mb-4">Quality Breakdown</h3>
-                  <div className="space-y-3">
-                    <QualityBar label="Relevance" value={summary.avg_relevance} />
-                    <QualityBar label="Coherence" value={summary.avg_coherence} />
-                    <QualityBar label="Helpfulness" value={summary.avg_helpfulness} />
-                    <QualityBar label="Safety" value={summary.avg_safety} />
-                  </div>
-                </div>
-
-                <div className="card">
-                  <h3 className="text-sm font-medium text-text-primary mb-4">Sentiment Distribution</h3>
-                  {Object.keys(summary.sentiment_breakdown).length > 0 ? (
-                    <div className="space-y-3">
-                      {Object.entries(summary.sentiment_breakdown).map(([label, count]) => (
-                        <div key={label} className="flex items-center gap-3">
-                          <span className={`flex items-center gap-1.5 text-xs w-24 ${sentimentColor(label)}`}>
-                            {sentimentIcon(label)} {label}
-                          </span>
-                          <div className="flex-1">
-                            <SparkBar
-                              value={count}
-                              max={summary.total_scored_turns}
-                              color={
-                                label === "positive" ? "bg-status-live" :
-                                label === "negative" ? "bg-status-error" :
-                                label === "mixed" ? "bg-status-warning" :
-                                "bg-text-muted"
-                              }
-                            />
-                          </div>
-                          <span className="text-xs text-text-muted w-8 text-right">{count}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-text-muted">No sentiment data yet</p>
-                  )}
-                </div>
-              </div>
-
-              {/* Alerts + Topics */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="card">
-                  <h3 className="text-sm font-medium text-text-primary mb-4">Alerts</h3>
-                  <div className="space-y-2">
-                    <AlertRow
-                      icon={<Zap size={14} />}
-                      label="Tool Failures"
-                      count={summary.tool_failure_count}
-                      color="text-status-error"
-                    />
-                    <AlertRow
-                      icon={<AlertTriangle size={14} />}
-                      label="Hallucination Risks"
-                      count={summary.hallucination_risk_count}
-                      color="text-status-warning"
-                    />
-                  </div>
-                </div>
-
-                <div className="card">
-                  <h3 className="text-sm font-medium text-text-primary mb-4">Top Topics</h3>
-                  {summary.top_topics.length > 0 ? (
-                    <div className="space-y-2">
-                      {summary.top_topics.slice(0, 6).map((t) => (
-                        <div key={t.topic} className="flex items-center justify-between">
-                          <span className="text-xs text-text-secondary">{t.topic}</span>
-                          <span className="text-xs text-text-muted">{t.count}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-text-muted">No topics detected yet</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          )}
-        </QueryState>
+      {activeTab === "Feedback" && (
+        <FeedbackTab sinceDays={sinceDays} />
       )}
 
-      {/* ── Tab: Trends ────────────────────────────────────────── */}
-      {activeTab === 1 && (
-        <QueryState loading={trendsQuery.loading} error={trendsQuery.error}>
-          {trends && (
-            <div className="space-y-6 mt-4">
-              {/* Daily trend table */}
-              <div className="card">
-                <h3 className="text-sm font-medium text-text-primary mb-4">Daily Quality & Sentiment</h3>
-                {trends.daily.length > 0 ? (
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-border-default text-text-muted">
-                          <th className="text-left py-2 pr-4">Date</th>
-                          <th className="text-right py-2 px-3">Quality</th>
-                          <th className="text-right py-2 px-3">Sentiment</th>
-                          <th className="text-right py-2 px-3">Turns</th>
-                          <th className="text-right py-2 px-3">Failures</th>
-                          <th className="py-2 px-3 w-32">Quality Bar</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {trends.daily.map((d) => (
-                          <tr key={d.day} className="border-b border-border-default/50 hover:bg-surface-overlay/30">
-                            <td className="py-2 pr-4 text-text-secondary">{d.day}</td>
-                            <td className="py-2 px-3 text-right text-text-primary">{(d.avg_quality ?? 0).toFixed(3)}</td>
-                            <td className={`py-2 px-3 text-right ${(d.avg_sentiment ?? 0) >= 0 ? "text-status-live" : "text-status-error"}`}>
-                              {(d.avg_sentiment ?? 0) >= 0 ? "+" : ""}{(d.avg_sentiment ?? 0).toFixed(3)}
-                            </td>
-                            <td className="py-2 px-3 text-right text-text-muted">{d.turn_count}</td>
-                            <td className="py-2 px-3 text-right">
-                              {(d.tool_failures ?? 0) > 0 ? (
-                                <span className="text-status-error">{d.tool_failures}</span>
-                              ) : (
-                                <span className="text-text-muted">0</span>
-                              )}
-                            </td>
-                            <td className="py-2 px-3">
-                              <SparkBar value={d.avg_quality ?? 0} max={1} color="bg-chart-purple" />
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <EmptyState message="No trend data available. Score some sessions first." />
-                )}
-              </div>
+      {activeTab !== "Feedback" && (
+      <>
+      {/* Signal Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-[var(--space-3)] mb-[var(--space-6)]">
+        <SignalCard
+          icon={<Sparkles size={16} />}
+          label="Avg Quality"
+          value={formatScore(avgQuality)}
+          iconColor="text-chart-purple"
+          bgColor="bg-chart-purple/10"
+        />
+        <SignalCard
+          icon={<ThumbsUp size={16} />}
+          label="Avg Sentiment"
+          value={formatSentiment(avgSentiment)}
+          iconColor={avgSentiment >= 0 ? "text-status-live" : "text-status-error"}
+          bgColor={avgSentiment >= 0 ? "bg-status-live/10" : "bg-status-error/10"}
+        />
+        <SignalCard
+          icon={<MessageSquare size={16} />}
+          label="Total Sessions"
+          value={String(totalSessions)}
+          iconColor="text-chart-blue"
+          bgColor="bg-chart-blue/10"
+        />
+        <SignalCard
+          icon={<Activity size={16} />}
+          label="No-Fail Rate"
+          value={`${noFailRate.toFixed(1)}%`}
+          iconColor="text-chart-green"
+          bgColor="bg-chart-green/10"
+        />
+      </div>
 
-              {/* Distributions */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <DistributionCard title="Sentiment" data={trends.sentiment_distribution} colorMap={{
-                  positive: "bg-status-live",
-                  negative: "bg-status-error",
-                  neutral: "bg-text-muted",
-                  mixed: "bg-status-warning",
-                }} />
-                <DistributionCard title="Intent" data={trends.intent_distribution} colorMap={{
-                  question: "bg-chart-blue",
-                  command: "bg-chart-orange",
-                  feedback: "bg-chart-green",
-                  complaint: "bg-status-error",
-                  chitchat: "bg-text-muted",
-                }} />
-                <DistributionCard title="Topic" data={trends.topic_distribution} colorMap={{}} />
-              </div>
-            </div>
-          )}
-        </QueryState>
-      )}
+      {/* Quality Trend Chart */}
+      <QueryState loading={trendsQuery.loading} error={trendsQuery.error}>
+        {trendDays.length > 0 && (
+          <div className="card mb-[var(--space-6)]">
+            <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+              Quality Trend
+            </h3>
+            <QualityTrendChart days={trendDays} agentNames={agentNames} />
+          </div>
+        )}
+      </QueryState>
 
-      {/* ── Tab: Sessions ──────────────────────────────────────── */}
-      {activeTab === 2 && (
-        <QueryState loading={analyticsQuery.loading} error={analyticsQuery.error}>
-          {analytics.length > 0 ? (
-            <div className="card mt-4">
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-border-default text-text-muted">
-                      <th className="text-left py-2 pr-4">Session</th>
-                      <th className="text-left py-2 px-3">Agent</th>
-                      <th className="text-right py-2 px-3">Quality</th>
-                      <th className="text-center py-2 px-3">Sentiment</th>
-                      <th className="text-center py-2 px-3">Trend</th>
-                      <th className="text-right py-2 px-3">Turns</th>
-                      <th className="text-right py-2 px-3">Failures</th>
-                      <th className="text-left py-2 px-3">Topics</th>
-                      <th className="text-center py-2 px-3">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {analytics.map((a) => (
-                      <tr
-                        key={a.session_id}
-                        className="border-b border-border-default/50 hover:bg-surface-overlay/30 cursor-pointer"
-                        onClick={() => { setSelectedSession(a.session_id); setDrawerOpen(true); }}
+      {/* Agent Breakdown Table */}
+      <QueryState loading={analyticsQuery.loading} error={analyticsQuery.error}>
+        {sortedBreakdown.length > 0 && (
+          <div className="card mb-[var(--space-6)]">
+            <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+              Agent Breakdown
+            </h3>
+            <div className="overflow-x-auto">
+              <table>
+                <thead>
+                  <tr>
+                    <SortTh
+                      label="Agent"
+                      field="name"
+                      current={sortField}
+                      asc={sortAsc}
+                      onSort={handleSort}
+                    />
+                    <SortTh
+                      label="Quality Score"
+                      field="quality"
+                      current={sortField}
+                      asc={sortAsc}
+                      onSort={handleSort}
+                      align="right"
+                    />
+                    <SortTh
+                      label="Sentiment"
+                      field="sentiment"
+                      current={sortField}
+                      asc={sortAsc}
+                      onSort={handleSort}
+                      align="right"
+                    />
+                    <SortTh
+                      label="Sessions"
+                      field="sessions"
+                      current={sortField}
+                      asc={sortAsc}
+                      onSort={handleSort}
+                      align="right"
+                    />
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedBreakdown.map((agent) => (
+                    <tr
+                      key={agent.name}
+                      className="cursor-pointer"
+                      onClick={() => navigate(`/agents/${agent.name}`)}
+                    >
+                      <td className="text-text-primary font-medium">
+                        {agent.name}
+                      </td>
+                      <td className="text-right font-mono">
+                        <span className="text-text-primary">
+                          {agent.avgQuality.toFixed(3)}
+                        </span>
+                        {agent.declining && (
+                          <ArrowDownRight
+                            size={14}
+                            className="inline ml-[var(--space-1)] text-status-error"
+                          />
+                        )}
+                      </td>
+                      <td
+                        className={`text-right font-mono ${
+                          agent.avgSentiment >= 0
+                            ? "text-status-live"
+                            : "text-status-error"
+                        }`}
                       >
-                        <td className="py-2 pr-4 font-mono text-text-secondary">{a.session_id.slice(0, 12)}...</td>
-                        <td className="py-2 px-3 text-text-primary">{a.agent_name || "—"}</td>
-                        <td className="py-2 px-3 text-right text-text-primary">{(a.avg_quality ?? 0).toFixed(2)}</td>
-                        <td className="py-2 px-3 text-center">
-                          <span className={`inline-flex items-center gap-1 ${sentimentColor(a.dominant_sentiment)}`}>
-                            {sentimentIcon(a.dominant_sentiment)}
-                            <span className="text-[10px]">{a.dominant_sentiment}</span>
-                          </span>
-                        </td>
-                        <td className="py-2 px-3 text-center">{trendIcon(a.sentiment_trend)}</td>
-                        <td className="py-2 px-3 text-right text-text-muted">{a.total_turns}</td>
-                        <td className="py-2 px-3 text-right">
-                          {a.tool_failure_count > 0 ? (
-                            <span className="text-status-error">{a.tool_failure_count}</span>
-                          ) : (
-                            <span className="text-text-muted">0</span>
-                          )}
-                        </td>
-                        <td className="py-2 px-3">
-                          <div className="flex flex-wrap gap-1">
-                            {(a.topics_json ?? []).slice(0, 3).map((t) => (
-                              <span key={t} className="px-1.5 py-0.5 rounded text-[10px] bg-surface-overlay text-text-secondary">{t}</span>
-                            ))}
-                          </div>
-                        </td>
-                        <td className="py-2 px-3 text-center">
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleScoreSession(a.session_id); }}
-                            className="text-accent hover:text-accent-hover text-[10px]"
-                          >
-                            Re-score
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : (
-            <EmptyState message="No session analytics yet. Score sessions to see data here." />
-          )}
-        </QueryState>
-      )}
-
-      {/* ── Tab: Scores (per-turn detail) ──────────────────────── */}
-      {activeTab === 3 && (
-        <div className="mt-4 space-y-4">
-          <div className="card">
-            <p className="text-xs text-text-muted mb-3">
-              Select a session from the Sessions tab to view per-turn scores, or enter a session ID:
-            </p>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Session ID..."
-                value={selectedSession ?? ""}
-                onChange={(e) => setSelectedSession(e.target.value || null)}
-                className="flex-1 px-3 py-2 text-xs rounded-lg bg-surface-raised border border-border-default text-text-primary"
-              />
-              <button
-                onClick={() => selectedSession && handleScoreSession(selectedSession)}
-                className="btn btn-primary text-xs"
-                disabled={!selectedSession}
-              >
-                Score
-              </button>
+                        {formatSentiment(agent.avgSentiment)}
+                      </td>
+                      <td className="text-right font-mono text-text-secondary">
+                        {agent.sessionCount}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </div>
+        )}
+      </QueryState>
 
-          {selectedSession && (
-            <QueryState loading={scoresQuery.loading} error={scoresQuery.error}>
-              {turnScores.length > 0 ? (
-                <div className="card">
-                  <h3 className="text-sm font-medium text-text-primary mb-3">
-                    Turn Scores — {selectedSession.slice(0, 16)}
-                  </h3>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-border-default text-text-muted">
-                          <th className="text-left py-2 pr-3">Turn</th>
-                          <th className="text-right py-2 px-3">Quality</th>
-                          <th className="text-right py-2 px-3">Relevance</th>
-                          <th className="text-right py-2 px-3">Coherence</th>
-                          <th className="text-right py-2 px-3">Helpful</th>
-                          <th className="text-right py-2 px-3">Safety</th>
-                          <th className="text-center py-2 px-3">Sentiment</th>
-                          <th className="text-left py-2 px-3">Topic</th>
-                          <th className="text-left py-2 px-3">Intent</th>
-                          <th className="text-center py-2 px-3">Flags</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {turnScores.map((s) => (
-                          <tr key={s.id} className="border-b border-border-default/50 hover:bg-surface-overlay/30">
-                            <td className="py-2 pr-3 text-text-secondary">#{s.turn_number}</td>
-                            <td className="py-2 px-3 text-right text-text-primary">{(s.quality_overall ?? 0).toFixed(2)}</td>
-                            <td className="py-2 px-3 text-right text-text-muted">{(s.relevance_score ?? 0).toFixed(2)}</td>
-                            <td className="py-2 px-3 text-right text-text-muted">{(s.coherence_score ?? 0).toFixed(2)}</td>
-                            <td className="py-2 px-3 text-right text-text-muted">{(s.helpfulness_score ?? 0).toFixed(2)}</td>
-                            <td className="py-2 px-3 text-right text-text-muted">{(s.safety_score ?? 0).toFixed(2)}</td>
-                            <td className="py-2 px-3 text-center">
-                              <span className={`inline-flex items-center gap-1 ${sentimentColor(s.sentiment)}`}>
-                                {sentimentIcon(s.sentiment)}
-                                <span className="text-[10px]">{(s.sentiment_score ?? 0).toFixed(2)}</span>
-                              </span>
-                            </td>
-                            <td className="py-2 px-3 text-text-secondary">{s.topic || "—"}</td>
-                            <td className="py-2 px-3 text-text-secondary">{s.intent || "—"}</td>
-                            <td className="py-2 px-3 text-center space-x-1">
-                              {s.has_tool_failure ? (
-                                <span className="text-status-error" title="Tool failure"><Zap size={12} /></span>
-                              ) : null}
-                              {s.has_hallucination_risk ? (
-                                <span className="text-status-warning" title="Hallucination risk"><AlertTriangle size={12} /></span>
-                              ) : null}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : (
-                <EmptyState message="No scores for this session. Click 'Score' to analyze it." />
-              )}
-            </QueryState>
+      {/* Bottom row: Sentiment Distribution + Top Topics */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-[var(--space-4)]">
+        {/* Sentiment Distribution */}
+        <div className="card">
+          <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+            Sentiment Distribution
+          </h3>
+          {sentTotal > 0 ? (
+            <SentimentBar distribution={sentimentDist} total={sentTotal} />
+          ) : (
+            <p className="text-[var(--text-sm)] text-text-muted">
+              No sentiment data available
+            </p>
           )}
         </div>
-      )}
 
-      {/* Drawer for session detail */}
-      <SlidePanel
-        open={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedSession(null); }}
-        title={`Session Intelligence — ${selectedSession?.slice(0, 16) ?? ""}`}
-      >
-        {selectedSession && (
-          <QueryState loading={scoresQuery.loading} error={scoresQuery.error}>
-            <div className="space-y-4">
-              {turnScores.map((s) => (
-                <div key={s.id} className="p-3 rounded-lg bg-surface-overlay/30 border border-border-default/50">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-medium text-text-primary">Turn #{s.turn_number}</span>
-                    <span className={`text-xs ${sentimentColor(s.sentiment)}`}>{s.sentiment}</span>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <div>
-                      <span className="text-text-muted">Quality</span>
-                      <SparkBar value={s.quality_overall} max={1} color="bg-chart-purple" />
-                    </div>
-                    <div>
-                      <span className="text-text-muted">Relevance</span>
-                      <SparkBar value={s.relevance_score} max={1} color="bg-chart-blue" />
-                    </div>
-                    <div>
-                      <span className="text-text-muted">Coherence</span>
-                      <SparkBar value={s.coherence_score} max={1} color="bg-chart-cyan" />
-                    </div>
-                    <div>
-                      <span className="text-text-muted">Helpfulness</span>
-                      <SparkBar value={s.helpfulness_score} max={1} color="bg-chart-orange" />
-                    </div>
-                  </div>
-                  {(s.topic || s.intent) && (
-                    <div className="flex gap-2 mt-2">
-                      {s.topic && <span className="px-1.5 py-0.5 rounded text-[10px] bg-surface-overlay text-text-secondary">{s.topic}</span>}
-                      {s.intent && <span className="px-1.5 py-0.5 rounded text-[10px] bg-accent-muted text-accent">{s.intent}</span>}
-                    </div>
-                  )}
+        {/* Top Topics */}
+        <div className="card">
+          <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+            Top Topics
+          </h3>
+          {topTopics.length > 0 ? (
+            <div className="space-y-[var(--space-2)]">
+              {topTopics.map((t) => (
+                <div
+                  key={t.topic}
+                  className="flex items-center justify-between"
+                >
+                  <span className="text-[var(--text-sm)] text-text-secondary">
+                    {t.topic}
+                  </span>
+                  <span className="text-[var(--text-xs)] text-text-muted font-mono">
+                    {t.count}
+                  </span>
                 </div>
               ))}
-              {turnScores.length === 0 && (
-                <div className="text-center py-8">
-                  <p className="text-xs text-text-muted mb-3">No scores yet for this session</p>
-                  <button onClick={() => handleScoreSession(selectedSession)} className="btn btn-primary text-xs">
-                    Score Now
-                  </button>
-                </div>
-              )}
             </div>
-          </QueryState>
-        )}
-      </SlidePanel>
-    </div>
-  );
-};
-
-/* ── Sub-components ────────────────────────────────────────────── */
-
-const KpiCard = ({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: string; color: string }) => (
-  <div className="card flex items-center gap-3">
-    <div className={`flex items-center justify-center w-9 h-9 rounded-lg bg-surface-overlay ${color}`}>
-      {icon}
-    </div>
-    <div>
-      <p className="text-lg font-semibold text-text-primary">{value}</p>
-      <p className="text-[10px] text-text-muted uppercase tracking-wide">{label}</p>
-    </div>
-  </div>
-);
-
-const QualityBar = ({ label, value }: { label: string; value: number }) => (
-  <div className="flex items-center gap-3">
-    <span className="text-xs text-text-secondary w-24">{label}</span>
-    <div className="flex-1">
-      <SparkBar value={value} max={1} color="bg-chart-purple" />
-    </div>
-    <span className="text-xs text-text-primary w-12 text-right">{pct(value)}</span>
-  </div>
-);
-
-const AlertRow = ({ icon, label, count, color }: { icon: React.ReactNode; label: string; count: number; color: string }) => (
-  <div className="flex items-center justify-between">
-    <span className={`flex items-center gap-2 text-xs ${color}`}>
-      {icon} {label}
-    </span>
-    <span className={`text-sm font-semibold ${count > 0 ? color : "text-text-muted"}`}>{count}</span>
-  </div>
-);
-
-const DistributionCard = ({ title, data, colorMap }: { title: string; data: Record<string, number>; colorMap: Record<string, string> }) => {
-  const total = Object.values(data).reduce((s, v) => s + v, 0);
-  const defaultColors = ["bg-chart-blue", "bg-chart-orange", "bg-chart-purple", "bg-chart-cyan", "bg-chart-green"];
-  let colorIdx = 0;
-  return (
-    <div className="card">
-      <h3 className="text-sm font-medium text-text-primary mb-3">{title}</h3>
-      {Object.keys(data).length > 0 ? (
-        <div className="space-y-2">
-          {Object.entries(data)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 8)
-            .map(([label, count]) => {
-              const color = colorMap[label] || defaultColors[colorIdx++ % defaultColors.length];
-              return (
-                <div key={label} className="flex items-center gap-2">
-                  <span className="text-xs text-text-secondary w-20 truncate">{label}</span>
-                  <div className="flex-1">
-                    <SparkBar value={count} max={total} color={color} />
-                  </div>
-                  <span className="text-[10px] text-text-muted w-6 text-right">{count}</span>
-                </div>
-              );
-            })}
+          ) : (
+            <p className="text-[var(--text-sm)] text-text-muted">
+              No topics detected yet
+            </p>
+          )}
         </div>
-      ) : (
-        <p className="text-xs text-text-muted">No data</p>
+      </div>
+      </>
       )}
     </div>
   );
-};
+}
+
+/* ── Feedback Tab ───────────────────────────────────────────────── */
+
+function FeedbackTab({ sinceDays }: { sinceDays: number }) {
+  const [agentFilter, setAgentFilter] = useState("");
+  const [ratingFilter, setRatingFilter] = useState("");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const statsQuery = useApiQuery<FeedbackStats>(
+    `/api/v1/feedback/stats?since_days=${sinceDays}${agentFilter ? `&agent_name=${agentFilter}` : ""}`,
+  );
+  const listQuery = useApiQuery<{ feedback: FeedbackItem[]; count: number }>(
+    `/api/v1/feedback?since_days=${sinceDays}&limit=50${agentFilter ? `&agent_name=${agentFilter}` : ""}${ratingFilter ? `&rating=${ratingFilter}` : ""}`,
+  );
+
+  const stats = statsQuery.data;
+  const feedbackList = listQuery.data?.feedback ?? [];
+
+  /* ── Feedback Trend: group by day ────────────────────────────── */
+  const feedbackTrendData = useMemo(() => {
+    if (feedbackList.length === 0) return [];
+    const byDay = new Map<string, { positive: number; negative: number }>();
+
+    for (const fb of feedbackList) {
+      const ts = fb.created_at;
+      if (!ts) continue;
+      const d = new Date(typeof ts === "number" && ts < 1e12 ? ts * 1000 : ts);
+      const key = d.toISOString().slice(0, 10);
+      const entry = byDay.get(key) || { positive: 0, negative: 0 };
+      if (fb.rating === "positive") entry.positive++;
+      else if (fb.rating === "negative") entry.negative++;
+      byDay.set(key, entry);
+    }
+
+    // Fill in missing days in the range
+    const sorted = [...byDay.entries()].sort(([a], [b]) => a.localeCompare(b));
+    if (sorted.length === 0) return [];
+
+    const result: Array<{ day: string; positive: number; negative: number }> = [];
+    const start = new Date(sorted[0][0]);
+    const end = new Date(sorted[sorted.length - 1][0]);
+    const cursor = new Date(start);
+    while (cursor <= end) {
+      const key = cursor.toISOString().slice(0, 10);
+      const entry = byDay.get(key) || { positive: 0, negative: 0 };
+      result.push({ day: key, ...entry });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return result;
+  }, [feedbackList]);
+
+  /* ── Per-Agent Satisfaction ──────────────────────────────────── */
+  const agentSatisfaction = useMemo(() => {
+    const byAgent = stats?.by_agent ?? [];
+    return byAgent
+      .map((a) => {
+        const total = (a.positive ?? 0) + (a.negative ?? 0);
+        const satisfaction = total > 0 ? ((a.positive ?? 0) / total) * 100 : 0;
+        return { name: a.agent_name, satisfaction, positive: a.positive, negative: a.negative, total };
+      })
+      .filter((a) => a.total > 0)
+      .sort((a, b) => a.satisfaction - b.satisfaction);
+  }, [stats]);
+
+  /* ── Comment Highlights ─────────────────────────────────────── */
+  const commentHighlights = useMemo(() => {
+    return feedbackList
+      .filter((fb) => fb.comment && fb.comment.trim().length > 0)
+      .slice(0, 10);
+  }, [feedbackList]);
+
+  return (
+    <div>
+      {/* Signal cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-[var(--space-3)] mb-[var(--space-6)]">
+        <SignalCard
+          icon={<MessageSquare size={16} />}
+          label="Total Feedback"
+          value={String(stats?.total ?? 0)}
+          iconColor="text-chart-blue"
+          bgColor="bg-chart-blue/10"
+        />
+        <SignalCard
+          icon={<ThumbsUp size={16} />}
+          label="Positive %"
+          value={`${(stats?.positive_pct ?? 0).toFixed(1)}%`}
+          iconColor="text-status-live"
+          bgColor="bg-status-live/10"
+        />
+        <SignalCard
+          icon={<ThumbsDown size={16} />}
+          label="Negative %"
+          value={`${(stats?.negative_pct ?? 0).toFixed(1)}%`}
+          iconColor="text-status-error"
+          bgColor="bg-status-error/10"
+        />
+        <SignalCard
+          icon={<Activity size={16} />}
+          label="vs. Last Period"
+          value={
+            stats?.trend_direction === "up"
+              ? `+${stats.total - stats.prev_total}`
+              : stats?.trend_direction === "down"
+                ? `${stats.total - stats.prev_total}`
+                : "0"
+          }
+          iconColor={
+            stats?.trend_direction === "up"
+              ? "text-status-live"
+              : stats?.trend_direction === "down"
+                ? "text-status-error"
+                : "text-text-muted"
+          }
+          bgColor={
+            stats?.trend_direction === "up"
+              ? "bg-status-live/10"
+              : stats?.trend_direction === "down"
+                ? "bg-status-error/10"
+                : "bg-surface-overlay"
+          }
+        />
+      </div>
+
+      {/* Feedback Trend Chart */}
+      {feedbackTrendData.length > 1 && (
+        <div className="card mb-[var(--space-6)]">
+          <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+            Feedback Trend (Last {sinceDays} Days)
+          </h3>
+          <FeedbackTrendChart data={feedbackTrendData} />
+        </div>
+      )}
+
+      {/* Per-Agent Satisfaction */}
+      {agentSatisfaction.length > 0 && (
+        <div className="card mb-[var(--space-6)]">
+          <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+            Per-Agent Satisfaction
+          </h3>
+          <AgentSatisfactionChart agents={agentSatisfaction} />
+        </div>
+      )}
+
+      {/* Comment Highlights */}
+      {commentHighlights.length > 0 && (
+        <div className="card mb-[var(--space-6)]">
+          <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+            Comment Highlights
+          </h3>
+          <div className="space-y-[var(--space-2)]">
+            {commentHighlights.map((fb) => (
+              <div
+                key={fb.id}
+                className="flex items-start gap-[var(--space-3)] p-[var(--space-3)] rounded-lg border border-border-default bg-surface-base"
+              >
+                {fb.rating === "positive" ? (
+                  <ThumbsUp size={14} className="text-status-live flex-shrink-0 mt-0.5" />
+                ) : (
+                  <ThumbsDown size={14} className="text-status-error flex-shrink-0 mt-0.5" />
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-[var(--space-2)] mb-[var(--space-1)]">
+                    <span className="text-[var(--text-xs)] font-medium text-text-secondary">
+                      {fb.agent_name || "unknown"}
+                    </span>
+                    <span className="text-[10px] text-text-muted font-mono">
+                      {timeAgo(fb.created_at)}
+                    </span>
+                  </div>
+                  <p className="text-[var(--text-xs)] text-text-primary leading-relaxed">
+                    {fb.comment}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Filters */}
+      <div className="flex items-center gap-[var(--space-3)] mb-[var(--space-4)]">
+        <div className="flex items-center gap-[var(--space-2)]">
+          <Filter size={14} className="text-text-muted" />
+          <select
+            value={ratingFilter}
+            onChange={(e) => setRatingFilter(e.target.value)}
+            className="text-[var(--text-xs)] bg-surface-base border border-border-default rounded-lg px-[var(--space-2)] py-[var(--space-1)] min-h-[var(--touch-target-min)] text-text-primary"
+          >
+            <option value="">All ratings</option>
+            <option value="positive">Positive</option>
+            <option value="negative">Negative</option>
+            <option value="neutral">Neutral</option>
+          </select>
+        </div>
+
+        {stats?.by_agent && stats.by_agent.length > 0 && (
+          <select
+            value={agentFilter}
+            onChange={(e) => setAgentFilter(e.target.value)}
+            className="text-[var(--text-xs)] bg-surface-base border border-border-default rounded-lg px-[var(--space-2)] py-[var(--space-1)] min-h-[var(--touch-target-min)] text-text-primary"
+          >
+            <option value="">All agents</option>
+            {stats.by_agent.map((a) => (
+              <option key={a.agent_name} value={a.agent_name}>
+                {a.agent_name} ({a.total})
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {/* Feedback list */}
+      <div className="card">
+        <h3 className="text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+          Recent Feedback
+        </h3>
+
+        {feedbackList.length === 0 ? (
+          <p className="text-[var(--text-sm)] text-text-muted py-[var(--space-4)]">
+            No feedback recorded yet. Feedback appears when users click thumbs up/down in the playground.
+          </p>
+        ) : (
+          <div className="space-y-[var(--space-2)]">
+            {feedbackList.map((fb) => (
+              <div
+                key={fb.id}
+                className="rounded-lg border border-border-default bg-surface-base overflow-hidden"
+              >
+                <button
+                  onClick={() => setExpandedId(expandedId === fb.id ? null : fb.id)}
+                  className="w-full flex items-center gap-[var(--space-3)] p-[var(--space-3)] min-h-[var(--touch-target-min)] hover:bg-surface-overlay transition-colors text-left"
+                >
+                  {/* Rating icon */}
+                  {fb.rating === "positive" ? (
+                    <ThumbsUp size={14} className="text-status-live flex-shrink-0" />
+                  ) : fb.rating === "negative" ? (
+                    <ThumbsDown size={14} className="text-status-error flex-shrink-0" />
+                  ) : (
+                    <MessageSquare size={14} className="text-text-muted flex-shrink-0" />
+                  )}
+
+                  {/* Agent name */}
+                  <span className="text-[var(--text-xs)] font-medium text-text-secondary w-24 truncate flex-shrink-0">
+                    {fb.agent_name || "unknown"}
+                  </span>
+
+                  {/* Message preview */}
+                  <span className="text-[var(--text-xs)] text-text-muted flex-1 truncate">
+                    {fb.message_preview?.slice(0, 120) || "No preview"}
+                  </span>
+
+                  {/* Timestamp */}
+                  <span className="text-[10px] text-text-muted font-mono flex-shrink-0">
+                    {timeAgo(fb.created_at)}
+                  </span>
+
+                  {expandedId === fb.id ? (
+                    <ChevronDown size={12} className="text-text-muted flex-shrink-0" />
+                  ) : (
+                    <ChevronRight size={12} className="text-text-muted flex-shrink-0" />
+                  )}
+                </button>
+
+                {expandedId === fb.id && (
+                  <div className="px-[var(--space-4)] pb-[var(--space-4)] space-y-[var(--space-2)] border-t border-border-subtle">
+                    {/* Full message */}
+                    <div className="mt-[var(--space-2)]">
+                      <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+                        Message
+                      </p>
+                      <p className="text-[var(--text-xs)] text-text-secondary bg-surface-overlay rounded-lg p-[var(--space-3)] whitespace-pre-wrap">
+                        {fb.message_preview || "No content"}
+                      </p>
+                    </div>
+
+                    {/* Comment */}
+                    {fb.comment && (
+                      <div>
+                        <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
+                          Comment
+                        </p>
+                        <p className="text-[var(--text-xs)] text-text-secondary">
+                          {fb.comment}
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Metadata */}
+                    <div className="flex items-center gap-[var(--space-4)] text-[10px] text-text-muted font-mono">
+                      <span>Channel: {fb.channel}</span>
+                      <span>Turn: {fb.turn_number}</span>
+                      {fb.session_id && (
+                        <span>Session: {fb.session_id.slice(0, 8)}...</span>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ── Feedback Trend Chart (SVG) ─────────────────────────────────── */
+
+function FeedbackTrendChart({
+  data,
+}: {
+  data: Array<{ day: string; positive: number; negative: number }>;
+}) {
+  const width = 800;
+  const height = 200;
+  const padLeft = 40;
+  const padRight = 16;
+  const padTop = 12;
+  const padBottom = 32;
+  const chartW = width - padLeft - padRight;
+  const chartH = height - padTop - padBottom;
+
+  const maxCount = Math.max(
+    1,
+    ...data.map((d) => Math.max(d.positive, d.negative)),
+  );
+
+  const toX = (i: number) =>
+    padLeft + (data.length > 1 ? (i / (data.length - 1)) * chartW : chartW / 2);
+  const toY = (val: number) =>
+    padTop + (1 - val / maxCount) * chartH;
+
+  const posPoints = data.map((d, i) => `${toX(i)},${toY(d.positive)}`).join(" ");
+  const negPoints = data.map((d, i) => `${toX(i)},${toY(d.negative)}`).join(" ");
+
+  /* Y-axis labels */
+  const ySteps = [0, Math.round(maxCount / 2), maxCount];
+
+  /* X-axis: show a few labels */
+  const xIndices =
+    data.length <= 7
+      ? data.map((_, i) => i)
+      : [0, Math.floor(data.length / 2), data.length - 1];
+
+  return (
+    <div>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="w-full"
+        style={{ maxHeight: "200px" }}
+        preserveAspectRatio="xMidYMid meet"
+      >
+        {/* Grid lines */}
+        {ySteps.map((v) => (
+          <line
+            key={v}
+            x1={padLeft}
+            x2={width - padRight}
+            y1={toY(v)}
+            y2={toY(v)}
+            stroke="var(--color-border-subtle)"
+            strokeWidth="1"
+          />
+        ))}
+
+        {/* Y labels */}
+        {ySteps.map((v) => (
+          <text
+            key={`y-${v}`}
+            x={padLeft - 8}
+            y={toY(v) + 4}
+            fill="var(--color-text-muted)"
+            fontSize="10"
+            textAnchor="end"
+          >
+            {v}
+          </text>
+        ))}
+
+        {/* X labels */}
+        {xIndices.map((i) => (
+          <text
+            key={`x-${i}`}
+            x={toX(i)}
+            y={height - 6}
+            fill="var(--color-text-muted)"
+            fontSize="10"
+            textAnchor="middle"
+          >
+            {data[i]?.day?.slice(5) ?? ""}
+          </text>
+        ))}
+
+        {/* Positive line (green) */}
+        <polyline
+          points={posPoints}
+          fill="none"
+          stroke="var(--color-chart-green)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {data.map((d, i) => (
+          <circle
+            key={`pos-${i}`}
+            cx={toX(i)}
+            cy={toY(d.positive)}
+            r="2.5"
+            fill="var(--color-chart-green)"
+            stroke="var(--color-surface-raised)"
+            strokeWidth="1"
+          />
+        ))}
+
+        {/* Negative line (red) */}
+        <polyline
+          points={negPoints}
+          fill="none"
+          stroke="var(--color-status-error)"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {data.map((d, i) => (
+          <circle
+            key={`neg-${i}`}
+            cx={toX(i)}
+            cy={toY(d.negative)}
+            r="2.5"
+            fill="var(--color-status-error)"
+            stroke="var(--color-surface-raised)"
+            strokeWidth="1"
+          />
+        ))}
+      </svg>
+
+      {/* Legend */}
+      <div className="flex items-center gap-[var(--space-4)] mt-[var(--space-2)]">
+        <div className="flex items-center gap-[var(--space-2)]">
+          <span className="inline-block w-3 h-[3px] rounded-full bg-chart-green" />
+          <span className="text-[var(--text-xs)] text-text-muted">Positive</span>
+        </div>
+        <div className="flex items-center gap-[var(--space-2)]">
+          <span className="inline-block w-3 h-[3px] rounded-full bg-status-error" />
+          <span className="text-[var(--text-xs)] text-text-muted">Negative</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Agent Satisfaction Horizontal Bars ─────────────────────────── */
+
+function AgentSatisfactionChart({
+  agents,
+}: {
+  agents: Array<{
+    name: string;
+    satisfaction: number;
+    positive: number;
+    negative: number;
+    total: number;
+  }>;
+}) {
+  return (
+    <div className="space-y-[var(--space-3)]">
+      {agents.map((agent) => {
+        const barColor =
+          agent.satisfaction > 80
+            ? "var(--color-chart-green)"
+            : agent.satisfaction >= 50
+              ? "var(--color-status-warning)"
+              : "var(--color-status-error)";
+
+        return (
+          <div key={agent.name} className="flex items-center gap-[var(--space-3)]">
+            <span className="text-[var(--text-xs)] text-text-secondary w-28 truncate flex-shrink-0">
+              {agent.name}
+            </span>
+            <div className="flex-1 h-5 rounded bg-surface-overlay overflow-hidden relative">
+              <div
+                className="h-full rounded transition-all"
+                style={{
+                  width: `${Math.max(agent.satisfaction, 2)}%`,
+                  backgroundColor: barColor,
+                }}
+              />
+            </div>
+            <span
+              className="text-[var(--text-xs)] font-mono w-12 text-right flex-shrink-0"
+              style={{ color: barColor }}
+            >
+              {agent.satisfaction.toFixed(0)}%
+            </span>
+            <span className="text-[10px] text-text-muted font-mono w-16 text-right flex-shrink-0">
+              {agent.positive}/{agent.total}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── Signal Card ─────────────────────────────────────────────────── */
+
+function SignalCard({
+  icon,
+  label,
+  value,
+  iconColor,
+  bgColor,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  iconColor: string;
+  bgColor: string;
+}) {
+  return (
+    <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
+      <div className={`p-2 rounded-lg ${bgColor}`}>
+        <span className={iconColor}>{icon}</span>
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
+          {value}
+        </p>
+        <p className="text-[10px] text-text-muted uppercase tracking-wide">
+          {label}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ── Quality Trend Chart (Multi-line SVG) ────────────────────────── */
+
+function QualityTrendChart({
+  days,
+  agentNames,
+}: {
+  days: TrendDay[];
+  agentNames: string[];
+}) {
+  const width = 800;
+  const height = 400;
+  const padLeft = 48;
+  const padRight = 16;
+  const padTop = 16;
+  const padBottom = 40;
+  const chartW = width - padLeft - padRight;
+  const chartH = height - padTop - padBottom;
+
+  /* Y axis: 0 to 1 */
+  const yMin = 0;
+  const yMax = 1;
+  const thresholdY = 0.7;
+
+  const toX = (i: number) =>
+    padLeft + (days.length > 1 ? (i / (days.length - 1)) * chartW : chartW / 2);
+  const toY = (val: number) =>
+    padTop + (1 - (val - yMin) / (yMax - yMin)) * chartH;
+
+  /* Build overall quality polyline */
+  const overallPoints = days
+    .map((d, i) => `${toX(i)},${toY(d.avg_quality)}`)
+    .join(" ");
+
+  /* Y-axis labels */
+  const yLabels = [0, 0.25, 0.5, 0.7, 1.0];
+
+  /* X-axis labels: show first, middle, last */
+  const xLabelIndices = days.length <= 7
+    ? days.map((_, i) => i)
+    : [0, Math.floor(days.length / 2), days.length - 1];
+
+  return (
+    <div>
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="w-full"
+        style={{ maxHeight: "400px" }}
+        preserveAspectRatio="xMidYMid meet"
+      >
+        {/* Grid lines */}
+        {yLabels.map((v) => (
+          <line
+            key={v}
+            x1={padLeft}
+            x2={width - padRight}
+            y1={toY(v)}
+            y2={toY(v)}
+            stroke="var(--color-border-subtle)"
+            strokeWidth="1"
+          />
+        ))}
+
+        {/* Threshold line at 0.7 */}
+        <line
+          x1={padLeft}
+          x2={width - padRight}
+          y1={toY(thresholdY)}
+          y2={toY(thresholdY)}
+          stroke="var(--color-status-warning)"
+          strokeWidth="1"
+          strokeDasharray="6 4"
+          opacity="0.6"
+        />
+        <text
+          x={width - padRight + 4}
+          y={toY(thresholdY) + 4}
+          fill="var(--color-status-warning)"
+          fontSize="10"
+          opacity="0.8"
+        >
+          0.7
+        </text>
+
+        {/* Y-axis labels */}
+        {yLabels.map((v) => (
+          <text
+            key={`ylbl-${v}`}
+            x={padLeft - 8}
+            y={toY(v) + 4}
+            fill="var(--color-text-muted)"
+            fontSize="10"
+            textAnchor="end"
+          >
+            {v.toFixed(1)}
+          </text>
+        ))}
+
+        {/* X-axis labels */}
+        {xLabelIndices.map((i) => (
+          <text
+            key={`xlbl-${i}`}
+            x={toX(i)}
+            y={height - 8}
+            fill="var(--color-text-muted)"
+            fontSize="10"
+            textAnchor="middle"
+          >
+            {days[i]?.day?.slice(5) ?? ""}
+          </text>
+        ))}
+
+        {/* Overall quality line */}
+        <polyline
+          points={overallPoints}
+          fill="none"
+          stroke={CHART_COLORS[0]}
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+
+        {/* Dots on the line */}
+        {days.map((d, i) => (
+          <circle
+            key={i}
+            cx={toX(i)}
+            cy={toY(d.avg_quality)}
+            r="3"
+            fill={
+              d.avg_quality < thresholdY
+                ? "var(--color-status-error)"
+                : CHART_COLORS[0]
+            }
+            stroke="var(--color-surface-raised)"
+            strokeWidth="1.5"
+          />
+        ))}
+      </svg>
+
+      {/* Legend */}
+      <div className="flex items-center gap-[var(--space-4)] mt-[var(--space-2)] flex-wrap">
+        <div className="flex items-center gap-[var(--space-2)]">
+          <span
+            className="inline-block w-3 h-[3px] rounded-full"
+            style={{ backgroundColor: CHART_COLORS[0] }}
+          />
+          <span className="text-[var(--text-xs)] text-text-muted">
+            Avg Quality
+          </span>
+        </div>
+        <div className="flex items-center gap-[var(--space-2)]">
+          <span className="inline-block w-3 h-[2px] rounded-full bg-status-warning opacity-60" />
+          <span className="text-[var(--text-xs)] text-text-muted">
+            Threshold (0.7)
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Sentiment Stacked Bar ───────────────────────────────────────── */
+
+function SentimentBar({
+  distribution,
+  total,
+}: {
+  distribution: Record<string, number>;
+  total: number;
+}) {
+  const positive = distribution.positive ?? 0;
+  const neutral = distribution.neutral ?? 0;
+  const negative = distribution.negative ?? 0;
+
+  const posPct = (positive / total) * 100;
+  const neuPct = (neutral / total) * 100;
+  const negPct = (negative / total) * 100;
+
+  return (
+    <div>
+      {/* Stacked bar */}
+      <div className="flex h-6 rounded-md overflow-hidden mb-[var(--space-3)]">
+        {posPct > 0 && (
+          <div
+            className="h-full"
+            style={{
+              width: `${posPct}%`,
+              backgroundColor: "var(--color-chart-green)",
+            }}
+            title={`Positive: ${positive}`}
+          />
+        )}
+        {neuPct > 0 && (
+          <div
+            className="h-full"
+            style={{
+              width: `${neuPct}%`,
+              backgroundColor: "var(--color-text-muted)",
+              opacity: 0.5,
+            }}
+            title={`Neutral: ${neutral}`}
+          />
+        )}
+        {negPct > 0 && (
+          <div
+            className="h-full"
+            style={{
+              width: `${negPct}%`,
+              backgroundColor: "var(--color-status-error)",
+            }}
+            title={`Negative: ${negative}`}
+          />
+        )}
+      </div>
+
+      {/* Labels */}
+      <div className="flex items-center gap-[var(--space-4)] text-[var(--text-xs)]">
+        <div className="flex items-center gap-[var(--space-1)]">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-chart-green" />
+          <span className="text-text-muted">
+            Positive {positive} ({posPct.toFixed(0)}%)
+          </span>
+        </div>
+        <div className="flex items-center gap-[var(--space-1)]">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-text-muted opacity-50" />
+          <span className="text-text-muted">
+            Neutral {neutral} ({neuPct.toFixed(0)}%)
+          </span>
+        </div>
+        <div className="flex items-center gap-[var(--space-1)]">
+          <span className="inline-block w-2.5 h-2.5 rounded-sm bg-status-error" />
+          <span className="text-text-muted">
+            Negative {negative} ({negPct.toFixed(0)}%)
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Sortable Table Header ───────────────────────────────────────── */
+
+function SortTh({
+  label,
+  field,
+  current,
+  asc,
+  onSort,
+  align,
+}: {
+  label: string;
+  field: string;
+  current: string;
+  asc: boolean;
+  onSort: (f: any) => void;
+  align?: "right";
+}) {
+  const isActive = field === current;
+  return (
+    <th
+      className={`cursor-pointer select-none ${align === "right" ? "text-right" : "text-left"}`}
+      onClick={() => onSort(field)}
+    >
+      <span className="inline-flex items-center gap-[var(--space-1)]">
+        {label}
+        {isActive && (
+          <span className="text-accent text-[10px]">{asc ? "\u25B2" : "\u25BC"}</span>
+        )}
+      </span>
+    </th>
+  );
+}
+
+export { IntelligencePage as default };

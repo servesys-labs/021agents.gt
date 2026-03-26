@@ -132,6 +132,13 @@ type MetaDraft = {
   tools: string[];
   resources: Array<{ type: string; name: string }>;
   createdAt: number;
+  gatePack?: { rollout?: { decision?: string; reason?: string } };
+};
+
+type MaintenanceRunResponse = {
+  rollout?: { decision?: string };
+  proposals?: { generated?: number };
+  approval_packet?: { ready_for_approval?: boolean; blocking_reasons?: string[] };
 };
 
 type ProjectSummary = {
@@ -233,6 +240,18 @@ function CanvasWorkspaceInner() {
   const [metaResult, setMetaResult] = useState<string | undefined>();
   const [agentRailOpen, setAgentRailOpen] = useState(false);
   const [metaDraft, setMetaDraft] = useState<MetaDraft | null>(null);
+  const [maintenanceState, setMaintenanceState] = useState<{
+    running: boolean;
+    lastRunAt?: number;
+    rolloutDecision?: string;
+    readyForApproval?: boolean;
+    blockingReasons?: string[];
+    proposalsGenerated?: number;
+    proposalCount?: number;
+    gatePackRanAt?: number;
+    promoting?: boolean;
+    lastPromotion?: string;
+  }>({ running: false });
 
   // Agent log
   const [logEntries, setLogEntries] = useState<LogEntry[]>([
@@ -922,12 +941,22 @@ function CanvasWorkspaceInner() {
 
       try {
         const draftPath = `/api/v1/agents/create-from-description?draft_only=true&description=${encodeURIComponent(prompt)}`;
-        const result = await apiRequest<{ name?: string; model?: string; tools?: string[] }>(
+        const result = await apiRequest<{
+          name?: string;
+          model?: string;
+          tools?: string[];
+          gate_pack?: { rollout?: { decision?: string; reason?: string } };
+        }>(
           draftPath,
           "POST",
         );
 
-        const msg = "Meta-Agent generated a draft. Approve & Create to persist it.";
+        const rolloutDecision = String(result.gate_pack?.rollout?.decision || "").trim();
+        const rolloutReason = String(result.gate_pack?.rollout?.reason || "").trim();
+        const msg =
+          rolloutDecision
+            ? `Meta-Agent generated a draft. Gate-pack: ${rolloutDecision}${rolloutReason ? ` (${rolloutReason})` : ""}. Approve & Create to persist it.`
+            : "Meta-Agent generated a draft. Approve & Create to persist it.";
         setMetaResult(msg);
         addLogEntry("Meta-Agent completed", "done");
 
@@ -1013,6 +1042,7 @@ function CanvasWorkspaceInner() {
           tools,
           resources,
           createdAt: Date.now(),
+          gatePack: result.gate_pack,
         });
         addLogEntry(
           `Meta-Agent created ${agentName}${resources.length ? ` with ${resources.length} resource nodes` : ""}`,
@@ -1047,11 +1077,26 @@ function CanvasWorkspaceInner() {
     addLogEntry(`Centered on ${metaDraft.agentName} cluster`, "done");
   }, [metaDraft, nodes, setCenter, addLogEntry]);
 
-  const handleMetaDeployDraft = useCallback(async () => {
+  const handleMetaDeployDraft = useCallback(async (overrideHold?: boolean, overrideReason?: string) => {
     if (!metaDraft) return;
+    const gateDecision = String(metaDraft.gatePack?.rollout?.decision || "").toLowerCase();
+    if (gateDecision === "hold" && !overrideHold) {
+      setMetaResult("Gate-pack decision is HOLD. Check the override box to explicitly approve and continue.");
+      addLogEntry(`Blocked create for ${metaDraft.agentName}: gate-pack hold requires explicit override`, "error");
+      return;
+    }
+    if (gateDecision === "hold" && !String(overrideReason || "").trim()) {
+      setMetaResult("Gate-pack decision is HOLD. Provide an override reason before creating.");
+      addLogEntry(`Blocked create for ${metaDraft.agentName}: override reason required`, "error");
+      return;
+    }
     addLogEntry(`Approving draft ${metaDraft.agentName}...`, "running");
     try {
-      const createPath = `/api/v1/agents/create-from-description?draft_only=false&description=${encodeURIComponent(metaDraft.prompt)}&name=${encodeURIComponent(metaDraft.agentName)}&tools=${encodeURIComponent(metaDraft.tools.length ? metaDraft.tools.join(",") : "none")}`;
+      const overrideQuery =
+        gateDecision === "hold"
+          ? `&override_hold=${overrideHold ? "true" : "false"}&override_reason=${encodeURIComponent(String(overrideReason || "").trim())}`
+          : "";
+      const createPath = `/api/v1/agents/create-from-description?draft_only=false&description=${encodeURIComponent(metaDraft.prompt)}&name=${encodeURIComponent(metaDraft.agentName)}&tools=${encodeURIComponent(metaDraft.tools.length ? metaDraft.tools.join(",") : "none")}${overrideQuery}`;
       const created = await apiRequest<{ created?: boolean; name?: string; model?: string; tools?: string[] }>(
         createPath,
         "POST",
@@ -1065,13 +1110,162 @@ function CanvasWorkspaceInner() {
         ),
       );
       setMetaDraft((prev) => (prev ? { ...prev, agentName: createdName } : prev));
-      addLogEntry(`Approved draft for ${createdName}`, "done");
+      if (gateDecision === "hold" && overrideHold) {
+        addLogEntry(`Approved draft for ${createdName} with explicit HOLD override`, "done");
+      } else {
+        addLogEntry(`Approved draft for ${createdName}`, "done");
+      }
       await deployAgentByName(createdName);
     } catch (err) {
       addLogEntry(`Approve failed: ${err instanceof Error ? err.message : "Unknown error"}`, "error");
       return;
     }
   }, [metaDraft, deployAgentByName, addLogEntry, setNodes, setMetaDraft]);
+
+  const handleRunMaintenance = useCallback(async () => {
+    const agentName = String(playbookAgentName || "").trim();
+    if (!agentName) {
+      setMetaResult("Select or create an agent first to run maintenance.");
+      addLogEntry("Maintenance skipped: no active agent selected", "error");
+      return;
+    }
+    setMaintenanceState((prev) => ({ ...prev, running: true }));
+    addLogEntry(`Running maintenance cycle for ${agentName}...`, "running");
+    try {
+      const resp = await apiRequest<MaintenanceRunResponse>(
+        `/api/v1/observability/agents/${encodeURIComponent(agentName)}/autonomous-maintenance-run`,
+        "POST",
+        {
+          dry_run: true,
+          persist_proposals: true,
+          max_proposals: 8,
+        },
+      );
+      const decision = String(resp.rollout?.decision || "").trim();
+      const ready = Boolean(resp.approval_packet?.ready_for_approval);
+      const generated = Number(resp.proposals?.generated || 0);
+      const reasons = Array.isArray(resp.approval_packet?.blocking_reasons) ? resp.approval_packet?.blocking_reasons : [];
+      setMaintenanceState({
+        running: false,
+        lastRunAt: Date.now(),
+        rolloutDecision: decision,
+        readyForApproval: ready,
+        blockingReasons: reasons,
+        proposalsGenerated: generated,
+        proposalCount: generated,
+      });
+      const statusMsg = `Maintenance cycle complete for ${agentName}. Rollout: ${decision || "n/a"}, ready: ${ready ? "yes" : "no"}, proposals: ${generated}.`;
+      setMetaResult(statusMsg);
+      addLogEntry(statusMsg, ready ? "done" : "running");
+    } catch (err) {
+      setMaintenanceState((prev) => ({ ...prev, running: false }));
+      const msg = `Maintenance failed: ${err instanceof Error ? err.message : "Unknown error"}`;
+      setMetaResult(msg);
+      addLogEntry(msg, "error");
+    }
+  }, [playbookAgentName, addLogEntry]);
+
+  const handleOpenProposals = useCallback(async () => {
+    const agentName = String(playbookAgentName || "").trim();
+    if (!agentName) {
+      setMetaResult("Select or create an agent first to open proposals.");
+      addLogEntry("Open proposals skipped: no active agent selected", "error");
+      return;
+    }
+    addLogEntry(`Loading proposals for ${agentName}...`, "running");
+    try {
+      const resp = await apiRequest<{ proposals?: Array<Record<string, unknown>> }>(
+        `/api/v1/observability/agents/${encodeURIComponent(agentName)}/meta-proposals?status=&limit=50`,
+        "GET",
+      );
+      const proposals = Array.isArray(resp.proposals) ? resp.proposals : [];
+      setMaintenanceState((prev) => ({ ...prev, proposalCount: proposals.length }));
+      const msg = `Loaded ${proposals.length} proposals for ${agentName}.`;
+      setMetaResult(msg);
+      addLogEntry(msg, "done");
+      if (proposals.length === 0) {
+        addLogEntry("No proposals yet — run maintenance cycle or generate proposals.", "running");
+      }
+    } catch (err) {
+      const msg = `Open proposals failed: ${err instanceof Error ? err.message : "Unknown error"}`;
+      setMetaResult(msg);
+      addLogEntry(msg, "error");
+    }
+  }, [playbookAgentName, addLogEntry]);
+
+  const handleRunGatePack = useCallback(async () => {
+    const agentName = String(playbookAgentName || "").trim();
+    if (!agentName) {
+      setMetaResult("Select or create an agent first to run gate-pack.");
+      addLogEntry("Gate-pack skipped: no active agent selected", "error");
+      return;
+    }
+    addLogEntry(`Running gate-pack for ${agentName}...`, "running");
+    try {
+      const resp = await apiRequest<{
+        rollout?: { decision?: string; reason?: string };
+        eval_gate?: { passed?: boolean };
+        graph_lint?: { valid?: boolean };
+      }>(
+        "/api/v1/graphs/gate-pack",
+        "POST",
+        {
+          agent_name: agentName,
+          strict_graph_lint: true,
+          target_channel: currentEnv || "staging",
+        },
+      );
+      const decision = String(resp.rollout?.decision || "").trim();
+      const reason = String(resp.rollout?.reason || "").trim();
+      const ready = decision.toLowerCase() === "promote_candidate";
+      setMaintenanceState((prev) => ({
+        ...prev,
+        rolloutDecision: decision,
+        readyForApproval: ready,
+        blockingReasons: ready ? [] : [reason || "Gate-pack requires additional work before promotion."],
+        gatePackRanAt: Date.now(),
+      }));
+      const msg = `Gate-pack complete for ${agentName}. Rollout: ${decision || "n/a"}${reason ? ` (${reason})` : ""}.`;
+      setMetaResult(msg);
+      addLogEntry(msg, ready ? "done" : "running");
+    } catch (err) {
+      const msg = `Gate-pack failed: ${err instanceof Error ? err.message : "Unknown error"}`;
+      setMetaResult(msg);
+      addLogEntry(msg, "error");
+    }
+  }, [playbookAgentName, addLogEntry, currentEnv]);
+
+  const handlePromoteCandidate = useCallback(async () => {
+    const agentName = String(playbookAgentName || "").trim();
+    if (!agentName) {
+      setMetaResult("Select or create an agent first to promote.");
+      addLogEntry("Promotion skipped: no active agent selected", "error");
+      return;
+    }
+    const decision = String(maintenanceState.rolloutDecision || "").toLowerCase();
+    if (decision !== "promote_candidate" || !maintenanceState.readyForApproval) {
+      setMetaResult("Promotion blocked: approval packet is not ready. Run maintenance or gate-pack first.");
+      addLogEntry(`Promotion blocked for ${agentName}: packet not ready`, "error");
+      return;
+    }
+    setMaintenanceState((prev) => ({ ...prev, promoting: true, lastPromotion: undefined }));
+    addLogEntry(`Promoting ${agentName} from draft to ${currentEnv}...`, "running");
+    try {
+      const resp = await apiRequest<{ promoted?: string; from?: string; to?: string; version?: string }>(
+        `/api/v1/releases/${encodeURIComponent(agentName)}/promote?from_channel=draft&to_channel=${encodeURIComponent(currentEnv || "staging")}`,
+        "POST",
+      );
+      const msg = `Promoted ${resp.promoted || agentName} ${resp.from ? `(${resp.from} -> ${resp.to})` : ""}${resp.version ? ` version ${resp.version}` : ""}.`;
+      setMaintenanceState((prev) => ({ ...prev, promoting: false, lastPromotion: msg }));
+      setMetaResult(msg);
+      addLogEntry(msg, "done");
+    } catch (err) {
+      const msg = `Promotion failed: ${err instanceof Error ? err.message : "Unknown error"}`;
+      setMaintenanceState((prev) => ({ ...prev, promoting: false, lastPromotion: msg }));
+      setMetaResult(msg);
+      addLogEntry(msg, "error");
+    }
+  }, [playbookAgentName, maintenanceState.rolloutDecision, maintenanceState.readyForApproval, currentEnv, addLogEntry]);
 
   /* ── Snapshot before drag starts (for undo) ─────────────── */
   const onNodeDragStart = useCallback(
@@ -1452,16 +1646,23 @@ function CanvasWorkspaceInner() {
               playbookLoading={playbookQuery.loading}
               playbookError={playbookQuery.error}
               playbook={playbookQuery.data}
+              maintenance={maintenanceState}
               latestDraft={metaDraft ? {
                 agentName: metaDraft.agentName,
                 model: metaDraft.model,
                 tools: metaDraft.tools,
                 resources: metaDraft.resources,
                 createdAt: metaDraft.createdAt,
+                gateDecision: metaDraft.gatePack?.rollout?.decision,
+                gateReason: metaDraft.gatePack?.rollout?.reason,
               } : null}
               onReviewDraft={handleMetaReviewDraft}
               onCenterDraft={handleMetaCenterDraft}
               onDeployDraft={handleMetaDeployDraft}
+              onRunMaintenance={handleRunMaintenance}
+              onOpenProposals={handleOpenProposals}
+              onRunGatePack={handleRunGatePack}
+              onPromoteCandidate={handlePromoteCandidate}
             />
           </div>
         )}

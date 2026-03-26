@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Plus,
   Trash2,
@@ -20,6 +20,7 @@ import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { safeArray, type AgentInfo } from "../../lib/adapters";
 import { apiRequest, useApiQuery } from "../../lib/api";
+import { extractList } from "../../lib/normalize";
 
 type Episode = { id?: string; input?: string; output?: string; metadata?: Record<string, unknown> };
 type Fact = { key: string; value?: string; content?: string; category?: string; confidence?: number };
@@ -49,9 +50,9 @@ export const MemoryPage = () => {
     `/api/v1/memory/${encodeURIComponent(selectedAgent)}/procedures?limit=50`,
   );
 
-  const episodes = episodesQuery.data?.episodes ?? [];
-  const facts = factsQuery.data?.facts ?? [];
-  const procedures = proceduresQuery.data?.procedures ?? [];
+  const episodes = useMemo(() => extractList<Episode>(episodesQuery.data, "episodes"), [episodesQuery.data]);
+  const facts = useMemo(() => extractList<Fact>(factsQuery.data, "facts"), [factsQuery.data]);
+  const procedures = useMemo(() => extractList<Procedure>(proceduresQuery.data, "procedures"), [proceduresQuery.data]);
 
   /* ── Add episode panel ────────────────────────────────────── */
   const [episodePanelOpen, setEpisodePanelOpen] = useState(false);

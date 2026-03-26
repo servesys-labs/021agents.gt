@@ -1,371 +1,405 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   AlertCircle,
   AlertTriangle,
-  CheckCircle,
-  XCircle,
   Bug,
-  Shield,
-  Brain,
-  Zap,
+  CheckCircle,
   Clock,
-  Settings,
-  RefreshCw,
+  ExternalLink,
+  Shield,
   Wrench,
+  Zap,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
-import { SlidePanel } from "../../components/common/SlidePanel";
-import { useApiQuery, apiRequest } from "../../lib/api";
-import { useToast } from "../../components/common/ToastProvider";
+import { useApiQuery } from "../../lib/api";
 
-/* ── Types ─────────────────────────────────────────────────────── */
+/* ── Types ──────────────────────────────────────────────────────── */
 
 type Issue = {
   issue_id: string;
   agent_name: string;
   title: string;
-  description: string;
-  category: string;
+  description?: string;
+  category?: string;
   severity: string;
   status: string;
-  source: string;
-  source_session_id: string;
-  suggested_fix: string;
-  assigned_to: string;
-  created_at: number;
-  updated_at: number;
+  source?: string;
+  source_session_id?: string;
+  suggested_fix?: string | Record<string, unknown>;
+  affected_sessions_count?: number;
+  created_at?: number | string;
+  updated_at?: number | string;
 };
 
 type IssueSummary = {
   total: number;
-  by_status: Record<string, number>;
-  by_category: Record<string, number>;
   by_severity: Record<string, number>;
+  by_status: Record<string, number>;
+  by_category?: Record<string, number>;
 };
 
-/* ── Helpers ───────────────────────────────────────────────────── */
+/* ── Helpers ─────────────────────────────────────────────────────── */
 
-const severityColor = (s: string) => {
-  switch (s) {
-    case "critical": return "text-status-error";
-    case "high": return "text-chart-orange";
-    case "medium": return "text-status-warning";
-    default: return "text-text-muted";
+function timeSince(ts?: number | string): string {
+  if (!ts) return "--";
+  const date = new Date(typeof ts === "number" && ts < 1e12 ? ts * 1000 : ts);
+  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function severityOrder(s: string): number {
+  switch (s.toLowerCase()) {
+    case "critical":
+    case "high":
+      return 0;
+    case "medium":
+      return 1;
+    case "low":
+      return 2;
+    default:
+      return 3;
   }
-};
+}
 
-const severityIcon = (s: string) => {
-  switch (s) {
-    case "critical": return <XCircle size={14} />;
-    case "high": return <AlertTriangle size={14} />;
-    case "medium": return <AlertCircle size={14} />;
-    default: return <Bug size={14} />;
+function severityBadge(severity: string) {
+  const s = severity.toLowerCase();
+  if (s === "high" || s === "critical") {
+    return {
+      emoji: "\uD83D\uDD34",
+      bg: "bg-status-error/15",
+      text: "text-status-error",
+      border: "border-status-error/20",
+      label: "HIGH",
+    };
   }
-};
-
-const categoryIcon = (c: string) => {
-  switch (c) {
-    case "security": return <Shield size={12} className="text-status-error" />;
-    case "tool_failure": return <Zap size={12} className="text-chart-orange" />;
-    case "hallucination": return <Brain size={12} className="text-chart-purple" />;
-    case "performance": return <Clock size={12} className="text-status-warning" />;
-    case "config_drift": return <Settings size={12} className="text-chart-blue" />;
-    default: return <Bug size={12} className="text-text-muted" />;
+  if (s === "medium") {
+    return {
+      emoji: "\uD83D\uDFE1",
+      bg: "bg-status-warning/15",
+      text: "text-status-warning",
+      border: "border-status-warning/20",
+      label: "MEDIUM",
+    };
   }
-};
+  return {
+    emoji: "\uD83D\uDFE2",
+    bg: "bg-status-live/15",
+    text: "text-status-live",
+    border: "border-status-live/20",
+    label: "LOW",
+  };
+}
 
-const statusColor = (s: string) => {
-  switch (s) {
-    case "open": return "bg-status-error/10 text-status-error border-status-error/20";
-    case "triaged": return "bg-status-warning/10 text-status-warning border-status-warning/20";
-    case "fixing": return "bg-chart-blue/10 text-chart-blue border-chart-blue/20";
-    case "resolved": return "bg-status-live/10 text-status-live border-status-live/20";
-    default: return "bg-text-muted/10 text-text-muted border-text-muted/20";
-  }
-};
+/* ── Issues Queue ────────────────────────────────────────────────── */
 
-/* ── Main Page ─────────────────────────────────────────────────── */
+export function IssuesPage() {
+  const navigate = useNavigate();
 
-export const IssuesPage = () => {
-  const { showToast } = useToast();
-  const [statusFilter, setStatusFilter] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState("");
-  const [selectedIssue, setSelectedIssue] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
+  /* Filters */
+  const [agentFilter, setAgentFilter] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("");
+  const [statusToggle, setStatusToggle] = useState<"open" | "resolved">("open");
 
-  const issuesQuery = useApiQuery<{ issues: Issue[] }>(
-    `/api/v1/issues?status=${statusFilter}&category=${categoryFilter}&limit=100`,
-  );
+  /* Queries */
   const summaryQuery = useApiQuery<IssueSummary>("/api/v1/issues/summary");
-  const detailQuery = useApiQuery<Issue>(
-    `/api/v1/issues/${selectedIssue ?? ""}`,
-    Boolean(selectedIssue),
+  const issuesQuery = useApiQuery<{ issues: Issue[] } | Issue[]>(
+    `/api/v1/issues?status=${statusToggle}&limit=100${
+      agentFilter ? `&agent_name=${encodeURIComponent(agentFilter)}` : ""
+    }${severityFilter ? `&severity=${encodeURIComponent(severityFilter)}` : ""}`,
   );
 
-  const issues = useMemo(() => issuesQuery.data?.issues ?? [], [issuesQuery.data]);
   const summary = summaryQuery.data;
+  const issues: Issue[] = useMemo(() => {
+    const raw = issuesQuery.data;
+    if (!raw) return [];
+    if (Array.isArray(raw)) return raw;
+    return raw.issues ?? [];
+  }, [issuesQuery.data]);
 
-  const handleRefresh = () => {
-    issuesQuery.refetch();
-    summaryQuery.refetch();
-  };
-
-  const handleResolve = async (issueId: string) => {
-    try {
-      await apiRequest(`/api/v1/issues/${issueId}/resolve`, "POST");
-      showToast("Issue resolved", "success");
-      handleRefresh();
-    } catch {
-      showToast("Failed to resolve issue", "error");
+  /* Extract unique agent names for filter dropdown */
+  const agentNames = useMemo(() => {
+    const names = new Set<string>();
+    for (const issue of issues) {
+      if (issue.agent_name) names.add(issue.agent_name);
     }
-  };
+    return Array.from(names).sort();
+  }, [issues]);
 
-  const handleTriage = async (issueId: string) => {
-    try {
-      await apiRequest(`/api/v1/issues/${issueId}/triage`, "POST");
-      showToast("Issue triaged", "success");
-      handleRefresh();
-      if (selectedIssue === issueId) detailQuery.refetch();
-    } catch {
-      showToast("Failed to triage issue", "error");
+  /* Group by severity */
+  const grouped = useMemo(() => {
+    const sorted = [...issues].sort(
+      (a, b) => severityOrder(a.severity) - severityOrder(b.severity),
+    );
+    const groups: { severity: string; items: Issue[] }[] = [];
+    let currentSev = "";
+    for (const issue of sorted) {
+      const sev = issue.severity?.toLowerCase() ?? "medium";
+      const normalizedSev =
+        sev === "critical" || sev === "high"
+          ? "high"
+          : sev === "medium"
+            ? "medium"
+            : "low";
+      if (normalizedSev !== currentSev) {
+        currentSev = normalizedSev;
+        groups.push({ severity: normalizedSev, items: [] });
+      }
+      groups[groups.length - 1].items.push(issue);
     }
-  };
+    return groups;
+  }, [issues]);
 
-  const openCount = issues.filter(i => i.status === "open").length;
+  /* Compute resolved this week */
+  const resolvedThisWeek = useMemo(() => {
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return summary?.by_status?.resolved ?? 0;
+  }, [summary]);
+
+  const highCount = summary?.by_severity?.high ?? summary?.by_severity?.critical ?? 0;
+  const mediumCount = summary?.by_severity?.medium ?? 0;
 
   return (
     <div className="max-w-[1400px] mx-auto">
       <PageHeader
-        title="Issues"
-        subtitle="Automated issue tracking, classification, and remediation"
-        liveCount={openCount}
-        liveLabel="Open"
-        actions={
-          <button onClick={handleRefresh} className="btn btn-secondary">
-            <RefreshCw size={14} />
-          </button>
-        }
+        title="Issues Queue"
+        subtitle="Agent issues detected, triaged, and resolved"
       />
 
-      {/* Summary KPIs */}
-      {summary && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          <div className="card flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-chart-blue/10"><Bug size={16} className="text-chart-blue" /></div>
-            <div>
-              <p className="text-lg font-semibold text-text-primary">{summary.total}</p>
-              <p className="text-[10px] text-text-muted uppercase">Total Issues</p>
-            </div>
+      {/* Signal Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-[var(--space-3)] mb-[var(--space-6)]">
+        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
+          <div className="p-2 rounded-lg bg-status-error/10">
+            <AlertTriangle size={16} className="text-status-error" />
           </div>
-          <div className="card flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-status-error/10"><AlertCircle size={16} className="text-status-error" /></div>
-            <div>
-              <p className="text-lg font-semibold text-text-primary">{summary.by_status?.open ?? 0}</p>
-              <p className="text-[10px] text-text-muted uppercase">Open</p>
-            </div>
-          </div>
-          <div className="card flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-status-warning/10"><Wrench size={16} className="text-status-warning" /></div>
-            <div>
-              <p className="text-lg font-semibold text-text-primary">{(summary.by_status?.triaged ?? 0) + (summary.by_status?.fixing ?? 0)}</p>
-              <p className="text-[10px] text-text-muted uppercase">In Progress</p>
-            </div>
-          </div>
-          <div className="card flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-status-live/10"><CheckCircle size={16} className="text-status-live" /></div>
-            <div>
-              <p className="text-lg font-semibold text-text-primary">{summary.by_status?.resolved ?? 0}</p>
-              <p className="text-[10px] text-text-muted uppercase">Resolved</p>
-            </div>
+          <div>
+            <p className="text-[var(--text-xl)] font-bold text-status-error font-mono">
+              {highCount}
+            </p>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide">
+              High Severity
+            </p>
           </div>
         </div>
-      )}
-
-      {/* Filters */}
-      <div className="flex items-center gap-3 mb-4">
-        <select
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value)}
-          className="px-2 py-1.5 text-xs rounded-lg bg-surface-raised border border-border-default text-text-primary"
-        >
-          <option value="">All Status</option>
-          <option value="open">Open</option>
-          <option value="triaged">Triaged</option>
-          <option value="fixing">Fixing</option>
-          <option value="resolved">Resolved</option>
-        </select>
-        <select
-          value={categoryFilter}
-          onChange={(e) => setCategoryFilter(e.target.value)}
-          className="px-2 py-1.5 text-xs rounded-lg bg-surface-raised border border-border-default text-text-primary"
-        >
-          <option value="">All Categories</option>
-          <option value="security">Security</option>
-          <option value="tool_failure">Tool Failure</option>
-          <option value="hallucination">Hallucination</option>
-          <option value="knowledge_gap">Knowledge Gap</option>
-          <option value="performance">Performance</option>
-          <option value="config_drift">Config Drift</option>
-        </select>
+        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
+          <div className="p-2 rounded-lg bg-status-warning/10">
+            <AlertCircle size={16} className="text-status-warning" />
+          </div>
+          <div>
+            <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
+              {mediumCount}
+            </p>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide">
+              Medium Severity
+            </p>
+          </div>
+        </div>
+        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
+          <div className="p-2 rounded-lg bg-status-live/10">
+            <CheckCircle size={16} className="text-status-live" />
+          </div>
+          <div>
+            <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
+              {resolvedThisWeek}
+            </p>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide">
+              Resolved This Week
+            </p>
+          </div>
+        </div>
       </div>
 
-      {/* Issues list */}
+      {/* Filters */}
+      <div className="flex items-center gap-[var(--space-3)] mb-[var(--space-4)] flex-wrap">
+        {/* Agent dropdown */}
+        <select
+          value={agentFilter}
+          onChange={(e) => setAgentFilter(e.target.value)}
+          className="px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] rounded-lg min-h-[var(--touch-target-min)]"
+        >
+          <option value="">All Agents</option>
+          {agentNames.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+
+        {/* Severity dropdown */}
+        <select
+          value={severityFilter}
+          onChange={(e) => setSeverityFilter(e.target.value)}
+          className="px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] rounded-lg min-h-[var(--touch-target-min)]"
+        >
+          <option value="">All Severities</option>
+          <option value="high">High</option>
+          <option value="medium">Medium</option>
+          <option value="low">Low</option>
+        </select>
+
+        {/* Status toggle */}
+        <div className="flex items-center gap-0 rounded-lg border border-border-default overflow-hidden">
+          <button
+            onClick={() => setStatusToggle("open")}
+            className={`px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] font-medium min-h-[var(--touch-target-min)] transition-colors ${
+              statusToggle === "open"
+                ? "bg-accent text-text-inverse"
+                : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
+            }`}
+          >
+            Open
+          </button>
+          <button
+            onClick={() => setStatusToggle("resolved")}
+            className={`px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] font-medium min-h-[var(--touch-target-min)] transition-colors ${
+              statusToggle === "resolved"
+                ? "bg-accent text-text-inverse"
+                : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
+            }`}
+          >
+            Resolved
+          </button>
+        </div>
+      </div>
+
+      {/* Issues List */}
       <QueryState loading={issuesQuery.loading} error={issuesQuery.error}>
-        {issues.length > 0 ? (
-          <div className="card">
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border-default text-text-muted">
-                    <th className="text-left py-2 pr-4">Issue</th>
-                    <th className="text-center py-2 px-3">Severity</th>
-                    <th className="text-center py-2 px-3">Status</th>
-                    <th className="text-left py-2 px-3">Category</th>
-                    <th className="text-left py-2 px-3">Agent</th>
-                    <th className="text-left py-2 px-3">Source</th>
-                    <th className="text-center py-2 px-3">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {issues.map((issue) => (
-                    <tr
-                      key={issue.issue_id}
-                      className="border-b border-border-default/50 hover:bg-surface-overlay/30 cursor-pointer"
-                      onClick={() => { setSelectedIssue(issue.issue_id); setDrawerOpen(true); }}
-                    >
-                      <td className="py-2 pr-4">
-                        <p className="text-text-primary font-medium text-xs">{issue.title}</p>
-                        <p className="text-[10px] text-text-muted font-mono">{issue.issue_id}</p>
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        <span className={`inline-flex items-center gap-1 ${severityColor(issue.severity)}`}>
-                          {severityIcon(issue.severity)}
-                          <span className="text-[10px]">{issue.severity}</span>
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-center">
-                        <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-medium border ${statusColor(issue.status)}`}>
-                          {issue.status}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3">
-                        <span className="inline-flex items-center gap-1 text-[10px] text-text-secondary">
-                          {categoryIcon(issue.category)} {issue.category}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-text-muted">{issue.agent_name || "—"}</td>
-                      <td className="py-2 px-3 text-text-muted">{issue.source}</td>
-                      <td className="py-2 px-3 text-center space-x-2">
-                        {issue.status === "open" && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleTriage(issue.issue_id); }}
-                            className="text-chart-blue hover:underline text-[10px]"
-                          >
-                            Triage
-                          </button>
-                        )}
-                        {issue.status !== "resolved" && (
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleResolve(issue.issue_id); }}
-                            className="text-status-live hover:underline text-[10px]"
-                          >
-                            Resolve
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        ) : (
+        {issues.length === 0 ? (
           <EmptyState
-            message={statusFilter || categoryFilter ? "No issues match your filters." : "No issues detected yet. Issues are auto-created when problems are found."}
+            icon={<CheckCircle size={32} className="text-status-live" />}
+            title="No open issues"
+            description="Your agents are running smoothly"
           />
-        )}
-      </QueryState>
-
-      {/* Detail Drawer */}
-      <SlidePanel
-        open={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setSelectedIssue(null); }}
-        title={`Issue — ${detailQuery.data?.title?.slice(0, 40) ?? ""}`}
-      >
-        {selectedIssue && (
-          <QueryState loading={detailQuery.loading} error={detailQuery.error}>
-            {detailQuery.data && (() => {
-              const issue = detailQuery.data;
+        ) : (
+          <div className="space-y-[var(--space-6)]">
+            {grouped.map((group) => {
+              const badge = severityBadge(group.severity);
               return (
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex justify-between text-xs">
-                      <span className="text-text-muted">ID</span>
-                      <span className="font-mono text-text-secondary">{issue.issue_id}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-text-muted">Status</span>
-                      <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${statusColor(issue.status)}`}>{issue.status}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-text-muted">Severity</span>
-                      <span className={severityColor(issue.severity)}>{issue.severity}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-text-muted">Category</span>
-                      <span className="inline-flex items-center gap-1 text-text-secondary">{categoryIcon(issue.category)} {issue.category}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-text-muted">Agent</span>
-                      <span className="text-text-secondary">{issue.agent_name || "—"}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span className="text-text-muted">Source</span>
-                      <span className="text-text-secondary">{issue.source}</span>
-                    </div>
-                    {issue.source_session_id && (
-                      <div className="flex justify-between text-xs">
-                        <span className="text-text-muted">Session</span>
-                        <span className="font-mono text-text-secondary">{issue.source_session_id.slice(0, 16)}</span>
-                      </div>
-                    )}
+                <div key={group.severity}>
+                  {/* Group header */}
+                  <div className="flex items-center gap-[var(--space-2)] mb-[var(--space-3)]">
+                    <span
+                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide border ${badge.bg} ${badge.text} ${badge.border}`}
+                    >
+                      {badge.label}
+                    </span>
+                    <span className="text-[var(--text-xs)] text-text-muted">
+                      {group.items.length} issue{group.items.length !== 1 ? "s" : ""}
+                    </span>
                   </div>
 
-                  <div>
-                    <p className="text-xs text-text-muted mb-1">Description</p>
-                    <p className="text-xs text-text-secondary">{issue.description || "No description"}</p>
-                  </div>
-
-                  {issue.suggested_fix && (
-                    <div>
-                      <p className="text-xs text-text-muted mb-1">Suggested Fix</p>
-                      <pre className="text-[10px] text-chart-green bg-surface-base rounded-lg p-3 border border-border-default whitespace-pre-wrap">
-                        {issue.suggested_fix}
-                      </pre>
-                    </div>
-                  )}
-
-                  <div className="flex gap-2 pt-2">
-                    {issue.status === "open" && (
-                      <button onClick={() => handleTriage(issue.issue_id)} className="btn btn-secondary text-xs flex-1">
-                        Triage
-                      </button>
-                    )}
-                    {issue.status !== "resolved" && (
-                      <button onClick={() => handleResolve(issue.issue_id)} className="btn btn-primary text-xs flex-1">
-                        Resolve
-                      </button>
-                    )}
+                  {/* Issue cards */}
+                  <div className="space-y-[var(--space-2)]">
+                    {group.items.map((issue) => (
+                      <IssueCard
+                        key={issue.issue_id}
+                        issue={issue}
+                        onNavigate={() =>
+                          navigate(
+                            `/agents/${issue.agent_name}/issues/${issue.issue_id}`,
+                          )
+                        }
+                        onAgentClick={() =>
+                          navigate(`/agents/${issue.agent_name}`)
+                        }
+                      />
+                    ))}
                   </div>
                 </div>
               );
-            })()}
-          </QueryState>
+            })}
+          </div>
         )}
-      </SlidePanel>
+      </QueryState>
     </div>
   );
-};
+}
+
+/* ── Issue Card ──────────────────────────────────────────────────── */
+
+function IssueCard({
+  issue,
+  onNavigate,
+  onAgentClick,
+}: {
+  issue: Issue;
+  onNavigate: () => void;
+  onAgentClick: () => void;
+}) {
+  const badge = severityBadge(issue.severity);
+  const hasFix =
+    issue.suggested_fix != null &&
+    issue.suggested_fix !== "" &&
+    (typeof issue.suggested_fix !== "object" ||
+      Object.keys(issue.suggested_fix).length > 0);
+
+  const actionLabel = hasFix
+    ? "Auto-Fix"
+    : issue.status === "open"
+      ? "Triage"
+      : "View";
+
+  return (
+    <div
+      className="card card-hover flex items-center gap-[var(--space-3)] py-[var(--space-3)] cursor-pointer transition-all hover:border-accent/30"
+      onClick={onNavigate}
+    >
+      {/* Severity badge */}
+      <span
+        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide border flex-shrink-0 ${badge.bg} ${badge.text} ${badge.border}`}
+      >
+        {badge.label}
+      </span>
+
+      {/* Title + agent */}
+      <div className="flex-1 min-w-0">
+        <p className="text-[var(--text-sm)] text-text-primary font-medium truncate">
+          {issue.title}
+        </p>
+        <div className="flex items-center gap-[var(--space-2)] mt-[var(--space-1)]">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onAgentClick();
+            }}
+            className="text-[10px] text-accent hover:text-accent-hover transition-colors"
+          >
+            {issue.agent_name}
+          </button>
+          {issue.affected_sessions_count != null && (
+            <span className="text-[10px] text-text-muted">
+              {issue.affected_sessions_count} session
+              {issue.affected_sessions_count !== 1 ? "s" : ""} affected
+            </span>
+          )}
+          <span className="text-[10px] text-text-muted">
+            {timeSince(issue.created_at)}
+          </span>
+        </div>
+      </div>
+
+      {/* Action button */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onNavigate();
+        }}
+        className="btn btn-secondary text-[var(--text-xs)] min-h-[var(--touch-target-min)] flex-shrink-0"
+      >
+        {actionLabel}
+        <span className="ml-1">&rarr;</span>
+      </button>
+    </div>
+  );
+}
+
+export { IssuesPage as default };

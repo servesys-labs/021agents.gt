@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Plus,
   Play,
@@ -27,6 +27,7 @@ import { Tabs } from "../../components/common/Tabs";
 import { useToast } from "../../components/common/ToastProvider";
 import { apiRequest, useApiQuery } from "../../lib/api";
 import { toNumber, type RuntimeInsightsResponse } from "../../lib/adapters";
+import { extractList } from "../../lib/normalize";
 
 type Workflow = {
   workflow_id?: string;
@@ -89,6 +90,31 @@ type WorkflowRun = {
   };
 };
 type WorkflowRunsResponse = { runs?: WorkflowRun[] };
+type ApprovalDecision = "approved" | "rejected";
+type ApprovalWorkflow = {
+  approval_id?: string;
+  org_id?: string;
+  project_id?: string;
+  agent_name?: string;
+  run_id?: string;
+  gate_id?: string;
+  checkpoint_id?: string;
+  status?: string;
+  decision?: ApprovalDecision;
+  reviewer_id?: string;
+  review_comment?: string;
+  backend_mode?: string;
+  workflow_instance_id?: string;
+  idempotency_key?: string;
+  deadline_at?: number;
+  decided_at?: number;
+  created_at?: number;
+  updated_at?: number;
+  idempotent?: boolean;
+  dispatch_warning?: string;
+};
+
+const APPROVAL_HISTORY_STORAGE_KEY = "runtime-approval-history-v1";
 
 export const RuntimePage = () => {
   const { showToast } = useToast();
@@ -99,20 +125,20 @@ export const RuntimePage = () => {
   const dlqQuery = useApiQuery<DLQResponse>("/api/v1/jobs/dlq");
   const runtimeInsightsQuery = useApiQuery<RuntimeInsightsResponse>("/api/v1/sessions/runtime/insights?since_days=30&limit_sessions=300");
   const [selectedWorkflowForRuns, setSelectedWorkflowForRuns] = useState<string | null>(null);
-  const workflowRunsQuery = useApiQuery<WorkflowRunsResponse>(
+  const workflowRunsQuery = useApiQuery<WorkflowRunsResponse | WorkflowRun[]>(
     `/api/v1/workflows/${selectedWorkflowForRuns ?? ""}/runs?limit=25`,
     Boolean(selectedWorkflowForRuns),
   );
   const workflowRuns = useMemo(
-    () => workflowRunsQuery.data?.runs ?? [],
+    () => extractList<WorkflowRun>(workflowRunsQuery.data, "runs"),
     [workflowRunsQuery.data],
   );
   const workflows = useMemo(
-    () => workflowsQuery.data?.workflows ?? [],
+    () => extractList<Workflow>(workflowsQuery.data, "workflows"),
     [workflowsQuery.data],
   );
-  const jobs = useMemo(() => jobsQuery.data?.jobs ?? [], [jobsQuery.data]);
-  const dlqEntries = useMemo(() => dlqQuery.data?.entries ?? [], [dlqQuery.data]);
+  const jobs = useMemo(() => extractList<Job>(jobsQuery.data, "jobs"), [jobsQuery.data]);
+  const dlqEntries = useMemo(() => extractList<DLQEntry>(dlqQuery.data, "entries"), [dlqQuery.data]);
 
   /* ── Search ───────────────────────────────────────────────── */
   const [wfSearch, setWfSearch] = useState("");
@@ -138,6 +164,17 @@ export const RuntimePage = () => {
   const [panelOpen, setPanelOpen] = useState(false);
   const [wfForm, setWfForm] = useState({ name: "", description: "" });
   const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [approvalForm, setApprovalForm] = useState({
+    agent_name: "support-bot",
+    run_id: "",
+    gate_id: "gate-human-approval",
+    checkpoint_id: "",
+    idempotency_key: "",
+    deadline_minutes: "60",
+  });
+  const [approvalActionLoading, setApprovalActionLoading] = useState(false);
+  const [activeApproval, setActiveApproval] = useState<ApprovalWorkflow | null>(null);
+  const [approvalHistory, setApprovalHistory] = useState<ApprovalWorkflow[]>([]);
 
   /* ── Detail panel ─────────────────────────────────────────── */
   const [detailOpen, setDetailOpen] = useState(false);
@@ -197,6 +234,140 @@ export const RuntimePage = () => {
       },
     });
     setConfirmOpen(true);
+  };
+
+  /* ── Approval workflow actions ─────────────────────────────── */
+  const upsertApprovalHistory = (entry: ApprovalWorkflow) => {
+    const approvalId = entry.approval_id;
+    if (!approvalId) return;
+    setApprovalHistory((prev) => {
+      const withoutCurrent = prev.filter((item) => item.approval_id !== approvalId);
+      return [entry, ...withoutCurrent].slice(0, 10);
+    });
+  };
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(APPROVAL_HISTORY_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return;
+      const normalized = parsed
+        .filter((item): item is ApprovalWorkflow => {
+          return (
+            typeof item === "object" &&
+            item !== null &&
+            typeof (item as ApprovalWorkflow).approval_id === "string" &&
+            (item as ApprovalWorkflow).approval_id !== ""
+          );
+        })
+        .slice(0, 10);
+      setApprovalHistory(normalized);
+      if (normalized.length > 0) {
+        setActiveApproval((prev) => prev ?? normalized[0]);
+      }
+    } catch {
+      // ignore malformed local state
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        APPROVAL_HISTORY_STORAGE_KEY,
+        JSON.stringify(approvalHistory.slice(0, 10)),
+      );
+    } catch {
+      // ignore storage failures in restricted contexts
+    }
+  }, [approvalHistory]);
+
+  const handleStartApproval = async () => {
+    if (!approvalForm.agent_name.trim() || !approvalForm.run_id.trim() || !approvalForm.gate_id.trim()) {
+      showToast("Agent, Run ID, and Gate ID are required", "error");
+      return;
+    }
+    const deadlineMinutes = Number(approvalForm.deadline_minutes || "60");
+    const deadlineAt = Math.floor(Date.now() / 1000) + Math.max(1, deadlineMinutes) * 60;
+    setApprovalActionLoading(true);
+    try {
+      const payload = await apiRequest<ApprovalWorkflow>("/api/v1/workflows/approval/start", "POST", {
+        agent_name: approvalForm.agent_name.trim(),
+        run_id: approvalForm.run_id.trim(),
+        gate_id: approvalForm.gate_id.trim(),
+        checkpoint_id: approvalForm.checkpoint_id.trim() || undefined,
+        idempotency_key: approvalForm.idempotency_key.trim() || undefined,
+        deadline_at: deadlineAt,
+      });
+      setActiveApproval(payload);
+      upsertApprovalHistory(payload);
+      showToast(
+        payload.idempotent
+          ? `Approval ${payload.approval_id?.slice(0, 10)} loaded (idempotent)`
+          : `Approval ${payload.approval_id?.slice(0, 10)} started`,
+        "success",
+      );
+    } catch {
+      showToast("Failed to start approval workflow", "error");
+    } finally {
+      setApprovalActionLoading(false);
+    }
+  };
+
+  const handleRefreshApproval = async () => {
+    const approvalId = activeApproval?.approval_id;
+    if (!approvalId) return;
+    setApprovalActionLoading(true);
+    try {
+      const payload = await apiRequest<ApprovalWorkflow>(`/api/v1/workflows/approval/${approvalId}`);
+      setActiveApproval(payload);
+      upsertApprovalHistory(payload);
+      showToast("Approval refreshed", "success");
+    } catch {
+      showToast("Failed to refresh approval", "error");
+    } finally {
+      setApprovalActionLoading(false);
+    }
+  };
+
+  const handleDecisionApproval = async (decision: ApprovalDecision) => {
+    const approvalId = activeApproval?.approval_id;
+    if (!approvalId) return;
+    setApprovalActionLoading(true);
+    try {
+      const payload = await apiRequest<ApprovalWorkflow>(
+        `/api/v1/workflows/approval/${approvalId}/decision`,
+        "POST",
+        { decision },
+      );
+      setActiveApproval(payload);
+      upsertApprovalHistory(payload);
+      showToast(
+        payload.idempotent
+          ? `Decision already applied (${decision})`
+          : `Approval ${decision}`,
+        "success",
+      );
+    } catch {
+      showToast(`Failed to ${decision} approval`, "error");
+    } finally {
+      setApprovalActionLoading(false);
+    }
+  };
+
+  const handleSelectApproval = async (approvalId: string) => {
+    if (!approvalId) return;
+    setApprovalActionLoading(true);
+    try {
+      const payload = await apiRequest<ApprovalWorkflow>(`/api/v1/workflows/approval/${approvalId}`);
+      setActiveApproval(payload);
+      upsertApprovalHistory(payload);
+      showToast(`Loaded approval ${approvalId.slice(0, 10)}`, "success");
+    } catch {
+      showToast("Failed to load approval", "error");
+    } finally {
+      setApprovalActionLoading(false);
+    }
   };
 
   /* ── Job actions ──────────────────────────────────────────── */
@@ -330,6 +501,143 @@ export const RuntimePage = () => {
   /* ── Workflows tab content ────────────────────────────────── */
   const workflowsTab = (
     <div>
+      <div className="card mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-sm font-semibold text-text-primary">Approval Workflows (MVP)</p>
+          <StatusBadge status={activeApproval?.status ?? "idle"} />
+        </div>
+        <p className="text-xs text-text-muted mb-3">
+          Start a human approval gate, then approve/reject it from this page.
+        </p>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-2">
+          <input
+            type="text"
+            value={approvalForm.agent_name}
+            onChange={(e) => setApprovalForm((prev) => ({ ...prev, agent_name: e.target.value }))}
+            placeholder="agent name"
+            className="text-xs"
+          />
+          <input
+            type="text"
+            value={approvalForm.run_id}
+            onChange={(e) => setApprovalForm((prev) => ({ ...prev, run_id: e.target.value }))}
+            placeholder="run id"
+            className="text-xs"
+          />
+          <input
+            type="text"
+            value={approvalForm.gate_id}
+            onChange={(e) => setApprovalForm((prev) => ({ ...prev, gate_id: e.target.value }))}
+            placeholder="gate id"
+            className="text-xs"
+          />
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mb-3">
+          <input
+            type="text"
+            value={approvalForm.checkpoint_id}
+            onChange={(e) => setApprovalForm((prev) => ({ ...prev, checkpoint_id: e.target.value }))}
+            placeholder="checkpoint id (optional)"
+            className="text-xs"
+          />
+          <input
+            type="text"
+            value={approvalForm.idempotency_key}
+            onChange={(e) => setApprovalForm((prev) => ({ ...prev, idempotency_key: e.target.value }))}
+            placeholder="idempotency key (optional)"
+            className="text-xs"
+          />
+          <input
+            type="number"
+            min={1}
+            value={approvalForm.deadline_minutes}
+            onChange={(e) => setApprovalForm((prev) => ({ ...prev, deadline_minutes: e.target.value }))}
+            placeholder="deadline (minutes)"
+            className="text-xs"
+          />
+        </div>
+        <div className="flex items-center flex-wrap gap-2 mb-2">
+          <button
+            className="btn btn-primary text-xs"
+            onClick={() => void handleStartApproval()}
+            disabled={approvalActionLoading}
+          >
+            <Play size={12} />
+            Start Approval
+          </button>
+          <button
+            className="btn btn-secondary text-xs"
+            onClick={() => void handleRefreshApproval()}
+            disabled={approvalActionLoading || !activeApproval?.approval_id}
+          >
+            <RotateCcw size={12} />
+            Refresh
+          </button>
+          <button
+            className="btn btn-secondary text-xs text-status-live"
+            onClick={() => void handleDecisionApproval("approved")}
+            disabled={approvalActionLoading || !activeApproval?.approval_id || activeApproval?.status !== "pending"}
+          >
+            <PlayCircle size={12} />
+            Approve
+          </button>
+          <button
+            className="btn btn-secondary text-xs text-status-error"
+            onClick={() => void handleDecisionApproval("rejected")}
+            disabled={approvalActionLoading || !activeApproval?.approval_id || activeApproval?.status !== "pending"}
+          >
+            <XCircle size={12} />
+            Reject
+          </button>
+        </div>
+        {activeApproval?.approval_id && (
+          <div className="text-[10px] text-text-muted space-y-1">
+            <p>
+              Approval: <span className="font-mono text-text-secondary">{activeApproval.approval_id}</span> · Mode:{" "}
+              <span className="font-mono text-text-secondary">{activeApproval.backend_mode || "checkpoint_fallback"}</span>
+            </p>
+            <p>
+              Agent: {activeApproval.agent_name || "--"} · Run:{" "}
+              <span className="font-mono">{activeApproval.run_id || "--"}</span> · Gate:{" "}
+              <span className="font-mono">{activeApproval.gate_id || "--"}</span>
+            </p>
+            {activeApproval.deadline_at ? (
+              <p>
+                Deadline: {new Date(activeApproval.deadline_at * 1000).toLocaleString()}
+                {activeApproval.decided_at
+                  ? ` · Decided: ${new Date(activeApproval.decided_at * 1000).toLocaleString()}`
+                  : ""}
+              </p>
+            ) : null}
+          </div>
+        )}
+        {approvalHistory.length > 0 && (
+          <div className="mt-3 border-t border-border-default pt-2">
+            <p className="text-[10px] uppercase text-text-muted mb-1">Recent Approvals</p>
+            <div className="space-y-1">
+              {approvalHistory.map((item) => (
+                <div
+                  key={item.approval_id}
+                  className="flex items-center gap-2 text-[10px] bg-surface-overlay border border-border-default rounded px-2 py-1"
+                >
+                  <button
+                    className="font-mono text-accent hover:underline"
+                    onClick={() => void handleSelectApproval(item.approval_id || "")}
+                    disabled={approvalActionLoading}
+                  >
+                    {(item.approval_id || "").slice(0, 12)}
+                  </button>
+                  <StatusBadge status={item.status ?? "unknown"} />
+                  <span className="text-text-muted truncate flex-1">
+                    {item.agent_name || "--"} / {item.gate_id || "--"}
+                  </span>
+                  <span className="font-mono text-text-muted">{item.backend_mode || "checkpoint_fallback"}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
       <div className="flex items-center justify-between mb-4">
         <div className="relative flex-1 max-w-xs">
           <Search
