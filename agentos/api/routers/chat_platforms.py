@@ -24,6 +24,76 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat-platforms"])
 
 
+async def _invoke_worker_runnable(
+    *,
+    agent_name: str,
+    input_text: str,
+    chat_id: str,
+) -> str:
+    """Invoke edge runtime runnable endpoint and return output text."""
+    worker_url = os.environ.get("AGENTOS_WORKER_URL", "").strip().rstrip("/")
+    service_token = os.environ.get("SERVICE_TOKEN", "").strip()
+    if not worker_url or not service_token:
+        raise RuntimeError("AGENTOS_WORKER_URL or SERVICE_TOKEN is not configured")
+
+    payload = {
+        "agent_name": agent_name,
+        "input": input_text,
+        "channel": "telegram",
+        "channel_user_id": chat_id,
+        "wait": True,
+        "config": {
+            "run_name": "telegram_webhook",
+            "tags": ["channel:telegram"],
+            "metadata": {"chat_id": chat_id},
+            "input_raw": input_text,
+        },
+    }
+    import httpx
+
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.post(
+            f"{worker_url}/api/v1/runtime-proxy/runnable/invoke",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {service_token}",
+                "Content-Type": "application/json",
+            },
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(f"worker invoke failed ({resp.status_code})")
+        body = resp.json()
+        # If worker returned async-start, poll run status briefly.
+        if resp.status_code == 202:
+            run_id = str(body.get("run_id", "")).strip()
+            if run_id:
+                import asyncio
+
+                for _ in range(12):  # ~24s max (12 * 2s)
+                    poll = await client.get(
+                        f"{worker_url}/api/v1/runs/{run_id}",
+                        headers={"Authorization": f"Bearer {service_token}"},
+                    )
+                    if poll.status_code >= 400:
+                        break
+                    poll_body = poll.json()
+                    status = str(poll_body.get("status", "")).lower()
+                    if status in {"completed", "success"}:
+                        out = poll_body.get("output", "")
+                        return out if isinstance(out, str) else str(out)
+                    if status in {"failed", "error"}:
+                        err = poll_body.get("error", "run failed")
+                        raise RuntimeError(str(err))
+                    await asyncio.sleep(2)
+            raise RuntimeError("run is still in progress; no output yet")
+        output = body.get("output")
+        if isinstance(output, str):
+            return output
+        if output is None:
+            return ""
+        return str(output)
+
+
 def _get_telegram_token() -> str:
     """Get Telegram bot token — from org secrets (DB) first, then env var fallback."""
     # Try org secrets store (set via portal)
@@ -144,27 +214,16 @@ async def telegram_webhook(request: Request):
                 await adapter.send_message(msg.chat_id, reply, reply_to=msg.message_id)
                 return {"ok": True}
 
-    # Run agent — always via backend runtime (same harness for all channels)
+    # Execute on edge runtime and return response to user.
     try:
-        agent_name = os.environ.get("TELEGRAM_AGENT_NAME", "")
-        if agent_name:
-            from agentos.agent import Agent
-            agent = Agent.from_name(agent_name)
-            if hasattr(agent, "set_runtime_context"):
-                agent.set_runtime_context(
-                    org_id=f"telegram-{msg.chat_id}",
-                    project_id="",
-                    user_id=f"channel:telegram:{msg.chat_id}",
-                )
-            results = await agent.run(msg.text)
-            output = ""
-            for r in results:
-                if hasattr(r, "llm_response") and r.llm_response and r.llm_response.content:
-                    output = r.llm_response.content
-        else:
-            output = "No agent configured. Set TELEGRAM_AGENT_NAME."
+        agent_name = os.environ.get("TELEGRAM_AGENT_NAME", "").strip() or "telegram-bot"
+        output = await _invoke_worker_runnable(
+            agent_name=agent_name,
+            input_text=msg.text,
+            chat_id=str(msg.chat_id),
+        )
     except Exception as exc:
-        logger.error("Agent run failed: %s", exc)
+        logger.error("Telegram edge invoke failed: %s", exc)
         output = f"Sorry, I encountered an error: {str(exc)[:200]}"
 
     # Send reply

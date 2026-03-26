@@ -89,6 +89,29 @@ def _agent_is_owned(db: Any, agent_name: str, org_id: str) -> bool:
     return False
 
 
+def _event_ts_seconds(event: dict[str, Any]) -> float:
+    """Best-effort event timestamp in epoch seconds for filtering."""
+    payload = event.get("payload", {}) if isinstance(event, dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    for raw in (
+        event.get("event_ts"),
+        event.get("created_at"),
+        event.get("timestamp"),
+        payload.get("timestamp"),
+        payload.get("event_ts"),
+    ):
+        try:
+            ts = float(raw)
+        except Exception:
+            continue
+        if ts <= 0:
+            continue
+        # Normalize ms epoch to seconds.
+        return ts / 1000.0 if ts > 1e12 else ts
+    return 0.0
+
+
 def _meta_proposals_from_report(agent_name: str, report: dict[str, Any], max_proposals: int) -> list[dict[str, Any]]:
     signals = report.get("signals", {}) if isinstance(report, dict) else {}
     proposals: list[dict[str, Any]] = []
@@ -227,6 +250,101 @@ def _build_eval_plan(agent_name: str, report: dict[str, Any], proposals: list[di
     }
 
 
+def _meta_control_plane_entrypoints(agent_name: str) -> dict[str, Any]:
+    """Canonical control-plane APIs for meta-agent CRUD, telemetry, and eval loops."""
+    return {
+        "agent_crud": {
+            "list": "/api/v1/agents",
+            "get": f"/api/v1/agents/{agent_name}",
+            "create": "/api/v1/agents",
+            "update": f"/api/v1/agents/{agent_name}",
+            "delete": f"/api/v1/agents/{agent_name}",
+            "create_from_description": "/api/v1/agents/create-from-description",
+        },
+        "graph_design": {
+            "validate": "/api/v1/graphs/validate",
+            "lint": "/api/v1/graphs/lint",
+            "run_linear": "/api/v1/graphs/linear-run",
+            "run_dag": "/api/v1/graphs/dag-run",
+        },
+        "telemetry": {
+            "meta_report": f"/api/v1/observability/agents/{agent_name}/meta-report",
+            "meta_control_plane": f"/api/v1/observability/agents/{agent_name}/meta-control-plane",
+            "trace_bundle": "/api/v1/observability/traces/{trace_id}/bundle",
+            "trace_events": "/api/v1/observability/traces/{trace_id}/events",
+        },
+        "eval_experiments": {
+            "run_eval": "/api/v1/eval/run",
+            "list_runs": "/api/v1/eval/runs",
+            "list_trials_for_run": "/api/v1/eval/runs/{run_id}/trials",
+            "datasets": "/api/v1/eval/datasets",
+            "evaluators": "/api/v1/eval/evaluators",
+            "experiments": "/api/v1/eval/experiments",
+        },
+        "improvement_loops": {
+            "generate_meta_proposals": f"/api/v1/observability/agents/{agent_name}/meta-proposals/generate",
+            "review_meta_proposal": f"/api/v1/observability/agents/{agent_name}/meta-proposals/{{proposal_id}}/review",
+            "autoresearch": "/api/v1/autoresearch/start",
+        },
+    }
+
+
+def _langchain_equivalent_runtime_map() -> dict[str, Any]:
+    """Runtime feature map for chain/graph parity guidance in meta workflows."""
+    return {
+        "runnable_composition": {
+            "primitives": ["pipe", "mapInputs", "branch", "parseOutput"],
+            "module": "deploy/src/runtime/runnable.ts",
+        },
+        "graph_execution": {
+            "deterministic_linear": "/api/v1/graphs/linear-run",
+            "bounded_dag": "/api/v1/graphs/dag-run",
+            "replay_integrity": "trace_digest_sha256",
+        },
+        "observability_eval": {
+            "meta_control_plane": "/api/v1/observability/agents/{agent_name}/meta-control-plane",
+            "eval_router": "/api/v1/eval/*",
+        },
+    }
+
+
+def _multi_agent_blueprint(agent_name: str) -> dict[str, Any]:
+    """Recommended supervisor/specialist blueprint for multi-agent systems."""
+    return {
+        "pattern": "supervisor_specialists",
+        "roles": [
+            {
+                "role": "supervisor",
+                "responsibility": "Task decomposition, routing, aggregation, final response.",
+                "node_kinds": ["bootstrap", "route_llm", "final"],
+            },
+            {
+                "role": "specialists",
+                "responsibility": "Focused execution (research, coding, support, compliance).",
+                "invocation": "run-agent",
+            },
+            {
+                "role": "background_ops",
+                "responsibility": "Telemetry, eval, indexing, and analytics off critical path.",
+                "node_kinds": ["telemetry_emit", "eval_enqueue", "index_write"],
+                "requirements": ["async=true", "idempotency_key"],
+            },
+        ],
+        "guardrails": {
+            "graph_lint_endpoint": "/api/v1/graphs/lint?strict=true",
+            "critical_path_rule": "No background node on path to final response.",
+            "fanin_rule": "Avoid fan-in from async branches into blocking joins.",
+        },
+        "workflow": [
+            f"1) Query meta-control-plane for {agent_name}.",
+            "2) Generate/review proposals and select top changes.",
+            "3) Apply agent CRUD updates and run strict graph lint.",
+            "4) Execute eval/experiments and compare deltas.",
+            "5) Promote only when quality/cost/latency gates pass.",
+        ],
+    }
+
+
 @router.get("/stats")
 async def db_stats(user: CurrentUser = Depends(get_current_user)):
     """Get database health and table counts."""
@@ -261,6 +379,12 @@ async def get_trace(
     include_checkpoints: bool = True,
     include_eval_trials: bool = True,
     include_annotations: bool = True,
+    event_limit: int = 2000,
+    event_type: str = "",
+    tool_name: str = "",
+    status: str = "",
+    from_ts: float = 0.0,
+    to_ts: float = 0.0,
     user: CurrentUser = Depends(get_current_user),
 ):
     """Get full trace chain with LangSmith-style telemetry bundle."""
@@ -270,7 +394,15 @@ async def get_trace(
     sessions = db.query_trace(trace_id)
     rollup = db.trace_cost_rollup(trace_id)
     spans = db.query_trace_spans(trace_id) if include_spans else []
-    events = db.query_runtime_events(trace_id=trace_id, limit=2000) if include_events else []
+    events = db.query_runtime_events(
+        trace_id=trace_id,
+        event_types=[event_type] if event_type else None,
+        status=status,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        tool_name=tool_name,
+        limit=max(1, min(int(event_limit or 2000), 10000)),
+    ) if include_events else []
     checkpoints = db.list_graph_checkpoints(trace_id=trace_id, limit=500) if include_checkpoints else []
     eval_trials = db.list_eval_trials_by_trace(trace_id, limit=500) if include_eval_trials else []
     annotations = db.list_trace_annotations(trace_id, limit=500) if include_annotations else []
@@ -283,6 +415,14 @@ async def get_trace(
         "graph_checkpoints": checkpoints,
         "eval_trials": eval_trials,
         "annotations": annotations,
+        "runtime_event_filters": {
+            "event_type": event_type,
+            "tool_name": tool_name,
+            "status": status,
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+            "limit": max(1, min(int(event_limit or 2000), 10000)),
+        },
     }
 
 
@@ -302,13 +442,98 @@ async def get_trace_run_tree(
 async def get_trace_events(
     trace_id: str,
     limit: int = 2000,
+    event_type: str = "",
+    tool_name: str = "",
+    status: str = "",
+    from_ts: float = 0.0,
+    to_ts: float = 0.0,
     user: CurrentUser = Depends(get_current_user),
 ):
     """Get runtime events for a trace (node lifecycle, tool, llm, errors)."""
     db = _get_db()
     if not _trace_is_owned(db, trace_id, user.org_id):
         raise HTTPException(status_code=404, detail="Trace not found")
-    return {"trace_id": trace_id, "events": db.query_runtime_events(trace_id=trace_id, limit=limit)}
+    raw_events = db.query_runtime_events(
+        trace_id=trace_id,
+        event_types=[event_type] if event_type else None,
+        limit=max(limit, 1),
+    )
+    filtered: list[dict[str, Any]] = []
+    status_filter = status.strip()
+    tool_filter = tool_name.strip()
+    from_filter = float(from_ts or 0.0)
+    to_filter = float(to_ts or 0.0)
+    for event in raw_events:
+        payload = event.get("payload", {}) if isinstance(event, dict) else {}
+        if not isinstance(payload, dict):
+            payload = {}
+        if tool_filter:
+            event_tool = str(
+                event.get("tool_name")
+                or payload.get("tool_name")
+                or payload.get("tool")
+                or ""
+            )
+            if event_tool != tool_filter:
+                continue
+        if status_filter:
+            event_status = str(event.get("status") or payload.get("status") or "")
+            if event_status != status_filter:
+                continue
+        event_ts = _event_ts_seconds(event)
+        if from_filter > 0 and (event_ts <= 0 or event_ts < from_filter):
+            continue
+        if to_filter > 0 and (event_ts <= 0 or event_ts > to_filter):
+            continue
+        filtered.append(event)
+    return {
+        "trace_id": trace_id,
+        "events": filtered[:limit],
+        "filters": {
+            "event_type": event_type,
+            "tool_name": tool_name,
+            "status": status,
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+        },
+    }
+
+
+@router.get("/traces/{trace_id}/replay")
+async def get_trace_replay(
+    trace_id: str,
+    up_to_id: int = 0,
+    cursor_index: int = -1,
+    event_id: str = "",
+    include_events: bool = False,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Time-travel replay: runtime events up to a cursor and latest ``state_snapshot`` in that prefix."""
+    db = _get_db()
+    if not _trace_is_owned(db, trace_id, user.org_id):
+        raise HTTPException(status_code=404, detail="Trace not found")
+    replay = db.replay_runtime_events_at_cursor(
+        trace_id=trace_id,
+        up_to_row_id=up_to_id,
+        cursor_index=cursor_index,
+        event_id=event_id,
+        include_events=include_events,
+    )
+    return {
+        "trace_id": trace_id,
+        "session_id": replay.get("session_id", ""),
+        "cursor_row_id": replay.get("cursor_row_id", 0),
+        "cursor_index": replay.get("cursor_index", -1),
+        "event_count": replay.get("event_count", 0),
+        "state_snapshot": replay.get("state_snapshot", {}),
+        "event_at_cursor": replay.get("event_at_cursor"),
+        "events": replay.get("events", []) if include_events else [],
+        "has_more": replay.get("has_more", False),
+        "next_row_id": replay.get("next_row_id"),
+        "next_cursor_index": replay.get("next_cursor_index"),
+        "watermark_row_id": replay.get("watermark_row_id", 0),
+        "watermark_event_count": replay.get("watermark_event_count", 0),
+    }
 
 
 @router.get("/traces/{trace_id}/checkpoints")
@@ -638,6 +863,9 @@ async def get_agent_meta_control_plane(
         "agent_name": agent_name,
         "generated_at": time.time(),
         "meta_report": report,
+        "control_plane_entrypoints": _meta_control_plane_entrypoints(agent_name),
+        "langchain_equivalent_runtime": _langchain_equivalent_runtime_map(),
+        "multi_agent_blueprint": _multi_agent_blueprint(agent_name),
         "meta_proposals": {
             "existing_total": len(existing_meta),
             "pending_total": len(pending_meta),

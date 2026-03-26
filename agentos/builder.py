@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
 from agentos.agent import AgentConfig, save_agent_config, AGENTS_DIR
-from agentos.defaults import DEFAULT_MODEL, slugify as _slugify
+from agentos.defaults import AGENT_TEMPLATES, DEFAULT_MODEL, slugify as _slugify
 from agentos.llm.provider import LLMProvider, LLMResponse, StubProvider
 from agentos.tools.registry import ToolRegistry
 
@@ -205,6 +206,13 @@ TOOL_RECOMMENDATIONS: dict[str, list[str]] = {
 }
 
 
+_META_OPERATOR_HINT_RE = re.compile(
+    r"\b(meta[-\s]?agent|orchestrator|control\s*plane|crud|telemetry|langsmith|"
+    r"evaluation|experiments?|evolve|autoresearch|rollout|multi[-\s]?agent)\b",
+    re.IGNORECASE,
+)
+
+
 def recommend_tools(description: str) -> list[str]:
     """Recommend tools based on keywords in the agent description."""
     import re
@@ -226,6 +234,103 @@ def format_tool_recommendations() -> str:
         keywords = pattern.replace("|", ", ")
         lines.append(f"- **{keywords}** agents → {', '.join(tools)}")
     return "\n".join(lines)
+
+
+def _is_meta_operator_intent(description: str) -> bool:
+    return bool(_META_OPERATOR_HINT_RE.search(description or ""))
+
+
+def _meta_operator_tools(description: str) -> list[str]:
+    baseline = {
+        "todo",
+        "create-agent",
+        "delete-agent",
+        "run-agent",
+        "eval-agent",
+        "evolve-agent",
+        "autoresearch",
+        "list-agents",
+        "list-tools",
+        "view-traces",
+        "view-costs",
+        "manage-issues",
+        "compliance",
+        "manage-releases",
+        "compare-agents",
+        "manage-policies",
+        "manage-workflows",
+        "http-request",
+        "web-search",
+    }
+    baseline.update(recommend_tools(description))
+    return sorted(baseline)
+
+
+def _meta_operator_system_prompt(description: str, tools: list[str]) -> str:
+    tool_line = ", ".join(tools)
+    return (
+        "You are a project meta-operator agent. Manage agent lifecycle, telemetry, evals, and rollout decisions.\n\n"
+        "Primary workflow for every change:\n"
+        "1) Inspect control-plane state and telemetry.\n"
+        "2) Propose agent/config/graph updates.\n"
+        "3) Enforce strict graph lint before publish.\n"
+        "4) Run evals/experiments and compare deltas.\n"
+        "5) Recommend promotion, canary, or rollback.\n\n"
+        "Use supervisor + specialist delegation for multi-agent systems: supervisor plans/routes, specialists execute.\n"
+        "Keep telemetry/eval/indexing off the critical response path and require idempotency on async side effects.\n\n"
+        "Tool contract:\n"
+        f"- Available tools: {tool_line}\n"
+        "- Use 'todo' to plan before multi-step actions.\n"
+        "- Use 'run-agent' for specialist delegation and aggregate results.\n"
+        "- Use eval/evolution tools to prove improvements before rollout.\n"
+        "- Prefer evidence-backed decisions from traces, cost, issue, and eval signals.\n\n"
+        f"Current objective: {description}"
+    )
+
+
+def _build_meta_operator_fallback(description: str) -> AgentConfig:
+    name = _slugify(description)
+    tools = _meta_operator_tools(description)
+    tpl = AGENT_TEMPLATES.get("orchestrator", {})
+    cfg = AgentConfig(
+        name=name,
+        description=description,
+        system_prompt=_meta_operator_system_prompt(description, tools),
+        model=tpl.get("model", DEFAULT_MODEL),
+        tools=tools,
+        tags=["orchestrator", "meta-agent", "control-plane"],
+        plan="standard",
+    )
+    cfg.max_turns = max(50, int(tpl.get("max_turns", 50)))
+    cfg.governance["budget_limit_usd"] = 20.0
+    if not isinstance(cfg.harness, dict):
+        cfg.harness = {}
+    cfg.harness["enable_async_memory"] = True
+    return cfg
+
+
+def _harden_meta_operator_config(description: str, config: AgentConfig) -> AgentConfig:
+    if not _is_meta_operator_intent(description):
+        return config
+    required_tools = set(_meta_operator_tools(description))
+    existing = {str(t) for t in config.tools if isinstance(t, str)}
+    config.tools = sorted(existing | required_tools)
+    prompt = (config.system_prompt or "").strip()
+    if "strict graph lint" not in prompt.lower() or "rollout" not in prompt.lower():
+        config.system_prompt = _meta_operator_system_prompt(description, config.tools)  # type: ignore[arg-type]
+    tags = list(config.tags or [])
+    for t in ("orchestrator", "meta-agent", "control-plane"):
+        if t not in tags:
+            tags.append(t)
+    config.tags = tags
+    if not isinstance(config.harness, dict):
+        config.harness = {}
+    config.harness["enable_async_memory"] = True
+    config.governance["budget_limit_usd"] = max(
+        float(config.governance.get("budget_limit_usd", 10.0) or 10.0),
+        20.0,
+    )
+    return config
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -374,26 +479,29 @@ class AgentBuilder:
 
         extracted = _extract_json(response)
         if extracted and "name" in extracted:
-            self._result = AgentConfig.from_dict(extracted)
+            self._result = _harden_meta_operator_config(description, AgentConfig.from_dict(extracted))
             self._complete = True
             return self._result
 
         # Fallback: generate a sensible config from the description with auto-assigned tools
-        name = _slugify(description)
-        tools = recommend_tools(description)
-        tool_section = ""
-        if tools:
-            tool_section = (
-                f"\n\nYou have these tools available: {', '.join(tools)}.\n"
-                "Use 'todo' to plan multi-step work. Use the right tool for each step."
+        if _is_meta_operator_intent(description):
+            self._result = _build_meta_operator_fallback(description)
+        else:
+            name = _slugify(description)
+            tools = recommend_tools(description)
+            tool_section = ""
+            if tools:
+                tool_section = (
+                    f"\n\nYou have these tools available: {', '.join(tools)}.\n"
+                    "Use 'todo' to plan multi-step work. Use the right tool for each step."
+                )
+            self._result = AgentConfig(
+                name=name,
+                description=description,
+                system_prompt=f"You are an AI assistant specialized in: {description}. "
+                f"Be helpful, accurate, and concise.{tool_section}",
+                tools=tools,
             )
-        self._result = AgentConfig(
-            name=name,
-            description=description,
-            system_prompt=f"You are an AI assistant specialized in: {description}. "
-            f"Be helpful, accurate, and concise.{tool_section}",
-            tools=tools,
-        )
         self._complete = True
         return self._result
 

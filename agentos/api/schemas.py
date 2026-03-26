@@ -136,6 +136,18 @@ class AgentCreateRequest(BaseModel):
     max_turns: int = Field(50, le=1000)
     budget_limit_usd: float = Field(10.0, le=10000)
     tags: list[str] = []
+    graph: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional declarative graph spec for no-code agent runtime behavior.",
+    )
+    strict_graph_lint: bool = Field(
+        default=True,
+        description="When true, graph lint warnings are treated as publish-blocking errors.",
+    )
+    auto_graph: bool = Field(
+        default=False,
+        description="When true and no graph is provided, attach a safe starter graph template.",
+    )
 
 
 class AgentResponse(BaseModel):
@@ -156,8 +168,35 @@ class RunResponse(BaseModel):
     latency_ms: float
     session_id: str = ""
     trace_id: str = ""
+    run_id: str = ""
     stop_reason: str = ""
     checkpoint_id: str = ""
+    parent_session_id: str = ""
+    resumed_from_checkpoint: str = ""
+
+
+class RunnableRunMetadata(BaseModel):
+    success: bool = False
+    turns: int = 0
+    tool_calls: int = 0
+    cost_usd: float = 0.0
+    latency_ms: float = 0.0
+    session_id: str = ""
+    trace_id: str = ""
+    run_id: str = ""
+    stop_reason: str = ""
+    checkpoint_id: str = ""
+    parent_session_id: str = ""
+    resumed_from_checkpoint: str = ""
+    run_name: str = ""
+    tags: list[str] = []
+    metadata: dict[str, Any] = {}
+    input_raw: Any = ""
+
+
+class RunnableInvokeResponse(BaseModel):
+    output: str = ""
+    metadata: RunnableRunMetadata = Field(default_factory=RunnableRunMetadata)
 
 
 # ── Sessions ────────────────────────────────────────────────────────────

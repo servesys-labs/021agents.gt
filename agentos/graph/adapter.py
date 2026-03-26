@@ -17,6 +17,7 @@ from agentos.graph.nodes import (
     HarnessSetupNode,
     LLMNode,
     RecordNode,
+    SubgraphNode,
     ToolExecNode,
     TurnResultNode,
 )
@@ -72,12 +73,16 @@ async def run_with_graph_runtime(harness: AgentHarness, user_input: str) -> list
         )
         ctx = GraphContext(
             messages=[{"role": "user", "content": user_input}],
+            state_reducers=dict(getattr(harness.config, "state_reducers", {}) or {}),
             session_state={
                 "results": [],
                 "middleware_ctx": mw_ctx,
                 "event_bus": harness.event_bus,
                 "trace_id": harness.trace_id,
                 "session_id": harness._current_session_id,
+                "__graph_id": "root",
+                "__parent_graph_id": "",
+                "__graph_seq": 0,
                 "node_spans": [],
                 "checkpoint_snapshots": [],
             },
@@ -92,7 +97,7 @@ async def run_with_graph_runtime(harness: AgentHarness, user_input: str) -> list
             runtime_nodes.append(CheckpointNode("checkpoint_pre_llm"))
         runtime_nodes.append(LLMNode(harness))
         runtime_nodes.append(ApprovalNode(harness, state))
-        runtime_nodes.append(ToolExecNode(harness))
+        runtime_nodes.append(SubgraphNode("subgraph_tools", [ToolExecNode(harness)]))
         if getattr(harness.config, "enable_checkpoints", False):
             runtime_nodes.append(CheckpointNode("checkpoint_post_tools"))
         runtime_nodes.extend([
@@ -209,12 +214,16 @@ async def resume_with_graph_runtime(harness: AgentHarness, checkpoint_payload: d
         turn = int(checkpoint_payload.get("current_turn", 1) or 1)
         ctx = GraphContext(
             messages=messages,
+            state_reducers=dict(getattr(harness.config, "state_reducers", {}) or {}),
             session_state={
                 "results": [],
                 "middleware_ctx": mw_ctx,
                 "event_bus": harness.event_bus,
                 "trace_id": harness.trace_id,
                 "session_id": harness._current_session_id,
+                "__graph_id": "root",
+                "__parent_graph_id": "",
+                "__graph_seq": 0,
                 "node_spans": [],
                 "checkpoint_snapshots": [],
                 "current_turn": turn,
@@ -223,7 +232,7 @@ async def resume_with_graph_runtime(harness: AgentHarness, checkpoint_payload: d
             },
         )
         setattr(harness, "_graph_node_spans", [])
-        resume_turn_nodes = [ToolExecNode(harness)]
+        resume_turn_nodes = [SubgraphNode("subgraph_tools", [ToolExecNode(harness)])]
         if getattr(harness.config, "enable_checkpoints", False):
             resume_turn_nodes.append(CheckpointNode("checkpoint_post_tools"))
         resume_turn_nodes.extend([
@@ -237,7 +246,7 @@ async def resume_with_graph_runtime(harness: AgentHarness, checkpoint_payload: d
         followup_nodes.extend([
             LLMNode(harness),
             ApprovalNode(harness, state),
-            ToolExecNode(harness),
+            SubgraphNode("subgraph_tools", [ToolExecNode(harness)]),
         ])
         if getattr(harness.config, "enable_checkpoints", False):
             followup_nodes.append(CheckpointNode("checkpoint_post_tools"))

@@ -58,6 +58,7 @@ class HarnessConfig:
     skills_dir: str = ""
     enable_checkpoints: bool = False
     require_human_approval: bool = False
+    state_reducers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

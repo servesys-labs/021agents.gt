@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 import uuid
+import json
+from copy import deepcopy
 from typing import Protocol
 
 from agentos.core.events import Event, EventType
@@ -24,6 +26,74 @@ class GraphNode(Protocol):
         ...
 
 
+def _stable_repr(value: object) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    except Exception:
+        return str(value)
+
+
+def _reduce_value(current: object, incoming: object, strategy: str) -> object:
+    if strategy == "sum_numeric":
+        return float(current or 0.0) + float(incoming or 0.0)
+    if strategy == "max_numeric":
+        return max(float(current or 0.0), float(incoming or 0.0))
+    if strategy == "append_list":
+        left = list(current) if isinstance(current, list) else []
+        right = list(incoming) if isinstance(incoming, list) else [incoming]
+        return left + right
+    if strategy == "extend_unique":
+        left = list(current) if isinstance(current, list) else []
+        right = list(incoming) if isinstance(incoming, list) else [incoming]
+        dedup: dict[str, object] = {}
+        for item in left + right:
+            dedup[_stable_repr(item)] = item
+        return [dedup[k] for k in sorted(dedup.keys())]
+    if strategy == "merge_dict":
+        left = dict(current) if isinstance(current, dict) else {}
+        right = dict(incoming) if isinstance(incoming, dict) else {}
+        merged = {**left, **right}
+        return {k: merged[k] for k in sorted(merged.keys())}
+    return deepcopy(incoming)
+
+
+def merge_branch_states(
+    branch_states: list[dict[str, object]],
+    reducers: dict[str, str] | None = None,
+) -> dict[str, object]:
+    """Deterministically merge branch states using per-key reducers.
+
+    Branches may include optional `__branch_id` for stable ordering.
+    Supported reducers:
+    - replace (default)
+    - sum_numeric
+    - max_numeric
+    - append_list
+    - extend_unique
+    - merge_dict
+    """
+    reducer_map = reducers or {}
+    ordered = sorted(
+        branch_states,
+        key=lambda s: (
+            str(s.get("__branch_id", "")),
+            _stable_repr({k: v for k, v in s.items() if k != "__branch_id"}),
+        ),
+    )
+    merged: dict[str, object] = {}
+    for state in ordered:
+        for key in sorted(state.keys()):
+            if key == "__branch_id":
+                continue
+            incoming = state[key]
+            if key not in merged:
+                merged[key] = deepcopy(incoming)
+                continue
+            strategy = str(reducer_map.get(key, "replace"))
+            merged[key] = _reduce_value(merged[key], incoming, strategy)
+    return {k: merged[k] for k in sorted(merged.keys())}
+
+
 class GraphRuntime:
     """Sequential graph executor with per-node retry and checkpoints.
 
@@ -33,6 +103,13 @@ class GraphRuntime:
 
     def __init__(self, nodes: list[GraphNode]) -> None:
         self.nodes = nodes
+
+    @staticmethod
+    def merge_branch_states(
+        branch_states: list[dict[str, object]],
+        reducers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        return merge_branch_states(branch_states, reducers)
 
     async def run(self, ctx: GraphContext) -> GraphContext:
         for node in self.nodes:
@@ -51,6 +128,9 @@ class GraphRuntime:
             max_attempts = max(1, self._max_retries(node) + 1)
             last_error: Exception | None = None
             for attempt in range(1, max_attempts + 1):
+                span_id = uuid.uuid4().hex[:16]
+                parent_span_id = str(ctx.session_state.get("__span_parent_id", ""))
+                ctx.session_state["__active_span_id"] = span_id
                 ctx.checkpoint(node_id, "running", {"attempt": attempt})
                 await self._emit_node_start(ctx, node_id=node_id, turn=turn, attempt=attempt)
                 started = time.time()
@@ -63,6 +143,8 @@ class GraphRuntime:
                         node_id=node_id,
                         turn=turn,
                         attempt=attempt,
+                        span_id=span_id,
+                        parent_span_id=parent_span_id,
                         started=started,
                         ended=ended,
                         status="ok",
@@ -87,6 +169,8 @@ class GraphRuntime:
                         node_id=node_id,
                         turn=turn,
                         attempt=attempt,
+                        span_id=span_id,
+                        parent_span_id=parent_span_id,
                         started=started,
                         ended=ended,
                         status="error",
@@ -107,6 +191,8 @@ class GraphRuntime:
                     )
                     if attempt >= max_attempts:
                         raise
+                finally:
+                    ctx.session_state.pop("__active_span_id", None)
             if last_error is not None and max_attempts == 0:
                 raise last_error
 
@@ -134,6 +220,8 @@ class GraphRuntime:
         node_id: str,
         turn: int,
         attempt: int,
+        span_id: str,
+        parent_span_id: str,
         started: float,
         ended: float,
         status: str,
@@ -141,9 +229,9 @@ class GraphRuntime:
     ) -> None:
         spans = ctx.session_state.setdefault("node_spans", [])
         span = {
-            "span_id": uuid.uuid4().hex[:16],
+            "span_id": span_id,
             "trace_id": str(ctx.session_state.get("trace_id", "")),
-            "parent_span_id": "",
+            "parent_span_id": parent_span_id,
             "session_id": str(ctx.session_state.get("session_id", "")),
             "name": node_id,
             "kind": "graph_node",
@@ -156,6 +244,8 @@ class GraphRuntime:
                 "turn": turn,
                 "attempt": attempt,
                 "error": error,
+                "graph_id": str(ctx.session_state.get("__graph_id", "root")),
+                "parent_graph_id": str(ctx.session_state.get("__parent_graph_id", "")),
             },
             "events": [],
         }
@@ -174,6 +264,8 @@ class GraphRuntime:
             "node_id": node_id,
             "turn": turn,
             "attempt": attempt,
+            "graph_id": str(ctx.session_state.get("__graph_id", "root")),
+            "parent_graph_id": str(ctx.session_state.get("__parent_graph_id", "")),
         }))
 
     async def _emit_node_end(
@@ -195,6 +287,8 @@ class GraphRuntime:
             "status": status,
             "attempt": attempt,
             "latency_ms": latency_ms,
+            "graph_id": str(ctx.session_state.get("__graph_id", "root")),
+            "parent_graph_id": str(ctx.session_state.get("__parent_graph_id", "")),
         }))
 
     async def _emit_node_error(
@@ -216,4 +310,6 @@ class GraphRuntime:
             "attempt": attempt,
             "latency_ms": latency_ms,
             "error": error,
+            "graph_id": str(ctx.session_state.get("__graph_id", "root")),
+            "parent_graph_id": str(ctx.session_state.get("__parent_graph_id", "")),
         }))

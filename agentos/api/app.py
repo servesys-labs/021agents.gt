@@ -9,8 +9,6 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from agentos.core.events import EventBus
-from agentos.core.governance import GovernanceLayer, GovernancePolicy
 from agentos.core.harness import AgentHarness
 from agentos.env import load_dotenv_if_present
 from agentos.api.deps import CurrentUser, get_current_user, _get_db_safe
@@ -53,81 +51,11 @@ class AgentInfo(BaseModel):
     tags: list[str]
 
 
-def _build_run_response(results: list) -> RunResponse:
-    """Convert harness results to API response."""
-    turns: list[TurnOutput] = []
-    final_output = ""
-    for r in results:
-        content = r.llm_response.content if r.llm_response else ""
-        turns.append(TurnOutput(
-            turn=r.turn_number,
-            content=content,
-            tool_results=r.tool_results,
-            done=r.done,
-            error=r.error,
-        ))
-        if r.done and content:
-            final_output = content
-    return RunResponse(turns=turns, final_output=final_output)
-
-
-def _build_harness_with_overrides(
-    base: AgentHarness,
-    overrides: dict[str, Any],
-) -> AgentHarness:
-    """Build a request-scoped harness with safe config overrides."""
-    base_cfg = base.config
-    cfg = {
-        "max_turns": base_cfg.max_turns,
-        "timeout_seconds": base_cfg.timeout_seconds,
-        "retry_on_tool_failure": base_cfg.retry_on_tool_failure,
-        "max_retries": base_cfg.max_retries,
-    }
-    gov_base = base.governance.policy
-    gov = {
-        "require_confirmation_for_destructive": gov_base.require_confirmation_for_destructive,
-        "budget_limit_usd": gov_base.budget_limit_usd,
-        "allowed_domains": list(gov_base.allowed_domains),
-        "blocked_tools": list(gov_base.blocked_tools),
-        "max_tokens_per_turn": gov_base.max_tokens_per_turn,
-    }
-
-    for key in ("max_turns", "timeout_seconds", "retry_on_tool_failure", "max_retries"):
-        if key in overrides:
-            cfg[key] = overrides[key]
-    for key in (
-        "budget_limit_usd",
-        "blocked_tools",
-        "require_confirmation_for_destructive",
-        "allowed_domains",
-        "max_tokens_per_turn",
-    ):
-        if key in overrides:
-            gov[key] = overrides[key]
-
-    # Guardrails against malformed request values.
-    cfg["max_turns"] = max(1, int(cfg["max_turns"]))
-    cfg["timeout_seconds"] = max(0.01, float(cfg["timeout_seconds"]))
-    cfg["max_retries"] = max(0, int(cfg["max_retries"]))
-    cfg["retry_on_tool_failure"] = bool(cfg["retry_on_tool_failure"])
-    gov["budget_limit_usd"] = max(0.0, float(gov["budget_limit_usd"]))
-    gov["blocked_tools"] = [str(t) for t in gov["blocked_tools"]]
-    gov["allowed_domains"] = [str(d) for d in gov["allowed_domains"]]
-    gov["require_confirmation_for_destructive"] = bool(
-        gov["require_confirmation_for_destructive"]
+def _edge_runtime_gone_detail(worker_path: str) -> str:
+    return (
+        "Backend runtime execution is removed (edge-first architecture). "
+        f"Use worker `{worker_path}`."
     )
-    gov["max_tokens_per_turn"] = max(1, int(gov["max_tokens_per_turn"]))
-
-    request_harness = AgentHarness(
-        config=type(base_cfg)(**cfg),
-        llm_router=base.llm_router,
-        tool_executor=base.tool_executor,
-        memory_manager=base.memory_manager,
-        governance=GovernanceLayer(GovernancePolicy(**gov)),
-        event_bus=EventBus(),
-    )
-    request_harness.system_prompt = base.system_prompt
-    return request_harness
 
 
 def create_app(harness: AgentHarness | None = None) -> FastAPI:
@@ -180,7 +108,7 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         chat_platforms,
         edge_ingest,
         runtime_proxy,
-        autoresearch,
+        autoresearch, graphs,
     )
     for r in [
         auth.router, agents_router.router, sessions.router,
@@ -203,22 +131,23 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         edge_ingest.router,
         runtime_proxy.router,
         autoresearch.router,
+        graphs.router,
     ]:
         app.include_router(r, prefix="/api/v1")
 
-    # Auto-start scheduler and job worker as background tasks
+    # Startup initializes DB + seeds agent metadata.
+    # Runtime execution remains edge-only; control-plane background workers are allowed.
     @app.on_event("startup")
     async def _start_background_services() -> None:
         import asyncio
 
         # DB init runs in a thread so the server can accept health checks immediately.
         # All endpoints that need the DB go through initialize_db() which blocks until done.
-        loop = asyncio.get_event_loop()
         from agentos.core.db_config import initialize_db
 
-        # DB init in a thread — doesn't block the event loop.
-        # Seeding deferred to a separate async task to avoid blocking.
-        loop.run_in_executor(None, initialize_db)
+        # Ensure DB is initialized before serving requests.
+        # Keep it off the event loop but await completion for deterministic startup.
+        await asyncio.to_thread(initialize_db)
 
         async def _seed_agents():
             await asyncio.sleep(10)  # Wait for DB init to complete
@@ -343,59 +272,17 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
 
     @app.post("/run", response_model=RunResponse)
     async def run(request: RunRequest, user: CurrentUser = Depends(get_current_user)) -> RunResponse:
-        runner = (
-            _build_harness_with_overrides(_harness, request.config)
-            if request.config
-            else _harness
+        raise HTTPException(
+            status_code=410,
+            detail=_edge_runtime_gone_detail("/api/v1/runtime-proxy/agent/run"),
         )
-        results = await runner.run(request.input)
-        return _build_run_response(results)
 
     @app.post("/run/stream")
     async def run_stream(request: RunRequest, user: CurrentUser = Depends(get_current_user)):
-        """Stream agent run results as Server-Sent Events."""
-        import asyncio
-        from starlette.responses import StreamingResponse
-
-        turn_queue: asyncio.Queue = asyncio.Queue()
-
-        runner = (
-            _build_harness_with_overrides(_harness, request.config)
-            if request.config
-            else _harness
+        raise HTTPException(
+            status_code=410,
+            detail=_edge_runtime_gone_detail("/api/v1/runtime-proxy/agent/run"),
         )
-
-        def on_turn(result):
-            content = result.llm_response.content if result.llm_response else ""
-            turn_queue.put_nowait({
-                "turn": result.turn_number,
-                "content": content,
-                "tool_results": result.tool_results,
-                "done": result.done,
-                "error": result.error,
-                "cost_usd": result.cost_usd,
-            })
-
-        runner.on_turn_complete = on_turn
-
-        async def event_stream():
-            import json as _json
-            task = asyncio.create_task(runner.run(request.input))
-            while not task.done():
-                try:
-                    data = await asyncio.wait_for(turn_queue.get(), timeout=0.5)
-                    yield f"data: {_json.dumps(data)}\n\n"
-                    if data.get("done"):
-                        break
-                except asyncio.TimeoutError:
-                    continue
-            # Drain remaining
-            while not turn_queue.empty():
-                data = turn_queue.get_nowait()
-                yield f"data: {_json.dumps(data)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.get("/tools")
     async def list_tools(user: CurrentUser = Depends(get_current_user)) -> list[dict[str, Any]]:
@@ -445,14 +332,10 @@ def create_app(harness: AgentHarness | None = None) -> FastAPI:
         request: AgentRunRequest,
         user: CurrentUser = Depends(get_current_user),
     ) -> RunResponse:
-        """Run a named agent on a task."""
-        from agentos.agent import Agent
-        try:
-            agent = Agent.from_name(agent_name)
-        except FileNotFoundError:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
-        results = await agent.run(request.input)
-        return _build_run_response(results)
+        raise HTTPException(
+            status_code=410,
+            detail=_edge_runtime_gone_detail("/api/v1/runtime-proxy/agent/run"),
+        )
 
     @app.get("/agents/{agent_name}/tools")
     async def get_agent_tools(

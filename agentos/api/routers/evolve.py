@@ -23,68 +23,13 @@ async def run_evolution(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Run the evolution loop on an agent."""
-    from agentos.agent import Agent
-    from agentos.evolution.loop import EvolutionLoop
-    from agentos.eval.gym import EvalGym, EvalTask, AgentResult
-    from agentos.eval.grader import ContainsGrader, LLMGrader
-
-    try:
-        agent = Agent.from_name(agent_name)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
-
-    # Load eval tasks
-    eval_path = Path(eval_file)
-    if not eval_path.exists():
-        raise HTTPException(status_code=404, detail=f"Eval file not found: {eval_file}")
-
-    tasks_data = json.loads(eval_path.read_text())
-    gym = EvalGym()
-    gym.trials_per_task = trials
-    for t in tasks_data:
-        grader_type = t.get("grader", "contains")
-        grader = LLMGrader(criteria=t.get("criteria", t.get("expected", ""))) if grader_type == "llm" else ContainsGrader()
-        gym.add_task(EvalTask(name=t.get("name", ""), input=t["input"], expected=t["expected"], grader=grader))
-
-    async def agent_fn(task_input: str) -> AgentResult:
-        results = await agent.run(task_input)
-        output, cost = "", 0.0
-        for r in results:
-            if r.llm_response:
-                output = r.llm_response.content
-                cost += r.cost_usd
-        return AgentResult(output=output, cost_usd=cost)
-
-    loop = EvolutionLoop.for_agent(agent, min_sessions_for_analysis=1)
-
-    results = []
-    for cycle in range(1, max_cycles + 1):
-        baseline = await gym.run(agent_fn)
-        report = loop.analyze(db=agent.db)
-        proposals = loop.propose(report)
-
-        cycle_result = {
-            "cycle": cycle,
-            "baseline_pass_rate": baseline.pass_rate,
-            "recommendations": report.recommendations,
-            "proposals": [{"id": p.id, "title": p.title, "priority": p.priority, "rationale": p.rationale} for p in proposals],
-        }
-
-        if proposals and auto_approve:
-            for p in loop.review_queue.pending:
-                loop.approve(p.id, note="auto-approved via API")
-            approved = loop.review_queue.approved
-            if approved:
-                metrics_before = {"pass_rate": baseline.pass_rate, "avg_score": baseline.avg_score}
-                new_config = loop.apply_approved(metrics_before=metrics_before)
-                if new_config:
-                    cycle_result["applied"] = len(approved)
-                    cycle_result["new_version"] = new_config.version
-                    agent = Agent.from_name(agent_name)
-
-        results.append(cycle_result)
-
-    return {"agent": agent_name, "cycles": results}
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Evolution runtime execution is edge-only. "
+            "Run trials on worker runtime and keep this API for control-plane reads/writes."
+        ),
+    )
 
 
 @router.get("/{agent_name}/proposals")

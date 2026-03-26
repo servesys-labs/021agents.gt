@@ -2,35 +2,123 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from starlette.responses import StreamingResponse
 
 from agentos.api.deps import CurrentUser, get_current_user, get_optional_user, require_scope, _get_db
 from agentos.api.schemas import (
     AgentCreateRequest, AgentResponse, AgentRunRequest, ChatRequest, RunResponse,
 )
+from agentos.graph.design_lint import lint_graph_design
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
-def _set_runtime_mode_override(agent: Any, runtime_mode: str | None) -> str:
-    """No-op — graph runtime is the only mode. Kept for API compat."""
-    return "graph"
+def _runtime_moved_to_edge(detail_suffix: str = "") -> None:
+    detail = (
+        "Runtime execution is edge-only. Use worker runtime endpoints "
+        "(`/api/v1/runtime-proxy/runnable/*` or `/api/v1/runtime-proxy/agent/run`)."
+    )
+    if detail_suffix:
+        detail = f"{detail} {detail_suffix}"
+    raise HTTPException(status_code=410, detail=detail)
 
 
-def _set_harness_bool_override(agent: Any, key: str, value: bool | None) -> bool:
-    """Set per-request harness bool and return previous value."""
-    harness_cfg = agent.config.harness if isinstance(agent.config.harness, dict) else {}
-    prev = bool(harness_cfg.get(key, False))
-    if isinstance(value, bool):
-        harness_cfg[key] = value
-    return prev
+def _default_no_code_graph() -> dict[str, Any]:
+    """Safe starter graph for no-code agents: response path + async telemetry branch."""
+    return {
+        "id": "no-code-starter",
+        "nodes": [
+            {"id": "bootstrap", "kind": "bootstrap"},
+            {"id": "route_llm", "kind": "route_llm"},
+            {"id": "tools", "kind": "tools"},
+            {"id": "after_tools", "kind": "after_tools"},
+            {"id": "final", "kind": "final"},
+            {
+                "id": "telemetry_emit",
+                "kind": "telemetry_emit",
+                "async": True,
+                "idempotency_key": "session:${session_id}:turn:${turn}:telemetry_emit",
+            },
+        ],
+        "edges": [
+            {"source": "bootstrap", "target": "route_llm"},
+            {"source": "route_llm", "target": "tools"},
+            {"source": "tools", "target": "after_tools"},
+            {"source": "after_tools", "target": "final"},
+            {"source": "bootstrap", "target": "telemetry_emit"},
+        ],
+    }
+
+
+def _ensure_declarative_graph(config: Any, *, auto_graph: bool) -> dict[str, Any] | None:
+    """Get or initialize declarative graph under harness config."""
+    harness = getattr(config, "harness", None)
+    if not isinstance(harness, dict):
+        harness = {}
+        setattr(config, "harness", harness)
+    for key in ("declarative_graph", "graph"):
+        graph = harness.get(key)
+        if isinstance(graph, dict):
+            if key != "declarative_graph":
+                harness["declarative_graph"] = graph
+            return graph
+    if not auto_graph:
+        return None
+    graph = _default_no_code_graph()
+    harness["declarative_graph"] = graph
+    return graph
+
+
+def _lint_suggestions_from_errors(errors: list[dict[str, Any]]) -> list[str]:
+    code_to_hint = {
+        "BACKGROUND_ON_CRITICAL_PATH": "Move telemetry/eval/index nodes off the path to final response.",
+        "ASYNC_SIDE_EFFECT_MISSING_IDEMPOTENCY": "Add idempotency_key to async side-effect nodes (e.g. session+turn scoped key).",
+        "FANIN_FROM_ASYNC_BRANCH": "Avoid joining async branches into blocking response joins; split or make join async-safe.",
+        "CYCLE": "Remove cycles and keep graph as a DAG with deterministic flow.",
+    }
+    out: list[str] = []
+    for item in errors:
+        code = str(item.get("code", "")).strip()
+        hint = code_to_hint.get(code)
+        if hint and hint not in out:
+            out.append(hint)
+    return out
+
+
+def _lint_graph_or_raise(
+    graph: dict[str, Any] | None,
+    *,
+    strict: bool,
+    source: str,
+) -> dict[str, Any] | None:
+    """Validate no-code graph semantics and raise 422 with fix suggestions when invalid."""
+    if not isinstance(graph, dict):
+        return None
+    result = lint_graph_design(graph, strict=strict)
+    if result.valid:
+        return {
+            "valid": True,
+            "errors": [],
+            "warnings": [w.to_dict() for w in result.warnings],
+            "summary": result.summary,
+        }
+    errors = [e.to_dict() for e in result.errors]
+    warnings = [w.to_dict() for w in result.warnings]
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": "No-code graph lint failed. Fix graph design before publish.",
+            "source": source,
+            "strict": strict,
+            "errors": errors,
+            "warnings": warnings,
+            "suggestions": _lint_suggestions_from_errors(errors),
+        },
+    )
 
 
 @router.get("", response_model=list[AgentResponse])
@@ -77,6 +165,12 @@ async def create_agent(request: AgentCreateRequest, user: CurrentUser = Depends(
         tags=request.tags,
     )
     config.governance["budget_limit_usd"] = request.budget_limit_usd
+    if isinstance(request.graph, dict):
+        if not isinstance(config.harness, dict):
+            config.harness = {}
+        config.harness["declarative_graph"] = request.graph
+    graph = _ensure_declarative_graph(config, auto_graph=bool(request.auto_graph))
+    _lint_graph_or_raise(graph, strict=bool(request.strict_graph_lint), source="agents.create")
     save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
 
     # Snapshot version in agent_versions table
@@ -183,6 +277,12 @@ async def update_agent(name: str, request: AgentCreateRequest, user: CurrentUser
         config.tags = request.tags
     config.max_turns = request.max_turns
     config.governance["budget_limit_usd"] = request.budget_limit_usd
+    if isinstance(request.graph, dict):
+        if not isinstance(config.harness, dict):
+            config.harness = {}
+        config.harness["declarative_graph"] = request.graph
+    graph = _ensure_declarative_graph(config, auto_graph=bool(request.auto_graph))
+    _lint_graph_or_raise(graph, strict=bool(request.strict_graph_lint), source="agents.update")
     save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
 
     # Snapshot updated version
@@ -279,7 +379,7 @@ async def run_agent(
     request: AgentRunRequest,
     user: CurrentUser = Depends(require_scope("agents:run")),
 ):
-    """Run an agent on a task."""
+    """Runtime execution is edge-only; keep access checks for policy parity."""
     from agentos.agent import Agent
 
     try:
@@ -297,73 +397,7 @@ async def run_agent(
             user_id=user.user_id,
         )
 
-    start = time.monotonic()
-    prev_runtime_mode = _set_runtime_mode_override(agent, request.runtime_mode)
-    prev_require_approval = _set_harness_bool_override(
-        agent,
-        "require_human_approval",
-        request.require_human_approval,
-    )
-    prev_enable_checkpoints = _set_harness_bool_override(
-        agent,
-        "enable_checkpoints",
-        request.enable_checkpoints,
-    )
-    try:
-        results = await agent.run(request.task)
-    finally:
-        _set_runtime_mode_override(agent, prev_runtime_mode)
-        _set_harness_bool_override(agent, "require_human_approval", prev_require_approval)
-        _set_harness_bool_override(agent, "enable_checkpoints", prev_enable_checkpoints)
-    elapsed = (time.monotonic() - start) * 1000
-
-    output = ""
-    total_cost = 0.0
-    total_tools = 0
-    session_id = ""
-    trace_id = ""
-    stop_reason = ""
-    checkpoint_id = ""
-
-    for r in results:
-        if r.llm_response and r.llm_response.content:
-            output = r.llm_response.content
-        total_cost += r.cost_usd
-        total_tools += len(r.tool_results)
-        stop_reason = r.stop_reason or stop_reason
-
-    if hasattr(agent, "_observer") and agent._observer and agent._observer.records:
-        last_rec = agent._observer.records[-1]
-        session_id = last_rec.session_id
-        trace_id = last_rec.trace_id
-
-    pending_checkpoint = getattr(agent._harness, "_pending_graph_resume_payload", None)
-    if stop_reason == "human_approval_required" and isinstance(pending_checkpoint, dict):
-        checkpoint_id = str(pending_checkpoint.get("checkpoint_id", ""))
-        if checkpoint_id:
-            db = _get_db()
-            db.upsert_graph_checkpoint(
-                checkpoint_id=checkpoint_id,
-                agent_name=name,
-                session_id=str(pending_checkpoint.get("session_id", "")),
-                trace_id=str(pending_checkpoint.get("trace_id", "")),
-                status="pending_approval",
-                payload=pending_checkpoint,
-                metadata={"created_by": user.user_id, "org_id": user.org_id},
-            )
-
-    return RunResponse(
-        success=not any(r.error for r in results),
-        output=output,
-        turns=len(results),
-        tool_calls=total_tools,
-        cost_usd=round(total_cost, 6),
-        latency_ms=round(elapsed, 1),
-        session_id=session_id,
-        trace_id=trace_id,
-        stop_reason=stop_reason,
-        checkpoint_id=checkpoint_id,
-    )
+    _runtime_moved_to_edge()
 
 
 @router.post("/{name}/run/checkpoints/{checkpoint_id}/resume", response_model=RunResponse)
@@ -372,7 +406,7 @@ async def resume_agent_run_checkpoint(
     checkpoint_id: str,
     user: CurrentUser = Depends(require_scope("agents:run")),
 ):
-    """Resume a paused approval-gated graph run from checkpoint."""
+    """Resume is handled by edge runtime endpoints."""
     from agentos.agent import Agent
 
     try:
@@ -390,55 +424,7 @@ async def resume_agent_run_checkpoint(
             user_id=user.user_id,
         )
 
-    db = _get_db()
-    row = db.get_graph_checkpoint(checkpoint_id)
-    if not row or str(row.get("agent_name", "")) != name:
-        raise HTTPException(status_code=404, detail=f"Checkpoint '{checkpoint_id}' not found for agent '{name}'")
-    status = str(row.get("status", ""))
-    if status == "resumed":
-        raise HTTPException(status_code=409, detail=f"Checkpoint '{checkpoint_id}' was already resumed")
-    if status != "pending_approval":
-        raise HTTPException(status_code=409, detail=f"Checkpoint '{checkpoint_id}' is not resumable (status={status})")
-
-    payload = row.get("payload", {})
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail=f"Checkpoint '{checkpoint_id}' payload is invalid")
-
-    start = time.monotonic()
-    results = await agent.resume_from_checkpoint(payload)
-    db.mark_graph_checkpoint_resumed(checkpoint_id)
-    elapsed = (time.monotonic() - start) * 1000
-
-    output = ""
-    total_cost = 0.0
-    total_tools = 0
-    session_id = ""
-    trace_id = ""
-    stop_reason = ""
-    for r in results:
-        if r.llm_response and r.llm_response.content:
-            output = r.llm_response.content
-        total_cost += r.cost_usd
-        total_tools += len(r.tool_results)
-        stop_reason = r.stop_reason or stop_reason
-
-    if hasattr(agent, "_observer") and agent._observer and agent._observer.records:
-        last_rec = agent._observer.records[-1]
-        session_id = last_rec.session_id
-        trace_id = last_rec.trace_id
-
-    return RunResponse(
-        success=not any(r.error for r in results),
-        output=output,
-        turns=len(results),
-        tool_calls=total_tools,
-        cost_usd=round(total_cost, 6),
-        latency_ms=round(elapsed, 1),
-        session_id=session_id,
-        trace_id=trace_id,
-        stop_reason=stop_reason,
-        checkpoint_id=checkpoint_id,
-    )
+    _runtime_moved_to_edge("Resume via edge checkpoint endpoint.")
 
 
 @router.post("/{name}/run/stream")
@@ -447,7 +433,7 @@ async def run_agent_stream(
     request: AgentRunRequest,
     user: CurrentUser = Depends(require_scope("agents:run")),
 ):
-    """Run an agent with SSE streaming."""
+    """Streaming execution is edge-only."""
     from agentos.agent import Agent
 
     try:
@@ -465,53 +451,7 @@ async def run_agent_stream(
             user_id=user.user_id,
         )
 
-    turn_queue: asyncio.Queue = asyncio.Queue()
-    prev_runtime_mode = _set_runtime_mode_override(agent, request.runtime_mode)
-    prev_require_approval = _set_harness_bool_override(
-        agent,
-        "require_human_approval",
-        request.require_human_approval,
-    )
-    prev_enable_checkpoints = _set_harness_bool_override(
-        agent,
-        "enable_checkpoints",
-        request.enable_checkpoints,
-    )
-
-    def on_turn(result):
-        content = result.llm_response.content if result.llm_response else ""
-        turn_queue.put_nowait({
-            "turn": result.turn_number,
-            "content": content,
-            "tool_results": result.tool_results,
-            "done": result.done,
-            "error": result.error,
-            "cost_usd": result.cost_usd,
-        })
-
-    agent._harness.on_turn_complete = on_turn
-
-    async def event_stream():
-        try:
-            task = asyncio.create_task(agent.run(request.task))
-            while not task.done():
-                try:
-                    data = await asyncio.wait_for(turn_queue.get(), timeout=0.5)
-                    yield f"data: {json.dumps(data)}\n\n"
-                    if data.get("done"):
-                        break
-                except asyncio.TimeoutError:
-                    continue
-            while not turn_queue.empty():
-                data = turn_queue.get_nowait()
-                yield f"data: {json.dumps(data)}\n\n"
-            yield "data: [DONE]\n\n"
-        finally:
-            _set_runtime_mode_override(agent, prev_runtime_mode)
-            _set_harness_bool_override(agent, "require_human_approval", prev_require_approval)
-            _set_harness_bool_override(agent, "enable_checkpoints", prev_enable_checkpoints)
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    _runtime_moved_to_edge("Use `/api/v1/runtime-proxy/runnable/stream-events` on worker.")
 
 
 @router.get("/{name}/versions")
@@ -555,6 +495,9 @@ async def create_from_description(
     name: str = "",
     tools: str = "auto",
     draft_only: bool = False,
+    strict_graph_lint: bool = True,
+    auto_graph: bool = True,
+    graph_json: str = "",
     user: CurrentUser = Depends(get_current_user),
 ):
     """Create an agent from a natural language description (LLM-powered).
@@ -571,11 +514,31 @@ async def create_from_description(
         config.name = name
 
     if tools == "auto":
-        config.tools = recommend_tools(description)
+        recommended = set(recommend_tools(description))
+        existing = {t for t in config.tools if isinstance(t, str)}
+        config.tools = sorted(existing | recommended)
     elif tools == "none":
         config.tools = []
     elif tools:
         config.tools = [t.strip() for t in tools.split(",") if t.strip()]
+
+    if graph_json.strip():
+        try:
+            parsed_graph = json.loads(graph_json)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid graph_json: {exc}") from exc
+        if not isinstance(parsed_graph, dict):
+            raise HTTPException(status_code=400, detail="graph_json must decode to a JSON object")
+        if not isinstance(config.harness, dict):
+            config.harness = {}
+        config.harness["declarative_graph"] = parsed_graph
+
+    graph = _ensure_declarative_graph(config, auto_graph=auto_graph)
+    lint_report = _lint_graph_or_raise(
+        graph,
+        strict=strict_graph_lint,
+        source="agents.create-from-description",
+    )
 
     if draft_only:
         return {
@@ -587,6 +550,7 @@ async def create_from_description(
             "tags": config.tags,
             "version": config.version,
             "draft": config.to_dict(),
+            "graph_lint": lint_report,
         }
 
     save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
@@ -605,27 +569,8 @@ async def create_from_description(
 
 @router.post("/{name}/chat")
 async def chat_turn(name: str, request: ChatRequest):
-    """Send a single turn in a multi-turn conversation."""
-    from agentos.agent import Agent
-
-    try:
-        agent = Agent.from_name(name)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-
-    session_id = request.session_id or str(uuid.uuid4())
-    results = await agent.run(request.message)
-    output = ""
-    for r in results:
-        if r.llm_response and r.llm_response.content:
-            output = r.llm_response.content
-
-    return {
-        "response": output,
-        "session_id": session_id,
-        "turns": len(results),
-        "cost_usd": sum(r.cost_usd for r in results),
-    }
+    """Chat runtime is edge-only."""
+    _runtime_moved_to_edge("Use runnable invoke on worker for chat turns.")
 
 
 @router.get("/{name}/tools")
@@ -672,6 +617,15 @@ async def clone_agent(name: str, new_name: str, user: CurrentUser = Depends(get_
 async def import_agent(config: dict[str, Any], user: CurrentUser = Depends(get_current_user)):
     """Import an agent from a JSON config."""
     from agentos.agent import AgentConfig, save_agent_config
+    harness = config.get("harness")
+    graph = None
+    if isinstance(harness, dict):
+        g = harness.get("declarative_graph", harness.get("graph"))
+        if isinstance(g, dict):
+            graph = g
+    if isinstance(config.get("graph"), dict) and graph is None:
+        graph = config["graph"]
+    _lint_graph_or_raise(graph, strict=True, source="agents.import")
     agent_config = AgentConfig.from_dict(config)
     save_agent_config(agent_config, org_id=user.org_id, created_by=user.user_id)
     return AgentResponse(
@@ -687,35 +641,8 @@ async def cancel_agent_run(
     session_id: str,
     user: CurrentUser = Depends(get_current_user),
 ):
-    """Cancel an active agent run by session ID."""
-    from agentos.agent import Agent
-
-    try:
-        agent = Agent.from_name(name)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-
-    # Attempt to cancel through the harness if it tracks active runs
-    if hasattr(agent._harness, "cancel"):
-        cancelled = agent._harness.cancel(session_id)
-        if not cancelled:
-            raise HTTPException(status_code=404, detail=f"No active run found for session '{session_id}'")
-        return {"cancelled": session_id, "agent": name}
-
-    # Fallback: mark the session as cancelled in the database
-    from agentos.api.deps import _get_db
-    db = _get_db()
-    row = db.conn.execute(
-        "SELECT session_id FROM sessions WHERE session_id = ? AND agent_name = ?",
-        (session_id, name),
-    ).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found for agent '{name}'")
-    db.conn.execute(
-        "UPDATE sessions SET status = 'cancelled' WHERE session_id = ?", (session_id,)
-    )
-    db.conn.commit()
-    return {"cancelled": session_id, "agent": name}
+    """Cancellation is handled by edge runtime/session coordination."""
+    _runtime_moved_to_edge("Cancellation is managed in edge runtime/session layer.")
 
 
 @router.get("/{name}/export")

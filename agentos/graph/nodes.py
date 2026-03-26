@@ -11,6 +11,8 @@ from typing import Any
 from agentos.core.events import Event, EventType
 from agentos.core.harness import AgentHarness, TurnResult
 from agentos.graph.context import GraphContext
+from agentos.graph.runtime import merge_branch_states
+from agentos.graph.runtime import GraphRuntime
 from agentos.middleware.base import MiddlewareContext
 
 
@@ -126,6 +128,42 @@ class CheckpointNode:
         return ctx
 
 
+class SubgraphNode:
+    """Execute a nested node list as a child subgraph with span linkage."""
+
+    def __init__(self, node_id: str, nodes: list[Any]):
+        self.node_id = node_id
+        self._runtime = GraphRuntime(nodes=nodes)
+
+    def should_skip(self, ctx: GraphContext) -> bool:
+        return False
+
+    async def execute(self, ctx: GraphContext) -> GraphContext:
+        previous_parent = str(ctx.session_state.get("__span_parent_id", ""))
+        previous_graph_id = str(ctx.session_state.get("__graph_id", "root"))
+        previous_parent_graph_id = str(ctx.session_state.get("__parent_graph_id", ""))
+        seq = int(ctx.session_state.get("__graph_seq", 0) or 0) + 1
+        child_graph_id = f"{self.node_id}:{seq}"
+        ctx.session_state["__graph_seq"] = seq
+        parent_for_children = str(ctx.session_state.get("__active_span_id", ""))
+        if parent_for_children:
+            ctx.session_state["__span_parent_id"] = parent_for_children
+        ctx.session_state["__parent_graph_id"] = previous_graph_id
+        ctx.session_state["__graph_id"] = child_graph_id
+        try:
+            return await self._runtime.run(ctx)
+        finally:
+            if previous_parent:
+                ctx.session_state["__span_parent_id"] = previous_parent
+            else:
+                ctx.session_state.pop("__span_parent_id", None)
+            ctx.session_state["__graph_id"] = previous_graph_id
+            if previous_parent_graph_id:
+                ctx.session_state["__parent_graph_id"] = previous_parent_graph_id
+            else:
+                ctx.session_state["__parent_graph_id"] = ""
+
+
 class ApprovalNode:
     """Initial human gate: halt before tool execution when approval is required."""
 
@@ -226,6 +264,12 @@ class ToolExecNode:
         if llm_response is None or not llm_response.tool_calls:
             ctx.session_state["tool_results"] = []
             ctx.session_state["execution_mode"] = "sequential"
+            ctx.session_state["state_snapshot"] = {
+                "tool_calls_count": 0,
+                "tool_result_ids": [],
+                "cost_usd": 0.0,
+                "tool_latency_ms": 0.0,
+            }
             return ctx
         tool_results = await self.harness._execute_tools(llm_response.tool_calls)
         execution_mode = (
@@ -233,7 +277,75 @@ class ToolExecNode:
             if self.harness.config.parallel_tool_calls and len(llm_response.tool_calls) > 1
             else "sequential"
         )
-        ctx.session_state["tool_results"] = tool_results
+        if execution_mode == "parallel":
+            # Deterministic fan-in: merge per-tool branch states by tool_call_id.
+            by_id: dict[str, dict[str, Any]] = {}
+            for tr in tool_results:
+                key = str(tr.get("tool_call_id", ""))
+                if key:
+                    by_id[key] = tr
+            branch_states: list[dict[str, object]] = []
+            for tc in llm_response.tool_calls:
+                branch_id = str(tc.get("id", ""))
+                tr = by_id.get(branch_id)
+                if tr is None:
+                    continue
+                branch_states.append(
+                    {
+                        "__branch_id": branch_id,
+                        "tool_results": [tr],
+                        "tool_calls_count": 1,
+                        "cost_usd": float(getattr(llm_response, "cost_usd", 0.0) or 0.0),
+                        "tool_latency_ms": float(tr.get("latency_ms", 0.0) or 0.0),
+                    }
+                )
+            reducer_cfg = {
+                "tool_results": "append_list",
+                "tool_calls_count": "sum_numeric",
+                "cost_usd": "max_numeric",
+                "tool_latency_ms": "max_numeric",
+            }
+            reducer_overrides = (
+                ctx.state_reducers
+                if isinstance(getattr(ctx, "state_reducers", {}), dict)
+                else {}
+            )
+            if isinstance(reducer_overrides, dict):
+                for key in ("tool_results", "tool_calls_count", "cost_usd", "tool_latency_ms"):
+                    if key in reducer_overrides:
+                        reducer_cfg[key] = str(reducer_overrides[key])
+            merged = merge_branch_states(
+                branch_states,
+                reducers=reducer_cfg,
+            )
+            stable_results = merged.get("tool_results", [])
+            ctx.session_state["tool_results"] = (
+                list(stable_results) if isinstance(stable_results, list) else list(tool_results)
+            )
+            ctx.session_state["state_snapshot"] = {
+                "tool_calls_count": int(merged.get("tool_calls_count", len(ctx.session_state["tool_results"]))),
+                "tool_result_ids": [
+                    str(item.get("tool_call_id", ""))
+                    for item in ctx.session_state["tool_results"]
+                    if isinstance(item, dict)
+                ],
+                "cost_usd": float(merged.get("cost_usd", 0.0) or 0.0),
+                "tool_latency_ms": float(merged.get("tool_latency_ms", 0.0) or 0.0),
+            }
+        else:
+            ctx.session_state["tool_results"] = tool_results
+            ctx.session_state["state_snapshot"] = {
+                "tool_calls_count": len(tool_results),
+                "tool_result_ids": [
+                    str(item.get("tool_call_id", ""))
+                    for item in tool_results
+                    if isinstance(item, dict)
+                ],
+                "cost_usd": float(getattr(llm_response, "cost_usd", 0.0) or 0.0),
+                "tool_latency_ms": max(
+                    [float(item.get("latency_ms", 0.0) or 0.0) for item in tool_results if isinstance(item, dict)] or [0.0]
+                ),
+            }
         ctx.session_state["execution_mode"] = execution_mode
         return ctx
 
@@ -536,6 +648,7 @@ class RecordNode:
                     "execution_mode": latest.execution_mode if latest else "sequential",
                     "plan_artifact": latest.plan_artifact if latest else {},
                     "reflection": latest.reflection if latest else {},
+                    "state_snapshot": ctx.session_state.get("state_snapshot", {}),
                     "node_spans": turn_node_spans,
                 }))
             except Exception:

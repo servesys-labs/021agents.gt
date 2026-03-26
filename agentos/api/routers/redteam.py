@@ -122,59 +122,13 @@ async def run_runtime_scan(
     user: CurrentUser = Depends(get_current_user),
 ):
     """Run output-level adversarial probes against a live agent."""
-    from agentos.security.redteam import RedTeamRunner
-
-    db = _get_db()
-
-    # Load agent config
-    import json as _json
-    from pathlib import Path
-    agent_path = Path("agents") / f"{agent_name}.json"
-    if not agent_path.exists():
-        try:
-            from agentos.agent import load_agent_config
-            agent_config = load_agent_config(agent_name).to_dict()
-        except Exception:
-            raise HTTPException(status_code=404, detail=f"Agent '{agent_name}' not found")
-    else:
-        agent_config = _json.loads(agent_path.read_text())
-
-    # Build the agent and create a run function
-    try:
-        from agentos.agent import Agent
-        agent = Agent.from_name(agent_name)
-
-        async def run_fn(input_text: str) -> str:
-            results = await agent.run(input_text)
-            if results and isinstance(results, list):
-                last = results[-1]
-                return last.get("content", str(last)) if isinstance(last, dict) else str(last)
-            return str(results)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not load agent: {exc}")
-
-    runner = RedTeamRunner(db=db)
-    result = await runner.scan_runtime(
-        agent_name=agent_name,
-        agent_config=agent_config,
-        run_fn=run_fn,
-        org_id=user.org_id,
+    raise HTTPException(
+        status_code=410,
+        detail=(
+            "Runtime scanning is edge-only. "
+            "Invoke probes against worker runtime and persist findings via control plane."
+        ),
     )
-
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=result["error"])
-
-    return {
-        "scan_id": result["scan_id"],
-        "agent_name": agent_name,
-        "scan_type": "runtime",
-        "risk_score": result["risk_score"],
-        "risk_level": result["risk_level"],
-        "total_probes": result["total_probes"],
-        "passed": result["passed"],
-        "failed": result["failed"],
-        "findings_count": len(result.get("findings", [])),
-    }
 
 
 @router.get("/scan/{scan_id}/report")

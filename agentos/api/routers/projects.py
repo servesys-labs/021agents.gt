@@ -74,7 +74,12 @@ def _bootstrap_project_meta_agent(
         f"- project_slug: {slug}\n"
         f"- plan: {project_plan}\n"
         f"- description: {project_description or 'n/a'}\n"
-        f"Prioritize work and recommendations for this project context."
+        "Prioritize work and recommendations for this project context.\n\n"
+        "## Meta-Agent Control-Plane Workflow (Required)\n"
+        "- Start each improvement cycle by pulling `/api/v1/observability/agents/{agent_name}/meta-control-plane`.\n"
+        "- For no-code agent edits, run strict graph lint via `/api/v1/graphs/lint` before publish.\n"
+        "- Keep telemetry/eval/indexing off the critical response path; require idempotency on async side effects.\n"
+        "- For multi-agent systems, use supervisor + specialist delegation and evaluate each role independently.\n"
     )
     config = AgentConfig(
         name=agent_name,

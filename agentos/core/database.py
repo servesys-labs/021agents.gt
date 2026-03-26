@@ -3417,6 +3417,10 @@ class AgentDB:
         trace_id: str = "",
         session_id: str = "",
         event_types: list[str] | None = None,
+        status: str = "",
+        from_ts: float = 0.0,
+        to_ts: float = 0.0,
+        tool_name: str = "",
         limit: int = 500,
     ) -> list[dict[str, Any]]:
         """Query runtime events for observability timelines."""
@@ -3432,6 +3436,15 @@ class AgentDB:
             placeholders = ", ".join("?" for _ in event_types)
             sql += f" AND event_type IN ({placeholders})"
             params.extend(event_types)
+        if status:
+            sql += " AND status = ?"
+            params.append(status)
+        if from_ts > 0:
+            sql += " AND event_ts >= ?"
+            params.append(float(from_ts))
+        if to_ts > 0:
+            sql += " AND event_ts <= ?"
+            params.append(float(to_ts))
         sql += " ORDER BY event_ts ASC, id ASC LIMIT ?"
         params.append(limit)
         try:
@@ -3439,14 +3452,224 @@ class AgentDB:
         except Exception:
             return []
         out: list[dict[str, Any]] = []
+        tool_filter = str(tool_name or "").strip()
         for row in rows:
             item = dict(row)
             try:
                 item["payload"] = json.loads(item.get("payload_json", "{}"))
             except Exception:
                 item["payload"] = {}
+            if tool_filter:
+                payload = item.get("payload", {})
+                if not isinstance(payload, dict):
+                    payload = {}
+                event_tool = str(payload.get("tool_name") or payload.get("tool") or "")
+                if event_tool != tool_filter:
+                    continue
             out.append(item)
         return out
+
+    def _runtime_events_scope_where(
+        self, *, trace_id: str, session_id: str
+    ) -> tuple[str, list[Any]]:
+        tid = str(trace_id or "").strip()
+        sid = str(session_id or "").strip()
+        if tid:
+            return "trace_id = ?", [tid]
+        if sid:
+            return "session_id = ?", [sid]
+        return "", []
+
+    def _runtime_events_stats_for_scope(
+        self, *, trace_id: str = "", session_id: str = ""
+    ) -> tuple[int, int]:
+        """Return (event_count, max_row_id) for runtime_events in scope."""
+        clause, params = self._runtime_events_scope_where(trace_id=trace_id, session_id=session_id)
+        if not clause:
+            return 0, 0
+        try:
+            row = self.conn.execute(
+                f"SELECT COUNT(*) AS cnt, MAX(id) AS max_id FROM runtime_events WHERE {clause}",
+                params,
+            ).fetchone()
+        except Exception:
+            return 0, 0
+        if not row:
+            return 0, 0
+        item = dict(row)
+        cnt = int(item.get("cnt", 0) or 0)
+        max_id = int(item.get("max_id", 0) or 0)
+        return cnt, max_id
+
+    @staticmethod
+    def _fold_state_snapshot_from_runtime_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """Latest non-empty ``state_snapshot`` dict in payload wins (time-travel prefix)."""
+        latest: dict[str, Any] = {}
+        for row in rows:
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            snap = payload.get("state_snapshot")
+            if isinstance(snap, dict) and snap:
+                latest = dict(snap)
+        return latest
+
+    @staticmethod
+    def _compact_runtime_event_for_replay(row: dict[str, Any]) -> dict[str, Any]:
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        return {
+            "id": int(row.get("id", 0) or 0),
+            "event_id": str(row.get("event_id", "")),
+            "event_type": str(row.get("event_type", "")),
+            "session_id": str(row.get("session_id", "")),
+            "trace_id": str(row.get("trace_id", "")),
+            "turn": int(row.get("turn", 0) or 0),
+            "node_id": str(row.get("node_id", "")),
+            "event_ts": float(row.get("event_ts", 0.0) or 0.0),
+            "payload": payload,
+        }
+
+    def replay_runtime_events_at_cursor(
+        self,
+        *,
+        trace_id: str = "",
+        session_id: str = "",
+        up_to_row_id: int = 0,
+        cursor_index: int = -1,
+        event_id: str = "",
+        include_events: bool = False,
+        max_scan: int = 10000,
+    ) -> dict[str, Any]:
+        """Time-travel replay: ordered prefix of runtime_events and reconstructed state.
+
+        Ordering is deterministic: ``event_ts ASC, id ASC`` (same as ``query_runtime_events``).
+
+        Cursor resolution precedence: ``up_to_row_id`` > ``event_id`` > ``cursor_index`` >= 0 >
+        full prefix (capped by ``max_scan``).
+
+        ``state_snapshot`` is the last non-empty ``payload.state_snapshot`` object in the prefix.
+        """
+        clause, scope_params = self._runtime_events_scope_where(trace_id=trace_id, session_id=session_id)
+        if not clause:
+            return {
+                "trace_id": str(trace_id or "").strip(),
+                "session_id": str(session_id or "").strip(),
+                "cursor_row_id": 0,
+                "cursor_index": -1,
+                "event_count": 0,
+                "state_snapshot": {},
+                "event_at_cursor": None,
+                "events": [] if include_events else [],
+                "has_more": False,
+                "next_row_id": None,
+                "next_cursor_index": None,
+                "watermark_row_id": 0,
+                "watermark_event_count": 0,
+            }
+
+        safe_scan = max(1, min(int(max_scan or 10000), 50000))
+        total_count, watermark_id = self._runtime_events_stats_for_scope(
+            trace_id=str(trace_id or "").strip(),
+            session_id=str(session_id or "").strip(),
+        )
+
+        up_id = int(up_to_row_id or 0)
+        cidx = int(cursor_index)
+        evid = str(event_id or "").strip()
+
+        try:
+            if up_id > 0:
+                sql = (
+                    f"SELECT * FROM runtime_events WHERE {clause} AND id <= ? "
+                    "ORDER BY event_ts ASC, id ASC"
+                )
+                params = list(scope_params) + [up_id]
+                raw_rows = self.conn.execute(sql, params).fetchall()
+            elif evid:
+                sql = (
+                    f"SELECT * FROM runtime_events WHERE {clause} AND id <= ("
+                    f"SELECT MIN(id) FROM runtime_events WHERE {clause} AND event_id = ?"
+                    ") ORDER BY event_ts ASC, id ASC"
+                )
+                params = list(scope_params) + list(scope_params) + [evid]
+                raw_rows = self.conn.execute(sql, params).fetchall()
+            elif cidx >= 0:
+                lim = min(cidx + 1, safe_scan)
+                sql = (
+                    f"SELECT * FROM runtime_events WHERE {clause} "
+                    "ORDER BY event_ts ASC, id ASC LIMIT ?"
+                )
+                params = list(scope_params) + [lim]
+                raw_rows = self.conn.execute(sql, params).fetchall()
+            else:
+                sql = (
+                    f"SELECT * FROM runtime_events WHERE {clause} "
+                    "ORDER BY event_ts ASC, id ASC LIMIT ?"
+                )
+                params = list(scope_params) + [safe_scan]
+                raw_rows = self.conn.execute(sql, params).fetchall()
+        except Exception:
+            raw_rows = []
+
+        prefix: list[dict[str, Any]] = []
+        for row in raw_rows:
+            item = dict(row)
+            try:
+                item["payload"] = json.loads(item.get("payload_json", "{}"))
+            except Exception:
+                item["payload"] = {}
+            prefix.append(item)
+
+        state_snapshot = self._fold_state_snapshot_from_runtime_rows(prefix)
+        last = prefix[-1] if prefix else None
+        cursor_row_id = int(last.get("id", 0) or 0) if last else 0
+        out_sid = str(last.get("session_id", "") if last else "")
+        out_tid = str(last.get("trace_id", "") if last else "") or str(trace_id or "").strip()
+
+        # cursor_index in full trace order (0-based index of last included event)
+        cursor_idx = len(prefix) - 1 if prefix else -1
+        has_more = False
+        next_row_id: int | None = None
+        next_cidx: int | None = None
+        gap_by_id = bool(
+            prefix and watermark_id > 0 and cursor_row_id > 0 and cursor_row_id < watermark_id
+        )
+        gap_by_count = bool(prefix and total_count > len(prefix))
+        if gap_by_id or gap_by_count:
+            has_more = True
+            try:
+                nrow = self.conn.execute(
+                    f"SELECT MIN(id) AS n FROM runtime_events WHERE {clause} AND id > ?",
+                    list(scope_params) + [cursor_row_id],
+                ).fetchone()
+            except Exception:
+                nrow = None
+            if nrow and dict(nrow).get("n") is not None:
+                next_row_id = int(dict(nrow)["n"] or 0) or None
+            if cursor_idx >= 0 and (next_row_id is not None or gap_by_count):
+                next_cidx = cursor_idx + 1
+
+        result: dict[str, Any] = {
+            "trace_id": out_tid,
+            "session_id": out_sid,
+            "cursor_row_id": cursor_row_id,
+            "cursor_index": cursor_idx,
+            "event_count": len(prefix),
+            "state_snapshot": state_snapshot,
+            "event_at_cursor": self._compact_runtime_event_for_replay(last) if last else None,
+            "has_more": bool(has_more),
+            "next_row_id": next_row_id,
+            "next_cursor_index": next_cidx,
+            "watermark_row_id": watermark_id,
+            "watermark_event_count": total_count,
+        }
+        if include_events:
+            result["events"] = [self._compact_runtime_event_for_replay(r) for r in prefix]
+        else:
+            result["events"] = []
+        return result
 
     def list_eval_trials_by_trace(self, trace_id: str, limit: int = 200) -> list[dict[str, Any]]:
         """List eval trial records linked to a trace id."""
@@ -3907,6 +4130,28 @@ class AgentDB:
                 root = node
                 break
 
+        graph_lineage: dict[str, dict[str, Any]] = {}
+        for node in by_id.values():
+            attrs = node.get("attributes", {})
+            if not isinstance(attrs, dict):
+                continue
+            graph_id = str(attrs.get("graph_id", "") or "")
+            if not graph_id:
+                continue
+            entry = graph_lineage.setdefault(
+                graph_id,
+                {
+                    "graph_id": graph_id,
+                    "parent_graph_id": str(attrs.get("parent_graph_id", "") or ""),
+                    "span_count": 0,
+                    "node_names": set(),
+                },
+            )
+            entry["span_count"] = int(entry.get("span_count", 0)) + 1
+            node_names = entry.get("node_names")
+            if isinstance(node_names, set):
+                node_names.add(str(node.get("name", "")))
+
         return {
             "trace_id": trace_id,
             "root": root or {},
@@ -3914,6 +4159,15 @@ class AgentDB:
             "graph_checkpoints": checkpoints,
             "eval_trials": eval_trials,
             "annotations": annotations,
+            "graph_lineage": [
+                {
+                    "graph_id": v["graph_id"],
+                    "parent_graph_id": v["parent_graph_id"],
+                    "span_count": v["span_count"],
+                    "node_names": sorted(v["node_names"]) if isinstance(v.get("node_names"), set) else [],
+                }
+                for _, v in sorted(graph_lineage.items(), key=lambda kv: kv[0])
+            ],
             "counts": {
                 "spans": len(spans),
                 "runtime_events": len(runtime_events),
