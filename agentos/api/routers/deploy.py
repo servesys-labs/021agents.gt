@@ -28,7 +28,9 @@ async def deploy_agent(
     Creates a stateless proxy worker at:
       agentos-{org_slug}-{agent_name}
 
-    The worker routes all requests to the backend /runtime-proxy/agent/run.
+    The worker routes all requests to the main CF worker's edge runtime.
+    API keys and CF bindings live on the main worker — dispatch workers
+    only carry agent identity (name, org, project) and an edge token.
     """
     from agentos.agent import Agent
 
