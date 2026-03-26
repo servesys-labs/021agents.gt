@@ -7,6 +7,8 @@ import { ClerkSessionManager } from "./auth/ClerkSessionManager";
 import { CLERK_PUBLISHABLE_KEY, isClerkMode } from "./auth/config";
 import { ToastProvider } from "./components/common/ToastProvider";
 import { CommandPalette } from "./components/common/CommandPalette";
+import { MetaAgentProvider } from "./providers/MetaAgentProvider";
+import { MetaAgentFAB } from "./components/common/MetaAgentFAB";
 
 import { SkeletonDashboard } from "./components/common/Skeleton";
 import { usePageTitle } from "./hooks/usePageTitle";
@@ -175,18 +177,21 @@ function LoadingFallback() {
 function AuthenticatedLayout() {
   return (
     <RequireAuth>
-      <Sidebar>
-        <PageTransition>
-          <Outlet />
-        </PageTransition>
-      </Sidebar>
+      <MetaAgentProvider>
+        <Sidebar>
+          <PageTransition>
+            <Outlet />
+          </PageTransition>
+        </Sidebar>
+        <MetaAgentFAB />
+      </MetaAgentProvider>
     </RequireAuth>
   );
 }
 
 /* ── App ────────────────────────────────────────────────────────── */
 
-function App() {
+function AppContent() {
   // Update page title on route change
   usePageTitle();
 
@@ -205,82 +210,88 @@ function App() {
   }, [handleKeyDown]);
 
   return (
+    <AuthProvider>
+      <ToastProvider>
+        {isClerkMode() && CLERK_PUBLISHABLE_KEY ? <ClerkSessionManager /> : null}
+        <CommandPalette
+          isOpen={commandPaletteOpen}
+          onClose={() => setCommandPaletteOpen(false)}
+        />
+        <Suspense fallback={<LoadingFallback />}>
+          <Routes>
+            {/* Public routes */}
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/signup" element={<SignupPage />} />
+
+            {/* Authenticated routes */}
+            <Route element={<AuthenticatedLayout />}>
+              {/* Screen 1: Dashboard */}
+              <Route index element={<DashboardPage />} />
+
+              {/* Journey 1: Zero to Deployed Agent */}
+              <Route path="/agents" element={<AgentListPage />} />
+              <Route path="/agents/new" element={<CreateAgentPage />} />
+              <Route path="/agents/:name" element={<AgentDetailPage />} />
+              <Route path="/agents/:name/playground" element={<PlaygroundPage />} />
+              <Route path="/agents/:name/deploy" element={<DeployPage />} />
+              <Route path="/agents/:name/success" element={<SuccessPage />} />
+
+              {/* Journey 2: Troubleshooting workflow */}
+              <Route path="/agents/:name/sessions/:sessionId" element={<SessionTracePage />} />
+              <Route path="/agents/:name/issues/:issueId" element={<IssueDetailPage />} />
+              <Route path="/agents/:name/verify" element={<VerifyPage />} />
+
+              {/* Cross-agent pages */}
+              <Route path="/intelligence" element={<IntelligencePage />} />
+              <Route path="/issues" element={<IssuesPage />} />
+              <Route path="/workflows" element={<WorkflowsPage />} />
+              <Route path="/compliance" element={<CompliancePage />} />
+              <Route path="/guardrails" element={<GuardrailsPage />} />
+              <Route path="/security" element={<SecurityPage />} />
+              <Route path="/connectors" element={<ConnectorHubPage />} />
+              <Route path="/pipelines" element={<PipelinesPage />} />
+              <Route path="/codemode" element={<CodemodePage />} />
+              <Route path="/skills" element={<SkillsPage />} />
+              <Route path="/jobs" element={<JobsPage />} />
+              <Route path="/sessions" element={<SessionsPage />} />
+              <Route path="/autoresearch" element={<AutoResearchPage />} />
+              <Route path="/audit" element={<AuditPage />} />
+
+              {/* Tool Registry */}
+              <Route path="/tools" element={<ToolRegistryPage />} />
+              <Route path="/tools/new" element={<CreateToolPage />} />
+              <Route path="/tools/:toolName" element={<ToolDetailPage />} />
+
+              {/* Billing */}
+              <Route path="/billing/pricing" element={<PricingPage />} />
+              <Route path="/billing/invoices" element={<InvoicesPage />} />
+
+              {/* A2A Protocol */}
+              <Route path="/a2a" element={<A2ADiscoveryPage />} />
+              <Route path="/a2a/compose" element={<A2AComposePage />} />
+
+              {/* Security detail pages */}
+              <Route path="/security/findings" element={<SecurityFindingsPage />} />
+              <Route path="/security/report" element={<SecurityReportPage />} />
+              <Route path="/security/scans/:scanId" element={<ScanDetailPage />} />
+
+              {/* Settings */}
+              <Route path="/settings" element={<SettingsPage />} />
+            </Route>
+
+            {/* Catch-all: redirect to dashboard */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+      </ToastProvider>
+    </AuthProvider>
+  );
+}
+
+function App() {
+  return (
     <BrowserRouter>
-      <AuthProvider>
-        <ToastProvider>
-          {isClerkMode() && CLERK_PUBLISHABLE_KEY ? <ClerkSessionManager /> : null}
-          <CommandPalette
-            isOpen={commandPaletteOpen}
-            onClose={() => setCommandPaletteOpen(false)}
-          />
-          <Suspense fallback={<LoadingFallback />}>
-            <Routes>
-              {/* Public routes */}
-              <Route path="/login" element={<LoginPage />} />
-              <Route path="/signup" element={<SignupPage />} />
-
-              {/* Authenticated routes */}
-              <Route element={<AuthenticatedLayout />}>
-                {/* Screen 1: Dashboard */}
-                <Route index element={<DashboardPage />} />
-
-                {/* Journey 1: Zero to Deployed Agent */}
-                <Route path="/agents" element={<AgentListPage />} />
-                <Route path="/agents/new" element={<CreateAgentPage />} />
-                <Route path="/agents/:name" element={<AgentDetailPage />} />
-                <Route path="/agents/:name/playground" element={<PlaygroundPage />} />
-                <Route path="/agents/:name/deploy" element={<DeployPage />} />
-                <Route path="/agents/:name/success" element={<SuccessPage />} />
-
-                {/* Journey 2: Troubleshooting workflow */}
-                <Route path="/agents/:name/sessions/:sessionId" element={<SessionTracePage />} />
-                <Route path="/agents/:name/issues/:issueId" element={<IssueDetailPage />} />
-                <Route path="/agents/:name/verify" element={<VerifyPage />} />
-
-                {/* Cross-agent pages */}
-                <Route path="/intelligence" element={<IntelligencePage />} />
-                <Route path="/issues" element={<IssuesPage />} />
-                <Route path="/workflows" element={<WorkflowsPage />} />
-                <Route path="/compliance" element={<CompliancePage />} />
-                <Route path="/guardrails" element={<GuardrailsPage />} />
-                <Route path="/security" element={<SecurityPage />} />
-                <Route path="/connectors" element={<ConnectorHubPage />} />
-                <Route path="/pipelines" element={<PipelinesPage />} />
-                <Route path="/codemode" element={<CodemodePage />} />
-                <Route path="/skills" element={<SkillsPage />} />
-                <Route path="/jobs" element={<JobsPage />} />
-                <Route path="/sessions" element={<SessionsPage />} />
-                <Route path="/autoresearch" element={<AutoResearchPage />} />
-                <Route path="/audit" element={<AuditPage />} />
-
-                {/* Tool Registry */}
-                <Route path="/tools" element={<ToolRegistryPage />} />
-                <Route path="/tools/new" element={<CreateToolPage />} />
-                <Route path="/tools/:toolName" element={<ToolDetailPage />} />
-
-                {/* Billing */}
-                <Route path="/billing/pricing" element={<PricingPage />} />
-                <Route path="/billing/invoices" element={<InvoicesPage />} />
-
-                {/* A2A Protocol */}
-                <Route path="/a2a" element={<A2ADiscoveryPage />} />
-                <Route path="/a2a/compose" element={<A2AComposePage />} />
-
-                {/* Security detail pages */}
-                <Route path="/security/findings" element={<SecurityFindingsPage />} />
-                <Route path="/security/report" element={<SecurityReportPage />} />
-                <Route path="/security/scans/:scanId" element={<ScanDetailPage />} />
-
-                {/* Settings */}
-                <Route path="/settings" element={<SettingsPage />} />
-              </Route>
-
-              {/* Catch-all: redirect to dashboard */}
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </Suspense>
-        </ToastProvider>
-      </AuthProvider>
+      <AppContent />
     </BrowserRouter>
   );
 }

@@ -54,7 +54,7 @@ function ClerkSignupPage() {
           routing="path"
           path="/signup"
           signInUrl="/login"
-          afterSignUpUrl="/"
+          fallbackRedirectUrl="/"
         />
       </div>
     </div>
