@@ -149,6 +149,17 @@ const A2AComposePage = lazy(() =>
   import("./pages/a2a/compose").then((m) => ({ default: m.A2AComposePage })),
 );
 
+// Security detail pages
+const SecurityFindingsPage = lazy(() =>
+  import("./pages/security/findings").then((m) => ({ default: m.SecurityFindingsPage })),
+);
+const SecurityReportPage = lazy(() =>
+  import("./pages/security/report").then((m) => ({ default: m.SecurityReportPage })),
+);
+const ScanDetailPage = lazy(() =>
+  import("./pages/security/scan-detail").then((m) => ({ default: m.ScanDetailPage })),
+);
+
 /* ── Loading fallback ───────────────────────────────────────────── */
 
 function LoadingFallback() {
@@ -254,6 +265,11 @@ function App() {
                 {/* A2A Protocol */}
                 <Route path="/a2a" element={<A2ADiscoveryPage />} />
                 <Route path="/a2a/compose" element={<A2AComposePage />} />
+
+                {/* Security detail pages */}
+                <Route path="/security/findings" element={<SecurityFindingsPage />} />
+                <Route path="/security/report" element={<SecurityReportPage />} />
+                <Route path="/security/scans/:scanId" element={<ScanDetailPage />} />
 
                 {/* Settings */}
                 <Route path="/settings" element={<SettingsPage />} />
