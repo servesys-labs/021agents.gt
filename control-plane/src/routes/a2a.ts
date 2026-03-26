@@ -180,6 +180,48 @@ a2aRoutes.get("/.well-known/agents.json", async (c) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Agents list for portal consumption
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /agents
+ * List all agents in the portal-expected format.
+ */
+a2aRoutes.get("/api/v1/a2a/agents", async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  let agents: Array<Record<string, unknown>> = [];
+  try {
+    const rows = await sql`
+      SELECT name, description, config_json, is_active, created_at, updated_at
+      FROM agents
+      WHERE org_id = ${user.org_id}
+      ORDER BY created_at DESC
+    `;
+
+    const baseUrl = new URL(c.req.url).origin;
+
+    agents = rows.map((row: any) => {
+      const config = parseAgentConfigJson(row.config_json);
+      return {
+        agent_id: (config.agent_id as string) || row.name,
+        name: row.name,
+        description: row.description || (config.description as string) || "",
+        url: `${baseUrl}/a2a`,
+        status: Number(row.is_active) === 1 ? "active" : "inactive",
+        capabilities: Array.isArray(config.capabilities) ? config.capabilities : [],
+        skills: Array.isArray(config.tools) ? config.tools : [],
+        created_at: row.created_at,
+        updated_at: row.updated_at || row.created_at,
+      };
+    });
+  } catch {}
+
+  return c.json({ agents });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // JSON-RPC A2A Endpoint (legacy - supports both old and new task paths)
 // ─────────────────────────────────────────────────────────────────────────────
 

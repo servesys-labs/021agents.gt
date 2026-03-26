@@ -65,6 +65,7 @@ import { pipelineRoutes } from "./routes/pipelines";
 import { feedbackRoutes } from "./routes/feedback";
 import { codemodeRoutes } from "./routes/codemode";
 import { a2aRoutes } from "./routes/a2a";
+import { dashboardRoutes } from "./routes/dashboard";
 
 type AppType = {
   Bindings: Env;
@@ -92,12 +93,6 @@ app.use("*", authMiddleware);
 app.onError((err, c) => {
   const message = err instanceof Error ? err.message : "Internal server error";
 
-  // Missing DB tables — return empty results instead of 500
-  if (message.includes("does not exist") || message.includes("relation")) {
-    console.warn(`[onError] Missing table: ${c.req.method} ${c.req.path}: ${message}`);
-    return c.json({ data: [], items: [], components: [], count: 0, total: 0 }, 200);
-  }
-
   console.error(`[onError] ${c.req.method} ${c.req.path}: ${message}`);
   if (err instanceof Error && err.stack) console.error(err.stack);
   return c.json({ error: message }, 500);
@@ -105,6 +100,9 @@ app.onError((err, c) => {
 
 // ── Health ───────────────────────────────────────────────────────────────
 app.get("/health", (c) =>
+  c.json({ status: "ok", version: "0.2.0", service: "control-plane", timestamp: Date.now() }),
+);
+app.get("/api/v1/health", (c) =>
   c.json({ status: "ok", version: "0.2.0", service: "control-plane", timestamp: Date.now() }),
 );
 
@@ -207,6 +205,9 @@ app.route("/api/v1/feedback", feedbackRoutes);
 
 // Codemode (snippets, execution, templates)
 app.route("/api/v1/codemode", codemodeRoutes);
+
+// Dashboard (aggregated stats + activity)
+app.route("/api/v1/dashboard", dashboardRoutes);
 
 // A2A (Agent-to-Agent) protocol endpoints
 app.route("/", a2aRoutes);

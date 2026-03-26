@@ -331,38 +331,12 @@ authRoutes.post("/cf-access/exchange", async (c) => {
     return c.json({ error: "cf_access_token is required" }, 400);
   }
 
-  let cfClaims: TokenClaims | null = null;
-  let verifyError = "";
-  try {
-    cfClaims = await verifyCfAccessToken(parsed.data.cf_access_token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
-      aud: c.env.CF_ACCESS_AUD,
-    });
-  } catch (err) {
-    verifyError = err instanceof Error ? err.message : String(err);
-  }
+  const cfClaims = await verifyCfAccessToken(parsed.data.cf_access_token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
+    aud: c.env.CF_ACCESS_AUD,
+  });
 
   if (!cfClaims || !cfClaims.sub || !cfClaims.email) {
-    // Debug info — remove once auth is working
-    const parts = parsed.data.cf_access_token.split(".");
-    let debugPayload: Record<string, unknown> = {};
-    try {
-      debugPayload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
-    } catch {}
-    return c.json({
-      error: "Invalid CF Access token",
-      debug: {
-        verifyError,
-        hasClaims: !!cfClaims,
-        sub: cfClaims?.sub ?? "",
-        email: cfClaims?.email ?? "",
-        tokenAud: debugPayload.aud,
-        expectedAud: c.env.CF_ACCESS_AUD ? `${c.env.CF_ACCESS_AUD.slice(0, 8)}...` : "NOT_SET",
-        teamDomain: c.env.CF_ACCESS_TEAM_DOMAIN,
-        tokenIss: debugPayload.iss,
-        tokenExp: debugPayload.exp,
-        now: Math.floor(Date.now() / 1000),
-      },
-    }, 401);
+    return c.json({ error: "Invalid CF Access token" }, 401);
   }
 
   const sql = await getDb(c.env.HYPERDRIVE);

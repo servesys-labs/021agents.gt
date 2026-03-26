@@ -152,6 +152,23 @@ billingRoutes.post("/checkout", requireScope("billing:write"), async (c) => {
   });
 });
 
+billingRoutes.get("/quota", requireScope("billing:read"), async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  let used = 0;
+  try {
+    const [row] = await sql`
+      SELECT COALESCE(SUM(total_cost_usd), 0) as total
+      FROM billing_records
+      WHERE org_id = ${user.org_id}
+    `;
+    used = Number(row.total);
+  } catch {}
+
+  return c.json({ limit: 1000, used, unit: "credits" });
+});
+
 billingRoutes.get("/pricing", requireScope("billing:read"), async (c) => {
   const resourceType = c.req.query("resource_type") || "";
   const provider = c.req.query("provider") || "";

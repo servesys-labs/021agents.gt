@@ -85,6 +85,47 @@ observabilityRoutes.get("/daily-cost", requireScope("observability:read"), async
   });
 });
 
+/**
+ * GET /cost-ledger
+ * Per-agent cost breakdown from billing_records or sessions.
+ */
+observabilityRoutes.get("/cost-ledger", requireScope("observability:read"), async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  let entries: Array<{
+    agent_name: string;
+    model: string;
+    cost_usd: number;
+    input_tokens: number;
+    output_tokens: number;
+  }> = [];
+
+  try {
+    const rows = await sql`
+      SELECT
+        COALESCE(agent_name, '') as agent_name,
+        COALESCE(model, '') as model,
+        COALESCE(SUM(total_cost_usd), 0) as cost_usd,
+        COALESCE(SUM(input_tokens), 0) as input_tokens,
+        COALESCE(SUM(output_tokens), 0) as output_tokens
+      FROM billing_records
+      WHERE org_id = ${user.org_id}
+      GROUP BY agent_name, model
+      ORDER BY cost_usd DESC
+    `;
+    entries = rows.map((r: any) => ({
+      agent_name: String(r.agent_name),
+      model: String(r.model),
+      cost_usd: Number(r.cost_usd),
+      input_tokens: Number(r.input_tokens),
+      output_tokens: Number(r.output_tokens),
+    }));
+  } catch {}
+
+  return c.json({ entries });
+});
+
 observabilityRoutes.get("/trace/:trace_id", requireScope("observability:read"), async (c) => {
   const user = c.get("user");
   const traceId = c.req.param("trace_id");
