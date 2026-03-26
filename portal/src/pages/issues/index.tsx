@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, type CSSProperties } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -322,9 +322,10 @@ export function IssuesPage() {
 
                   {/* Issue cards */}
                   <div className="space-y-[var(--space-2)]">
-                    {group.items.map((issue) => (
+                    {group.items.map((issue, i) => (
                       <IssueCard
                         key={issue.issue_id}
+                        index={i}
                         issue={issue}
                         onNavigate={() =>
                           navigate(
@@ -351,10 +352,12 @@ export function IssuesPage() {
 
 function IssueCard({
   issue,
+  index,
   onNavigate,
   onAgentClick,
 }: {
   issue: Issue;
+  index: number;
   onNavigate: () => void;
   onAgentClick: () => void;
 }) {
