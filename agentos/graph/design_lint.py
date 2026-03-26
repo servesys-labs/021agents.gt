@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentos.graph.contracts import lint_graph_contracts
 from agentos.graph.validate import GraphValidationIssue, GraphValidationResult, validate_graph_definition
 
 _BACKGROUND_KINDS = frozenset(
@@ -178,6 +179,16 @@ def lint_graph_design(raw: Any, *, strict: bool = False) -> GraphValidationResul
                 ),
             )
 
+    async_node_ids = {nid for nid in node_ids if _node_async(node_map.get(nid, {}))}
+    c_errors, c_warnings = lint_graph_contracts(
+        raw,
+        node_ids=node_ids,
+        node_map=node_map,
+        async_node_ids=async_node_ids,
+    )
+    errors.extend(c_errors)
+    warnings.extend(c_warnings)
+
     for nid in sorted(node_ids):
         if incoming_count.get(nid, 0) <= 1:
             continue
@@ -210,6 +221,7 @@ def lint_graph_design(raw: Any, *, strict: bool = False) -> GraphValidationResul
             for nid in node_ids
             if _node_kind(node_map.get(nid, {})) in _BACKGROUND_KINDS
         ),
+        "async_node_count": len(async_node_ids),
     }
 
     return GraphValidationResult(errors=errors, warnings=warnings, summary=summary)

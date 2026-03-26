@@ -12,7 +12,9 @@ from agentos.api.deps import CurrentUser, get_current_user, get_optional_user, r
 from agentos.api.schemas import (
     AgentCreateRequest, AgentResponse, AgentRunRequest, ChatRequest, RunResponse,
 )
+from agentos.graph.contracts import summarize_graph_contracts
 from agentos.graph.design_lint import lint_graph_design
+from agentos.graph.autofix import lint_and_autofix_graph
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -119,6 +121,71 @@ def _lint_graph_or_raise(
             "suggestions": _lint_suggestions_from_errors(errors),
         },
     )
+
+
+def _latest_eval_gate(
+    agent_name: str,
+    *,
+    min_eval_pass_rate: float,
+    min_eval_trials: int,
+) -> dict[str, Any]:
+    """Compute eval gate status from latest eval run."""
+    try:
+        db = _get_db()
+        row = db.conn.execute(
+            "SELECT id, pass_rate, total_trials, total_tasks, created_at FROM eval_runs WHERE agent_name = ? ORDER BY created_at DESC LIMIT 1",
+            (agent_name,),
+        ).fetchone()
+    except Exception:
+        row = None
+    latest_eval = dict(row) if row else None
+    passed = False
+    if latest_eval is not None:
+        pass_rate = float(latest_eval.get("pass_rate") or 0.0)
+        total_trials = int(latest_eval.get("total_trials") or 0)
+        passed = pass_rate >= min_eval_pass_rate and total_trials >= min_eval_trials
+    return {
+        "latest_eval_run": latest_eval,
+        "min_eval_pass_rate": min_eval_pass_rate,
+        "min_eval_trials": min_eval_trials,
+        "passed": passed,
+    }
+
+
+def _rollout_recommendation(
+    *,
+    agent_name: str,
+    graph_lint: dict[str, Any] | None,
+    eval_gate: dict[str, Any],
+    target_channel: str,
+) -> dict[str, Any]:
+    """Build rollout recommendation payload for no-code wizard consumers."""
+    rollout = {
+        "decision": "hold",
+        "target_channel": target_channel,
+        "reason": "",
+        "recommended_action": "",
+        "release_endpoint": f"/api/v1/releases/{agent_name}/promote?from_channel=draft&to_channel={target_channel}",
+    }
+    lint_valid = bool((graph_lint or {}).get("valid"))
+    latest_eval = eval_gate.get("latest_eval_run")
+    if not lint_valid:
+        rollout["reason"] = "Graph lint failed."
+        rollout["recommended_action"] = "Apply graph_autofix result and re-check gate_pack."
+    elif latest_eval is None:
+        rollout["reason"] = "No eval run found for agent."
+        rollout["recommended_action"] = "Run /api/v1/eval/run before promotion."
+    elif not bool(eval_gate.get("passed")):
+        rollout["reason"] = (
+            f"Eval gate failed (pass_rate={float(latest_eval.get('pass_rate') or 0.0):.2f}, "
+            f"trials={int(latest_eval.get('total_trials') or 0)})."
+        )
+        rollout["recommended_action"] = "Run targeted eval/experiments and iterate before promotion."
+    else:
+        rollout["decision"] = "promote_candidate"
+        rollout["reason"] = "Lint and eval gates passed."
+        rollout["recommended_action"] = "Promote to target channel and optionally start canary."
+    return rollout
 
 
 @router.get("", response_model=list[AgentResponse])
@@ -498,6 +565,14 @@ async def create_from_description(
     strict_graph_lint: bool = True,
     auto_graph: bool = True,
     graph_json: str = "",
+    include_autofix: bool = True,
+    include_gate_pack: bool = True,
+    include_contracts_validate: bool = True,
+    min_eval_pass_rate: float = 0.85,
+    min_eval_trials: int = 3,
+    target_channel: str = "staging",
+    override_hold: bool = False,
+    override_reason: str = "",
     user: CurrentUser = Depends(get_current_user),
 ):
     """Create an agent from a natural language description (LLM-powered).
@@ -534,14 +609,69 @@ async def create_from_description(
         config.harness["declarative_graph"] = parsed_graph
 
     graph = _ensure_declarative_graph(config, auto_graph=auto_graph)
-    lint_report = _lint_graph_or_raise(
-        graph,
-        strict=strict_graph_lint,
-        source="agents.create-from-description",
+    lint_report: dict[str, Any] | None = None
+    graph_autofix: dict[str, Any] | None = None
+    if isinstance(graph, dict):
+        graph_autofix = lint_and_autofix_graph(graph, strict=strict_graph_lint, apply=include_autofix)
+        if graph_autofix.get("autofix_applied") and isinstance(config.harness, dict):
+            fixed_graph = graph_autofix.get("graph")
+            if isinstance(fixed_graph, dict):
+                config.harness["declarative_graph"] = fixed_graph
+                graph = fixed_graph
+        lint_report = graph_autofix.get("lint_after") if graph_autofix else None
+        lint_valid = bool((lint_report or {}).get("valid"))
+        if not lint_valid and not draft_only:
+            errors = list((lint_report or {}).get("errors") or [])
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "No-code graph lint failed. Fix graph design before publish.",
+                    "source": "agents.create-from-description",
+                    "strict": strict_graph_lint,
+                    "errors": errors,
+                    "warnings": list((lint_report or {}).get("warnings") or []),
+                    "suggestions": _lint_suggestions_from_errors(errors),
+                    "graph_autofix": graph_autofix,
+                },
+            )
+    elif not draft_only:
+        lint_report = _lint_graph_or_raise(
+            graph,
+            strict=strict_graph_lint,
+            source="agents.create-from-description",
+        )
+
+    eval_gate = _latest_eval_gate(
+        config.name,
+        min_eval_pass_rate=min_eval_pass_rate,
+        min_eval_trials=min_eval_trials,
     )
+    gate_pack = {
+        "graph_lint": lint_report,
+        "eval_gate": eval_gate,
+        "rollout": _rollout_recommendation(
+            agent_name=config.name,
+            graph_lint=lint_report,
+            eval_gate=eval_gate,
+            target_channel=target_channel,
+        ),
+    }
+    contracts_validate: dict[str, Any] | None = None
+    if isinstance(graph, dict):
+        contracts_result = lint_graph_design(graph, strict=strict_graph_lint)
+        contracts_summary = dict(contracts_result.summary or {})
+        contracts_summary["contracts"] = summarize_graph_contracts(graph)
+        contracts_validate = {
+            "valid": contracts_result.valid,
+            "errors": [e.to_dict() for e in contracts_result.errors],
+            "warnings": [w.to_dict() for w in contracts_result.warnings],
+            "summary": contracts_summary,
+        }
+    rollout_decision = str(gate_pack.get("rollout", {}).get("decision", "")).strip().lower()
+    hold_override_applied = False
 
     if draft_only:
-        return {
+        payload = {
             "created": False,
             "name": config.name,
             "description": config.description,
@@ -552,11 +682,66 @@ async def create_from_description(
             "draft": config.to_dict(),
             "graph_lint": lint_report,
         }
+        if include_autofix:
+            payload["graph_autofix"] = graph_autofix
+        if include_gate_pack:
+            payload["gate_pack"] = gate_pack
+        if include_contracts_validate:
+            payload["contracts_validate"] = contracts_validate
+        return payload
+
+    if rollout_decision == "hold" and not override_hold:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Gate-pack rollout decision is HOLD. Explicit override required to create.",
+                "override_required": True,
+                "gate_pack": gate_pack,
+            },
+        )
+    if rollout_decision == "hold" and override_hold and not (override_reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="override_reason is required when overriding a hold decision",
+        )
+    if rollout_decision == "hold" and override_hold:
+        hold_override_applied = True
+        try:
+            db = _get_db()
+            db.audit(
+                action="agent.create.hold_override",
+                user_id=user.user_id,
+                org_id=user.org_id,
+                project_id=user.project_id,
+                resource_type="agent",
+                resource_id=config.name,
+                changes={
+                    "reason": (override_reason or "").strip(),
+                    "gate_pack": gate_pack,
+                    "source": "agents.create-from-description",
+                },
+            )
+        except Exception:
+            pass
+        try:
+            db = _get_db()
+            db.insert_config_audit(
+                org_id=user.org_id,
+                agent_name=config.name,
+                action="hold_override",
+                field_changed="gate_pack.rollout.decision",
+                old_value="hold",
+                new_value="override",
+                change_reason=(override_reason or "").strip(),
+                changed_by=user.user_id,
+            )
+        except Exception:
+            pass
 
     save_agent_config(config, org_id=user.org_id, created_by=user.user_id)
     _snapshot_version(config, user.user_id)
 
-    return {
+    payload = {
         "created": True,
         "name": config.name,
         "description": config.description,
@@ -565,6 +750,14 @@ async def create_from_description(
         "tags": config.tags,
         "version": config.version,
     }
+    if include_autofix:
+        payload["graph_autofix"] = graph_autofix
+    if include_gate_pack:
+        payload["gate_pack"] = gate_pack
+    if include_contracts_validate:
+        payload["contracts_validate"] = contracts_validate
+    payload["hold_override_applied"] = hold_override_applied
+    return payload
 
 
 @router.post("/{name}/chat")

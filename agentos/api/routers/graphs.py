@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from copy import deepcopy
 from typing import Any
 
 import httpx
@@ -15,7 +14,9 @@ from agentos.graph.declarative_linear import (
     validate_bounded_dag_declarative_graph,
     validate_linear_declarative_graph,
 )
+from agentos.graph.contracts import summarize_graph_contracts
 from agentos.graph.design_lint import lint_graph_design
+from agentos.graph.autofix import lint_and_autofix_graph, lint_payload_from_result
 from agentos.graph.validate import validate_graph_definition
 
 router = APIRouter(prefix="/graphs", tags=["graphs"])
@@ -52,6 +53,15 @@ class GraphAutoFixRequest(GraphLintRequest):
     )
 
 
+class GraphContractsValidateRequest(GraphLintRequest):
+    """Contract validation request for skills/state safety checks."""
+
+    strict: bool = Field(
+        default=True,
+        description="Promote contract warnings to errors when true.",
+    )
+
+
 class GraphGatePackRequest(BaseModel):
     """No-code gate pack: graph lint + eval readiness + rollout recommendation."""
 
@@ -77,77 +87,6 @@ class GraphValidateResponse(BaseModel):
     errors: list[GraphIssueResponse]
     warnings: list[GraphIssueResponse]
     summary: dict[str, Any] | None = None
-
-
-def _node_id_from_issue(issue: dict[str, Any]) -> str:
-    details = issue.get("details")
-    if isinstance(details, dict):
-        nid = details.get("node_id")
-        if isinstance(nid, str) and nid.strip():
-            return nid.strip()
-    path = issue.get("path")
-    if isinstance(path, str) and path.startswith("nodes[") and path.endswith("]"):
-        return path[len("nodes[") : -1]
-    return ""
-
-
-def _autofix_graph_common_issues(
-    graph: dict[str, Any],
-    issues: list[dict[str, Any]],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    fixed = deepcopy(graph)
-    nodes_raw = fixed.get("nodes")
-    edges_raw = fixed.get("edges")
-    if not isinstance(nodes_raw, list) or not isinstance(edges_raw, list):
-        return fixed, []
-    nodes_by_id: dict[str, dict[str, Any]] = {}
-    for node in nodes_raw:
-        if isinstance(node, dict) and isinstance(node.get("id"), str):
-            nid = node["id"].strip()
-            if nid:
-                nodes_by_id[nid] = node
-    applied: list[dict[str, Any]] = []
-    for issue in issues:
-        code = str(issue.get("code", "")).strip()
-        if code == "ASYNC_SIDE_EFFECT_MISSING_IDEMPOTENCY":
-            nid = _node_id_from_issue(issue)
-            node = nodes_by_id.get(nid)
-            if isinstance(node, dict):
-                node["idempotency_key"] = (
-                    node.get("idempotency_key")
-                    or f"session:${{session_id}}:turn:${{turn}}:{nid or 'side_effect'}"
-                )
-                applied.append({"code": code, "node_id": nid, "action": "set_idempotency_key"})
-        elif code == "BACKGROUND_ON_CRITICAL_PATH":
-            nid = _node_id_from_issue(issue)
-            before = len(edges_raw)
-            edges_raw[:] = [
-                e
-                for e in edges_raw
-                if not (
-                    isinstance(e, dict)
-                    and isinstance(e.get("source", e.get("from")), str)
-                    and e.get("source", e.get("from")).strip() == nid
-                )
-            ]
-            if len(edges_raw) != before:
-                applied.append({"code": code, "node_id": nid, "action": "remove_outgoing_edges"})
-        elif code == "FANIN_FROM_ASYNC_BRANCH":
-            details = issue.get("details")
-            async_preds = []
-            if isinstance(details, dict):
-                raw_preds = details.get("async_predecessors")
-                if isinstance(raw_preds, list):
-                    async_preds = [str(p).strip() for p in raw_preds if isinstance(p, str) and p.strip()]
-            changed = []
-            for pred in async_preds:
-                node = nodes_by_id.get(pred)
-                if isinstance(node, dict):
-                    node["async"] = False
-                    changed.append(pred)
-            if changed:
-                applied.append({"code": code, "node_ids": changed, "action": "set_async_false"})
-    return fixed, applied
 
 
 def _load_agent_graph(agent_name: str) -> dict[str, Any] | None:
@@ -202,35 +141,24 @@ async def autofix_graph(
     _user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Apply deterministic auto-fixes for common no-code lint issues."""
-    before = lint_graph_design(body.graph, strict=body.strict)
-    before_payload = {
-        "valid": before.valid,
-        "errors": [e.to_dict() for e in before.errors],
-        "warnings": [w.to_dict() for w in before.warnings],
-        "summary": before.summary,
-    }
-    if not body.apply or before.valid:
-        return {
-            "autofix_applied": False,
-            "applied_fixes": [],
-            "lint_before": before_payload,
-            "graph": body.graph,
-            "lint_after": before_payload,
-        }
-    fixed_graph, applied = _autofix_graph_common_issues(body.graph, before_payload["errors"])
-    after = lint_graph_design(fixed_graph, strict=body.strict)
-    return {
-        "autofix_applied": len(applied) > 0,
-        "applied_fixes": applied,
-        "lint_before": before_payload,
-        "graph": fixed_graph,
-        "lint_after": {
-            "valid": after.valid,
-            "errors": [e.to_dict() for e in after.errors],
-            "warnings": [w.to_dict() for w in after.warnings],
-            "summary": after.summary,
-        },
-    }
+    return lint_and_autofix_graph(body.graph, strict=body.strict, apply=body.apply)
+
+
+@router.post("/contracts/validate", response_model=GraphValidateResponse)
+async def validate_graph_contracts(
+    body: GraphContractsValidateRequest,
+    _user: CurrentUser = Depends(get_current_user),
+) -> GraphValidateResponse:
+    """Validate skill/state contracts used by no-code graph execution."""
+    result = lint_graph_design(body.graph, strict=body.strict)
+    summary = dict(result.summary or {})
+    summary["contracts"] = summarize_graph_contracts(body.graph)
+    return GraphValidateResponse(
+        valid=result.valid,
+        errors=[GraphIssueResponse(**e.to_dict()) for e in result.errors],
+        warnings=[GraphIssueResponse(**w.to_dict()) for w in result.warnings],
+        summary=summary,
+    )
 
 
 @router.post("/gate-pack")
@@ -239,6 +167,16 @@ async def graph_gate_pack(
     _user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Run no-code gate pack: lint + eval posture + rollout recommendation."""
+    # Verify org ownership whenever agent_name is provided — even with inline graph,
+    # the eval gate query uses agent_name and would leak cross-org pass-rate data.
+    if body.agent_name:
+        db = _get_db()
+        row = db.conn.execute(
+            "SELECT 1 FROM agents WHERE name = ? AND org_id = ? AND is_active = 1",
+            (body.agent_name, _user.org_id),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Agent not found or not owned by your organization")
     graph = body.graph if isinstance(body.graph, dict) else _load_agent_graph(body.agent_name)
     if not isinstance(graph, dict):
         raise HTTPException(
@@ -247,15 +185,12 @@ async def graph_gate_pack(
         )
     lint_result = lint_graph_design(graph, strict=body.strict_graph_lint)
     lint_payload = {
-        "valid": lint_result.valid,
-        "errors": [e.to_dict() for e in lint_result.errors],
-        "warnings": [w.to_dict() for w in lint_result.warnings],
-        "summary": lint_result.summary,
+        **lint_payload_from_result(lint_result),
     }
     db = _get_db()
     row = db.conn.execute(
-        "SELECT id, pass_rate, total_trials, total_tasks, created_at FROM eval_runs WHERE agent_name = ? ORDER BY created_at DESC LIMIT 1",
-        (body.agent_name,),
+        "SELECT id, pass_rate, total_trials, total_tasks, created_at FROM eval_runs WHERE agent_name = ? AND org_id = ? ORDER BY created_at DESC LIMIT 1",
+        (body.agent_name, _user.org_id),
     ).fetchone()
     latest_eval = dict(row) if row else None
     eval_gate_pass = False

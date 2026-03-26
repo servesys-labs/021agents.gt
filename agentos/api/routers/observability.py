@@ -14,6 +14,9 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from agentos.api.deps import CurrentUser, get_current_user, _get_db
+from agentos.graph.autofix import lint_and_autofix_graph
+from agentos.graph.contracts import summarize_graph_contracts
+from agentos.graph.design_lint import lint_graph_design
 
 router = APIRouter(prefix="/observability", tags=["observability"])
 
@@ -56,6 +59,15 @@ class MetaProposalGenerateRequest(BaseModel):
     max_proposals: int = Field(8, ge=1, le=50)
 
 
+class AutonomousMaintenanceRunRequest(BaseModel):
+    dry_run: bool = True
+    persist_proposals: bool = True
+    max_proposals: int = Field(8, ge=1, le=50)
+    min_eval_pass_rate: float = Field(0.85, ge=0.0, le=1.0)
+    min_eval_trials: int = Field(3, ge=1, le=1000)
+    target_channel: str = "staging"
+
+
 def _trace_is_owned(db: Any, trace_id: str, org_id: str) -> bool:
     """Check if a trace belongs to the caller org across telemetry tables."""
     checks = [
@@ -87,6 +99,93 @@ def _agent_is_owned(db: Any, agent_name: str, org_id: str) -> bool:
         except Exception:
             continue
     return False
+
+
+def _agent_exists(agent_name: str) -> bool:
+    from agentos.agent import Agent
+    try:
+        Agent.from_name(agent_name)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _load_agent_graph(agent_name: str) -> dict[str, Any] | None:
+    from agentos.agent import Agent
+    try:
+        agent = Agent.from_name(agent_name)
+    except FileNotFoundError:
+        return None
+    harness = getattr(agent.config, "harness", {})
+    if isinstance(harness, dict):
+        for key in ("declarative_graph", "graph"):
+            graph = harness.get(key)
+            if isinstance(graph, dict):
+                return graph
+    return None
+
+
+def _latest_eval_gate(
+    db: Any,
+    agent_name: str,
+    *,
+    min_eval_pass_rate: float,
+    min_eval_trials: int,
+) -> dict[str, Any]:
+    row = db.conn.execute(
+        "SELECT id, pass_rate, total_trials, total_tasks, created_at FROM eval_runs WHERE agent_name = ? ORDER BY created_at DESC LIMIT 1",
+        (agent_name,),
+    ).fetchone()
+    latest_eval = dict(row) if row else None
+    passed = False
+    if latest_eval is not None:
+        pass_rate = float(latest_eval.get("pass_rate") or 0.0)
+        total_trials = int(latest_eval.get("total_trials") or 0)
+        passed = pass_rate >= min_eval_pass_rate and total_trials >= min_eval_trials
+    return {
+        "latest_eval_run": latest_eval,
+        "min_eval_pass_rate": min_eval_pass_rate,
+        "min_eval_trials": min_eval_trials,
+        "passed": passed,
+    }
+
+
+def _maintenance_rollout_recommendation(
+    *,
+    agent_name: str,
+    graph_available: bool,
+    graph_lint_valid: bool,
+    eval_gate: dict[str, Any],
+    target_channel: str,
+) -> dict[str, Any]:
+    rollout = {
+        "decision": "hold",
+        "target_channel": target_channel,
+        "reason": "",
+        "recommended_action": "",
+        "release_endpoint": f"/api/v1/releases/{agent_name}/promote?from_channel=draft&to_channel={target_channel}",
+    }
+    latest_eval = eval_gate.get("latest_eval_run")
+    if not graph_available:
+        rollout["reason"] = "No declarative graph found for agent."
+        rollout["recommended_action"] = "Attach harness.declarative_graph and re-run maintenance."
+    elif not graph_lint_valid:
+        rollout["reason"] = "Graph lint failed."
+        rollout["recommended_action"] = "Apply graph autofix and re-run maintenance."
+    elif latest_eval is None:
+        rollout["reason"] = "No eval run found for agent."
+        rollout["recommended_action"] = "Run /api/v1/eval/run before promotion."
+    elif not bool(eval_gate.get("passed")):
+        rollout["reason"] = (
+            f"Eval gate failed (pass_rate={float(latest_eval.get('pass_rate') or 0.0):.2f}, "
+            f"trials={int(latest_eval.get('total_trials') or 0)})."
+        )
+        rollout["recommended_action"] = "Run targeted eval/experiments and iterate before promotion."
+    else:
+        rollout["decision"] = "promote_candidate"
+        rollout["reason"] = "Lint and eval gates passed."
+        rollout["recommended_action"] = "Promote to target channel and optionally start canary."
+    return rollout
 
 
 def _event_ts_seconds(event: dict[str, Any]) -> float:
@@ -264,6 +363,9 @@ def _meta_control_plane_entrypoints(agent_name: str) -> dict[str, Any]:
         "graph_design": {
             "validate": "/api/v1/graphs/validate",
             "lint": "/api/v1/graphs/lint",
+            "autofix": "/api/v1/graphs/autofix",
+            "contracts_validate": "/api/v1/graphs/contracts/validate",
+            "gate_pack": "/api/v1/graphs/gate-pack",
             "run_linear": "/api/v1/graphs/linear-run",
             "run_dag": "/api/v1/graphs/dag-run",
         },
@@ -284,6 +386,7 @@ def _meta_control_plane_entrypoints(agent_name: str) -> dict[str, Any]:
         "improvement_loops": {
             "generate_meta_proposals": f"/api/v1/observability/agents/{agent_name}/meta-proposals/generate",
             "review_meta_proposal": f"/api/v1/observability/agents/{agent_name}/meta-proposals/{{proposal_id}}/review",
+            "autonomous_maintenance_run": f"/api/v1/observability/agents/{agent_name}/autonomous-maintenance-run",
             "autoresearch": "/api/v1/autoresearch/start",
         },
     }
@@ -332,6 +435,9 @@ def _multi_agent_blueprint(agent_name: str) -> dict[str, Any]:
         ],
         "guardrails": {
             "graph_lint_endpoint": "/api/v1/graphs/lint?strict=true",
+            "graph_autofix_endpoint": "/api/v1/graphs/autofix",
+            "graph_contracts_validate_endpoint": "/api/v1/graphs/contracts/validate",
+            "gate_pack_endpoint": "/api/v1/graphs/gate-pack",
             "critical_path_rule": "No background node on path to final response.",
             "fanin_rule": "Avoid fan-in from async branches into blocking joins.",
         },
@@ -725,7 +831,8 @@ async def list_agent_meta_proposals(
 ):
     """List meta-agent generated proposals for an agent."""
     db = _get_db()
-    _ = user  # reserved for auth/scope usage parity
+    if not _agent_is_owned(db, agent_name, user.org_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
     return {"agent_name": agent_name, "proposals": db.list_meta_proposals(agent_name=agent_name, status=status, limit=limit)}
 
 
@@ -781,7 +888,8 @@ async def review_agent_meta_proposal(
 ):
     """Approve/reject a meta proposal for human-in-the-loop review."""
     db = _get_db()
-    _ = (agent_name, user)
+    if not _agent_is_owned(db, agent_name, user.org_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
     status = "approved" if approved else "rejected"
     ok = db.review_meta_proposal(proposal_id, status=status, note=note)
     if not ok:
@@ -792,6 +900,99 @@ async def review_agent_meta_proposal(
     except Exception:
         pass
     return {"proposal_id": proposal_id, "status": status}
+
+
+@router.post("/agents/{agent_name}/autonomous-maintenance-run")
+async def autonomous_maintenance_run(
+    agent_name: str,
+    request: AutonomousMaintenanceRunRequest,
+    user: CurrentUser = Depends(get_current_user),
+):
+    """Run one meta-agent maintenance cycle and return a human approval packet."""
+    db = _get_db()
+    if not _agent_is_owned(db, agent_name, user.org_id):
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    report = db.agent_meta_observability_report(
+        agent_name=agent_name,
+        org_id=user.org_id,
+        limit_sessions=200,
+    )
+    proposals = _meta_proposals_from_report(agent_name, report, request.max_proposals)
+    if request.persist_proposals and not request.dry_run:
+        for proposal in proposals:
+            db.upsert_meta_proposal(proposal)
+
+    graph = _load_agent_graph(agent_name)
+    graph_available = isinstance(graph, dict)
+    graph_autofix: dict[str, Any] | None = None
+    graph_lint: dict[str, Any] | None = None
+    contracts_validate: dict[str, Any] | None = None
+    if graph_available and isinstance(graph, dict):
+        graph_autofix = lint_and_autofix_graph(graph, strict=True, apply=True)
+        graph_lint = graph_autofix.get("lint_after") if isinstance(graph_autofix, dict) else None
+        contracts_result = lint_graph_design(graph, strict=True)
+        contracts_summary = dict(contracts_result.summary or {})
+        contracts_summary["contracts"] = summarize_graph_contracts(graph)
+        contracts_validate = {
+            "valid": contracts_result.valid,
+            "errors": [e.to_dict() for e in contracts_result.errors],
+            "warnings": [w.to_dict() for w in contracts_result.warnings],
+            "summary": contracts_summary,
+        }
+
+    eval_gate = _latest_eval_gate(
+        db,
+        agent_name,
+        min_eval_pass_rate=request.min_eval_pass_rate,
+        min_eval_trials=request.min_eval_trials,
+    )
+    lint_valid = bool((graph_lint or {}).get("valid")) if graph_lint is not None else False
+    rollout = _maintenance_rollout_recommendation(
+        agent_name=agent_name,
+        graph_available=graph_available,
+        graph_lint_valid=lint_valid,
+        eval_gate=eval_gate,
+        target_channel=request.target_channel,
+    )
+    blocking_reasons: list[str] = []
+    if rollout["decision"] == "hold":
+        blocking_reasons.append(str(rollout.get("reason") or "Hold decision"))
+
+    return {
+        "agent_name": agent_name,
+        "dry_run": request.dry_run,
+        "generated_at": time.time(),
+        "meta_report": report,
+        "graph_checks": {
+            "available": graph_available,
+            "graph_lint": graph_lint,
+            "contracts_validate": contracts_validate,
+            "graph_autofix": graph_autofix,
+        },
+        "eval_gate": eval_gate,
+        "rollout": rollout,
+        "proposals": {
+            "generated": len(proposals),
+            "persisted": request.persist_proposals and not request.dry_run,
+            "items": proposals,
+        },
+        "approval_packet": {
+            "requires_human_approval": True,
+            "ready_for_approval": rollout["decision"] == "promote_candidate",
+            "blocking_reasons": blocking_reasons,
+            "review_endpoints": {
+                "meta_control_plane": f"/api/v1/observability/agents/{agent_name}/meta-control-plane",
+                "meta_proposals": f"/api/v1/observability/agents/{agent_name}/meta-proposals",
+                "gate_pack": "/api/v1/graphs/gate-pack",
+            },
+        },
+        "suggested_actions": [
+            "Review generated proposals and graph contract/lint outputs.",
+            "Approve config changes and run targeted eval regressions.",
+            "Promote only if rollout decision is promote_candidate.",
+        ],
+    }
 
 
 @router.get("/agents/{agent_name}/meta-control-plane")
