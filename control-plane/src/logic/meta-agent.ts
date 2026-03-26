@@ -125,124 +125,168 @@ const PLATFORM_TOOLS = {
 /** All platform tool names. */
 export const PLATFORM_TOOL_NAMES = Object.keys(PLATFORM_TOOLS);
 
-/* ── Pipedream MCP Connector Catalog ────────────────────────────── */
+/* ── Pipedream MCP Connector Discovery ──────────────────────────── */
 /*
- * Top ~50 Pipedream apps organized by use case. The meta-agent uses this
- * to recommend relevant third-party integrations during agent creation.
- * OAuth is handled post-creation in the portal connectors page.
+ * Instead of a hardcoded catalog, the meta-agent proposes app names
+ * based on its own judgment, then we validate against Pipedream's
+ * live API and pull real tool schemas.
  */
 
-const PIPEDREAM_APPS: Record<string, Array<{ app: string; tools: string[] }>> = {
-  "CRM & Sales": [
-    { app: "hubspot", tools: ["create-contact", "update-deal", "search-companies", "create-engagement"] },
-    { app: "salesforce", tools: ["query-records", "create-opportunity", "update-lead", "search-accounts"] },
-    { app: "pipedrive", tools: ["create-deal", "update-person", "search-activities"] },
-    { app: "close", tools: ["create-lead", "send-email", "log-activity"] },
-    { app: "apollo", tools: ["enrich-contact", "search-people", "get-organization"] },
-  ],
-  "Email": [
-    { app: "gmail", tools: ["send-email", "search-emails", "create-draft", "list-labels"] },
-    { app: "microsoft-outlook", tools: ["send-email", "search-messages", "create-event"] },
-    { app: "sendgrid", tools: ["send-email", "create-contact", "add-to-list"] },
-    { app: "mailchimp", tools: ["add-subscriber", "send-campaign", "search-members"] },
-  ],
-  "Communication & Chat": [
-    { app: "slack", tools: ["send-message", "create-channel", "list-users", "upload-file"] },
-    { app: "discord", tools: ["send-message", "create-channel", "list-members"] },
-    { app: "microsoft-teams", tools: ["send-message", "create-channel", "list-team-members"] },
-    { app: "twilio", tools: ["send-sms", "make-call", "send-whatsapp"] },
-    { app: "intercom", tools: ["create-contact", "send-message", "search-conversations"] },
-  ],
-  "Marketing & Social": [
-    { app: "linkedin", tools: ["create-post", "search-people", "send-message"] },
-    { app: "twitter", tools: ["create-tweet", "search-tweets", "get-user"] },
-    { app: "facebook-pages", tools: ["create-post", "get-page-insights"] },
-    { app: "google-ads", tools: ["get-campaign-stats", "update-budget"] },
-    { app: "meta-ads", tools: ["get-ad-insights", "create-campaign"] },
-  ],
-  "Project Management": [
-    { app: "linear", tools: ["create-issue", "update-issue", "search-issues"] },
-    { app: "jira", tools: ["create-issue", "update-issue", "search-issues", "add-comment"] },
-    { app: "asana", tools: ["create-task", "update-task", "search-tasks"] },
-    { app: "notion", tools: ["create-page", "update-page", "query-database"] },
-    { app: "trello", tools: ["create-card", "move-card", "add-comment"] },
-  ],
-  "DevOps & Engineering": [
-    { app: "github", tools: ["create-issue", "create-pr", "search-code", "list-repos"] },
-    { app: "gitlab", tools: ["create-issue", "create-mr", "list-pipelines"] },
-    { app: "datadog", tools: ["query-metrics", "create-monitor", "list-events"] },
-    { app: "pagerduty", tools: ["create-incident", "acknowledge-incident"] },
-    { app: "sentry", tools: ["list-issues", "resolve-issue", "get-event"] },
-  ],
-  "Finance & Payments": [
-    { app: "stripe", tools: ["create-customer", "create-invoice", "list-subscriptions"] },
-    { app: "quickbooks", tools: ["create-invoice", "search-customers", "get-reports"] },
-    { app: "xero", tools: ["create-invoice", "search-contacts"] },
-  ],
-  "Productivity & Storage": [
-    { app: "google-sheets", tools: ["read-rows", "append-row", "update-cell", "create-spreadsheet"] },
-    { app: "google-drive", tools: ["upload-file", "search-files", "create-folder"] },
-    { app: "google-calendar", tools: ["create-event", "list-events", "update-event"] },
-    { app: "airtable", tools: ["create-record", "search-records", "update-record"] },
-    { app: "dropbox", tools: ["upload-file", "search-files", "share-file"] },
-    { app: "calendly", tools: ["list-events", "get-event-types", "cancel-event"] },
-  ],
-  "Analytics & Data": [
-    { app: "google-analytics", tools: ["run-report", "get-realtime-data"] },
-    { app: "mixpanel", tools: ["track-event", "query-jql", "get-funnel"] },
-    { app: "amplitude", tools: ["query-events", "get-user-activity"] },
-    { app: "segment", tools: ["track-event", "identify-user"] },
-  ],
+type PipedreamApp = {
+  name_slug: string;
+  name: string;
+  description?: string;
 };
 
-/** Build a formatted string of the Pipedream catalog for the prompt. */
-function buildPipedreamCatalogString(): string {
-  return Object.entries(PIPEDREAM_APPS)
-    .map(([category, apps]) => {
-      const appList = apps
-        .map((a) => `    - ${a.app}: ${a.tools.join(", ")}`)
-        .join("\n");
-      return `  ${category}:\n${appList}`;
-    })
-    .join("\n\n");
+type PipedreamAction = {
+  key: string;
+  name: string;
+  description?: string;
+};
+
+type ValidatedConnector = {
+  app: string;
+  app_name: string;
+  reason: string;
+  recommended_tools: string[];
+  validated: boolean;
+};
+
+/**
+ * Query Pipedream's API to search for apps by name.
+ * Returns matching app slugs and descriptions.
+ */
+async function searchPipedreamApps(
+  query: string,
+  clientId: string,
+  clientSecret: string,
+  projectId: string,
+): Promise<PipedreamApp[]> {
+  try {
+    // Get access token via client credentials
+    const tokenResp = await fetch("https://api.pipedream.com/v1/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    });
+    if (!tokenResp.ok) return [];
+    const tokenData = await tokenResp.json() as { access_token?: string };
+    const accessToken = tokenData.access_token;
+    if (!accessToken) return [];
+
+    // Search apps
+    const resp = await fetch(
+      `https://api.pipedream.com/v1/connect/apps?q=${encodeURIComponent(query)}&limit=5`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "x-pd-project-id": projectId,
+        },
+      },
+    );
+    if (!resp.ok) return [];
+    const data = await resp.json() as { data?: PipedreamApp[] };
+    return data.data ?? [];
+  } catch {
+    return [];
+  }
 }
 
-/** Recommend MCP connectors based on description keywords. */
-export function recommendConnectors(description: string): Array<{ app: string; reason: string; recommended_tools: string[] }> {
-  const lower = description.toLowerCase();
-  const recommended: Array<{ app: string; reason: string; recommended_tools: string[] }> = [];
+/**
+ * Get available actions (tools) for a specific Pipedream app.
+ */
+async function getPipedreamActions(
+  appSlug: string,
+  clientId: string,
+  clientSecret: string,
+  projectId: string,
+): Promise<string[]> {
+  try {
+    const tokenResp = await fetch("https://api.pipedream.com/v1/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+    });
+    if (!tokenResp.ok) return [];
+    const tokenData = await tokenResp.json() as { access_token?: string };
+    const accessToken = tokenData.access_token;
+    if (!accessToken) return [];
 
-  const CONNECTOR_KEYWORDS: Record<string, { keywords: string[]; reason: string }> = {
-    hubspot: { keywords: ["crm", "sales", "leads", "deals", "pipeline", "hubspot"], reason: "CRM for lead and deal management" },
-    salesforce: { keywords: ["salesforce", "crm", "enterprise sales", "opportunity"], reason: "Enterprise CRM integration" },
-    gmail: { keywords: ["email", "mail", "outreach", "follow-up", "inbox", "gmail"], reason: "Email outreach and follow-ups" },
-    "microsoft-outlook": { keywords: ["outlook", "office 365", "microsoft mail"], reason: "Email via Microsoft 365" },
-    slack: { keywords: ["slack", "team", "channel", "notification", "chat"], reason: "Team notifications and collaboration" },
-    linkedin: { keywords: ["linkedin", "social", "professional", "networking", "b2b"], reason: "Professional networking and content" },
-    twitter: { keywords: ["twitter", "x.com", "tweet", "social media"], reason: "Social media engagement" },
-    "google-sheets": { keywords: ["spreadsheet", "sheets", "csv", "data", "tracking"], reason: "Data tracking and reporting" },
-    "google-calendar": { keywords: ["calendar", "meeting", "schedule", "appointment", "booking"], reason: "Meeting scheduling" },
-    calendly: { keywords: ["calendly", "booking", "schedule meeting", "appointment"], reason: "Automated meeting scheduling" },
-    stripe: { keywords: ["payment", "billing", "subscription", "invoice", "stripe"], reason: "Payment and billing management" },
-    github: { keywords: ["github", "code", "repository", "pull request", "issue"], reason: "Code and issue management" },
-    linear: { keywords: ["linear", "issue", "project", "sprint", "task"], reason: "Project and issue tracking" },
-    jira: { keywords: ["jira", "issue", "project", "sprint", "agile"], reason: "Project management" },
-    notion: { keywords: ["notion", "wiki", "documentation", "knowledge base"], reason: "Documentation and knowledge management" },
-    sendgrid: { keywords: ["sendgrid", "bulk email", "email campaign", "newsletter"], reason: "Bulk email campaigns" },
-    intercom: { keywords: ["intercom", "support", "chat", "customer", "helpdesk"], reason: "Customer support chat" },
-    twilio: { keywords: ["sms", "phone", "call", "whatsapp", "twilio"], reason: "SMS and phone communication" },
-    datadog: { keywords: ["monitoring", "metrics", "alerts", "datadog", "observability"], reason: "Infrastructure monitoring" },
-    airtable: { keywords: ["airtable", "database", "records", "base"], reason: "Flexible database for tracking" },
-  };
+    const resp = await fetch(
+      `https://api.pipedream.com/v1/connect/apps/${appSlug}/actions?limit=10`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "x-pd-project-id": projectId,
+        },
+      },
+    );
+    if (!resp.ok) return [];
+    const data = await resp.json() as { data?: PipedreamAction[] };
+    return (data.data ?? []).map((a) => a.name || a.key).slice(0, 5);
+  } catch {
+    return [];
+  }
+}
 
-  for (const [app, { keywords, reason }] of Object.entries(CONNECTOR_KEYWORDS)) {
-    if (keywords.some((kw) => lower.includes(kw))) {
-      const appData = Object.values(PIPEDREAM_APPS).flat().find((a) => a.app === app);
-      recommended.push({ app, reason, recommended_tools: appData?.tools ?? [] });
+/**
+ * Validate and enrich connector recommendations from the LLM
+ * against Pipedream's live API. Returns connectors with real tool names.
+ */
+export async function validateConnectors(
+  proposed: Array<{ app: string; reason: string; recommended_tools?: string[] }>,
+  pipedreamCreds: { clientId: string; clientSecret: string; projectId: string },
+): Promise<ValidatedConnector[]> {
+  const results: ValidatedConnector[] = [];
+
+  // Process in parallel (bounded to 5)
+  const tasks = proposed.slice(0, 8).map(async (connector) => {
+    const apps = await searchPipedreamApps(
+      connector.app, pipedreamCreds.clientId, pipedreamCreds.clientSecret, pipedreamCreds.projectId,
+    );
+
+    if (apps.length === 0) {
+      // App not found on Pipedream — return as unvalidated with LLM's tools
+      return {
+        app: connector.app,
+        app_name: connector.app,
+        reason: connector.reason,
+        recommended_tools: connector.recommended_tools ?? [],
+        validated: false,
+      };
+    }
+
+    const matched = apps[0];
+    // Get real tools for this app
+    const tools = await getPipedreamActions(
+      matched.name_slug, pipedreamCreds.clientId, pipedreamCreds.clientSecret, pipedreamCreds.projectId,
+    );
+
+    return {
+      app: matched.name_slug,
+      app_name: matched.name || matched.name_slug,
+      reason: connector.reason,
+      recommended_tools: tools.length > 0 ? tools : (connector.recommended_tools ?? []),
+      validated: true,
+    };
+  });
+
+  const settled = await Promise.allSettled(tasks);
+  for (const result of settled) {
+    if (result.status === "fulfilled") {
+      results.push(result.value);
     }
   }
 
-  return recommended;
+  return results;
 }
 
 /** Recommend tools based on description — uses the actual platform inventory. */
@@ -334,6 +378,7 @@ export async function buildFromDescription(
     hyperdrive?: Hyperdrive;
     orgId?: string;
     openrouterApiKey?: string;
+    pipedream?: { clientId: string; clientSecret: string; projectId: string };
   } = {},
 ): Promise<Record<string, unknown>> {
   if (!opts.openrouterApiKey) {
@@ -367,14 +412,27 @@ ${toolInventory}
 - **Governance**: Budget limits, tool restrictions, confirmation gates for destructive/bulk actions.
 - **Evaluation**: Automated test scenarios with pass/fail thresholds that gate deployment.
 - **Releases**: Channel-based deployment (staging → canary → production) with traffic splitting.
-- **MCP Connectors**: 3,000+ external app integrations via Pipedream. OAuth managed automatically. Agents can use Gmail, Slack, HubSpot, Salesforce, LinkedIn, Calendly, Stripe, and thousands more.
+- **MCP Connectors**: 3,000+ external app integrations via Pipedream MCP. OAuth managed automatically. Any SaaS app the agent needs (Gmail, Slack, HubSpot, Salesforce, LinkedIn, Calendly, Stripe, Jira, Notion, Zendesk, Shopify, Twilio, etc.) can be connected. The platform validates app availability automatically.
 
 ## External Integrations (Pipedream MCP — 3,000+ apps)
-When an agent needs external app integrations, recommend specific apps from this catalog:
+You have access to 3,000+ external apps via Pipedream's MCP connector infrastructure. When an agent needs to interact with external services, freely recommend ANY apps you think are relevant. Common categories:
+- CRM: HubSpot, Salesforce, Pipedrive, Close, Apollo
+- Email: Gmail, Outlook, SendGrid, Mailchimp, Resend
+- Chat: Slack, Discord, Microsoft Teams, Intercom
+- Social: LinkedIn, Twitter/X, Facebook, Instagram
+- Scheduling: Calendly, Google Calendar, Cal.com
+- Payments: Stripe, Square, PayPal, QuickBooks
+- Project Management: Jira, Linear, Asana, Notion, Trello, Monday
+- DevOps: GitHub, GitLab, Datadog, PagerDuty, Sentry
+- Analytics: Google Analytics, Mixpanel, Amplitude, Segment
+- Storage: Google Sheets, Airtable, Google Drive, Dropbox, S3
+- Support: Zendesk, Freshdesk, Help Scout
+- E-commerce: Shopify, WooCommerce, Stripe
+- Communication: Twilio (SMS/Voice/WhatsApp), Vonage
 
-${buildPipedreamCatalogString()}
+Don't limit yourself to this list — propose any app that makes sense for the agent's purpose. The platform will validate each app against Pipedream's live API and pull real tool schemas.
 
-Include a "mcp_connectors" array in your output with recommended apps, why each is needed, and which tools to use.
+Include a "mcp_connectors" array in your output with the apps you recommend, why each is needed, and suggested tool names.
 
 ## Output Format — Complete Agent Package
 
@@ -593,8 +651,19 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
     guardrails: Array.isArray(pkg.guardrails) ? pkg.guardrails : [],
     eval_config: pkg.eval_config ?? null,
     release_strategy: pkg.release_strategy ?? null,
-    mcp_connectors: Array.isArray(pkg.mcp_connectors) ? pkg.mcp_connectors : recommendConnectors(description),
+    mcp_connectors: Array.isArray(pkg.mcp_connectors) ? pkg.mcp_connectors : [],
   };
+
+  // Validate MCP connectors against Pipedream's live API
+  const proposedConnectors = (agentConfig._package as Record<string, unknown>).mcp_connectors as Array<{ app: string; reason: string; recommended_tools?: string[] }>;
+  if (proposedConnectors.length > 0 && opts.pipedream) {
+    try {
+      const validated = await validateConnectors(proposedConnectors, opts.pipedream);
+      (agentConfig._package as Record<string, unknown>).mcp_connectors = validated;
+    } catch {
+      // Validation failed — keep LLM's unvalidated suggestions
+    }
+  }
 
   return agentConfig;
 }

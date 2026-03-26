@@ -42,6 +42,11 @@ export interface Env {
   CF_ACCESS_TEAM_DOMAIN?: string; // e.g. "crucial-lemur-88.cloudflareaccess.com"
   CF_ACCESS_AUD?: string;         // Application AUD tag
 
+  // Pipedream MCP Connectors (optional)
+  PIPEDREAM_CLIENT_ID?: string;
+  PIPEDREAM_CLIENT_SECRET?: string;
+  PIPEDREAM_PROJECT_ID?: string;
+
   // Vars
   RUNTIME_WORKER_URL: string;
   AUTH_ALLOW_PASSWORD?: string;

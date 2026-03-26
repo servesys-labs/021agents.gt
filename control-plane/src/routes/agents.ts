@@ -889,6 +889,11 @@ agentRoutes.post(
       hyperdrive: c.env.HYPERDRIVE,
       orgId: user.org_id,
       openrouterApiKey: c.env.OPENROUTER_API_KEY,
+      pipedream: c.env.PIPEDREAM_CLIENT_ID ? {
+        clientId: c.env.PIPEDREAM_CLIENT_ID,
+        clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
+        projectId: c.env.PIPEDREAM_PROJECT_ID ?? "",
+      } : undefined,
     });
 
     if (req.name) config.name = req.name;
