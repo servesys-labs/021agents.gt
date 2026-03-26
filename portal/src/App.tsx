@@ -9,6 +9,7 @@ import { ToastProvider } from "./components/common/ToastProvider";
 import { CommandPalette } from "./components/common/CommandPalette";
 
 import { SkeletonDashboard } from "./components/common/Skeleton";
+import { usePageTitle } from "./hooks/usePageTitle";
 import "./index.css";
 
 /* ── Page transition wrapper ────────────────────────────────────── */
@@ -148,6 +149,9 @@ function AuthenticatedLayout() {
 /* ── App ────────────────────────────────────────────────────────── */
 
 function App() {
+  // Update page title on route change
+  usePageTitle();
+
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
