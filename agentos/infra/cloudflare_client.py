@@ -59,10 +59,7 @@ class CloudflareClient:
     def from_env(cls) -> CloudflareClient | None:
         """Create from env vars. Returns None if not configured."""
         url = os.environ.get("AGENTOS_WORKER_URL", "").strip()
-        token = (
-            os.environ.get("EDGE_INGEST_TOKEN", "")
-            or os.environ.get("BACKEND_INGEST_TOKEN", "")
-        ).strip()
+        token = os.environ.get("SERVICE_TOKEN", "").strip()
         if not url or not token:
             return None
         return cls(url, token)
@@ -304,26 +301,26 @@ class CloudflareClient:
         agent_name: str,
         org_id: str = "",
         project_id: str = "",
+        telegram_bot_token: str = "",
     ) -> dict[str, Any]:
         """Deploy a customer agent worker into the dispatch namespace.
 
-        The worker is a stateless proxy — same code for every agent,
-        only the env var bindings differ (AGENT_NAME, ORG_ID, etc.).
+        The worker handles API requests, Telegram webhooks, and other channels.
+        Only the env var bindings differ per agent (AGENT_NAME, ORG_ID, etc.).
         """
         worker_name = self._worker_name(org_slug, agent_name)
         account_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
         api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
         namespace = os.environ.get("DISPATCH_NAMESPACE", "agentos-production")
-        # Customer worker calls the Railway BACKEND (not the worker).
-        # Resolve the backend's public URL from Railway env vars.
-        backend_url = os.environ.get("BACKEND_PUBLIC_URL", "").strip()
-        if not backend_url:
-            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
-            if domain:
-                backend_url = f"https://{domain}"
-        if not backend_url:
-            backend_url = "https://backend-production-b174.up.railway.app"
-        backend_token = self.edge_token
+        # Customer worker calls the MAIN CF WORKER (edge runtime), not Railway.
+        # The main worker holds all API keys and CF bindings.
+        worker_url = os.environ.get("AGENTOS_WORKER_URL", "").strip()
+        if not worker_url:
+            worker_url = os.environ.get("WORKER_URL", "").strip()
+        if not worker_url:
+            # Fallback: derive from worker name in wrangler config
+            worker_url = "https://agentos.workers.dev"
+        edge_token = self.edge_token
 
         if not account_id or not api_token:
             return {"error": "CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN not set", "deployed": False}
@@ -334,13 +331,13 @@ class CloudflareClient:
         try:
             template_code = open(template_path).read()
         except FileNotFoundError:
-            # Fallback: inline minimal proxy
+            # Fallback: inline minimal proxy (routes to main worker edge runtime)
             template_code = (
                 'export default{async fetch(r,e){const b=await r.json().catch(()=>({}));'
-                'const resp=await fetch(`${e.BACKEND_INGEST_URL}/api/v1/runtime-proxy/agent/run`,'
-                '{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${e.BACKEND_INGEST_TOKEN}`},'
+                'const resp=await fetch(`${e.WORKER_URL}/api/v1/runtime-proxy/runnable/invoke`,'
+                '{method:"POST",headers:{"Content-Type":"application/json","Authorization":`Bearer ${e.SERVICE_TOKEN}`},'
                 'body:JSON.stringify({...b,agent_name:e.AGENT_NAME,org_id:e.ORG_ID,channel:"dispatch_worker"})});'
-                'return new Response(resp.body,{status:resp.status,headers:{"Content-Type":"application/json"}})}}'
+                'return new Response(resp.body,{status:resp.status,headers:resp.headers})}}'
             )
 
         # Multipart upload to dispatch namespace
@@ -350,8 +347,13 @@ class CloudflareClient:
                 {"type": "plain_text", "name": "AGENT_NAME", "text": agent_name},
                 {"type": "plain_text", "name": "ORG_ID", "text": org_id},
                 {"type": "plain_text", "name": "PROJECT_ID", "text": project_id},
-                {"type": "plain_text", "name": "BACKEND_INGEST_URL", "text": backend_url},
-                {"type": "secret_text", "name": "BACKEND_INGEST_TOKEN", "text": backend_token},
+                {"type": "plain_text", "name": "WORKER_URL", "text": worker_url},
+                {"type": "secret_text", "name": "SERVICE_TOKEN", "text": edge_token},
+                # Channel integrations — only added if configured
+                *(
+                    [{"type": "secret_text", "name": "TELEGRAM_BOT_TOKEN", "text": telegram_bot_token}]
+                    if telegram_bot_token else []
+                ),
             ],
             "tags": [f"org:{org_slug}", f"agent:{agent_name}"],
             "compatibility_date": "2026-03-01",
