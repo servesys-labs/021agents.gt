@@ -101,6 +101,25 @@
 
   /* Touch target minimum */
   --touch-target-min: 2.75rem; /* 44px */
+
+  /* ── Motion tokens — themable animation system ────────────── */
+
+  /* Durations */
+  --duration-instant: 100ms;   /* button press, toggle */
+  --duration-fast: 150ms;      /* tooltip, fade, hover */
+  --duration-normal: 200ms;    /* panel slide, tab switch */
+  --duration-slow: 350ms;      /* page transition, stagger item */
+  --duration-shimmer: 1.6s;    /* skeleton loading pulse */
+  --duration-float: 3s;        /* empty state float */
+
+  /* Easing curves */
+  --ease-default: cubic-bezier(0.4, 0, 0.2, 1);   /* Material standard */
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);           /* Accelerate */
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);          /* Decelerate */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1); /* Overshoot */
+
+  /* Stagger delay per item */
+  --stagger-delay: 50ms;
 }
 
 * {
@@ -203,7 +222,7 @@ body {
 
 .card-hover:hover {
   border-color: var(--color-border-strong);
-  transition: border-color 0.15s ease;
+  transition: border-color var(--duration-fast) var(--ease-default);
 }
 
 .badge-live {
@@ -278,7 +297,7 @@ select {
   padding: 0.5rem 0.75rem;
   font-size: var(--text-md);
   color: var(--color-text-primary);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--duration-fast) var(--ease-default), box-shadow var(--duration-fast) var(--ease-default);
   width: 100%;
 }
 
@@ -318,7 +337,7 @@ textarea::placeholder {
   font-weight: 500;
   border-radius: 0.375rem;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--duration-fast) var(--ease-default);
   border: 1px solid transparent;
 }
 
@@ -487,7 +506,7 @@ textarea::placeholder {
   border-left: 1px solid var(--color-glass-border);
   z-index: 50;
   box-shadow: -8px 0 40px rgba(0, 0, 0, 0.4), inset 1px 0 0 var(--color-glass-highlight);
-  animation: slide-in-right 0.2s ease-out;
+  animation: slide-in-right var(--duration-normal) var(--ease-out);
 }
 
 @keyframes slide-in-right {
@@ -561,7 +580,7 @@ textarea::placeholder {
   height: 2rem;
   min-width: 2rem;
   border-radius: 0.5rem;
-  transition: background-color 0.15s ease;
+  transition: background-color var(--duration-fast) var(--ease-default);
 }
 
 .sidebar-logo:hover {
@@ -593,7 +612,7 @@ textarea::placeholder {
   min-height: var(--touch-target-min);
   padding: 0 var(--space-3);
   border-radius: 0.5rem;
-  transition: background-color 0.15s ease, color 0.15s ease;
+  transition: background-color var(--duration-fast) var(--ease-default), color var(--duration-fast) var(--ease-default);
   cursor: pointer;
 }
 
@@ -682,7 +701,7 @@ textarea::placeholder {
     var(--color-surface-overlay) 80%
   );
   background-size: 200% 100%;
-  animation: shimmer 1.6s ease-in-out infinite;
+  animation: shimmer var(--duration-shimmer) var(--ease-default) infinite;
   will-change: background-position;
 }
 
@@ -692,8 +711,8 @@ textarea::placeholder {
 }
 
 .skeleton-stagger {
-  animation: staggerFadeIn 0.4s ease-out both;
-  animation-delay: calc(var(--stagger-index, 0) * 60ms);
+  animation: staggerFadeIn var(--duration-slow) var(--ease-out) both;
+  animation-delay: calc(var(--stagger-index, 0) * var(--stagger-delay));
 }
 
 /* ============================================
@@ -706,7 +725,7 @@ textarea::placeholder {
 }
 
 .page-enter {
-  animation: pageFadeIn 0.25s ease-out both;
+  animation: pageFadeIn var(--duration-normal) var(--ease-out) both;
 }
 
 /* ============================================
@@ -714,7 +733,7 @@ textarea::placeholder {
    ============================================ */
 
 .card-lift {
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.15s ease;
+  transition: transform var(--duration-normal) var(--ease-default), box-shadow var(--duration-normal) var(--ease-default), border-color var(--duration-fast) var(--ease-default);
   will-change: transform;
 }
 
@@ -727,7 +746,7 @@ textarea::placeholder {
 .card[role="button"],
 .card.cursor-pointer,
 .card-hover {
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.15s ease;
+  transition: transform var(--duration-normal) var(--ease-default), box-shadow var(--duration-normal) var(--ease-default), border-color var(--duration-fast) var(--ease-default);
   will-change: transform;
 }
 
@@ -754,11 +773,11 @@ textarea::placeholder {
 }
 
 .toast-enter {
-  animation: toastSlideIn 0.28s ease-out both;
+  animation: toastSlideIn var(--duration-slow) var(--ease-out) both;
 }
 
 .toast-exit {
-  animation: toastSlideOut 0.22s ease-in both;
+  animation: toastSlideOut var(--duration-normal) var(--ease-in) both;
 }
 
 /* ============================================
@@ -766,7 +785,7 @@ textarea::placeholder {
    ============================================ */
 
 .btn {
-  transition: all 0.15s ease, transform 0.1s ease;
+  transition: all var(--duration-fast) var(--ease-default), transform var(--duration-instant) var(--ease-default);
 }
 
 .btn:active:not(:disabled) {
@@ -783,8 +802,8 @@ textarea::placeholder {
 }
 
 .stagger-item {
-  animation: staggerFadeIn 0.35s ease-out both;
-  animation-delay: calc(var(--stagger-index, 0) * 50ms);
+  animation: staggerFadeIn var(--duration-slow) var(--ease-out) both;
+  animation-delay: calc(var(--stagger-index, 0) * var(--stagger-delay));
 }
 
 /* ============================================
@@ -805,7 +824,7 @@ textarea::placeholder {
   background-color: var(--color-accent);
   border-radius: 1px;
   transform: scaleX(0);
-  transition: transform 0.2s ease;
+  transition: transform var(--duration-normal) var(--ease-default);
   transform-origin: center;
 }
 
@@ -857,7 +876,7 @@ textarea::placeholder {
 
 .tool-call-node {
   border-left-color: var(--color-border-default);
-  transition: border-left-color 0.15s ease;
+  transition: border-left-color var(--duration-fast) var(--ease-default);
 }
 
 .tool-call-node:hover {
@@ -921,7 +940,7 @@ input[type="checkbox"] {
   border: 1.5px solid var(--color-border-strong);
   background-color: var(--color-surface-base);
   cursor: pointer;
-  transition: background-color 0.15s ease, border-color 0.15s ease;
+  transition: background-color var(--duration-fast) var(--ease-default), border-color var(--duration-fast) var(--ease-default);
   position: relative;
   flex-shrink: 0;
 }
@@ -957,7 +976,7 @@ table thead {
 }
 
 table tr {
-  transition: background-color 0.1s ease;
+  transition: background-color var(--duration-instant) var(--ease-default);
 }
 
 table tr:hover td {
@@ -970,7 +989,7 @@ table tr:hover td {
 
 .sidebar-group-items {
   overflow: hidden;
-  transition: max-height 0.2s ease-out, opacity 0.15s ease;
+  transition: max-height var(--duration-normal) var(--ease-out), opacity var(--duration-fast) var(--ease-default);
 }
 
 /* ============================================
@@ -983,7 +1002,7 @@ table tr:hover td {
 }
 
 .slide-up {
-  animation: slideUp 0.2s ease-out both;
+  animation: slideUp var(--duration-normal) var(--ease-out) both;
 }
 
 /* ============================================
@@ -1012,7 +1031,7 @@ table tr:hover td {
     var(--color-surface-overlay) 80%
   );
   background-size: 200% 100%;
-  animation: shimmer 1.6s ease-in-out infinite;
+  animation: shimmer var(--duration-shimmer) var(--ease-default) infinite;
   border-radius: 0.375rem;
 }
 
@@ -1052,6 +1071,53 @@ table tr:hover td {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ============================================
+   CSS Containment — GPU compositing hints
+   Prevents layout/paint from leaking into parent
+   during animations, improving frame rates.
+   ============================================ */
+
+/* Animated items that transform/opacity — safe for layout+paint containment */
+.stagger-item,
+.skeleton-stagger,
+.skeleton-shimmer,
+.card-lift,
+.toast-enter,
+.toast-exit {
+  contain: layout paint;
+}
+
+/* Page transitions — contain the entire animated subtree */
+.page-enter {
+  contain: layout style;
+}
+
+/* Cards with hover lift — contain transform repaints */
+.card[role="button"],
+.card.cursor-pointer,
+.card-hover {
+  contain: layout paint;
+}
+
+/* Sidebar group items container — contain expand/collapse reflows */
+.sidebar-group-items {
+  contain: layout paint;
+}
+
+/* Skeleton blocks — isolated paint layer */
+.skeleton-block {
+  contain: layout paint;
+}
+
+/* Glass surfaces — isolated compositing layer for backdrop-filter */
+.glass-heavy,
+.glass-medium,
+.glass-light,
+.glass-dropdown,
+.card-glass {
+  contain: layout;
 }
 
 .progress-bar-gradient {
@@ -1103,7 +1169,7 @@ table tr:hover td {
   -webkit-backdrop-filter: blur(32px) saturate(1.8);
   border: 1px solid var(--color-glass-border-strong);
   border-radius: 0.5rem;
-  animation: fadeIn 0.15s ease-out;
+  animation: fadeIn var(--duration-fast) var(--ease-out);
 }
 
 /* ============================================
@@ -1134,7 +1200,7 @@ table tr:hover td {
   -webkit-backdrop-filter: blur(40px) saturate(1.8);
   border: 1px solid var(--color-glass-border-strong);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6), inset 0 1px 0 var(--color-glass-highlight);
-  animation: cmdPaletteFadeIn 0.15s ease-out;
+  animation: cmdPaletteFadeIn var(--duration-fast) var(--ease-out);
 }
 
 @keyframes cmdPaletteFadeIn {
@@ -1246,7 +1312,7 @@ table tr:hover td {
   background: transparent;
   cursor: pointer;
   text-align: left;
-  transition: background-color 0.1s ease;
+  transition: background-color var(--duration-instant) var(--ease-default);
 }
 
 .command-palette-item:hover,
@@ -1377,7 +1443,7 @@ table tr:hover td {
   border: 1px solid var(--color-border-default);
   border-radius: 9999px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: all var(--duration-fast) var(--ease-default);
   white-space: nowrap;
 }
 
@@ -1443,7 +1509,7 @@ table tr:hover td {
   min-height: var(--touch-target-min);
   color: var(--color-text-muted);
   text-decoration: none;
-  transition: color 0.15s ease;
+  transition: color var(--duration-fast) var(--ease-default);
 }
 
 .bottom-tab-item:hover,
@@ -1551,7 +1617,7 @@ table tr:hover td {
   border-radius: 0.5rem;
   padding: var(--space-4);
   cursor: pointer;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  transition: border-color var(--duration-fast) var(--ease-default), box-shadow var(--duration-fast) var(--ease-default);
   overflow: hidden;
 }
 
@@ -1573,7 +1639,7 @@ table tr:hover td {
   gap: var(--space-1);
   opacity: 0;
   transform: translateY(-4px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity var(--duration-fast) var(--ease-default), transform var(--duration-fast) var(--ease-default);
   pointer-events: none;
 }
 
@@ -1594,7 +1660,7 @@ table tr:hover td {
   border: 1px solid var(--color-border-default);
   color: var(--color-text-secondary);
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: all var(--duration-instant) var(--ease-default);
 }
 
 .agent-card-action-btn:hover {
@@ -1624,7 +1690,7 @@ table tr:hover td {
   background: transparent;
   cursor: pointer;
   flex-shrink: 0;
-  transition: background-color 0.12s ease;
+  transition: background-color var(--duration-instant) var(--ease-default);
 }
 
 .copy-id-btn:hover {
@@ -1650,7 +1716,7 @@ table tr:hover td {
   border-radius: 0.25rem;
   white-space: nowrap;
   pointer-events: none;
-  animation: fadeIn 0.12s ease;
+  animation: fadeIn var(--duration-instant) var(--ease-default);
   z-index: 10;
 }
 
