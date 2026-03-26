@@ -41,6 +41,11 @@ const SignupPage = lazy(() =>
   import("./pages/auth/signup").then((m) => ({ default: m.SignupPage })),
 );
 
+// Onboarding
+const OnboardingPage = lazy(() =>
+  import("./pages/onboarding").then((m) => ({ default: m.OnboardingPage })),
+);
+
 // Dashboard (Screen 1)
 const DashboardPage = lazy(() =>
   import("./pages/dashboard").then((m) => ({ default: m.DashboardPage })),
@@ -224,6 +229,9 @@ function AppContent() {
 
             {/* Authenticated routes */}
             <Route element={<AuthenticatedLayout />}>
+              {/* Onboarding — first-time setup */}
+              <Route path="/onboarding" element={<OnboardingPage />} />
+
               {/* Screen 1: Dashboard */}
               <Route index element={<DashboardPage />} />
 

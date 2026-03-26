@@ -883,6 +883,18 @@ agentRoutes.post(
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
+    // Load org's default connectors for the meta-agent prompt
+    let orgDefaultConnectors: string[] = [];
+    try {
+      const settingsRows = await sql`
+        SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+      `;
+      if (settingsRows.length > 0) {
+        const settings = JSON.parse(String(settingsRows[0].settings_json || "{}"));
+        orgDefaultConnectors = Array.isArray(settings.default_connectors) ? settings.default_connectors : [];
+      }
+    } catch { /* ignore — preferences are optional */ }
+
     // Generate config via Claude Sonnet 4.6 (plan-aware model selection)
     const config = await buildFromDescription(c.env.AI, req.description, {
       name: req.name || undefined,
@@ -894,6 +906,7 @@ agentRoutes.post(
         clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
         projectId: c.env.PIPEDREAM_PROJECT_ID ?? "",
       } : undefined,
+      orgDefaultConnectors,
     });
 
     if (req.name) config.name = req.name;

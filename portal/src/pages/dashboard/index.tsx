@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties } from "react";
+import { useEffect, useMemo, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Bot,
@@ -52,8 +52,17 @@ type RecentActivity = {
   timestamp?: string;
 };
 
+type OrgSettings = {
+  onboarding_complete?: boolean;
+  default_connectors?: string[];
+  org_name?: string;
+};
+
 export const DashboardPage = () => {
   const navigate = useNavigate();
+
+  // Check if onboarding is complete — redirect to /onboarding if not
+  const orgSettingsQuery = useApiQuery<OrgSettings>("/api/v1/org/settings");
   const statsQuery = useApiQuery<DashStats>("/api/v1/dashboard/stats");
   const activityQuery = useApiQuery<{ activities: RecentActivity[] }>("/api/v1/dashboard/activity?limit=10");
   const intelQuery = useApiQuery<IntelSummary>("/api/v1/intelligence/summary?since_days=30");
@@ -109,7 +118,16 @@ export const DashboardPage = () => {
     }
   };
 
-  /* ── Loading / empty-state fork ──────────────────────────────── */
+  /* ── First-visit redirect ────────────────────────────────────── */
+  const onboardingDone = orgSettingsQuery.data?.onboarding_complete;
+  useEffect(() => {
+    // Only redirect when we have a definitive answer (not loading, not error)
+    if (!orgSettingsQuery.loading && !orgSettingsQuery.error && onboardingDone === false) {
+      navigate("/onboarding", { replace: true });
+    }
+  }, [onboardingDone, orgSettingsQuery.loading, orgSettingsQuery.error, navigate]);
+
+  /* ── Loading / empty-state fork ────────────────────────────────── */
   // Wait for the agents query to resolve before deciding which view to show.
   // This prevents the "flash of dashboard → onboarding" jump.
   if (agentsQuery.loading) {

@@ -379,6 +379,7 @@ export async function buildFromDescription(
     orgId?: string;
     openrouterApiKey?: string;
     pipedream?: { clientId: string; clientSecret: string; projectId: string };
+    orgDefaultConnectors?: string[];
   } = {},
 ): Promise<Record<string, unknown>> {
   if (!opts.openrouterApiKey) {
@@ -431,7 +432,11 @@ You have access to 3,000+ external apps via Pipedream's MCP connector infrastruc
 - Communication: Twilio (SMS/Voice/WhatsApp), Vonage
 
 Don't limit yourself to this list — propose any app that makes sense for the agent's purpose. The platform will validate each app against Pipedream's live API and pull real tool schemas.
-
+${opts.orgDefaultConnectors && opts.orgDefaultConnectors.length > 0 ? `
+## Organization's Preferred Tools
+This organization has already configured these apps as their defaults: ${opts.orgDefaultConnectors.join(", ")}
+ALWAYS include these in your mcp_connectors recommendations when relevant to the agent's purpose. These are pre-approved by the org.
+` : ""}
 Include a "mcp_connectors" array in your output with the apps you recommend, why each is needed, and suggested tool names.
 
 ## Output Format — Complete Agent Package
