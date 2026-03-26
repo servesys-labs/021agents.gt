@@ -119,10 +119,7 @@
   // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
     "DEFAULT_PLAN": "standard",
-    "DEFAULT_PROVIDER": "gmi",
-    "DEFAULT_MODEL": "deepseek-ai/DeepSeek-V3.2",
-    "BACKEND_INGEST_URL": "https://backend-production-b174.up.railway.app",
-    "BACKEND_PROXY_ONLY": "true",
-    "WORKER_PROXY_MODE": "true"
+    "DEFAULT_PROVIDER": "openrouter",
+    "DEFAULT_MODEL": "@cf/moonshotai/kimi-k2.5"
   }
 }
