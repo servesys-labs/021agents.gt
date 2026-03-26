@@ -1,0 +1,76 @@
+// wrangler.jsonc — AgentOS Control-Plane Worker
+{
+  "name": "agentos-control-plane",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  // Hyperdrive — accelerated Supabase Postgres connection from edge
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "775f7e11ce8c479993855531f728770a"
+    }
+  ],
+
+  // Workers AI binding for LLM inference (meta-agent, issue classifier, etc.)
+  "ai": {
+    "binding": "AI"
+  },
+
+  // R2 — eval datasets, agent artifacts, document storage
+  "r2_buckets": [
+    {
+      "binding": "STORAGE",
+      "bucket_name": "agentos-storage"
+    }
+  ],
+
+  // Vectorize for RAG embeddings
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "agentos-knowledge"
+    }
+  ],
+
+  // Service Binding to runtime worker — zero-latency internal calls
+  "services": [
+    {
+      "binding": "RUNTIME",
+      "service": "agentos"
+    }
+  ],
+
+  // Queues — async job processing
+  "queues": {
+    "producers": [
+      { "binding": "JOB_QUEUE", "queue": "agentos-jobs" }
+    ],
+    "consumers": [
+      {
+        "queue": "agentos-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "agentos-jobs-dlq"
+      }
+    ]
+  },
+
+  // Cron Triggers — scheduled agent runs + data retention
+  "triggers": {
+    "crons": [
+      "*/1 * * * *"
+    ]
+  },
+
+  // Environment variables (secrets via `wrangler secret put`)
+  "vars": {
+    "RUNTIME_WORKER_URL": "https://agentos.servesys.workers.dev"
+  }
+}

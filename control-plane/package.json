@@ -1,0 +1,27 @@
+{
+  "name": "agentos-control-plane",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate:eval:filesystem": "node scripts/migrate-eval-from-filesystem.mjs",
+    "migrate:evolve:filesystem": "node scripts/migrate-evolve-from-filesystem.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.7.0",
+    "postgres": "^3.4.5",
+    "zod": "^3.24.0",
+    "stripe": "^17.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^4.20260301.0",
+    "typescript": "^5.7",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.77.0"
+  }
+}
