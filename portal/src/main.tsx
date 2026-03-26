@@ -15,7 +15,7 @@ const app = (
   </StrictMode>
 );
 
-createRoot(document.getElementById('root')!).render(
+createRoot(document.getElementById("root")!).render(
   isClerkMode() && CLERK_PUBLISHABLE_KEY ? (
     <ClerkProvider publishableKey={CLERK_PUBLISHABLE_KEY}>
       {app}
@@ -23,4 +23,4 @@ createRoot(document.getElementById('root')!).render(
   ) : (
     app
   ),
-)
+);

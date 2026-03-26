@@ -4,13 +4,11 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   build: {
+    sourcemap: false,
     chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("@refinedev/")) {
-            return "vendor-refine";
-          }
           if (id.includes("chart.js")) {
             return "vendor-chartjs";
           }
@@ -26,12 +24,12 @@ export default defineConfig({
     port: 3000,
     allowedHosts: true,
     proxy: {
-      "/api": "http://localhost:8340",
-      "/health": "http://localhost:8340",
-      "/openapi.json": "http://localhost:8340",
-      "/.well-known": "http://localhost:8340",
-      "/a2a": "http://localhost:8340",
-      "/docs": "http://localhost:8340",
+      "/api": "http://localhost:8788",
+      "/health": "http://localhost:8788",
+      "/openapi.json": "http://localhost:8788",
+      "/.well-known": "http://localhost:8788",
+      "/a2a": "http://localhost:8788",
+      "/docs": "http://localhost:8788",
     },
   },
 });
