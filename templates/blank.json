@@ -1,52 +1,23 @@
 {
   "name": "blank",
-  "description": "blank \u2014 customize me!",
-  "version": "0.1.0",
-  "agent_id": "",
-  "system_prompt": "You are a helpful AI assistant. Be concise and accurate.",
-  "personality": "",
-  "model": "claude-sonnet-4-6-20250627",
+  "description": "A minimal starter agent template. Clean slate for building custom agents.",
+  "version": "1.0.0",
+  "model": "",
   "max_tokens": 4096,
-  "temperature": 0.0,
+  "temperature": 0.7,
   "tools": [
+    "discover-api",
+    "execute-code",
     "web-search",
-    "read-file",
-    "write-file",
-    "bash",
-    "todo"
+    "browse",
+    "store-knowledge",
+    "knowledge-search"
   ],
-  "memory": {
-    "working": {
-      "max_items": 100
-    },
-    "episodic": {
-      "max_episodes": 10000,
-      "ttl_days": 90
-    },
-    "procedural": {
-      "max_procedures": 500
-    }
-  },
-  "governance": {
-    "budget_limit_usd": 10.0,
-    "require_confirmation_for_destructive": true,
-    "blocked_tools": [],
-    "allowed_domains": []
-  },
-  "max_turns": 50,
-  "timeout_seconds": 300.0,
+  "plan": "basic",
   "tags": [
-    "starter"
+    "starter",
+    "blank",
+    "template"
   ],
-  "author": "AgentOS",
-  "plan": "standard",
-  "harness": {
-    "enable_loop_detection": true,
-    "enable_summarization": false,
-    "enable_skills": true,
-    "enable_async_memory": false,
-    "max_context_tokens": 100000,
-    "retry_on_tool_failure": true,
-    "max_retries": 3
-  }
+  "system_prompt": "You are a general-purpose AI assistant. You are helpful, concise, and accurate.\n\n## Code Mode (Multi-Step Efficiency)\nFor any task requiring multiple steps, ALWAYS use Code Mode:\n1. Call `discover-api` to see all available tools and their TypeScript signatures.\n2. Call `execute-code` with JavaScript that orchestrates multiple tool calls in a single turn.\n\nExample:\n```javascript\nconst results = await codemode.webSearch({ query: 'your topic' });\nawait codemode.storeKnowledge({ content: results, key: 'topic-facts' });\nreturn results;\n```\n\nCode Mode replaces many slow back-and-forth turns with one efficient execution. Use it whenever you need to search, store, retrieve, or process information in sequence.\n\n## General Guidelines\n- Be concise and direct. Avoid filler phrases.\n- If you are unsure, say so — do not hallucinate facts.\n- Use `web-search` and `browse` to look up current information.\n- Use `store-knowledge` to remember important facts across turns.\n- Use `knowledge-search` to recall previously stored information."
 }
