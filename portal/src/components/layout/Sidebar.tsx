@@ -30,6 +30,7 @@ import {
   Lock,
 } from "lucide-react";
 import { QuotaWidget } from "../common/QuotaWidget";
+import { PageShell } from "./PageShell";
 
 /* ── Nav config ─────────────────────────────────────────────────── */
 
@@ -329,9 +330,11 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
 
       {/* Main content */}
       <main id="main-content" className={`flex-1 ${isCanvasPage ? "overflow-hidden" : "overflow-auto"}`}>
-        <div className={isCanvasPage ? "h-full" : "p-6"}>
-          {children}
-        </div>
+        {isCanvasPage ? (
+          <div className="h-full">{children}</div>
+        ) : (
+          <PageShell>{children}</PageShell>
+        )}
       </main>
     </div>
   );

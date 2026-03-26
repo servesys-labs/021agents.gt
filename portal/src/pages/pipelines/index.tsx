@@ -534,7 +534,7 @@ export function PipelinesPage() {
   /* ── Render ────────────────────────────────────────────────────── */
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Pipelines"
         subtitle="Stream, transform, and sink data for your agents"

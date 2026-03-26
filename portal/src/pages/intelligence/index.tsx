@@ -286,7 +286,7 @@ export function IntelligencePage() {
   const trendDays = trends?.days ?? [];
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Intelligence Dashboard"
         subtitle="Quality trends, sentiment analysis, and agent health overview"

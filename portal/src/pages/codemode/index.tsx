@@ -346,7 +346,7 @@ export function CodemodePage() {
   const [activeTab, setActiveTab] = useState<Tab>("Snippets");
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Codemode"
         subtitle="Snippet library and reusable code components for your agent pipelines"

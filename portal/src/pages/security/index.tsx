@@ -280,7 +280,7 @@ export function SecurityPage() {
   );
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Security"
         subtitle="Red-teaming, AIVSS risk scoring, and security scan history"

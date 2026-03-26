@@ -159,7 +159,7 @@ export function CompliancePage() {
   const [activeTab, setActiveTab] = useState<ComplianceTabId>("overview");
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Compliance & Governance"
         subtitle="Gold image drift, SLO monitoring, audit logs, retention, and policies"

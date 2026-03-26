@@ -22,6 +22,8 @@ import { PageHeader } from "../../components/common/PageHeader";
 import { StatusBadge } from "../../components/common/StatusBadge";
 import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
 import { AssistPanel } from "../../components/common/AssistPanel";
+import { SkeletonDashboard } from "../../components/common/Skeleton";
+import { PageShell } from "../../components/layout/PageShell";
 import { useApiQuery } from "../../lib/api";
 import { safeArray, type AgentInfo } from "../../lib/adapters";
 import { QuotaWidget } from "../../components/common/QuotaWidget";
@@ -107,15 +109,20 @@ export const DashboardPage = () => {
     }
   };
 
-  /* ── Empty-state onboarding ──────────────────────────────────── */
-  const hasAgents = agents.length > 0;
-  const isLoading = agentsQuery.loading || statsQuery.loading;
+  /* ── Loading / empty-state fork ──────────────────────────────── */
+  // Wait for the agents query to resolve before deciding which view to show.
+  // This prevents the "flash of dashboard → onboarding" jump.
+  if (agentsQuery.loading) {
+    return <SkeletonDashboard />;
+  }
 
-  if (!isLoading && !hasAgents) {
+  const hasAgents = agents.length > 0;
+
+  if (!hasAgents) {
     return (
-      <div>
+      <PageShell variant="centered">
         <OnboardingHero onNavigate={navigate} />
-      </div>
+      </PageShell>
     );
   }
 
@@ -338,7 +345,7 @@ const onboardingSteps = [
 
 function OnboardingHero({ onNavigate }: { onNavigate: (path: string) => void }) {
   return (
-    <div className="max-w-5xl">
+    <div className="w-full">
       {/* ── Welcome header — compact, left-aligned ────────────── */}
       <div className="flex items-start justify-between gap-6 mb-6">
         <div className="flex items-center gap-4">

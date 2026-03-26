@@ -525,7 +525,7 @@ export function JobsPage() {
         : dlqQuery.refetch;
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Jobs & Scheduling"
         subtitle="Configure recurring jobs, monitor execution, and manage failures"

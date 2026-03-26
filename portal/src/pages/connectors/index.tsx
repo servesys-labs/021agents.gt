@@ -162,7 +162,7 @@ export function ConnectorHubPage() {
   );
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Connector Hub"
         subtitle="Browse and connect 3000+ app integrations via Pipedream"

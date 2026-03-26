@@ -163,7 +163,7 @@ export const VoicePage = () => {
   const detailError = activePlatform === "vapi" ? callDetailQuery.error : genericDetailQuery.error;
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Voice"
         subtitle="Voice platform integrations — Vapi, ElevenLabs, Retell, Bland, Tavus"

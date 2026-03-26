@@ -187,7 +187,7 @@ export function IssuesPage() {
   const mediumCount = summary?.by_severity?.medium ?? 0;
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Issues Queue"
         subtitle="Agent issues detected, triaged, and resolved"

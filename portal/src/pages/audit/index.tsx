@@ -123,7 +123,7 @@ export function AuditPage() {
   }, [showToast]);
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Audit Log"
         subtitle="Complete audit trail of all actions across the platform"

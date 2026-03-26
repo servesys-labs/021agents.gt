@@ -220,7 +220,7 @@ export function SkillsPage() {
   );
 
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Skills Library"
         subtitle="Reusable prompt templates, tool chains, and workflows"

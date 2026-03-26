@@ -1823,7 +1823,7 @@ function HighlightedEventText({ text, matches }: { text: string; matches: PiiMat
 
 export function GuardrailsPage() {
   return (
-    <div className="max-w-[1400px] mx-auto">
+    <div>
       <PageHeader
         title="Guardrails & DLP"
         subtitle="PII detection, prompt injection defense, output safety scanning, and data loss prevention"
