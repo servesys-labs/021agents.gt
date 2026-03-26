@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link } from "react-router-dom";
 import {
   Plus,
   Users,
@@ -1054,12 +1054,20 @@ export const SettingsPage = () => {
               <p className="text-xs text-text-muted uppercase tracking-wide">Plan</p>
               <p className="text-sm font-semibold text-text-primary mt-0.5">{plan}</p>
             </div>
-            <button
-              className="btn btn-secondary text-xs"
-              onClick={() => void handleManageSubscription()}
-            >
-              Manage Subscription <ExternalLink size={12} />
-            </button>
+            <div className="flex items-center gap-2">
+              <Link to="/billing/pricing" className="btn btn-secondary text-xs">
+                <CreditCard size={12} /> Pricing
+              </Link>
+              <Link to="/billing/invoices" className="btn btn-secondary text-xs">
+                Invoices
+              </Link>
+              <button
+                className="btn btn-secondary text-xs"
+                onClick={() => void handleManageSubscription()}
+              >
+                Manage Subscription <ExternalLink size={12} />
+              </button>
+            </div>
           </div>
         </>
       )}

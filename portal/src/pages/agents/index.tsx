@@ -13,6 +13,7 @@ import {
   LayoutGrid,
   List,
   Clock,
+  Wrench,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -315,10 +316,16 @@ export const AgentsPage = () => {
         liveLabel="Live"
         onRefresh={() => void agentsQuery.refetch()}
         actions={
-          <button className="btn btn-primary text-xs" onClick={openCreate}>
-            <Plus size={14} />
-            New Agent
-          </button>
+          <div className="flex items-center gap-2">
+            <button className="btn btn-secondary text-xs" onClick={() => navigate("/tools")}>
+              <Wrench size={14} />
+              Browse Tools
+            </button>
+            <button className="btn btn-primary text-xs" onClick={openCreate}>
+              <Plus size={14} />
+              New Agent
+            </button>
+          </div>
         }
       />
 
