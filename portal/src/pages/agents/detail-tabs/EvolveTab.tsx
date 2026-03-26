@@ -64,7 +64,8 @@ export const EvolveTab = ({ agentName }: { agentName: string }) => {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisDays, setAnalysisDays] = useState(7);
   const [expandedProposal, setExpandedProposal] = useState<string | null>(null);
-  const [reviewNote, setReviewNote] = useState("");
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
+  const [confirmApply, setConfirmApply] = useState<string | null>(null);
 
   const reportQuery = useApiQuery<{ report: AnalysisReport | null; sessions_analyzed?: number }>(
     `/api/v1/evolve/${agentName}/report`,
@@ -97,21 +98,24 @@ export const EvolveTab = ({ agentName }: { agentName: string }) => {
   }
 
   async function approveProposal(proposalId: string) {
-    await apiPost(`/api/v1/evolve/${agentName}/proposals/${proposalId}/approve`, { note: reviewNote });
-    setReviewNote("");
+    const note = reviewNotes[proposalId] || "";
+    await apiPost(`/api/v1/evolve/${agentName}/proposals/${proposalId}/approve`, { note });
+    setReviewNotes((prev) => { const n = { ...prev }; delete n[proposalId]; return n; });
     proposalsQuery.refetch();
     ledgerQuery.refetch();
   }
 
   async function rejectProposal(proposalId: string) {
-    await apiPost(`/api/v1/evolve/${agentName}/proposals/${proposalId}/reject`, { note: reviewNote });
-    setReviewNote("");
+    const note = reviewNotes[proposalId] || "";
+    await apiPost(`/api/v1/evolve/${agentName}/proposals/${proposalId}/reject`, { note });
+    setReviewNotes((prev) => { const n = { ...prev }; delete n[proposalId]; return n; });
     proposalsQuery.refetch();
     ledgerQuery.refetch();
   }
 
   async function applyProposal(proposalId: string) {
     await apiPost(`/api/v1/evolve/${agentName}/proposals/${proposalId}/apply`);
+    setConfirmApply(null);
     proposalsQuery.refetch();
     ledgerQuery.refetch();
   }
@@ -312,8 +316,8 @@ export const EvolveTab = ({ agentName }: { agentName: string }) => {
                         <input
                           type="text"
                           placeholder="Review note (optional)"
-                          value={reviewNote}
-                          onChange={(e) => setReviewNote(e.target.value)}
+                          value={reviewNotes[proposal.proposal_id] || ""}
+                          onChange={(e) => setReviewNotes((prev) => ({ ...prev, [proposal.proposal_id]: e.target.value }))}
                           className="flex-1 text-xs bg-surface-base border border-border-default rounded px-2 py-1 text-text-secondary"
                         />
                         <button
@@ -356,12 +360,21 @@ export const EvolveTab = ({ agentName }: { agentName: string }) => {
                       <span className="text-[10px] text-text-muted">— {proposal.review_note}</span>
                     )}
                   </div>
-                  <button
-                    onClick={() => applyProposal(proposal.proposal_id)}
-                    className="btn btn-primary text-xs"
-                  >
-                    Apply
-                  </button>
+                  {confirmApply === proposal.proposal_id ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-status-error font-semibold">This will modify the agent config.</span>
+                      <button onClick={() => applyProposal(proposal.proposal_id)} className="btn btn-primary text-xs">
+                        Confirm
+                      </button>
+                      <button onClick={() => setConfirmApply(null)} className="btn btn-ghost text-xs">
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmApply(proposal.proposal_id)} className="btn btn-primary text-xs">
+                      Apply
+                    </button>
+                  )}
                 </div>
               ))}
           </div>

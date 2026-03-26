@@ -229,19 +229,8 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
   const currentConfig = safeJsonParse(agentRows[0].config_json) || {};
   const modification = safeJsonParse(proposal.config_diff_json) || {};
 
-  // Apply modification to config (shallow merge for now)
-  const newConfig = { ...currentConfig };
-  for (const [key, value] of Object.entries(modification)) {
-    if (key === "tools" && typeof value === "object" && (value as any).remove) {
-      // Remove tools
-      const toRemove = new Set((value as any).remove);
-      newConfig.tools = (currentConfig.tools || []).filter((t: string) => !toRemove.has(t));
-    } else if (key === "system_prompt" && typeof value === "object" && (value as any).append) {
-      newConfig.system_prompt = (currentConfig.system_prompt || "") + (value as any).append;
-    } else if (typeof value !== "object" || value === null) {
-      newConfig[key] = value;
-    }
-  }
+  // Apply modification to config (deep merge with special-case handling)
+  const newConfig = deepMergeConfig(currentConfig, modification);
 
   // Update agent config
   const now = Date.now() / 1000;
@@ -292,6 +281,55 @@ function safeJsonParse(val: unknown): any {
   if (val === null || val === undefined) return undefined;
   if (typeof val === "object") return val;
   try { return JSON.parse(String(val)); } catch { return undefined; }
+}
+
+/**
+ * Deep merge a config modification into an existing config.
+ * Handles special cases: tools.remove, system_prompt.append, nested objects like governance.
+ */
+function deepMergeConfig(
+  current: Record<string, any>,
+  modification: Record<string, any>,
+): Record<string, any> {
+  const result = { ...current };
+
+  for (const [key, value] of Object.entries(modification)) {
+    // Special: tools.remove — remove specific tools from array
+    if (key === "tools" && typeof value === "object" && value !== null && (value as any).remove) {
+      const toRemove = new Set((value as any).remove);
+      result.tools = (current.tools || []).filter((t: string) => !toRemove.has(t));
+      continue;
+    }
+
+    // Special: system_prompt.append — append to existing prompt
+    if (key === "system_prompt" && typeof value === "object" && value !== null && (value as any).append) {
+      result.system_prompt = (current.system_prompt || "") + (value as any).append;
+      continue;
+    }
+
+    // Special: system_prompt.review / .improve_quality — skip (advisory only)
+    if (key === "system_prompt" && typeof value === "object" && value !== null &&
+        ((value as any).review || (value as any).improve_quality)) {
+      continue;
+    }
+
+    // Special: model.evaluate_alternatives — skip (advisory only)
+    if (key === "model" && typeof value === "object" && value !== null && (value as any).evaluate_alternatives) {
+      continue;
+    }
+
+    // Deep merge nested objects (e.g., governance, memory, routing)
+    if (typeof value === "object" && value !== null && !Array.isArray(value) &&
+        typeof current[key] === "object" && current[key] !== null && !Array.isArray(current[key])) {
+      result[key] = deepMergeConfig(current[key], value);
+      continue;
+    }
+
+    // Direct value assignment
+    result[key] = value;
+  }
+
+  return result;
 }
 
 evolveRoutes.get("/:agent_name/proposals", requireScope("evolve:read"), async (c) => {
