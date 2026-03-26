@@ -53,7 +53,7 @@ async def create_plan(
     moderate_model: str,
     complex_model: str,
     tool_call_model: str = "",
-    provider: str = "gmi",
+    provider: str = "openrouter",
 ):
     """Create a custom LLM plan."""
     try:

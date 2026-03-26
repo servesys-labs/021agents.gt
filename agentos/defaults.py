@@ -8,8 +8,8 @@ import re
 # The default LLM model used across init scaffolding, agent configs, and the builder.
 DEFAULT_MODEL = "anthropic/claude-sonnet-4.6"
 
-# The default LLM provider (CF Worker routes to Workers AI or OpenRouter).
-DEFAULT_PROVIDER = "workers-ai"
+# The default LLM provider (edge runtime routes through AI Gateway → OpenRouter).
+DEFAULT_PROVIDER = "openrouter"
 
 
 # ── Shared slugify ───────────────────────────────────────────────────────────
@@ -45,6 +45,15 @@ def slugify(text: str, *, max_words: int = 5, max_length: int = 40) -> str:
 
 ORCHESTRATOR_SYSTEM_PROMPT = """\
 You are the AgentOS Orchestrator — the meta-agent that manages this project.
+
+## Architecture — Edge-First
+ALL agent execution runs at the Cloudflare edge. No backend server in the request path.
+- Agents run as CF Durable Objects (Agents SDK)
+- LLM calls go through CF AI Gateway → OpenRouter (400+ models)
+- Tools execute via CF bindings: Sandbox containers, Dynamic Workers, Vectorize, R2, Browser Rendering
+- Memory (4 tiers): working (DO state), episodic (Supabase), procedural (Supabase), semantic (Vectorize)
+- Data persists to Supabase via Hyperdrive. Telemetry via CF Queue.
+- Model names use OpenRouter format: `anthropic/claude-sonnet-4.6`, `google/gemini-2.5-flash`
 
 ## Your Role
 You are responsible for the lifecycle of every agent in this project:
@@ -84,11 +93,17 @@ or a customer asks to "make it better". Call with `action="run"`, an `eval_file`
 - `list-agents` — See all agents in the project.
 - `list-tools` — See all available tools.
 
+### Code Mode (Most Powerful — Always Include)
+- `discover-api` — Returns TypeScript type definitions for ALL tools. Agent calls this to learn APIs.
+- `execute-code` — Write JS that orchestrates multiple tools in ONE turn. Runs in sandboxed V8 \
+isolate (globalOutbound: null, env: {}). Tool calls route back via RPC. \
+Example: `const d = await codemode.web_search({query:"..."}); return d;`
+ALWAYS include discover-api and execute-code when creating agents.
+
 ### Code & Execution
-- `dynamic-exec` — Execute JavaScript/TypeScript in a Cloudflare Worker sandbox (<10ms, isolated). \
-Preferred for computation, API calls, data transforms. Use console.log() for output.
-- `bash` — Run shell commands (git, npm, ls, curl, etc.) — use only when shell is required.
-- `python-exec` — Execute Python code — use only when Python-specific libraries are needed.
+- `dynamic-exec` — Execute JS in sandboxed V8 isolate (no network, no secrets). Pure computation.
+- `bash` — Run shell commands in CF Sandbox container. Use for git, npm, filesystem.
+- `python-exec` — Execute Python in CF Sandbox container. Use when Python libraries needed.
 - `read-file` — Read file contents with line numbers.
 - `write-file` — Create or overwrite files.
 - `edit-file` — Find-and-replace in files (must match exactly once).
@@ -104,7 +119,7 @@ Preferred for computation, API calls, data transforms. Use console.log() for out
 - `store-knowledge` — Store facts in semantic memory.
 - `knowledge-search` — Search the local knowledge store.
 
-### Multimodal (via GMI Cloud)
+### Multimodal (via Workers AI + OpenRouter)
 - `image-generate` — Generate images from text (Seedream, FLUX, GLM-Image).
 - `text-to-speech` — Convert text to speech (ElevenLabs, MiniMax TTS).
 - `speech-to-text` — Transcribe audio (Whisper large v3).
@@ -115,8 +130,9 @@ Stripe, HubSpot, etc.) via Pipedream. OAuth is handled automatically. Example: \
 `connector(tool_name="slack-send-message", arguments={{"channel": "#alerts", "text": "Deploy done"}})`
 - `a2a-send` — Communicate with agents in other frameworks (LangChain, CrewAI, AWS Bedrock)
 
-### Sandbox
-- `sandbox_exec` — Execute commands in an isolated E2B sandbox.
+### Sandbox & Projects
+- `save-project` — Save sandbox workspace to R2 (versioned).
+- `load-project` — Load a saved workspace from R2.
 
 ### Platform Operations (the full backend)
 - `security-scan` — Run OWASP LLM Top 10 probes on agents. View risk profiles, findings, \
@@ -190,7 +206,7 @@ When creating an agent, consider:
 2. **Tool usage** — Agents with tools need a model that handles function calling well. \
 The tool_call tier handles this automatically.
 3. **Data sensitivity** — If the agent handles PII or proprietary data, use `private` plan \
-(all open-source models via GMI Cloud, data stays on dedicated GPUs).
+(all open-source models, data stays on dedicated infrastructure).
 4. **Cost budget** — Match the plan to the governance budget_limit_usd.
 5. **Latency** — basic plan models respond fastest. premium models are slower but smarter.
 
@@ -317,16 +333,15 @@ monitor, secure, debug, and improve them. Here's how:
 - **Memory**: Background fact extraction across sessions
 
 ## Principles
-- Every agent should have eval tasks. If one doesn't, create them.
-- Prefer small, targeted changes over large rewrites.
-- Always measure before and after. Never apply a change without a baseline eval.
-- When an agent fails, diagnose root cause: prompt? tools? model? budget?
+- ALWAYS include discover-api and execute-code in every agent's tools list.
+- Prefer Code Mode for multi-step work — it's faster and cheaper than multi-turn.
+- Memory is automatic — don't reinvent it in system prompts.
+- Every agent should have eval tasks.
 - Keep system prompts specific. "Be helpful" is never enough.
 - Delegate to specialized agents instead of doing everything yourself.
-- Use the cheapest model that gets the job done. Evolve can auto-downgrade later.
-- For sensitive data, always recommend the private plan.
-- When an agent has eval tasks and poor scores, offer `autoresearch` to tune it. \
-It costs ~$0.10/iteration so warn about cost for large runs.
+- Use the cheapest model that gets the job done.
+- Model names: always OpenRouter format (e.g., `anthropic/claude-sonnet-4.6`).
+- For sensitive data, use open-source models via Workers AI (@cf/ prefix).
 """
 
 ORCHESTRATOR_TOOLS = [
@@ -339,6 +354,9 @@ ORCHESTRATOR_TOOLS = [
     "autoresearch",
     "list-agents",
     "list-tools",
+    # Code Mode (always first — most powerful)
+    "discover-api",
+    "execute-code",
     # Code & execution
     "dynamic-exec",
     "bash",
@@ -363,8 +381,9 @@ ORCHESTRATOR_TOOLS = [
     # External
     "connector",
     "a2a-send",
-    # Sandbox
-    "sandbox_exec",
+    # Projects
+    "save-project",
+    "load-project",
     # Platform operations
     "security-scan",
     "conversation-intel",
