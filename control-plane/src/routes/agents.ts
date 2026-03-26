@@ -773,9 +773,11 @@ agentRoutes.post(
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-    // Generate config via Workers AI
+    // Generate config via Workers AI (plan-aware model selection)
     const config = await buildFromDescription(c.env.AI, req.description, {
       name: req.name || undefined,
+      hyperdrive: c.env.HYPERDRIVE,
+      orgId: user.org_id,
     });
 
     if (req.name) config.name = req.name;

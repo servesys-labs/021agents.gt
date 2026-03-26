@@ -140,7 +140,13 @@ export function CreateAgentPage() {
 
       const result = await apiPost<GeneratedConfig>(
         "/api/v1/agents/create-from-description",
-        { description: prompt.trim(), draft_only: true },
+        {
+          description: prompt.trim(),
+          draft_only: true,
+          tools: "auto",
+          include_gate_pack: true,
+          include_contracts_validate: true,
+        },
       );
 
       /* Clear timers and mark all done */

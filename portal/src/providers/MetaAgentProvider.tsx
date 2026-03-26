@@ -211,6 +211,7 @@ export function MetaAgentProvider({ children }: { children: ReactNode }) {
             description: prompt,
             draft_only: true,
             auto_graph: true,
+            tools: "auto",
           });
 
           const agent = result.agent;
