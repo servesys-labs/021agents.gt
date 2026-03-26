@@ -1,142 +1,77 @@
-import { Link } from "react-router-dom";
-import { Zap, Bot, HardDrive, ArrowUpRight } from "lucide-react";
+import { useApiQuery } from "../../lib/api";
 
-/* ── Types ──────────────────────────────────────────────────────── */
-
-interface QuotaItem {
-  label: string;
-  icon: React.ReactNode;
+type QuotaData = {
   used: number;
   limit: number;
   unit?: string;
-}
+};
 
-interface QuotaWidgetProps {
-  apiCalls: { used: number; limit: number };
-  agents: { used: number; limit: number };
-  storage: { used: number; limit: number; unit?: string };
-  className?: string;
-}
+/**
+ * Quota usage indicator. Supports three variants:
+ * - default: compact icon-rail style for sidebar
+ * - compact: minimal bar only
+ * - card: wider dashboard-style with labels
+ */
+export function QuotaWidget({ compact = false, variant = "default" }: { compact?: boolean; variant?: "default" | "compact" | "card" }) {
+  const quotaQuery = useApiQuery<QuotaData>("/api/v1/billing/quota");
+  const quota = quotaQuery.data;
 
-/* ── Helpers ─────────────────────────────────────────────────────── */
+  if (!quota || quotaQuery.loading) return null;
 
-function getPercentage(used: number, limit: number): number {
-  if (limit <= 0) return 0;
-  return Math.min(Math.round((used / limit) * 100), 100);
-}
+  const pct = quota.limit > 0 ? Math.min(100, (quota.used / quota.limit) * 100) : 0;
+  const isWarning = pct >= 80;
+  const isCritical = pct >= 95;
 
-function getBarColor(pct: number): string {
-  if (pct >= 90) return "bg-status-error";
-  if (pct >= 75) return "bg-status-warning";
-  return "bg-status-live";
-}
+  const barColor = isCritical
+    ? "bg-status-error"
+    : isWarning
+      ? "bg-status-warning"
+      : "bg-accent";
 
-function getBarTrackAccent(pct: number): string {
-  if (pct >= 90) return "bg-status-error/10";
-  if (pct >= 75) return "bg-status-warning/10";
-  return "bg-status-live/10";
-}
+  const unit = quota.unit ?? "credits";
 
-function formatNumber(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
-}
-
-/* ── Component ──────────────────────────────────────────────────── */
-
-export function QuotaWidget({
-  apiCalls,
-  agents,
-  storage,
-  className = "",
-}: QuotaWidgetProps) {
-  const quotas: QuotaItem[] = [
-    {
-      label: "API Calls",
-      icon: <Zap size={14} />,
-      used: apiCalls.used,
-      limit: apiCalls.limit,
-    },
-    {
-      label: "Agents",
-      icon: <Bot size={14} />,
-      used: agents.used,
-      limit: agents.limit,
-    },
-    {
-      label: "Storage",
-      icon: <HardDrive size={14} />,
-      used: storage.used,
-      limit: storage.limit,
-      unit: storage.unit ?? "MB",
-    },
-  ];
-
-  const nearLimit = quotas.some(
-    (q) => getPercentage(q.used, q.limit) >= 75,
-  );
-
-  return (
-    <div
-      className={`card glass-light ${className}`}
-      role="region"
-      aria-label="Quota usage"
-    >
-      <div className="flex items-center justify-between mb-[var(--space-4)]">
-        <h3 className="text-[var(--text-xs)] font-semibold text-text-muted uppercase tracking-wide">
-          Usage
-        </h3>
-        {nearLimit && (
-          <Link
-            to="/billing/pricing"
-            className="inline-flex items-center gap-[var(--space-1)] text-[10px] font-semibold text-accent hover:text-accent-hover transition-colors min-h-[var(--touch-target-min)] px-[var(--space-2)]"
-          >
-            Upgrade
-            <ArrowUpRight size={10} />
-          </Link>
+  /* Card variant for dashboard */
+  if (variant === "card") {
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-text-secondary">{quota.used.toLocaleString()} / {quota.limit.toLocaleString()} {unit}</span>
+          <span className={`font-mono font-semibold ${isCritical ? "text-status-error" : isWarning ? "text-status-warning" : "text-text-primary"}`}>
+            {Math.round(pct)}%
+          </span>
+        </div>
+        <div className="h-2 rounded-full bg-surface-overlay overflow-hidden">
+          <div className={`h-full rounded-full ${barColor} transition-all`} style={{ width: `${pct}%` }} />
+        </div>
+        {isCritical && (
+          <p className="text-[10px] text-status-error">Approaching quota limit. Consider upgrading your plan.</p>
         )}
       </div>
+    );
+  }
 
-      <div className="space-y-[var(--space-4)]">
-        {quotas.map((quota) => {
-          const pct = getPercentage(quota.used, quota.limit);
-          const barColor = getBarColor(pct);
-          const trackAccent = getBarTrackAccent(pct);
-
-          return (
-            <div key={quota.label}>
-              <div className="flex items-center justify-between mb-[var(--space-1)]">
-                <div className="flex items-center gap-[var(--space-2)] text-[var(--text-xs)] text-text-secondary">
-                  <span className="text-text-muted">{quota.icon}</span>
-                  {quota.label}
-                </div>
-                <span className="text-[var(--text-xs)] text-text-muted font-mono">
-                  {formatNumber(quota.used)}
-                  <span className="text-text-muted/60"> / </span>
-                  {formatNumber(quota.limit)}
-                  {quota.unit ? ` ${quota.unit}` : ""}
-                </span>
-              </div>
-              <div
-                className={`progress-track h-1.5 ${trackAccent}`}
-                role="progressbar"
-                aria-valuenow={pct}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label={`${quota.label}: ${pct}% used`}
-              >
-                <div
-                  className={`h-full rounded-full transition-all duration-300 ${barColor}`}
-                  style={{ width: `${pct}%` }}
-                />
-              </div>
-            </div>
-          );
-        })}
+  /* Compact variant: bar only */
+  if (compact) {
+    return (
+      <div className="w-11 px-1.5" title={`${quota.used} / ${quota.limit} ${unit} used`}>
+        <div className="h-1 rounded-full bg-surface-overlay overflow-hidden">
+          <div className={`h-full rounded-full ${barColor} transition-all`} style={{ width: `${pct}%` }} />
+        </div>
       </div>
+    );
+  }
+
+  /* Default: sidebar icon-rail style */
+  return (
+    <div className="w-11 flex flex-col items-center gap-0.5 group relative" title={`${quota.used} / ${quota.limit} ${unit}`}>
+      <div className="w-7 h-1 rounded-full bg-surface-overlay overflow-hidden">
+        <div className={`h-full rounded-full ${barColor} transition-all`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-[8px] text-text-muted font-mono">{Math.round(pct)}%</span>
+      {/* Tooltip */}
+      <span className="absolute left-full ml-2 px-2 py-1 rounded-md bg-surface-overlay text-text-primary text-[11px] whitespace-nowrap opacity-0 pointer-events-none group-hover:opacity-100 transition-opacity z-50 shadow-dropdown border border-border-default">
+        {quota.used} / {quota.limit} {unit}
+      </span>
     </div>
   );
 }
-
-export { QuotaWidget as default };

@@ -20,8 +20,9 @@ import {
   Terminal,
   X,
   ArrowDown,
+  Globe,
 } from "lucide-react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams, Link } from "react-router-dom";
 
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { useToast } from "../../components/common/ToastProvider";
@@ -565,6 +566,17 @@ export function PlaygroundPage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* A2A link */}
+          <Link
+            to="/a2a/compose"
+            className="btn btn-ghost text-xs gap-1.5"
+            title="Compose A2A task"
+            aria-label="A2A Compose"
+          >
+            <Globe size={14} />
+            <span className="hidden sm:inline">A2A</span>
+          </Link>
+
           {/* Search toggle */}
           <button
             className="btn btn-ghost text-xs gap-1.5"
