@@ -114,7 +114,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
               aria-label={item.label}
               aria-current={isActive(item.path) ? "page" : undefined}
               title={item.label}
-              className={`relative flex items-center justify-center w-[36px] h-[36px] rounded-lg transition-colors group ${
+              className={`relative flex items-center justify-center w-11 h-11 rounded-lg transition-colors group ${
                 isActive(item.path)
                   ? "bg-accent-muted text-accent"
                   : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
@@ -137,7 +137,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
               to={item.path}
               aria-label={item.label}
               title={item.label}
-              className={`relative flex items-center justify-center w-[36px] h-[36px] rounded-lg transition-colors group ${
+              className={`relative flex items-center justify-center w-11 h-11 rounded-lg transition-colors group ${
                 isActive(item.path)
                   ? "bg-accent-muted text-accent"
                   : "text-text-muted hover:bg-surface-overlay hover:text-text-primary"
@@ -157,7 +157,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
             ) : (
               <button
                 onClick={() => setUserMenuOpen(!userMenuOpen)}
-                className="flex items-center justify-center w-[36px] h-[36px] rounded-lg bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors"
+                className="flex items-center justify-center w-11 h-11 rounded-lg bg-accent/20 text-accent text-xs font-bold hover:bg-accent/30 transition-colors"
                 aria-label={`Account menu for ${user?.email || "user"}`}
                 aria-haspopup="menu"
                 aria-expanded={userMenuOpen}
