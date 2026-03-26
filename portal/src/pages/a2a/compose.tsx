@@ -227,7 +227,7 @@ export function A2AComposePage() {
                 </div>
               </div>
 
-              {submitMutation.data.result && (
+              {submitMutation.data.result != null && (
                 <div>
                   <label className="block text-xs text-text-muted mb-1">
                     Result
@@ -235,7 +235,7 @@ export function A2AComposePage() {
                   <pre className="text-xs font-mono bg-surface-base border border-border-default rounded-md p-4 overflow-x-auto max-h-60">
                     {typeof submitMutation.data.result === "string"
                       ? submitMutation.data.result
-                      : JSON.stringify(submitMutation.data.result, null, 2)}
+                      : JSON.stringify(submitMutation.data.result, null, 2) as string}
                   </pre>
                 </div>
               )}

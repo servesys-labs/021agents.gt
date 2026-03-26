@@ -15,6 +15,7 @@ import {
   ThumbsUp,
   Wrench,
   Globe,
+  ChevronRight,
 } from "lucide-react";
 
 import { PageHeader } from "../../components/common/PageHeader";
@@ -113,24 +114,7 @@ export const DashboardPage = () => {
   if (!isLoading && !hasAgents) {
     return (
       <div>
-        <PageHeader
-          title="Dashboard"
-          subtitle="Control plane overview"
-          onRefresh={() => { void statsQuery.refetch(); void agentsQuery.refetch(); }}
-        />
         <OnboardingHero onNavigate={navigate} />
-
-        {/* Meta-agent assist for NL agent creation */}
-        <div className="max-w-3xl mx-auto mt-6">
-          <AssistPanel
-            heading="Or ask the Meta-Agent"
-            customSuggestions={[
-              { label: "Create a support agent", prompt: "Create a customer support agent with tools for order lookup, refund processing, and FAQ search" },
-              { label: "Create a data analyst", prompt: "Create a data analysis agent that can query databases, generate reports, and send summaries via email" },
-              { label: "Create a code reviewer", prompt: "Create a code review agent that analyzes pull requests, checks for security issues, and suggests improvements" },
-            ]}
-          />
-        </div>
       </div>
     );
   }
@@ -354,58 +338,87 @@ const onboardingSteps = [
 
 function OnboardingHero({ onNavigate }: { onNavigate: (path: string) => void }) {
   return (
-    <div className="max-w-3xl mx-auto py-8">
-      {/* Welcome card */}
-      <div className="card text-center py-10 mb-8">
-        <div className="w-14 h-14 rounded-2xl bg-accent/15 flex items-center justify-center mx-auto mb-4">
-          <Bot size={28} className="text-accent" />
+    <div className="max-w-5xl">
+      {/* ── Welcome header — compact, left-aligned ────────────── */}
+      <div className="flex items-start justify-between gap-6 mb-6">
+        <div className="flex items-center gap-4">
+          <div className="w-11 h-11 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
+            <Bot size={22} className="text-accent" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-text-primary">
+              Welcome to AgentOS
+            </h1>
+            <p className="text-sm text-text-muted mt-0.5">
+              Build, deploy, and monitor AI agents in 4 steps
+            </p>
+          </div>
         </div>
-        <h2 className="text-xl font-bold text-text-primary mb-2">
-          Welcome to AgentOS
-        </h2>
-        <p className="text-sm text-text-secondary max-w-md mx-auto mb-6">
-          Build, deploy, and monitor AI agents with built-in security, compliance, and observability. Get started in 4 steps.
-        </p>
         <button
-          className="btn btn-primary text-sm px-6"
+          className="btn btn-primary text-xs flex-shrink-0"
           onClick={() => onNavigate("/agents/new")}
         >
-          <Bot size={16} />
-          Create Your First Agent
+          <Bot size={14} />
+          Create Agent
         </button>
       </div>
 
-      {/* Step cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {onboardingSteps.map((s) => (
+      {/* ── Steps — single horizontal row with connectors ────── */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+        {onboardingSteps.map((s, i) => (
           <button
             key={s.step}
-            className="card card-hover text-left p-5 transition-all hover:border-accent/30 group"
+            className="card card-hover text-left p-4 transition-all hover:border-accent/30 group relative stagger-item"
+            style={{ "--stagger-index": i } as CSSProperties}
             onClick={() => onNavigate(s.path)}
           >
-            <div className="flex items-start gap-3">
-              <div className={`p-2 rounded-lg ${s.bg} flex-shrink-0`}>
-                <s.icon size={18} className={s.color} />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-[10px] font-bold text-text-muted bg-surface-overlay rounded-full w-5 h-5 flex items-center justify-center">
-                    {s.step}
-                  </span>
-                  <h3 className="text-sm font-semibold text-text-primary">
-                    {s.title}
-                  </h3>
-                </div>
-                <p className="text-xs text-text-muted leading-relaxed mb-3">
-                  {s.description}
-                </p>
-                <span className="text-xs text-accent font-medium group-hover:underline">
-                  {s.action} &rarr;
-                </span>
+            {/* Step number + icon row */}
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-[9px] font-bold text-text-muted bg-surface-overlay rounded-full w-4 h-4 flex items-center justify-center flex-shrink-0">
+                {s.step}
+              </span>
+              <div className={`p-1.5 rounded-md ${s.bg}`}>
+                <s.icon size={14} className={s.color} />
               </div>
             </div>
+            <h3 className="text-xs font-semibold text-text-primary mb-1">
+              {s.title}
+            </h3>
+            <p className="text-[11px] text-text-muted leading-relaxed mb-2">
+              {s.description}
+            </p>
+            <span className="text-[11px] text-accent font-medium group-hover:underline">
+              {s.action} &rarr;
+            </span>
+
+            {/* Connector arrow between steps */}
+            {i < onboardingSteps.length - 1 && (
+              <div className="hidden lg:flex absolute -right-2 top-1/2 -translate-y-1/2 z-10 w-4 h-4 rounded-full bg-surface-raised border border-border-default items-center justify-center">
+                <ChevronRight size={8} className="text-text-muted" />
+              </div>
+            )}
           </button>
         ))}
+      </div>
+
+      {/* ── Meta-Agent — integrated as secondary path ─────────── */}
+      <div className="card p-4 flex items-center gap-4">
+        <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">
+          <Sparkles size={14} className="text-accent" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-medium text-text-secondary">
+            Or describe what you need and the Meta-Agent will build it
+          </p>
+        </div>
+        <AssistPanel
+          compact
+          customSuggestions={[
+            { label: "Support agent", prompt: "Create a customer support agent with tools for order lookup, refund processing, and FAQ search" },
+            { label: "Data analyst", prompt: "Create a data analysis agent that can query databases, generate reports, and send summaries via email" },
+            { label: "Code reviewer", prompt: "Create a code review agent that analyzes pull requests, checks for security issues, and suggests improvements" },
+          ]}
+        />
       </div>
     </div>
   );

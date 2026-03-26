@@ -35,9 +35,14 @@ export function ToolsPage() {
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
 
-  const { data, loading, error, refetch } = useApiQuery<Tool[]>("/api/v1/tools");
+  const { data, loading, error, refetch } = useApiQuery<{ tools: Tool[] }>("/api/v1/tools");
 
-  const tools = useMemo(() => data ?? [], [data]);
+  const tools: Tool[] = useMemo(() => {
+    if (!data) return [];
+    if (Array.isArray(data)) return data as unknown as Tool[];
+    if (Array.isArray(data.tools)) return data.tools;
+    return [];
+  }, [data]);
 
   const categories = useMemo(() => {
     const cats = new Set<string>();
@@ -72,7 +77,7 @@ export function ToolsPage() {
         actions={
           <button
             className="btn btn-primary text-xs"
-            onClick={() => navigate("/tools/create")}
+            onClick={() => navigate("/tools/new")}
           >
             <Plus size={14} />
             Register Tool
@@ -135,7 +140,7 @@ export function ToolsPage() {
               !search && categoryFilter === "all" ? (
                 <button
                   className="btn btn-primary text-xs"
-                  onClick={() => navigate("/tools/create")}
+                  onClick={() => navigate("/tools/new")}
                 >
                   <Plus size={14} />
                   Register Tool
