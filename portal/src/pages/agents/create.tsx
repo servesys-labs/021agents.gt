@@ -13,8 +13,22 @@ import {
   X,
 } from "lucide-react";
 import { apiPost, apiPut } from "../../lib/api";
+import { CollapsibleSection } from "../../components/common/CollapsibleSection";
 
 /* ── Types ──────────────────────────────────────────────────────── */
+
+type AgentGraph = {
+  id: string;
+  nodes: Array<{ id: string; kind: string; async?: boolean; breakpoint?: boolean; tools?: string[]; agent_name?: string }>;
+  edges: Array<{ source: string; target: string }>;
+};
+type SubAgent = { name: string; description: string; system_prompt: string; model: string; tools: string[]; max_turns?: number };
+type Skill = { name: string; description: string; category: string; content: string };
+type CodemodeSnippet = { name: string; description: string; code: string; scope?: string };
+type Guardrail = { name: string; type: string; rule: string; action: string };
+type EvalConfig = { scenarios: string[]; metrics?: string[]; thresholds?: Record<string, number> };
+type ReleaseStrategy = { initial_channel: string; canary_percent: number; promote_after: string };
+type McpConnector = { app: string; reason: string; recommended_tools: string[] };
 
 type GeneratedConfig = {
   name: string;
@@ -26,9 +40,19 @@ type GeneratedConfig = {
     budget_limit_usd: number;
     blocked_tools: string[];
     require_confirmation_for_destructive: boolean;
+    require_confirmation_for?: string[];
   };
   graph?: GraphNode[];
   gate_pack?: GatePackResult;
+  // Full package fields from meta-agent
+  agent_graph?: AgentGraph;
+  sub_agents?: SubAgent[];
+  skills?: Skill[];
+  codemode_snippets?: CodemodeSnippet[];
+  guardrails?: Guardrail[];
+  eval_config?: EvalConfig;
+  release_strategy?: ReleaseStrategy;
+  mcp_connectors?: McpConnector[];
 };
 
 type GraphNode = {
@@ -53,27 +77,29 @@ type GenerationStep = {
 /* ── Models ─────────────────────────────────────────────────────── */
 
 const MODELS = [
-  "gpt-4.1-mini",
-  "gpt-4.1-nano",
-  "gpt-4o",
-  "gpt-4o-mini",
-  "claude-sonnet-4-20250514",
-  "claude-3.5-haiku",
-  "gemini-2.5-flash",
+  "anthropic/claude-sonnet-4-6",
+  "anthropic/claude-haiku-4-5",
+  "google/gemini-2.5-flash",
+  "openai/gpt-4.1-mini",
+  "openai/gpt-4.1-nano",
+  "openai/gpt-4o",
+  "@cf/moonshotai/kimi-k2.5",
 ];
 
-const AVAILABLE_TOOLS = [
-  "web_search",
-  "sandbox_exec",
-  "file_read",
-  "file_write",
-  "slack_send_message",
-  "search_docs",
-  "create_ticket",
-  "query_database",
-  "send_email",
-  "http_request",
-];
+const TOOL_CATEGORIES: Record<string, string[]> = {
+  "Search & Research": ["web-search", "browse", "web-crawl", "browser-render", "knowledge-search", "store-knowledge", "autoresearch"],
+  "Code & Execution": ["bash", "python-exec", "sandbox-exec", "dynamic-exec"],
+  "File Operations": ["read-file", "write-file", "edit-file", "view-file", "search-file", "find-file", "grep", "glob"],
+  "Communication": ["send-email", "a2a-send", "route-to-agent", "submit-feedback"],
+  "Data & APIs": ["http-request", "db-query", "db-batch", "db-report", "query-pipeline", "send-to-pipeline"],
+  "Media": ["image-generate", "text-to-speech"],
+  "Platform Ops": ["create-agent", "run-agent", "eval-agent", "evolve-agent", "list-agents", "list-tools", "security-scan", "conversation-intel", "manage-issues", "compliance", "view-costs", "view-traces", "manage-releases"],
+  "DevOps": ["git-init", "git-status", "git-diff", "git-commit", "git-log", "git-branch", "git-stash"],
+  "Scheduling": ["create-schedule", "list-schedules", "manage-workflows", "todo"],
+  "Advanced": ["run-codemode", "manage-rag", "manage-mcp", "manage-secrets", "discover-api"],
+};
+
+const ALL_TOOLS = Object.values(TOOL_CATEGORIES).flat();
 
 /* ── Stage enum ─────────────────────────────────────────────────── */
 
@@ -94,11 +120,11 @@ export function CreateAgentPage() {
 
   /* Generation steps */
   const [steps, setSteps] = useState<GenerationStep[]>([
-    { label: "Generating config", status: "pending" },
-    { label: "Detecting tools", status: "pending" },
-    { label: "Building graph", status: "pending" },
-    { label: "Linting", status: "pending" },
-    { label: "Checking compliance", status: "pending" },
+    { label: "Analyzing requirements", status: "pending" },
+    { label: "Designing agent & graph", status: "pending" },
+    { label: "Selecting tools & connectors", status: "pending" },
+    { label: "Generating skills & codemode", status: "pending" },
+    { label: "Running lint & compliance", status: "pending" },
   ]);
 
   /* ── Generate handler ──────────────────────────────────────────── */
@@ -109,11 +135,11 @@ export function CreateAgentPage() {
     setError(null);
 
     const newSteps: GenerationStep[] = [
-      { label: "Generating config", status: "running" },
-      { label: "Detecting tools", status: "pending" },
-      { label: "Building graph", status: "pending" },
-      { label: "Linting", status: "pending" },
-      { label: "Checking compliance", status: "pending" },
+      { label: "Analyzing requirements", status: "running" },
+      { label: "Designing agent & graph", status: "pending" },
+      { label: "Selecting tools & connectors", status: "pending" },
+      { label: "Generating skills & codemode", status: "pending" },
+      { label: "Running lint & compliance", status: "pending" },
     ];
     setSteps([...newSteps]);
 
@@ -133,10 +159,10 @@ export function CreateAgentPage() {
         );
       };
 
-      advanceStep(1, 600);
-      advanceStep(2, 1400);
-      advanceStep(3, 2200);
-      advanceStep(4, 3000);
+      advanceStep(1, 1500);
+      advanceStep(2, 3500);
+      advanceStep(3, 5500);
+      advanceStep(4, 7500);
 
       const result = await apiPost<GeneratedConfig>(
         "/api/v1/agents/create-from-description",
@@ -178,6 +204,15 @@ export function CreateAgentPage() {
           contracts: "pending",
           rollout: "pending",
         },
+        // Package fields
+        agent_graph: result.agent_graph ?? undefined,
+        sub_agents: result.sub_agents ?? [],
+        skills: result.skills ?? [],
+        codemode_snippets: result.codemode_snippets ?? [],
+        guardrails: result.guardrails ?? [],
+        eval_config: result.eval_config ?? undefined,
+        release_strategy: result.release_strategy ?? undefined,
+        mcp_connectors: result.mcp_connectors ?? [],
       };
 
       setConfig(finalConfig);
@@ -442,15 +477,15 @@ function ReviewStage({
 }) {
   const deployRef = useRef<HTMLDivElement>(null);
 
-  /* Close deploy menu on outside click */
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
+    if (!deployMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
       if (deployRef.current && !deployRef.current.contains(e.target as Node)) {
         setDeployMenuOpen(false);
       }
     };
-    if (deployMenuOpen) document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
   }, [deployMenuOpen, setDeployMenuOpen]);
 
   const updateField = <K extends keyof GeneratedConfig>(key: K, value: GeneratedConfig[K]) => {
@@ -467,67 +502,37 @@ function ReviewStage({
   return (
     <div>
       {/* Header */}
-      <div className="flex items-center justify-between mb-[var(--space-6)]">
+      <div className="flex items-center justify-between mb-6">
         <div>
-          <h1 className="text-[var(--text-lg)] font-bold text-text-primary">
+          <h1 className="text-lg font-bold text-text-primary">
             Review: {config.name}
           </h1>
-          <p className="text-[var(--text-sm)] text-text-muted mt-[var(--space-1)]">
+          <p className="text-sm text-text-muted mt-1">
             Review and configure before testing or deploying
           </p>
         </div>
-        <div className="flex items-center gap-[var(--space-3)]">
-          <button
-            onClick={onDiscard}
-            className="btn btn-ghost min-h-[var(--touch-target-min)] text-text-muted hover:text-status-error"
-          >
-            <X size={16} />
-            Discard
+        <div className="flex items-center gap-3">
+          <button onClick={onDiscard} className="btn btn-ghost min-h-[var(--touch-target-min)] text-text-muted hover:text-status-error">
+            <X size={16} /> Discard
           </button>
-          <button
-            onClick={onSaveConfig}
-            className="btn btn-secondary min-h-[var(--touch-target-min)]"
-          >
-            <Save size={16} />
-            Save
+          <button onClick={onSaveConfig} className="btn btn-secondary min-h-[var(--touch-target-min)]">
+            <Save size={16} /> Save
           </button>
-          <button
-            onClick={onSaveAndTest}
-            className="btn btn-primary min-h-[var(--touch-target-min)]"
-          >
-            <Play size={16} />
-            Save & Test
+          <button onClick={onSaveAndTest} className="btn btn-primary min-h-[var(--touch-target-min)]">
+            <Play size={16} /> Save & Test
           </button>
-
-          {/* Deploy dropdown */}
           <div className="relative" ref={deployRef}>
             <button
               onClick={() => setDeployMenuOpen(!deployMenuOpen)}
               className="btn btn-primary min-h-[var(--touch-target-min)] bg-status-live hover:bg-status-live/90"
             >
-              <Rocket size={16} />
-              Deploy
-              <ChevronDown size={14} />
+              <Rocket size={16} /> Deploy
+              <ChevronDown size={12} className={`transition-transform ${deployMenuOpen ? "rotate-180" : ""}`} />
             </button>
             {deployMenuOpen && (
-              <div className="absolute right-0 top-full mt-[var(--space-1)] w-48 rounded-lg glass-dropdown border border-border-default shadow-dropdown z-50">
-                <button
-                  onClick={() => {
-                    setDeployMenuOpen(false);
-                    onDeploy();
-                  }}
-                  className="w-full text-left px-[var(--space-4)] py-[var(--space-3)] text-[var(--text-sm)] text-text-primary hover:bg-surface-overlay transition-colors min-h-[var(--touch-target-min)]"
-                >
-                  Deploy to Production
-                </button>
-                <button
-                  onClick={() => {
-                    setDeployMenuOpen(false);
-                    onDeploy();
-                  }}
-                  className="w-full text-left px-[var(--space-4)] py-[var(--space-3)] text-[var(--text-sm)] text-text-secondary hover:bg-surface-overlay transition-colors min-h-[var(--touch-target-min)]"
-                >
-                  Deploy as Canary
+              <div className="absolute right-0 mt-2 w-48 rounded-lg border border-border-default shadow-dropdown glass-dropdown z-50">
+                <button onClick={onDeploy} className="w-full text-left px-4 py-2 text-xs hover:bg-surface-overlay transition-colors rounded-lg">
+                  Deploy to staging
                 </button>
               </div>
             )}
@@ -535,143 +540,253 @@ function ReviewStage({
         </div>
       </div>
 
-      {/* Two-column layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-[var(--space-6)]">
-        {/* Left: Editable config */}
-        <div className="space-y-[var(--space-4)]">
-          {/* Name */}
-          <div className="card">
-            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-2)]">
-              Name
-            </label>
-            <input
-              type="text"
-              value={config.name}
-              onChange={(e) => updateField("name", e.target.value)}
-              className="text-[var(--text-sm)]"
-            />
-          </div>
-
-          {/* System prompt */}
-          <div className="card">
-            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-2)]">
-              System Prompt
-            </label>
-            <textarea
-              value={config.system_prompt}
-              onChange={(e) => updateField("system_prompt", e.target.value)}
-              rows={6}
-              className="text-[var(--text-sm)] font-mono"
-            />
-          </div>
-
-          {/* Model */}
-          <div className="card">
-            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-2)]">
-              Model
-            </label>
-            <select
-              value={config.model}
-              onChange={(e) => updateField("model", e.target.value)}
-              className="text-[var(--text-sm)]"
-            >
-              {MODELS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          {/* Tools checklist */}
-          <div className="card">
-            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
-              Tools
-            </label>
-            <div className="grid grid-cols-2 gap-[var(--space-2)]">
-              {AVAILABLE_TOOLS.map((tool) => (
-                <label
-                  key={tool}
-                  className="flex items-center gap-[var(--space-2)] p-[var(--space-2)] rounded-lg hover:bg-surface-overlay transition-colors cursor-pointer min-h-[var(--touch-target-min)]"
-                >
-                  <input
-                    type="checkbox"
-                    checked={config.tools.includes(tool)}
-                    onChange={() => toggleTool(tool)}
-                    className="w-4 h-4 rounded border-border-default bg-surface-base accent-accent"
-                  />
-                  <span className="text-[var(--text-xs)] text-text-secondary font-mono">
-                    {tool}
-                  </span>
-                </label>
-              ))}
+      {/* Sections */}
+      <div className="space-y-4">
+        {/* Agent Config */}
+        <CollapsibleSection title="Agent Config" defaultOpen>
+          <div className="space-y-4">
+            <div>
+              <label className="text-label text-text-muted mb-1 block">Name</label>
+              <input type="text" value={config.name} onChange={(e) => updateField("name", e.target.value)} />
+            </div>
+            <div>
+              <label className="text-label text-text-muted mb-1 block">System Prompt</label>
+              <textarea value={config.system_prompt} onChange={(e) => updateField("system_prompt", e.target.value)} rows={8} className="font-mono text-xs" />
+            </div>
+            <div>
+              <label className="text-label text-text-muted mb-1 block">Model</label>
+              <select value={config.model} onChange={(e) => updateField("model", e.target.value)}>
+                {MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+                {!MODELS.includes(config.model) && <option value={config.model}>{config.model}</option>}
+              </select>
             </div>
           </div>
+        </CollapsibleSection>
 
-          {/* Governance */}
-          <div className="card">
-            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
-              Governance
-            </label>
-            <div className="space-y-[var(--space-3)]">
-              <div>
-                <label className="block text-[var(--text-xs)] text-text-secondary mb-[var(--space-1)]">
-                  Budget Limit (USD)
-                </label>
-                <input
-                  type="number"
-                  min={0}
-                  step={0.5}
-                  value={config.governance.budget_limit_usd}
-                  onChange={(e) =>
-                    updateField("governance", {
-                      ...config.governance,
-                      budget_limit_usd: parseFloat(e.target.value),
-                    })
-                  }
-                  className="text-[var(--text-sm)]"
-                />
+        {/* Tools — categorized */}
+        <CollapsibleSection title="Tools" count={config.tools.length} defaultOpen>
+          <div className="space-y-4">
+            {Object.entries(TOOL_CATEGORIES).map(([category, tools]) => (
+              <div key={category}>
+                <p className="text-xs font-semibold text-text-muted mb-2">{category}</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-2">
+                  {tools.map((tool) => (
+                    <label key={tool} className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-surface-overlay cursor-pointer text-xs">
+                      <input type="checkbox" checked={config.tools.includes(tool)} onChange={() => toggleTool(tool)} />
+                      <span className={config.tools.includes(tool) ? "text-text-primary" : "text-text-muted"}>{tool}</span>
+                    </label>
+                  ))}
+                </div>
               </div>
-              <label className="flex items-center gap-[var(--space-2)] cursor-pointer min-h-[var(--touch-target-min)]">
-                <input
-                  type="checkbox"
-                  checked={config.governance.require_confirmation_for_destructive}
-                  onChange={(e) =>
-                    updateField("governance", {
-                      ...config.governance,
-                      require_confirmation_for_destructive: e.target.checked,
-                    })
-                  }
-                  className="w-4 h-4 rounded border-border-default bg-surface-base accent-accent"
-                />
-                <span className="text-[var(--text-xs)] text-text-secondary">
-                  Require confirmation for destructive actions
-                </span>
-              </label>
-            </div>
+            ))}
           </div>
-        </div>
+        </CollapsibleSection>
 
-        {/* Right: Graph + Gate Pack */}
-        <div className="space-y-[var(--space-4)]">
-          {/* Graph visualization */}
-          <div className="card">
-            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-4)]">
-              Agent Graph
+        {/* Execution Graph */}
+        {config.agent_graph && (
+          <CollapsibleSection title="Execution Graph" count={config.agent_graph.nodes.length}>
+            <div className="space-y-2">
+              {config.agent_graph.nodes.map((node) => (
+                <div key={node.id} className="flex items-center gap-3 px-3 py-2 bg-surface-base rounded-lg border border-border-default">
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-accent/10 text-accent">{node.kind}</span>
+                  <span className="text-xs text-text-primary font-mono">{node.id}</span>
+                  {node.async && <span className="px-1.5 py-0.5 text-[9px] bg-chart-blue/10 text-chart-blue rounded">async</span>}
+                  {node.breakpoint && <span className="px-1.5 py-0.5 text-[9px] bg-status-error/10 text-status-error rounded">breakpoint</span>}
+                  {node.agent_name && <span className="text-[10px] text-text-muted">{"\u2192"} {node.agent_name}</span>}
+                </div>
+              ))}
+              <div className="mt-3">
+                <p className="text-xs text-text-muted mb-2">Edges</p>
+                <div className="flex flex-wrap gap-2">
+                  {config.agent_graph.edges.map((edge, i) => (
+                    <span key={i} className="px-2 py-1 text-[10px] bg-surface-overlay rounded border border-border-default font-mono">
+                      {edge.source} {"\u2192"} {edge.target}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Sub-Agents */}
+        {(config.sub_agents?.length ?? 0) > 0 && (
+          <CollapsibleSection title="Sub-Agents" count={config.sub_agents!.length}>
+            <div className="space-y-3">
+              {config.sub_agents!.map((sa) => (
+                <div key={sa.name} className="p-3 bg-surface-base rounded-lg border border-border-default">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-sm font-semibold text-text-primary">{sa.name}</span>
+                    <span className="text-[10px] text-text-muted">max {sa.max_turns ?? 15} turns</span>
+                  </div>
+                  <p className="text-xs text-text-muted mb-2">{sa.description}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {sa.tools.map((t) => (
+                      <span key={t} className="px-1.5 py-0.5 text-[10px] bg-accent/10 text-accent rounded">{t}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Skills */}
+        {(config.skills?.length ?? 0) > 0 && (
+          <CollapsibleSection title="Skills" count={config.skills!.length}>
+            <div className="space-y-3">
+              {config.skills!.map((sk) => (
+                <div key={sk.name} className="p-3 bg-surface-base rounded-lg border border-border-default">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-sm font-semibold text-text-primary">{sk.name}</span>
+                    <span className="px-1.5 py-0.5 text-[9px] font-bold rounded-full bg-chart-blue/10 text-chart-blue">{sk.category}</span>
+                  </div>
+                  <p className="text-xs text-text-muted mb-2">{sk.description}</p>
+                  <pre className="text-[10px] text-text-muted bg-surface-overlay rounded p-2 overflow-x-auto max-h-32">{sk.content.slice(0, 500)}</pre>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Codemode Snippets */}
+        {(config.codemode_snippets?.length ?? 0) > 0 && (
+          <CollapsibleSection title="Codemode Snippets" count={config.codemode_snippets!.length}>
+            <div className="space-y-3">
+              {config.codemode_snippets!.map((sn) => (
+                <div key={sn.name} className="p-3 bg-surface-base rounded-lg border border-border-default">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-sm font-semibold text-text-primary">{sn.name}</span>
+                    <span className="px-1.5 py-0.5 text-[9px] bg-chart-purple/10 text-chart-purple rounded">{sn.scope ?? "agent"}</span>
+                  </div>
+                  <p className="text-xs text-text-muted mb-2">{sn.description}</p>
+                  <pre className="text-[10px] font-mono text-text-muted bg-surface-overlay rounded p-2 overflow-x-auto max-h-40">{sn.code.slice(0, 600)}</pre>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Governance */}
+        <CollapsibleSection title="Governance" defaultOpen>
+          <div className="space-y-3">
+            <div>
+              <label className="text-label text-text-muted mb-1 block">Budget Limit (USD)</label>
+              <input
+                type="number" min={0} step={1}
+                value={config.governance?.budget_limit_usd ?? 10}
+                onChange={(e) => updateField("governance", { ...config.governance, budget_limit_usd: Number(e.target.value) })}
+              />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+              <input
+                type="checkbox"
+                checked={config.governance?.require_confirmation_for_destructive ?? true}
+                onChange={(e) => updateField("governance", { ...config.governance, require_confirmation_for_destructive: e.target.checked })}
+              />
+              Require confirmation for destructive actions
             </label>
-            <GraphVisualization nodes={config.graph || []} />
+            {config.governance?.require_confirmation_for && (
+              <div>
+                <p className="text-xs text-text-muted mb-1">Requires confirmation for:</p>
+                <div className="flex flex-wrap gap-1">
+                  {config.governance.require_confirmation_for.map((r) => (
+                    <span key={r} className="px-2 py-1 text-[10px] bg-status-warning/10 text-status-warning rounded">{r}</span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
+        </CollapsibleSection>
 
-          {/* Gate pack status */}
-          {config.gate_pack && (
-            <div className="card">
-              <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
-                Gate Pack Status
-              </label>
-              <GatePackDisplay gatePack={config.gate_pack} />
+        {/* Guardrails */}
+        {(config.guardrails?.length ?? 0) > 0 && (
+          <CollapsibleSection title="Guardrails" count={config.guardrails!.length}>
+            <div className="space-y-2">
+              {config.guardrails!.map((gr, i) => (
+                <div key={i} className="flex items-center gap-3 px-3 py-2 bg-surface-base rounded-lg border border-border-default">
+                  <span className="px-2 py-0.5 text-[10px] font-bold rounded-full bg-status-warning/10 text-status-warning">{gr.type}</span>
+                  <span className="text-xs text-text-secondary flex-1">{gr.rule}</span>
+                  <span className="px-2 py-0.5 text-[10px] rounded bg-surface-overlay text-text-muted">{gr.action}</span>
+                </div>
+              ))}
             </div>
-          )}
-        </div>
+          </CollapsibleSection>
+        )}
+
+        {/* MCP Connectors */}
+        {(config.mcp_connectors?.length ?? 0) > 0 && (
+          <CollapsibleSection title="MCP Connectors" count={config.mcp_connectors!.length} defaultOpen>
+            <p className="text-xs text-text-muted mb-3">These integrations will be available after you connect them in Settings {"\u2192"} Connectors.</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {config.mcp_connectors!.map((mc) => (
+                <div key={mc.app} className="p-3 bg-surface-base rounded-lg border border-border-default">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-sm font-semibold text-text-primary capitalize">{mc.app.replace(/-/g, " ")}</span>
+                    <span className="px-1.5 py-0.5 text-[9px] bg-chart-green/10 text-chart-green rounded">connect later</span>
+                  </div>
+                  <p className="text-xs text-text-muted mb-2">{mc.reason}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {mc.recommended_tools.map((t) => (
+                      <span key={t} className="px-1.5 py-0.5 text-[10px] bg-surface-overlay text-text-muted rounded">{t}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Eval Config */}
+        {config.eval_config && (
+          <CollapsibleSection title="Eval Config">
+            <div className="space-y-2">
+              <div>
+                <p className="text-xs text-text-muted mb-1">Test Scenarios</p>
+                {config.eval_config.scenarios.map((s, i) => (
+                  <div key={i} className="px-3 py-2 bg-surface-base rounded-lg border border-border-default mb-1 text-xs text-text-secondary">{s}</div>
+                ))}
+              </div>
+              {config.eval_config.thresholds && (
+                <div>
+                  <p className="text-xs text-text-muted mb-1">Thresholds</p>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(config.eval_config.thresholds).map(([k, v]) => (
+                      <span key={k} className="px-2 py-1 text-[10px] bg-surface-overlay rounded font-mono">{k}: {v}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Release Strategy */}
+        {config.release_strategy && (
+          <CollapsibleSection title="Release Strategy">
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="text-label text-text-muted mb-1 block">Channel</label>
+                <input type="text" value={config.release_strategy.initial_channel} readOnly className="text-xs" />
+              </div>
+              <div>
+                <label className="text-label text-text-muted mb-1 block">Canary %</label>
+                <input type="number" value={config.release_strategy.canary_percent} readOnly className="text-xs" />
+              </div>
+              <div>
+                <label className="text-label text-text-muted mb-1 block">Promote After</label>
+                <input type="text" value={config.release_strategy.promote_after} readOnly className="text-xs" />
+              </div>
+            </div>
+          </CollapsibleSection>
+        )}
+
+        {/* Gate Pack */}
+        {config.gate_pack && (
+          <CollapsibleSection title="Gate Pack Status" defaultOpen>
+            <GatePackDisplay gatePack={config.gate_pack} />
+          </CollapsibleSection>
+        )}
       </div>
     </div>
   );

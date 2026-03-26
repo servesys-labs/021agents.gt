@@ -125,6 +125,126 @@ const PLATFORM_TOOLS = {
 /** All platform tool names. */
 export const PLATFORM_TOOL_NAMES = Object.keys(PLATFORM_TOOLS);
 
+/* ── Pipedream MCP Connector Catalog ────────────────────────────── */
+/*
+ * Top ~50 Pipedream apps organized by use case. The meta-agent uses this
+ * to recommend relevant third-party integrations during agent creation.
+ * OAuth is handled post-creation in the portal connectors page.
+ */
+
+const PIPEDREAM_APPS: Record<string, Array<{ app: string; tools: string[] }>> = {
+  "CRM & Sales": [
+    { app: "hubspot", tools: ["create-contact", "update-deal", "search-companies", "create-engagement"] },
+    { app: "salesforce", tools: ["query-records", "create-opportunity", "update-lead", "search-accounts"] },
+    { app: "pipedrive", tools: ["create-deal", "update-person", "search-activities"] },
+    { app: "close", tools: ["create-lead", "send-email", "log-activity"] },
+    { app: "apollo", tools: ["enrich-contact", "search-people", "get-organization"] },
+  ],
+  "Email": [
+    { app: "gmail", tools: ["send-email", "search-emails", "create-draft", "list-labels"] },
+    { app: "microsoft-outlook", tools: ["send-email", "search-messages", "create-event"] },
+    { app: "sendgrid", tools: ["send-email", "create-contact", "add-to-list"] },
+    { app: "mailchimp", tools: ["add-subscriber", "send-campaign", "search-members"] },
+  ],
+  "Communication & Chat": [
+    { app: "slack", tools: ["send-message", "create-channel", "list-users", "upload-file"] },
+    { app: "discord", tools: ["send-message", "create-channel", "list-members"] },
+    { app: "microsoft-teams", tools: ["send-message", "create-channel", "list-team-members"] },
+    { app: "twilio", tools: ["send-sms", "make-call", "send-whatsapp"] },
+    { app: "intercom", tools: ["create-contact", "send-message", "search-conversations"] },
+  ],
+  "Marketing & Social": [
+    { app: "linkedin", tools: ["create-post", "search-people", "send-message"] },
+    { app: "twitter", tools: ["create-tweet", "search-tweets", "get-user"] },
+    { app: "facebook-pages", tools: ["create-post", "get-page-insights"] },
+    { app: "google-ads", tools: ["get-campaign-stats", "update-budget"] },
+    { app: "meta-ads", tools: ["get-ad-insights", "create-campaign"] },
+  ],
+  "Project Management": [
+    { app: "linear", tools: ["create-issue", "update-issue", "search-issues"] },
+    { app: "jira", tools: ["create-issue", "update-issue", "search-issues", "add-comment"] },
+    { app: "asana", tools: ["create-task", "update-task", "search-tasks"] },
+    { app: "notion", tools: ["create-page", "update-page", "query-database"] },
+    { app: "trello", tools: ["create-card", "move-card", "add-comment"] },
+  ],
+  "DevOps & Engineering": [
+    { app: "github", tools: ["create-issue", "create-pr", "search-code", "list-repos"] },
+    { app: "gitlab", tools: ["create-issue", "create-mr", "list-pipelines"] },
+    { app: "datadog", tools: ["query-metrics", "create-monitor", "list-events"] },
+    { app: "pagerduty", tools: ["create-incident", "acknowledge-incident"] },
+    { app: "sentry", tools: ["list-issues", "resolve-issue", "get-event"] },
+  ],
+  "Finance & Payments": [
+    { app: "stripe", tools: ["create-customer", "create-invoice", "list-subscriptions"] },
+    { app: "quickbooks", tools: ["create-invoice", "search-customers", "get-reports"] },
+    { app: "xero", tools: ["create-invoice", "search-contacts"] },
+  ],
+  "Productivity & Storage": [
+    { app: "google-sheets", tools: ["read-rows", "append-row", "update-cell", "create-spreadsheet"] },
+    { app: "google-drive", tools: ["upload-file", "search-files", "create-folder"] },
+    { app: "google-calendar", tools: ["create-event", "list-events", "update-event"] },
+    { app: "airtable", tools: ["create-record", "search-records", "update-record"] },
+    { app: "dropbox", tools: ["upload-file", "search-files", "share-file"] },
+    { app: "calendly", tools: ["list-events", "get-event-types", "cancel-event"] },
+  ],
+  "Analytics & Data": [
+    { app: "google-analytics", tools: ["run-report", "get-realtime-data"] },
+    { app: "mixpanel", tools: ["track-event", "query-jql", "get-funnel"] },
+    { app: "amplitude", tools: ["query-events", "get-user-activity"] },
+    { app: "segment", tools: ["track-event", "identify-user"] },
+  ],
+};
+
+/** Build a formatted string of the Pipedream catalog for the prompt. */
+function buildPipedreamCatalogString(): string {
+  return Object.entries(PIPEDREAM_APPS)
+    .map(([category, apps]) => {
+      const appList = apps
+        .map((a) => `    - ${a.app}: ${a.tools.join(", ")}`)
+        .join("\n");
+      return `  ${category}:\n${appList}`;
+    })
+    .join("\n\n");
+}
+
+/** Recommend MCP connectors based on description keywords. */
+export function recommendConnectors(description: string): Array<{ app: string; reason: string; recommended_tools: string[] }> {
+  const lower = description.toLowerCase();
+  const recommended: Array<{ app: string; reason: string; recommended_tools: string[] }> = [];
+
+  const CONNECTOR_KEYWORDS: Record<string, { keywords: string[]; reason: string }> = {
+    hubspot: { keywords: ["crm", "sales", "leads", "deals", "pipeline", "hubspot"], reason: "CRM for lead and deal management" },
+    salesforce: { keywords: ["salesforce", "crm", "enterprise sales", "opportunity"], reason: "Enterprise CRM integration" },
+    gmail: { keywords: ["email", "mail", "outreach", "follow-up", "inbox", "gmail"], reason: "Email outreach and follow-ups" },
+    "microsoft-outlook": { keywords: ["outlook", "office 365", "microsoft mail"], reason: "Email via Microsoft 365" },
+    slack: { keywords: ["slack", "team", "channel", "notification", "chat"], reason: "Team notifications and collaboration" },
+    linkedin: { keywords: ["linkedin", "social", "professional", "networking", "b2b"], reason: "Professional networking and content" },
+    twitter: { keywords: ["twitter", "x.com", "tweet", "social media"], reason: "Social media engagement" },
+    "google-sheets": { keywords: ["spreadsheet", "sheets", "csv", "data", "tracking"], reason: "Data tracking and reporting" },
+    "google-calendar": { keywords: ["calendar", "meeting", "schedule", "appointment", "booking"], reason: "Meeting scheduling" },
+    calendly: { keywords: ["calendly", "booking", "schedule meeting", "appointment"], reason: "Automated meeting scheduling" },
+    stripe: { keywords: ["payment", "billing", "subscription", "invoice", "stripe"], reason: "Payment and billing management" },
+    github: { keywords: ["github", "code", "repository", "pull request", "issue"], reason: "Code and issue management" },
+    linear: { keywords: ["linear", "issue", "project", "sprint", "task"], reason: "Project and issue tracking" },
+    jira: { keywords: ["jira", "issue", "project", "sprint", "agile"], reason: "Project management" },
+    notion: { keywords: ["notion", "wiki", "documentation", "knowledge base"], reason: "Documentation and knowledge management" },
+    sendgrid: { keywords: ["sendgrid", "bulk email", "email campaign", "newsletter"], reason: "Bulk email campaigns" },
+    intercom: { keywords: ["intercom", "support", "chat", "customer", "helpdesk"], reason: "Customer support chat" },
+    twilio: { keywords: ["sms", "phone", "call", "whatsapp", "twilio"], reason: "SMS and phone communication" },
+    datadog: { keywords: ["monitoring", "metrics", "alerts", "datadog", "observability"], reason: "Infrastructure monitoring" },
+    airtable: { keywords: ["airtable", "database", "records", "base"], reason: "Flexible database for tracking" },
+  };
+
+  for (const [app, { keywords, reason }] of Object.entries(CONNECTOR_KEYWORDS)) {
+    if (keywords.some((kw) => lower.includes(kw))) {
+      const appData = Object.values(PIPEDREAM_APPS).flat().find((a) => a.app === app);
+      recommended.push({ app, reason, recommended_tools: appData?.tools ?? [] });
+    }
+  }
+
+  return recommended;
+}
+
 /** Recommend tools based on description — uses the actual platform inventory. */
 export function recommendTools(description: string): string[] {
   const lower = description.toLowerCase();
@@ -247,6 +367,14 @@ ${toolInventory}
 - **Governance**: Budget limits, tool restrictions, confirmation gates for destructive/bulk actions.
 - **Evaluation**: Automated test scenarios with pass/fail thresholds that gate deployment.
 - **Releases**: Channel-based deployment (staging → canary → production) with traffic splitting.
+- **MCP Connectors**: 3,000+ external app integrations via Pipedream. OAuth managed automatically. Agents can use Gmail, Slack, HubSpot, Salesforce, LinkedIn, Calendly, Stripe, and thousands more.
+
+## External Integrations (Pipedream MCP — 3,000+ apps)
+When an agent needs external app integrations, recommend specific apps from this catalog:
+
+${buildPipedreamCatalogString()}
+
+Include a "mcp_connectors" array in your output with recommended apps, why each is needed, and which tools to use.
 
 ## Output Format — Complete Agent Package
 
@@ -339,7 +467,15 @@ Return a JSON object with ALL of these top-level fields:
     "initial_channel": "staging",
     "canary_percent": 10,
     "promote_after": "eval pass + 24h soak"
-  }
+  },
+
+  "mcp_connectors": [
+    {
+      "app": "hubspot",
+      "reason": "Why this agent needs this external app",
+      "recommended_tools": ["create-contact", "update-deal"]
+    }
+  ]
 }
 
 ## System Prompt Guidelines
@@ -457,6 +593,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
     guardrails: Array.isArray(pkg.guardrails) ? pkg.guardrails : [],
     eval_config: pkg.eval_config ?? null,
     release_strategy: pkg.release_strategy ?? null,
+    mcp_connectors: Array.isArray(pkg.mcp_connectors) ? pkg.mcp_connectors : recommendConnectors(description),
   };
 
   return agentConfig;

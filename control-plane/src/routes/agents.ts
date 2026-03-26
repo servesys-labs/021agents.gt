@@ -758,6 +758,116 @@ agentRoutes.get("/:name/export", async (c) => {
   return c.json({ agent: parseConfig((rows[0] as Record<string, unknown>).config_json) });
 });
 
+/* ── persistAgentPackage ─────────────────────────────────────────── */
+/*
+ * After the main agent INSERT, persist all subsidiary resources
+ * (sub-agents, skills, codemode, guardrails, release channels).
+ * Fire-and-forget with error collection — parent agent is never rolled back.
+ */
+
+async function persistAgentPackage(
+  sql: ReturnType<typeof getDb>,
+  agentName: string,
+  orgId: string,
+  projectId: string,
+  userId: string,
+  pkg: Record<string, unknown>,
+): Promise<string[]> {
+  const errors: string[] = [];
+  const now = Date.now() / 1000;
+
+  // Sub-agents (max 3)
+  const subAgents = Array.isArray(pkg.sub_agents) ? pkg.sub_agents.slice(0, 3) : [];
+  for (const sa of subAgents) {
+    try {
+      const subConfig = {
+        ...(sa as Record<string, unknown>),
+        parent_agent: agentName,
+        governance: { budget_limit_usd: 10 },
+        harness: {},
+      };
+      const subName = String((sa as Record<string, unknown>).name || `${agentName}-sub`);
+      const subId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      await sql`
+        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+        VALUES (${subId}, ${subName}, ${orgId}, ${projectId}, ${JSON.stringify(subConfig)},
+                ${String((sa as Record<string, unknown>).description || "")}, 1, now(), now())
+        ON CONFLICT (name, org_id) DO UPDATE SET config_json = ${JSON.stringify(subConfig)}, updated_at = now()
+      `;
+    } catch (e) {
+      errors.push(`sub-agent ${(sa as Record<string, unknown>).name}: ${(e as Error).message}`);
+    }
+  }
+
+  // Skills (max 5)
+  const skills = Array.isArray(pkg.skills) ? pkg.skills.slice(0, 5) : [];
+  for (const sk of skills) {
+    try {
+      const s = sk as Record<string, unknown>;
+      await sql`
+        INSERT INTO skills (name, description, category, content, assigned_agents, org_id, enabled, created_at)
+        VALUES (${String(s.name)}, ${String(s.description || "")}, ${String(s.category || "prompt")},
+                ${String(s.content || "")}, ${JSON.stringify([agentName])}, ${orgId}, true, now())
+        ON CONFLICT DO NOTHING
+      `;
+    } catch (e) {
+      errors.push(`skill ${(sk as Record<string, unknown>).name}: ${(e as Error).message}`);
+    }
+  }
+
+  // Codemode snippets (max 5)
+  const snippets = Array.isArray(pkg.codemode_snippets) ? pkg.codemode_snippets.slice(0, 5) : [];
+  for (const sn of snippets) {
+    try {
+      const s = sn as Record<string, unknown>;
+      const snippetId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      await sql`
+        INSERT INTO codemode_snippets (id, org_id, name, description, code, scope, tags, version, is_template, created_at, updated_at)
+        VALUES (${snippetId}, ${orgId}, ${String(s.name)}, ${String(s.description || "")},
+                ${String(s.code || "")}, ${String(s.scope || "agent")},
+                ${JSON.stringify([agentName])}, 1, false, ${now}, ${now})
+        ON CONFLICT DO NOTHING
+      `;
+    } catch (e) {
+      errors.push(`codemode ${(sn as Record<string, unknown>).name}: ${(e as Error).message}`);
+    }
+  }
+
+  // Guardrails (max 5)
+  const guardrails = Array.isArray(pkg.guardrails) ? pkg.guardrails.slice(0, 5) : [];
+  for (const gr of guardrails) {
+    try {
+      const g = gr as Record<string, unknown>;
+      const grId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      const policyJson = JSON.stringify({ type: g.type, rule: g.rule, action: g.action });
+      await sql`
+        INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy_json, created_at, updated_at)
+        VALUES (${grId}, ${orgId}, ${String(g.name)}, ${agentName}, ${policyJson}, ${now}, ${now})
+        ON CONFLICT DO NOTHING
+      `;
+    } catch (e) {
+      errors.push(`guardrail ${(gr as Record<string, unknown>).name}: ${(e as Error).message}`);
+    }
+  }
+
+  // Release channel (max 1)
+  const release = pkg.release_strategy as Record<string, unknown> | null;
+  if (release) {
+    try {
+      const channel = String(release.initial_channel || "staging");
+      await sql`
+        INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+        VALUES (${orgId}, ${agentName}, ${channel}, ${"0.1.0"}, ${JSON.stringify(release)}, ${userId}, ${now})
+        ON CONFLICT DO NOTHING
+      `;
+    } catch (e) {
+      errors.push(`release channel: ${(e as Error).message}`);
+    }
+  }
+
+  return errors;
+}
+
 // POST /agents/create-from-description — LLM-powered agent creation
 agentRoutes.post(
   "/create-from-description",
@@ -801,10 +911,21 @@ agentRoutes.post(
         .filter(Boolean);
     }
 
-    // Initialize harness + governance
-    config.governance = { budget_limit_usd: 10 };
+    // Initialize harness + governance — use LLM-proposed governance if available
+    const pkg = (config as Record<string, unknown>)._package as Record<string, unknown> | undefined;
+    config.governance = (pkg?.governance as Record<string, unknown>) ?? config.governance ?? { budget_limit_usd: 10 };
     if (typeof config.harness !== "object" || config.harness === null) {
       config.harness = {};
+    }
+
+    // Use LLM-proposed graph instead of hardcoded 5-node template
+    if (pkg?.graph && typeof pkg.graph === "object") {
+      (config.harness as Record<string, unknown>).declarative_graph = pkg.graph;
+    }
+
+    // Store eval config in agent config if provided
+    if (pkg?.eval_config) {
+      (config as Record<string, unknown>).eval_config = pkg.eval_config;
     }
 
     // Parse explicit graph_json if provided
@@ -936,6 +1057,7 @@ agentRoutes.post(
         payload.guardrails = pkg.guardrails;
         payload.eval_config = pkg.eval_config;
         payload.release_strategy = pkg.release_strategy;
+        payload.mcp_connectors = pkg.mcp_connectors;
       }
 
       if (req.include_autofix) payload.graph_autofix = graphAutofix;
@@ -995,6 +1117,16 @@ agentRoutes.post(
 
     await snapshotVersion(sql, String(config.name), String(config.version), config, user.user_id);
 
+    // Persist the full agent package (sub-agents, skills, codemode, guardrails, releases)
+    let packageErrors: string[] = [];
+    if (pkg) {
+      // Clean _package from config before using it
+      delete (config as Record<string, unknown>)._package;
+      packageErrors = await persistAgentPackage(
+        sql, String(config.name), user.org_id, user.project_id || "", user.user_id, pkg,
+      );
+    }
+
     // Notify runtime of new agent (fire-and-forget)
     notifyRuntimeOfConfigChange(c.env, String(config.name), String(config.version)).catch(() => {});
 
@@ -1007,6 +1139,14 @@ agentRoutes.post(
       tags: config.tags,
       version: config.version,
     };
+    if (pkg) {
+      payload.sub_agents_created = (Array.isArray(pkg.sub_agents) ? pkg.sub_agents : []).length;
+      payload.skills_created = (Array.isArray(pkg.skills) ? pkg.skills : []).length;
+      payload.codemode_snippets_created = (Array.isArray(pkg.codemode_snippets) ? pkg.codemode_snippets : []).length;
+      payload.guardrails_created = (Array.isArray(pkg.guardrails) ? pkg.guardrails : []).length;
+      payload.mcp_connectors = pkg.mcp_connectors;
+    }
+    if (packageErrors.length > 0) payload.package_errors = packageErrors;
     if (req.include_autofix) payload.graph_autofix = graphAutofix;
     if (req.include_gate_pack) payload.gate_pack = gatePack;
     if (req.include_contracts_validate) payload.contracts_validate = contractsValidate;
