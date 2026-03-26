@@ -48,22 +48,12 @@ export function AssistPanel({ customSuggestions, heading, compact }: AssistPanel
 
   return (
     <div className="rounded-xl border border-accent/15 bg-accent/[0.03] p-3">
-      {heading && (
-        <div className="flex items-center gap-1.5 mb-2.5">
-          <Sparkles size={12} className="text-accent" />
-          <p className="text-[11px] font-semibold text-text-secondary">
-            {heading}
-          </p>
-        </div>
-      )}
-      {!heading && (
-        <div className="flex items-center gap-1.5 mb-2.5">
-          <Sparkles size={12} className="text-accent" />
-          <p className="text-[11px] font-semibold text-text-secondary">
-            Meta-Agent Assist
-          </p>
-        </div>
-      )}
+      <div className="flex items-center gap-1.5 mb-2.5">
+        <Sparkles size={12} className="text-accent" />
+        <p className="text-[11px] font-semibold text-text-secondary">
+          {heading ?? "Meta-Agent Assist"}
+        </p>
+      </div>
       <div className="flex flex-wrap gap-1.5">
         {items.map((s) => (
           <button

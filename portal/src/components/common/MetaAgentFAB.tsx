@@ -90,10 +90,8 @@ export function MetaAgentFAB() {
   };
 
   /* ── Retry a failed message ───────────────────────────────────── */
-  const handleRetry = (failedMsg: ChatMessage) => {
-    // Find the user message that preceded this error
-    const idx = messages.indexOf(failedMsg);
-    const userMsg = idx > 0 ? messages[idx - 1] : null;
+  const handleRetry = (msgIndex: number) => {
+    const userMsg = msgIndex > 0 ? messages[msgIndex - 1] : null;
     if (userMsg?.role === "user") {
       void send(userMsg.text);
     }
@@ -117,11 +115,8 @@ export function MetaAgentFAB() {
           {/* Panel — dynamic height, responsive width */}
           <div
             ref={panelRef}
-            className="fixed bottom-20 right-4 sm:right-6 z-50 w-[calc(100vw-2rem)] sm:w-[400px] flex flex-col rounded-2xl border overflow-hidden glass-medium"
-            style={{
-              maxHeight: "calc(100vh - 8rem)",
-              animation: "fadeIn 0.15s ease-out",
-            }}
+            className="fixed bottom-20 right-4 sm:right-6 z-50 w-[calc(100vw-2rem)] sm:w-[400px] flex flex-col rounded-2xl border overflow-hidden glass-medium slide-up"
+            style={{ maxHeight: "calc(100vh - 8rem)" }}
             role="dialog"
             aria-modal="true"
             aria-label="Meta-Agent Chat"
@@ -193,7 +188,7 @@ export function MetaAgentFAB() {
                       {isErrorMessage(msg) && (
                         <div className="flex justify-start mt-1 ml-1">
                           <button
-                            onClick={() => handleRetry(msg)}
+                            onClick={() => handleRetry(i)}
                             disabled={processing}
                             className="inline-flex items-center gap-1 px-2 py-1 text-[10px] text-text-muted hover:text-accent transition-colors rounded-md hover:bg-accent/5 disabled:opacity-50"
                           >
