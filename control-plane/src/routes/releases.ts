@@ -92,7 +92,7 @@ releaseRoutes.get("/:agent_name/canary", requireScope("releases:read"), async (c
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
   `;
   if (rows.length === 0) return c.json({ canary: null });
   return c.json({ canary: rows[0] });
@@ -113,7 +113,7 @@ releaseRoutes.post("/:agent_name/canary", requireScope("releases:write"), async 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE canary_splits
-    SET is_active = false
+    SET is_active = 0
     WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
   `;
   await sql`
@@ -135,7 +135,7 @@ releaseRoutes.delete("/:agent_name/canary", requireScope("releases:write"), asyn
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE canary_splits
-    SET is_active = false
+    SET is_active = 0
     WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
   `;
   return c.json({ removed: true });

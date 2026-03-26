@@ -88,6 +88,14 @@ app.use("*", errorHandler);
 app.use("*", rateLimitMiddleware);
 app.use("*", authMiddleware);
 
+// Hono-level error handler (catches errors that bypass middleware)
+app.onError((err, c) => {
+  const message = err instanceof Error ? err.message : "Internal server error";
+  console.error(`[onError] ${c.req.method} ${c.req.path}: ${message}`);
+  if (err instanceof Error && err.stack) console.error(err.stack);
+  return c.json({ error: message }, 500);
+});
+
 // ── Health ───────────────────────────────────────────────────────────────
 app.get("/health", (c) =>
   c.json({ status: "ok", version: "0.2.0", service: "control-plane", timestamp: Date.now() }),

@@ -7,6 +7,7 @@ import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { ORCHESTRATOR_SYSTEM_PROMPT, ORCHESTRATOR_TOOLS } from "../templates/orchestrator";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const projectRoutes = new Hono<R>();
@@ -62,19 +63,39 @@ projectRoutes.post("/", requireScope("projects:write"), async (c) => {
     `;
   }
 
-  // Bootstrap meta-agent using AI binding
+  // Bootstrap meta-agent with full orchestrator prompt and tools
   let metaAgent: any = { name: "", created: false };
   try {
     const agentName = `${slug}-meta-agent` || `project-${projectId.slice(0, 8)}-meta-agent`;
     // Check if already exists
     const existing = await sql`SELECT name FROM agents WHERE name = ${agentName}`;
     if (existing.length === 0) {
-      const systemPrompt = `You are the project meta-agent for ${name}. Project ID: ${projectId}, Plan: ${plan}. ${description}`;
+      // Inject project context into the orchestrator system prompt
+      const projectContext = `\n\n## Project Context\n- Project: ${name}\n- Project ID: ${projectId}\n- Plan: ${plan}\n- Description: ${description || "N/A"}\n`;
+      const systemPrompt = ORCHESTRATOR_SYSTEM_PROMPT + projectContext;
+      const toolsJson = JSON.stringify(ORCHESTRATOR_TOOLS);
+      const governanceJson = JSON.stringify({
+        budget_limit_usd: 20.0,
+        require_confirmation_for_destructive: true,
+        blocked_tools: [],
+        allowed_domains: [],
+      });
+
       await sql`
-        INSERT INTO agents (name, org_id, project_id, description, system_prompt, model, is_active, created_by, created_at)
-        VALUES (${agentName}, ${user.org_id}, ${projectId}, ${`Project Meta-Agent for ${name}`}, ${systemPrompt}, 'anthropic/claude-sonnet-4', true, ${user.user_id}, ${Date.now() / 1000})
+        INSERT INTO agents (
+          name, org_id, project_id, description, system_prompt, model,
+          tools_json, governance_json, max_turns,
+          is_active, created_by, created_at
+        )
+        VALUES (
+          ${agentName}, ${user.org_id}, ${projectId},
+          ${`Orchestrator meta-agent for ${name} — builds, tests, and continuously improves all agents`},
+          ${systemPrompt}, 'anthropic/claude-sonnet-4.6',
+          ${toolsJson}, ${governanceJson}, ${20},
+          true, ${user.user_id}, ${Date.now() / 1000}
+        )
       `;
-      metaAgent = { name: agentName, created: true };
+      metaAgent = { name: agentName, created: true, tools_count: ORCHESTRATOR_TOOLS.length };
     } else {
       metaAgent = { name: agentName, created: false };
     }

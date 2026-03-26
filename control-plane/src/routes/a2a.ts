@@ -119,7 +119,7 @@ a2aRoutes.get("/.well-known/agent.json", async (c) => {
   const rows = await sql`
     SELECT name, description, config_json
     FROM agents
-    WHERE org_id = ${user.org_id} AND is_active = true
+    WHERE org_id = ${user.org_id} AND is_active = 1
     ORDER BY created_at DESC
     LIMIT 1
   `;
@@ -156,7 +156,7 @@ a2aRoutes.get("/.well-known/agents.json", async (c) => {
   const rows = await sql`
     SELECT name, description, config_json
     FROM agents
-    WHERE org_id = ${user.org_id} AND is_active = true
+    WHERE org_id = ${user.org_id} AND is_active = 1
     ORDER BY created_at DESC
   `;
 
@@ -226,7 +226,7 @@ a2aRoutes.post("/a2a", async (c) => {
         if (!targetAgentName) {
           const rows = await sql`
             SELECT name FROM agents
-            WHERE org_id = ${user.org_id} AND is_active = true
+            WHERE org_id = ${user.org_id} AND is_active = 1
             ORDER BY created_at DESC
             LIMIT 1
           `;
@@ -308,7 +308,7 @@ a2aRoutes.post("/a2a", async (c) => {
       if (!targetAgentName) {
         const rows = await sql`
           SELECT name FROM agents
-          WHERE org_id = ${user.org_id} AND is_active = true
+          WHERE org_id = ${user.org_id} AND is_active = 1
           ORDER BY created_at DESC
           LIMIT 1
         `;
@@ -473,7 +473,7 @@ a2aRoutes.post("/a2a/tasks/send", async (c) => {
     if (!targetAgentName) {
       const rows = await sql`
         SELECT name FROM agents
-        WHERE org_id = ${user.org_id} AND is_active = true
+        WHERE org_id = ${user.org_id} AND is_active = 1
         ORDER BY created_at DESC
         LIMIT 1
       `;
@@ -561,7 +561,7 @@ a2aRoutes.post("/a2a/tasks/sendSubscribe", async (c) => {
   if (!targetAgentName) {
     const rows = await sql`
       SELECT name FROM agents
-      WHERE org_id = ${user.org_id} AND is_active = true
+      WHERE org_id = ${user.org_id} AND is_active = 1
       ORDER BY created_at DESC
       LIMIT 1
     `;
