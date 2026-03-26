@@ -94,6 +94,14 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
 
   return (
     <div className="flex h-screen bg-surface-base text-text-primary overflow-hidden">
+      {/* Skip to content link - visible on focus for keyboard users */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-[100] focus:px-4 focus:py-2 focus:bg-accent focus:text-white focus:rounded-lg focus:outline-none"
+      >
+        Skip to main content
+      </a>
+
       {/* Icon rail — 52px, icon-only, tooltips on hover */}
       <aside className="flex flex-col w-[52px] flex-shrink-0 bg-surface-raised border-r border-border-subtle">
         {/* Logo */}
@@ -220,7 +228,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
       </aside>
 
       {/* Main content */}
-      <main className={`flex-1 ${isCanvasPage ? "overflow-hidden" : "overflow-auto"}`}>
+      <main id="main-content" className={`flex-1 ${isCanvasPage ? "overflow-hidden" : "overflow-auto"}`}>
         <div className={isCanvasPage ? "h-full" : "p-6"}>
           {children}
         </div>

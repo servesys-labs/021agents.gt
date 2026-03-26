@@ -1083,6 +1083,166 @@ async function dispatch(
       return JSON.stringify({ routing: results, agent_count: capabilities.length });
     }
 
+    // ── DB Query Tools (codemode-safe, templated) ─────────────────
+    // These use the /cf/db/query allowlist — no raw SQL, always org-scoped.
+
+    case "db-query": {
+      // Execute a single templated DB query
+      const queryId = String(args.query_id || "");
+      if (!queryId) return "db-query requires query_id (e.g., 'sessions.list', 'issues.open', 'eval.runs')";
+
+      const orgId = args.org_id || "";
+      const userId = args.user_id || "";
+
+      // Call our own /cf/db/query endpoint (same worker, internal)
+      try {
+        const body = JSON.stringify({
+          query_id: queryId,
+          context: { org_id: orgId, user_id: userId, role: "agent" },
+          params: args.params || {},
+        });
+
+        // Self-call via internal fetch if HYPERDRIVE available, else error
+        const hyperdrive = (env as any).HYPERDRIVE;
+        if (!hyperdrive) return "db-query requires database access";
+
+        const { getDb } = await import("./db");
+        const sql = await getDb(hyperdrive);
+
+        // Execute with RLS context
+        const rows = await sql.begin(async (tx: any) => {
+          await tx`SELECT set_config('app.current_org_id', ${orgId}, true)`;
+          await tx`SELECT set_config('app.current_user_id', ${userId || "agent"}, true)`;
+          await tx`SELECT set_config('app.current_role', 'agent', true)`;
+
+          // Dispatch to query handler (reuse the allowlist logic)
+          const p = args.params || {};
+          switch (queryId) {
+            case "sessions.stats": {
+              const an = p.agent_name ? String(p.agent_name) : null;
+              const sd = Math.min(Number(p.since_days) || 7, 90);
+              const since = Date.now() / 1000 - sd * 86400;
+              return an
+                ? await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND agent_name = ${an} AND created_at >= ${since}`
+                : await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND created_at >= ${since}`;
+            }
+            case "issues.summary":
+              return await tx`SELECT status, severity, COUNT(*) as count FROM issues WHERE org_id = ${orgId} GROUP BY status, severity`;
+            case "eval.latest_run": {
+              const an = String(p.agent_name || "");
+              return await tx`SELECT * FROM eval_runs WHERE agent_name = ${an} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`;
+            }
+            case "billing.usage": {
+              const sd = Math.min(Number(p.since_days) || 30, 365);
+              const since = Date.now() / 1000 - sd * 86400;
+              return await tx`SELECT COALESCE(SUM(total_cost_usd),0) as total, COALESCE(SUM(input_tokens),0) as input_tokens, COALESCE(SUM(output_tokens),0) as output_tokens FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since}`;
+            }
+            case "billing.by_agent": {
+              const sd = Math.min(Number(p.since_days) || 30, 365);
+              const since = Date.now() / 1000 - sd * 86400;
+              return await tx`SELECT agent_name, SUM(total_cost_usd) as cost, COUNT(*) as sessions FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY agent_name ORDER BY cost DESC`;
+            }
+            case "feedback.stats": {
+              const sd = Math.min(Number(p.since_days) || 30, 365);
+              const since = Date.now() / 1000 - sd * 86400;
+              return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
+            }
+            default:
+              throw new Error(`Unknown query_id: ${queryId}. Available: sessions.stats, issues.summary, eval.latest_run, billing.usage, billing.by_agent, feedback.stats`);
+          }
+        });
+
+        return JSON.stringify({ query_id: queryId, rows, row_count: Array.isArray(rows) ? rows.length : 0 });
+      } catch (err: any) {
+        return `db-query failed: ${err.message || err}`;
+      }
+    }
+
+    case "db-batch": {
+      // Execute multiple queries in one call — saves tokens vs multiple tool calls
+      const queries = args.queries;
+      if (!Array.isArray(queries) || queries.length === 0) return "db-batch requires queries array";
+      if (queries.length > 10) return "db-batch max 10 queries per batch";
+
+      const orgId = args.org_id || "";
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "db-batch requires database access";
+
+      try {
+        // Execute all queries via recursive tool call (reuse db-query logic)
+        const results = await Promise.all(
+          queries.map(async (q: { query_id: string; params?: Record<string, unknown> }) => {
+            const result = await dispatch(
+              env, "db-query",
+              { query_id: q.query_id, params: q.params || {}, org_id: orgId },
+              sessionId,
+            );
+            try { return JSON.parse(result); } catch { return { query_id: q.query_id, error: result }; }
+          }),
+        );
+        return JSON.stringify({ batch: true, count: results.length, results });
+      } catch (err: any) {
+        return `db-batch failed: ${err.message || err}`;
+      }
+    }
+
+    case "db-report": {
+      // Pre-built composite reports — agent health, org overview
+      const reportId = String(args.report_id || "");
+      const orgId = args.org_id || "";
+      if (!reportId) return "db-report requires report_id (e.g., 'agent_health', 'org_overview')";
+
+      try {
+        if (reportId === "agent_health") {
+          const agentName = String(args.agent_name || "");
+          if (!agentName) return "agent_health report requires agent_name";
+          // Batch 4 queries for a single agent
+          const batchResult = await dispatch(env, "db-batch", {
+            org_id: orgId,
+            queries: [
+              { query_id: "sessions.stats", params: { agent_name: agentName, since_days: 7 } },
+              { query_id: "issues.summary", params: {} },
+              { query_id: "eval.latest_run", params: { agent_name: agentName } },
+              { query_id: "feedback.stats", params: { since_days: 7 } },
+            ],
+          }, sessionId);
+          const parsed = JSON.parse(batchResult);
+          return JSON.stringify({
+            report: "agent_health",
+            agent_name: agentName,
+            sessions: parsed.results?.[0]?.rows?.[0] || {},
+            issues: parsed.results?.[1]?.rows || [],
+            eval: parsed.results?.[2]?.rows?.[0] || null,
+            feedback: parsed.results?.[3]?.rows || [],
+          });
+        }
+
+        if (reportId === "org_overview") {
+          const batchResult = await dispatch(env, "db-batch", {
+            org_id: orgId,
+            queries: [
+              { query_id: "sessions.stats", params: { since_days: 7 } },
+              { query_id: "issues.summary", params: {} },
+              { query_id: "billing.usage", params: { since_days: 30 } },
+              { query_id: "billing.by_agent", params: { since_days: 30 } },
+            ],
+          }, sessionId);
+          const parsed = JSON.parse(batchResult);
+          return JSON.stringify({
+            report: "org_overview",
+            sessions: parsed.results?.[0]?.rows?.[0] || {},
+            issues: parsed.results?.[1]?.rows || [],
+            billing: parsed.results?.[2]?.rows?.[0] || {},
+            billing_by_agent: parsed.results?.[3]?.rows || [],
+          });
+        }
+
+        return `Unknown report_id: ${reportId}. Available: agent_health, org_overview`;
+      } catch (err: any) {
+        return `db-report failed: ${err.message || err}`;
+      }
+    }
+
     default:
       throw new Error(`Tool '${tool}' not available on edge runtime`);
   }
@@ -2116,6 +2276,72 @@ const TOOL_CATALOG: ToolDefinition[] = [
           org_id: { type: "string", description: "Organization ID (to look up available agents)" },
         },
         required: ["input"],
+      },
+    },
+  },
+  // ── DB Query Tools (codemode-safe, templated) ─────────────────
+  {
+    type: "function",
+    function: {
+      name: "db-query",
+      description:
+        "Execute a templated database query. Uses predefined query IDs (no raw SQL). " +
+        "Always org-scoped. Available queries: sessions.stats, issues.summary, eval.latest_run, " +
+        "billing.usage, billing.by_agent, feedback.stats. More efficient than multiple API calls.",
+      parameters: {
+        type: "object",
+        properties: {
+          query_id: { type: "string", description: "Query template ID (e.g., 'sessions.stats', 'billing.by_agent')" },
+          params: {
+            type: "object",
+            description: "Query parameters (varies by query_id). Common: agent_name, since_days, limit.",
+          },
+        },
+        required: ["query_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "db-batch",
+      description:
+        "Execute multiple templated queries in one call. Saves tokens vs multiple db-query calls. Max 10 queries per batch.",
+      parameters: {
+        type: "object",
+        properties: {
+          queries: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                query_id: { type: "string" },
+                params: { type: "object" },
+              },
+              required: ["query_id"],
+            },
+            description: "Array of {query_id, params} objects",
+          },
+        },
+        required: ["queries"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "db-report",
+      description:
+        "Generate a pre-built composite report. Combines multiple queries into a structured result. " +
+        "Available reports: 'agent_health' (sessions + issues + eval + feedback for one agent), " +
+        "'org_overview' (sessions + issues + billing across all agents).",
+      parameters: {
+        type: "object",
+        properties: {
+          report_id: { type: "string", description: "Report ID: 'agent_health' or 'org_overview'" },
+          agent_name: { type: "string", description: "Agent name (required for agent_health report)" },
+        },
+        required: ["report_id"],
       },
     },
   },

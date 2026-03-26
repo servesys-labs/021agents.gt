@@ -1,6 +1,56 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "lucide-react";
 
+/**
+ * Focus trap for accessibility - keeps keyboard focus within the modal/panel
+ */
+function useFocusTrap(containerRef: React.RefObject<HTMLElement | null>, isActive: boolean) {
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!isActive) return;
+
+    // Store previously focused element
+    previousFocusRef.current = document.activeElement as HTMLElement;
+
+    const container = containerRef.current;
+    if (!container) return;
+
+    // Get all focusable elements
+    const focusableElements = container.querySelectorAll<HTMLElement>(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    );
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+
+    const handleTabKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+
+      if (e.shiftKey) {
+        // Shift + Tab
+        if (document.activeElement === firstElement) {
+          e.preventDefault();
+          lastElement?.focus();
+        }
+      } else {
+        // Tab
+        if (document.activeElement === lastElement) {
+          e.preventDefault();
+          firstElement?.focus();
+        }
+      }
+    };
+
+    container.addEventListener("keydown", handleTabKey);
+
+    return () => {
+      container.removeEventListener("keydown", handleTabKey);
+      // Restore focus when closing
+      previousFocusRef.current?.focus();
+    };
+  }, [isActive, containerRef]);
+}
+
 interface SlidePanelProps {
   isOpen?: boolean;
   open?: boolean;
@@ -25,6 +75,9 @@ export function SlidePanel({
   const resolvedOpen = isOpen ?? open ?? false;
   const panelRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+
+  // Enable focus trap when panel is open
+  useFocusTrap(panelRef, resolvedOpen);
 
   useEffect(() => {
     if (!resolvedOpen) return;
