@@ -108,6 +108,7 @@ export async function loadAgentConfig(
     codemode_middleware: parseJson(cfg.codemode_middleware || cfg.codemodeMiddleware),
     codemode_observability: cfg.codemode_observability || cfg.codemodeObservability || undefined,
     use_code_mode: cfg.use_code_mode === true || cfg.useCodeMode === true,
+    reasoning_strategy: cfg.reasoning_strategy || cfg.reasoningStrategy || undefined,
   };
 }
 

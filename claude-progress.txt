@@ -61,7 +61,42 @@
 
 ### What to do next
 - Ensure sandbox base images include git (required for git-* tools)
-- Add reasoning strategy injection to system prompts (step-back, tree-of-thought)
-- Port the evolution analyzer from Python (FailureAnalyzer, proposal generation)
-- Add a portal page for viewing agent harness telemetry (reflection events, tool failures)
 - Consider adding workspace isolation (git worktree per session) for parallel agents
+
+---
+
+## 2026-03-27 — Evolution Analyzer + Reasoning Strategies + Review Fixes
+
+### What was done
+- Built evolution analyzer engine (control-plane/src/logic/evolution-analyzer.ts):
+  - Failure clustering, cost anomaly detection, per-tool analysis, unused tools
+  - 8 proposal generators with evidence and config diffs
+  - Full evolve routes: POST /analyze, GET /report, POST /apply
+  - DB migration: evolution_reports table, extended proposals + ledger
+- Built EvolveTab portal UI:
+  - Analysis trigger with time window, KPI dashboard, failure patterns,
+    tool performance, proposals with approve/reject/apply, evolution ledger
+- 17 passing unit tests for evolution analyzer
+- Fixed review concerns:
+  - Per-proposal review notes (was global state bug)
+  - Confirm dialog before applying proposals
+  - Deep config merge (governance.*, tools.remove, system_prompt.append)
+  - Git tools check for git availability
+- Upgraded evolve-agent meta-agent tool to call control-plane analyzer
+- Fixed critical codemode privilege escalation (execute-code bypassed tool scope)
+- Built reasoning strategy system (deploy/src/runtime/reasoning-strategies.ts):
+  - 5 strategies: step-back, chain-of-thought, plan-then-execute, verify-then-respond, decompose
+  - Auto-selection from task characteristics if no explicit strategy configured
+  - Wired into FRESH_BOOTSTRAP node in graph executor
+  - Configurable per-agent via reasoning_strategy config field
+
+### What was left incomplete
+- codeMcpServer/openApiMcpServer wrappers (Phase C of codemode review)
+- Deploy runtime integration tests (mocked executor/Supabase)
+- Storybook visual regression tests for EvolveTab
+
+### What to do next
+- Integration test the evolution analyzer against real Supabase
+- Add MCP wrappers for instant tool onboarding
+- Build scheduled evolution analysis (cron trigger)
+- Add reasoning strategy to agent creation wizard in portal

@@ -414,6 +414,21 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         }
       }
 
+      // Reasoning strategy injection (harness pattern: reasoning prompts)
+      // Selects a strategy based on config or auto-detects from task characteristics.
+      // Injected as a system message before the user's task.
+      try {
+        const { selectReasoningStrategy, autoSelectStrategy } = await import("./reasoning-strategies");
+        const strategyName = (config as any).reasoning_strategy;
+        const strategyPrompt = selectReasoningStrategy(strategyName, request.task, 1)
+          || (!strategyName ? autoSelectStrategy(request.task, ctx.activeTools.length) : null);
+        if (strategyPrompt) {
+          ctx.messages.push({ role: "system", content: strategyPrompt });
+        }
+      } catch {
+        /* best-effort */
+      }
+
       let task = request.task;
       const channel = (request.channel || "").toLowerCase();
       if (["telegram", "discord", "whatsapp", "sms"].includes(channel)) {

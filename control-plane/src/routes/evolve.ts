@@ -3,10 +3,12 @@
  *
  * The evolution loop:
  *   POST /:agent_name/analyze  → run FailureAnalyzer on recent sessions → generate proposals
- *   GET  /:agent_name/proposals → list proposals with evidence
+ *   GET  /:agent_name/proposals → list proposals with evidence + impact data
  *   POST /:agent_name/proposals/:id/approve → approve + record in ledger
  *   POST /:agent_name/proposals/:id/reject  → reject + record in ledger
- *   POST /:agent_name/proposals/:id/apply   → apply config diff to agent
+ *   POST /:agent_name/proposals/:id/apply   → apply config diff to agent (captures baseline metrics)
+ *   POST /:agent_name/proposals/:id/measure-impact → measure post-apply impact vs baseline
+ *   POST /:agent_name/proposals/:id/auto-rollback  → rollback if regression detected
  *   GET  /:agent_name/ledger    → evolution history
  *   GET  /:agent_name/report    → latest analysis report
  */
@@ -229,8 +231,17 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
   const currentConfig = safeJsonParse(agentRows[0].config_json) || {};
   const modification = safeJsonParse(proposal.config_diff_json) || {};
 
+  // ── Capture pre-apply baseline metrics (last 7 days) ──────
+  const baselineMetrics = await computeAgentMetrics(sql, agentName, orgId, Date.now() / 1000 - 7 * 86400, Date.now() / 1000);
+
   // Apply modification to config (deep merge with special-case handling)
   const newConfig = deepMergeConfig(currentConfig, modification);
+
+  // Guard: reject configs larger than 500KB
+  const configStr = JSON.stringify(newConfig);
+  if (configStr.length > 500_000) {
+    return c.json({ error: "Resulting config exceeds 500KB limit" }, 400);
+  }
 
   // Update agent config
   const now = new Date().toISOString();
@@ -239,21 +250,35 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
     WHERE name = ${agentName} AND org_id = ${orgId}
   `;
 
+  // R2 VCS: commit the config change for full version history
+  try {
+    const { commitAgentConfig } = await import("../logic/r2-vcs");
+    await commitAgentConfig(
+      c.env.STORAGE, orgId, agentName, newConfig,
+      `evolution: ${proposal.title || proposalId}`,
+      user.user_id,
+      { proposal_id: proposalId, source: "evolution_apply" },
+    );
+  } catch {
+    // Best-effort — Postgres is the source of truth
+  }
+
   // Mark proposal as applied
   await sql`
     UPDATE evolution_proposals SET status = 'applied', reviewed_at = ${now}
     WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
   `;
 
-  // Record in ledger with before/after configs
+  // Record in ledger with before/after configs and baseline metrics
   await sql`
     INSERT INTO evolution_ledger (
       agent_name, org_id, proposal_id, action, note,
-      previous_config_json, new_config_json, created_at
+      previous_config_json, new_config_json, metrics_before_json, created_at
     ) VALUES (
       ${agentName}, ${orgId}, ${proposalId}, 'applied',
       ${proposal.title || ""},
-      ${JSON.stringify(currentConfig)}, ${JSON.stringify(newConfig)}, ${now}
+      ${JSON.stringify(currentConfig)}, ${JSON.stringify(newConfig)},
+      ${JSON.stringify(baselineMetrics)}, ${now}
     )
   `;
 
@@ -262,6 +287,207 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
     proposal_id: proposalId,
     title: proposal.title,
     changes: Object.keys(modification),
+    metrics_before: baselineMetrics,
+  });
+});
+
+// ── Measure impact of an applied proposal ─────────────────────
+
+evolveRoutes.post("/:agent_name/proposals/:proposal_id/measure-impact", requireScope("evolve:write"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const proposalId = c.req.param("proposal_id");
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Fetch proposal — must be applied
+  const proposalRows = await sql`
+    SELECT * FROM evolution_proposals
+    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
+  `;
+  if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+  const proposal = proposalRows[0];
+  if (proposal.status !== "applied") {
+    return c.json({ error: "Can only measure impact on applied proposals" }, 400);
+  }
+
+  // Fetch the ledger entry to get applied_at timestamp and baseline metrics
+  const ledgerRows = await sql`
+    SELECT * FROM evolution_ledger
+    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
+      AND action = 'applied'
+    ORDER BY created_at DESC LIMIT 1
+  `;
+  if (ledgerRows.length === 0) {
+    return c.json({ error: "No ledger entry found for this applied proposal" }, 404);
+  }
+  const ledger = ledgerRows[0];
+  const appliedAt = Number(ledger.created_at);
+  const metricsBefore = safeJsonParse(ledger.metrics_before_json) || {
+    success_rate: 0, avg_cost: 0, avg_turns: 0, avg_quality: 0, session_count: 0,
+  };
+
+  // Compute metrics for sessions AFTER the proposal was applied
+  const now = Date.now() / 1000;
+  const metricsAfter = await computeAgentMetrics(sql, agentName, orgId, appliedAt, now);
+
+  // Compute deltas
+  const delta = {
+    success_rate: round(metricsAfter.success_rate - metricsBefore.success_rate, 4),
+    avg_cost: round(metricsAfter.avg_cost - metricsBefore.avg_cost, 6),
+    avg_turns: round(metricsAfter.avg_turns - metricsBefore.avg_turns, 2),
+    avg_quality: round(metricsAfter.avg_quality - metricsBefore.avg_quality, 4),
+  };
+
+  // Determine if improved: success_rate or quality went up, cost or turns went down
+  const improved =
+    delta.success_rate >= 0 && delta.avg_quality >= 0 &&
+    delta.avg_cost <= 0 && delta.avg_turns <= 0 &&
+    // At least one metric must have meaningfully improved
+    (delta.success_rate > 0.01 || delta.avg_quality > 0.01 || delta.avg_cost < -0.001 || delta.avg_turns < -0.5);
+
+  // Check for regressions >10%
+  const regressions: string[] = [];
+  if (metricsBefore.success_rate > 0 && delta.success_rate / metricsBefore.success_rate < -0.10) {
+    regressions.push(`success_rate regressed by ${(Math.abs(delta.success_rate) * 100).toFixed(1)}pp`);
+  }
+  if (metricsBefore.avg_cost > 0 && delta.avg_cost / metricsBefore.avg_cost > 0.10) {
+    regressions.push(`avg_cost increased by ${((delta.avg_cost / metricsBefore.avg_cost) * 100).toFixed(1)}%`);
+  }
+  if (metricsBefore.avg_turns > 0 && delta.avg_turns / metricsBefore.avg_turns > 0.10) {
+    regressions.push(`avg_turns increased by ${((delta.avg_turns / metricsBefore.avg_turns) * 100).toFixed(1)}%`);
+  }
+  if (metricsBefore.avg_quality > 0 && delta.avg_quality / metricsBefore.avg_quality < -0.10) {
+    regressions.push(`avg_quality regressed by ${(Math.abs(delta.avg_quality / metricsBefore.avg_quality) * 100).toFixed(1)}%`);
+  }
+
+  const recommendation = regressions.length > 0
+    ? `Rollback recommended: ${regressions.join("; ")}`
+    : improved
+      ? "Proposal is improving agent performance. No action needed."
+      : "No significant change detected. Consider collecting more data.";
+
+  // Store impact data
+  const impactData = { metrics_before: metricsBefore, metrics_after: metricsAfter, delta, improved, regressions, recommendation };
+
+  await sql`
+    UPDATE evolution_proposals
+    SET impact_json = ${JSON.stringify(impactData)}
+    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
+  `;
+
+  // Update ledger with metrics_after
+  await sql`
+    UPDATE evolution_ledger
+    SET metrics_after_json = ${JSON.stringify(metricsAfter)}
+    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
+      AND action = 'applied'
+  `;
+
+  return c.json({
+    improved,
+    metrics_before: metricsBefore,
+    metrics_after: metricsAfter,
+    delta,
+    recommendation,
+  });
+});
+
+// ── Auto-rollback on regression ───────────────────────────────
+
+evolveRoutes.post("/:agent_name/proposals/:proposal_id/auto-rollback", requireScope("evolve:write"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const proposalId = c.req.param("proposal_id");
+  const body = await c.req.json().catch(() => ({}));
+  const reason = String(body.reason || "Auto-rollback due to metric regression");
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Fetch proposal
+  const proposalRows = await sql`
+    SELECT * FROM evolution_proposals
+    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
+  `;
+  if (proposalRows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+  const proposal = proposalRows[0];
+  if (proposal.status !== "applied") {
+    return c.json({ error: "Can only rollback applied proposals" }, 400);
+  }
+
+  // Fetch ledger entry with previous config
+  const ledgerRows = await sql`
+    SELECT * FROM evolution_ledger
+    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
+      AND action = 'applied'
+    ORDER BY created_at DESC LIMIT 1
+  `;
+  if (ledgerRows.length === 0) {
+    return c.json({ error: "No ledger entry found — cannot determine previous config" }, 404);
+  }
+  const ledger = ledgerRows[0];
+  const previousConfig = safeJsonParse(ledger.previous_config_json);
+  if (!previousConfig) {
+    return c.json({ error: "Previous config not available in ledger" }, 400);
+  }
+
+  const now = Date.now() / 1000;
+
+  // Restore previous config to the agent
+  await sql`
+    UPDATE agents SET config_json = ${JSON.stringify(previousConfig)}
+    WHERE name = ${agentName} AND org_id = ${orgId}
+  `;
+
+  // Commit rollback to R2 VCS (store config snapshot in STORAGE bucket)
+  try {
+    const vcsKey = `vcs/${orgId}/${agentName}/rollback-${proposalId}-${Math.floor(now)}.json`;
+    const vcsPayload = JSON.stringify({
+      action: "rollback",
+      proposal_id: proposalId,
+      reason,
+      config: previousConfig,
+      rolled_back_at: now,
+      rolled_back_by: user.sub || user.user_id || "system",
+    });
+    await c.env.STORAGE.put(vcsKey, vcsPayload, {
+      customMetadata: {
+        agent_name: agentName,
+        org_id: orgId,
+        action: "rollback",
+        proposal_id: proposalId,
+      },
+    });
+  } catch {
+    // R2 write failure is non-fatal — the DB state is already restored
+  }
+
+  // Update proposal status to rolled_back
+  await sql`
+    UPDATE evolution_proposals
+    SET status = 'rolled_back', rolled_back_at = ${now}, rollback_reason = ${reason}
+    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
+  `;
+
+  // Record rollback in ledger
+  await sql`
+    INSERT INTO evolution_ledger (
+      agent_name, org_id, proposal_id, action, note,
+      previous_config_json, new_config_json, created_at
+    ) VALUES (
+      ${agentName}, ${orgId}, ${proposalId}, 'rolled_back',
+      ${reason},
+      ${ledger.new_config_json || "{}"}, ${JSON.stringify(previousConfig)}, ${now}
+    )
+  `;
+
+  return c.json({
+    rolled_back: true,
+    proposal_id: proposalId,
+    reason,
+    config_restored: true,
   });
 });
 
@@ -277,6 +503,71 @@ evolveRoutes.post("/:agent_name/run", requireScope("evolve:write"), (c) =>
   ),
 );
 
+// ── Helpers ────────────────────────────────────────────────────
+
+interface AgentMetrics {
+  success_rate: number;
+  avg_cost: number;
+  avg_turns: number;
+  avg_quality: number;
+  session_count: number;
+}
+
+/**
+ * Compute aggregate metrics for an agent over a time window.
+ */
+async function computeAgentMetrics(
+  sql: any,
+  agentName: string,
+  orgId: string,
+  fromEpoch: number,
+  toEpoch: number,
+): Promise<AgentMetrics> {
+  const sessions = await sql`
+    SELECT session_id, status, cost_total_usd, step_count
+    FROM sessions
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+      AND created_at >= ${fromEpoch} AND created_at <= ${toEpoch}
+    ORDER BY created_at DESC LIMIT 500
+  `.catch(() => []);
+
+  if (sessions.length === 0) {
+    return { success_rate: 0, avg_cost: 0, avg_turns: 0, avg_quality: 0, session_count: 0 };
+  }
+
+  const successCount = sessions.filter((s: any) => s.status === "success").length;
+  const successRate = successCount / sessions.length;
+  const avgCost = sessions.reduce((sum: number, s: any) => sum + Number(s.cost_total_usd || 0), 0) / sessions.length;
+  const avgTurns = sessions.reduce((sum: number, s: any) => sum + Number(s.step_count || 0), 0) / sessions.length;
+
+  // Fetch quality scores from conversation_analytics
+  const sessionIds = sessions.map((s: any) => String(s.session_id));
+  let avgQuality = 0;
+  if (sessionIds.length > 0) {
+    const qualityRows = await sql`
+      SELECT AVG(avg_quality) as avg_q
+      FROM conversation_analytics
+      WHERE session_id = ANY(${sessionIds})
+    `.catch(() => []);
+    if (qualityRows.length > 0 && qualityRows[0].avg_q != null) {
+      avgQuality = Number(qualityRows[0].avg_q);
+    }
+  }
+
+  return {
+    success_rate: round(successRate, 4),
+    avg_cost: round(avgCost, 6),
+    avg_turns: round(avgTurns, 2),
+    avg_quality: round(avgQuality, 4),
+    session_count: sessions.length,
+  };
+}
+
+function round(n: number, decimals: number): number {
+  const f = Math.pow(10, decimals);
+  return Math.round(n * f) / f;
+}
+
 function safeJsonParse(val: unknown): any {
   if (val === null || val === undefined) return undefined;
   if (typeof val === "object") return val;
@@ -290,7 +581,9 @@ function safeJsonParse(val: unknown): any {
 function deepMergeConfig(
   current: Record<string, any>,
   modification: Record<string, any>,
+  depth: number = 0,
 ): Record<string, any> {
+  if (depth > 10) throw new Error("Config merge depth exceeded (max 10)");
   const result = { ...current };
 
   for (const [key, value] of Object.entries(modification)) {
@@ -321,7 +614,7 @@ function deepMergeConfig(
     // Deep merge nested objects (e.g., governance, memory, routing)
     if (typeof value === "object" && value !== null && !Array.isArray(value) &&
         typeof current[key] === "object" && current[key] !== null && !Array.isArray(current[key])) {
-      result[key] = deepMergeConfig(current[key], value);
+      result[key] = deepMergeConfig(current[key], value, depth + 1);
       continue;
     }
 
@@ -348,7 +641,23 @@ evolveRoutes.get("/:agent_name/proposals", requireScope("evolve:read"), async (c
       WHERE agent_name = ${agentName} AND org_id = ${orgId}
       ORDER BY created_at DESC
     `;
-    return c.json({ proposals: rows });
+
+    // Enrich applied/rolled_back proposals with impact data
+    const proposals = rows.map((row: any) => {
+      const base: any = { ...row };
+      if ((row.status === "applied" || row.status === "rolled_back") && row.impact_json) {
+        const impact = safeJsonParse(row.impact_json);
+        if (impact) {
+          base.impact = impact;
+        }
+      }
+      if (row.status === "rolled_back" && row.rollback_reason) {
+        base.rollback_reason = row.rollback_reason;
+      }
+      return base;
+    });
+
+    return c.json({ proposals });
   } catch {
     return c.json({ proposals: [] });
   }
@@ -445,4 +754,104 @@ evolveRoutes.get("/:agent_name/ledger", requireScope("evolve:read"), async (c) =
   } catch {
     return c.json({ entries: [], current_version: "0.1.0" });
   }
+});
+
+// ── Evolution Schedule Management ─────────────────────────────
+
+evolveRoutes.get("/:agent_name/schedule", requireScope("evolve:read"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const rows = await sql`
+    SELECT * FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (rows.length === 0) {
+    return c.json({ schedule: null, message: "No evolution schedule configured for this agent." });
+  }
+
+  return c.json({ schedule: rows[0] });
+});
+
+evolveRoutes.post("/:agent_name/schedule", requireScope("evolve:write"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const body = await c.req.json().catch(() => ({}));
+
+  const intervalDays = Math.min(365, Math.max(1, Number(body.interval_days) || 7));
+  const minSessions = Math.min(1000, Math.max(1, Number(body.min_sessions) || 10));
+  const enabled = body.enabled !== false;
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const now = Date.now() / 1000;
+  const nextRunAt = now + intervalDays * 86400;
+  const id = `evosched-${crypto.randomUUID().slice(0, 12)}`;
+
+  // Upsert: create or update existing schedule for this agent+org
+  await sql`
+    INSERT INTO evolution_schedules (id, agent_name, org_id, enabled, interval_days, min_sessions, next_run_at, created_at)
+    VALUES (${id}, ${agentName}, ${orgId}, ${enabled}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  // If a row already exists for this agent+org, update it instead
+  const existing = await sql`
+    SELECT id FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId} AND id != ${id}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (existing.length > 0) {
+    await sql`
+      UPDATE evolution_schedules
+      SET enabled = ${enabled},
+          interval_days = ${intervalDays},
+          min_sessions = ${minSessions},
+          next_run_at = CASE WHEN next_run_at IS NULL THEN ${nextRunAt} ELSE next_run_at END
+      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+    `;
+    // Remove the duplicate we just inserted
+    await sql`DELETE FROM evolution_schedules WHERE id = ${id}`.catch(() => {});
+  }
+
+  const rows = await sql`
+    SELECT * FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId} LIMIT 1
+  `.catch(() => []);
+
+  return c.json({ schedule: rows[0] || null, created: existing.length === 0 });
+});
+
+evolveRoutes.delete("/:agent_name/schedule", requireScope("evolve:write"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  // Soft-disable rather than delete, so history is preserved
+  await sql`
+    UPDATE evolution_schedules
+    SET enabled = false
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+  `.catch(() => {});
+
+  return c.json({ disabled: true, agent_name: agentName });
 });
