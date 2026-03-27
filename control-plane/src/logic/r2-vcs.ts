@@ -97,6 +97,29 @@ export interface VcsStatus {
   has_uncommitted: boolean;
 }
 
+// ── Input Validation ──────────────────────────────────────────
+
+/** Validate a VCS path to prevent directory traversal attacks. */
+function validateVcsPath(path: string): void {
+  if (!path || typeof path !== "string") throw new Error("VCS path is required");
+  if (path.includes("..")) throw new Error("VCS path cannot contain '..'");
+  if (path.includes("\0")) throw new Error("VCS path cannot contain null bytes");
+  // Normalize and check for absolute paths trying to escape
+  const normalized = path.replace(/\\/g, "/");
+  if (normalized.startsWith("/") && !normalized.startsWith("/workspace")) {
+    throw new Error("VCS path must be relative or within /workspace");
+  }
+}
+
+/** Validate org/repo identifiers (no path traversal, only safe chars). */
+function validateIdentifier(value: string, name: string): void {
+  if (!value || typeof value !== "string") throw new Error(`${name} is required`);
+  if (value.includes("..") || value.includes("/") || value.includes("\0")) {
+    throw new Error(`${name} contains invalid characters`);
+  }
+  if (value.length > 256) throw new Error(`${name} exceeds maximum length (256)`);
+}
+
 // ── Core VCS Operations ───────────────────────────────────────
 
 /**
@@ -107,6 +130,8 @@ export async function vcsInit(
   org: string,
   repo: string,
 ): Promise<{ commit_id: string; branch: string }> {
+  validateIdentifier(org, "org");
+  validateIdentifier(repo, "repo");
   const prefix = `vcs/${org}/${repo}`;
 
   // Check if already initialized
@@ -192,6 +217,9 @@ export async function vcsCommit(
   branch: string = "main",
   metadata?: Record<string, unknown>,
 ): Promise<VcsCommit> {
+  validateIdentifier(org, "org");
+  validateIdentifier(repo, "repo");
+  for (const f of files) validateVcsPath(f.path);
   const prefix = `vcs/${org}/${repo}`;
 
   // Store all file objects
@@ -635,13 +663,9 @@ async function sha256(data: Uint8Array): Promise<string> {
     .join("");
 }
 
-function sha256Short(input: string): string {
-  // Fast non-crypto hash for IDs (not security-sensitive)
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    const c = input.charCodeAt(i);
-    hash = ((hash << 5) - hash) + c;
-    hash = hash & hash;
-  }
-  return Math.abs(hash).toString(36) + Date.now().toString(36);
+function sha256Short(_input: string): string {
+  // Use crypto.randomUUID for collision-resistant unique IDs.
+  // The input parameter is ignored — IDs don't need to be derived from content.
+  // Content-addressing uses the real sha256() for objects.
+  return crypto.randomUUID().replace(/-/g, "").slice(0, 24);
 }

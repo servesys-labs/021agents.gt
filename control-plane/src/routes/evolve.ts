@@ -232,6 +232,12 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
   // Apply modification to config (deep merge with special-case handling)
   const newConfig = deepMergeConfig(currentConfig, modification);
 
+  // Guard: reject configs larger than 500KB
+  const configStr = JSON.stringify(newConfig);
+  if (configStr.length > 500_000) {
+    return c.json({ error: "Resulting config exceeds 500KB limit" }, 400);
+  }
+
   // Update agent config
   const now = Date.now() / 1000;
   await sql`
@@ -303,7 +309,9 @@ function safeJsonParse(val: unknown): any {
 function deepMergeConfig(
   current: Record<string, any>,
   modification: Record<string, any>,
+  depth: number = 0,
 ): Record<string, any> {
+  if (depth > 10) throw new Error("Config merge depth exceeded (max 10)");
   const result = { ...current };
 
   for (const [key, value] of Object.entries(modification)) {
@@ -334,7 +342,7 @@ function deepMergeConfig(
     // Deep merge nested objects (e.g., governance, memory, routing)
     if (typeof value === "object" && value !== null && !Array.isArray(value) &&
         typeof current[key] === "object" && current[key] !== null && !Array.isArray(current[key])) {
-      result[key] = deepMergeConfig(current[key], value);
+      result[key] = deepMergeConfig(current[key], value, depth + 1);
       continue;
     }
 

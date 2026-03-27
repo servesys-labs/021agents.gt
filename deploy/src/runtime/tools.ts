@@ -2826,9 +2826,9 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
 const ALWAYS_AVAILABLE = new Set(["discover-api"]);
 
 export function getToolDefinitions(enabledTools: string[]): ToolDefinition[] {
-  const all = TOOL_CATALOG;
-  if (enabledTools.length === 0) return all;
-  return all.filter(
+  // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api).
+  // This prevents privilege escalation where an agent with tools:[] gets all tools.
+  return TOOL_CATALOG.filter(
     (t) => enabledTools.includes(t.function.name) || ALWAYS_AVAILABLE.has(t.function.name),
   );
 }

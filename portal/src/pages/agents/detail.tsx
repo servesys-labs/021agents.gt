@@ -352,7 +352,7 @@ export const AgentDetailPage = () => {
               <div className="px-3 pt-1 pb-1">
                 <span className="text-[9px] font-semibold uppercase tracking-wider text-text-muted">Ship</span>
               </div>
-              {SECONDARY_TABS.filter((t) => t.id === "releases").map((tab) => (
+              {SECONDARY_TABS.filter((t) => t.id === "releases" || t.id === "versions").map((tab) => (
                 <MoreMenuItem key={tab.id} tab={tab} activeTab={activeTab} onSelect={selectTab} />
               ))}
             </div>
