@@ -335,7 +335,313 @@ export default {
       console.error("[cron] Schedule check failed:", err);
     }
 
-    // 2. Apply retention policies (delete old data)
+    // 2. Evolution scheduling — run analyzer for due schedules
+    try {
+      const dueEvolutionSchedules = await sql`
+        SELECT id, agent_name, org_id, interval_days, min_sessions, last_run_at
+        FROM evolution_schedules
+        WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= ${now})
+        LIMIT 10
+      `;
+
+      const { analyzeSessionRecords, generateProposals } = await import("./logic/evolution-analyzer");
+
+      for (const schedule of dueEvolutionSchedules) {
+        try {
+          const agentName = String(schedule.agent_name);
+          const orgId = String(schedule.org_id);
+          const intervalDays = Number(schedule.interval_days || 7);
+          const minSessions = Number(schedule.min_sessions || 10);
+          const since = schedule.last_run_at ? Number(schedule.last_run_at) : now - intervalDays * 86400;
+
+          // Count sessions since last run
+          const countRows = await sql`
+            SELECT COUNT(*) as cnt FROM sessions
+            WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
+          `;
+          const sessionCount = Number(countRows[0]?.cnt || 0);
+
+          if (sessionCount < minSessions) {
+            // Not enough sessions — skip but keep the same next_run_at so we retry next cron tick
+            continue;
+          }
+
+          // Fetch agent config
+          const agentRows = await sql`
+            SELECT config_json FROM agents
+            WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
+          `;
+          if (agentRows.length === 0) continue;
+
+          let agentConfig: Record<string, unknown> = {};
+          try { agentConfig = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
+
+          // Fetch session records
+          const sessions = await sql`
+            SELECT session_id, agent_name, status, cost_total_usd, wall_clock_seconds,
+                   step_count, action_count, created_at
+            FROM sessions
+            WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
+            ORDER BY created_at DESC LIMIT 500
+          `;
+
+          const records: Array<{
+            session_id: string; agent_name: string; status: string; stop_reason: string;
+            cost_total_usd: number; wall_clock_seconds: number; step_count: number;
+            action_count: number; created_at: number; tool_calls: Array<{
+              tool_name: string; success: boolean; error?: string; latency_ms: number; turn_number: number;
+            }>; errors: Array<{
+              source: "llm" | "tool" | "governance" | "timeout" | "unknown";
+              message: string; tool_name?: string; turn_number: number; recoverable: boolean;
+            }>; quality_score?: number; sentiment?: string; task_completed?: boolean;
+          }> = [];
+
+          for (const session of sessions) {
+            const turns = await sql`
+              SELECT turn_number, tool_calls_json, tool_results_json, error
+              FROM turns WHERE session_id = ${session.session_id}
+              ORDER BY turn_number ASC LIMIT 100
+            `.catch(() => []);
+
+            const toolCalls: Array<{ tool_name: string; success: boolean; error?: string; latency_ms: number; turn_number: number }> = [];
+            const errors: Array<{ source: "llm" | "tool" | "governance" | "timeout" | "unknown"; message: string; tool_name?: string; turn_number: number; recoverable: boolean }> = [];
+
+            for (const turn of turns) {
+              let tcList: any[] = [];
+              let trList: any[] = [];
+              try { tcList = JSON.parse(String(turn.tool_calls_json || "[]")); } catch {}
+              try { trList = JSON.parse(String(turn.tool_results_json || "[]")); } catch {}
+
+              for (let i = 0; i < tcList.length; i++) {
+                const tc = tcList[i];
+                const tr = trList[i] || {};
+                toolCalls.push({
+                  tool_name: tc.name || tc.tool || "",
+                  success: !tr.error,
+                  error: tr.error || undefined,
+                  latency_ms: Number(tr.latency_ms || 0),
+                  turn_number: Number(turn.turn_number || 0),
+                });
+                if (tr.error) {
+                  errors.push({
+                    source: "tool",
+                    message: String(tr.error).slice(0, 300),
+                    tool_name: tc.name || tc.tool || "",
+                    turn_number: Number(turn.turn_number || 0),
+                    recoverable: true,
+                  });
+                }
+              }
+
+              if (turn.error) {
+                errors.push({
+                  source: "llm",
+                  message: String(turn.error).slice(0, 300),
+                  turn_number: Number(turn.turn_number || 0),
+                  recoverable: false,
+                });
+              }
+            }
+
+            records.push({
+              session_id: String(session.session_id),
+              agent_name: String(session.agent_name),
+              status: String(session.status || "unknown"),
+              stop_reason: String(session.status || "unknown"),
+              cost_total_usd: Number(session.cost_total_usd || 0),
+              wall_clock_seconds: Number(session.wall_clock_seconds || 0),
+              step_count: Number(session.step_count || 0),
+              action_count: Number(session.action_count || 0),
+              created_at: Number(session.created_at || 0),
+              tool_calls: toolCalls,
+              errors,
+            });
+          }
+
+          // Run analyzer + generate proposals
+          const availableTools = Array.isArray(agentConfig.tools) ? agentConfig.tools as string[] : [];
+          const report = analyzeSessionRecords(agentName, records, availableTools, intervalDays);
+          const proposals = generateProposals(report, agentConfig);
+
+          // Store proposals
+          for (const proposal of proposals) {
+            await sql`
+              INSERT INTO evolution_proposals (
+                proposal_id, agent_name, org_id, title, rationale, category,
+                priority, config_diff_json, evidence_json, status, created_at
+              ) VALUES (
+                ${proposal.id}, ${agentName}, ${orgId}, ${proposal.title},
+                ${proposal.rationale}, ${proposal.category}, ${proposal.priority},
+                ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)},
+                'pending', ${now}
+              ) ON CONFLICT (proposal_id) DO UPDATE SET
+                title = EXCLUDED.title,
+                rationale = EXCLUDED.rationale,
+                priority = EXCLUDED.priority,
+                config_diff_json = EXCLUDED.config_diff_json,
+                evidence_json = EXCLUDED.evidence_json
+            `.catch(() => {});
+          }
+
+          // Store report
+          await sql`
+            INSERT INTO evolution_reports (agent_name, org_id, report_json, session_count, created_at)
+            VALUES (${agentName}, ${orgId}, ${JSON.stringify(report)}, ${records.length}, ${now})
+          `.catch(() => {});
+
+          // Update schedule: set last_run_at, compute next_run_at
+          const nextRunAt = now + intervalDays * 86400;
+          await sql`
+            UPDATE evolution_schedules
+            SET last_run_at = ${now}, next_run_at = ${nextRunAt}
+            WHERE id = ${schedule.id}
+          `;
+
+          console.log(`[cron] Evolution analysis completed for ${agentName}: ${records.length} sessions, ${proposals.length} proposals`);
+        } catch (err) {
+          console.error(`[cron] Evolution schedule ${schedule.id} failed:`, err);
+        }
+      }
+    } catch (err) {
+      console.error("[cron] Evolution scheduling failed:", err);
+    }
+
+    // 3. Auto-trigger evolution on quality drop (>10% success_rate decline over 7 days)
+    try {
+      // Get all active agents
+      const activeAgents = await sql`
+        SELECT DISTINCT name, org_id FROM agents WHERE is_active = true LIMIT 100
+      `;
+
+      const sevenDaysAgo = now - 7 * 86400;
+      const fourteenDaysAgo = now - 14 * 86400;
+
+      for (const agent of activeAgents) {
+        const agentName = String(agent.name);
+        const orgId = String(agent.org_id);
+
+        // Current 7-day success rate
+        const currentRows = await sql`
+          SELECT COUNT(*) as total,
+                 SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successes
+          FROM sessions
+          WHERE agent_name = ${agentName} AND org_id = ${orgId}
+            AND created_at > ${sevenDaysAgo}
+        `;
+        const currentTotal = Number(currentRows[0]?.total || 0);
+        const currentSuccesses = Number(currentRows[0]?.successes || 0);
+
+        if (currentTotal < 5) continue; // Not enough data
+
+        const currentRate = currentSuccesses / currentTotal;
+
+        // Prior 7-day success rate (days 8-14)
+        const priorRows = await sql`
+          SELECT COUNT(*) as total,
+                 SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successes
+          FROM sessions
+          WHERE agent_name = ${agentName} AND org_id = ${orgId}
+            AND created_at > ${fourteenDaysAgo} AND created_at <= ${sevenDaysAgo}
+        `;
+        const priorTotal = Number(priorRows[0]?.total || 0);
+        const priorSuccesses = Number(priorRows[0]?.successes || 0);
+
+        if (priorTotal < 5) continue; // Not enough prior data
+
+        const priorRate = priorSuccesses / priorTotal;
+        const drop = priorRate - currentRate;
+
+        // Trigger if success rate dropped more than 10 percentage points
+        if (drop > 0.10) {
+          // Check if we already ran analysis in the last 24 hours for this agent
+          const recentReports = await sql`
+            SELECT 1 FROM evolution_reports
+            WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${now - 86400}
+            LIMIT 1
+          `.catch(() => []);
+
+          if (recentReports.length > 0) continue; // Already analyzed recently
+
+          console.log(
+            `[cron] Quality drop detected for ${agentName}: ${(priorRate * 100).toFixed(1)}% -> ${(currentRate * 100).toFixed(1)}% (drop: ${(drop * 100).toFixed(1)}pp). Auto-triggering analysis.`
+          );
+
+          // Dispatch analysis via the queue so we don't block the cron handler too long
+          try {
+            const { analyzeSessionRecords: analyze, generateProposals: genProposals } = await import("./logic/evolution-analyzer");
+
+            // Fetch agent config
+            const agentRows = await sql`
+              SELECT config_json FROM agents
+              WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
+            `;
+            if (agentRows.length === 0) continue;
+
+            let agentConfig: Record<string, unknown> = {};
+            try { agentConfig = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
+
+            // Quick analysis on last 7 days of sessions (lightweight — just counts + status)
+            const sessions = await sql`
+              SELECT session_id, agent_name, status, cost_total_usd, wall_clock_seconds,
+                     step_count, action_count, created_at
+              FROM sessions
+              WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${sevenDaysAgo}
+              ORDER BY created_at DESC LIMIT 200
+            `;
+
+            const records = sessions.map((s: any) => ({
+              session_id: String(s.session_id),
+              agent_name: String(s.agent_name),
+              status: String(s.status || "unknown"),
+              stop_reason: String(s.status || "unknown"),
+              cost_total_usd: Number(s.cost_total_usd || 0),
+              wall_clock_seconds: Number(s.wall_clock_seconds || 0),
+              step_count: Number(s.step_count || 0),
+              action_count: Number(s.action_count || 0),
+              created_at: Number(s.created_at || 0),
+              tool_calls: [] as any[],
+              errors: [] as any[],
+            }));
+
+            const availableTools = Array.isArray(agentConfig.tools) ? agentConfig.tools as string[] : [];
+            const report = analyze(agentName, records, availableTools, 7);
+            const proposals = genProposals(report, agentConfig);
+
+            // Store proposals
+            for (const proposal of proposals) {
+              await sql`
+                INSERT INTO evolution_proposals (
+                  proposal_id, agent_name, org_id, title, rationale, category,
+                  priority, config_diff_json, evidence_json, status, created_at
+                ) VALUES (
+                  ${proposal.id}, ${agentName}, ${orgId}, ${proposal.title},
+                  ${proposal.rationale}, ${proposal.category}, ${proposal.priority},
+                  ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)},
+                  'pending', ${now}
+                ) ON CONFLICT (proposal_id) DO UPDATE SET
+                  title = EXCLUDED.title, rationale = EXCLUDED.rationale,
+                  priority = EXCLUDED.priority, config_diff_json = EXCLUDED.config_diff_json,
+                  evidence_json = EXCLUDED.evidence_json
+              `.catch(() => {});
+            }
+
+            // Store report
+            await sql`
+              INSERT INTO evolution_reports (agent_name, org_id, report_json, session_count, created_at)
+              VALUES (${agentName}, ${orgId}, ${JSON.stringify(report)}, ${records.length}, ${now})
+            `.catch(() => {});
+
+            console.log(`[cron] Quality-drop analysis for ${agentName}: ${records.length} sessions, ${proposals.length} proposals`);
+          } catch (err) {
+            console.error(`[cron] Quality-drop analysis for ${agentName} failed:`, err);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[cron] Quality drop detection failed:", err);
+    }
+
+    // 4. Apply retention policies (delete old data)
     try {
       const policies = await sql`
         SELECT id, resource_type, retention_days, org_id, redact_pii, archive_before_delete

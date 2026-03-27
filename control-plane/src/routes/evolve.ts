@@ -467,3 +467,103 @@ evolveRoutes.get("/:agent_name/ledger", requireScope("evolve:read"), async (c) =
     return c.json({ entries: [], current_version: "0.1.0" });
   }
 });
+
+// ── Evolution Schedule Management ─────────────────────────────
+
+evolveRoutes.get("/:agent_name/schedule", requireScope("evolve:read"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const rows = await sql`
+    SELECT * FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (rows.length === 0) {
+    return c.json({ schedule: null, message: "No evolution schedule configured for this agent." });
+  }
+
+  return c.json({ schedule: rows[0] });
+});
+
+evolveRoutes.post("/:agent_name/schedule", requireScope("evolve:write"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const body = await c.req.json().catch(() => ({}));
+
+  const intervalDays = Math.min(365, Math.max(1, Number(body.interval_days) || 7));
+  const minSessions = Math.min(1000, Math.max(1, Number(body.min_sessions) || 10));
+  const enabled = body.enabled !== false;
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const now = Date.now() / 1000;
+  const nextRunAt = now + intervalDays * 86400;
+  const id = `evosched-${crypto.randomUUID().slice(0, 12)}`;
+
+  // Upsert: create or update existing schedule for this agent+org
+  await sql`
+    INSERT INTO evolution_schedules (id, agent_name, org_id, enabled, interval_days, min_sessions, next_run_at, created_at)
+    VALUES (${id}, ${agentName}, ${orgId}, ${enabled}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  // If a row already exists for this agent+org, update it instead
+  const existing = await sql`
+    SELECT id FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId} AND id != ${id}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (existing.length > 0) {
+    await sql`
+      UPDATE evolution_schedules
+      SET enabled = ${enabled},
+          interval_days = ${intervalDays},
+          min_sessions = ${minSessions},
+          next_run_at = CASE WHEN next_run_at IS NULL THEN ${nextRunAt} ELSE next_run_at END
+      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+    `;
+    // Remove the duplicate we just inserted
+    await sql`DELETE FROM evolution_schedules WHERE id = ${id}`.catch(() => {});
+  }
+
+  const rows = await sql`
+    SELECT * FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId} LIMIT 1
+  `.catch(() => []);
+
+  return c.json({ schedule: rows[0] || null, created: existing.length === 0 });
+});
+
+evolveRoutes.delete("/:agent_name/schedule", requireScope("evolve:write"), async (c) => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const agentName = c.req.param("agent_name");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  // Soft-disable rather than delete, so history is preserved
+  await sql`
+    UPDATE evolution_schedules
+    SET enabled = false
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+  `.catch(() => {});
+
+  return c.json({ disabled: true, agent_name: agentName });
+});
