@@ -2297,6 +2297,15 @@ async function dispatch(
     }
 
     case "self-check": {
+      // Rate limit: max 10 self-check calls per session
+      const selfCheckKey = `self-check:${args.session_id || "unknown"}`;
+      const selfCheckCount = ((globalThis as any).__selfCheckCounts ??= new Map<string, number>());
+      const currentCount = selfCheckCount.get(selfCheckKey) ?? 0;
+      if (currentCount >= 10) {
+        return "self-check rate limit reached (max 10 per session). Use the information you already have.";
+      }
+      selfCheckCount.set(selfCheckKey, currentCount + 1);
+
       const hyperdrive = (env as any).HYPERDRIVE;
       if (!hyperdrive) return "self-check requires database access";
       const { getDb } = await import("./db");

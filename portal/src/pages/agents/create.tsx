@@ -42,6 +42,7 @@ type GeneratedConfig = {
     require_confirmation_for_destructive: boolean;
     require_confirmation_for?: string[];
   };
+  reasoning_strategy?: string;
   graph?: GraphNode[];
   gate_pack?: GatePackResult;
   // Full package fields from meta-agent
@@ -559,6 +560,18 @@ function ReviewStage({
                 {MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
                 {!MODELS.includes(config.model) && <option value={config.model}>{config.model}</option>}
               </select>
+            </div>
+            <div>
+              <label className="text-label text-text-muted mb-1 block">Reasoning Strategy</label>
+              <select value={config.reasoning_strategy ?? ""} onChange={(e) => updateField("reasoning_strategy", e.target.value || undefined)}>
+                <option value="">Auto-detect</option>
+                <option value="chain-of-thought">Chain of Thought — step-by-step reasoning</option>
+                <option value="plan-then-execute">Plan then Execute — outline before acting</option>
+                <option value="step-back">Step Back — zoom out before diving in</option>
+                <option value="verify-then-respond">Verify then Respond — check facts first</option>
+                <option value="decompose">Decompose — break complex tasks into subtasks</option>
+              </select>
+              <p className="text-hint mt-1">How the agent approaches complex tasks. Auto-detect infers from the description.</p>
             </div>
           </div>
         </CollapsibleSection>

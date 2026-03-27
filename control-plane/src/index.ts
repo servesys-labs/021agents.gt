@@ -277,6 +277,57 @@ export default {
             }),
           );
           await resp.json(); // consume response
+        } else if (job.type === "evolution_analysis") {
+          // Async quality-drop analysis — dispatched from cron
+          const data = msg.body as { agent_name: string; org_id: string; days?: number };
+          const agentName = String(data.agent_name);
+          const orgId = String(data.org_id);
+          const days = Number(data.days) || 7;
+
+          const { analyzeSessionRecords: analyze, generateProposals: genProposals } = await import("./logic/evolution-analyzer");
+
+          const agentRows = await sql`
+            SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = 1 LIMIT 1
+          `;
+          if (agentRows.length > 0) {
+            let agentConfig: Record<string, unknown> = {};
+            try { agentConfig = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
+
+            const since = Date.now() / 1000 - days * 86400;
+            const sessions = await sql`
+              SELECT session_id, agent_name, status, cost_total_usd, wall_clock_seconds, step_count, action_count, created_at
+              FROM sessions WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
+              ORDER BY created_at DESC LIMIT 200
+            `;
+
+            const records = sessions.map((s: any) => ({
+              session_id: String(s.session_id), agent_name: String(s.agent_name),
+              status: String(s.status || "unknown"), stop_reason: String(s.status || "unknown"),
+              cost_total_usd: Number(s.cost_total_usd || 0), wall_clock_seconds: Number(s.wall_clock_seconds || 0),
+              step_count: Number(s.step_count || 0), action_count: Number(s.action_count || 0),
+              created_at: Number(s.created_at || 0), tool_calls: [] as any[], errors: [] as any[],
+            }));
+
+            const availableTools = Array.isArray(agentConfig.tools) ? agentConfig.tools as string[] : [];
+            const report = analyze(agentName, records, availableTools, days);
+            const proposals = genProposals(report, agentConfig);
+            const nowTs = Date.now() / 1000;
+
+            for (const proposal of proposals) {
+              await sql`
+                INSERT INTO evolution_proposals (proposal_id, agent_name, org_id, title, rationale, category, priority, config_diff_json, evidence_json, status, created_at)
+                VALUES (${proposal.id}, ${agentName}, ${orgId}, ${proposal.title}, ${proposal.rationale}, ${proposal.category}, ${proposal.priority}, ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)}, 'pending', ${nowTs})
+                ON CONFLICT (proposal_id) DO UPDATE SET title = EXCLUDED.title, priority = EXCLUDED.priority
+              `.catch(() => {});
+            }
+
+            await sql`
+              INSERT INTO evolution_reports (agent_name, org_id, report_json, session_count, created_at)
+              VALUES (${agentName}, ${orgId}, ${JSON.stringify(report)}, ${records.length}, ${nowTs})
+            `.catch(() => {});
+
+            console.log(`[queue] Evolution analysis for ${agentName}: ${records.length} sessions, ${proposals.length} proposals`);
+          }
         }
 
         msg.ack();
@@ -574,74 +625,19 @@ export default {
             `[cron] Quality drop detected for ${agentName}: ${(priorRate * 100).toFixed(1)}% -> ${(currentRate * 100).toFixed(1)}% (drop: ${(drop * 100).toFixed(1)}pp). Auto-triggering analysis.`
           );
 
-          // Dispatch analysis via the queue so we don't block the cron handler too long
+          // Dispatch analysis via the job queue — don't block the cron handler
           try {
-            const { analyzeSessionRecords: analyze, generateProposals: genProposals } = await import("./logic/evolution-analyzer");
-
-            // Fetch agent config
-            const agentRows = await sql`
-              SELECT config_json FROM agents
-              WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
-            `;
-            if (agentRows.length === 0) continue;
-
-            let agentConfig: Record<string, unknown> = {};
-            try { agentConfig = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
-
-            // Quick analysis on last 7 days of sessions (lightweight — just counts + status)
-            const sessions = await sql`
-              SELECT session_id, agent_name, status, cost_total_usd, wall_clock_seconds,
-                     step_count, action_count, created_at
-              FROM sessions
-              WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${sevenDaysAgo}
-              ORDER BY created_at DESC LIMIT 200
-            `;
-
-            const records = sessions.map((s: any) => ({
-              session_id: String(s.session_id),
-              agent_name: String(s.agent_name),
-              status: String(s.status || "unknown"),
-              stop_reason: String(s.status || "unknown"),
-              cost_total_usd: Number(s.cost_total_usd || 0),
-              wall_clock_seconds: Number(s.wall_clock_seconds || 0),
-              step_count: Number(s.step_count || 0),
-              action_count: Number(s.action_count || 0),
-              created_at: Number(s.created_at || 0),
-              tool_calls: [] as any[],
-              errors: [] as any[],
-            }));
-
-            const availableTools = Array.isArray(agentConfig.tools) ? agentConfig.tools as string[] : [];
-            const report = analyze(agentName, records, availableTools, 7);
-            const proposals = genProposals(report, agentConfig);
-
-            // Store proposals
-            for (const proposal of proposals) {
-              await sql`
-                INSERT INTO evolution_proposals (
-                  proposal_id, agent_name, org_id, title, rationale, category,
-                  priority, config_diff_json, evidence_json, status, created_at
-                ) VALUES (
-                  ${proposal.id}, ${agentName}, ${orgId}, ${proposal.title},
-                  ${proposal.rationale}, ${proposal.category}, ${proposal.priority},
-                  ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)},
-                  'pending', ${now}
-                ) ON CONFLICT (proposal_id) DO UPDATE SET
-                  title = EXCLUDED.title, rationale = EXCLUDED.rationale,
-                  priority = EXCLUDED.priority, config_diff_json = EXCLUDED.config_diff_json,
-                  evidence_json = EXCLUDED.evidence_json
-              `.catch(() => {});
-            }
-
-            // Store report
-            await sql`
-              INSERT INTO evolution_reports (agent_name, org_id, report_json, session_count, created_at)
-              VALUES (${agentName}, ${orgId}, ${JSON.stringify(report)}, ${records.length}, ${now})
-            `.catch(() => {});
-
-            console.log(`[cron] Quality-drop analysis for ${agentName}: ${records.length} sessions, ${proposals.length} proposals`);
+            await (env as any).JOB_QUEUE.send({
+              type: "evolution_analysis",
+              agent_name: agentName,
+              org_id: orgId,
+              trigger: "quality_drop",
+              drop_pp: drop,
+              days: 7,
+            });
+            console.log(`[cron] Quality-drop analysis queued for ${agentName} (drop: ${(drop * 100).toFixed(1)}pp)`);
           } catch (err) {
-            console.error(`[cron] Quality-drop analysis for ${agentName} failed:`, err);
+            console.error(`[cron] Failed to queue quality-drop analysis for ${agentName}:`, err);
           }
         }
       }

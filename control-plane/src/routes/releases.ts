@@ -8,6 +8,7 @@ import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
+import { getThresholds } from "../logic/policies";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const releaseRoutes = new Hono<R>();
@@ -35,9 +36,10 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
 
   // ── Eval gate enforcement for production promotion ──
   if (toChannel === "production") {
+    const thresholds = await getThresholds(c.env.HYPERDRIVE, user.org_id, agentName);
     const evalGate = await latestEvalGate(sql, agentName, {
-      minEvalPassRate: 0.8,
-      minEvalTrials: 5,
+      minEvalPassRate: thresholds.eval_pass_rate,
+      minEvalTrials: thresholds.eval_min_trials,
       orgId: user.org_id,
     });
     const recommendation = rolloutRecommendation({
