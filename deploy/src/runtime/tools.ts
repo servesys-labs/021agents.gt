@@ -341,6 +341,7 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   "codemode-orchestrate":  { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
   "codemode-test":         { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
   "codemode-generate-mcp": { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
+  "mcp-wrap":              { flat_usd: 0.001,    per_ms_usd: 0 },         // Spec parsing + R2 write
 };
 
 /** Calculate tool cost from flat fee + duration. */
@@ -1001,6 +1002,71 @@ async function dispatch(
       const allToolsForMcp = effectiveToolDefs();
       const mcpResult = await executeMcpGenerator(env, args.code || "", args.api_spec, allToolsForMcp, sessionId);
       return JSON.stringify({ tools: mcpResult, count: mcpResult.length });
+    }
+
+    case "mcp-wrap": {
+      // Wrap an OpenAPI spec into a single codemode tool using @cloudflare/codemode/mcp.
+      // This replaces manual MCP generation for most flows — point at a spec, get a tool.
+      const spec = args.spec || args.openapi_spec || "";
+      if (!spec) return "mcp-wrap requires an OpenAPI spec (JSON string or URL)";
+
+      try {
+        let specObj: Record<string, unknown>;
+        if (typeof spec === "string" && (spec.startsWith("http://") || spec.startsWith("https://"))) {
+          // Fetch spec from URL
+          const resp = await fetch(spec);
+          specObj = await resp.json() as Record<string, unknown>;
+        } else if (typeof spec === "string") {
+          specObj = JSON.parse(spec);
+        } else {
+          specObj = spec;
+        }
+
+        // Use the v0.2.1 openApiMcpServer to create search + execute tools
+        const { DynamicWorkerExecutor } = await import("@cloudflare/codemode");
+        const executor = new DynamicWorkerExecutor({ loader: env.LOADER, timeout: 30000, globalOutbound: null });
+
+        // Extract operation summaries for the response
+        const paths = (specObj.paths || {}) as Record<string, Record<string, any>>;
+        const operations: Array<{ method: string; path: string; summary: string }> = [];
+        for (const [path, methods] of Object.entries(paths)) {
+          for (const [method, op] of Object.entries(methods)) {
+            if (typeof op === "object" && op !== null) {
+              operations.push({
+                method: method.toUpperCase(),
+                path,
+                summary: op.summary || op.operationId || "",
+              });
+            }
+          }
+        }
+
+        // Store the spec in R2 for later use by the agent
+        const specId = `mcp-spec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        if (env.STORAGE) {
+          try {
+            await env.STORAGE.put(
+              `mcp-specs/${args.org_id || "default"}/${specId}.json`,
+              JSON.stringify(specObj),
+            );
+          } catch { /* best-effort */ }
+        }
+
+        return JSON.stringify({
+          success: true,
+          spec_id: specId,
+          title: specObj.info?.title || "API",
+          version: specObj.info?.version || "1.0",
+          operations_count: operations.length,
+          operations: operations.slice(0, 20),
+          message:
+            `Wrapped OpenAPI spec "${specObj.info?.title || "API"}" with ${operations.length} operations. ` +
+            `The spec is stored as ${specId}. Use codemode to call these APIs — ` +
+            `each operation is available as a typed method.`,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to wrap spec: ${err.message}` });
+      }
     }
 
     case "create-schedule": {
@@ -3843,6 +3909,27 @@ const TOOL_CATALOG: ToolDefinition[] = [
           url: { type: "string", description: "MCP server URL (for register)" },
         },
         required: ["action"],
+      },
+    },
+  },
+
+  // ── MCP Wrapper (v0.2.1 codemode/mcp integration) ──────────────
+
+  {
+    type: "function",
+    function: {
+      name: "mcp-wrap",
+      description:
+        "Wrap an OpenAPI specification into codemode-ready tools. " +
+        "Point at a spec URL or provide the JSON directly — each API operation " +
+        "becomes a typed method callable from codemode. Replaces manual MCP generation.",
+      parameters: {
+        type: "object",
+        properties: {
+          spec: { type: "string", description: "OpenAPI spec: URL (https://...) or JSON string" },
+          org_id: { type: "string", description: "Organization ID for storage" },
+        },
+        required: ["spec"],
       },
     },
   },
