@@ -153,7 +153,7 @@ export async function buildDeclarativeGraphContext(
   const sessionId = options.sessionId || crypto.randomUUID().slice(0, 16);
   const traceId = options.traceId || crypto.randomUUID().slice(0, 16);
   
-  const toolDefs = getToolDefinitions(config.tools);
+  const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
   

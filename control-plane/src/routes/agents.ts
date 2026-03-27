@@ -12,9 +12,31 @@ import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from 
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
 import { defaultNoCodeGraph, buildFromDescription, recommendTools } from "../logic/meta-agent";
+import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const agentRoutes = new Hono<R>();
+
+// ── GET /agents/templates — list pre-built agent templates ────────────
+
+agentRoutes.get("/templates", (c) => {
+  return c.json({
+    templates: AGENT_TEMPLATES.map((t) => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      tools: t.tools,
+      reasoning_strategy: t.reasoning_strategy,
+      tags: t.tags,
+    })),
+  });
+});
+
+agentRoutes.get("/templates/:id", (c) => {
+  const template = getTemplateById(c.req.param("id"));
+  if (!template) return c.json({ error: "Template not found" }, 404);
+  return c.json(template);
+});
 
 // ── Helper: Notify runtime of config changes ─────────────────────────
 

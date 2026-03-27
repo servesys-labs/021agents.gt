@@ -17,6 +17,22 @@ import { getDb } from "../db/client";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const authRoutes = new Hono<R>();
+
+/** Fire-and-forget audit log for auth events */
+async function auditAuthEvent(
+  sql: ReturnType<typeof getDb>,
+  action: string,
+  userId: string,
+  orgId: string,
+  details?: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await sql`
+      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      VALUES (${orgId}, ${userId}, ${action}, 'auth', ${userId}, ${JSON.stringify(details ?? {})}, now())
+    `;
+  } catch { /* non-critical */ }
+}
 const authRateLimitStore = new Map<string, { count: number; resetAt: number }>();
 
 // ── Zod schemas ──────────────────────────────────────────────────────────
@@ -319,6 +335,8 @@ authRoutes.post("/signup", async (c) => {
     provider: "local",
   });
 
+  auditAuthEvent(sql, "auth.signup", userId, orgId, { email, provider: "local" });
+
   return c.json({
     token,
     user_id: userId,
@@ -375,6 +393,8 @@ authRoutes.post("/login", async (c) => {
     org_id: orgId,
     provider: "local",
   });
+
+  auditAuthEvent(sql, "auth.login", user.user_id, String(orgId), { email: user.email, provider: "local" });
 
   return c.json({
     token,
@@ -568,6 +588,9 @@ authRoutes.post("/logout", async (c) => {
   }
 
   // Stateless JWT — client discards the token. Server acknowledges.
+  const sql = getDb(c.env.HYPERDRIVE);
+  auditAuthEvent(sql, "auth.logout", user.user_id, user.org_id ?? "", { email: user.email });
+
   return c.json({ logged_out: true });
 });
 
