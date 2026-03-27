@@ -12,9 +12,31 @@ import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from 
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
 import { defaultNoCodeGraph, buildFromDescription, recommendTools } from "../logic/meta-agent";
+import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const agentRoutes = new Hono<R>();
+
+// ── GET /agents/templates — list pre-built agent templates ────────────
+
+agentRoutes.get("/templates", (c) => {
+  return c.json({
+    templates: AGENT_TEMPLATES.map((t) => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      tools: t.tools,
+      reasoning_strategy: t.reasoning_strategy,
+      tags: t.tags,
+    })),
+  });
+});
+
+agentRoutes.get("/templates/:id", (c) => {
+  const template = getTemplateById(c.req.param("id"));
+  if (!template) return c.json({ error: "Template not found" }, 404);
+  return c.json(template);
+});
 
 // ── Helper: Notify runtime of config changes ─────────────────────────
 
@@ -77,6 +99,11 @@ async function listAgentsViaDataProxy(
 
 // ── Zod schemas ──────────────────────────────────────────────────────
 
+const VALID_REASONING_STRATEGIES = [
+  "step-back", "chain-of-thought", "plan-then-execute",
+  "verify-then-respond", "decompose",
+] as const;
+
 const AgentCreateSchema = z.object({
   name: z.string().min(1).max(128),
   description: z.string().max(2000).default(""),
@@ -89,6 +116,16 @@ const AgentCreateSchema = z.object({
   graph: z.record(z.unknown()).nullable().optional().default(null),
   strict_graph_lint: z.boolean().default(true),
   auto_graph: z.boolean().default(false),
+  reasoning_strategy: z.enum(VALID_REASONING_STRATEGIES).optional(),
+  // Full package fields (from meta-agent)
+  sub_agents: z.array(z.record(z.unknown())).optional(),
+  skills: z.array(z.record(z.unknown())).optional(),
+  codemode_snippets: z.array(z.record(z.unknown())).optional(),
+  guardrails: z.array(z.record(z.unknown())).optional(),
+  governance: z.record(z.unknown()).optional(),
+  eval_config: z.record(z.unknown()).optional(),
+  release_strategy: z.record(z.unknown()).optional(),
+  mcp_connectors: z.array(z.record(z.unknown())).optional(),
 });
 
 const CreateFromDescriptionSchema = z.object({
@@ -176,6 +213,11 @@ function lintGraphOrThrow(
   };
 }
 
+/**
+ * Snapshot agent config to agent_versions table.
+ * This is the PRIMARY versioning system. R2 VCS (in evolve.ts) is audit-only.
+ * Called on: create, update, create-from-description, version restore.
+ */
 async function snapshotVersion(
   sql: Awaited<ReturnType<typeof getDbForOrg>>,
   agentName: string,
@@ -289,14 +331,24 @@ agentRoutes.post(
       name: req.name,
       description: req.description,
       system_prompt: req.system_prompt,
-      model: req.model || "anthropic/claude-sonnet-4.6",
+      model: req.model || "anthropic/claude-sonnet-4-6",
       tools: req.tools,
       max_turns: req.max_turns,
       tags: req.tags,
       version: "0.1.0",
-      governance: { budget_limit_usd: req.budget_limit_usd },
+      governance: req.governance ?? { budget_limit_usd: req.budget_limit_usd },
       harness: {},
     };
+
+    // Reasoning strategy
+    if (req.reasoning_strategy) {
+      configJson.reasoning_strategy = req.reasoning_strategy;
+    }
+
+    // Eval config
+    if (req.eval_config) {
+      configJson.eval_config = req.eval_config;
+    }
 
     // Attach graph if provided
     if (req.graph && typeof req.graph === "object") {
@@ -333,14 +385,30 @@ agentRoutes.post(
     // Snapshot version
     await snapshotVersion(sql, req.name, "0.1.0", configJson, user.user_id);
 
-    return c.json({
+    // Persist full package if provided
+    let packageErrors: string[] = [];
+    const hasPackage = req.sub_agents || req.skills || req.codemode_snippets || req.guardrails || req.release_strategy;
+    if (hasPackage) {
+      packageErrors = await persistAgentPackage(sql, req.name, user.org_id, user.project_id || "", user.user_id, {
+        sub_agents: req.sub_agents,
+        skills: req.skills,
+        codemode_snippets: req.codemode_snippets,
+        guardrails: req.guardrails,
+        release_strategy: req.release_strategy,
+      });
+    }
+
+    const response: Record<string, unknown> = {
       name: req.name,
       description: req.description,
       model: configJson.model,
       tools: req.tools,
       tags: req.tags,
       version: "0.1.0",
-    }, 201);
+    };
+    if (req.reasoning_strategy) response.reasoning_strategy = req.reasoning_strategy;
+    if (packageErrors.length > 0) response.package_errors = packageErrors;
+    return c.json(response, 201);
   },
 );
 
@@ -542,41 +610,35 @@ agentRoutes.delete(
 );
 
 // GET /agents/:name/versions — list versions
-agentRoutes.get("/:name/versions", async (c) => {
-  const { name } = c.req.param();
-  const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+agentRoutes.get(
+  "/:name/versions",
+  requireScope("agents:read"),
+  async (c) => {
+    const agentName = c.req.param("name");
+    const user = c.get("user");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  let versions: Record<string, unknown>[] = [];
-  try {
     const rows = await sql`
-      SELECT av.version_number, av.config_json, av.created_by, av.created_at
-      FROM agent_versions av
-      JOIN agents a ON a.name = av.agent_name AND a.org_id = ${user.org_id}
-      WHERE av.agent_name = ${name}
-      ORDER BY av.created_at DESC
+      SELECT id, agent_name, version, config_json, created_by, created_at
+      FROM agent_versions
+      WHERE agent_name = ${agentName}
+      ORDER BY created_at DESC
+      LIMIT 50
     `;
-    versions = rows as Record<string, unknown>[];
-  } catch {
-    // Table may not exist
-  }
 
-  // Get current version from agent config
-  let current = "0.1.0";
-  try {
-    const agentRows = await sql`
-      SELECT config_json FROM agents WHERE name = ${name} AND org_id = ${user.org_id} LIMIT 1
-    `;
-    if (agentRows.length > 0) {
-      const config = parseConfig((agentRows[0] as Record<string, unknown>).config_json);
-      current = String(config.version ?? "0.1.0");
-    }
-  } catch {
-    // non-critical
-  }
+    const versions = rows.map((row, i) => ({
+      id: String(row.id),
+      tree_id: String(row.id),
+      parent_id: i < rows.length - 1 ? String(rows[i + 1].id) : null,
+      message: `Version ${row.version || "0.1.0"}`,
+      author: String(row.created_by || "system"),
+      timestamp: new Date(row.created_at as string).getTime() / 1000,
+      metadata: { version: row.version, source: "agent_versions" },
+    }));
 
-  return c.json({ versions, current });
-});
+    return c.json({ versions, total: versions.length });
+  },
+);
 
 // GET /agents/:name/tools — list tools for agent
 agentRoutes.get("/:name/tools", async (c) => {
@@ -1198,3 +1260,87 @@ agentRoutes.post("/:name/run/:session_id/cancel", (c) => {
     "Cancellation is managed in edge runtime/session layer.",
   );
 });
+
+// ── Version Restore (auth-protected) ───────────────────────────────────────
+
+agentRoutes.post(
+  "/:name/versions/:commitId/restore",
+  requireScope("agents:write"),
+  async (c) => {
+    const user = c.get("user");
+    const agentName = c.req.param("name");
+    const commitId = c.req.param("commitId");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const rows = await sql`
+      SELECT config_json, version FROM agent_versions
+      WHERE id = ${commitId} AND agent_name = ${agentName}
+      LIMIT 1
+    `;
+    if (rows.length === 0) return c.json({ error: "Version not found" }, 404);
+
+    const configJson = String(rows[0].config_json);
+
+    // Snapshot current config before overwriting (for undo)
+    const current = await sql`
+      SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    `;
+    if (current.length > 0) {
+      await snapshotVersion(sql, agentName, `pre-restore-${Date.now()}`,
+        JSON.parse(String(current[0].config_json || "{}")), user.user_id);
+    }
+
+    await sql`UPDATE agents SET config_json = ${configJson}, updated_at = now() WHERE name = ${agentName} AND org_id = ${user.org_id}`;
+    await snapshotVersion(sql, agentName, String(rows[0].version || "restored"), JSON.parse(configJson), user.user_id);
+
+    return c.json({ restored: true, version: rows[0].version });
+  },
+);
+
+// ── Trash / Soft Delete (auth-protected) ──────────────────────────────────
+
+agentRoutes.get(
+  "/:name/trash",
+  requireScope("agents:read"),
+  async (c) => {
+    const user = c.get("user");
+    const agentName = c.req.param("name");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const rows = await sql`
+      SELECT agent_id, name, config_json, updated_at, created_by
+      FROM agents
+      WHERE name LIKE ${agentName + '-deleted-%'} AND org_id = ${user.org_id} AND is_active = 0
+      ORDER BY updated_at DESC LIMIT 20
+    `;
+
+    const trash = rows.map((row) => ({
+      id: String(row.agent_id),
+      path: String(row.name),
+      deleted_at: new Date(row.updated_at as string).getTime() / 1000,
+      deleted_by: String(row.created_by || "system"),
+      expires_at: new Date(row.updated_at as string).getTime() / 1000 + 30 * 86400,
+      reason: "Soft-deleted",
+    }));
+
+    return c.json({ trash });
+  },
+);
+
+agentRoutes.post(
+  "/:name/trash/:trashId/restore",
+  requireScope("agents:write"),
+  async (c) => {
+    const user = c.get("user");
+    const agentName = c.req.param("name");
+    const trashId = c.req.param("trashId");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    await sql`
+      UPDATE agents SET is_active = 1, name = ${agentName}, updated_at = now()
+      WHERE agent_id = ${trashId} AND org_id = ${user.org_id} AND is_active = 0
+    `;
+
+    return c.json({ restored: true });
+  },
+);

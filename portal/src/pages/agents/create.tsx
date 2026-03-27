@@ -12,7 +12,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { apiPost, apiPut } from "../../lib/api";
+import { apiPost, apiPut, apiGet } from "../../lib/api";
 import { CollapsibleSection } from "../../components/common/CollapsibleSection";
 
 /* ── Types ──────────────────────────────────────────────────────── */
@@ -42,6 +42,7 @@ type GeneratedConfig = {
     require_confirmation_for_destructive: boolean;
     require_confirmation_for?: string[];
   };
+  reasoning_strategy?: string;
   graph?: GraphNode[];
   gate_pack?: GatePackResult;
   // Full package fields from meta-agent
@@ -112,10 +113,30 @@ export function CreateAgentPage() {
   const [searchParams] = useSearchParams();
   const initialPrompt = searchParams.get("prompt") ?? searchParams.get("description") ?? "";
 
-  const [stage, setStage] = useState<Stage>(initialPrompt ? "description" : "description");
+  const templateId = searchParams.get("template");
+  const [stage, setStage] = useState<Stage>("description");
   const [prompt, setPrompt] = useState(initialPrompt);
   const [config, setConfig] = useState<GeneratedConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [templateLoaded, setTemplateLoaded] = useState(false);
+
+  // Load template if ?template= query param is set
+  useEffect(() => {
+    if (!templateId || templateLoaded) return;
+    setTemplateLoaded(true);
+    apiGet<GeneratedConfig>(`/api/v1/agents/templates/${templateId}`)
+      .then((template) => {
+        setConfig({
+          ...template,
+          governance: template.governance ?? { budget_limit_usd: 10, blocked_tools: [], require_confirmation_for_destructive: true },
+          gate_pack: { lint: "pending", eval: "pending", contracts: "pending", rollout: "pending" },
+        });
+        setStage("review");
+      })
+      .catch(() => {
+        setError(`Template "${templateId}" not found`);
+      });
+  }, [templateId, templateLoaded]);
   const [deployMenuOpen, setDeployMenuOpen] = useState(false);
 
   /* Generation steps */
@@ -204,6 +225,7 @@ export function CreateAgentPage() {
           contracts: "pending",
           rollout: "pending",
         },
+        reasoning_strategy: result.reasoning_strategy ?? undefined,
         // Package fields
         agent_graph: result.agent_graph ?? undefined,
         sub_agents: result.sub_agents ?? [],
@@ -559,6 +581,18 @@ function ReviewStage({
                 {MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
                 {!MODELS.includes(config.model) && <option value={config.model}>{config.model}</option>}
               </select>
+            </div>
+            <div>
+              <label className="text-label text-text-muted mb-1 block">Reasoning Strategy</label>
+              <select value={config.reasoning_strategy ?? ""} onChange={(e) => updateField("reasoning_strategy", e.target.value || undefined)}>
+                <option value="">Auto-detect</option>
+                <option value="chain-of-thought">Chain of Thought — step-by-step reasoning</option>
+                <option value="plan-then-execute">Plan then Execute — outline before acting</option>
+                <option value="step-back">Step Back — zoom out before diving in</option>
+                <option value="verify-then-respond">Verify then Respond — check facts first</option>
+                <option value="decompose">Decompose — break complex tasks into subtasks</option>
+              </select>
+              <p className="text-hint mt-1">How the agent approaches complex tasks. Auto-detect infers from the description.</p>
             </div>
           </div>
         </CollapsibleSection>

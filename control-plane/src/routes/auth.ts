@@ -14,10 +14,26 @@ import { createToken, verifyToken } from "../auth/jwt";
 import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { getDb } from "../db/client";
-import { rateLimit } from "../middleware/rate-limit";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const authRoutes = new Hono<R>();
+
+/** Fire-and-forget audit log for auth events */
+async function auditAuthEvent(
+  sql: ReturnType<typeof getDb>,
+  action: string,
+  userId: string,
+  orgId: string,
+  details?: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await sql`
+      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      VALUES (${orgId}, ${userId}, ${action}, 'auth', ${userId}, ${JSON.stringify(details ?? {})}, now())
+    `;
+  } catch { /* non-critical */ }
+}
+const authRateLimitStore = new Map<string, { count: number; resetAt: number }>();
 
 // ── Zod schemas ──────────────────────────────────────────────────────────
 
@@ -49,6 +65,32 @@ const TokenVerifyRequest = z.object({
 
 function generateId(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+}
+
+function getClientIp(c: any): string {
+  const forwarded = c.req.header("x-forwarded-for");
+  if (forwarded) return String(forwarded).split(",")[0].trim();
+  return c.req.header("cf-connecting-ip") || "unknown";
+}
+
+function checkRateLimit(c: any, key: string, limit: number, windowMs: number): Response | null {
+  const now = Date.now();
+  const bucket = authRateLimitStore.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    authRateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
+    return null;
+  }
+  if (bucket.count >= limit) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    return c.json(
+      { error: "Too many requests", retry_after_seconds: retryAfterSeconds },
+      429,
+      { "Retry-After": String(retryAfterSeconds) },
+    );
+  }
+  bucket.count += 1;
+  authRateLimitStore.set(key, bucket);
+  return null;
 }
 
 /**
@@ -138,44 +180,15 @@ function passwordAuthDisabled(env: Env): boolean {
   return (env.AUTH_ALLOW_PASSWORD ?? "true").toLowerCase() === "false";
 }
 
-/** Log auth events to auth_audit_log (best-effort, never fails the request). */
-async function logAuthEvent(
-  env: Env,
-  event: {
-    org_id?: string;
-    user_id?: string;
-    email?: string;
-    event_type: string;
-    ip_address?: string;
-    user_agent?: string;
-    metadata?: Record<string, unknown>;
-  },
-): Promise<void> {
-  try {
-    const sql = await getDb(env.HYPERDRIVE);
-    await sql`
-      INSERT INTO auth_audit_log (org_id, user_id, email, event_type, ip_address, user_agent, metadata_json)
-      VALUES (
-        ${event.org_id || null},
-        ${event.user_id || null},
-        ${event.email || null},
-        ${event.event_type},
-        ${event.ip_address || null},
-        ${event.user_agent || null},
-        ${JSON.stringify(event.metadata || {})}
-      )
-    `;
-  } catch (err) {
-    console.warn("[auth-audit] Failed to log event:", err);
-  }
-}
-
 // ── POST /signup ─────────────────────────────────────────────────────────
 
-authRoutes.post("/signup", rateLimit(5, 3600_000, "signup"), async (c) => {
+authRoutes.post("/signup", async (c) => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
+  const signupLimit = checkRateLimit(c, `signup:${getClientIp(c)}`, 5, 24 * 60 * 60 * 1000);
+  if (signupLimit) return signupLimit;
+
   const body = await c.req.json().catch(() => ({}));
   const parsed = SignupRequest.safeParse(body);
   if (!parsed.success) {
@@ -250,7 +263,15 @@ authRoutes.post("/signup", rateLimit(5, 3600_000, "signup"), async (c) => {
   try {
     await sql`
       INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
-      VALUES (${orgId}, ${"free"}, ${JSON.stringify({ onboarding_complete: false })}, ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })}, ${JSON.stringify(["basic_agents", "basic_observability"])}, now(), now())
+      VALUES (
+        ${orgId},
+        ${"free"},
+        ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
+        ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+        ${JSON.stringify(["basic_agents", "basic_observability"])},
+        now(),
+        now()
+      )
       ON CONFLICT (org_id) DO NOTHING
     `;
   } catch (err) {
@@ -314,12 +335,7 @@ authRoutes.post("/signup", rateLimit(5, 3600_000, "signup"), async (c) => {
     provider: "local",
   });
 
-  logAuthEvent(c.env, {
-    org_id: orgId, user_id: userId, email,
-    event_type: "signup",
-    ip_address: c.req.header("cf-connecting-ip") || "",
-    user_agent: c.req.header("user-agent") || "",
-  });
+  auditAuthEvent(sql, "auth.signup", userId, orgId, { email, provider: "local" });
 
   return c.json({
     token,
@@ -336,6 +352,9 @@ authRoutes.post("/login", async (c) => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
+  const loginLimit = checkRateLimit(c, `login:${getClientIp(c)}`, 10, 60 * 60 * 1000);
+  if (loginLimit) return loginLimit;
+
   const body = await c.req.json().catch(() => ({}));
   const parsed = LoginRequest.safeParse(body);
   if (!parsed.success) {
@@ -374,6 +393,8 @@ authRoutes.post("/login", async (c) => {
     org_id: orgId,
     provider: "local",
   });
+
+  auditAuthEvent(sql, "auth.login", user.user_id, String(orgId), { email: user.email, provider: "local" });
 
   return c.json({
     token,
@@ -478,7 +499,15 @@ authRoutes.post("/cf-access/exchange", async (c) => {
     try {
       await sql`
         INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
-        VALUES (${orgId}, ${"free"}, ${JSON.stringify({ onboarding_complete: false })}, ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })}, ${JSON.stringify(["basic_agents", "basic_observability"])}, ${nowEpoch}, ${nowEpoch})
+        VALUES (
+          ${orgId},
+          ${"free"},
+          ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
+          ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+          ${JSON.stringify(["basic_agents", "basic_observability"])},
+          ${nowEpoch},
+          ${nowEpoch}
+        )
       `;
     } catch {}
     role = "owner";
@@ -559,6 +588,9 @@ authRoutes.post("/logout", async (c) => {
   }
 
   // Stateless JWT — client discards the token. Server acknowledges.
+  const sql = getDb(c.env.HYPERDRIVE);
+  auditAuthEvent(sql, "auth.logout", user.user_id, user.org_id ?? "", { email: user.email });
+
   return c.json({ logged_out: true });
 });
 

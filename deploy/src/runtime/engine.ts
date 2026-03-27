@@ -77,6 +77,27 @@ export async function edgeRun(
     // Best-effort — startup context should never block execution
   }
 
+  // Load assigned skills and inject into system prompt
+  try {
+    const { getDb } = await import("./db");
+    const sql = getDb(hyperdrive);
+    const skills = await sql`
+      SELECT name, content, category FROM skills
+      WHERE (assigned_agents @> ${JSON.stringify([config.agent_name])}::jsonb
+             OR assigned_agents = '[]'::jsonb)
+        AND enabled = true
+      ORDER BY name LIMIT 10
+    `;
+    if (skills.length > 0) {
+      const skillBlock = skills
+        .map((s) => `### Skill: ${s.name} (${s.category})\n${s.content}`)
+        .join("\n\n");
+      config.system_prompt = config.system_prompt + "\n\n## Available Skills\n" + skillBlock;
+    }
+  } catch {
+    // Best-effort — skill loading should never block execution
+  }
+
   const ctx = buildFreshGraphCtx(
     env,
     hyperdrive,

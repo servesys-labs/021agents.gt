@@ -420,7 +420,7 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
       // Injected as a system message before the user's task.
       try {
         const { selectReasoningStrategy, autoSelectStrategy } = await import("./reasoning-strategies");
-        const strategyName = (config as any).reasoning_strategy;
+        const strategyName = config.reasoning_strategy;
         const strategyPrompt = selectReasoningStrategy(strategyName, request.task, 1)
           || (!strategyName ? autoSelectStrategy(request.task, ctx.activeTools.length) : null);
         if (strategyPrompt) {
@@ -1187,7 +1187,7 @@ export function buildFreshGraphCtx(
   traceId: string,
   telemetryQueue?: Queue,
 ): FreshGraphCtx {
-  const toolDefs = getToolDefinitions(config.tools);
+  const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
   const stateReducerOverrides = coerceReducerMap(
@@ -1672,7 +1672,7 @@ export function buildResumeGraphCtx(
   config: AgentConfig,
   telemetryQueue?: Queue,
 ): ResumeGraphCtx {
-  const toolDefs = getToolDefinitions(config.tools);
+  const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
   const stateReducerOverrides = coerceReducerMap(

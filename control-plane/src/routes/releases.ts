@@ -8,6 +8,7 @@ import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
+import { getThresholds } from "../logic/policies";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const releaseRoutes = new Hono<R>();
@@ -35,9 +36,10 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
 
   // ── Eval gate enforcement for production promotion ──
   if (toChannel === "production") {
+    const thresholds = await getThresholds(c.env.HYPERDRIVE, user.org_id, agentName);
     const evalGate = await latestEvalGate(sql, agentName, {
-      minEvalPassRate: 0.8,
-      minEvalTrials: 5,
+      minEvalPassRate: thresholds.eval_pass_rate,
+      minEvalTrials: thresholds.eval_min_trials,
       orgId: user.org_id,
     });
     const recommendation = rolloutRecommendation({
@@ -60,6 +62,41 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
         );
       }
 
+      // Check if org requires approval for overrides (not just audit)
+      try {
+        const policyRows = await sql`
+          SELECT config_json FROM agent_policies
+          WHERE org_id = ${user.org_id} AND policy_type = 'thresholds'
+            AND (agent_name = ${agentName} OR agent_name IS NULL)
+          ORDER BY agent_name DESC NULLS LAST LIMIT 1
+        `;
+        if (policyRows.length > 0) {
+          const policy = JSON.parse(String(policyRows[0].config_json || "{}"));
+          if (policy.override_requires_approval) {
+            // Check if a different user has approved this override
+            const approvalBody = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+            const approvedBy = approvalBody.approved_by as string | undefined;
+            if (!approvedBy || approvedBy === user.user_id) {
+              return c.json({
+                error: "Override requires approval from a different team member",
+                hint: "Pass { override: true, approved_by: '<other_user_id>' } with a different user's approval.",
+              }, 403);
+            }
+            // Verify approved_by is a real member of this org
+            const memberCheck = await sql`
+              SELECT 1 FROM org_members
+              WHERE org_id = ${user.org_id} AND user_id = ${approvedBy}
+              LIMIT 1
+            `;
+            if (memberCheck.length === 0) {
+              return c.json({
+                error: `User '${approvedBy}' is not a member of this organization`,
+              }, 403);
+            }
+          }
+        }
+      } catch { /* policy check failed — allow override with audit */ }
+
       // Log override usage in audit
       const now = Date.now() / 1000;
       try {
@@ -71,6 +108,7 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
                     to: toChannel,
                     gate_reason: recommendation.reason,
                     override: true,
+                    approved_by: (await c.req.json().catch(() => ({}))).approved_by ?? null,
                   })}, ${now})
         `;
       } catch {}

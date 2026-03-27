@@ -13,6 +13,24 @@ import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
 const MAX_SANDBOX_TIMEOUT_SECONDS = 120;
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
 const DEFAULT_SANDBOX_MEMORY_LIMIT_MB = 512;
+
+/* ── Per-session tool rate limiter (bounded, LRU eviction) ────── */
+const RATE_LIMIT_MAX_ENTRIES = 2000;
+const toolRateLimits = new Map<string, number>();
+
+function checkToolRateLimit(toolName: string, sessionId: unknown, maxCalls: number): boolean {
+  const key = `${toolName}:${sessionId || "unknown"}`;
+  const count = toolRateLimits.get(key) ?? 0;
+  if (count >= maxCalls) return true; // rate limited
+  toolRateLimits.set(key, count + 1);
+  // LRU eviction: if map grows too large, delete oldest 25%
+  if (toolRateLimits.size > RATE_LIMIT_MAX_ENTRIES) {
+    const keys = [...toolRateLimits.keys()];
+    const toRemove = Math.floor(keys.length / 4);
+    for (let i = 0; i < toRemove; i++) toolRateLimits.delete(keys[i]);
+  }
+  return false;
+}
 const DYNAMIC_WORKER_CACHE_LIMIT = 32;
 const DYNAMIC_WORKER_CACHE_TTL_MS = 5 * 60_000;
 type DynamicWorkerCacheEntry = { worker: any; expiresAt: number };
@@ -520,16 +538,33 @@ async function executeSingleTool(
 
   // ── Governance: Domain allowlist check ────────────────────────
   const config = (env as any).__agentConfig as
-    | { allowed_domains?: string[]; require_confirmation_for_destructive?: boolean; max_tokens_per_turn?: number }
+    | {
+      allowed_domains?: string[];
+      blocked_domains?: string[];
+      require_confirmation_for_destructive?: boolean;
+      max_tokens_per_turn?: number;
+    }
     | undefined;
 
-  if (config?.allowed_domains && config.allowed_domains.length > 0) {
-    const urlTools = new Set(["browse", "http-request", "web-crawl", "browser-render", "a2a-send"]);
-    if (urlTools.has(tc.name)) {
-      const targetUrl = String(args.url || args.endpoint || "");
-      if (targetUrl) {
-        try {
-          const hostname = new URL(targetUrl).hostname;
+  const urlTools = new Set(["browse", "http-request", "web-crawl", "browser-render", "a2a-send"]);
+  if (urlTools.has(tc.name)) {
+    const targetUrl = String(args.url || args.endpoint || "");
+    if (targetUrl) {
+      try {
+        const hostname = new URL(targetUrl).hostname;
+        if (config?.blocked_domains && config.blocked_domains.length > 0) {
+          const blocked = config.blocked_domains.some(
+            (d) => hostname === d || hostname.endsWith(`.${d}`),
+          );
+          if (blocked) {
+            return {
+              tool: tc.name, tool_call_id: tc.id, result: "",
+              error: `Domain '${hostname}' is blocked by governance policy`,
+              latency_ms: Date.now() - started,
+            };
+          }
+        }
+        if (config?.allowed_domains && config.allowed_domains.length > 0) {
           const allowed = config.allowed_domains.some(
             (d) => hostname === d || hostname.endsWith(`.${d}`),
           );
@@ -540,8 +575,8 @@ async function executeSingleTool(
               latency_ms: Date.now() - started,
             };
           }
-        } catch { /* invalid URL — SSRF check will catch it */ }
-      }
+        }
+      } catch { /* invalid URL — SSRF check will catch it */ }
     }
   }
 
@@ -2297,6 +2332,11 @@ async function dispatch(
     }
 
     case "self-check": {
+      // Rate limit: max 10 self-check calls per session (bounded LRU map)
+      if (checkToolRateLimit("self-check", args.session_id, 10)) {
+        return "self-check rate limit reached (max 10 per session). Use the information you already have.";
+      }
+
       const hyperdrive = (env as any).HYPERDRIVE;
       if (!hyperdrive) return "self-check requires database access";
       const { getDb } = await import("./db");
@@ -2429,6 +2469,11 @@ async function dispatch(
     }
 
     case "adapt-strategy": {
+      // Rate limit: max 3 strategy switches per session
+      if (checkToolRateLimit("adapt-strategy", args.session_id, 3)) {
+        return "Strategy switch limit reached (max 3 per session). Commit to your current approach.";
+      }
+
       const strategy = String(args.strategy || "");
       const reason = String(args.reason || "");
       const ALLOWED_STRATEGIES = ["step-back", "chain-of-thought", "plan-then-execute", "verify-then-respond", "decompose"];
@@ -3087,11 +3132,16 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
  */
 const ALWAYS_AVAILABLE = new Set(["discover-api"]);
 
-export function getToolDefinitions(enabledTools: string[]): ToolDefinition[] {
+export function getToolDefinitions(enabledTools: string[], blockedTools: string[] = []): ToolDefinition[] {
   // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api).
   // This prevents privilege escalation where an agent with tools:[] gets all tools.
+  const blocked = new Set(blockedTools);
   return TOOL_CATALOG.filter(
-    (t) => enabledTools.includes(t.function.name) || ALWAYS_AVAILABLE.has(t.function.name),
+    (t) => {
+      const name = t.function.name;
+      if (blocked.has(name)) return false; // Governance: blocked tools never available
+      return enabledTools.includes(name) || ALWAYS_AVAILABLE.has(name);
+    },
   );
 }
 
