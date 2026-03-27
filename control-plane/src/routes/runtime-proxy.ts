@@ -137,17 +137,40 @@ runtimeProxyRoutes.get("/health", async (c) => {
  * Also returns health status to help debug routing issues.
  */
 runtimeProxyRoutes.post("/agent/run", async (c) => {
-  const health = await checkRuntimeHealth(c.env.RUNTIME);
-  
-  return c.json(
-    {
-      detail:
-        "Backend runtime execution is removed. Use worker `/api/v1/runtime-proxy/agent/run`.",
-      runtime_health: health.healthy ? "healthy" : "unhealthy",
-      runtime_latency_ms: health.latencyMs,
-    },
-    410,
-  );
+  const user = c.get("user");
+  const body = await c.req.json();
+  const agentName = String(body.agent_name || "");
+  const input = String(body.input || body.message || body.task || "");
+
+  if (!agentName || !input) {
+    return c.json({ error: "agent_name and input are required" }, 400);
+  }
+
+  try {
+    const resp = await c.env.RUNTIME.fetch(
+      new Request("https://runtime/run", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+        },
+        body: JSON.stringify({
+          input,
+          agent_name: agentName,
+          org_id: user.org_id,
+          project_id: user.project_id || "",
+          channel: "portal",
+          channel_user_id: user.user_id,
+          history: body.history,
+        }),
+      }),
+    );
+
+    const result = await resp.json() as Record<string, unknown>;
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: `Runtime execution failed: ${err.message || err}` }, 502);
+  }
 });
 
 runtimeProxyRoutes.post("/batch", async (c) => {
