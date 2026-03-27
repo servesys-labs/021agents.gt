@@ -29,6 +29,8 @@ type GeneratedConfig = {
   };
   graph?: GraphNode[];
   gate_pack?: GatePackResult;
+  reasoning_strategy?: string;
+  use_code_mode?: boolean;
 };
 
 type GraphNode = {
@@ -640,8 +642,8 @@ function ReviewStage({
                   Reasoning Strategy
                 </label>
                 <select
-                  value={(config as any).reasoning_strategy || "auto"}
-                  onChange={(e) => updateField("reasoning_strategy" as any, e.target.value === "auto" ? undefined : e.target.value)}
+                  value={config.reasoning_strategy || "auto"}
+                  onChange={(e) => updateField("reasoning_strategy", e.target.value === "auto" ? undefined : e.target.value)}
                   className="text-[var(--text-sm)] w-full bg-surface-base border border-border-default rounded px-2 py-1.5 text-text-secondary"
                 >
                   <option value="auto">Auto-detect from task</option>
@@ -658,8 +660,8 @@ function ReviewStage({
               <label className="flex items-center gap-[var(--space-2)] cursor-pointer min-h-[var(--touch-target-min)]">
                 <input
                   type="checkbox"
-                  checked={(config as any).use_code_mode || false}
-                  onChange={(e) => updateField("use_code_mode" as any, e.target.checked)}
+                  checked={config.use_code_mode || false}
+                  onChange={(e) => updateField("use_code_mode", e.target.checked)}
                   className="w-4 h-4 rounded border-border-default bg-surface-base accent-accent"
                 />
                 <span className="text-[var(--text-xs)] text-text-secondary">
