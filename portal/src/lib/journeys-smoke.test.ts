@@ -29,6 +29,7 @@ describe("portal journey route smoke coverage", () => {
       "/agents/:name/verify",
       "/issues",
       "/intelligence",
+      "/observability/trace-integrity",
     ]);
   });
 

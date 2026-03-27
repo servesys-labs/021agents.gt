@@ -14,6 +14,7 @@ import { createToken, verifyToken } from "../auth/jwt";
 import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { getDb } from "../db/client";
+import { logSecurityEvent } from "../logic/security-events";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const authRoutes = new Hono<R>();
@@ -368,16 +369,44 @@ authRoutes.post("/login", async (c) => {
     SELECT user_id, email, name, password_hash FROM users WHERE email = ${email}
   `;
   if (rows.length === 0) {
+    // Security event: login failed — unknown email
+    logSecurityEvent(sql, {
+      org_id: "",
+      event_type: "login.failed",
+      actor_id: email,
+      actor_type: "user",
+      ip_address: getClientIp(c),
+      severity: "medium",
+      details: { reason: "unknown_email", email },
+    });
     return c.json({ error: "Invalid credentials" }, 401);
   }
 
   const user = rows[0];
   if (!user.password_hash) {
+    logSecurityEvent(sql, {
+      org_id: "",
+      event_type: "login.failed",
+      actor_id: email,
+      actor_type: "user",
+      ip_address: getClientIp(c),
+      severity: "medium",
+      details: { reason: "no_password_hash", email },
+    });
     return c.json({ error: "Invalid credentials" }, 401);
   }
 
   const valid = await verifyPassword(password, user.password_hash);
   if (!valid) {
+    logSecurityEvent(sql, {
+      org_id: "",
+      event_type: "login.failed",
+      actor_id: email,
+      actor_type: "user",
+      ip_address: getClientIp(c),
+      severity: "medium",
+      details: { reason: "wrong_password", email },
+    });
     return c.json({ error: "Invalid credentials" }, 401);
   }
 
@@ -395,6 +424,17 @@ authRoutes.post("/login", async (c) => {
   });
 
   auditAuthEvent(sql, "auth.login", user.user_id, String(orgId), { email: user.email, provider: "local" });
+
+  // Security event: login success
+  logSecurityEvent(sql, {
+    org_id: String(orgId),
+    event_type: "login.success",
+    actor_id: user.user_id,
+    actor_type: "user",
+    ip_address: getClientIp(c),
+    severity: "info",
+    details: { email: user.email, provider: "local" },
+  });
 
   return c.json({
     token,

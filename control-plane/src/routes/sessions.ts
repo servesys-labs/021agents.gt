@@ -126,6 +126,8 @@ sessionRoutes.get("/", requireScope("sessions:read"), async (c) => {
       cost_total_usd: Number(r.cost_total_usd || 0),
       wall_clock_seconds: Number(r.wall_clock_seconds || 0),
       trace_id: r.trace_id || "",
+      parent_session_id: r.parent_session_id || null,
+      depth: Number(r.depth || 0),
       created_at: Number(r.created_at || 0),
     })),
   );
@@ -148,6 +150,8 @@ sessionRoutes.get("/:session_id", requireScope("sessions:read"), async (c) => {
     cost_total_usd: Number(r.cost_total_usd || 0),
     wall_clock_seconds: Number(r.wall_clock_seconds || 0),
     trace_id: r.trace_id || "",
+    parent_session_id: r.parent_session_id || null,
+    depth: Number(r.depth || 0),
     created_at: Number(r.created_at || 0),
   });
 });

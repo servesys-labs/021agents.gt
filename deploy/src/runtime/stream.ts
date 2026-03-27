@@ -26,6 +26,7 @@ import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop } from "./middleware";
 import { serializeForWebSocket } from "./protocol";
 import { createBackpressureController } from "./backpressure";
+import { attachDelegationLineage, type DelegationContextInput } from "./delegation";
 import { attachToolPolicyEnvelope } from "./policy-envelope";
 
 type WsSend = (data: string) => void;
@@ -244,6 +245,7 @@ export async function streamRun(
     project_id?: string;
     channel?: string;
     history_messages?: Array<{ role: "user" | "assistant"; content: string }>;
+    delegation?: DelegationContextInput;
   },
 ): Promise<void> {
   const started = Date.now();
@@ -260,6 +262,12 @@ export async function streamRun(
     if (opts?.org_id) config.org_id = opts.org_id;
     if (opts?.project_id) config.project_id = opts.project_id;
     attachToolPolicyEnvelope(env, config);
+    const lineage = attachDelegationLineage(env, config, { session_id: sessionId, trace_id: traceId }, {
+      agent_name: agentName,
+      org_id: opts?.org_id,
+      project_id: opts?.project_id,
+      delegation: opts?.delegation,
+    });
 
     // Tools
     const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
@@ -320,6 +328,14 @@ export async function streamRun(
       session_id: sessionId,
       trace_id: traceId,
       agent_name: config.agent_name,
+      delegation: lineage.parent_session_id
+        ? {
+            parent_session_id: lineage.parent_session_id,
+            parent_trace_id: lineage.parent_trace_id,
+            parent_agent_name: lineage.parent_agent_name,
+            depth: lineage.depth,
+          }
+        : undefined,
     }));
 
     // Plan routing
@@ -334,6 +350,12 @@ export async function streamRun(
     let lastModel = config.model;
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
+      const lineage = (env as any).__delegationLineage;
+      if (lineage && typeof lineage === "object") {
+        lineage.turn = turn;
+        lineage.cumulative_cost_usd = cumulativeCost;
+      }
+
       // Budget check
       if (cumulativeCost >= config.budget_limit_usd) {
         send(serializeForWebSocket({ type: "error", message: "Budget exhausted", code: "BUDGET_EXHAUSTED" }));
@@ -507,6 +529,8 @@ export async function streamRun(
       input_text: input, output_text: output, model: lastModel, trace_id: traceId,
       step_count: totalToolCalls > 0 ? totalToolCalls : 1, action_count: totalToolCalls,
       wall_clock_seconds: elapsedMs / 1000, cost_total_usd: cumulativeCost,
+      parent_session_id: lineage.parent_session_id,
+      depth: lineage.depth,
     }).catch(() => {});
 
     // Billing write (fire-and-forget)

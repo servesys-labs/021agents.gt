@@ -136,7 +136,102 @@ sloRoutes.get("/status", requireScope("slos:read"), async (c) => {
     }
 
     results.push({ ...s, current_value: current, breached });
+
+    // ── Persist evaluation to history ──────────────────────────────────
+    const evalId = genId();
+    try {
+      await sql`
+        INSERT INTO slo_evaluations (eval_id, org_id, slo_id, metric, agent_name, threshold, actual_value, breached, window_hours)
+        VALUES (${evalId}, ${user.org_id}, ${s.slo_id}, ${s.metric}, ${s.agent_name}, ${s.threshold}, ${current}, ${breached}, ${s.window_hours})
+      `;
+    } catch {}
+
+    // ── Update error budget for current month ─────────────────────────
+    const now = new Date();
+    const monthKey = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    try {
+      await sql`
+        INSERT INTO slo_error_budgets (org_id, slo_id, month, total_evaluations, breaches, budget_remaining_pct)
+        VALUES (${user.org_id}, ${s.slo_id}, ${monthKey}, 1, ${breached ? 1 : 0}, ${breached ? 99.0 : 100.0})
+        ON CONFLICT (org_id, slo_id, month)
+        DO UPDATE SET
+          total_evaluations = slo_error_budgets.total_evaluations + 1,
+          breaches = slo_error_budgets.breaches + ${breached ? 1 : 0},
+          budget_remaining_pct = GREATEST(0, 100.0 - (
+            (slo_error_budgets.breaches + ${breached ? 1 : 0})::FLOAT
+            / (slo_error_budgets.total_evaluations + 1)::FLOAT
+            * 100.0
+          ))
+      `;
+    } catch {}
   }
 
   return c.json({ slos: results, breached_count: results.filter((r) => r.breached).length });
+});
+
+// ── SLO evaluation history ────────────────────────────────────────────────
+sloRoutes.get("/history", requireScope("slos:read"), async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const sloId = c.req.query("slo_id") || "";
+  const sinceDays = Math.min(Math.max(Number(c.req.query("since_days") || 30), 1), 365);
+  const limit = Math.min(Math.max(Number(c.req.query("limit") || 100), 1), 1000);
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
+
+  let rows;
+  if (sloId) {
+    rows = await sql`
+      SELECT * FROM slo_evaluations
+      WHERE org_id = ${user.org_id} AND slo_id = ${sloId} AND created_at >= ${since}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `;
+  } else {
+    rows = await sql`
+      SELECT * FROM slo_evaluations
+      WHERE org_id = ${user.org_id} AND created_at >= ${since}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `;
+  }
+
+  return c.json({ evaluations: rows, count: rows.length });
+});
+
+// ── Error budgets (all SLOs) ──────────────────────────────────────────────
+sloRoutes.get("/error-budgets", requireScope("slos:read"), async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const rows = await sql`
+    SELECT eb.slo_id, sd.metric, eb.month, eb.total_evaluations, eb.breaches, eb.budget_remaining_pct
+    FROM slo_error_budgets eb
+    JOIN slo_definitions sd ON sd.slo_id = eb.slo_id AND sd.org_id = eb.org_id
+    WHERE eb.org_id = ${user.org_id}
+    ORDER BY eb.month DESC, sd.metric
+  `;
+
+  return c.json({ error_budgets: rows });
+});
+
+// ── Error budget for a specific SLO (across months) ───────────────────────
+sloRoutes.get("/error-budgets/:slo_id", requireScope("slos:read"), async (c) => {
+  const user = c.get("user");
+  const sloId = c.req.param("slo_id");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const slo = await sql`
+    SELECT * FROM slo_definitions WHERE slo_id = ${sloId} AND org_id = ${user.org_id}
+  `;
+  if (!slo.length) return c.json({ error: "SLO not found" }, 404);
+
+  const budgets = await sql`
+    SELECT month, total_evaluations, breaches, budget_remaining_pct
+    FROM slo_error_budgets
+    WHERE org_id = ${user.org_id} AND slo_id = ${sloId}
+    ORDER BY month DESC
+  `;
+
+  return c.json({ slo: slo[0], budgets });
 });

@@ -16,6 +16,7 @@ import {
   DEFAULT_GUARDRAIL_POLICY,
   type GuardrailPolicy,
 } from "../logic/guardrail-engine";
+import { logSecurityEvent } from "../logic/security-events";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const guardrailRoutes = new Hono<R>();
@@ -109,6 +110,30 @@ guardrailRoutes.post("/scan", requireScope("guardrails:write"), async (c) => {
     `;
   } catch {
     // Best-effort logging
+  }
+
+  // Security event: guardrail triggered or blocked
+  if (result.action === "block" || result.action === "warn") {
+    try {
+      const sqlSec = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+      logSecurityEvent(sqlSec, {
+        org_id: user.org_id,
+        event_type: result.action === "block" ? "guardrail.blocked" : "guardrail.triggered",
+        actor_id: user.user_id,
+        actor_type: "user",
+        severity: "high",
+        details: {
+          scan_type,
+          action: result.action,
+          agent_name: agent_name ?? "unknown",
+          pii_count: piiMatches.length,
+          injection_score: injectionResult.score,
+          reasons: result.reasons,
+        },
+      });
+    } catch {
+      // Best-effort
+    }
   }
 
   return c.json({

@@ -9,6 +9,7 @@ import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import type { Sql } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { logSecurityEvent } from "../logic/security-events";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const orgRoutes = new Hono<R>();
@@ -160,6 +161,18 @@ orgRoutes.post("/:org_id/members", requireScope("orgs:write"), async (c) => {
     ON CONFLICT (org_id, user_id) DO NOTHING
   `;
 
+  // Security event: user invited
+  logSecurityEvent(sql, {
+    org_id: orgId,
+    event_type: "user.invited",
+    actor_id: user.user_id,
+    actor_type: "user",
+    target_id: targetUserId,
+    target_type: "user",
+    severity: "info",
+    details: { email, role },
+  });
+
   return c.json({ invited: email, role });
 });
 
@@ -241,6 +254,19 @@ orgRoutes.put("/:org_id/members/:member_user_id", requireScope("orgs:write"), as
   await sql`
     UPDATE org_members SET role = ${role} WHERE org_id = ${orgId} AND user_id = ${memberUserId}
   `;
+
+  // Security event: role changed
+  logSecurityEvent(sql, {
+    org_id: orgId,
+    event_type: "user.role_changed",
+    actor_id: user.user_id,
+    actor_type: "user",
+    target_id: memberUserId,
+    target_type: "user",
+    severity: "medium",
+    details: { new_role: role },
+  });
+
   return c.json({ updated: memberUserId, role });
 });
 
@@ -257,6 +283,19 @@ orgRoutes.delete("/:org_id/members/:member_user_id", requireScope("orgs:write"),
   }
 
   await sql`DELETE FROM org_members WHERE org_id = ${orgId} AND user_id = ${memberUserId}`;
+
+  // Security event: user removed
+  logSecurityEvent(sql, {
+    org_id: orgId,
+    event_type: "user.removed",
+    actor_id: user.user_id,
+    actor_type: "user",
+    target_id: memberUserId,
+    target_type: "user",
+    severity: "medium",
+    details: { removed_user_id: memberUserId },
+  });
+
   return c.json({ removed: memberUserId });
 });
 

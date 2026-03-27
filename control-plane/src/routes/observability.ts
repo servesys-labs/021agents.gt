@@ -7,6 +7,17 @@ import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import {
+  applyDedupeWindow,
+  buildCircuitIncident,
+  buildIntegrityIncident,
+  buildLoopIncident,
+  compareSeverity,
+  filterIncidentKinds,
+  severityFromIntegrityPayload,
+  type IncidentKind,
+  type ObservabilityIncident,
+} from "../logic/observability-incidents";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const observabilityRoutes = new Hono<R>();
@@ -57,6 +68,267 @@ observabilityRoutes.get("/summary", requireScope("observability:read"), async (c
     total_input_tokens: Number(billing.input_tokens),
     total_output_tokens: Number(billing.output_tokens),
     since_days: sinceDays,
+  });
+});
+
+observabilityRoutes.get("/integrity/breaches", requireScope("observability:read"), async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
+  const traceId = String(c.req.query("trace_id") || "").trim();
+
+  const rows = traceId
+    ? await sql`
+      SELECT resource_id, changes_json, created_at, user_id
+      FROM audit_log
+      WHERE org_id = ${user.org_id}
+        AND action = 'trace.integrity_breach'
+        AND resource_type = 'trace'
+        AND resource_id = ${traceId}
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `.catch(() => [])
+    : await sql`
+      SELECT resource_id, changes_json, created_at, user_id
+      FROM audit_log
+      WHERE org_id = ${user.org_id}
+        AND action = 'trace.integrity_breach'
+        AND resource_type = 'trace'
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `.catch(() => []);
+
+  const entries = rows.map((r: any) => {
+    const details = parseJsonSafe(r.changes_json);
+    const warnings = Array.isArray(details.warnings) ? details.warnings.map((w) => String(w)) : [];
+    return {
+      trace_id: String(r.resource_id || ""),
+      created_at: r.created_at,
+      user_id: String(r.user_id || ""),
+      strict: Boolean(details.strict),
+      missing_turns: Number(details.missing_turns || 0),
+      missing_runtime_events: Number(details.missing_runtime_events || 0),
+      missing_billing_records: Number(details.missing_billing_records || 0),
+      lifecycle_mismatch: Number(details.lifecycle_mismatch || 0),
+      warnings,
+      severity: severityFromIntegrityPayload(details),
+    };
+  });
+
+  const byTrace: Record<string, number> = {};
+  let strictCount = 0;
+  for (const entry of entries) {
+    byTrace[entry.trace_id] = (byTrace[entry.trace_id] || 0) + 1;
+    if (entry.strict) strictCount += 1;
+  }
+  const hottestTraces = Object.entries(byTrace)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([trace_id, breaches]) => ({ trace_id, breaches }));
+
+  return c.json({
+    total_breaches: entries.length,
+    strict_breaches: strictCount,
+    non_strict_breaches: entries.length - strictCount,
+    hottest_traces: hottestTraces,
+    entries,
+  });
+});
+
+const INCIDENT_KINDS = new Set<IncidentKind>(["integrity_breach", "loop_halt", "loop_warn", "circuit_block"]);
+
+observabilityRoutes.get("/incidents", requireScope("observability:read"), async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const sinceHours = Math.max(1, Math.min(168, Number(c.req.query("since_hours")) || 24));
+  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
+  const dedupeRaw = c.req.query("dedupe_window_sec");
+  const dedupeParsed = dedupeRaw !== undefined && dedupeRaw !== "" ? Number(dedupeRaw) : 300;
+  const dedupeWindowSec = Math.max(0, Math.min(3600, Number.isFinite(dedupeParsed) ? dedupeParsed : 300));
+  const includeSuppressed = c.req.query("include_suppressed") !== "false";
+  const minSeverity = String(c.req.query("min_severity") || "").trim().toLowerCase();
+
+  const kindsParam = String(c.req.query("kinds") || "").trim();
+  const kindFilter: Set<IncidentKind> | null = kindsParam
+    ? new Set(
+        kindsParam
+          .split(",")
+          .map((k) => k.trim())
+          .filter((k): k is IncidentKind => INCIDENT_KINDS.has(k as IncidentKind)),
+      )
+    : null;
+  if (kindFilter && kindFilter.size === 0) {
+    return c.json({ error: "Invalid kinds= (use integrity_breach,loop_halt,loop_warn,circuit_block)" }, 400);
+  }
+
+  const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
+  const evaluatedAt = new Date().toISOString();
+
+  const sources = {
+    audit_log: true,
+    middleware_events: true,
+    runtime_events: true,
+  };
+
+  const raw: ObservabilityIncident[] = [];
+
+  const wantIntegrity = !kindFilter || kindFilter.has("integrity_breach");
+  if (wantIntegrity) {
+    try {
+      const rows = await sql`
+        SELECT resource_id, changes_json, created_at, user_id
+        FROM audit_log
+        WHERE org_id = ${user.org_id}
+          AND action = 'trace.integrity_breach'
+          AND resource_type = 'trace'
+          AND created_at >= ${since}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `;
+      for (const r of rows as any[]) {
+        const details = parseJsonSafe(r.changes_json);
+        raw.push(
+          buildIntegrityIncident({
+            traceId: String(r.resource_id || ""),
+            sessionId: null,
+            openedAt: String(r.created_at || evaluatedAt),
+            userId: String(r.user_id || ""),
+            details,
+          }),
+        );
+      }
+    } catch {
+      sources.audit_log = false;
+    }
+  }
+
+  const wantLoop = !kindFilter || kindFilter.has("loop_halt") || kindFilter.has("loop_warn");
+  if (wantLoop) {
+    try {
+      const rows = await sql`
+        SELECT m.session_id, m.event_type, m.details_json, m.created_at, s.trace_id
+        FROM middleware_events m
+        LEFT JOIN sessions s ON s.session_id = m.session_id AND s.org_id = m.org_id
+        WHERE m.org_id = ${user.org_id}
+          AND m.middleware_name = 'loop_detection'
+          AND m.event_type IN ('loop_halt', 'loop_warn')
+          AND m.created_at >= ${since}
+        ORDER BY m.created_at DESC
+        LIMIT ${limit}
+      `;
+      for (const r of rows as any[]) {
+        const et = String(r.event_type || "");
+        if (et !== "loop_halt" && et !== "loop_warn") continue;
+        if (kindFilter) {
+          if (et === "loop_halt" && !kindFilter.has("loop_halt")) continue;
+          if (et === "loop_warn" && !kindFilter.has("loop_warn")) continue;
+        }
+        const details = parseJsonSafe(r.details_json);
+        raw.push(
+          buildLoopIncident({
+            eventType: et,
+            openedAt: String(r.created_at || evaluatedAt),
+            traceId: r.trace_id != null ? String(r.trace_id) : null,
+            sessionId: String(r.session_id || ""),
+            details,
+          }),
+        );
+      }
+    } catch {
+      sources.middleware_events = false;
+    }
+  }
+
+  const wantCircuit = !kindFilter || kindFilter.has("circuit_block");
+  if (wantCircuit) {
+    try {
+      const rows = await sql`
+        SELECT trace_id, session_id, event_type, details_json, created_at
+        FROM runtime_events
+        WHERE org_id = ${user.org_id}
+          AND event_type = 'turn_completed'
+          AND (
+            COALESCE(details_json::jsonb->>'error', '') ILIKE '%circuit breaker%'
+            OR COALESCE(details_json::text, '') ILIKE '%circuit breaker%'
+          )
+          AND created_at >= ${since}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `;
+      for (const r of rows as any[]) {
+        const details = parseJsonSafe(r.details_json);
+        raw.push(
+          buildCircuitIncident({
+            openedAt: String(r.created_at || evaluatedAt),
+            traceId: r.trace_id != null ? String(r.trace_id) : null,
+            sessionId: String(r.session_id || ""),
+            details: { ...details, event_type: String(r.event_type || "") },
+          }),
+        );
+      }
+    } catch {
+      sources.runtime_events = false;
+    }
+  }
+
+  let incidents = applyDedupeWindow(raw, dedupeWindowSec);
+  incidents = filterIncidentKinds(incidents, kindFilter);
+
+  const severityRank: Record<string, number> = {
+    critical: 5,
+    high: 4,
+    medium: 3,
+    low: 2,
+    info: 1,
+  };
+  const minRank = minSeverity ? severityRank[minSeverity] : 0;
+  if (minSeverity && !minRank) {
+    return c.json({ error: "Invalid min_severity (critical|high|medium|low|info)" }, 400);
+  }
+  if (minRank) {
+    incidents = incidents.filter((i) => severityRank[i.severity] >= minRank);
+  }
+
+  if (!includeSuppressed) {
+    incidents = incidents.filter((i) => i.suppression.is_primary);
+  }
+
+  incidents.sort((a, b) => {
+    const t = Date.parse(b.opened_at) - Date.parse(a.opened_at);
+    if (t !== 0) return t;
+    return compareSeverity(b.severity, a.severity);
+  });
+
+  incidents = incidents.slice(0, limit);
+
+  const bySeverity: Record<string, number> = {};
+  const byKind: Record<string, number> = {};
+  for (const i of incidents) {
+    bySeverity[i.severity] = (bySeverity[i.severity] || 0) + 1;
+    byKind[i.kind] = (byKind[i.kind] || 0) + 1;
+  }
+
+  const openPrimary = incidents.filter((i) => i.suppression.is_primary).length;
+
+  return c.json({
+    window: {
+      since_hours: sinceHours,
+      since,
+      evaluated_at: evaluatedAt,
+    },
+    defaults: {
+      dedupe_window_sec: dedupeWindowSec,
+      include_suppressed: includeSuppressed,
+    },
+    sources,
+    counts: {
+      total: incidents.length,
+      open_primary: openPrimary,
+      by_severity: bySeverity,
+      by_kind: byKind,
+    },
+    incidents,
   });
 });
 

@@ -7,6 +7,7 @@
  */
 
 import type { AgentConfig, TurnResult, RuntimeEvent } from "./types";
+import { applyDeployPolicyToConfigJson } from "./deploy-policy-contract";
 import type postgres from "postgres";
 
 type Sql = ReturnType<typeof postgres>;
@@ -67,6 +68,7 @@ export async function loadAgentConfig(
       tools: [],
       blocked_tools: [],
       allowed_domains: [],
+      blocked_domains: [],
       max_tokens_per_turn: 0,
       require_confirmation_for_destructive: false,
       parallel_tool_calls: true,
@@ -79,6 +81,13 @@ export async function loadAgentConfig(
   const row = rows[0];
   const cfg = parseJson(row.config_json) || {};
   const governance = parseJson(cfg.governance) || {};
+  const cfgRec = cfg as Record<string, unknown>;
+  const policyAttach = applyDeployPolicyToConfigJson(cfgRec, { fallbackStripOverlay: true });
+  if (!policyAttach.ok) {
+    console.warn(
+      `[DB] deploy_policy could not be attached for ${agentName}: ${policyAttach.errors.join("; ")}`,
+    );
+  }
 
   // config_json contains harness config: system_prompt, provider, model, tools, etc.
   return {
@@ -92,6 +101,8 @@ export async function loadAgentConfig(
     tools: parseJsonArray(cfg.tools),
     blocked_tools: parseJsonArray(cfg.blocked_tools || cfg.blockedTools || governance.blocked_tools),
     allowed_domains: parseJsonArray(cfg.allowed_domains || cfg.allowedDomains || governance.allowed_domains),
+    blocked_domains: parseJsonArray(cfg.blocked_domains || cfg.blockedDomains || governance.blocked_domains),
+    deploy_policy: policyAttach.ok ? (cfgRec.deploy_policy as AgentConfig["deploy_policy"]) : undefined,
     max_tokens_per_turn: Number(cfg.max_tokens_per_turn || governance.max_tokens_per_turn) || 0,
     require_confirmation_for_destructive:
       cfg.require_confirmation_for_destructive === true

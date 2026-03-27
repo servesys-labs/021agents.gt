@@ -185,9 +185,19 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // ── Callable Methods (RPC from client) ──────────────────────────
 
   @callable()
-  async run(input: string): Promise<TurnResult[]> {
+  async run(
+    input: string,
+    opts?: {
+      delegation?: {
+        parent_session_id?: string;
+        parent_trace_id?: string;
+        parent_agent_name?: string;
+        parent_depth?: number;
+      };
+    },
+  ): Promise<TurnResult[]> {
     // Always execute on edge runtime.
-    return this._runAtEdge(input);
+    return this._runAtEdge(input, opts);
   }
 
   /**
@@ -195,7 +205,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
    * No backend hop — LLM, tools, DB all execute here.
    * Errors surface directly; no silent fallback to backend.
    */
-  private async _runAtEdge(input: string): Promise<TurnResult[]> {
+  private async _runAtEdge(
+    input: string,
+    opts?: {
+      delegation?: {
+        parent_session_id?: string;
+        parent_trace_id?: string;
+        parent_agent_name?: string;
+        parent_depth?: number;
+      };
+    },
+  ): Promise<TurnResult[]> {
     const config = this.state.config;
     const started = Date.now();
 
@@ -222,6 +242,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       task: input,
       org_id: config.orgId || "",
       project_id: config.projectId || "",
+      delegation: opts?.delegation,
     };
 
     const result = await edgeRun(
@@ -546,6 +567,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             project_id: data.project_id || config.projectId || "",
             channel: data.channel || "websocket",
             history_messages: history,
+            delegation: data.delegation,
           },
         );
       }
@@ -704,6 +726,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           project_id: data.project_id || config.projectId || "",
           channel: data.channel || "async_rest",
           history_messages: history,
+          delegation: data.delegation,
         },
       );
 
@@ -780,6 +803,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               project_id: data.project_id || config.projectId || "",
               channel: data.channel || "sse",
               history_messages: history,
+              delegation: data.delegation,
             },
           ).then(() => {
             self._appendConversationMessage("user", inputText, data.channel || "sse");
@@ -1202,7 +1226,13 @@ async function runViaAgent(
   env: { AGENTOS_AGENT: any; SERVICE_TOKEN?: string },
   agentName: string,
   task: string,
-  opts?: { org_id?: string; project_id?: string; channel?: string; channel_user_id?: string },
+  opts?: {
+    org_id?: string;
+    project_id?: string;
+    channel?: string;
+    channel_user_id?: string;
+    delegation?: Record<string, unknown>;
+  },
 ): Promise<{ output: string; success: boolean; error?: string; turns: number; tool_calls: number; cost_usd: number; latency_ms: number; session_id: string; trace_id: string; stop_reason: string; [key: string]: unknown }> {
   // Per-user DO isolation: each user gets their own conversation thread
   // Include org_id to prevent cross-org collision
@@ -1228,6 +1258,7 @@ async function runViaAgent(
       project_id: opts?.project_id || "",
       channel: opts?.channel || "api",
       channel_user_id: opts?.channel_user_id || "",
+      delegation: opts?.delegation,
     }),
   }));
   return resp.json() as any;
@@ -1404,12 +1435,21 @@ export default {
     // POST /run — route to Durable Object for agent execution
     if (url.pathname === "/run" && request.method === "POST") {
       try {
-        const body = await request.json() as { agent_name?: string; input?: string; org_id?: string; project_id?: string; channel?: string; channel_user_id?: string };
+        const body = await request.json() as {
+          agent_name?: string;
+          input?: string;
+          org_id?: string;
+          project_id?: string;
+          channel?: string;
+          channel_user_id?: string;
+          delegation?: Record<string, unknown>;
+        };
         const result = await runViaAgent(env, body.agent_name || "agentos", body.input || "", {
           org_id: body.org_id,
           project_id: body.project_id,
           channel: body.channel || "api",
           channel_user_id: body.channel_user_id,
+          delegation: body.delegation,
         });
         return Response.json(result);
       } catch (err) {

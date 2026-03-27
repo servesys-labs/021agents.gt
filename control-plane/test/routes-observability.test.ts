@@ -289,4 +289,217 @@ describe("observability ownership and maintenance contracts", () => {
     expect(strictPayload.complete).toBe(false);
     expect(strictPayload.warnings.some((w) => w.includes("billing records"))).toBe(true);
   });
+
+  it("integrity breaches endpoint returns aggregated breach summary", async () => {
+    const mockSql9 = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("FROM audit_log") && query.includes("trace.integrity_breach")) {
+        return [
+          {
+            resource_id: "trace-1",
+            user_id: "u-1",
+            created_at: "2026-03-27T00:00:00.000Z",
+            changes_json: JSON.stringify({
+              strict: true,
+              missing_turns: 1,
+              missing_runtime_events: 0,
+              missing_billing_records: 1,
+              lifecycle_mismatch: 1,
+              warnings: ["1 sessions have no billing records"],
+            }),
+          },
+          {
+            resource_id: "trace-1",
+            user_id: "u-1",
+            created_at: "2026-03-27T00:01:00.000Z",
+            changes_json: JSON.stringify({
+              strict: false,
+              missing_turns: 0,
+              missing_runtime_events: 1,
+              missing_billing_records: 0,
+              lifecycle_mismatch: 0,
+              warnings: ["1 sessions have no runtime events"],
+            }),
+          },
+          {
+            resource_id: "trace-2",
+            user_id: "u-2",
+            created_at: "2026-03-27T00:02:00.000Z",
+            changes_json: "{}",
+          },
+        ];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql9);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql9);
+
+    const app = buildApp("org-a");
+    const res = await app.request("/integrity/breaches?limit=10", { method: "GET" }, mockEnv());
+    expect(res.status).toBe(200);
+    const payload = await res.json() as {
+      total_breaches: number;
+      strict_breaches: number;
+      hottest_traces: Array<{ trace_id: string; breaches: number }>;
+      entries: Array<{ trace_id: string }>;
+    };
+    expect(payload.total_breaches).toBe(3);
+    expect(payload.strict_breaches).toBe(1);
+    expect(payload.hottest_traces[0]).toEqual({ trace_id: "trace-1", breaches: 2 });
+    expect(payload.entries.length).toBe(3);
+    expect((payload.entries[0] as { severity?: string }).severity).toBe("critical");
+  });
+
+  it("integrity breaches endpoint supports trace filter", async () => {
+    const mockSql10 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes("resource_id =")) {
+        expect(values.some((v) => String(v) === "trace-filtered")).toBe(true);
+      }
+      if (query.includes("FROM audit_log") && query.includes("trace.integrity_breach")) {
+        return [{
+          resource_id: "trace-filtered",
+          user_id: "u-1",
+          created_at: "2026-03-27T00:00:00.000Z",
+          changes_json: JSON.stringify({ strict: true }),
+        }];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql10);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql10);
+
+    const app = buildApp("org-a");
+    const res = await app.request(
+      "/integrity/breaches?trace_id=trace-filtered",
+      { method: "GET" },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    const payload = await res.json() as { entries: Array<{ trace_id: string }> };
+    expect(payload.entries[0]?.trace_id).toBe("trace-filtered");
+  });
+
+  it("incidents endpoint aggregates integrity, loop, and circuit signals", async () => {
+    const mockSqlIncidents = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("FROM audit_log") && query.includes("created_at >=")) {
+        return [
+          {
+            resource_id: "trace-inc",
+            user_id: "u-1",
+            created_at: "2026-03-27T12:00:00.000Z",
+            changes_json: JSON.stringify({
+              strict: false,
+              missing_runtime_events: 1,
+              missing_turns: 0,
+              lifecycle_mismatch: 0,
+              missing_billing_records: 0,
+              warnings: [],
+            }),
+          },
+        ];
+      }
+      if (query.includes("FROM middleware_events")) {
+        return [
+          {
+            session_id: "sess-loop",
+            event_type: "loop_halt",
+            details_json: JSON.stringify({ message: "halt", turn: 2 }),
+            created_at: "2026-03-27T12:05:00.000Z",
+            trace_id: "trace-loop",
+          },
+        ];
+      }
+      if (query.includes("FROM runtime_events")) {
+        return [
+          {
+            trace_id: "trace-circ",
+            session_id: "sess-circ",
+            event_type: "turn_completed",
+            details_json: JSON.stringify({ error: "Circuit breaker OPEN for browse. Retry after 12s" }),
+            created_at: "2026-03-27T12:06:00.000Z",
+          },
+        ];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSqlIncidents);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSqlIncidents);
+
+    const app = buildApp("org-a");
+    const res = await app.request("/incidents?limit=20&dedupe_window_sec=0", { method: "GET" }, mockEnv());
+    expect(res.status).toBe(200);
+    const payload = await res.json() as {
+      window?: { since_hours?: number };
+      defaults?: { dedupe_window_sec?: number };
+      sources?: Record<string, boolean>;
+      counts?: { total?: number; by_kind?: Record<string, number> };
+      incidents?: Array<{ kind?: string; severity?: string; signal_source?: string }>;
+    };
+    expect(payload.window?.since_hours).toBe(24);
+    expect(payload.defaults?.dedupe_window_sec).toBe(0);
+    expect(payload.sources?.audit_log).toBe(true);
+    expect(payload.sources?.middleware_events).toBe(true);
+    expect(payload.sources?.runtime_events).toBe(true);
+    expect(payload.counts?.total).toBe(3);
+    expect(payload.counts?.by_kind?.integrity_breach).toBe(1);
+    expect(payload.counts?.by_kind?.loop_halt).toBe(1);
+    expect(payload.counts?.by_kind?.circuit_block).toBe(1);
+    const kinds = new Set((payload.incidents ?? []).map((i) => i.kind));
+    expect(kinds.has("integrity_breach")).toBe(true);
+    expect(kinds.has("loop_halt")).toBe(true);
+    expect(kinds.has("circuit_block")).toBe(true);
+    const integ = payload.incidents?.find((i) => i.kind === "integrity_breach");
+    expect(integ?.severity).toBe("medium");
+    expect(integ?.signal_source).toBe("audit_log");
+    const loop = payload.incidents?.find((i) => i.kind === "loop_halt");
+    expect(loop?.severity).toBe("critical");
+  });
+
+  it("incidents endpoint rejects invalid kinds", async () => {
+    vi.mocked(getDb).mockResolvedValue((async () => []) as any);
+    vi.mocked(getDbForOrg).mockResolvedValue((async () => []) as any);
+    const app = buildApp("org-a");
+    const res = await app.request("/incidents?kinds=not_a_kind", { method: "GET" }, mockEnv());
+    expect(res.status).toBe(400);
+  });
+
+  it("incidents endpoint filters by min_severity", async () => {
+    const mockSqlSev = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("FROM audit_log") && query.includes("created_at >=")) {
+        return [
+          {
+            resource_id: "t-low",
+            user_id: "u-1",
+            created_at: "2026-03-27T12:00:00.000Z",
+            changes_json: JSON.stringify({ strict: false, missing_billing_records: 1 }),
+          },
+        ];
+      }
+      if (query.includes("FROM middleware_events")) {
+        return [
+          {
+            session_id: "s-h",
+            event_type: "loop_halt",
+            details_json: "{}",
+            created_at: "2026-03-27T12:01:00.000Z",
+            trace_id: "t-h",
+          },
+        ];
+      }
+      if (query.includes("FROM runtime_events")) return [];
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSqlSev);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSqlSev);
+
+    const app = buildApp("org-a");
+    const res = await app.request("/incidents?min_severity=high&dedupe_window_sec=0", { method: "GET" }, mockEnv());
+    expect(res.status).toBe(200);
+    const payload = await res.json() as { incidents?: unknown[]; counts?: { total?: number } };
+    expect(payload.counts?.total).toBe(1);
+    expect((payload.incidents?.[0] as { kind?: string }).kind).toBe("loop_halt");
+  });
 });

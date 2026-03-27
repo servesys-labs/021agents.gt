@@ -28,6 +28,7 @@ import { billingRoutes } from "./routes/billing";
 import { stripeRoutes } from "./routes/stripe";
 import { sessionRoutes } from "./routes/sessions";
 import { observabilityRoutes } from "./routes/observability";
+import { opsObservabilityRoutes } from "./routes/ops-observability";
 import { memoryRoutes } from "./routes/memory";
 import { ragRoutes } from "./routes/rag";
 import { projectRoutes } from "./routes/projects";
@@ -48,6 +49,7 @@ import { skillRoutes } from "./routes/skills";
 import { toolRoutes } from "./routes/tools";
 import { auditRoutes } from "./routes/audit";
 import { retentionRoutes } from "./routes/retention";
+import { complianceRoutes } from "./routes/compliance";
 import { configRoutes } from "./routes/config";
 import { deployRoutes } from "./routes/deploy";
 import { autoresearchRoutes } from "./routes/autoresearch";
@@ -70,6 +72,20 @@ import { domainRoutes } from "./routes/domains";
 import { publicAgentRoutes } from "./routes/public-api";
 import { hostnameMiddleware } from "./middleware/hostname";
 import { openapiRoutes } from "./routes/openapi";
+import { widgetServeRoutes } from "./routes/widget-serve";
+import { apiKeyRateLimitMiddleware } from "./middleware/api-key-rate-limit";
+import { ipAllowlistMiddleware } from "./middleware/ip-allowlist";
+import { apiAuditLogMiddleware } from "./middleware/api-audit-log";
+import { securityHeadersMiddleware } from "./middleware/security-headers";
+import { endUserTokenRoutes } from "./routes/end-user-tokens";
+import { batchApiRoutes } from "./routes/batch-api";
+import { opsObservabilityRoutes } from "./routes/ops-observability";
+import { alertRoutes } from "./routes/alerts";
+import { complianceRoutes } from "./routes/compliance";
+import { sessionMgmtRoutes } from "./routes/session-mgmt";
+import { securityEventRoutes } from "./routes/security-events";
+import { secretsRotationRoutes } from "./routes/secrets-rotation";
+import { mfaEnforcementMiddleware } from "./middleware/mfa-enforcement";
 
 type AppType = {
   Bindings: Env;
@@ -79,6 +95,7 @@ type AppType = {
 const app = new Hono<AppType>();
 
 // ── Global middleware ────────────────────────────────────────────────────
+app.use("*", securityHeadersMiddleware);
 app.use("*", cors({
   origin: (origin) => {
     const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://agentos-portal.servesys.workers.dev").split(",");
@@ -96,6 +113,10 @@ app.use("*", errorHandler);
 app.use("*", hostnameMiddleware);
 app.use("*", rateLimitMiddleware);
 app.use("*", authMiddleware);
+app.use("*", ipAllowlistMiddleware);
+app.use("*", apiKeyRateLimitMiddleware);
+app.use("*", mfaEnforcementMiddleware);
+app.use("*", apiAuditLogMiddleware);
 
 // Hono-level error handler (catches errors that bypass middleware)
 app.onError((err, c) => {
@@ -144,6 +165,7 @@ app.route("/api/v1/stripe", stripeRoutes);
 // Sessions + observability
 app.route("/api/v1/sessions", sessionRoutes);
 app.route("/api/v1/observability", observabilityRoutes);
+app.route("/api/v1/ops", opsObservabilityRoutes);
 
 // Memory + RAG
 app.route("/api/v1/memory", memoryRoutes);
@@ -179,6 +201,7 @@ app.route("/api/v1/tools", toolRoutes);
 // Audit + retention
 app.route("/api/v1/audit", auditRoutes);
 app.route("/api/v1/retention", retentionRoutes);
+app.route("/api/v1/compliance", complianceRoutes);
 
 // Config, deploy, autoresearch
 app.route("/api/v1/config", configRoutes);
@@ -226,7 +249,24 @@ app.route("/api/v1/domains", domainRoutes);
 // These routes are accessed via custom org domains (acme.agentos.dev)
 // or directly with API key auth. They proxy to the runtime worker.
 app.route("/v1", publicAgentRoutes);
+app.route("/v1", batchApiRoutes);
 app.route("/v1", openapiRoutes);
+
+// End-user token management (SaaS multi-tenant)
+app.route("/api/v1/end-user-tokens", endUserTokenRoutes);
+
+// Ops observability + Alerts
+app.route("/api/v1/ops", opsObservabilityRoutes);
+app.route("/api/v1/alerts", alertRoutes);
+
+// Compliance (GDPR, data export, account deletion)
+app.route("/api/v1/compliance", complianceRoutes);
+app.route("/api/v1/session-management", sessionMgmtRoutes);
+app.route("/api/v1/security-events", securityEventRoutes);
+app.route("/api/v1/secrets-rotation", secretsRotationRoutes);
+
+// Widget script serving (public, no auth)
+app.route("/", widgetServeRoutes);
 
 // A2A (Agent-to-Agent) protocol endpoints
 app.route("/", a2aRoutes);
@@ -265,6 +305,84 @@ export default {
             UPDATE job_queue SET status = 'completed', result_json = ${JSON.stringify(result)}, completed_at = ${now}
             WHERE job_id = ${String(job.payload.job_id || "")}
           `.catch(() => {});
+        } else if (job.type === "webhook_delivery") {
+          // Deliver a webhook with retry
+          const { deliverWebhook } = await import("./logic/webhook-delivery");
+          const p = job.payload;
+          const delivered = await deliverWebhook(
+            String(p.url), String(p.body), String(p.secret || ""),
+            sql, String(p.webhook_id || ""),
+          );
+          if (!delivered) {
+            // Retry via queue (msg.retry())
+            msg.retry();
+            continue;
+          }
+        } else if (job.type === "batch_run") {
+          // Process a batch of agent runs
+          const batchId = String(job.payload.batch_id || "");
+          const orgId = String(job.payload.org_id || "");
+          const agentName = String(job.payload.agent_name || "");
+
+          await sql`UPDATE batch_jobs SET status = 'running' WHERE batch_id = ${batchId}`.catch(() => {});
+
+          const tasks = await sql`
+            SELECT task_id, task_index, input, system_prompt, response_format, response_schema
+            FROM batch_tasks WHERE batch_id = ${batchId} AND status = 'pending'
+            ORDER BY task_index ASC
+          `;
+
+          let completedCount = 0;
+          let failedCount = 0;
+
+          for (const task of tasks) {
+            try {
+              await sql`UPDATE batch_tasks SET status = 'running' WHERE task_id = ${task.task_id}`;
+              const runtimeBody: Record<string, unknown> = {
+                input: task.input, agent_name: agentName, org_id: orgId, project_id: "", channel: "batch_api",
+              };
+              if (task.system_prompt) runtimeBody.system_prompt = task.system_prompt;
+              if (task.response_format) runtimeBody.response_format = task.response_format;
+              if (task.response_schema) {
+                try { runtimeBody.response_schema = typeof task.response_schema === "string" ? JSON.parse(task.response_schema) : task.response_schema; } catch {}
+              }
+
+              const resp = await env.RUNTIME.fetch(
+                new Request("https://runtime/run", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}) },
+                  body: JSON.stringify(runtimeBody),
+                }),
+              );
+              const result = await resp.json() as Record<string, unknown>;
+              await sql`
+                UPDATE batch_tasks SET status = 'completed', output = ${String(result.output || "")},
+                  session_id = ${String(result.session_id || "")},
+                  cost_usd = ${Number(result.cost_usd || 0)}, latency_ms = ${Number(result.latency_ms || 0)}
+                WHERE task_id = ${task.task_id}
+              `;
+              completedCount++;
+            } catch (taskErr) {
+              await sql`UPDATE batch_tasks SET status = 'failed', error = ${String(taskErr)} WHERE task_id = ${task.task_id}`.catch(() => {});
+              failedCount++;
+            }
+          }
+
+          await sql`
+            UPDATE batch_jobs SET status = 'completed', completed_tasks = ${completedCount}, failed_tasks = ${failedCount}, completed_at = ${now}
+            WHERE batch_id = ${batchId}
+          `.catch(() => {});
+
+          // Deliver callback webhook if configured
+          const batchRow = await sql`SELECT callback_url, callback_secret FROM batch_jobs WHERE batch_id = ${batchId}`.catch(() => []);
+          if (batchRow.length > 0 && batchRow[0].callback_url) {
+            const { deliverWebhook } = await import("./logic/webhook-delivery");
+            await deliverWebhook(
+              batchRow[0].callback_url,
+              JSON.stringify({ event: "batch.completed", timestamp: now, data: { batch_id: batchId, agent_name: agentName, completed_tasks: completedCount, failed_tasks: failedCount } }),
+              batchRow[0].callback_secret || "", sql,
+            ).catch(() => {});
+          }
         } else if (job.type === "security_scan") {
           // Dispatch security scan
           const { agent_name, org_id } = job.payload;
@@ -662,6 +780,31 @@ export default {
       }
     } catch (err) {
       console.error("[cron] Quality drop detection failed:", err);
+    }
+
+    // 3b. Clean up expired idempotency cache and end-user tokens
+    try {
+      await sql`DELETE FROM idempotency_cache WHERE expires_at < now()`;
+      await sql`DELETE FROM end_user_tokens WHERE expires_at < now() AND revoked = false`;
+    } catch (err) {
+      console.error("[cron] Idempotency/token cleanup failed:", err);
+    }
+
+    // 3c. Evaluate alert configs and fire webhooks for breaches
+    try {
+      const { evaluateAlerts } = await import("./logic/alert-evaluator");
+      const orgsWithAlerts = await sql`
+        SELECT DISTINCT org_id FROM alert_configs WHERE enabled = true LIMIT 50
+      `;
+      for (const row of orgsWithAlerts) {
+        try {
+          await evaluateAlerts(sql, String(row.org_id));
+        } catch (err) {
+          console.error(`[cron] Alert evaluation failed for org ${row.org_id}:`, err);
+        }
+      }
+    } catch (err) {
+      console.error("[cron] Alert evaluation failed:", err);
     }
 
     // 4. Apply retention policies (delete old data)

@@ -93,6 +93,72 @@ auditRoutes.get("/export", async (c) => {
   });
 });
 
+// ── DELETE /log — Immutable audit mode guard ──────────────────────────────
+auditRoutes.delete("/log", async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Check immutable_audit setting
+  try {
+    const settingsRows = await sql`
+      SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+    `;
+    if (settingsRows.length > 0) {
+      const settings = typeof settingsRows[0].settings_json === "string"
+        ? JSON.parse(settingsRows[0].settings_json)
+        : settingsRows[0].settings_json ?? {};
+      if (settings.immutable_audit === true) {
+        return c.json({ error: "Audit log is in immutable mode" }, 403);
+      }
+    }
+  } catch {
+    // If we can't verify, deny by default for safety
+    return c.json({ error: "Unable to verify audit immutability setting" }, 500);
+  }
+
+  // If not immutable, allow deletion with filters
+  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
+  const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
+
+  const result = await sql`
+    DELETE FROM audit_log
+    WHERE org_id = ${user.org_id} AND created_at < ${since}
+  `;
+
+  return c.json({ deleted: result.count ?? 0 });
+});
+
+// ── DELETE /log/:entry_id — Delete a single audit entry (immutable guard) ──
+auditRoutes.delete("/log/:entry_id", async (c) => {
+  const user = c.get("user");
+  const entryId = c.req.param("entry_id");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Check immutable_audit setting
+  try {
+    const settingsRows = await sql`
+      SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+    `;
+    if (settingsRows.length > 0) {
+      const settings = typeof settingsRows[0].settings_json === "string"
+        ? JSON.parse(settingsRows[0].settings_json)
+        : settingsRows[0].settings_json ?? {};
+      if (settings.immutable_audit === true) {
+        return c.json({ error: "Audit log is in immutable mode" }, 403);
+      }
+    }
+  } catch {
+    return c.json({ error: "Unable to verify audit immutability setting" }, 500);
+  }
+
+  const result = await sql`
+    DELETE FROM audit_log
+    WHERE org_id = ${user.org_id} AND id = ${entryId}
+  `;
+
+  return c.json({ deleted: result.count ?? 0 });
+});
+
 auditRoutes.get("/events", async (c) => {
   const sql = await getDb(c.env.HYPERDRIVE);
   try {

@@ -111,7 +111,7 @@ function MoreMenuItem({ tab, activeTab, onSelect }: { tab: TabDef; activeTab: Ta
 /* ── Component ─────────────────────────────────────────────────── */
 
 export const AgentDetailPage = () => {
-  const { agentName } = useParams<{ agentName: string }>();
+  const { name: agentName } = useParams<{ name: string }>();
   const navigate = useNavigate();
 
   const [activeTab, setActiveTab] = useState<TabId>("overview");
@@ -190,11 +190,11 @@ export const AgentDetailPage = () => {
       case "overview":
         return <OverviewTab agent={agent} />;
       case "config":
-        return <ConfigTab agent={agent} />;
+        return <ConfigTab agent={agent} onAgentUpdated={() => void configQuery.refetch()} />;
       case "knowledge":
         return <KnowledgeTab agentName={agent.name} />;
       case "tools":
-        return <ToolsTab agent={agent} />;
+        return <ToolsTab agent={agent} onAgentUpdated={() => void configQuery.refetch()} />;
       case "playground":
         return <PlaygroundTab agentName={agent.name} />;
       case "traces":

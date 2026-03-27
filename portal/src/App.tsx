@@ -122,6 +122,9 @@ const WorkflowsPage = lazy(() =>
 const SessionsPage = lazy(() =>
   import("./pages/sessions").then((m) => ({ default: m.SessionsPage })),
 );
+const TraceIntegrityPage = lazy(() =>
+  import("./pages/observability/trace-integrity").then((m) => ({ default: m.TraceIntegrityPage })),
+);
 const ReleasesPage = lazy(() =>
   import("./pages/releases").then((m) => ({ default: m.ReleasesPage })),
 );
@@ -157,12 +160,30 @@ const InvoicesPage = lazy(() =>
   import("./pages/billing/invoices").then((m) => ({ default: m.InvoicesPage })),
 );
 
+// Developer Portal + Usage
+const DeveloperPortalPage = lazy(() =>
+  import("./pages/developer-portal").then((m) => ({ default: m.DeveloperPortalPage })),
+);
+const UsagePage = lazy(() =>
+  import("./pages/usage").then((m) => ({ default: m.UsagePage })),
+);
+
+// Ops monitoring
+const OpsPage = lazy(() =>
+  import("./pages/ops").then((m) => ({ default: m.OpsPage })),
+);
+
 // A2A Protocol
 const A2ADiscoveryPage = lazy(() =>
   import("./pages/a2a/index").then((m) => ({ default: m.A2APage })),
 );
 const A2AComposePage = lazy(() =>
   import("./pages/a2a/compose").then((m) => ({ default: m.A2AComposePage })),
+);
+
+// Security events (compliance)
+const SecurityEventsPage = lazy(() =>
+  import("./pages/security-events").then((m) => ({ default: m.SecurityEventsPage })),
 );
 
 // Security detail pages
@@ -270,6 +291,7 @@ function AppContent() {
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
+              <Route path="/observability/trace-integrity" element={<TraceIntegrityPage />} />
               <Route path="/releases" element={<ReleasesPage />} />
               <Route path="/autoresearch" element={<AutoResearchPage />} />
               <Route path="/audit" element={<AuditPage />} />
@@ -293,6 +315,15 @@ function AppContent() {
               <Route path="/security/findings" element={<SecurityFindingsPage />} />
               <Route path="/security/report" element={<SecurityReportPage />} />
               <Route path="/security/scans/:scanId" element={<ScanDetailPage />} />
+
+              {/* Developer Portal + Usage + Ops */}
+              <Route path="/developers" element={<DeveloperPortalPage />} />
+              <Route path="/usage" element={<UsagePage />} />
+              <Route path="/ops" element={<OpsPage />} />
+
+              {/* Settings */}
+              {/* Security events */}
+              <Route path="/security-events" element={<SecurityEventsPage />} />
 
               {/* Settings */}
               <Route path="/settings" element={<SettingsPage />} />

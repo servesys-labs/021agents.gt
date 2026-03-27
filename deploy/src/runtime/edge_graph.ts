@@ -8,6 +8,7 @@
 
 import { callLLM } from "./llm";
 import { executeTools, getToolDefinitions } from "./tools";
+import { attachDelegationLineage } from "./delegation";
 import { attachToolPolicyEnvelope } from "./policy-envelope";
 import { resolvePlanRouting, writeTurn, writeSession } from "./db";
 import {
@@ -1169,6 +1170,12 @@ export function buildFreshGraphCtx(
   traceId: string,
   telemetryQueue?: Queue,
 ): FreshGraphCtx {
+  attachDelegationLineage(env, config, { session_id: sessionId, trace_id: traceId }, {
+    agent_name: config.agent_name || request.agent_name,
+    org_id: request.org_id,
+    project_id: request.project_id,
+    delegation: request.delegation,
+  });
   const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
@@ -1656,6 +1663,14 @@ export function buildResumeGraphCtx(
   config: AgentConfig,
   telemetryQueue?: Queue,
 ): ResumeGraphCtx {
+  attachDelegationLineage(env, config, {
+    session_id: resumedSessionId,
+    trace_id: checkpoint.trace_id,
+  }, {
+    agent_name: config.agent_name || checkpoint.agent_name,
+    org_id: config.org_id,
+    project_id: config.project_id,
+  });
   const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));

@@ -8,6 +8,7 @@ import {
   Brain,
   Bug,
   GitBranch,
+  Shield,
   ShieldCheck,
   ShieldAlert,
   Plug,
@@ -28,6 +29,7 @@ import {
   Activity,
   Eye,
   Lock,
+  Fingerprint,
 } from "lucide-react";
 import { QuotaWidget } from "../common/QuotaWidget";
 import { PageShell } from "./PageShell";
@@ -57,6 +59,15 @@ const navGroups: NavGroup[] = [
     ],
   },
   {
+    id: "consume",
+    label: "Consume",
+    icon: <ExternalLink size={14} strokeWidth={iconStroke} />,
+    items: [
+      { path: "/developers", label: "Developer Portal", icon: <BookOpen size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/usage", label: "Usage & Users", icon: <Users size={iconSize} strokeWidth={iconStroke} /> },
+    ],
+  },
+  {
     id: "operate",
     label: "Operate",
     icon: <Activity size={14} strokeWidth={iconStroke} />,
@@ -73,8 +84,14 @@ const navGroups: NavGroup[] = [
     label: "Observe",
     icon: <Eye size={14} strokeWidth={iconStroke} />,
     items: [
+      { path: "/ops", label: "Ops Monitor", icon: <Activity size={iconSize} strokeWidth={iconStroke} /> },
       { path: "/intelligence", label: "Intelligence", icon: <Brain size={iconSize} strokeWidth={iconStroke} /> },
       { path: "/issues", label: "Issues", icon: <Bug size={iconSize} strokeWidth={iconStroke} /> },
+      {
+        path: "/observability/trace-integrity",
+        label: "Trace integrity",
+        icon: <Fingerprint size={iconSize} strokeWidth={iconStroke} />,
+      },
     ],
   },
   {
@@ -83,6 +100,7 @@ const navGroups: NavGroup[] = [
     icon: <Lock size={14} strokeWidth={iconStroke} />,
     items: [
       { path: "/security", label: "Security", icon: <ShieldAlert size={iconSize} strokeWidth={iconStroke} /> },
+      { path: "/security-events", label: "Security Events", icon: <Shield size={iconSize} strokeWidth={iconStroke} /> },
       { path: "/compliance", label: "Compliance", icon: <ShieldCheck size={iconSize} strokeWidth={iconStroke} /> },
       { path: "/guardrails", label: "Guardrails", icon: <ShieldAlert size={iconSize} strokeWidth={iconStroke} /> },
     ],

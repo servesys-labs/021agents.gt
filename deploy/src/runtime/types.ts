@@ -1,5 +1,7 @@
 import type { Sandbox } from "@cloudflare/sandbox";
 
+import type { DeployPolicyV1 } from "./deploy-policy-contract";
+
 /**
  * Edge Runtime — shared types for graph execution at the edge.
  *
@@ -76,6 +78,9 @@ export interface AgentConfig {
   tools: string[];
   blocked_tools: string[];
   allowed_domains: string[];           // Domain allowlist for HTTP/browse tools
+  blocked_domains?: string[];
+  /** Normalized deploy-time policy artifact (config_json.deploy_policy). */
+  deploy_policy?: DeployPolicyV1;
   max_tokens_per_turn: number;         // Token cap per LLM call (0 = unlimited)
   require_confirmation_for_destructive: boolean; // Halt on delete/drop/destroy
   parallel_tool_calls: boolean;
@@ -220,6 +225,12 @@ export interface RunRequest {
   task: string;
   org_id?: string;
   project_id?: string;
+  delegation?: {
+    parent_session_id?: string;
+    parent_trace_id?: string;
+    parent_agent_name?: string;
+    parent_depth?: number;
+  };
   channel?: string;
   channel_user_id?: string;
   run_name?: string;

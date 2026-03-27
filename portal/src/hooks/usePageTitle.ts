@@ -22,6 +22,7 @@ const routeTitles: Record<string, string> = {
   "/jobs": "Jobs",
   "/settings": "Settings",
   "/sessions": "Sessions",
+  "/observability/trace-integrity": "Trace integrity",
   "/security": "Security",
   "/autoresearch": "Autoresearch",
   "/audit": "Audit",

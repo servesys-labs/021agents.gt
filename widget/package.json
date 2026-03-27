@@ -1,0 +1,15 @@
+{
+  "name": "@agentos/widget",
+  "version": "0.1.0",
+  "description": "Embeddable chat widget for AgentOS agents",
+  "main": "dist/widget.js",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch"
+  },
+  "files": ["dist"],
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.21.0"
+  }
+}

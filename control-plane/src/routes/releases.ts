@@ -10,6 +10,7 @@ import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
 import { lintGraphDesign } from "../logic/graph-lint";
 import { getThresholds } from "../logic/policies";
+import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const releaseRoutes = new Hono<R>();
@@ -74,15 +75,29 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
     version = source[0].version || "0.1.0";
   }
 
+  let parsedPromoteConfig: Record<string, unknown>;
+  try {
+    parsedPromoteConfig = JSON.parse(String(configJson || "{}")) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid config_json on promotion source" }, 400);
+  }
+  const promotePolicy = applyDeployPolicyToConfigJson(parsedPromoteConfig);
+  if (!promotePolicy.ok) {
+    return c.json(
+      {
+        error: "Deploy policy validation failed",
+        details: promotePolicy.errors,
+        warnings: promotePolicy.warnings,
+      },
+      400,
+    );
+  }
+  configJson = JSON.stringify(parsedPromoteConfig);
+
   // ── Eval + graph lint enforcement for production promotion ──
   if (toChannel === "production") {
     let graphLintValid = true;
-    let parsedConfig: Record<string, unknown> = {};
-    try {
-      parsedConfig = JSON.parse(configJson || "{}");
-    } catch {
-      graphLintValid = false;
-    }
+    const parsedConfig = parsedPromoteConfig;
     const graph = extractGraphForLint(parsedConfig);
     if (graph) {
       graphLintValid = lintGraphDesign(graph, { strict: true }).valid;

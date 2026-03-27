@@ -43,6 +43,25 @@ type IssueSummary = {
   by_category?: Record<string, number>;
 };
 
+type Incident = {
+  incident_key: string;
+  kind: "integrity_breach" | "loop_halt" | "loop_warn" | "circuit_block";
+  severity: "critical" | "high" | "medium" | "low" | "info";
+  title: string;
+  opened_at: string;
+  trace_id: string | null;
+  session_id: string | null;
+};
+
+type IncidentResponse = {
+  counts?: {
+    total?: number;
+    by_kind?: Record<string, number>;
+    by_severity?: Record<string, number>;
+  };
+  incidents?: Incident[];
+};
+
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
 function timeSince(ts?: number | string): string {
@@ -135,6 +154,9 @@ export function IssuesPage() {
       agentFilter ? `&agent_name=${encodeURIComponent(agentFilter)}` : ""
     }${severityFilter ? `&severity=${encodeURIComponent(severityFilter)}` : ""}`,
   );
+  const incidentsQuery = useApiQuery<IncidentResponse>(
+    "/api/v1/observability/incidents?since_hours=24&limit=8&include_suppressed=false",
+  );
 
   const summary = summaryQuery.data;
   const issues: Issue[] = useMemo(() => {
@@ -143,6 +165,10 @@ export function IssuesPage() {
     if (Array.isArray(raw)) return raw;
     return raw.issues ?? [];
   }, [issuesQuery.data]);
+  const incidents = useMemo(
+    () => (Array.isArray(incidentsQuery.data?.incidents) ? incidentsQuery.data?.incidents ?? [] : []),
+    [incidentsQuery.data],
+  );
 
   /* Extract unique agent names for filter dropdown */
   const agentNames = useMemo(() => {
@@ -185,6 +211,8 @@ export function IssuesPage() {
 
   const highCount = summary?.by_severity?.high ?? summary?.by_severity?.critical ?? 0;
   const mediumCount = summary?.by_severity?.medium ?? 0;
+  const incidentHigh = incidentsQuery.data?.counts?.by_severity?.high ?? 0;
+  const incidentCritical = incidentsQuery.data?.counts?.by_severity?.critical ?? 0;
 
   return (
     <div>
@@ -239,6 +267,63 @@ export function IssuesPage() {
       {/* Meta-agent assist */}
       <div className="mb-[var(--space-4)]">
         <AssistPanel compact />
+      </div>
+
+      {/* Operational incidents from observability pipeline */}
+      <div className="card mb-[var(--space-4)]">
+        <div className="flex items-center justify-between mb-[var(--space-3)]">
+          <div>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide">Runtime incidents (24h)</p>
+            <p className="text-[var(--text-sm)] text-text-primary font-semibold">
+              {incidentsQuery.data?.counts?.total ?? 0} incidents
+            </p>
+          </div>
+          <button
+            className="btn btn-secondary text-[var(--text-xs)]"
+            onClick={() => navigate("/observability/trace-integrity")}
+          >
+            Trace Integrity
+            <ExternalLink size={12} />
+          </button>
+        </div>
+        <QueryState loading={incidentsQuery.loading} error={incidentsQuery.error}>
+          <div className="flex items-center gap-[var(--space-3)] mb-[var(--space-3)]">
+            <span className="text-[10px] text-status-error uppercase">
+              Critical: {incidentCritical}
+            </span>
+            <span className="text-[10px] text-status-warning uppercase">
+              High: {incidentHigh}
+            </span>
+          </div>
+          {incidents.length === 0 ? (
+            <p className="text-[var(--text-xs)] text-text-muted">No active incidents in the selected window.</p>
+          ) : (
+            <div className="space-y-[var(--space-2)]">
+              {incidents.slice(0, 5).map((inc) => (
+                <button
+                  key={inc.incident_key}
+                  onClick={() => {
+                    if (inc.kind === "integrity_breach" && inc.trace_id) {
+                      navigate(`/observability/trace-integrity?trace_id=${encodeURIComponent(inc.trace_id)}`);
+                      return;
+                    }
+                    if (inc.session_id) {
+                      navigate(`/sessions?q=${encodeURIComponent(inc.session_id)}`);
+                      return;
+                    }
+                    navigate("/sessions");
+                  }}
+                  className="w-full text-left rounded-lg border border-border-default px-[var(--space-3)] py-[var(--space-2)] hover:bg-surface-overlay transition-colors"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[var(--text-xs)] text-text-primary">{inc.title}</span>
+                    <span className="text-[10px] text-text-muted uppercase">{inc.kind}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </QueryState>
       </div>
 
       {/* Filters */}

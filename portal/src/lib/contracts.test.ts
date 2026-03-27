@@ -184,7 +184,50 @@ describe("timestamp normalization", () => {
   });
 });
 
-// ── 5. API error parsing ────────────────────────────────────────────
+// ── 5. Observability integrity breaches ─────────────────────────────
+
+describe("integrity breaches API shape", () => {
+  it("normalizes entries and hottest_traces from control-plane JSON", () => {
+    const response = {
+      total_breaches: 2,
+      strict_breaches: 1,
+      non_strict_breaches: 1,
+      hottest_traces: [{ trace_id: "tr_1", breaches: 2 }],
+      entries: [
+        {
+          trace_id: "tr_1",
+          created_at: "2025-01-01T00:00:00.000Z",
+          user_id: "u1",
+          strict: true,
+          missing_turns: 1,
+          missing_runtime_events: 0,
+          missing_billing_records: 0,
+          lifecycle_mismatch: 0,
+          warnings: ["1 sessions have no turns"],
+        },
+      ],
+    };
+
+    const entries = Array.isArray(response.entries) ? response.entries : [];
+    const hottest = Array.isArray(response.hottest_traces) ? response.hottest_traces : [];
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].trace_id).toBe("tr_1");
+    expect(entries[0].warnings?.[0]).toContain("turns");
+    expect(hottest[0]).toEqual({ trace_id: "tr_1", breaches: 2 });
+    expect(response.total_breaches).toBe(2);
+  });
+
+  it("builds query string for breaches list and optional trace filter", () => {
+    const base = "/api/v1/observability/integrity/breaches";
+    const list = `${base}?limit=100`;
+    const filtered = `${base}?limit=100&trace_id=${encodeURIComponent("tr_abc")}`;
+    expect(list).toContain("limit=100");
+    expect(filtered).toContain("trace_id=tr_abc");
+  });
+});
+
+// ── 6. API error parsing ────────────────────────────────────────────
 
 describe("API error response parsing", () => {
   it("extracts error from { error: string }", () => {

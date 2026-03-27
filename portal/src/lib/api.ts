@@ -55,11 +55,52 @@ function parseErrorMessage(
     detail?: unknown;
     details?: unknown;
     message?: unknown;
+    errors?: unknown;
   };
+
+  const fromDetails = (details: unknown): string | null => {
+    if (!details) return null;
+    if (typeof details === "string" && details.trim()) return details;
+    if (Array.isArray(details)) {
+      const first = details.find((d) => typeof d === "string" && d.trim());
+      if (typeof first === "string") return first;
+      return null;
+    }
+    if (typeof details === "object") {
+      const d = details as {
+        formErrors?: unknown;
+        fieldErrors?: Record<string, unknown>;
+      };
+      if (Array.isArray(d.formErrors)) {
+        const firstForm = d.formErrors.find((v) => typeof v === "string" && v.trim());
+        if (typeof firstForm === "string") return firstForm;
+      }
+      if (d.fieldErrors && typeof d.fieldErrors === "object") {
+        for (const [field, msgs] of Object.entries(d.fieldErrors)) {
+          if (Array.isArray(msgs)) {
+            const first = msgs.find((v) => typeof v === "string" && v.trim());
+            if (typeof first === "string") return `${field}: ${first}`;
+          } else if (typeof msgs === "string" && msgs.trim()) {
+            return `${field}: ${msgs}`;
+          }
+        }
+      }
+    }
+    return null;
+  };
+
   if (typeof obj.error === "string" && obj.error) return obj.error;
   if (typeof obj.detail === "string" && obj.detail) return obj.detail;
   if (typeof obj.message === "string" && obj.message) return obj.message;
-  if (typeof obj.details === "string" && obj.details) return obj.details;
+  if (Array.isArray(obj.errors) && obj.errors.length > 0) {
+    const first = obj.errors[0] as { message?: unknown; code?: unknown } | string;
+    if (typeof first === "string" && first.trim()) return first;
+    if (first && typeof first === "object" && typeof first.message === "string" && first.message.trim()) {
+      return first.message;
+    }
+  }
+  const expandedDetails = fromDetails(obj.details);
+  if (expandedDetails) return expandedDetails;
   return fallback;
 }
 
