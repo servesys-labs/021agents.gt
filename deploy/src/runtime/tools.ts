@@ -342,6 +342,10 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   "codemode-test":         { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
   "codemode-generate-mcp": { flat_usd: 0,        per_ms_usd: 0.000012 },  // Isolate only
   "mcp-wrap":              { flat_usd: 0.001,    per_ms_usd: 0 },         // Spec parsing + R2 write
+
+  // Self-awareness (DB queries)
+  "self-check":           { flat_usd: 0.00005,  per_ms_usd: 0 },          // DB query
+  "adapt-strategy":       { flat_usd: 0.00005,  per_ms_usd: 0 },          // DB query
 };
 
 /** Calculate tool cost from flat fee + duration. */
@@ -2292,6 +2296,166 @@ async function dispatch(
       return r.stdout || r.stderr || "Stash operation complete";
     }
 
+    case "self-check": {
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "self-check requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const orgId = args.org_id || "";
+      const agentName = String(args.agent_name || "");
+      if (!agentName) return "self-check requires agent_name";
+      const check = String(args.check || "health");
+      const ALLOWED_CHECKS = ["performance", "slo", "proposals", "health"];
+      if (!ALLOWED_CHECKS.includes(check)) {
+        return `Invalid check type: ${check}. Allowed: ${ALLOWED_CHECKS.join(", ")}`;
+      }
+
+      try {
+        // Helper: query performance from last 20 sessions
+        const queryPerformance = async () => {
+          const rows = await sql`
+            SELECT
+              COUNT(*) as total_sessions,
+              COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
+              COALESCE(AVG(cost_total_usd), 0) as avg_cost,
+              COALESCE(AVG(turns), 0) as avg_turns,
+              COALESCE(AVG(wall_clock_seconds), 0) as avg_latency,
+              COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as error_count
+            FROM (
+              SELECT status, cost_total_usd, turns, wall_clock_seconds
+              FROM sessions
+              WHERE org_id = ${orgId} AND agent_name = ${agentName}
+              ORDER BY created_at DESC
+              LIMIT 20
+            ) recent
+          `;
+          return rows[0] || { total_sessions: 0, success_rate: 0, avg_cost: 0, avg_turns: 0, avg_latency: 0, error_count: 0 };
+        };
+
+        // Helper: query SLO breach status
+        const querySlos = async () => {
+          const slos = await sql`
+            SELECT id, metric, threshold FROM slo_definitions
+            WHERE org_id = ${orgId} AND agent_name = ${agentName}
+          `;
+          if (slos.length === 0) return { slos: [], breaches: [] };
+          // Get actual metrics to compare against
+          const since = Date.now() / 1000 - 7 * 86400;
+          const metrics = await sql`
+            SELECT
+              COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
+              COALESCE(AVG(cost_total_usd), 0) as avg_cost,
+              COALESCE(AVG(wall_clock_seconds), 0) as avg_latency,
+              COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY wall_clock_seconds), 0) as latency_p99
+            FROM sessions
+            WHERE org_id = ${orgId} AND agent_name = ${agentName} AND created_at >= ${since}
+          `;
+          const actual = metrics[0] || {};
+          const breaches: any[] = [];
+          for (const slo of slos) {
+            const metricValue = Number(actual[slo.metric] ?? 0);
+            const threshold = Number(slo.threshold);
+            // For rate-type metrics (success_rate), actual should be >= threshold
+            // For cost/latency metrics, actual should be <= threshold
+            const isRateMetric = String(slo.metric).includes("rate");
+            const breached = isRateMetric ? metricValue < threshold : metricValue > threshold;
+            breaches.push({
+              slo_id: slo.id,
+              metric: slo.metric,
+              threshold,
+              actual: metricValue,
+              breached,
+            });
+          }
+          return { slos: breaches, breaches: breaches.filter((b: any) => b.breached) };
+        };
+
+        // Helper: query pending evolution proposals
+        const queryProposals = async () => {
+          const rows = await sql`
+            SELECT id, title, priority, created_at
+            FROM evolution_proposals
+            WHERE org_id = ${orgId} AND agent_name = ${agentName} AND status = 'pending'
+            ORDER BY priority DESC, created_at DESC
+            LIMIT 10
+          `;
+          return rows;
+        };
+
+        if (check === "performance") {
+          const perf = await queryPerformance();
+          return JSON.stringify({ check: "performance", agent_name: agentName, ...perf });
+        }
+
+        if (check === "slo") {
+          const sloStatus = await querySlos();
+          return JSON.stringify({ check: "slo", agent_name: agentName, ...sloStatus });
+        }
+
+        if (check === "proposals") {
+          const proposals = await queryProposals();
+          return JSON.stringify({ check: "proposals", agent_name: agentName, pending_count: proposals.length, proposals });
+        }
+
+        // health: combined view
+        const [perf, sloStatus, proposals] = await Promise.all([
+          queryPerformance(),
+          querySlos(),
+          queryProposals(),
+        ]);
+
+        // Recent error patterns
+        const errorRows = await sql`
+          SELECT error, COUNT(*) as count
+          FROM sessions
+          WHERE org_id = ${orgId} AND agent_name = ${agentName} AND status = 'error'
+            AND created_at >= ${Date.now() / 1000 - 7 * 86400}
+          GROUP BY error
+          ORDER BY count DESC
+          LIMIT 5
+        `;
+
+        return JSON.stringify({
+          check: "health",
+          agent_name: agentName,
+          performance: perf,
+          slo_status: sloStatus,
+          pending_proposals: proposals.length,
+          recent_error_patterns: errorRows,
+        });
+      } catch (err: any) {
+        return `self-check failed: ${err.message || err}`;
+      }
+    }
+
+    case "adapt-strategy": {
+      const strategy = String(args.strategy || "");
+      const reason = String(args.reason || "");
+      const ALLOWED_STRATEGIES = ["step-back", "chain-of-thought", "plan-then-execute", "verify-then-respond", "decompose"];
+      if (!ALLOWED_STRATEGIES.includes(strategy)) {
+        return `Invalid strategy: ${strategy}. Allowed: ${ALLOWED_STRATEGIES.join(", ")}`;
+      }
+      if (!reason) return "adapt-strategy requires a reason explaining why you are switching strategies";
+
+      const strategyPrompts: Record<string, string> = {
+        "step-back": "Take a step back before answering. First identify the high-level concept or principle involved, then reason from that principle to the specific case. Avoid jumping to conclusions.",
+        "chain-of-thought": "Think step by step. Break your reasoning into numbered steps, showing your work at each stage. Verify each step before proceeding to the next.",
+        "plan-then-execute": "Before taking any action, create an explicit plan with numbered steps. State the plan, then execute each step in order. After each step, check if the plan needs revision.",
+        "verify-then-respond": "Before giving any answer, generate a candidate answer, then systematically verify it by checking for errors, edge cases, and counterexamples. Only return the answer after verification passes.",
+        "decompose": "Break this complex problem into smaller, independent sub-problems. Solve each sub-problem separately, then combine the results into a final answer.",
+      };
+
+      // The injected system message will be picked up by the runtime and appended
+      // to the conversation context for subsequent turns
+      return JSON.stringify({
+        adapted: true,
+        strategy,
+        reason,
+        _system_inject: `[STRATEGY ADAPTATION] You have switched your reasoning strategy to "${strategy}". Reason: ${reason}\n\nNew instruction: ${strategyPrompts[strategy]}`,
+        confirmation: `Strategy switched to "${strategy}". Reason: ${reason}. This will guide your reasoning for subsequent turns in this session.`,
+      });
+    }
+
     default:
       throw new Error(`Tool '${tool}' not available on edge runtime`);
   }
@@ -4086,6 +4250,57 @@ const TOOL_CATALOG: ToolDefinition[] = [
           action: { type: "string", description: "Action: push, pop, list" },
         },
         required: [],
+      },
+    },
+  },
+  // ── Self-Awareness Tools ────────────────────────────────────────
+  {
+    type: "function",
+    function: {
+      name: "self-check",
+      description:
+        "Check your own performance metrics, SLO status, and pending improvement proposals. " +
+        "Use this when you're unsure if your approach is working or want to understand your recent track record.",
+      parameters: {
+        type: "object",
+        properties: {
+          check: {
+            type: "string",
+            description:
+              "What to check: 'performance' (success rate, cost, latency from last 20 sessions), " +
+              "'slo' (SLO breach status), 'proposals' (pending evolution proposals), " +
+              "'health' (combined view of all)",
+          },
+        },
+        required: ["check"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "adapt-strategy",
+      description:
+        "Switch your reasoning strategy mid-session. Use when you realize the current approach " +
+        "isn't working (e.g., switch from direct answering to step-back analysis for a complex " +
+        "debug task).",
+      parameters: {
+        type: "object",
+        properties: {
+          strategy: {
+            type: "string",
+            description:
+              "Reasoning strategy to adopt: 'step-back' (reason from principles), " +
+              "'chain-of-thought' (numbered step-by-step), 'plan-then-execute' (plan first, then act), " +
+              "'verify-then-respond' (generate then verify before answering), " +
+              "'decompose' (break into sub-problems)",
+          },
+          reason: {
+            type: "string",
+            description: "Why you are switching strategies (e.g., 'direct approach failed, need to decompose the problem')",
+          },
+        },
+        required: ["strategy", "reason"],
       },
     },
   },
