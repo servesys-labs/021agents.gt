@@ -26,6 +26,7 @@ import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop } from "./middleware";
 import { serializeForWebSocket } from "./protocol";
 import { createBackpressureController } from "./backpressure";
+import { attachToolPolicyEnvelope } from "./policy-envelope";
 
 type WsSend = (data: string) => void;
 
@@ -258,6 +259,7 @@ export async function streamRun(
     });
     if (opts?.org_id) config.org_id = opts.org_id;
     if (opts?.project_id) config.project_id = opts.project_id;
+    attachToolPolicyEnvelope(env, config);
 
     // Tools
     const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
@@ -407,7 +409,13 @@ export async function streamRun(
       }
 
       // Progress timer reports ALL active long-running tools
-      const toolResultsPromise = executeTools(env, llmResponse.tool_calls, sessionId, config.parallel_tool_calls);
+      const toolResultsPromise = executeTools(
+        env,
+        llmResponse.tool_calls,
+        sessionId,
+        config.parallel_tool_calls,
+        config.tools,
+      );
       let toolProgressTimer: ReturnType<typeof setInterval> | null = null;
       if (longRunningNames.length > 0) {
         let elapsed = 0;

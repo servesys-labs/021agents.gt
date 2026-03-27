@@ -12,6 +12,7 @@ import { selectModel, type PlanRouting } from "./router";
 import { buildMemoryContext, createWorkingMemory } from "./memory";
 import { detectLoop, createLoopState } from "./middleware";
 import { pushRuntimeEvent, mergeStateSnapshots, type StateMergeStrategy } from "./edge_graph";
+import { attachToolPolicyEnvelope } from "./policy-envelope";
 import { subgraphRegistry, expandSubgraphs, type SubgraphDefinition } from "./subgraph";
 import { schemaRegistry, validateDataAgainstSchema, validateGraphSchemas, type JsonSchema } from "./graph-schema";
 import { 
@@ -560,7 +561,14 @@ async function executeToolNode(
     if (Array.isArray(mod.tool_calls)) toolCalls = mod.tool_calls;
   }
 
-  const results = await executeTools(ctx.env, toolCalls, ctx.sessionId, ctx.config.parallel_tool_calls ?? true);
+  attachToolPolicyEnvelope(ctx.env, ctx.config);
+  const results = await executeTools(
+    ctx.env,
+    toolCalls,
+    ctx.sessionId,
+    ctx.config.parallel_tool_calls ?? true,
+    ctx.config.tools,
+  );
   
   const toolCost = results.reduce((sum, r) => sum + (r.cost_usd || 0), 0);
   ctx.cumulativeCost += toolCost;

@@ -151,6 +151,7 @@ observabilityRoutes.get("/trace/:trace_id", requireScope("observability:read"), 
 observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observability:read"), async (c) => {
   const user = c.get("user");
   const traceId = c.req.param("trace_id");
+  const strict = c.req.query("strict") === "true";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const sessions = await sql`
@@ -166,6 +167,7 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
   const turnCounts = new Map<string, number>();
   const eventCounts = new Map<string, number>();
   const billingCounts = new Map<string, number>();
+  const lifecycleCounts = new Map<string, { turn_start: number; turn_end: number; session_end: number }>();
 
   for (const sid of sessionIds) {
     const [turnRow] = await sql`
@@ -177,14 +179,32 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
     const [billingRow] = await sql`
       SELECT COUNT(*) as cnt FROM billing_records WHERE session_id = ${sid} AND org_id = ${user.org_id}
     `.catch(() => [{ cnt: 0 }]);
+    const [lifecycleRow] = await sql`
+      SELECT
+        SUM(CASE WHEN event_type = 'turn_start' THEN 1 ELSE 0 END) AS turn_start,
+        SUM(CASE WHEN event_type = 'turn_end' THEN 1 ELSE 0 END) AS turn_end,
+        SUM(CASE WHEN event_type = 'session_end' THEN 1 ELSE 0 END) AS session_end
+      FROM runtime_events
+      WHERE session_id = ${sid} AND org_id = ${user.org_id}
+    `.catch(() => [{ turn_start: 0, turn_end: 0, session_end: 0 }]);
     turnCounts.set(sid, Number(turnRow?.cnt || 0));
     eventCounts.set(sid, Number(eventRow?.cnt || 0));
     billingCounts.set(sid, Number(billingRow?.cnt || 0));
+    lifecycleCounts.set(sid, {
+      turn_start: Number(lifecycleRow?.turn_start || 0),
+      turn_end: Number(lifecycleRow?.turn_end || 0),
+      session_end: Number(lifecycleRow?.session_end || 0),
+    });
   }
 
   const missingTurns = sessionIds.filter((sid) => (turnCounts.get(sid) || 0) === 0);
   const missingEvents = sessionIds.filter((sid) => (eventCounts.get(sid) || 0) === 0);
   const missingBilling = sessionIds.filter((sid) => (billingCounts.get(sid) || 0) === 0);
+  const lifecycleMismatch = sessionIds.filter((sid) => {
+    const lc = lifecycleCounts.get(sid);
+    if (!lc) return true;
+    return lc.turn_start !== lc.turn_end || lc.session_end === 0;
+  });
 
   const maxCreatedAtMs = Math.max(
     ...sessions.map((s: any) => new Date(String(s.created_at || "")).getTime()).filter((n: number) => Number.isFinite(n)),
@@ -195,8 +215,11 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
   const warnings: string[] = [];
   if (missingTurns.length > 0) warnings.push(`${missingTurns.length} sessions have no turns`);
   if (missingEvents.length > 0) warnings.push(`${missingEvents.length} sessions have no runtime events`);
-  if (missingBilling.length > 0 && !isRecentTrace) {
+  if (missingBilling.length > 0 && (!isRecentTrace || strict)) {
     warnings.push(`${missingBilling.length} sessions have no billing records`);
+  }
+  if (lifecycleMismatch.length > 0) {
+    warnings.push(`${lifecycleMismatch.length} sessions have lifecycle event mismatch`);
   }
 
   return c.json({
@@ -214,6 +237,7 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
       turns: missingTurns,
       runtime_events: missingEvents,
       billing_records: missingBilling,
+      lifecycle_mismatch: lifecycleMismatch,
     },
     warnings,
   });

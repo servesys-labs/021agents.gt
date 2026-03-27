@@ -490,14 +490,16 @@ export async function executeTools(
   parallel: boolean = true,
   enabledTools?: string[],
 ): Promise<ToolResult[]> {
+  const envelope = (env as any).__agentConfig as { enabled_tools?: string[] } | undefined;
+  const effectiveEnabledTools = enabledTools ?? envelope?.enabled_tools;
   if (parallel && toolCalls.length > 1) {
     return Promise.all(
-      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId, enabledTools)),
+      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId, effectiveEnabledTools)),
     );
   }
   const results: ToolResult[] = [];
   for (const tc of toolCalls) {
-    results.push(await executeSingleTool(env, tc, sessionId, enabledTools));
+    results.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools));
   }
   return results;
 }
@@ -541,6 +543,7 @@ async function executeSingleTool(
     | {
       allowed_domains?: string[];
       blocked_domains?: string[];
+      enabled_tools?: string[];
       require_confirmation_for_destructive?: boolean;
       max_tokens_per_turn?: number;
     }

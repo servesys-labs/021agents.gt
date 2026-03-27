@@ -8,6 +8,7 @@
 
 import { callLLM } from "./llm";
 import { executeTools, getToolDefinitions } from "./tools";
+import { attachToolPolicyEnvelope } from "./policy-envelope";
 import { resolvePlanRouting, writeTurn, writeSession } from "./db";
 import {
   createWorkingMemory,
@@ -922,12 +923,8 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         parent_node_id: `llm:${turn}`,
       });
 
-      // Attach governance config for domain allowlist + destructive detection
-      (env as any).__agentConfig = {
-        allowed_domains: config.allowed_domains || [],
-        require_confirmation_for_destructive: config.require_confirmation_for_destructive || false,
-        max_tokens_per_turn: config.max_tokens_per_turn || 0,
-      };
+      // Attach unified policy envelope before tool execution.
+      attachToolPolicyEnvelope(env, config);
       const toolResults = await executeTools(
         env,
         llm.tool_calls,
@@ -1526,6 +1523,7 @@ const resumeNodes: Record<string, EdgeGraphNode<ResumeGraphCtx>> = {
         parent_graph_id: rootGraphId,
         parent_node_id: `llm:${turn}`,
       });
+      attachToolPolicyEnvelope(env, config);
       const toolResults = await executeTools(
         env,
         llm.tool_calls,
