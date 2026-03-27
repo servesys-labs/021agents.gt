@@ -233,7 +233,7 @@ export async function edgeRun(
               session_id: sessionId,
               turn: event.turn,
               event_type: event.event_type,
-              created_at: Number(event.timestamp) > 0 ? Number(event.timestamp) / 1000 : Date.now() / 1000,
+              created_at: Number(event.timestamp) > 0 ? new Date(Number(event.timestamp)).toISOString() : new Date().toISOString(),
               details: event.data || {},
               ...event.data,
             },
@@ -260,7 +260,7 @@ export async function edgeRun(
           output_tokens: ctx.totalOutputTokens,
           cost_usd: ctx.cumulativeCost,
           plan: config.plan,
-          created_at: Date.now() / 1000,
+          created_at: new Date().toISOString(),
         },
       }).catch(() => {}),
     );
@@ -287,7 +287,7 @@ export async function edgeRun(
               cost_usd: result.cost_usd,
               error: result.error || null,
             },
-            created_at: Date.now() / 1000,
+            created_at: new Date().toISOString(),
           },
         }).catch(() => {}),
       );
@@ -638,7 +638,7 @@ export async function writeCheckpoint(
       ${checkpoint.checkpoint_id}, ${checkpoint.agent_name},
       ${checkpoint.session_id}, ${checkpoint.trace_id},
       ${checkpoint.status}, ${JSON.stringify(checkpoint)},
-      '{}', ${Date.now() / 1000}
+      '{}', ${new Date().toISOString()}
     ) ON CONFLICT (checkpoint_id) DO UPDATE SET
       status = EXCLUDED.status,
       payload = EXCLUDED.payload

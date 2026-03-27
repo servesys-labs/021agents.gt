@@ -176,7 +176,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         const messages = await loadConversationHistory(this.env.HYPERDRIVE, this.name, 24);
         for (const msg of messages) {
           this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
-            VALUES (${msg.role}, ${msg.content.slice(0, 8000)}, ${msg.channel}, ${msg.created_at || Date.now() / 1000})`;
+            VALUES (${msg.role}, ${msg.content.slice(0, 8000)}, ${msg.channel}, ${msg.created_at || new Date().toISOString()})`;
         }
       } catch {}
     }
@@ -292,7 +292,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             old_value: JSON.stringify(before[key as keyof AgentConfig] ?? ""),
             new_value: JSON.stringify(updated[key as keyof AgentConfig] ?? ""),
             changed_by: "worker",
-            created_at: Date.now() / 1000,
+            created_at: new Date().toISOString(),
           },
         }).catch(() => {});
       }
@@ -361,7 +361,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     if (!clean) return;
     // 1. DO SQLite (fast, local)
     this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
-      VALUES (${role}, ${clean.slice(0, 8000)}, ${channel || ""}, ${Date.now() / 1000})`;
+      VALUES (${role}, ${clean.slice(0, 8000)}, ${channel || ""}, ${new Date().toISOString()})`;
     // Prune: keep last 100 messages to prevent unbounded growth
     this.sql`DELETE FROM conversation_messages WHERE id NOT IN (
       SELECT id FROM conversation_messages ORDER BY id DESC LIMIT 100
@@ -459,7 +459,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             INSERT INTO user_feedback (id, session_id, turn_number, rating, comment, message_preview, user_id, org_id, agent_name, channel, created_at)
             VALUES (${feedbackId}, ${sessionId}, ${turnNum},
                     ${validatedRating}, ${comment}, ${messageContent},
-                    ${userId}, ${data.org_id || ""}, ${data.agent_name || ""}, 'websocket', ${Date.now() / 1000})
+                    ${userId}, ${data.org_id || ""}, ${data.agent_name || ""}, 'websocket', ${new Date().toISOString()})
             ON CONFLICT (id) DO NOTHING
           `.catch((e: unknown) => console.error("[feedback] Write failed:", e)); // P1 Fix: Log failures
         }).catch((e: unknown) => console.error("[feedback] DB init failed:", e));
@@ -867,7 +867,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           action, plan, tier, provider, model, tool_name: toolName,
           status, latency_ms: latencyMs, input_tokens: inputTokens,
           output_tokens: outputTokens, cost_usd: costUsd,
-          details_json: detailsJson, created_at: Date.now() / 1000,
+          details_json: detailsJson, created_at: new Date().toISOString(),
         },
       }).catch(() => {});
     }
@@ -1212,7 +1212,11 @@ async function runViaAgent(
   const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
   const agentId = env.AGENTOS_AGENT.idFromName(doName);
   const agent = env.AGENTOS_AGENT.get(agentId);
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-partykit-namespace": "agentos",
+    "x-partykit-room": doName,
+  };
   if (env.SERVICE_TOKEN) headers.Authorization = `Bearer ${env.SERVICE_TOKEN}`;
   const resp = await agent.fetch(new Request("http://internal/run", {
     method: "POST",
@@ -1397,6 +1401,22 @@ export default {
       }, { status: degraded ? 503 : 200 });
     }
     
+    // POST /run — route to Durable Object for agent execution
+    if (url.pathname === "/run" && request.method === "POST") {
+      try {
+        const body = await request.json() as { agent_name?: string; input?: string; org_id?: string; project_id?: string; channel?: string; channel_user_id?: string };
+        const result = await runViaAgent(env, body.agent_name || "agentos", body.input || "", {
+          org_id: body.org_id,
+          project_id: body.project_id,
+          channel: body.channel || "api",
+          channel_user_id: body.channel_user_id,
+        });
+        return Response.json(result);
+      } catch (err) {
+        return Response.json({ error: err instanceof Error ? err.message : "Run failed" }, { status: 500 });
+      }
+    }
+
     // Config cache invalidation endpoint (called by control-plane on agent updates)
     if (url.pathname === "/api/v1/internal/config-invalidate" && request.method === "POST") {
       const serviceToken = env.SERVICE_TOKEN || "";
@@ -3134,7 +3154,7 @@ export default {
             if (queryId === "sessions.stats") {
               const agentName = body.params?.agent_name ? String(body.params.agent_name) : null;
               const sinceDays = Math.min(Number(body.params?.since_days) || 7, 90);
-              const since = Date.now() / 1000 - sinceDays * 86400;
+              const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
               return agentName
                 ? await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND agent_name = ${agentName} AND created_at >= ${since}`
                 : await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND created_at >= ${since}`;
@@ -3174,17 +3194,17 @@ export default {
             // ── Billing queries ───────────────────────────────────
             if (queryId === "billing.usage") {
               const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
-              const since = Date.now() / 1000 - sinceDays * 86400;
+              const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
               return await tx`SELECT COALESCE(SUM(total_cost_usd),0) as total, COALESCE(SUM(input_tokens),0) as input_tokens, COALESCE(SUM(output_tokens),0) as output_tokens FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since}`;
             }
             if (queryId === "billing.by_agent") {
               const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
-              const since = Date.now() / 1000 - sinceDays * 86400;
+              const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
               return await tx`SELECT agent_name, SUM(total_cost_usd) as cost, COUNT(*) as sessions FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY agent_name ORDER BY cost DESC`;
             }
             if (queryId === "billing.by_model") {
               const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
-              const since = Date.now() / 1000 - sinceDays * 86400;
+              const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
               return await tx`SELECT model, SUM(total_cost_usd) as cost, COUNT(*) as calls FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY model ORDER BY cost DESC`;
             }
 
@@ -3195,7 +3215,7 @@ export default {
             }
             if (queryId === "feedback.stats") {
               const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
-              const since = Date.now() / 1000 - sinceDays * 86400;
+              const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
               return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
             }
 
@@ -4349,8 +4369,8 @@ export default {
       return Response.json({ error: "unknown /cf endpoint" }, { status: 404 });
     }
 
-    // Serve static assets (portal SPA)
-    return env.ASSETS.fetch(request);
+    // No matching route
+    return Response.json({ error: "Not found", path: url.pathname }, { status: 404 });
   },
 
   // ── Queue Consumer — writes telemetry to Supabase via Hyperdrive ──
@@ -4389,7 +4409,7 @@ export default {
               ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
               ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
               ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
-              ${Number(p.created_at) || Date.now() / 1000}
+              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
             ) ON CONFLICT (session_id) DO UPDATE SET
               status = EXCLUDED.status, output_text = EXCLUDED.output_text,
               cost_total_usd = EXCLUDED.cost_total_usd, step_count = EXCLUDED.step_count`;
@@ -4419,7 +4439,7 @@ export default {
               ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
               ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
               ${p.status || ""}, ${p.latency_ms || 0}, ${JSON.stringify(p.details || {})},
-              ${Number(p.created_at) || Date.now() / 1000}
+              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
             )`;
           } else if (type === "cost_ledger") {
             // Per-session cost breakdown written at session end
@@ -4429,7 +4449,7 @@ export default {
             ) VALUES (
               ${p.session_id}, ${p.org_id || ""}, ${p.agent_name || ""},
               ${p.model || ""}, ${p.input_tokens || 0}, ${p.output_tokens || 0},
-              ${p.cost_usd || 0}, ${p.plan || ""}, ${Number(p.created_at) || Date.now() / 1000}
+              ${p.cost_usd || 0}, ${p.plan || ""}, ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
             )`;
           } else if (type === "runtime_event") {
             // Runtime-level events (node executions, graph transitions, errors)
@@ -4440,7 +4460,7 @@ export default {
               ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
               ${p.event_type || ""}, ${p.node_id || ""},
               ${p.status || ""}, ${p.duration_ms || 0}, ${JSON.stringify(p.details || {})},
-              ${Number(p.created_at) || Date.now() / 1000}
+              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
             )`;
           } else if (type === "middleware_event") {
             // Middleware execution events (loop detection, summarization, etc.)
@@ -4450,7 +4470,7 @@ export default {
             ) VALUES (
               ${p.org_id || ""}, ${p.session_id || ""}, ${p.middleware_name || ""},
               ${p.event_type || ""}, ${JSON.stringify(p.details || {})},
-              ${Number(p.created_at) || Date.now() / 1000}
+              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
             )`;
           }
           msg.ack();

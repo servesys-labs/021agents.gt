@@ -222,12 +222,12 @@ export async function recordProcedureOutcome(
   try {
     if (success) {
       await sql`
-        UPDATE procedures SET success_count = success_count + 1, last_used = ${Date.now() / 1000}
+        UPDATE procedures SET success_count = success_count + 1, last_used = ${new Date().toISOString()}
         WHERE name = ${name}
       `;
     } else {
       await sql`
-        UPDATE procedures SET failure_count = failure_count + 1, last_used = ${Date.now() / 1000}
+        UPDATE procedures SET failure_count = failure_count + 1, last_used = ${new Date().toISOString()}
         WHERE name = ${name}
       `;
     }
@@ -358,7 +358,7 @@ export async function storeFact(
   try {
     await sql`
       INSERT INTO memory_facts (id, content, content_hash, category, confidence, source, created_at)
-      VALUES (${id}, ${fact.content}, ${contentHash}, ${fact.category}, ${fact.confidence}, ${fact.source}, ${Date.now() / 1000})
+      VALUES (${id}, ${fact.content}, ${contentHash}, ${fact.category}, ${fact.confidence}, ${fact.source}, ${new Date().toISOString()})
       ON CONFLICT (content_hash) DO UPDATE SET
         confidence = GREATEST(memory_facts.confidence, EXCLUDED.confidence),
         source = EXCLUDED.source

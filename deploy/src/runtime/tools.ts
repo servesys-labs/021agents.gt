@@ -1090,7 +1090,7 @@ async function dispatch(
       try {
         await sql`
           INSERT INTO schedules (id, agent_name, org_id, task, cron_expression, enabled, run_count, created_at)
-          VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${Date.now() / 1000})
+          VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${new Date().toISOString()})
         `;
         return JSON.stringify({ created: true, schedule_id: scheduleId, agent_name: agentName, cron: cronExpr, task: taskDesc });
       } catch (err: any) {
@@ -1232,7 +1232,7 @@ async function dispatch(
                 agent_name: args.agent_name || e.agent_name || "",
                 org_id: args.org_id || e.org_id || "",
                 event_type: String(e.event_type || e.type || ""),
-                ingested_at: Date.now() / 1000,
+                ingested_at: new Date().toISOString(),
               },
             });
           }
@@ -1302,7 +1302,7 @@ async function dispatch(
         await sql`
           INSERT INTO user_feedback (id, session_id, turn_number, rating, comment, message_preview, org_id, agent_name, channel, created_at)
           VALUES (${feedbackId}, ${sessionId2}, ${turn}, ${rating}, ${comment}, ${messageContent},
-                  ${args.org_id || ""}, ${args.agent_name || ""}, ${args.channel || "api"}, ${Date.now() / 1000})
+                  ${args.org_id || ""}, ${args.agent_name || ""}, ${args.channel || "api"}, ${new Date().toISOString()})
         `;
         return JSON.stringify({ submitted: true, feedback_id: feedbackId });
       } catch (err: any) {
@@ -1376,7 +1376,7 @@ async function dispatch(
             case "sessions.stats": {
               const an = p.agent_name ? String(p.agent_name) : null;
               const sd = Math.min(Number(p.since_days) || 7, 90);
-              const since = Date.now() / 1000 - sd * 86400;
+              const since = new Date(Date.now() - sd * 86400 * 1000).toISOString();
               return an
                 ? await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND agent_name = ${an} AND created_at >= ${since}`
                 : await tx`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(AVG(wall_clock_seconds),0) as avg_latency, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND created_at >= ${since}`;
@@ -1389,17 +1389,17 @@ async function dispatch(
             }
             case "billing.usage": {
               const sd = Math.min(Number(p.since_days) || 30, 365);
-              const since = Date.now() / 1000 - sd * 86400;
+              const since = new Date(Date.now() - sd * 86400 * 1000).toISOString();
               return await tx`SELECT COALESCE(SUM(total_cost_usd),0) as total, COALESCE(SUM(input_tokens),0) as input_tokens, COALESCE(SUM(output_tokens),0) as output_tokens FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since}`;
             }
             case "billing.by_agent": {
               const sd = Math.min(Number(p.since_days) || 30, 365);
-              const since = Date.now() / 1000 - sd * 86400;
+              const since = new Date(Date.now() - sd * 86400 * 1000).toISOString();
               return await tx`SELECT agent_name, SUM(total_cost_usd) as cost, COUNT(*) as sessions FROM billing_records WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY agent_name ORDER BY cost DESC`;
             }
             case "feedback.stats": {
               const sd = Math.min(Number(p.since_days) || 30, 365);
-              const since = Date.now() / 1000 - sd * 86400;
+              const since = new Date(Date.now() - sd * 86400 * 1000).toISOString();
               return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
             }
             default:
@@ -1517,7 +1517,7 @@ async function dispatch(
       try {
         await sql`
           INSERT INTO agents (name, org_id, description, system_prompt, model, tools_json, max_turns, is_active, created_at)
-          VALUES (${name}, ${orgId}, ${desc}, ${systemPrompt}, ${model}, ${toolsJson}, ${maxTurns}, true, ${Date.now() / 1000})
+          VALUES (${name}, ${orgId}, ${desc}, ${systemPrompt}, ${model}, ${toolsJson}, ${maxTurns}, true, ${new Date().toISOString()})
         `;
         return JSON.stringify({ created: true, name, tools_count: tools.length });
       } catch (err: any) {
@@ -1583,7 +1583,7 @@ async function dispatch(
       try {
         await sql`
           INSERT INTO eval_runs (id, agent_name, org_id, status, trials, created_at)
-          VALUES (${runId}, ${agentName}, ${orgId}, 'pending', ${trials}, ${Date.now() / 1000})
+          VALUES (${runId}, ${agentName}, ${orgId}, 'pending', ${trials}, ${new Date().toISOString()})
         `;
         return JSON.stringify({ eval_run_id: runId, agent_name: agentName, status: "pending", trials });
       } catch (err: any) {
@@ -1639,7 +1639,7 @@ async function dispatch(
         }
 
         // Fallback: basic stats from direct DB query
-        const since = Date.now() / 1000 - days * 86400;
+        const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
         const stats = await sql`
           SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost,
                  COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate
@@ -1668,7 +1668,7 @@ async function dispatch(
       try {
         await sql`
           INSERT INTO eval_runs (id, agent_name, org_id, status, trials, created_at)
-          VALUES (${runId}, ${agentName}, ${orgId}, 'autoresearch_pending', ${maxIter}, ${Date.now() / 1000})
+          VALUES (${runId}, ${agentName}, ${orgId}, 'autoresearch_pending', ${maxIter}, ${new Date().toISOString()})
         `;
         return JSON.stringify({ run_id: runId, agent_name: agentName, max_iterations: maxIter, time_budget_seconds: timeBudget, status: "pending" });
       } catch (err: any) {
@@ -1743,7 +1743,7 @@ async function dispatch(
       const sql = await getDb(hyperdrive);
       const orgId = args.org_id || "";
       const sinceDays = Math.min(Number(args.since_days) || 7, 90);
-      const since = Date.now() / 1000 - sinceDays * 86400;
+      const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
       const agentName = args.agent_name ? String(args.agent_name) : null;
       try {
         const rows = agentName
@@ -1777,14 +1777,14 @@ async function dispatch(
           const agentName = String(args.agent_name || "");
           await sql`
             INSERT INTO issues (id, org_id, agent_name, title, description, severity, status, created_at)
-            VALUES (${issueId}, ${orgId}, ${agentName}, ${title}, ${desc}, 'medium', 'open', ${Date.now() / 1000})
+            VALUES (${issueId}, ${orgId}, ${agentName}, ${title}, ${desc}, 'medium', 'open', ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, issue_id: issueId });
         }
         if (action === "auto-fix") {
           const issueId = String(args.issue_id || "");
           if (!issueId) return "auto-fix requires issue_id";
-          await sql`UPDATE issues SET status = 'resolved', resolved_at = ${Date.now() / 1000} WHERE id = ${issueId} AND org_id = ${orgId}`;
+          await sql`UPDATE issues SET status = 'resolved', resolved_at = ${new Date().toISOString()} WHERE id = ${issueId} AND org_id = ${orgId}`;
           return JSON.stringify({ resolved: true, issue_id: issueId });
         }
         return `Unknown action: ${action}. Use list, create, or auto-fix.`;
@@ -1826,7 +1826,7 @@ async function dispatch(
       const sql = await getDb(hyperdrive);
       const orgId = args.org_id || "";
       const sinceDays = Math.min(Number(args.since_days) || 30, 365);
-      const since = Date.now() / 1000 - sinceDays * 86400;
+      const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
       const agentName = args.agent_name ? String(args.agent_name) : null;
       try {
         if (agentName) {
@@ -1885,7 +1885,7 @@ async function dispatch(
           const releaseId = crypto.randomUUID().slice(0, 12);
           await sql`
             INSERT INTO release_channels (id, org_id, agent_name, channel, version, promoted_at)
-            VALUES (${releaseId}, ${orgId}, ${agentName}, ${toChannel}, 'latest', ${Date.now() / 1000})
+            VALUES (${releaseId}, ${orgId}, ${agentName}, ${toChannel}, 'latest', ${new Date().toISOString()})
           `;
           return JSON.stringify({ promoted: true, agent_name: agentName, channel: toChannel });
         }
@@ -1894,7 +1894,7 @@ async function dispatch(
           const weight = Math.min(Math.max(Number(args.canary_weight) || 0.1, 0), 1);
           await sql`
             INSERT INTO release_channels (id, org_id, agent_name, channel, version, promoted_at)
-            VALUES (${crypto.randomUUID().slice(0, 12)}, ${orgId}, ${agentName}, 'canary', ${String(weight)}, ${Date.now() / 1000})
+            VALUES (${crypto.randomUUID().slice(0, 12)}, ${orgId}, ${agentName}, 'canary', ${String(weight)}, ${new Date().toISOString()})
           `;
           return JSON.stringify({ canary: true, agent_name: agentName, weight });
         }
@@ -1923,7 +1923,7 @@ async function dispatch(
           const sloId = crypto.randomUUID().slice(0, 12);
           await sql`
             INSERT INTO slo_definitions (id, org_id, agent_name, metric, threshold, created_at)
-            VALUES (${sloId}, ${orgId}, ${agentName}, ${metric}, ${threshold}, ${Date.now() / 1000})
+            VALUES (${sloId}, ${orgId}, ${agentName}, ${metric}, ${threshold}, ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, slo_id: sloId, metric, threshold });
         }
@@ -1945,7 +1945,7 @@ async function dispatch(
       const sql = await getDb(hyperdrive);
       const orgId = args.org_id || "";
       const sinceDays = Math.min(Number(args.since_days) || 7, 90);
-      const since = Date.now() / 1000 - sinceDays * 86400;
+      const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
       const actionFilter = args.action_filter ? String(args.action_filter) : null;
       try {
         const rows = actionFilter
@@ -1976,7 +1976,7 @@ async function dispatch(
           if (!name || !value) return "create requires name and value";
           await sql`
             INSERT INTO secrets (name, org_id, encrypted_value, created_at)
-            VALUES (${name}, ${orgId}, ${value}, ${Date.now() / 1000})
+            VALUES (${name}, ${orgId}, ${value}, ${new Date().toISOString()})
             ON CONFLICT (name, org_id) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value
           `;
           return JSON.stringify({ stored: true, name });
@@ -2010,7 +2010,7 @@ async function dispatch(
       const agentB = String(args.agent_b || "");
       if (!agentA || !agentB) return "compare-agents requires agent_a and agent_b";
       try {
-        const since = Date.now() / 1000 - 7 * 86400;
+        const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
         const statsA = await sql`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND agent_name = ${agentA} AND created_at >= ${since}`;
         const statsB = await sql`SELECT COUNT(*) as total, COALESCE(AVG(cost_total_usd),0) as avg_cost, COALESCE(SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::float/NULLIF(COUNT(*),0),0) as success_rate FROM sessions WHERE org_id = ${orgId} AND agent_name = ${agentB} AND created_at >= ${since}`;
         return JSON.stringify({ agent_a: { name: agentA, ...(statsA[0] || {}) }, agent_b: { name: agentB, ...(statsB[0] || {}) } });
@@ -2053,7 +2053,7 @@ async function dispatch(
           const policyId = crypto.randomUUID().slice(0, 12);
           await sql`
             INSERT INTO policy_templates (id, org_id, name, budget_limit_usd, blocked_tools_json, created_at)
-            VALUES (${policyId}, ${orgId}, ${name}, ${budgetLimit}, ${blockedTools}, ${Date.now() / 1000})
+            VALUES (${policyId}, ${orgId}, ${name}, ${budgetLimit}, ${blockedTools}, ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, policy_id: policyId, name, budget_limit_usd: budgetLimit });
         }
@@ -2103,7 +2103,7 @@ async function dispatch(
           const wfId = crypto.randomUUID().slice(0, 12);
           await sql`
             INSERT INTO workflows (id, org_id, name, steps_json, status, created_at)
-            VALUES (${wfId}, ${orgId}, ${name}, ${steps}, 'draft', ${Date.now() / 1000})
+            VALUES (${wfId}, ${orgId}, ${name}, ${steps}, 'draft', ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, workflow_id: wfId, name });
         }
@@ -2151,7 +2151,7 @@ async function dispatch(
           const mcpId = crypto.randomUUID().slice(0, 12);
           await sql`
             INSERT INTO mcp_servers (id, org_id, name, url, status, created_at)
-            VALUES (${mcpId}, ${orgId}, ${name}, ${url}, 'active', ${Date.now() / 1000})
+            VALUES (${mcpId}, ${orgId}, ${name}, ${url}, 'active', ${new Date().toISOString()})
           `;
           return JSON.stringify({ registered: true, mcp_id: mcpId, name, url });
         }
@@ -2197,7 +2197,7 @@ async function dispatch(
           const gpuId = crypto.randomUUID().slice(0, 12);
           await sql`
             INSERT INTO gpu_endpoints (id, org_id, model_id, gpu_type, status, created_at)
-            VALUES (${gpuId}, ${orgId}, ${modelId}, ${gpuType}, 'provisioning', ${Date.now() / 1000})
+            VALUES (${gpuId}, ${orgId}, ${modelId}, ${gpuType}, 'provisioning', ${new Date().toISOString()})
           `;
           return JSON.stringify({ provisioned: true, gpu_id: gpuId, gpu_type: gpuType });
         }
@@ -2696,8 +2696,9 @@ async function knowledgeSearch(env: RuntimeEnv, args: Record<string, any>): Prom
       if (r.source) meta.push(`source=${r.source}`);
       if (r.pipeline) meta.push(`pipeline=${r.pipeline}`);
       if (r.event_type) meta.push(`type=${r.event_type}`);
-      if (r.ingested_at > 0) {
-        const ago = Math.round((Date.now() / 1000 - r.ingested_at) / 60);
+      if (r.ingested_at) {
+        const ingestedMs = typeof r.ingested_at === "string" ? new Date(r.ingested_at).getTime() : Number(r.ingested_at) * 1000;
+        const ago = Math.round((Date.now() - ingestedMs) / 60000);
         meta.push(ago < 60 ? `${ago}m ago` : `${Math.round(ago / 60)}h ago`);
       }
       const metaStr = meta.length > 0 ? ` (${meta.join(", ")})` : "";
