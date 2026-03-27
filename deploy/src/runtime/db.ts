@@ -201,7 +201,7 @@ export async function writeSession(
       ${session.model}, ${session.trace_id}, ${session.parent_session_id || ""},
       ${Number(session.depth) || 0}, ${session.step_count}, ${session.action_count},
       ${session.wall_clock_seconds}, ${session.cost_total_usd},
-      ${Date.now() / 1000}
+      ${new Date().toISOString()}
     ) ON CONFLICT (session_id) DO UPDATE SET
       status = EXCLUDED.status,
       output_text = EXCLUDED.output_text,
@@ -278,7 +278,7 @@ export async function writeEvent(
       ${event.status}, ${event.latency_ms},
       ${event.input_tokens}, ${event.output_tokens}, ${event.cost_usd},
       ${event.details_json},
-      ${Number(event.created_at) || Date.now() / 1000}
+      ${event.created_at ? (typeof event.created_at === "string" && String(event.created_at).includes("T") ? event.created_at : new Date(Number(event.created_at) * 1000).toISOString()) : new Date().toISOString()}
     )
   `;
 }
@@ -308,7 +308,7 @@ export async function writeBillingRecord(
       ) VALUES (
         ${record.session_id}, ${record.org_id}, ${record.agent_name},
         ${record.model}, ${record.input_tokens}, ${record.output_tokens},
-        ${record.cost_usd}, ${record.plan}, ${Date.now() / 1000}
+        ${record.cost_usd}, ${record.plan}, ${new Date().toISOString()}
       )
     `;
   } catch {
@@ -348,7 +348,7 @@ export async function writeEvalRun(
         ${run.agent_name}, ${run.eval_name}, ${"edge_runtime"},
         ${run.total_tasks}, ${run.total_trials}, ${run.pass_count}, ${run.fail_count}, ${run.error_count},
         ${run.pass_rate}, ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd},
-        ${run.eval_conditions_json}, ${Date.now() / 1000}
+        ${run.eval_conditions_json}, ${new Date().toISOString()}
       )
       RETURNING id
     `;
@@ -361,7 +361,7 @@ export async function writeEvalRun(
           avg_score, avg_latency_ms, total_cost_usd, created_at
         ) VALUES (
           ${run.agent_name}, ${run.total_tasks}, ${run.total_trials}, ${run.pass_rate},
-          ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd}, ${Date.now() / 1000}
+          ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd}, ${new Date().toISOString()}
         )
         RETURNING id
       `;
@@ -396,7 +396,7 @@ export async function writeEvalTrial(
       ) VALUES (
         ${Number(trial.eval_run_id) || 0}, ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
         ${trial.passed}, ${trial.score}, ${trial.details_json},
-        ${trial.trace_id}, ${trial.session_id}, ${Date.now() / 1000}
+        ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
       )
     `;
     return;
@@ -411,7 +411,7 @@ export async function writeEvalTrial(
       ) VALUES (
         ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
         ${trial.passed}, ${trial.score}, ${trial.details_json},
-        ${trial.trace_id}, ${trial.session_id}, ${Date.now() / 1000}
+        ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
       )
     `;
   } catch {
@@ -1459,7 +1459,7 @@ export async function writeConversationMessage(
         agent_name, instance_id, role, content, channel, created_at
       ) VALUES (
         ${msg.agent_name}, ${msg.instance_id}, ${msg.role},
-        ${msg.content.slice(0, 8000)}, ${msg.channel}, ${Date.now() / 1000}
+        ${msg.content.slice(0, 8000)}, ${msg.channel}, ${new Date().toISOString()}
       )
     `;
   } catch {
@@ -1485,7 +1485,7 @@ export async function writeConversationMessage(
           agent_name, instance_id, role, content, channel, created_at
         ) VALUES (
           ${msg.agent_name}, ${msg.instance_id}, ${msg.role},
-          ${msg.content.slice(0, 8000)}, ${msg.channel}, ${Date.now() / 1000}
+          ${msg.content.slice(0, 8000)}, ${msg.channel}, ${new Date().toISOString()}
         )
       `;
     } catch {}
@@ -1581,8 +1581,8 @@ export async function queryUsage(
   const cursor = opts.cursor || "";
   const orgId = opts.org_id || "";
   const agentName = opts.agent_name || "";
-  const fromTs = Number(opts.from_ts) || 0;
-  const toTs = Number(opts.to_ts) || (Date.now() / 1000);
+  const fromTs = opts.from_ts ? new Date(Number(opts.from_ts) * 1000).toISOString() : new Date(0).toISOString();
+  const toTs = opts.to_ts ? new Date(Number(opts.to_ts) * 1000).toISOString() : new Date().toISOString();
 
   // Summary aggregation
   let summaryRows: any[];
@@ -1626,8 +1626,8 @@ export async function queryUsage(
     total_input_tokens: 0, // Filled from billing_events below
     total_output_tokens: 0,
     total_wall_clock_seconds: Number(s.total_wall_clock_seconds) || 0,
-    period_start: new Date(fromTs * 1000).toISOString(),
-    period_end: new Date(toTs * 1000).toISOString(),
+    period_start: fromTs,
+    period_end: toTs,
   };
 
   // Token totals from billing_events (if available)

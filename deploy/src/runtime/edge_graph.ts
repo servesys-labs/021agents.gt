@@ -558,7 +558,7 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
               middleware_name: "summarization",
               event_type: "context_summarized",
               details: { cost_usd: summaryCost, turn },
-              created_at: Date.now() / 1000,
+              created_at: new Date().toISOString(),
             },
           }).catch(() => {});
         }
@@ -1095,7 +1095,7 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
               middleware_name: "loop_detection",
               event_type: "loop_halt",
               details: { message: loopResult.halt, turn: ctx.turn },
-              created_at: Date.now() / 1000,
+              created_at: new Date().toISOString(),
             },
           }).catch(() => {});
         }
@@ -1113,7 +1113,7 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
               middleware_name: "loop_detection",
               event_type: "loop_warn",
               details: { message: loopResult.warn, turn: ctx.turn },
-              created_at: Date.now() / 1000,
+              created_at: new Date().toISOString(),
             },
           }).catch(() => {});
         }

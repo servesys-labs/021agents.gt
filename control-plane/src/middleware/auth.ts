@@ -46,6 +46,7 @@ async function hashForCache(token: string): Promise<string> {
 const PUBLIC_PATHS = new Set([
   "/health",
   "/health/detailed",
+  "/api/v1/health",
   "/api/v1/auth/login",
   "/api/v1/auth/signup",
   "/api/v1/auth/providers",
