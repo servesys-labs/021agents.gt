@@ -12,7 +12,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { apiPost, apiPut } from "../../lib/api";
+import { apiPost, apiPut, apiGet } from "../../lib/api";
 import { CollapsibleSection } from "../../components/common/CollapsibleSection";
 
 /* ── Types ──────────────────────────────────────────────────────── */
@@ -113,10 +113,30 @@ export function CreateAgentPage() {
   const [searchParams] = useSearchParams();
   const initialPrompt = searchParams.get("prompt") ?? searchParams.get("description") ?? "";
 
-  const [stage, setStage] = useState<Stage>(initialPrompt ? "description" : "description");
+  const templateId = searchParams.get("template");
+  const [stage, setStage] = useState<Stage>("description");
   const [prompt, setPrompt] = useState(initialPrompt);
   const [config, setConfig] = useState<GeneratedConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [templateLoaded, setTemplateLoaded] = useState(false);
+
+  // Load template if ?template= query param is set
+  useEffect(() => {
+    if (!templateId || templateLoaded) return;
+    setTemplateLoaded(true);
+    apiGet<GeneratedConfig>(`/api/v1/agents/templates/${templateId}`)
+      .then((template) => {
+        setConfig({
+          ...template,
+          governance: template.governance ?? { budget_limit_usd: 10, blocked_tools: [], require_confirmation_for_destructive: true },
+          gate_pack: { lint: "pending", eval: "pending", contracts: "pending", rollout: "pending" },
+        });
+        setStage("review");
+      })
+      .catch(() => {
+        setError(`Template "${templateId}" not found`);
+      });
+  }, [templateId, templateLoaded]);
   const [deployMenuOpen, setDeployMenuOpen] = useState(false);
 
   /* Generation steps */

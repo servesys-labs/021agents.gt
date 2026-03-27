@@ -1172,7 +1172,7 @@ export function buildFreshGraphCtx(
   traceId: string,
   telemetryQueue?: Queue,
 ): FreshGraphCtx {
-  const toolDefs = getToolDefinitions(config.tools);
+  const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
   const stateReducerOverrides = coerceReducerMap(
@@ -1657,7 +1657,7 @@ export function buildResumeGraphCtx(
   config: AgentConfig,
   telemetryQueue?: Queue,
 ): ResumeGraphCtx {
-  const toolDefs = getToolDefinitions(config.tools);
+  const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
   const stateReducerOverrides = coerceReducerMap(

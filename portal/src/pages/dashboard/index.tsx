@@ -426,6 +426,29 @@ function OnboardingHero({ onNavigate }: { onNavigate: (path: string) => void }) 
         ))}
       </div>
 
+      {/* ── Templates — start from a proven config ──────────── */}
+      <div className="card p-4 mb-4">
+        <p className="text-xs font-semibold text-text-primary mb-3">Start from a template</p>
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+          {[
+            { id: "code-reviewer", label: "Code Reviewer", icon: "🔍" },
+            { id: "research-assistant", label: "Research Assistant", icon: "📚" },
+            { id: "customer-support", label: "Customer Support", icon: "💬" },
+            { id: "data-analyst", label: "Data Analyst", icon: "📊" },
+            { id: "devops-agent", label: "DevOps Agent", icon: "🚀" },
+          ].map((t) => (
+            <button
+              key={t.id}
+              className="flex items-center gap-2 px-3 py-2.5 rounded-lg border border-border-default bg-surface-base text-xs font-medium text-text-secondary hover:border-accent/30 hover:text-text-primary transition-all"
+              onClick={() => onNavigate(`/agents/new?template=${t.id}`)}
+            >
+              <span>{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* ── Meta-Agent — integrated as secondary path ─────────── */}
       <div className="card p-4 flex items-center gap-4">
         <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center flex-shrink-0">

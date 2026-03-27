@@ -3035,11 +3035,16 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
  */
 const ALWAYS_AVAILABLE = new Set(["discover-api"]);
 
-export function getToolDefinitions(enabledTools: string[]): ToolDefinition[] {
+export function getToolDefinitions(enabledTools: string[], blockedTools: string[] = []): ToolDefinition[] {
   // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api).
   // This prevents privilege escalation where an agent with tools:[] gets all tools.
+  const blocked = new Set(blockedTools);
   return TOOL_CATALOG.filter(
-    (t) => enabledTools.includes(t.function.name) || ALWAYS_AVAILABLE.has(t.function.name),
+    (t) => {
+      const name = t.function.name;
+      if (blocked.has(name)) return false; // Governance: blocked tools never available
+      return enabledTools.includes(name) || ALWAYS_AVAILABLE.has(name);
+    },
   );
 }
 

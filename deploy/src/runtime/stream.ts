@@ -260,7 +260,7 @@ export async function streamRun(
     if (opts?.project_id) config.project_id = opts.project_id;
 
     // Tools
-    const toolDefs = getToolDefinitions(config.tools);
+    const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
     const blockedSet = new Set(config.blocked_tools);
     const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
 
