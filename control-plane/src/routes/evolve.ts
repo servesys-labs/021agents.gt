@@ -239,6 +239,19 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
     WHERE name = ${agentName} AND org_id = ${orgId}
   `;
 
+  // R2 VCS: commit the config change for full version history
+  try {
+    const { commitAgentConfig } = await import("../logic/r2-vcs");
+    await commitAgentConfig(
+      c.env.STORAGE, orgId, agentName, newConfig,
+      `evolution: ${proposal.title || proposalId}`,
+      user.user_id,
+      { proposal_id: proposalId, source: "evolution_apply" },
+    );
+  } catch {
+    // Best-effort — Postgres is the source of truth
+  }
+
   // Mark proposal as applied
   await sql`
     UPDATE evolution_proposals SET status = 'applied', reviewed_at = ${now}
