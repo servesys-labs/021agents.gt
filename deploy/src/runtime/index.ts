@@ -88,6 +88,10 @@ export type { RuntimeEvent as ProtocolRuntimeEvent, TurnEndEvent, DoneEvent, Err
 export { validateEvent, serializeForSSE, serializeForWebSocket } from "./protocol";
 export { syncFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";
 
+// Reasoning strategies (harness pattern: strategy injection)
+export { REASONING_STRATEGIES, selectReasoningStrategy, autoSelectStrategy, REASONING_STRATEGY_SNIPPET_CODE } from "./reasoning-strategies";
+export type { ReasoningStrategy } from "./reasoning-strategies";
+
 // Cross-session progress tracking (harness pattern: cognitive anchor)
 export { buildProgressSummary, writeProgress, loadStartupContext } from "./progress";
 export type { ProgressEntry, ProgressSummary, StartupContext } from "./progress";

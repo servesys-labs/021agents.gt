@@ -2,7 +2,7 @@
   "_meta": {
     "description": "Structured feature registry — the cognitive anchor for AI dev agents. Read this file at the start of every session to understand what exists, what works, and what remains.",
     "format_version": "1.0.0",
-    "last_updated": "2026-03-26",
+    "last_updated": "2026-03-27",
     "instructions": "Do NOT remove or edit existing feature entries. Only update the 'passes' field after end-to-end verification. Add new entries when new features are built."
   },
   "categories": {
@@ -401,6 +401,62 @@
       "category": "portal",
       "description": "Multi-step agent deployment workflow with success confirmation screen",
       "key_files": ["portal/src/pages/agents/deploy.tsx", "portal/src/pages/agents/success.tsx"],
+      "passes": true
+    },
+    {
+      "id": "cp-evolution-analyzer",
+      "category": "control-plane",
+      "description": "Evolution analyzer: failure clustering, cost anomalies, tool analysis, 8 proposal generators with evidence + config diffs. POST /analyze, GET /report, POST /apply endpoints.",
+      "key_files": ["control-plane/src/logic/evolution-analyzer.ts", "control-plane/src/routes/evolve.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-reasoning-strategies",
+      "category": "runtime",
+      "description": "5 reasoning strategies (step-back, chain-of-thought, plan-then-execute, verify-then-respond, decompose) auto-selected from task characteristics or explicit config",
+      "key_files": ["deploy/src/runtime/reasoning-strategies.ts", "deploy/src/runtime/edge_graph.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-git-tools",
+      "category": "runtime",
+      "description": "Git tools for deployed agents: git-init, git-status, git-diff, git-commit, git-log, git-branch, git-stash with prerequisite check",
+      "key_files": ["deploy/src/runtime/tools.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-aci-tools",
+      "category": "runtime",
+      "description": "SWE-agent ACI tools: lint-on-edit, stateful file viewer (view-file), smart grep/glob with refinement forcing, search-file, find-file",
+      "key_files": ["deploy/src/runtime/tools.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-codemode-harness",
+      "category": "runtime",
+      "description": "Codemode v0.2.1 integration: createHarnessCodeTool (single code tool, ~85% token savings), harness helper modules, middleware hooks (pre_llm, pre_output), dual-mode execution",
+      "key_files": ["deploy/src/runtime/codemode.ts", "deploy/src/runtime/harness-modules.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-reflection-gate",
+      "category": "runtime",
+      "description": "Reflection gate in graph executor: confidence scoring from tool failures + warnings, retry if <0.6, tool failure recovery with alternative approach injection",
+      "key_files": ["deploy/src/runtime/edge_graph.ts"],
+      "passes": true
+    },
+    {
+      "id": "rt-codemode-security",
+      "category": "runtime",
+      "description": "Codemode privilege escalation fix: execute-code removed from ALWAYS_AVAILABLE, enabledTools threaded through all 8 codemode dispatch cases, SANDBOX_HELPERS as ES modules",
+      "key_files": ["deploy/src/runtime/tools.ts", "deploy/src/runtime/codemode.ts"],
+      "passes": true
+    },
+    {
+      "id": "portal-evolve-tab",
+      "category": "portal",
+      "description": "EvolveTab: analysis trigger, KPI dashboard, failure patterns, tool performance, proposals with approve/reject/apply, confirm dialog, evolution ledger",
+      "key_files": ["portal/src/pages/agents/detail-tabs/EvolveTab.tsx"],
       "passes": true
     }
   ]

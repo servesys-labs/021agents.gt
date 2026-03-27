@@ -98,6 +98,9 @@ export interface AgentConfig {
   // Enable code mode: collapse all tools into a single codemode tool
   // LLM writes code to chain tools instead of individual tool calls (~85% token savings)
   use_code_mode?: boolean;
+  // Reasoning strategy: step-back, chain-of-thought, plan-then-execute, verify-then-respond, decompose
+  // If not set, auto-selects based on task characteristics.
+  reasoning_strategy?: string;
 }
 
 // ── Runtime Context (flows through graph nodes) ────────────────
