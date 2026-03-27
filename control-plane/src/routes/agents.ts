@@ -182,7 +182,10 @@ async function snapshotVersion(
   version: string,
   configJson: Record<string, unknown>,
   createdBy: string,
+  storage?: R2Bucket,
+  orgId?: string,
 ): Promise<void> {
+  // 1. Postgres snapshot (fast reads, queryable)
   try {
     await sql`
       INSERT INTO agent_versions (agent_name, version_number, config_json, created_by, created_at)
@@ -192,6 +195,21 @@ async function snapshotVersion(
     `;
   } catch {
     // Non-critical
+  }
+
+  // 2. R2 VCS commit (full version history with content-addressed objects, diffs, branches)
+  if (storage && orgId) {
+    try {
+      const { commitAgentConfig } = await import("../logic/r2-vcs");
+      await commitAgentConfig(
+        storage, orgId, agentName, configJson,
+        `v${version}: ${configJson.description || "config update"}`,
+        createdBy,
+        { version, source: "agent_crud" },
+      );
+    } catch {
+      // R2 VCS is best-effort — Postgres is the source of truth
+    }
   }
 }
 
@@ -330,7 +348,7 @@ agentRoutes.post(
     `;
 
     // Snapshot version
-    await snapshotVersion(sql, req.name, "0.1.0", configJson, user.user_id);
+    await snapshotVersion(sql, req.name, "0.1.0", configJson, user.user_id, c.env.STORAGE, user.org_id);
 
     return c.json({
       name: req.name,
@@ -418,7 +436,7 @@ agentRoutes.put(
       WHERE name = ${name} AND org_id = ${user.org_id}
     `;
 
-    await snapshotVersion(sql, name, newVersion, existingConfig, user.user_id);
+    await snapshotVersion(sql, name, newVersion, existingConfig, user.user_id, c.env.STORAGE, user.org_id);
 
     // Notify runtime of config change (fire-and-forget)
     // This triggers the DO to reload config on next request
@@ -968,7 +986,7 @@ agentRoutes.post(
       SET config_json = ${JSON.stringify(config)}, updated_at = now()
     `;
 
-    await snapshotVersion(sql, String(config.name), String(config.version), config, user.user_id);
+    await snapshotVersion(sql, String(config.name), String(config.version), config, user.user_id, c.env.STORAGE, user.org_id);
 
     // Notify runtime of new agent (fire-and-forget)
     notifyRuntimeOfConfigChange(c.env, String(config.name), String(config.version)).catch(() => {});
@@ -1015,4 +1033,138 @@ agentRoutes.post("/:name/run/:session_id/cancel", (c) => {
   return runtimeMovedToEdge(
     "Cancellation is managed in edge runtime/session layer.",
   );
+});
+
+// ── R2 VCS: Config Version History ────────────────────────────
+
+agentRoutes.get("/:name/versions", requireScope("agents:read"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("name");
+  const limit = Math.min(50, Number(c.req.query("limit")) || 20);
+
+  try {
+    const { getConfigVersions } = await import("../logic/r2-vcs");
+    const log = await getConfigVersions(c.env.STORAGE, user.org_id, agentName, limit);
+    return c.json({ versions: log.commits, total: log.total, branch: log.branch });
+  } catch (err: any) {
+    return c.json({ versions: [], total: 0, error: err.message });
+  }
+});
+
+agentRoutes.get("/:name/versions/:commitId", requireScope("agents:read"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("name");
+  const commitId = c.req.param("commitId");
+
+  try {
+    const { restoreConfigVersion } = await import("../logic/r2-vcs");
+    const result = await restoreConfigVersion(c.env.STORAGE, user.org_id, agentName, commitId);
+    if (!result) return c.json({ error: "Version not found" }, 404);
+    return c.json({ config: result.config, commit: result.commit });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+agentRoutes.post("/:name/versions/:commitId/restore", requireScope("agents:write"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("name");
+  const commitId = c.req.param("commitId");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  try {
+    const { restoreConfigVersion, commitAgentConfig } = await import("../logic/r2-vcs");
+    const result = await restoreConfigVersion(c.env.STORAGE, user.org_id, agentName, commitId);
+    if (!result) return c.json({ error: "Version not found" }, 404);
+
+    // Update Postgres with the restored config
+    await sql`
+      UPDATE agents SET config_json = ${JSON.stringify(result.config)}
+      WHERE name = ${agentName} AND org_id = ${user.org_id}
+    `;
+
+    // Commit the restore as a new version
+    await commitAgentConfig(
+      c.env.STORAGE, user.org_id, agentName, result.config,
+      `Restored from version ${commitId}`,
+      user.user_id,
+      { restored_from: commitId, source: "manual_restore" },
+    );
+
+    return c.json({
+      restored: true,
+      from_commit: commitId,
+      message: result.commit.message,
+      timestamp: result.commit.timestamp,
+    });
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+agentRoutes.get("/:name/versions/diff/:fromId/:toId", requireScope("agents:read"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("name");
+  const fromId = c.req.param("fromId");
+  const toId = c.req.param("toId");
+
+  try {
+    const { vcsDiff } = await import("../logic/r2-vcs");
+    const diff = await vcsDiff(c.env.STORAGE, user.org_id, `config-${agentName}`, fromId, toId);
+    return c.json(diff);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+// ── R2 VCS: Trash / Soft Delete ───────────────────────────────
+
+agentRoutes.get("/:name/trash", requireScope("agents:read"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("name");
+
+  try {
+    const { vcsListTrash } = await import("../logic/r2-vcs");
+    const entries = await vcsListTrash(c.env.STORAGE, user.org_id, `config-${agentName}`);
+    return c.json({ trash: entries, count: entries.length });
+  } catch (err: any) {
+    return c.json({ trash: [], error: err.message });
+  }
+});
+
+agentRoutes.post("/:name/trash/:trashId/restore", requireScope("agents:write"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("name");
+  const trashId = c.req.param("trashId");
+
+  try {
+    const { vcsRestore } = await import("../logic/r2-vcs");
+    const result = await vcsRestore(c.env.STORAGE, user.org_id, `config-${agentName}`, trashId);
+    if (!result) return c.json({ error: "Trash entry not found" }, 404);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
+});
+
+agentRoutes.delete("/:name/trash/:trashId", requireScope("agents:write"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("name");
+  const trashId = c.req.param("trashId");
+  const body = await c.req.json().catch(() => ({}));
+
+  if (!body.confirmed) {
+    return c.json({
+      error: "Permanent deletion requires explicit confirmation",
+      hint: "Send { confirmed: true } to permanently delete. This cannot be undone.",
+    }, 400);
+  }
+
+  try {
+    const { vcsPermanentDelete } = await import("../logic/r2-vcs");
+    const result = await vcsPermanentDelete(c.env.STORAGE, user.org_id, `config-${agentName}`, trashId, true);
+    return c.json(result);
+  } catch (err: any) {
+    return c.json({ error: err.message }, 500);
+  }
 });
