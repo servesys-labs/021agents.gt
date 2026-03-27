@@ -82,6 +82,17 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
                 hint: "Pass { override: true, approved_by: '<other_user_id>' } with a different user's approval.",
               }, 403);
             }
+            // Verify approved_by is a real member of this org
+            const memberCheck = await sql`
+              SELECT 1 FROM org_members
+              WHERE org_id = ${user.org_id} AND user_id = ${approvedBy}
+              LIMIT 1
+            `;
+            if (memberCheck.length === 0) {
+              return c.json({
+                error: `User '${approvedBy}' is not a member of this organization`,
+              }, 403);
+            }
           }
         }
       } catch { /* policy check failed — allow override with audit */ }
@@ -97,6 +108,7 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
                     to: toChannel,
                     gate_reason: recommendation.reason,
                     override: true,
+                    approved_by: (await c.req.json().catch(() => ({}))).approved_by ?? null,
                   })}, ${now})
         `;
       } catch {}

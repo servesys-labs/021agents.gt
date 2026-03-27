@@ -13,6 +13,24 @@ import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
 const MAX_SANDBOX_TIMEOUT_SECONDS = 120;
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
 const DEFAULT_SANDBOX_MEMORY_LIMIT_MB = 512;
+
+/* ── Per-session tool rate limiter (bounded, LRU eviction) ────── */
+const RATE_LIMIT_MAX_ENTRIES = 2000;
+const toolRateLimits = new Map<string, number>();
+
+function checkToolRateLimit(toolName: string, sessionId: unknown, maxCalls: number): boolean {
+  const key = `${toolName}:${sessionId || "unknown"}`;
+  const count = toolRateLimits.get(key) ?? 0;
+  if (count >= maxCalls) return true; // rate limited
+  toolRateLimits.set(key, count + 1);
+  // LRU eviction: if map grows too large, delete oldest 25%
+  if (toolRateLimits.size > RATE_LIMIT_MAX_ENTRIES) {
+    const keys = [...toolRateLimits.keys()];
+    const toRemove = Math.floor(keys.length / 4);
+    for (let i = 0; i < toRemove; i++) toolRateLimits.delete(keys[i]);
+  }
+  return false;
+}
 const DYNAMIC_WORKER_CACHE_LIMIT = 32;
 const DYNAMIC_WORKER_CACHE_TTL_MS = 5 * 60_000;
 type DynamicWorkerCacheEntry = { worker: any; expiresAt: number };
@@ -2314,14 +2332,10 @@ async function dispatch(
     }
 
     case "self-check": {
-      // Rate limit: max 10 self-check calls per session
-      const selfCheckKey = `self-check:${args.session_id || "unknown"}`;
-      const selfCheckCount = ((globalThis as any).__selfCheckCounts ??= new Map<string, number>());
-      const currentCount = selfCheckCount.get(selfCheckKey) ?? 0;
-      if (currentCount >= 10) {
+      // Rate limit: max 10 self-check calls per session (bounded LRU map)
+      if (checkToolRateLimit("self-check", args.session_id, 10)) {
         return "self-check rate limit reached (max 10 per session). Use the information you already have.";
       }
-      selfCheckCount.set(selfCheckKey, currentCount + 1);
 
       const hyperdrive = (env as any).HYPERDRIVE;
       if (!hyperdrive) return "self-check requires database access";
@@ -2456,13 +2470,9 @@ async function dispatch(
 
     case "adapt-strategy": {
       // Rate limit: max 3 strategy switches per session
-      const adaptKey = `adapt-strategy:${args.session_id || "unknown"}`;
-      const adaptCounts = ((globalThis as any).__selfCheckCounts ??= new Map<string, number>());
-      const adaptCount = adaptCounts.get(adaptKey) ?? 0;
-      if (adaptCount >= 3) {
+      if (checkToolRateLimit("adapt-strategy", args.session_id, 3)) {
         return "Strategy switch limit reached (max 3 per session). Commit to your current approach.";
       }
-      adaptCounts.set(adaptKey, adaptCount + 1);
 
       const strategy = String(args.strategy || "");
       const reason = String(args.reason || "");

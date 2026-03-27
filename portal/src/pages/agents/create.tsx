@@ -205,6 +205,7 @@ export function CreateAgentPage() {
           contracts: "pending",
           rollout: "pending",
         },
+        reasoning_strategy: result.reasoning_strategy ?? undefined,
         // Package fields
         agent_graph: result.agent_graph ?? undefined,
         sub_agents: result.sub_agents ?? [],
