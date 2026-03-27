@@ -8,3 +8,4 @@ export { EvolveTab } from "./EvolveTab";
 export { EvalTab } from "./EvalTab";
 export { SecurityTab } from "./SecurityTab";
 export { ReleasesTab } from "./ReleasesTab";
+export { VersionsTab } from "./VersionsTab";

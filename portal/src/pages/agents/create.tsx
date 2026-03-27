@@ -628,6 +628,46 @@ function ReviewStage({
               </label>
             </div>
           </div>
+
+          {/* Harness Settings */}
+          <div className="card">
+            <label className="block text-[var(--text-xs)] text-text-muted uppercase tracking-wide mb-[var(--space-3)]">
+              Harness
+            </label>
+            <div className="space-y-[var(--space-3)]">
+              <div>
+                <label className="block text-[var(--text-xs)] text-text-secondary mb-[var(--space-1)]">
+                  Reasoning Strategy
+                </label>
+                <select
+                  value={(config as any).reasoning_strategy || "auto"}
+                  onChange={(e) => updateField("reasoning_strategy" as any, e.target.value === "auto" ? undefined : e.target.value)}
+                  className="text-[var(--text-sm)] w-full bg-surface-base border border-border-default rounded px-2 py-1.5 text-text-secondary"
+                >
+                  <option value="auto">Auto-detect from task</option>
+                  <option value="step-back">Step-Back — identify principles first (debug/investigate)</option>
+                  <option value="chain-of-thought">Chain of Thought — think step by step (analysis)</option>
+                  <option value="plan-then-execute">Plan Then Execute — outline before coding (implementation)</option>
+                  <option value="verify-then-respond">Verify Then Respond — re-read question before answering</option>
+                  <option value="decompose">Decompose — break into 3-5 sub-tasks (complex)</option>
+                </select>
+                <p className="text-[10px] text-text-muted mt-1">
+                  Injects reasoning prompts before each LLM call to improve accuracy.
+                </p>
+              </div>
+              <label className="flex items-center gap-[var(--space-2)] cursor-pointer min-h-[var(--touch-target-min)]">
+                <input
+                  type="checkbox"
+                  checked={(config as any).use_code_mode || false}
+                  onChange={(e) => updateField("use_code_mode" as any, e.target.checked)}
+                  className="w-4 h-4 rounded border-border-default bg-surface-base accent-accent"
+                />
+                <span className="text-[var(--text-xs)] text-text-secondary">
+                  Code Mode — collapse all tools into a single codemode tool (~85% token savings)
+                </span>
+              </label>
+            </div>
+          </div>
         </div>
 
         {/* Right: Graph + Gate Pack */}

@@ -13,6 +13,7 @@ import {
   FlaskConical,
   Shield,
   Rocket,
+  GitBranch,
 } from "lucide-react";
 
 import { useApiQuery } from "../../lib/api";
@@ -30,6 +31,7 @@ import {
   EvalTab,
   SecurityTab,
   ReleasesTab,
+  VersionsTab,
 } from "./detail-tabs";
 
 /* ── Tab definitions ───────────────────────────────────────────── */
@@ -44,7 +46,8 @@ type TabId =
   | "evolve"
   | "eval"
   | "security"
-  | "releases";
+  | "releases"
+  | "versions";
 
 interface TabDef {
   id: TabId;
@@ -71,6 +74,7 @@ const SECONDARY_TABS: TabDef[] = [
   { id: "security", label: "Security", icon: <Shield size={14} /> },
   /* Ship */
   { id: "releases", label: "Releases", icon: <Rocket size={14} /> },
+  { id: "versions", label: "Versions", icon: <GitBranch size={14} /> },
 ];
 
 const SECONDARY_TAB_IDS = new Set(SECONDARY_TABS.map((t) => t.id));
@@ -203,6 +207,8 @@ export const AgentDetailPage = () => {
         return <SecurityTab agent={agent} />;
       case "releases":
         return <ReleasesTab agentName={agent.name} />;
+      case "versions":
+        return <VersionsTab agentName={agent.name} />;
       default:
         return null;
     }
