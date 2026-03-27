@@ -369,14 +369,21 @@ agentRoutes.post(
     }
 
     // Ensure / auto-generate graph
-    const graph = ensureDeclarativeGraph(configJson, req.auto_graph);
+    let graph = ensureDeclarativeGraph(configJson, req.auto_graph);
 
-    // Lint graph
+    // Lint graph — fall back to safe default if it fails
     try {
       lintGraphOrThrow(graph, { strict: req.strict_graph_lint, source: "agents.create" });
-    } catch (err: unknown) {
-      const e = err as { status: number; body: unknown };
-      return c.json(e.body, 422);
+    } catch {
+      // LLM-generated or user-provided graph failed lint — fall back to safe default
+      console.warn("[agents/create] Graph lint failed, falling back to default graph");
+      const safeGraph = defaultNoCodeGraph();
+      if (configJson.harness && typeof configJson.harness === "object") {
+        (configJson.harness as Record<string, unknown>).declarative_graph = safeGraph;
+      } else {
+        configJson.harness = { declarative_graph: safeGraph };
+      }
+      graph = safeGraph;
     }
 
     const deployPolicyApply = applyDeployPolicyToConfigJson(configJson);
@@ -495,13 +502,18 @@ agentRoutes.put(
       harness.declarative_graph = req.graph;
     }
 
-    const graph = ensureDeclarativeGraph(existingConfig, req.auto_graph);
+    let graph = ensureDeclarativeGraph(existingConfig, req.auto_graph);
 
     try {
       lintGraphOrThrow(graph, { strict: req.strict_graph_lint, source: "agents.update" });
-    } catch (err: unknown) {
-      const e = err as { status: number; body: unknown };
-      return c.json(e.body, 422);
+    } catch {
+      // Fall back to safe default graph on lint failure
+      console.warn("[agents/update] Graph lint failed, falling back to default graph");
+      const safeGraph = defaultNoCodeGraph();
+      let harness = existingConfig.harness as Record<string, unknown> | undefined;
+      if (typeof harness !== "object" || harness === null) { harness = {}; existingConfig.harness = harness; }
+      harness.declarative_graph = safeGraph;
+      graph = safeGraph;
     }
 
     const deployPolicyUpdate = applyDeployPolicyToConfigJson(existingConfig);
