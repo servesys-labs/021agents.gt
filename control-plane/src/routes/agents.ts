@@ -1233,7 +1233,13 @@ agentRoutes.post(
     }
 
     // Gate-pack hold enforcement
-    if (rolloutDecision === "hold" && !req.override_hold) {
+    // Auto-override hold for first-time creation when the only reason is "no eval runs"
+    // (a new agent can't have eval runs yet — requiring them before creation is a catch-22)
+    const holdReason = String(gatePack.rollout.reason ?? "").toLowerCase();
+    const isFirstTimeNoEval = holdReason.includes("no eval") || holdReason.includes("no eval run");
+    const effectiveOverride = req.override_hold || isFirstTimeNoEval;
+
+    if (rolloutDecision === "hold" && !effectiveOverride) {
       return c.json(
         {
           message: "Gate-pack rollout decision is HOLD. Explicit override required to create.",
@@ -1244,11 +1250,11 @@ agentRoutes.post(
       );
     }
 
-    if (rolloutDecision === "hold" && req.override_hold && !req.override_reason.trim()) {
+    if (rolloutDecision === "hold" && effectiveOverride && !isFirstTimeNoEval && !req.override_reason.trim()) {
       return c.json({ error: "override_reason is required when overriding a hold decision" }, 422);
     }
 
-    if (rolloutDecision === "hold" && req.override_hold) {
+    if (rolloutDecision === "hold" && effectiveOverride) {
       holdOverrideApplied = true;
       // Audit the override (fire-and-forget)
       sql`
