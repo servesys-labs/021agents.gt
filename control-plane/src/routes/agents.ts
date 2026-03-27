@@ -588,41 +588,35 @@ agentRoutes.delete(
 );
 
 // GET /agents/:name/versions — list versions
-agentRoutes.get("/:name/versions", async (c) => {
-  const { name } = c.req.param();
-  const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+agentRoutes.get(
+  "/:name/versions",
+  requireScope("agents:read"),
+  async (c) => {
+    const agentName = c.req.param("name");
+    const user = c.get("user");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  let versions: Record<string, unknown>[] = [];
-  try {
     const rows = await sql`
-      SELECT av.version_number, av.config_json, av.created_by, av.created_at
-      FROM agent_versions av
-      JOIN agents a ON a.name = av.agent_name AND a.org_id = ${user.org_id}
-      WHERE av.agent_name = ${name}
-      ORDER BY av.created_at DESC
+      SELECT id, agent_name, version, config_json, created_by, created_at
+      FROM agent_versions
+      WHERE agent_name = ${agentName}
+      ORDER BY created_at DESC
+      LIMIT 50
     `;
-    versions = rows as Record<string, unknown>[];
-  } catch {
-    // Table may not exist
-  }
 
-  // Get current version from agent config
-  let current = "0.1.0";
-  try {
-    const agentRows = await sql`
-      SELECT config_json FROM agents WHERE name = ${name} AND org_id = ${user.org_id} LIMIT 1
-    `;
-    if (agentRows.length > 0) {
-      const config = parseConfig((agentRows[0] as Record<string, unknown>).config_json);
-      current = String(config.version ?? "0.1.0");
-    }
-  } catch {
-    // non-critical
-  }
+    const versions = rows.map((row, i) => ({
+      id: String(row.id),
+      tree_id: String(row.id),
+      parent_id: i < rows.length - 1 ? String(rows[i + 1].id) : null,
+      message: `Version ${row.version || "0.1.0"}`,
+      author: String(row.created_by || "system"),
+      timestamp: new Date(row.created_at as string).getTime() / 1000,
+      metadata: { version: row.version, source: "agent_versions" },
+    }));
 
-  return c.json({ versions, current });
-});
+    return c.json({ versions, total: versions.length });
+  },
+);
 
 // GET /agents/:name/tools — list tools for agent
 agentRoutes.get("/:name/tools", async (c) => {
@@ -1245,118 +1239,86 @@ agentRoutes.post("/:name/run/:session_id/cancel", (c) => {
   );
 });
 
-// ── Version History ─────────────────────────────────────────────────────────
+// ── Version Restore (auth-protected) ───────────────────────────────────────
 
-agentRoutes.get("/:name/versions", async (c) => {
-  const user = c.get("user");
-  const agentName = c.req.param("name");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+agentRoutes.post(
+  "/:name/versions/:commitId/restore",
+  requireScope("agents:write"),
+  async (c) => {
+    const user = c.get("user");
+    const agentName = c.req.param("name");
+    const commitId = c.req.param("commitId");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const rows = await sql`
-    SELECT id, agent_name, version, config_json, created_by, created_at
-    FROM agent_versions
-    WHERE agent_name = ${agentName}
-    ORDER BY created_at DESC
-    LIMIT 50
-  `;
+    const rows = await sql`
+      SELECT config_json, version FROM agent_versions
+      WHERE id = ${commitId} AND agent_name = ${agentName}
+      LIMIT 1
+    `;
+    if (rows.length === 0) return c.json({ error: "Version not found" }, 404);
 
-  const versions = rows.map((row, i) => ({
-    id: String(row.id),
-    tree_id: String(row.id),
-    parent_id: i < rows.length - 1 ? String(rows[i + 1].id) : null,
-    message: `Version ${row.version || "0.1.0"}`,
-    author: String(row.created_by || "system"),
-    timestamp: new Date(row.created_at as string).getTime() / 1000,
-    metadata: {
-      version: row.version,
-      source: "agent_versions",
-    },
-  }));
+    const configJson = String(rows[0].config_json);
 
-  return c.json({ versions, total: versions.length });
-});
+    // Snapshot current config before overwriting (for undo)
+    const current = await sql`
+      SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+    `;
+    if (current.length > 0) {
+      await snapshotVersion(sql, agentName, `pre-restore-${Date.now()}`,
+        JSON.parse(String(current[0].config_json || "{}")), user.user_id);
+    }
 
-agentRoutes.post("/:name/versions/:commitId/restore", async (c) => {
-  const user = c.get("user");
-  const agentName = c.req.param("name");
-  const commitId = c.req.param("commitId");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+    await sql`UPDATE agents SET config_json = ${configJson}, updated_at = now() WHERE name = ${agentName} AND org_id = ${user.org_id}`;
+    await snapshotVersion(sql, agentName, String(rows[0].version || "restored"), JSON.parse(configJson), user.user_id);
 
-  // Find the version to restore
-  const rows = await sql`
-    SELECT config_json, version FROM agent_versions
-    WHERE id = ${commitId} AND agent_name = ${agentName}
-    LIMIT 1
-  `;
+    return c.json({ restored: true, version: rows[0].version });
+  },
+);
 
-  if (rows.length === 0) {
-    return c.json({ error: "Version not found" }, 404);
-  }
+// ── Trash / Soft Delete (auth-protected) ──────────────────────────────────
 
-  const configJson = String(rows[0].config_json);
+agentRoutes.get(
+  "/:name/trash",
+  requireScope("agents:read"),
+  async (c) => {
+    const user = c.get("user");
+    const agentName = c.req.param("name");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Snapshot current config before overwriting (for undo)
-  const current = await sql`
-    SELECT config_json, version FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
-  `;
-  if (current.length > 0) {
-    await snapshotVersion(
-      sql, agentName, `pre-restore-${Date.now()}`,
-      JSON.parse(String(current[0].config_json || "{}")), user.user_id,
-    );
-  }
+    const rows = await sql`
+      SELECT agent_id, name, config_json, updated_at, created_by
+      FROM agents
+      WHERE name LIKE ${agentName + '-deleted-%'} AND org_id = ${user.org_id} AND is_active = 0
+      ORDER BY updated_at DESC LIMIT 20
+    `;
 
-  // Restore the selected version
-  await sql`
-    UPDATE agents SET config_json = ${configJson}, updated_at = now()
-    WHERE name = ${agentName} AND org_id = ${user.org_id}
-  `;
+    const trash = rows.map((row) => ({
+      id: String(row.agent_id),
+      path: String(row.name),
+      deleted_at: new Date(row.updated_at as string).getTime() / 1000,
+      deleted_by: String(row.created_by || "system"),
+      expires_at: new Date(row.updated_at as string).getTime() / 1000 + 30 * 86400,
+      reason: "Soft-deleted",
+    }));
 
-  // Snapshot the restored version
-  await snapshotVersion(sql, agentName, String(rows[0].version || "restored"), JSON.parse(configJson), user.user_id);
+    return c.json({ trash });
+  },
+);
 
-  return c.json({ restored: true, version: rows[0].version });
-});
+agentRoutes.post(
+  "/:name/trash/:trashId/restore",
+  requireScope("agents:write"),
+  async (c) => {
+    const user = c.get("user");
+    const agentName = c.req.param("name");
+    const trashId = c.req.param("trashId");
+    const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-// ── Trash / Soft Delete ────────────────────────────────────────────────────
+    await sql`
+      UPDATE agents SET is_active = 1, name = ${agentName}, updated_at = now()
+      WHERE agent_id = ${trashId} AND org_id = ${user.org_id} AND is_active = 0
+    `;
 
-agentRoutes.get("/:name/trash", async (c) => {
-  const user = c.get("user");
-  const agentName = c.req.param("name");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Check for soft-deleted agent versions (agent marked inactive)
-  const rows = await sql`
-    SELECT agent_id, name, config_json, updated_at, created_by
-    FROM agents
-    WHERE name LIKE ${agentName + '-deleted-%'} AND org_id = ${user.org_id} AND is_active = 0
-    ORDER BY updated_at DESC
-    LIMIT 20
-  `;
-
-  const trash = rows.map((row) => ({
-    id: String(row.agent_id),
-    path: String(row.name),
-    deleted_at: new Date(row.updated_at as string).getTime() / 1000,
-    deleted_by: String(row.created_by || "system"),
-    expires_at: new Date(row.updated_at as string).getTime() / 1000 + 30 * 86400, // 30 day retention
-    reason: "Soft-deleted",
-  }));
-
-  return c.json({ trash });
-});
-
-agentRoutes.post("/:name/trash/:trashId/restore", async (c) => {
-  const user = c.get("user");
-  const agentName = c.req.param("name");
-  const trashId = c.req.param("trashId");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Reactivate the soft-deleted agent
-  const result = await sql`
-    UPDATE agents SET is_active = 1, name = ${agentName}, updated_at = now()
-    WHERE agent_id = ${trashId} AND org_id = ${user.org_id} AND is_active = 0
-  `;
-
-  return c.json({ restored: true });
-});
+    return c.json({ restored: true });
+  },
+);
