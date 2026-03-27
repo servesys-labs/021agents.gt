@@ -42,6 +42,66 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   calendar: ["calendar", "schedule", "meeting", "event"],
 };
 
+/** ACI (Agent-Computer Interface) tools for code/file tasks. */
+const ACI_TOOLS: string[] = [
+  "view-file",
+  "search-file",
+  "find-file",
+  "edit-file",
+  "git-init",
+  "git-commit",
+  "git-status",
+  "git-diff",
+];
+
+/** Keywords that indicate the task involves code or file manipulation. */
+const CODE_FILE_KEYWORDS: string[] = [
+  "code",
+  "file",
+  "implement",
+  "build",
+  "refactor",
+  "debug",
+  "fix",
+  "repository",
+  "repo",
+  "commit",
+  "git",
+  "source",
+  "codebase",
+  "module",
+  "function",
+  "class",
+  "script",
+  "deploy",
+  "compile",
+  "lint",
+  "test",
+  "ci",
+  "cd",
+  "pipeline",
+];
+
+/** Reasoning strategy keyword mapping — first match wins. */
+const REASONING_STRATEGY_KEYWORDS: Array<{ strategy: string; keywords: string[] }> = [
+  {
+    strategy: "plan-then-execute",
+    keywords: ["code", "implement", "build", "refactor"],
+  },
+  {
+    strategy: "step-back",
+    keywords: ["debug", "fix", "investigate", "troubleshoot"],
+  },
+  {
+    strategy: "chain-of-thought",
+    keywords: ["analyze", "compare", "evaluate", "research"],
+  },
+  {
+    strategy: "verify-then-respond",
+    keywords: ["support", "help", "assist"],
+  },
+];
+
 /** Recommend tools based on description keywords. */
 export function recommendTools(description: string): string[] {
   const lower = description.toLowerCase();
@@ -51,7 +111,65 @@ export function recommendTools(description: string): string[] {
       recommended.push(tool);
     }
   }
+
+  // Add ACI tools when the task involves code or file work
+  const needsAci = CODE_FILE_KEYWORDS.some((kw) => lower.includes(kw));
+  if (needsAci) {
+    for (const tool of ACI_TOOLS) {
+      if (!recommended.includes(tool)) {
+        recommended.push(tool);
+      }
+    }
+  }
+
   return recommended;
+}
+
+/** Harness settings inferred from the agent description. */
+export interface HarnessSettings {
+  reasoning_strategy?: string;
+  use_code_mode?: boolean;
+  extra_tools?: string[];
+}
+
+/**
+ * Recommend harness-level settings (reasoning strategy, code mode, extra tools)
+ * based on a natural-language description of what the agent should do.
+ */
+export function recommendHarnessSettings(
+  description: string,
+  currentToolCount: number = 0,
+): HarnessSettings {
+  const lower = description.toLowerCase();
+  const settings: HarnessSettings = {};
+
+  // 1. Reasoning strategy — keyword match, or "decompose" for complex tasks
+  if (description.length > 200) {
+    settings.reasoning_strategy = "decompose";
+  } else {
+    for (const { strategy, keywords } of REASONING_STRATEGY_KEYWORDS) {
+      if (keywords.some((kw) => lower.includes(kw))) {
+        settings.reasoning_strategy = strategy;
+        break;
+      }
+    }
+  }
+
+  // 2. ACI extra tools when the task involves code/files
+  const needsAci = CODE_FILE_KEYWORDS.some((kw) => lower.includes(kw));
+  if (needsAci) {
+    settings.extra_tools = [...ACI_TOOLS];
+  }
+
+  // 3. Code mode when the total tool count exceeds 15
+  const totalTools = currentToolCount + (settings.extra_tools?.length ?? 0);
+  if (totalTools > 15) {
+    settings.use_code_mode = true;
+  } else {
+    settings.use_code_mode = false;
+  }
+
+  return settings;
 }
 
 /** Generate agent config from description using Workers AI. */

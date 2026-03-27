@@ -11,7 +11,8 @@ import { getDbForOrg } from "../db/client";
 import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from "../logic/graph-lint";
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
-import { defaultNoCodeGraph, buildFromDescription, recommendTools } from "../logic/meta-agent";
+import { defaultNoCodeGraph, buildFromDescription, recommendTools, recommendHarnessSettings } from "../logic/meta-agent";
+import { AGENT_TEMPLATES } from "../logic/agent-templates";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const agentRoutes = new Hono<R>();
@@ -257,6 +258,21 @@ agentRoutes.get("/", async (c) => {
   `;
 
   return c.json(rows.map((r) => agentResponse(r as Record<string, unknown>)));
+});
+
+// GET /agents/templates — list pre-built agent templates
+agentRoutes.get("/templates", (c) => {
+  return c.json(
+    AGENT_TEMPLATES.map((t) => ({
+      id: t.id,
+      name: t.name,
+      description: t.description,
+      tools: t.tools,
+      reasoning_strategy: t.reasoning_strategy,
+      use_code_mode: t.use_code_mode,
+      tags: t.tags,
+    })),
+  );
 });
 
 // GET /agents/:name — get single agent
@@ -813,10 +829,35 @@ agentRoutes.post(
         .filter(Boolean);
     }
 
+    // Recommend harness settings based on description
+    const toolsList = Array.isArray(config.tools) ? config.tools as string[] : [];
+    const harnessDefaults = recommendHarnessSettings(req.description, toolsList.length);
+
+    // Merge extra tools from harness recommendation
+    if (harnessDefaults.extra_tools && harnessDefaults.extra_tools.length > 0) {
+      const existing = new Set(toolsList);
+      for (const tool of harnessDefaults.extra_tools) {
+        if (!existing.has(tool)) {
+          toolsList.push(tool);
+        }
+      }
+      config.tools = toolsList;
+    }
+
     // Initialize harness + governance
     config.governance = { budget_limit_usd: 10 };
     if (typeof config.harness !== "object" || config.harness === null) {
       config.harness = {};
+    }
+
+    // Apply recommended harness settings
+    if (harnessDefaults.reasoning_strategy) {
+      (config.harness as Record<string, unknown>).reasoning_strategy =
+        harnessDefaults.reasoning_strategy;
+    }
+    if (harnessDefaults.use_code_mode !== undefined) {
+      (config.harness as Record<string, unknown>).use_code_mode =
+        harnessDefaults.use_code_mode;
     }
 
     // Parse explicit graph_json if provided
@@ -931,6 +972,7 @@ agentRoutes.post(
         version: config.version,
         draft: config,
         graph_lint: lintReport,
+        harness_defaults: harnessDefaults,
       };
       if (req.include_autofix) payload.graph_autofix = graphAutofix;
       if (req.include_gate_pack) payload.gate_pack = gatePack;
@@ -999,6 +1041,7 @@ agentRoutes.post(
       tools: config.tools,
       tags: config.tags,
       version: config.version,
+      harness_defaults: harnessDefaults,
     };
     if (req.include_autofix) payload.graph_autofix = graphAutofix;
     if (req.include_gate_pack) payload.gate_pack = gatePack;

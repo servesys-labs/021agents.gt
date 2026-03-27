@@ -95,6 +95,9 @@ export interface AgentConfig {
   };
   // Codemode observability processor snippet ID
   codemode_observability?: string;
+  // Reasoning strategy: direct | plan-then-execute | step-back | chain-of-thought |
+  // verify-then-respond | decompose
+  reasoning_strategy?: string;
   // Enable code mode: collapse all tools into a single codemode tool
   // LLM writes code to chain tools instead of individual tool calls (~85% token savings)
   use_code_mode?: boolean;
