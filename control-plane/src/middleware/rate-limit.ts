@@ -82,3 +82,69 @@ export const rateLimitMiddleware = createMiddleware<{ Bindings: Env }>(async (c,
 
   return next();
 });
+
+// ── Per-route rate limiter (sliding-window counter per IP) ──────────────
+
+interface RateLimitEntry {
+  count: number;
+  windowStart: number;
+}
+
+const rateLimitStore = new Map<string, RateLimitEntry>();
+const CLEANUP_INTERVAL = 60_000;
+let lastCleanup = Date.now();
+
+function cleanup(windowMs: number): void {
+  const now = Date.now();
+  if (now - lastCleanup < CLEANUP_INTERVAL) return;
+  lastCleanup = now;
+  for (const [key, entry] of rateLimitStore) {
+    if (now - entry.windowStart > windowMs * 2) rateLimitStore.delete(key);
+  }
+}
+
+function getClientIp(req: Request): string {
+  return (
+    req.headers.get("cf-connecting-ip") ||
+    req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "unknown"
+  );
+}
+
+/**
+ * Creates rate-limiting middleware.
+ * @param maxRequests - Maximum requests allowed within the window.
+ * @param windowMs - Time window in milliseconds.
+ * @param keyPrefix - Prefix for rate limit buckets (e.g., "auth" to limit auth routes separately).
+ */
+export function rateLimit(maxRequests: number, windowMs: number, keyPrefix = "global") {
+  return createMiddleware<{ Bindings: Env }>(async (c, next) => {
+    cleanup(windowMs);
+    const ip = getClientIp(c.req.raw);
+    const key = `${keyPrefix}:${ip}`;
+    const now = Date.now();
+
+    let entry = rateLimitStore.get(key);
+    if (!entry || now - entry.windowStart > windowMs) {
+      entry = { count: 0, windowStart: now };
+      rateLimitStore.set(key, entry);
+    }
+
+    entry.count++;
+
+    if (entry.count > maxRequests) {
+      const retryAfter = Math.ceil((entry.windowStart + windowMs - now) / 1000);
+      c.header("Retry-After", String(retryAfter));
+      c.header("X-RateLimit-Limit", String(maxRequests));
+      c.header("X-RateLimit-Remaining", "0");
+      return c.json(
+        { error: "Too many requests. Please try again later.", retry_after_seconds: retryAfter },
+        429,
+      );
+    }
+
+    c.header("X-RateLimit-Limit", String(maxRequests));
+    c.header("X-RateLimit-Remaining", String(Math.max(0, maxRequests - entry.count)));
+    return next();
+  });
+}
