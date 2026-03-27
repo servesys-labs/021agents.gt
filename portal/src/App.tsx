@@ -122,11 +122,20 @@ const WorkflowsPage = lazy(() =>
 const SessionsPage = lazy(() =>
   import("./pages/sessions").then((m) => ({ default: m.SessionsPage })),
 );
+const ReleasesPage = lazy(() =>
+  import("./pages/releases").then((m) => ({ default: m.ReleasesPage })),
+);
 const AutoResearchPage = lazy(() =>
   import("./pages/autoresearch").then((m) => ({ default: m.AutoResearchPage })),
 );
 const AuditPage = lazy(() =>
   import("./pages/audit").then((m) => ({ default: m.AuditPage })),
+);
+const SandboxPage = lazy(() =>
+  import("./pages/sandbox").then((m) => ({ default: m.SandboxPage })),
+);
+const VoicePage = lazy(() =>
+  import("./pages/voice").then((m) => ({ default: m.VoicePage })),
 );
 
 // Tool Registry
@@ -261,8 +270,11 @@ function AppContent() {
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/jobs" element={<JobsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
+              <Route path="/releases" element={<ReleasesPage />} />
               <Route path="/autoresearch" element={<AutoResearchPage />} />
               <Route path="/audit" element={<AuditPage />} />
+              <Route path="/sandbox" element={<SandboxPage />} />
+              <Route path="/voice" element={<VoicePage />} />
 
               {/* Tool Registry */}
               <Route path="/tools" element={<ToolRegistryPage />} />

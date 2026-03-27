@@ -8,10 +8,27 @@ import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
+import { lintGraphDesign } from "../logic/graph-lint";
 import { getThresholds } from "../logic/policies";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const releaseRoutes = new Hono<R>();
+
+function extractGraphForLint(config: unknown): Record<string, unknown> | null {
+  if (typeof config !== "object" || config === null || Array.isArray(config)) return null;
+  const cfg = config as Record<string, unknown>;
+  const harness = cfg.harness;
+  if (typeof harness === "object" && harness !== null && !Array.isArray(harness)) {
+    const h = harness as Record<string, unknown>;
+    for (const key of ["declarative_graph", "graph"]) {
+      const g = h[key];
+      if (typeof g === "object" && g !== null && !Array.isArray(g)) {
+        return g as Record<string, unknown>;
+      }
+    }
+  }
+  return null;
+}
 
 releaseRoutes.get("/:agent_name/channels", requireScope("releases:read"), async (c) => {
   const user = c.get("user");
@@ -31,11 +48,46 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
   const toChannel = String(body.to_channel || c.req.query("to_channel") || "staging");
 
   const override = body.override === true;
+  const approvedBy = typeof body.approved_by === "string" ? body.approved_by : undefined;
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // ── Eval gate enforcement for production promotion ──
+  // Get source channel config
+  const source = await sql`
+    SELECT * FROM release_channels
+    WHERE agent_name = ${agentName} AND channel = ${fromChannel} AND org_id = ${user.org_id}
+  `;
+
+  let configJson: string;
+  let version: string;
+
+  if (source.length === 0) {
+    // Try getting from agents table
+    const agents = await sql`
+      SELECT config_json, version FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
+    `;
+    if (agents.length === 0) return c.json({ error: `Agent '${agentName}' not found` }, 404);
+    configJson = agents[0].config_json || "{}";
+    version = agents[0].version || "0.1.0";
+  } else {
+    configJson = source[0].config_json || "{}";
+    version = source[0].version || "0.1.0";
+  }
+
+  // ── Eval + graph lint enforcement for production promotion ──
   if (toChannel === "production") {
+    let graphLintValid = true;
+    let parsedConfig: Record<string, unknown> = {};
+    try {
+      parsedConfig = JSON.parse(configJson || "{}");
+    } catch {
+      graphLintValid = false;
+    }
+    const graph = extractGraphForLint(parsedConfig);
+    if (graph) {
+      graphLintValid = lintGraphDesign(graph, { strict: true }).valid;
+    }
+
     const thresholds = await getThresholds(c.env.HYPERDRIVE, user.org_id, agentName);
     const evalGate = await latestEvalGate(sql, agentName, {
       minEvalPassRate: thresholds.eval_pass_rate,
@@ -44,7 +96,7 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
     });
     const recommendation = rolloutRecommendation({
       agentName,
-      graphLint: { valid: true }, // lint assumed passing at promotion time
+      graphLint: { valid: graphLintValid },
       evalGate,
       targetChannel: toChannel,
     });
@@ -53,7 +105,7 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
       if (!override) {
         return c.json(
           {
-            error: "Production promotion blocked by eval gate",
+            error: "Production promotion blocked by release gate",
             reason: recommendation.reason,
             recommended_action: recommendation.recommended_action,
             hint: "Pass { override: true } to force promotion in emergencies.",
@@ -73,9 +125,6 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
         if (policyRows.length > 0) {
           const policy = JSON.parse(String(policyRows[0].config_json || "{}"));
           if (policy.override_requires_approval) {
-            // Check if a different user has approved this override
-            const approvalBody = await c.req.json().catch(() => ({})) as Record<string, unknown>;
-            const approvedBy = approvalBody.approved_by as string | undefined;
             if (!approvedBy || approvedBy === user.user_id) {
               return c.json({
                 error: "Override requires approval from a different team member",
@@ -108,33 +157,11 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
                     to: toChannel,
                     gate_reason: recommendation.reason,
                     override: true,
-                    approved_by: (await c.req.json().catch(() => ({}))).approved_by ?? null,
+                    approved_by: approvedBy ?? null,
                   })}, ${now})
         `;
       } catch {}
     }
-  }
-
-  // Get source channel config
-  const source = await sql`
-    SELECT * FROM release_channels
-    WHERE agent_name = ${agentName} AND channel = ${fromChannel} AND org_id = ${user.org_id}
-  `;
-
-  let configJson: string;
-  let version: string;
-
-  if (source.length === 0) {
-    // Try getting from agents table
-    const agents = await sql`
-      SELECT config_json, version FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
-    `;
-    if (agents.length === 0) return c.json({ error: `Agent '${agentName}' not found` }, 404);
-    configJson = agents[0].config_json || "{}";
-    version = agents[0].version || "0.1.0";
-  } else {
-    configJson = source[0].config_json || "{}";
-    version = source[0].version || "0.1.0";
   }
 
   const now = new Date().toISOString();

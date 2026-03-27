@@ -1531,6 +1531,7 @@ const resumeNodes: Record<string, EdgeGraphNode<ResumeGraphCtx>> = {
         llm.tool_calls,
         resumedSessionId,
         config.parallel_tool_calls,
+        config.tools, // Keep fresh/resume tool allowlist parity for policy enforcement
       );
       ctx.totalToolCalls += toolResults.length;
       // Accumulate tool execution costs (search, crawl, etc.)

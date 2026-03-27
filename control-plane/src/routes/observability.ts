@@ -148,6 +148,77 @@ observabilityRoutes.get("/trace/:trace_id", requireScope("observability:read"), 
   return c.json({ trace_id: traceId, sessions, events });
 });
 
+observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observability:read"), async (c) => {
+  const user = c.get("user");
+  const traceId = c.req.param("trace_id");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const sessions = await sql`
+    SELECT session_id, status, created_at
+    FROM sessions
+    WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    ORDER BY created_at
+  `;
+  if (sessions.length === 0) return c.json({ error: "Trace not found" }, 404);
+
+  const sessionIds = sessions.map((s: any) => String(s.session_id));
+
+  const turnCounts = new Map<string, number>();
+  const eventCounts = new Map<string, number>();
+  const billingCounts = new Map<string, number>();
+
+  for (const sid of sessionIds) {
+    const [turnRow] = await sql`
+      SELECT COUNT(*) as cnt FROM turns WHERE session_id = ${sid}
+    `.catch(() => [{ cnt: 0 }]);
+    const [eventRow] = await sql`
+      SELECT COUNT(*) as cnt FROM runtime_events WHERE session_id = ${sid} AND org_id = ${user.org_id}
+    `.catch(() => [{ cnt: 0 }]);
+    const [billingRow] = await sql`
+      SELECT COUNT(*) as cnt FROM billing_records WHERE session_id = ${sid} AND org_id = ${user.org_id}
+    `.catch(() => [{ cnt: 0 }]);
+    turnCounts.set(sid, Number(turnRow?.cnt || 0));
+    eventCounts.set(sid, Number(eventRow?.cnt || 0));
+    billingCounts.set(sid, Number(billingRow?.cnt || 0));
+  }
+
+  const missingTurns = sessionIds.filter((sid) => (turnCounts.get(sid) || 0) === 0);
+  const missingEvents = sessionIds.filter((sid) => (eventCounts.get(sid) || 0) === 0);
+  const missingBilling = sessionIds.filter((sid) => (billingCounts.get(sid) || 0) === 0);
+
+  const maxCreatedAtMs = Math.max(
+    ...sessions.map((s: any) => new Date(String(s.created_at || "")).getTime()).filter((n: number) => Number.isFinite(n)),
+  );
+  const recentWindowMs = 90_000; // allow async ingest/queue fanout to settle
+  const isRecentTrace = Number.isFinite(maxCreatedAtMs) && (Date.now() - maxCreatedAtMs < recentWindowMs);
+
+  const warnings: string[] = [];
+  if (missingTurns.length > 0) warnings.push(`${missingTurns.length} sessions have no turns`);
+  if (missingEvents.length > 0) warnings.push(`${missingEvents.length} sessions have no runtime events`);
+  if (missingBilling.length > 0 && !isRecentTrace) {
+    warnings.push(`${missingBilling.length} sessions have no billing records`);
+  }
+
+  return c.json({
+    trace_id: traceId,
+    complete: warnings.length === 0,
+    consistency_window_ms: recentWindowMs,
+    is_recent_trace: isRecentTrace,
+    counts: {
+      sessions: sessions.length,
+      turns: sessionIds.reduce((acc, sid) => acc + (turnCounts.get(sid) || 0), 0),
+      runtime_events: sessionIds.reduce((acc, sid) => acc + (eventCounts.get(sid) || 0), 0),
+      billing_records: sessionIds.reduce((acc, sid) => acc + (billingCounts.get(sid) || 0), 0),
+    },
+    missing: {
+      turns: missingTurns,
+      runtime_events: missingEvents,
+      billing_records: missingBilling,
+    },
+    warnings,
+  });
+});
+
 observabilityRoutes.post("/annotations", requireScope("observability:write"), async (c) => {
   const user = c.get("user");
   const body = await c.req.json();

@@ -66,6 +66,10 @@ import { feedbackRoutes } from "./routes/feedback";
 import { codemodeRoutes } from "./routes/codemode";
 import { a2aRoutes } from "./routes/a2a";
 import { dashboardRoutes } from "./routes/dashboard";
+import { domainRoutes } from "./routes/domains";
+import { publicAgentRoutes } from "./routes/public-api";
+import { hostnameMiddleware } from "./middleware/hostname";
+import { openapiRoutes } from "./routes/openapi";
 
 type AppType = {
   Bindings: Env;
@@ -79,13 +83,17 @@ app.use("*", cors({
   origin: (origin) => {
     const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://agentos-portal.servesys.workers.dev").split(",");
     if (!origin || allowed.includes(origin) || allowed.includes("*")) return origin;
+    // Allow any *.agentos.dev subdomain (custom org domains)
+    if (origin && /^https:\/\/[a-z0-9-]+\.agentos\.dev$/.test(origin)) return origin;
     return null;
   },
-  allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
-  allowHeaders: ["Content-Type", "Authorization"],
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  allowHeaders: ["Content-Type", "Authorization", "X-Request-ID"],
+  exposeHeaders: ["X-Request-ID"],
   maxAge: 86400,
 }));
 app.use("*", errorHandler);
+app.use("*", hostnameMiddleware);
 app.use("*", rateLimitMiddleware);
 app.use("*", authMiddleware);
 
@@ -144,6 +152,8 @@ app.route("/api/v1/rag", ragRoutes);
 // Projects + orgs
 app.route("/api/v1/projects", projectRoutes);
 app.route("/api/v1/orgs", orgRoutes);
+// Backward-compatible alias used by some portal flows.
+app.route("/api/v1/org", orgRoutes);
 
 // Releases
 app.route("/api/v1/releases", releaseRoutes);
@@ -208,6 +218,15 @@ app.route("/api/v1/codemode", codemodeRoutes);
 
 // Dashboard (aggregated stats + activity)
 app.route("/api/v1/dashboard", dashboardRoutes);
+
+// Custom domains management
+app.route("/api/v1/domains", domainRoutes);
+
+// ── Public Agent API (for SDK / widget consumers) ───────────────────────
+// These routes are accessed via custom org domains (acme.agentos.dev)
+// or directly with API key auth. They proxy to the runtime worker.
+app.route("/v1", publicAgentRoutes);
+app.route("/v1", openapiRoutes);
 
 // A2A (Agent-to-Agent) protocol endpoints
 app.route("/", a2aRoutes);

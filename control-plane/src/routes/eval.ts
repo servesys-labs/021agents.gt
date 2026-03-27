@@ -129,7 +129,10 @@ evalRoutes.post("/run", requireScope("eval:run"), async (c) => {
   try {
     const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/eval/run", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+      },
       body: JSON.stringify(payload),
     });
     if (resp.status >= 400) {
