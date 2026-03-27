@@ -125,9 +125,9 @@ export const VersionsTab = ({ agentName }: { agentName: string }) => {
                       {isSelected && (
                         <div className="mt-2 pl-5 flex items-center gap-2">
                           <span className="text-[10px] text-text-muted font-mono">{version.id.slice(0, 12)}</span>
-                          {version.metadata?.source && (
+                          {typeof (version.metadata as Record<string, unknown>)?.source === "string" && (
                             <span className="text-[10px] text-text-muted bg-surface-base px-1.5 py-0.5 rounded">
-                              {String(version.metadata.source)}
+                              {(version.metadata as Record<string, string>).source}
                             </span>
                           )}
                           {!isLatest && (
