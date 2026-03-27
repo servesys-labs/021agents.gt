@@ -190,4 +190,103 @@ describe("observability ownership and maintenance contracts", () => {
     expect(Array.isArray(payload.events)).toBe(true);
     expect(payload.sessions?.length).toBe(1);
   });
+
+  it("trace integrity reports lifecycle mismatch and missing billing in strict mode", async () => {
+    const oldTs = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const mockSql6 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const query = strings.join("?");
+      if (query.includes("FROM sessions") && query.includes("trace_id")) {
+        return [{ session_id: "sess-1", status: "success", created_at: oldTs }];
+      }
+      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ cnt: 1 }];
+      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ cnt: 2 }];
+      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ cnt: 0 }];
+      if (query.includes("SUM(CASE WHEN event_type = 'turn_start'")) {
+        return [{ turn_start: 2, turn_end: 1, session_end: 0 }];
+      }
+      if (query.includes("INSERT INTO audit_log")) return [];
+      void values;
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql6);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql6);
+
+    const app = buildApp("org-a");
+    const res = await app.request("/trace/trace-1/integrity?strict=true", { method: "GET" }, mockEnv());
+    expect(res.status).toBe(200);
+    const payload = await res.json() as {
+      complete: boolean;
+      warnings: string[];
+      missing: { billing_records?: string[]; lifecycle_mismatch?: string[] };
+    };
+    expect(payload.complete).toBe(false);
+    expect(payload.missing.billing_records).toEqual(["sess-1"]);
+    expect(payload.missing.lifecycle_mismatch).toEqual(["sess-1"]);
+    expect(payload.warnings.some((w) => w.includes("lifecycle event mismatch"))).toBe(true);
+  });
+
+  it("trace integrity can emit audit alert on breach", async () => {
+    let auditLogged = false;
+    const oldTs = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const mockSql7 = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("FROM sessions") && query.includes("trace_id")) {
+        return [{ session_id: "sess-1", status: "success", created_at: oldTs }];
+      }
+      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ cnt: 0 }];
+      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ cnt: 0 }];
+      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ cnt: 0 }];
+      if (query.includes("SUM(CASE WHEN event_type = 'turn_start'")) {
+        return [{ turn_start: 0, turn_end: 0, session_end: 0 }];
+      }
+      if (query.includes("INSERT INTO audit_log")) {
+        auditLogged = true;
+        return [];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql7);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql7);
+
+    const app = buildApp("org-a");
+    const res = await app.request(
+      "/trace/trace-1/integrity?strict=true&alert_on_breach=true",
+      { method: "GET" },
+      mockEnv(),
+    );
+    expect(res.status).toBe(200);
+    expect(auditLogged).toBe(true);
+  });
+
+  it("trace integrity keeps billing warning relaxed for very recent traces unless strict", async () => {
+    const recentTs = new Date().toISOString();
+    const mockSql8 = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("FROM sessions") && query.includes("trace_id")) {
+        return [{ session_id: "sess-1", status: "success", created_at: recentTs }];
+      }
+      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ cnt: 1 }];
+      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ cnt: 2 }];
+      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ cnt: 0 }];
+      if (query.includes("SUM(CASE WHEN event_type = 'turn_start'")) {
+        return [{ turn_start: 1, turn_end: 1, session_end: 1 }];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql8);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql8);
+
+    const app = buildApp("org-a");
+    const relaxed = await app.request("/trace/trace-1/integrity", { method: "GET" }, mockEnv());
+    expect(relaxed.status).toBe(200);
+    const relaxedPayload = await relaxed.json() as { complete: boolean; warnings: string[] };
+    expect(relaxedPayload.complete).toBe(true);
+    expect(relaxedPayload.warnings.length).toBe(0);
+
+    const strict = await app.request("/trace/trace-1/integrity?strict=true", { method: "GET" }, mockEnv());
+    expect(strict.status).toBe(200);
+    const strictPayload = await strict.json() as { complete: boolean; warnings: string[] };
+    expect(strictPayload.complete).toBe(false);
+    expect(strictPayload.warnings.some((w) => w.includes("billing records"))).toBe(true);
+  });
 });
