@@ -191,6 +191,11 @@ function lintGraphOrThrow(
   };
 }
 
+/**
+ * Snapshot agent config to agent_versions table.
+ * This is the PRIMARY versioning system. R2 VCS (in evolve.ts) is audit-only.
+ * Called on: create, update, create-from-description, version restore.
+ */
 async function snapshotVersion(
   sql: Awaited<ReturnType<typeof getDbForOrg>>,
   agentName: string,

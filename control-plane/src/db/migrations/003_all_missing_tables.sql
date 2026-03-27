@@ -646,6 +646,7 @@ CREATE INDEX IF NOT EXISTS idx_billing_events_agent ON billing_events(agent_name
 CREATE TABLE IF NOT EXISTS org_settings (
   org_id text PRIMARY KEY,
   plan_type text NOT NULL DEFAULT 'free',
+  settings_json jsonb DEFAULT '{}',
   features_json jsonb DEFAULT '{}',
   limits_json jsonb DEFAULT '{}',
   created_at timestamptz DEFAULT now(),

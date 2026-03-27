@@ -163,7 +163,7 @@ nodeRegistry.register({
   description: "Check if budget exceeded",
   handler: (input, ctx) => {
     const cost = (ctx.state.cumulativeCost || 0) as number;
-    const budget = ((ctx.state.config as any)?.budget_limit_usd || 10) as number;
+    const budget = (ctx.state.config as { budget_limit_usd?: number })?.budget_limit_usd ?? 10;
     
     if (cost >= budget) {
       return { halt: true, output: "Budget exhausted" };

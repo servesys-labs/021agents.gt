@@ -520,16 +520,33 @@ async function executeSingleTool(
 
   // ── Governance: Domain allowlist check ────────────────────────
   const config = (env as any).__agentConfig as
-    | { allowed_domains?: string[]; require_confirmation_for_destructive?: boolean; max_tokens_per_turn?: number }
+    | {
+      allowed_domains?: string[];
+      blocked_domains?: string[];
+      require_confirmation_for_destructive?: boolean;
+      max_tokens_per_turn?: number;
+    }
     | undefined;
 
-  if (config?.allowed_domains && config.allowed_domains.length > 0) {
-    const urlTools = new Set(["browse", "http-request", "web-crawl", "browser-render", "a2a-send"]);
-    if (urlTools.has(tc.name)) {
-      const targetUrl = String(args.url || args.endpoint || "");
-      if (targetUrl) {
-        try {
-          const hostname = new URL(targetUrl).hostname;
+  const urlTools = new Set(["browse", "http-request", "web-crawl", "browser-render", "a2a-send"]);
+  if (urlTools.has(tc.name)) {
+    const targetUrl = String(args.url || args.endpoint || "");
+    if (targetUrl) {
+      try {
+        const hostname = new URL(targetUrl).hostname;
+        if (config?.blocked_domains && config.blocked_domains.length > 0) {
+          const blocked = config.blocked_domains.some(
+            (d) => hostname === d || hostname.endsWith(`.${d}`),
+          );
+          if (blocked) {
+            return {
+              tool: tc.name, tool_call_id: tc.id, result: "",
+              error: `Domain '${hostname}' is blocked by governance policy`,
+              latency_ms: Date.now() - started,
+            };
+          }
+        }
+        if (config?.allowed_domains && config.allowed_domains.length > 0) {
           const allowed = config.allowed_domains.some(
             (d) => hostname === d || hostname.endsWith(`.${d}`),
           );
@@ -540,8 +557,8 @@ async function executeSingleTool(
               latency_ms: Date.now() - started,
             };
           }
-        } catch { /* invalid URL — SSRF check will catch it */ }
-      }
+        }
+      } catch { /* invalid URL — SSRF check will catch it */ }
     }
   }
 
@@ -2438,6 +2455,15 @@ async function dispatch(
     }
 
     case "adapt-strategy": {
+      // Rate limit: max 3 strategy switches per session
+      const adaptKey = `adapt-strategy:${args.session_id || "unknown"}`;
+      const adaptCounts = ((globalThis as any).__selfCheckCounts ??= new Map<string, number>());
+      const adaptCount = adaptCounts.get(adaptKey) ?? 0;
+      if (adaptCount >= 3) {
+        return "Strategy switch limit reached (max 3 per session). Commit to your current approach.";
+      }
+      adaptCounts.set(adaptKey, adaptCount + 1);
+
       const strategy = String(args.strategy || "");
       const reason = String(args.reason || "");
       const ALLOWED_STRATEGIES = ["step-back", "chain-of-thought", "plan-then-execute", "verify-then-respond", "decompose"];

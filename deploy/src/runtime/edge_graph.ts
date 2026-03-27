@@ -419,7 +419,7 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
       // Injected as a system message before the user's task.
       try {
         const { selectReasoningStrategy, autoSelectStrategy } = await import("./reasoning-strategies");
-        const strategyName = (config as any).reasoning_strategy;
+        const strategyName = config.reasoning_strategy;
         const strategyPrompt = selectReasoningStrategy(strategyName, request.task, 1)
           || (!strategyName ? autoSelectStrategy(request.task, ctx.activeTools.length) : null);
         if (strategyPrompt) {

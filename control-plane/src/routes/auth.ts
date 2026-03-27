@@ -17,6 +17,7 @@ import { getDb } from "../db/client";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const authRoutes = new Hono<R>();
+const authRateLimitStore = new Map<string, { count: number; resetAt: number }>();
 
 // ── Zod schemas ──────────────────────────────────────────────────────────
 
@@ -48,6 +49,32 @@ const TokenVerifyRequest = z.object({
 
 function generateId(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+}
+
+function getClientIp(c: any): string {
+  const forwarded = c.req.header("x-forwarded-for");
+  if (forwarded) return String(forwarded).split(",")[0].trim();
+  return c.req.header("cf-connecting-ip") || "unknown";
+}
+
+function checkRateLimit(c: any, key: string, limit: number, windowMs: number): Response | null {
+  const now = Date.now();
+  const bucket = authRateLimitStore.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    authRateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
+    return null;
+  }
+  if (bucket.count >= limit) {
+    const retryAfterSeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    return c.json(
+      { error: "Too many requests", retry_after_seconds: retryAfterSeconds },
+      429,
+      { "Retry-After": String(retryAfterSeconds) },
+    );
+  }
+  bucket.count += 1;
+  authRateLimitStore.set(key, bucket);
+  return null;
 }
 
 /**
@@ -143,6 +170,9 @@ authRoutes.post("/signup", async (c) => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
+  const signupLimit = checkRateLimit(c, `signup:${getClientIp(c)}`, 5, 24 * 60 * 60 * 1000);
+  if (signupLimit) return signupLimit;
+
   const body = await c.req.json().catch(() => ({}));
   const parsed = SignupRequest.safeParse(body);
   if (!parsed.success) {
@@ -216,8 +246,16 @@ authRoutes.post("/signup", async (c) => {
   // Create default org_settings
   try {
     await sql`
-      INSERT INTO org_settings (org_id, plan_type, limits_json, features_json, created_at, updated_at)
-      VALUES (${orgId}, ${"free"}, ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })}, ${JSON.stringify(["basic_agents", "basic_observability"])}, now(), now())
+      INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+      VALUES (
+        ${orgId},
+        ${"free"},
+        ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
+        ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+        ${JSON.stringify(["basic_agents", "basic_observability"])},
+        now(),
+        now()
+      )
       ON CONFLICT (org_id) DO NOTHING
     `;
   } catch (err) {
@@ -296,6 +334,9 @@ authRoutes.post("/login", async (c) => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
+  const loginLimit = checkRateLimit(c, `login:${getClientIp(c)}`, 10, 60 * 60 * 1000);
+  if (loginLimit) return loginLimit;
+
   const body = await c.req.json().catch(() => ({}));
   const parsed = LoginRequest.safeParse(body);
   if (!parsed.success) {
@@ -437,8 +478,16 @@ authRoutes.post("/cf-access/exchange", async (c) => {
     // Create default org_settings for CF Access provisioned org
     try {
       await sql`
-        INSERT INTO org_settings (org_id, plan_type, max_agents, max_runs_per_month, max_seats, features, created_at, updated_at)
-        VALUES (${orgId}, ${"free"}, ${3}, ${1000}, ${1}, ${JSON.stringify(["basic_agents", "basic_observability"])}, ${nowEpoch}, ${nowEpoch})
+        INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+        VALUES (
+          ${orgId},
+          ${"free"},
+          ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
+          ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+          ${JSON.stringify(["basic_agents", "basic_observability"])},
+          ${nowEpoch},
+          ${nowEpoch}
+        )
       `;
     } catch {}
     role = "owner";

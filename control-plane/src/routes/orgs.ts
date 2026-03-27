@@ -3,6 +3,7 @@
  * Ported from agentos/api/routers/orgs.py
  */
 import { Hono } from "hono";
+import { z } from "zod";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
@@ -13,6 +14,22 @@ type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const orgRoutes = new Hono<R>();
 
 const ROLE_HIERARCHY: Record<string, number> = { owner: 4, admin: 3, member: 2, viewer: 1 };
+const ALLOWED_PLAN_TYPES = ["free", "starter", "pro", "enterprise"] as const;
+const ALLOWED_TEAM_SIZES = ["1-10", "11-50", "51-200", "201-1000", "1000+"] as const;
+const ALLOWED_DEPLOY_STYLES = ["fast", "balanced", "careful"] as const;
+const ALLOWED_SENSITIVITY = ["low", "medium", "high", "regulated", "restricted"] as const;
+
+const OrgSettingsPatch = z.object({
+  onboarding_complete: z.boolean().optional(),
+  org_name: z.string().trim().min(1).max(120).optional(),
+  industry: z.string().trim().min(1).max(80).optional(),
+  team_size: z.enum(ALLOWED_TEAM_SIZES).optional(),
+  use_cases: z.array(z.string().trim().min(1).max(80)).max(16).optional(),
+  data_sensitivity: z.enum(ALLOWED_SENSITIVITY).optional(),
+  deploy_style: z.enum(ALLOWED_DEPLOY_STYLES).optional(),
+  plan: z.enum(ALLOWED_PLAN_TYPES).optional(),
+  default_connectors: z.array(z.string().trim().min(1).max(120)).max(100).optional(),
+}).strict();
 
 async function requireOrgMember(sql: Sql, user: CurrentUser, orgId: string, minRole = "viewer") {
   const rows = await sql`
@@ -73,8 +90,16 @@ orgRoutes.post("/", requireScope("orgs:write"), async (c) => {
   const now = new Date().toISOString();
   try {
     await sql`
-      INSERT INTO org_settings (org_id, plan_type, max_agents, max_runs_per_month, max_seats, features, created_at, updated_at)
-      VALUES (${orgId}, ${"free"}, ${3}, ${1000}, ${1}, ${JSON.stringify(["basic_agents", "basic_observability"])}, ${now}, ${now})
+      INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+      VALUES (
+        ${orgId},
+        ${"free"},
+        ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
+        ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+        ${JSON.stringify(["basic_agents", "basic_observability"])},
+        ${now},
+        ${now}
+      )
     `;
   } catch {}
 
@@ -264,6 +289,11 @@ orgRoutes.get("/settings", async (c) => {
 orgRoutes.post("/settings", async (c) => {
   const user = c.get("user");
   const body = await c.req.json();
+  const parsed = OrgSettingsPatch.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
+  }
+
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Merge with existing settings
@@ -276,7 +306,7 @@ orgRoutes.post("/settings", async (c) => {
 
   const merged = {
     ...current,
-    ...body,
+    ...parsed.data,
   };
 
   const settingsJson = JSON.stringify(merged);
@@ -291,9 +321,9 @@ orgRoutes.post("/settings", async (c) => {
   `;
 
   // Also update org name if provided
-  if (body.org_name) {
+  if (parsed.data.org_name) {
     await sql`
-      UPDATE orgs SET name = ${body.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
+      UPDATE orgs SET name = ${parsed.data.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
     `.catch(() => {});
   }
 

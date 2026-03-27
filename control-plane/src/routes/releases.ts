@@ -62,6 +62,30 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
         );
       }
 
+      // Check if org requires approval for overrides (not just audit)
+      try {
+        const policyRows = await sql`
+          SELECT config_json FROM agent_policies
+          WHERE org_id = ${user.org_id} AND policy_type = 'thresholds'
+            AND (agent_name = ${agentName} OR agent_name IS NULL)
+          ORDER BY agent_name DESC NULLS LAST LIMIT 1
+        `;
+        if (policyRows.length > 0) {
+          const policy = JSON.parse(String(policyRows[0].config_json || "{}"));
+          if (policy.override_requires_approval) {
+            // Check if a different user has approved this override
+            const approvalBody = await c.req.json().catch(() => ({})) as Record<string, unknown>;
+            const approvedBy = approvalBody.approved_by as string | undefined;
+            if (!approvedBy || approvedBy === user.user_id) {
+              return c.json({
+                error: "Override requires approval from a different team member",
+                hint: "Pass { override: true, approved_by: '<other_user_id>' } with a different user's approval.",
+              }, 403);
+            }
+          }
+        }
+      } catch { /* policy check failed — allow override with audit */ }
+
       // Log override usage in audit
       const now = Date.now() / 1000;
       try {
