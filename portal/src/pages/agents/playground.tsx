@@ -22,7 +22,7 @@ import {
   ArrowDown,
   Globe,
 } from "lucide-react";
-import { useSearchParams, Link } from "react-router-dom";
+import { useParams, useSearchParams, Link } from "react-router-dom";
 
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { useToast } from "../../components/common/ToastProvider";
@@ -391,8 +391,9 @@ function MessageBubble({
    ================================================================ */
 
 export function PlaygroundPage() {
+  const { name: routeAgentName } = useParams<{ name: string }>();
   const [searchParams] = useSearchParams();
-  const agentName = searchParams.get("agent") || "default";
+  const agentName = routeAgentName || searchParams.get("agent") || "default";
   const { showToast } = useToast();
 
   /* ── State ──────────────────────────────────────────────────── */
@@ -473,16 +474,18 @@ export function PlaygroundPage() {
       const response = await apiRequest<{
         message?: string;
         content?: string;
+        output?: string;
         tool_calls?: ToolCall[];
-      }>(`/api/v1/agents/${agentName}/chat`, "POST", {
-        message: text,
+      }>(`/api/v1/runtime-proxy/agent/run`, "POST", {
+        agent_name: agentName,
+        input: text,
         history: messages.map((m) => ({ role: m.role, content: m.content })),
       });
 
       const assistantMsg: ChatMessage = {
         id: nextId(),
         role: "assistant",
-        content: response.message || response.content || "No response received.",
+        content: response.output || response.message || response.content || "No response received.",
         timestamp: Date.now(),
         tool_calls: response.tool_calls,
       };
