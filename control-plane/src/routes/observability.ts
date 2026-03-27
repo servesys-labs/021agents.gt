@@ -152,6 +152,7 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
   const user = c.get("user");
   const traceId = c.req.param("trace_id");
   const strict = c.req.query("strict") === "true";
+  const alertOnBreach = c.req.query("alert_on_breach") === "true";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const sessions = await sql`
@@ -221,10 +222,36 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
   if (lifecycleMismatch.length > 0) {
     warnings.push(`${lifecycleMismatch.length} sessions have lifecycle event mismatch`);
   }
+  const complete = warnings.length === 0;
+  if (!complete && alertOnBreach) {
+    try {
+      await sql`
+        INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+        VALUES (
+          ${user.org_id},
+          ${user.user_id},
+          'trace.integrity_breach',
+          'trace',
+          ${traceId},
+          ${JSON.stringify({
+            strict,
+            missing_turns: missingTurns.length,
+            missing_runtime_events: missingEvents.length,
+            missing_billing_records: missingBilling.length,
+            lifecycle_mismatch: lifecycleMismatch.length,
+            warnings,
+          })},
+          ${new Date().toISOString()}
+        )
+      `;
+    } catch {
+      // best-effort alerting path
+    }
+  }
 
   return c.json({
     trace_id: traceId,
-    complete: warnings.length === 0,
+    complete,
     consistency_window_ms: recentWindowMs,
     is_recent_trace: isRecentTrace,
     counts: {
