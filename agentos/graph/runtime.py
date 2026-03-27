@@ -112,9 +112,27 @@ class GraphRuntime:
         return merge_branch_states(branch_states, reducers)
 
     async def run(self, ctx: GraphContext) -> GraphContext:
+        governance = ctx.session_state.get("governance")
         for node in self.nodes:
             node_id = getattr(node, "node_id", "?")
             turn = int(ctx.session_state.get("current_turn", 0))
+
+            # Governance: budget gate — skip remaining nodes if budget exhausted
+            if governance is not None and not governance.check_budget(0):
+                ctx.checkpoint(node_id, "budget_exceeded")
+                await self._emit_node_end(ctx, node_id=node_id, turn=turn, status="budget_exceeded", attempt=0, latency_ms=0.0)
+                break
+
+            # Governance: tool permission gate — if node declares tool_calls, verify each is allowed
+            if governance is not None:
+                pending_tools = getattr(node, "tool_calls", None) or ctx.session_state.get("pending_tool_calls") or []
+                blocked = [t for t in pending_tools if not governance.is_tool_allowed(t if isinstance(t, str) else t.get("name", ""))]
+                if blocked:
+                    blocked_names = ", ".join(t if isinstance(t, str) else t.get("name", "") for t in blocked)
+                    ctx.checkpoint(node_id, "tool_blocked", {"blocked_tools": blocked_names})
+                    await self._emit_node_end(ctx, node_id=node_id, turn=turn, status="tool_blocked", attempt=0, latency_ms=0.0)
+                    continue
+
             if ctx.cancelled:
                 ctx.checkpoint(node_id, "cancelled")
                 await self._emit_node_end(ctx, node_id=node_id, turn=turn, status="cancelled", attempt=0, latency_ms=0.0)

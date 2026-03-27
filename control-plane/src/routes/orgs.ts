@@ -8,6 +8,7 @@ import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import type { Sql } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { z } from "zod";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const orgRoutes = new Hono<R>();
@@ -235,6 +236,23 @@ orgRoutes.delete("/:org_id/members/:member_user_id", requireScope("orgs:write"),
   return c.json({ removed: memberUserId });
 });
 
+const OrgSettingsInput = z.object({
+  onboarding_complete: z.boolean().optional(),
+  org_name: z.string().max(256).optional(),
+  industry: z.enum([
+    "SaaS / Software", "E-commerce / Retail", "Agency / Consulting",
+    "Finance / Fintech", "Healthcare", "Education",
+    "Media / Content", "Manufacturing", "Real Estate", "Other",
+  ]).optional(),
+  team_size: z.enum(["solo", "small", "medium", "large", "enterprise"]).optional(),
+  use_cases: z.array(z.string().max(100)).max(8).optional(),
+  data_sensitivity: z.enum(["standard", "pii", "financial", "health", "regulated"]).optional(),
+  deploy_style: z.enum(["fast", "balanced", "careful"]).optional(),
+  plan: z.enum(["free", "starter", "professional", "enterprise"]).optional(),
+  default_model: z.string().max(128).optional(),
+  default_connectors: z.array(z.string().max(100)).max(50).optional(),
+}).passthrough();
+
 // ── GET /org/settings — read org settings + onboarding state ─────────────────
 
 orgRoutes.get("/settings", async (c) => {
@@ -264,6 +282,11 @@ orgRoutes.get("/settings", async (c) => {
 orgRoutes.post("/settings", async (c) => {
   const user = c.get("user");
   const body = await c.req.json();
+  const parsed = OrgSettingsInput.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "Validation failed", detail: parsed.error.issues }, 400);
+  }
+  const validatedBody = parsed.data;
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Merge with existing settings
@@ -276,7 +299,7 @@ orgRoutes.post("/settings", async (c) => {
 
   const merged = {
     ...current,
-    ...body,
+    ...validatedBody,
   };
 
   const settingsJson = JSON.stringify(merged);
@@ -291,9 +314,9 @@ orgRoutes.post("/settings", async (c) => {
   `;
 
   // Also update org name if provided
-  if (body.org_name) {
+  if (validatedBody.org_name) {
     await sql`
-      UPDATE orgs SET name = ${body.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
+      UPDATE orgs SET name = ${validatedBody.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
     `.catch(() => {});
   }
 

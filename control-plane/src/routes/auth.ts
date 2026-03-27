@@ -14,6 +14,7 @@ import { createToken, verifyToken } from "../auth/jwt";
 import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { getDb } from "../db/client";
+import { rateLimit } from "../middleware/rate-limit";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const authRoutes = new Hono<R>();
@@ -137,9 +138,41 @@ function passwordAuthDisabled(env: Env): boolean {
   return (env.AUTH_ALLOW_PASSWORD ?? "true").toLowerCase() === "false";
 }
 
+/** Log auth events to auth_audit_log (best-effort, never fails the request). */
+async function logAuthEvent(
+  env: Env,
+  event: {
+    org_id?: string;
+    user_id?: string;
+    email?: string;
+    event_type: string;
+    ip_address?: string;
+    user_agent?: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  try {
+    const sql = await getDb(env.HYPERDRIVE);
+    await sql`
+      INSERT INTO auth_audit_log (org_id, user_id, email, event_type, ip_address, user_agent, metadata_json)
+      VALUES (
+        ${event.org_id || null},
+        ${event.user_id || null},
+        ${event.email || null},
+        ${event.event_type},
+        ${event.ip_address || null},
+        ${event.user_agent || null},
+        ${JSON.stringify(event.metadata || {})}
+      )
+    `;
+  } catch (err) {
+    console.warn("[auth-audit] Failed to log event:", err);
+  }
+}
+
 // ── POST /signup ─────────────────────────────────────────────────────────
 
-authRoutes.post("/signup", async (c) => {
+authRoutes.post("/signup", rateLimit(5, 3600_000, "signup"), async (c) => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
@@ -216,8 +249,8 @@ authRoutes.post("/signup", async (c) => {
   // Create default org_settings
   try {
     await sql`
-      INSERT INTO org_settings (org_id, plan_type, limits_json, features_json, created_at, updated_at)
-      VALUES (${orgId}, ${"free"}, ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })}, ${JSON.stringify(["basic_agents", "basic_observability"])}, now(), now())
+      INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+      VALUES (${orgId}, ${"free"}, ${JSON.stringify({ onboarding_complete: false })}, ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })}, ${JSON.stringify(["basic_agents", "basic_observability"])}, now(), now())
       ON CONFLICT (org_id) DO NOTHING
     `;
   } catch (err) {
@@ -279,6 +312,13 @@ authRoutes.post("/signup", async (c) => {
     name,
     org_id: orgId,
     provider: "local",
+  });
+
+  logAuthEvent(c.env, {
+    org_id: orgId, user_id: userId, email,
+    event_type: "signup",
+    ip_address: c.req.header("cf-connecting-ip") || "",
+    user_agent: c.req.header("user-agent") || "",
   });
 
   return c.json({
@@ -437,8 +477,8 @@ authRoutes.post("/cf-access/exchange", async (c) => {
     // Create default org_settings for CF Access provisioned org
     try {
       await sql`
-        INSERT INTO org_settings (org_id, plan_type, max_agents, max_runs_per_month, max_seats, features, created_at, updated_at)
-        VALUES (${orgId}, ${"free"}, ${3}, ${1000}, ${1}, ${JSON.stringify(["basic_agents", "basic_observability"])}, ${nowEpoch}, ${nowEpoch})
+        INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+        VALUES (${orgId}, ${"free"}, ${JSON.stringify({ onboarding_complete: false })}, ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })}, ${JSON.stringify(["basic_agents", "basic_observability"])}, ${nowEpoch}, ${nowEpoch})
       `;
     } catch {}
     role = "owner";
