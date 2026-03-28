@@ -8,7 +8,7 @@ interface StatCardProps {
 
 export function StatCard({ icon, label, value }: StatCardProps) {
   return (
-    <Card>
+    <Card className="transition-all duration-200 hover:shadow-sm hover:border-primary/20">
       <div className="flex items-center gap-2 mb-1">
         {icon}
         <span className="text-xs text-text-secondary">{label}</span>

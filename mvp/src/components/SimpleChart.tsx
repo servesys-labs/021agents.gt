@@ -27,7 +27,7 @@ export function SimpleChart({ data, height = 160, color = "var(--color-primary)"
     const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
 
     return (
-      <svg viewBox={`0 0 ${chartW} ${height}`} className="w-full" preserveAspectRatio="none" style={{ height }}>
+      <svg viewBox={`0 0 ${chartW} ${height}`} className="w-full animate-fade-in" preserveAspectRatio="none" style={{ height }}>
         <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         {points.map((p, i) => (
           <g key={i}>
@@ -47,7 +47,7 @@ export function SimpleChart({ data, height = 160, color = "var(--color-primary)"
   const barW = (chartW - padding.left - padding.right - barGap * (totalBars - 1)) / totalBars;
 
   return (
-    <svg viewBox={`0 0 ${chartW} ${height}`} className="w-full" preserveAspectRatio="none" style={{ height }}>
+    <svg viewBox={`0 0 ${chartW} ${height}`} className="w-full animate-fade-in" preserveAspectRatio="none" style={{ height }}>
       {data.map((d, i) => {
         const barH = (d.value / maxVal) * chartH;
         const x = padding.left + i * (barW + barGap);

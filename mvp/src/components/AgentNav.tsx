@@ -50,10 +50,10 @@ export function AgentNav({ agentName, children }: AgentNavProps) {
             <button
               key={tab.path}
               onClick={() => navigate(`/agents/${id}/${tab.path}`)}
-              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 whitespace-nowrap transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 whitespace-nowrap transition-all duration-200 ${
                 active
                   ? "border-primary text-primary"
-                  : "border-transparent text-text-secondary hover:text-text hover:border-gray-200"
+                  : "border-transparent text-text-secondary hover:text-text hover:border-gray-300"
               }`}
             >
               <tab.icon size={14} />

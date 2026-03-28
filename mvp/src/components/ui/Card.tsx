@@ -10,7 +10,7 @@ export function Card({ children, className = "", onClick, hover }: CardProps) {
     <div
       onClick={onClick}
       className={`bg-white rounded-xl border border-border p-5 ${
-        hover || onClick ? "hover:border-primary/30 hover:shadow-sm cursor-pointer transition-all" : ""
+        hover || onClick ? "hover:border-primary/30 hover:shadow-md cursor-pointer transition-all duration-200 active:scale-[0.98]" : ""
       } ${className}`}
     >
       {children}

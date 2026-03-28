@@ -20,7 +20,7 @@ export default function DashboardPage() {
           <h1 className="text-xl font-semibold text-text">Dashboard</h1>
           <p className="text-sm text-text-secondary mt-1">Your AI agents at a glance</p>
         </div>
-        <Button onClick={() => navigate("/agents/new")}>
+        <Button onClick={() => navigate("/agents/new")} className="bg-gradient-to-r from-primary to-blue-500 hover:from-primary/90 hover:to-blue-500/90 shadow-md shadow-primary/20">
           <Plus size={16} /> New Agent
         </Button>
       </div>
@@ -33,7 +33,7 @@ export default function DashboardPage() {
       </div>
 
       {/* Agent list */}
-      <h2 className="text-lg font-medium text-text mb-4">My Agents</h2>
+      <h2 className="text-lg font-semibold text-text mb-4 pb-3 border-b border-border">My Agents</h2>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {MOCK_AGENTS.map((agent) => (
           <Card key={agent.id} hover onClick={() => navigate(`/agents/${agent.id}/activity`)}>

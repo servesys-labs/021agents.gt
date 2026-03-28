@@ -23,8 +23,8 @@ export function Sidebar() {
   const nav = (
     <div className="flex flex-col h-full">
       {/* Logo */}
-      <div className="flex items-center gap-2.5 px-5 h-16 border-b border-border shrink-0">
-        <div className="w-7 h-7 bg-primary rounded-lg flex items-center justify-center">
+      <div className="flex items-center gap-2.5 px-5 h-16 border-b border-border shadow-[0_1px_2px_0_rgba(0,0,0,0.03)] shrink-0">
+        <div className="w-7 h-7 bg-primary rounded-lg flex items-center justify-center transition-transform hover:scale-110">
           <span className="text-white text-xs font-bold">A</span>
         </div>
         <span className="font-semibold text-text">AgentOS</span>
@@ -41,7 +41,7 @@ export function Sidebar() {
             className={({ isActive }) =>
               `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                 isActive
-                  ? "bg-primary-light text-primary"
+                  ? "bg-primary-light text-primary border-l-2 border-primary"
                   : "text-text-secondary hover:bg-surface-alt hover:text-text"
               }`
             }
@@ -63,7 +63,7 @@ export function Sidebar() {
                 className={({ isActive }) =>
                   `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                     isActive
-                      ? "bg-primary-light text-primary"
+                      ? "bg-primary-light text-primary border-l-2 border-primary"
                       : "text-text-secondary hover:bg-surface-alt hover:text-text"
                   }`
                 }
@@ -86,7 +86,7 @@ export function Sidebar() {
             className={({ isActive }) =>
               `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                 isActive
-                  ? "bg-primary-light text-primary"
+                  ? "bg-primary-light text-primary border-l-2 border-primary"
                   : "text-text-secondary hover:bg-surface-alt hover:text-text"
               }`
             }

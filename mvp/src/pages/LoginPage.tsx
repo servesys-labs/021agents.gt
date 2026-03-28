@@ -45,7 +45,9 @@ export default function LoginPage() {
           <span className="text-xl font-semibold text-text">AgentOS</span>
         </div>
 
-        <div className="bg-white rounded-xl border border-border p-6">
+        <div className="bg-white rounded-xl border border-border p-6 shadow-lg overflow-hidden relative">
+          {/* Gradient accent bar */}
+          <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-primary to-blue-400" />
           {/* Tabs */}
           <div className="flex gap-1 bg-surface-alt rounded-lg p-1 mb-6">
             <button
