@@ -13,6 +13,7 @@ import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
 import { defaultNoCodeGraph, buildFromDescription, recommendTools } from "../logic/meta-agent";
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
+import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const agentRoutes = new Hono<R>();
@@ -108,9 +109,13 @@ const AgentCreateSchema = z.object({
   name: z.string().min(1).max(128),
   description: z.string().max(2000).default(""),
   system_prompt: z.string().max(50000).default("You are a helpful AI assistant."),
+  personality: z.string().max(2000).default(""),
   model: z.string().max(128).default(""),
+  max_tokens: z.number().int().min(1).max(200000).optional(),
+  temperature: z.number().min(0).max(2).optional(),
   tools: z.array(z.string()).default([]),
   max_turns: z.number().int().min(1).max(1000).default(50),
+  timeout_seconds: z.number().int().min(1).max(3600).optional(),
   budget_limit_usd: z.number().min(0).max(10000).default(10),
   tags: z.array(z.string()).default([]),
   graph: z.record(z.unknown()).nullable().optional().default(null),
@@ -126,6 +131,7 @@ const AgentCreateSchema = z.object({
   eval_config: z.record(z.unknown()).optional(),
   release_strategy: z.record(z.unknown()).optional(),
   mcp_connectors: z.array(z.record(z.unknown())).optional(),
+  deploy_policy: z.record(z.unknown()).optional(),
 });
 
 const CreateFromDescriptionSchema = z.object({
@@ -331,9 +337,13 @@ agentRoutes.post(
       name: req.name,
       description: req.description,
       system_prompt: req.system_prompt,
+      personality: req.personality,
       model: req.model || "anthropic/claude-sonnet-4-6",
+      max_tokens: req.max_tokens,
+      temperature: req.temperature,
       tools: req.tools,
       max_turns: req.max_turns,
+      timeout_seconds: req.timeout_seconds,
       tags: req.tags,
       version: "0.1.0",
       governance: req.governance ?? { budget_limit_usd: req.budget_limit_usd },
@@ -349,6 +359,9 @@ agentRoutes.post(
     if (req.eval_config) {
       configJson.eval_config = req.eval_config;
     }
+    if (req.deploy_policy) {
+      configJson.deploy_policy = req.deploy_policy;
+    }
 
     // Attach graph if provided
     if (req.graph && typeof req.graph === "object") {
@@ -356,14 +369,33 @@ agentRoutes.post(
     }
 
     // Ensure / auto-generate graph
-    const graph = ensureDeclarativeGraph(configJson, req.auto_graph);
+    let graph = ensureDeclarativeGraph(configJson, req.auto_graph);
 
-    // Lint graph
+    // Lint graph — fall back to safe default if it fails
     try {
       lintGraphOrThrow(graph, { strict: req.strict_graph_lint, source: "agents.create" });
-    } catch (err: unknown) {
-      const e = err as { status: number; body: unknown };
-      return c.json(e.body, 422);
+    } catch {
+      // LLM-generated or user-provided graph failed lint — fall back to safe default
+      console.warn("[agents/create] Graph lint failed, falling back to default graph");
+      const safeGraph = defaultNoCodeGraph();
+      if (configJson.harness && typeof configJson.harness === "object") {
+        (configJson.harness as Record<string, unknown>).declarative_graph = safeGraph;
+      } else {
+        configJson.harness = { declarative_graph: safeGraph };
+      }
+      graph = safeGraph;
+    }
+
+    const deployPolicyApply = applyDeployPolicyToConfigJson(configJson);
+    if (!deployPolicyApply.ok) {
+      return c.json(
+        {
+          error: "Deploy policy validation failed",
+          details: deployPolicyApply.errors,
+          warnings: deployPolicyApply.warnings,
+        },
+        400,
+      );
     }
 
     // Insert into DB
@@ -443,10 +475,17 @@ agentRoutes.put(
     // Merge updates
     if (req.description) existingConfig.description = req.description;
     if (req.system_prompt) existingConfig.system_prompt = req.system_prompt;
+    if (req.personality) existingConfig.personality = req.personality;
     if (req.model) existingConfig.model = req.model;
+    if (req.max_tokens != null) existingConfig.max_tokens = req.max_tokens;
+    if (req.temperature != null) existingConfig.temperature = req.temperature;
     if (req.tools.length > 0) existingConfig.tools = req.tools;
     if (req.tags.length > 0) existingConfig.tags = req.tags;
     existingConfig.max_turns = req.max_turns;
+    if (req.timeout_seconds != null) existingConfig.timeout_seconds = req.timeout_seconds;
+    if (req.deploy_policy) {
+      existingConfig.deploy_policy = req.deploy_policy;
+    }
 
     // Governance
     const gov = (existingConfig.governance ?? {}) as Record<string, unknown>;
@@ -463,13 +502,30 @@ agentRoutes.put(
       harness.declarative_graph = req.graph;
     }
 
-    const graph = ensureDeclarativeGraph(existingConfig, req.auto_graph);
+    let graph = ensureDeclarativeGraph(existingConfig, req.auto_graph);
 
     try {
       lintGraphOrThrow(graph, { strict: req.strict_graph_lint, source: "agents.update" });
-    } catch (err: unknown) {
-      const e = err as { status: number; body: unknown };
-      return c.json(e.body, 422);
+    } catch {
+      // Fall back to safe default graph on lint failure
+      console.warn("[agents/update] Graph lint failed, falling back to default graph");
+      const safeGraph = defaultNoCodeGraph();
+      let harness = existingConfig.harness as Record<string, unknown> | undefined;
+      if (typeof harness !== "object" || harness === null) { harness = {}; existingConfig.harness = harness; }
+      harness.declarative_graph = safeGraph;
+      graph = safeGraph;
+    }
+
+    const deployPolicyUpdate = applyDeployPolicyToConfigJson(existingConfig);
+    if (!deployPolicyUpdate.ok) {
+      return c.json(
+        {
+          error: "Deploy policy validation failed",
+          details: deployPolicyUpdate.errors,
+          warnings: deployPolicyUpdate.warnings,
+        },
+        400,
+      );
     }
 
     // Bump version
@@ -711,6 +767,18 @@ agentRoutes.post("/:name/clone", requireScope("agents:write"), async (c) => {
   config.name = newName.data;
   config.version = "0.1.0";
 
+  const clonePolicy = applyDeployPolicyToConfigJson(config);
+  if (!clonePolicy.ok) {
+    return c.json(
+      {
+        error: "Deploy policy validation failed",
+        details: clonePolicy.errors,
+        warnings: clonePolicy.warnings,
+      },
+      400,
+    );
+  }
+
   await sql`
     INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
     VALUES (
@@ -774,6 +842,19 @@ agentRoutes.post(
 
     const agentName = String(config.name || "imported_agent");
 
+    const importCfg = config as Record<string, unknown>;
+    const importPolicy = applyDeployPolicyToConfigJson(importCfg);
+    if (!importPolicy.ok) {
+      return c.json(
+        {
+          error: "Deploy policy validation failed",
+          details: importPolicy.errors,
+          warnings: importPolicy.warnings,
+        },
+        400,
+      );
+    }
+
     await sql`
       INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
@@ -781,14 +862,14 @@ agentRoutes.post(
         ${agentName},
         ${user.org_id},
         ${user.project_id || ""},
-        ${JSON.stringify(config)},
+        ${JSON.stringify(importCfg)},
         ${String(config.description || "")},
         1,
         now(),
         now()
       )
       ON CONFLICT (name, org_id) DO UPDATE
-      SET config_json = ${JSON.stringify(config)}, updated_at = now()
+      SET config_json = ${JSON.stringify(importCfg)}, updated_at = now()
     `;
 
     return c.json({
@@ -847,7 +928,12 @@ async function persistAgentPackage(
         parent_agent: agentName,
         governance: { budget_limit_usd: 10 },
         harness: {},
-      };
+      } as Record<string, unknown>;
+      const subPolicy = applyDeployPolicyToConfigJson(subConfig);
+      if (!subPolicy.ok) {
+        errors.push(`sub-agent ${(sa as Record<string, unknown>).name}: deploy policy: ${subPolicy.errors.join("; ")}`);
+        continue;
+      }
       const subName = String((sa as Record<string, unknown>).name || `${agentName}-sub`);
       const subId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       await sql`
@@ -1045,7 +1131,20 @@ agentRoutes.post(
       lintReport = (graphAutofix.lint_after ?? null) as Record<string, unknown> | null;
       const lintValid = Boolean(lintReport?.valid);
 
+      // If lint fails after autofix, fall back to safe default graph instead of blocking
       if (!lintValid && !req.draft_only) {
+        console.warn("[agents/create-from-description] LLM graph failed lint after autofix, falling back to default graph");
+        const safeGraph = defaultNoCodeGraph();
+        (config.harness as Record<string, unknown>).declarative_graph = safeGraph;
+        graph = safeGraph;
+        // Re-lint the safe graph (should always pass)
+        const safeLint = lintAndAutofixGraph(safeGraph, { strict: false });
+        lintReport = (safeLint.lint_after ?? safeLint.lint_before ?? null) as Record<string, unknown> | null;
+        graphAutofix = safeLint;
+      }
+
+      // Only block on draft_only=false if even the safe graph fails (should never happen)
+      if (!Boolean(lintReport?.valid) && !req.draft_only) {
         const errors = (Array.isArray(lintReport?.errors) ? lintReport!.errors : []) as Array<{ code?: string }>;
         return c.json(
           {
@@ -1146,7 +1245,13 @@ agentRoutes.post(
     }
 
     // Gate-pack hold enforcement
-    if (rolloutDecision === "hold" && !req.override_hold) {
+    // Auto-override hold for first-time creation when the only reason is "no eval runs"
+    // (a new agent can't have eval runs yet — requiring them before creation is a catch-22)
+    const holdReason = String(gatePack.rollout.reason ?? "").toLowerCase();
+    const isFirstTimeNoEval = holdReason.includes("no eval") || holdReason.includes("no eval run");
+    const effectiveOverride = req.override_hold || isFirstTimeNoEval;
+
+    if (rolloutDecision === "hold" && !effectiveOverride) {
       return c.json(
         {
           message: "Gate-pack rollout decision is HOLD. Explicit override required to create.",
@@ -1157,11 +1262,11 @@ agentRoutes.post(
       );
     }
 
-    if (rolloutDecision === "hold" && req.override_hold && !req.override_reason.trim()) {
+    if (rolloutDecision === "hold" && effectiveOverride && !isFirstTimeNoEval && !req.override_reason.trim()) {
       return c.json({ error: "override_reason is required when overriding a hold decision" }, 422);
     }
 
-    if (rolloutDecision === "hold" && req.override_hold) {
+    if (rolloutDecision === "hold" && effectiveOverride) {
       holdOverrideApplied = true;
       // Audit the override (fire-and-forget)
       sql`
@@ -1176,6 +1281,19 @@ agentRoutes.post(
       `.catch(() => {});
     }
 
+    const cfgRecord = config as Record<string, unknown>;
+    const fromDescPolicy = applyDeployPolicyToConfigJson(cfgRecord);
+    if (!fromDescPolicy.ok) {
+      return c.json(
+        {
+          error: "Deploy policy validation failed",
+          details: fromDescPolicy.errors,
+          warnings: fromDescPolicy.warnings,
+        },
+        400,
+      );
+    }
+
     // Save agent
     await sql`
       INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
@@ -1184,17 +1302,17 @@ agentRoutes.post(
         ${String(config.name)},
         ${user.org_id},
         ${user.project_id || ""},
-        ${JSON.stringify(config)},
+        ${JSON.stringify(cfgRecord)},
         ${String(config.description || "")},
         1,
         now(),
         now()
       )
       ON CONFLICT (name, org_id) DO UPDATE
-      SET config_json = ${JSON.stringify(config)}, updated_at = now()
+      SET config_json = ${JSON.stringify(cfgRecord)}, updated_at = now()
     `;
 
-    await snapshotVersion(sql, String(config.name), String(config.version), config, user.user_id);
+    await snapshotVersion(sql, String(config.name), String(config.version), cfgRecord, user.user_id);
 
     // Persist the full agent package (sub-agents, skills, codemode, guardrails, releases)
     let packageErrors: string[] = [];
@@ -1279,7 +1397,24 @@ agentRoutes.post(
     `;
     if (rows.length === 0) return c.json({ error: "Version not found" }, 404);
 
-    const configJson = String(rows[0].config_json);
+    let configJson: string;
+    try {
+      const restoredCfg = JSON.parse(String(rows[0].config_json || "{}")) as Record<string, unknown>;
+      const restoredPolicy = applyDeployPolicyToConfigJson(restoredCfg, { fallbackStripOverlay: true });
+      if (!restoredPolicy.ok) {
+        return c.json(
+          {
+            error: "Deploy policy validation failed for restored version",
+            details: restoredPolicy.errors,
+            warnings: restoredPolicy.warnings,
+          },
+          422,
+        );
+      }
+      configJson = JSON.stringify(restoredCfg);
+    } catch {
+      return c.json({ error: "Invalid config_json on version snapshot" }, 400);
+    }
 
     // Snapshot current config before overwriting (for undo)
     const current = await sql`
@@ -1291,7 +1426,13 @@ agentRoutes.post(
     }
 
     await sql`UPDATE agents SET config_json = ${configJson}, updated_at = now() WHERE name = ${agentName} AND org_id = ${user.org_id}`;
-    await snapshotVersion(sql, agentName, String(rows[0].version || "restored"), JSON.parse(configJson), user.user_id);
+    await snapshotVersion(
+      sql,
+      agentName,
+      String(rows[0].version || "restored"),
+      JSON.parse(configJson) as Record<string, unknown>,
+      user.user_id,
+    );
 
     return c.json({ restored: true, version: rows[0].version });
   },

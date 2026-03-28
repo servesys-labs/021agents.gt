@@ -11,6 +11,7 @@ import type { CurrentUser } from "../auth/types";
 import { generateApiKey, hashApiKey } from "../auth/api-keys";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { logSecurityEvent } from "../logic/security-events";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser } };
 export const apiKeyRoutes = new Hono<R>();
@@ -23,6 +24,10 @@ const CreateApiKeyRequest = z.object({
   project_id: z.string().default(""),
   env: z.string().default(""),
   expires_in_days: z.number().int().positive().nullable().optional(),
+  ip_allowlist: z.array(z.string()).default([]),
+  allowed_agents: z.array(z.string()).default([]),
+  rate_limit_rpm: z.number().int().positive().default(60),
+  rate_limit_rpd: z.number().int().positive().default(10000),
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -46,7 +51,10 @@ apiKeyRoutes.get("/", requireScope("api_keys:read"), async (c) => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT key_id, name, key_prefix, scopes, project_id, env, created_at, last_used_at, is_active
+    SELECT
+      key_id, name, key_prefix, scopes, project_id, env,
+      expires_at, created_at, last_used_at, is_active,
+      ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
     FROM api_keys
     WHERE org_id = ${user.org_id}
     ORDER BY created_at DESC
@@ -67,9 +75,14 @@ apiKeyRoutes.get("/", requireScope("api_keys:read"), async (c) => {
       scopes,
       project_id: r.project_id || "",
       env: r.env || "",
+      expires_at: r.expires_at || null,
       created_at: Number(r.created_at),
       last_used_at: r.last_used_at ? Number(r.last_used_at) : null,
       is_active: Boolean(r.is_active),
+      ip_allowlist: Array.isArray(r.ip_allowlist) ? r.ip_allowlist : [],
+      allowed_agents: Array.isArray(r.allowed_agents) ? r.allowed_agents : [],
+      rate_limit_rpm: Number(r.rate_limit_rpm || 60),
+      rate_limit_rpd: Number(r.rate_limit_rpd || 10000),
     };
   });
 
@@ -105,14 +118,19 @@ apiKeyRoutes.post("/", requireScope("api_keys:write"), async (c) => {
 
   const scopesJson = JSON.stringify(req.scopes);
 
+  const ipAllowlistArr = req.ip_allowlist.length > 0 ? req.ip_allowlist : null;
+  const allowedAgentsArr = req.allowed_agents.length > 0 ? req.allowed_agents : null;
+
   await sql`
     INSERT INTO api_keys (
       key_id, org_id, user_id, name, key_prefix, key_hash, scopes,
-      project_id, env, expires_at, is_active, created_at
+      project_id, env, expires_at, is_active, created_at,
+      ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
     ) VALUES (
       ${keyId}, ${user.org_id}, ${user.user_id}, ${req.name}, ${prefix},
       ${keyHash}, ${scopesJson}, ${req.project_id}, ${req.env},
-      ${expiresAt}, ${true}, ${nowEpoch}
+      ${expiresAt}, ${true}, ${nowEpoch},
+      ${ipAllowlistArr}, ${allowedAgentsArr}, ${req.rate_limit_rpm}, ${req.rate_limit_rpd}
     )
   `;
 
@@ -126,6 +144,18 @@ apiKeyRoutes.post("/", requireScope("api_keys:write"), async (c) => {
     )
   `.catch(() => {}); // Best-effort audit
 
+  // Security event: API key created
+  logSecurityEvent(sql, {
+    org_id: user.org_id,
+    event_type: "api_key.created",
+    actor_id: user.user_id,
+    actor_type: "user",
+    target_id: keyId,
+    target_type: "api_key",
+    severity: "info",
+    details: { name: req.name, scopes: req.scopes, project_id: req.project_id },
+  });
+
   return c.json({
     key_id: keyId,
     name: req.name,
@@ -136,6 +166,10 @@ apiKeyRoutes.post("/", requireScope("api_keys:write"), async (c) => {
     created_at: nowEpoch,
     last_used_at: null,
     is_active: true,
+    ip_allowlist: req.ip_allowlist,
+    allowed_agents: req.allowed_agents,
+    rate_limit_rpm: req.rate_limit_rpm,
+    rate_limit_rpd: req.rate_limit_rpd,
     key, // Full key — only shown once at creation
   });
 });
@@ -161,6 +195,18 @@ apiKeyRoutes.delete("/:key_id", requireScope("api_keys:write"), async (c) => {
     return c.json({ error: "API key not found" }, 404);
   }
 
+  // Security event: API key revoked
+  logSecurityEvent(sql, {
+    org_id: user.org_id,
+    event_type: "api_key.revoked",
+    actor_id: user.user_id,
+    actor_type: "user",
+    target_id: keyId,
+    target_type: "api_key",
+    severity: "medium",
+    details: { key_id: keyId },
+  });
+
   return c.json({ revoked: keyId });
 });
 
@@ -177,7 +223,9 @@ apiKeyRoutes.post("/:key_id/rotate", requireScope("api_keys:write"), async (c) =
 
   // Fetch the existing key
   const rows = await sql`
-    SELECT key_id, org_id, user_id, name, scopes, project_id, env
+    SELECT
+      key_id, org_id, user_id, name, scopes, project_id, env,
+      expires_at, ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
     FROM api_keys
     WHERE key_id = ${keyId} AND org_id = ${user.org_id}
   `;
@@ -208,13 +256,29 @@ apiKeyRoutes.post("/:key_id/rotate", requireScope("api_keys:write"), async (c) =
   await sql`
     INSERT INTO api_keys (
       key_id, org_id, user_id, name, key_prefix, key_hash, scopes,
-      project_id, env, is_active, created_at
+      project_id, env, expires_at, is_active, created_at,
+      ip_allowlist, allowed_agents, rate_limit_rpm, rate_limit_rpd
     ) VALUES (
       ${newKeyId}, ${user.org_id}, ${user.user_id}, ${old.name}, ${prefix},
       ${keyHash}, ${scopesJson}, ${old.project_id || ""}, ${old.env || ""},
-      ${true}, ${nowEpoch}
+      ${old.expires_at || null}, ${true}, ${nowEpoch},
+      ${Array.isArray(old.ip_allowlist) && old.ip_allowlist.length > 0 ? old.ip_allowlist : null},
+      ${Array.isArray(old.allowed_agents) && old.allowed_agents.length > 0 ? old.allowed_agents : null},
+      ${Number(old.rate_limit_rpm || 60)}, ${Number(old.rate_limit_rpd || 10000)}
     )
   `;
+
+  // Security event: API key rotated
+  logSecurityEvent(sql, {
+    org_id: user.org_id,
+    event_type: "api_key.rotated",
+    actor_id: user.user_id,
+    actor_type: "user",
+    target_id: keyId,
+    target_type: "api_key",
+    severity: "medium",
+    details: { old_key_id: keyId, new_key_id: newKeyId },
+  });
 
   return c.json({
     key_id: newKeyId,
@@ -223,9 +287,14 @@ apiKeyRoutes.post("/:key_id/rotate", requireScope("api_keys:write"), async (c) =
     scopes,
     project_id: old.project_id || "",
     env: old.env || "",
+    expires_at: old.expires_at || null,
     created_at: nowEpoch,
     last_used_at: null,
     is_active: true,
+    ip_allowlist: Array.isArray(old.ip_allowlist) ? old.ip_allowlist : [],
+    allowed_agents: Array.isArray(old.allowed_agents) ? old.allowed_agents : [],
+    rate_limit_rpm: Number(old.rate_limit_rpm || 60),
+    rate_limit_rpd: Number(old.rate_limit_rpd || 10000),
     key, // Full key — only shown once
   });
 });

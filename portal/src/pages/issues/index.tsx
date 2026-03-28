@@ -16,7 +16,11 @@ import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
 import { AssistPanel } from "../../components/common/AssistPanel";
+import { StatCard } from "../../components/common/StatCard";
+import { SeverityBadge, getSeverityColors, normalizeLevel } from "../../components/common/SeverityBadge";
+import { FilterBar, type FilterConfig } from "../../components/common/FilterBar";
 import { useApiQuery } from "../../lib/api";
+import { timeSince } from "../../lib/format";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -43,20 +47,26 @@ type IssueSummary = {
   by_category?: Record<string, number>;
 };
 
-/* ── Helpers ─────────────────────────────────────────────────────── */
+type Incident = {
+  incident_key: string;
+  kind: "integrity_breach" | "loop_halt" | "loop_warn" | "circuit_block";
+  severity: "critical" | "high" | "medium" | "low" | "info";
+  title: string;
+  opened_at: string;
+  trace_id: string | null;
+  session_id: string | null;
+};
 
-function timeSince(ts?: number | string): string {
-  if (!ts) return "--";
-  const date = new Date(typeof ts === "number" && ts < 1e12 ? ts * 1000 : ts);
-  const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
+type IncidentResponse = {
+  counts?: {
+    total?: number;
+    by_kind?: Record<string, number>;
+    by_severity?: Record<string, number>;
+  };
+  incidents?: Incident[];
+};
+
+/* ── Helpers ─────────────────────────────────────────────────────── */
 
 function severityOrder(s: string): number {
   switch (s.toLowerCase()) {
@@ -70,35 +80,6 @@ function severityOrder(s: string): number {
     default:
       return 3;
   }
-}
-
-function severityBadge(severity: string) {
-  const s = severity.toLowerCase();
-  if (s === "high" || s === "critical") {
-    return {
-      emoji: "\uD83D\uDD34",
-      bg: "bg-status-error/15",
-      text: "text-status-error",
-      border: "border-status-error/20",
-      label: "HIGH",
-    };
-  }
-  if (s === "medium") {
-    return {
-      emoji: "\uD83D\uDFE1",
-      bg: "bg-status-warning/15",
-      text: "text-status-warning",
-      border: "border-status-warning/20",
-      label: "MEDIUM",
-    };
-  }
-  return {
-    emoji: "\uD83D\uDFE2",
-    bg: "bg-status-live/15",
-    text: "text-status-live",
-    border: "border-status-live/20",
-    label: "LOW",
-  };
 }
 
 /* ── Issues Queue ────────────────────────────────────────────────── */
@@ -135,6 +116,9 @@ export function IssuesPage() {
       agentFilter ? `&agent_name=${encodeURIComponent(agentFilter)}` : ""
     }${severityFilter ? `&severity=${encodeURIComponent(severityFilter)}` : ""}`,
   );
+  const incidentsQuery = useApiQuery<IncidentResponse>(
+    "/api/v1/observability/incidents?since_hours=24&limit=8&include_suppressed=false",
+  );
 
   const summary = summaryQuery.data;
   const issues: Issue[] = useMemo(() => {
@@ -143,6 +127,10 @@ export function IssuesPage() {
     if (Array.isArray(raw)) return raw;
     return raw.issues ?? [];
   }, [issuesQuery.data]);
+  const incidents = useMemo(
+    () => (Array.isArray(incidentsQuery.data?.incidents) ? incidentsQuery.data?.incidents ?? [] : []),
+    [incidentsQuery.data],
+  );
 
   /* Extract unique agent names for filter dropdown */
   const agentNames = useMemo(() => {
@@ -185,6 +173,8 @@ export function IssuesPage() {
 
   const highCount = summary?.by_severity?.high ?? summary?.by_severity?.critical ?? 0;
   const mediumCount = summary?.by_severity?.medium ?? 0;
+  const incidentHigh = incidentsQuery.data?.counts?.by_severity?.high ?? 0;
+  const incidentCritical = incidentsQuery.data?.counts?.by_severity?.critical ?? 0;
 
   return (
     <div>
@@ -194,46 +184,28 @@ export function IssuesPage() {
       />
 
       {/* Signal Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-3 gap-[var(--space-3)] mb-[var(--space-6)]">
-        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
-          <div className="p-2 rounded-lg bg-status-error/10">
-            <AlertTriangle size={16} className="text-status-error" />
-          </div>
-          <div>
-            <p className="text-[var(--text-xl)] font-bold text-status-error font-mono">
-              {highCount}
-            </p>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide">
-              High Severity
-            </p>
-          </div>
-        </div>
-        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
-          <div className="p-2 rounded-lg bg-status-warning/10">
-            <AlertCircle size={16} className="text-status-warning" />
-          </div>
-          <div>
-            <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
-              {mediumCount}
-            </p>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide">
-              Medium Severity
-            </p>
-          </div>
-        </div>
-        <div className="card flex items-center gap-[var(--space-3)] py-[var(--space-3)]">
-          <div className="p-2 rounded-lg bg-status-live/10">
-            <CheckCircle size={16} className="text-status-live" />
-          </div>
-          <div>
-            <p className="text-[var(--text-xl)] font-bold text-text-primary font-mono">
-              {resolvedThisWeek}
-            </p>
-            <p className="text-[10px] text-text-muted uppercase tracking-wide">
-              Resolved This Week
-            </p>
-          </div>
-        </div>
+      <div className="grid grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
+        <StatCard
+          label="High Severity"
+          value={highCount}
+          icon={<AlertTriangle size={16} className="text-status-error" />}
+          color="bg-status-error/10"
+          iconColor="text-status-error"
+        />
+        <StatCard
+          label="Medium Severity"
+          value={mediumCount}
+          icon={<AlertCircle size={16} className="text-status-warning" />}
+          color="bg-status-warning/10"
+          iconColor="text-status-warning"
+        />
+        <StatCard
+          label="Resolved This Week"
+          value={resolvedThisWeek}
+          icon={<CheckCircle size={16} className="text-status-live" />}
+          color="bg-status-live/10"
+          iconColor="text-status-live"
+        />
       </div>
 
       {/* Meta-agent assist */}
@@ -241,57 +213,114 @@ export function IssuesPage() {
         <AssistPanel compact />
       </div>
 
-      {/* Filters */}
-      <div className="flex items-center gap-[var(--space-3)] mb-[var(--space-4)] flex-wrap">
-        {/* Agent dropdown */}
-        <select
-          value={agentFilter}
-          onChange={(e) => setAgentFilter(e.target.value)}
-          className="px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] rounded-lg min-h-[var(--touch-target-min)]"
-        >
-          <option value="">All Agents</option>
-          {agentNames.map((name) => (
-            <option key={name} value={name}>
-              {name}
-            </option>
-          ))}
-        </select>
-
-        {/* Severity dropdown */}
-        <select
-          value={severityFilter}
-          onChange={(e) => setSeverityFilter(e.target.value)}
-          className="px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] rounded-lg min-h-[var(--touch-target-min)]"
-        >
-          <option value="">All Severities</option>
-          <option value="high">High</option>
-          <option value="medium">Medium</option>
-          <option value="low">Low</option>
-        </select>
-
-        {/* Status toggle */}
-        <div className="flex items-center gap-0 rounded-lg border border-border-default overflow-hidden">
+      {/* Operational incidents from observability pipeline */}
+      <div className="card mb-[var(--space-4)]">
+        <div className="flex items-center justify-between mb-[var(--space-3)]">
+          <div>
+            <p className="text-[10px] text-text-muted uppercase tracking-wide">Runtime incidents (24h)</p>
+            <p className="text-[var(--text-sm)] text-text-primary font-semibold">
+              {incidentsQuery.data?.counts?.total ?? 0} incidents
+            </p>
+          </div>
           <button
-            onClick={() => setStatusToggle("open")}
-            className={`px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] font-medium min-h-[var(--touch-target-min)] transition-colors ${
-              statusToggle === "open"
-                ? "bg-accent text-text-inverse"
-                : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
-            }`}
+            className="btn btn-secondary text-[var(--text-xs)]"
+            onClick={() => navigate("/observability/trace-integrity")}
           >
-            Open
-          </button>
-          <button
-            onClick={() => setStatusToggle("resolved")}
-            className={`px-[var(--space-3)] py-[var(--space-2)] text-[var(--text-xs)] font-medium min-h-[var(--touch-target-min)] transition-colors ${
-              statusToggle === "resolved"
-                ? "bg-accent text-text-inverse"
-                : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
-            }`}
-          >
-            Resolved
+            Trace Integrity
+            <ExternalLink size={12} />
           </button>
         </div>
+        <QueryState loading={incidentsQuery.loading} error={incidentsQuery.error}>
+          <div className="flex items-center gap-[var(--space-3)] mb-[var(--space-3)]">
+            <span className="text-[10px] text-status-error uppercase">
+              Critical: {incidentCritical}
+            </span>
+            <span className="text-[10px] text-status-warning uppercase">
+              High: {incidentHigh}
+            </span>
+          </div>
+          {incidents.length === 0 ? (
+            <p className="text-[var(--text-xs)] text-text-muted">No active incidents in the selected window.</p>
+          ) : (
+            <div className="space-y-[var(--space-2)]">
+              {incidents.slice(0, 5).map((inc) => (
+                <button
+                  key={inc.incident_key}
+                  onClick={() => {
+                    if (inc.kind === "integrity_breach" && inc.trace_id) {
+                      navigate(`/observability/trace-integrity?trace_id=${encodeURIComponent(inc.trace_id)}`);
+                      return;
+                    }
+                    if (inc.session_id) {
+                      navigate(`/sessions?q=${encodeURIComponent(inc.session_id)}`);
+                      return;
+                    }
+                    navigate("/sessions");
+                  }}
+                  className="w-full text-left rounded-lg border border-border-default px-[var(--space-3)] py-[var(--space-2)] hover:bg-surface-overlay transition-colors"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[var(--text-xs)] text-text-primary">{inc.title}</span>
+                    <span className="text-[10px] text-text-muted uppercase">{inc.kind}</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </QueryState>
+      </div>
+
+      {/* Filters */}
+      <FilterBar
+        className="mb-4"
+        filters={[
+          {
+            key: "agent",
+            label: "Agent",
+            value: agentFilter,
+            onChange: setAgentFilter,
+            options: [
+              { value: "", label: "All Agents" },
+              ...agentNames.map((name) => ({ value: name, label: name })),
+            ],
+          },
+          {
+            key: "severity",
+            label: "Severity",
+            value: severityFilter,
+            onChange: setSeverityFilter,
+            options: [
+              { value: "", label: "All Severities" },
+              { value: "high", label: "High" },
+              { value: "medium", label: "Medium" },
+              { value: "low", label: "Low" },
+            ],
+          },
+        ] satisfies FilterConfig[]}
+      />
+
+      {/* Status toggle */}
+      <div className="flex items-center gap-0 rounded-lg border border-border-default overflow-hidden mb-4 w-fit">
+        <button
+          onClick={() => setStatusToggle("open")}
+          className={`px-3 py-2 text-xs font-medium min-h-[44px] transition-colors ${
+            statusToggle === "open"
+              ? "bg-accent text-text-inverse"
+              : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
+          }`}
+        >
+          Open
+        </button>
+        <button
+          onClick={() => setStatusToggle("resolved")}
+          className={`px-3 py-2 text-xs font-medium min-h-[44px] transition-colors ${
+            statusToggle === "resolved"
+              ? "bg-accent text-text-inverse"
+              : "text-text-muted hover:text-text-primary hover:bg-surface-overlay"
+          }`}
+        >
+          Resolved
+        </button>
       </div>
 
       {/* Issues List */}
@@ -303,19 +332,15 @@ export function IssuesPage() {
             description="Your agents are running smoothly"
           />
         ) : (
-          <div className="space-y-[var(--space-6)]">
+          <div className="space-y-6">
             {grouped.map((group) => {
-              const badge = severityBadge(group.severity);
+              const level = normalizeLevel(group.severity);
               return (
                 <div key={group.severity}>
                   {/* Group header */}
-                  <div className="flex items-center gap-[var(--space-2)] mb-[var(--space-3)]">
-                    <span
-                      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-semibold uppercase tracking-wide border ${badge.bg} ${badge.text} ${badge.border}`}
-                    >
-                      {badge.label}
-                    </span>
-                    <span className="text-[var(--text-xs)] text-text-muted">
+                  <div className="flex items-center gap-2 mb-3">
+                    <SeverityBadge level={level} />
+                    <span className="text-xs text-text-muted">
                       {group.items.length} issue{group.items.length !== 1 ? "s" : ""}
                     </span>
                   </div>
@@ -361,7 +386,7 @@ function IssueCard({
   onNavigate: () => void;
   onAgentClick: () => void;
 }) {
-  const badge = severityBadge(issue.severity);
+  const level = normalizeLevel(issue.severity);
   const hasFix =
     issue.suggested_fix != null &&
     issue.suggested_fix !== "" &&
@@ -381,11 +406,7 @@ function IssueCard({
       onClick={onNavigate}
     >
       {/* Severity badge */}
-      <span
-        className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase tracking-wide border flex-shrink-0 ${badge.bg} ${badge.text} ${badge.border}`}
-      >
-        {badge.label}
-      </span>
+      <SeverityBadge level={level} size="sm" className="flex-shrink-0" />
 
       {/* Title + agent */}
       <div className="flex-1 min-w-0">

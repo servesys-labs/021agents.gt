@@ -33,6 +33,10 @@ import { useAuth } from "../../lib/auth";
 import { apiGet, apiPost, apiPut, apiDelete, useApiQuery } from "../../lib/api";
 import { Modal } from "../../components/common/Modal";
 import { extractList } from "../../lib/normalize";
+import { DomainsTab } from "./DomainsTab";
+import { EndUserTokensTab } from "./EndUserTokensTab";
+import { WidgetConfigTab } from "./WidgetConfigTab";
+import { ComplianceTab } from "./ComplianceTab";
 
 /* ══════════════════════════════════════════════════════════════════
    Types
@@ -53,6 +57,10 @@ type ApiKeyItem = {
   name: string;
   prefix: string;
   scopes: string[];
+  ip_allowlist?: string[];
+  allowed_agents?: string[];
+  rate_limit_rpm?: number;
+  rate_limit_rpd?: number;
   created_at?: string | number;
   last_used?: string | number;
   expires_at?: string | number;
@@ -64,22 +72,26 @@ type BackendApiKey = {
   key_prefix?: string;
   prefix?: string;
   scopes?: string[];
+  ip_allowlist?: string[] | null;
+  allowed_agents?: string[] | null;
+  rate_limit_rpm?: number | null;
+  rate_limit_rpd?: number | null;
   created_at?: string | number | null;
   last_used?: string | number | null;
   last_used_at?: string | number | null;
   expires_at?: string | number | null;
 };
 
-type BillingUsage = {
-  total: number;
-  inference: number;
-  tools: number;
-  infra: number;
-  by_agent: { name: string; cost: number }[];
-  by_model: { model: string; cost: number; pct: number }[];
+type BillingUsageRaw = {
+  total_cost_usd: number;
+  inference_cost_usd: number;
+  gpu_compute_cost_usd: number;
+  connector_cost_usd: number;
+  by_agent: Record<string, number>;
+  by_model: Record<string, number>;
 };
 
-type DailyPoint = { date: string; cost: number };
+type DailyPointRaw = { day: string; cost: number };
 
 type StripeStatus = { plan: string; portal_url?: string };
 
@@ -152,11 +164,15 @@ type Project = {
 const TAB_IDS = [
   "team",
   "api-keys",
+  "domains",
+  "end-users",
+  "widget",
   "billing",
   "integrations",
   "schedules",
   "webhooks",
   "secrets",
+  "compliance",
   "projects",
 ] as const;
 
@@ -165,11 +181,15 @@ type TabId = (typeof TAB_IDS)[number];
 const TAB_LABELS: Record<TabId, string> = {
   team: "Team",
   "api-keys": "API Keys",
+  domains: "Domains",
+  "end-users": "End-Users",
+  widget: "Widget",
   billing: "Billing",
   integrations: "Integrations",
   schedules: "Schedules",
   webhooks: "Webhooks",
   secrets: "Secrets",
+  compliance: "Compliance",
   projects: "Projects",
 };
 
@@ -556,6 +576,10 @@ export const SettingsPage = () => {
       name: String(k.name ?? ""),
       prefix: String(k.prefix ?? k.key_prefix ?? ""),
       scopes: Array.isArray(k.scopes) ? k.scopes : [],
+      ip_allowlist: Array.isArray(k.ip_allowlist) ? k.ip_allowlist : [],
+      allowed_agents: Array.isArray(k.allowed_agents) ? k.allowed_agents : [],
+      rate_limit_rpm: Number(k.rate_limit_rpm ?? 60),
+      rate_limit_rpd: Number(k.rate_limit_rpd ?? 10000),
       created_at: k.created_at ?? undefined,
       last_used:
         k.last_used ?? k.last_used_at ?? undefined,
@@ -567,6 +591,10 @@ export const SettingsPage = () => {
   const [keyName, setKeyName] = useState("");
   const [keyScopes, setKeyScopes] = useState<string[]>([]);
   const [keyExpiry, setKeyExpiry] = useState("none");
+  const [keyRateLimitRpm, setKeyRateLimitRpm] = useState(60);
+  const [keyRateLimitRpd, setKeyRateLimitRpd] = useState(10000);
+  const [keyAllowedAgents, setKeyAllowedAgents] = useState("");
+  const [keyIpAllowlist, setKeyIpAllowlist] = useState("");
   const [createdKeyValue, setCreatedKeyValue] = useState<string | null>(null);
   const [keyLoading, setKeyLoading] = useState(false);
 
@@ -585,7 +613,17 @@ export const SettingsPage = () => {
       const result = await apiPost<{ key: string }>("/api/v1/api-keys", {
         name: keyName,
         scopes: keyScopes.length ? keyScopes : ["*"],
-        expiry_days: keyExpiry === "none" ? null : parseInt(keyExpiry),
+        expires_in_days: keyExpiry === "none" ? null : parseInt(keyExpiry, 10),
+        rate_limit_rpm: Math.max(1, Number(keyRateLimitRpm) || 60),
+        rate_limit_rpd: Math.max(1, Number(keyRateLimitRpd) || 10000),
+        allowed_agents: keyAllowedAgents
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
+        ip_allowlist: keyIpAllowlist
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
       });
       setCreatedKeyValue(result.key);
       showToast("API key created", "success");
@@ -630,6 +668,10 @@ export const SettingsPage = () => {
     setKeyName("");
     setKeyScopes([]);
     setKeyExpiry("none");
+    setKeyRateLimitRpm(60);
+    setKeyRateLimitRpd(10000);
+    setKeyAllowedAgents("");
+    setKeyIpAllowlist("");
     setCreatedKeyValue(null);
   };
 
@@ -644,7 +686,17 @@ export const SettingsPage = () => {
         <h2 className="text-sm font-semibold text-text-primary">API Keys</h2>
         <button
           className="btn btn-primary text-xs"
-          onClick={() => { setCreatedKeyValue(null); setKeyName(""); setKeyScopes([]); setKeyExpiry("none"); setCreateKeyOpen(true); }}
+          onClick={() => {
+            setCreatedKeyValue(null);
+            setKeyName("");
+            setKeyScopes([]);
+            setKeyExpiry("none");
+            setKeyRateLimitRpm(60);
+            setKeyRateLimitRpd(10000);
+            setKeyAllowedAgents("");
+            setKeyIpAllowlist("");
+            setCreateKeyOpen(true);
+          }}
         >
           <Key size={12} /> Create Key
         </button>
@@ -704,6 +756,18 @@ export const SettingsPage = () => {
                     {(k.scopes ?? []).map((s) => (
                       <Pill key={s}>{s}</Pill>
                     ))}
+                    <Pill>RPM {Number(k.rate_limit_rpm ?? 60)}</Pill>
+                    <Pill>RPD {Number(k.rate_limit_rpd ?? 10000)}</Pill>
+                    {Array.isArray(k.allowed_agents) && k.allowed_agents.length > 0 ? (
+                      <Pill className="max-w-[220px] truncate">
+                        Agents: {k.allowed_agents.join(", ")}
+                      </Pill>
+                    ) : null}
+                    {Array.isArray(k.ip_allowlist) && k.ip_allowlist.length > 0 ? (
+                      <Pill className="max-w-[220px] truncate">
+                        IPs: {k.ip_allowlist.join(", ")}
+                      </Pill>
+                    ) : null}
                   </div>
                   <span className="text-[10px] text-text-muted ml-auto whitespace-nowrap">
                     Created {formatDate(k.created_at)}
@@ -812,6 +876,59 @@ export const SettingsPage = () => {
               </select>
             </div>
 
+            <div className="mb-4 grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">
+                  Rate Limit (RPM)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={keyRateLimitRpm}
+                  onChange={(e) => setKeyRateLimitRpm(Math.max(1, Number(e.target.value) || 60))}
+                  className="text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">
+                  Rate Limit (RPD)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  value={keyRateLimitRpd}
+                  onChange={(e) => setKeyRateLimitRpd(Math.max(1, Number(e.target.value) || 10000))}
+                  className="text-sm"
+                />
+              </div>
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">
+                Allowed Agents (comma separated)
+              </label>
+              <input
+                type="text"
+                value={keyAllowedAgents}
+                onChange={(e) => setKeyAllowedAgents(e.target.value)}
+                placeholder="agent-a, agent-b"
+                className="text-sm"
+              />
+            </div>
+
+            <div className="mb-4">
+              <label className="block text-xs font-medium text-text-secondary mb-1.5 uppercase tracking-wide">
+                IP Allowlist (comma separated)
+              </label>
+              <input
+                type="text"
+                value={keyIpAllowlist}
+                onChange={(e) => setKeyIpAllowlist(e.target.value)}
+                placeholder="203.0.113.10, 198.51.100.0/24"
+                className="text-sm"
+              />
+            </div>
+
             <div className="flex justify-end gap-2 mt-5">
               <button className="btn btn-secondary text-xs" onClick={closeKeyModal}>
                 Cancel
@@ -834,12 +951,21 @@ export const SettingsPage = () => {
      TAB 3: Billing
      ══════════════════════════════════════════════════════════════ */
 
-  const billingQuery = useApiQuery<BillingUsage>("/api/v1/billing/usage?since_days=30", activeTab === "billing");
-  const dailyQuery = useApiQuery<{ points: DailyPoint[] }>("/api/v1/billing/usage/daily?days=30", activeTab === "billing");
+  const billingQuery = useApiQuery<BillingUsageRaw>("/api/v1/billing/usage?since_days=30", activeTab === "billing");
+  const dailyQuery = useApiQuery<{ days: DailyPointRaw[] }>("/api/v1/billing/usage/daily?days=30", activeTab === "billing");
   const stripeQuery = useApiQuery<StripeStatus>("/api/v1/stripe/status", activeTab === "billing");
 
-  const billing = billingQuery.data;
-  const dailyPoints = dailyQuery.data?.points ?? [];
+  const billingRaw = billingQuery.data;
+  const totalCost = billingRaw?.total_cost_usd ?? 0;
+  const inferenceCost = billingRaw?.inference_cost_usd ?? 0;
+  const gpuCost = billingRaw?.gpu_compute_cost_usd ?? 0;
+  const connectorCost = billingRaw?.connector_cost_usd ?? 0;
+
+  const dailyPoints = useMemo(() => {
+    const raw = dailyQuery.data?.days ?? [];
+    return raw.map((d) => ({ date: d.day, cost: d.cost }));
+  }, [dailyQuery.data]);
+
   const plan = stripeQuery.data?.plan ?? "Free";
 
   const handleManageSubscription = async () => {
@@ -868,7 +994,11 @@ export const SettingsPage = () => {
     : "";
 
   // Horizontal bar chart for cost by agent
-  const agentCosts = billing?.by_agent ?? [];
+  const agentCosts = useMemo(() => {
+    const raw = billingRaw?.by_agent;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    return Object.entries(raw).map(([name, cost]) => ({ name, cost: Number(cost) }));
+  }, [billingRaw]);
   const maxAgentCost = Math.max(...agentCosts.map((a) => a.cost), 1);
 
   const billingContent = (
@@ -886,10 +1016,10 @@ export const SettingsPage = () => {
         <>
           {/* Signal cards */}
           <div className="flex flex-wrap gap-3 mb-6">
-            <SignalCard label="Total This Month" value={formatCurrency(billing?.total ?? 0)} />
-            <SignalCard label="Inference" value={formatCurrency(billing?.inference ?? 0)} />
-            <SignalCard label="Tools" value={formatCurrency(billing?.tools ?? 0)} />
-            <SignalCard label="Infra" value={formatCurrency(billing?.infra ?? 0)} />
+            <SignalCard label="Total This Month" value={formatCurrency(totalCost)} />
+            <SignalCard label="Inference" value={formatCurrency(inferenceCost)} />
+            <SignalCard label="GPU Compute" value={formatCurrency(gpuCost)} />
+            <SignalCard label="Connectors" value={formatCurrency(connectorCost)} />
           </div>
 
           {/* Daily cost chart */}
@@ -973,33 +1103,40 @@ export const SettingsPage = () => {
           )}
 
           {/* Cost by Model */}
-          {(billing?.by_model ?? []).length > 0 && (
-            <div className="card mb-6">
-              <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-3">
-                Cost by Model
-              </h3>
-              <div className="overflow-x-auto">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Model</th>
-                      <th>Cost</th>
-                      <th>% of Total</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(billing?.by_model ?? []).map((m) => (
-                      <tr key={m.model}>
-                        <td><span className="text-text-primary text-sm font-mono">{m.model}</span></td>
-                        <td><span className="text-text-secondary text-sm font-mono">{formatCurrency(m.cost)}</span></td>
-                        <td><span className="text-text-muted text-sm">{m.pct.toFixed(1)}%</span></td>
+          {(() => {
+            const rawModel = billingRaw?.by_model;
+            if (!rawModel || typeof rawModel !== "object" || Array.isArray(rawModel)) return null;
+            const modelEntries = Object.entries(rawModel).map(([model, cost]) => ({ model, cost: Number(cost) }));
+            if (modelEntries.length === 0) return null;
+            const modelTotal = modelEntries.reduce((s, m) => s + m.cost, 0) || 1;
+            return (
+              <div className="card mb-6">
+                <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-3">
+                  Cost by Model
+                </h3>
+                <div className="overflow-x-auto">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Model</th>
+                        <th>Cost</th>
+                        <th>% of Total</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {modelEntries.map((m) => (
+                        <tr key={m.model}>
+                          <td><span className="text-text-primary text-sm font-mono">{m.model}</span></td>
+                          <td><span className="text-text-secondary text-sm font-mono">{formatCurrency(m.cost)}</span></td>
+                          <td><span className="text-text-muted text-sm">{((m.cost / modelTotal) * 100).toFixed(1)}%</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Plan */}
           <div className="card flex items-center justify-between">
@@ -2263,11 +2400,15 @@ export const SettingsPage = () => {
   const tabContent: Record<TabId, React.ReactNode> = {
     team: teamContent,
     "api-keys": apiKeysContent,
+    domains: <DomainsTab />,
+    "end-users": <EndUserTokensTab />,
+    widget: <WidgetConfigTab />,
     billing: billingContent,
     integrations: integrationsContent,
     schedules: schedulesContent,
     webhooks: webhooksContent,
     secrets: secretsContent,
+    compliance: <ComplianceTab />,
     projects: projectsContent,
   };
 

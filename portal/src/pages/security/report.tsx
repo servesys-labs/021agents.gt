@@ -8,6 +8,8 @@ import {
 
 import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
+import { StatCard } from "../../components/common/StatCard";
+import { SeverityBadge, getSeverityColors, normalizeLevel } from "../../components/common/SeverityBadge";
 import { useApiQuery } from "../../lib/api";
 
 /* ── Types ──────────────────────────────────────────────────────── */
@@ -38,36 +40,6 @@ type SecurityReport = {
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
-
-function riskColor(level: string) {
-  switch (level?.toLowerCase()) {
-    case "critical":
-      return "text-status-error";
-    case "high":
-      return "text-chart-orange";
-    case "medium":
-      return "text-status-warning";
-    case "low":
-      return "text-status-live";
-    default:
-      return "text-text-muted";
-  }
-}
-
-function riskBadgeBg(level: string) {
-  switch (level?.toLowerCase()) {
-    case "critical":
-      return "bg-status-error/15 text-status-error border-status-error/20";
-    case "high":
-      return "bg-chart-orange/15 text-chart-orange border-chart-orange/20";
-    case "medium":
-      return "bg-status-warning/15 text-status-warning border-status-warning/20";
-    case "low":
-      return "bg-status-live/15 text-status-live border-status-live/20";
-    default:
-      return "bg-surface-overlay text-text-muted border-border-default";
-  }
-}
 
 /* ── Security Report Page ───────────────────────────────────────── */
 
@@ -125,21 +97,14 @@ export function SecurityReportPage() {
         {/* KPI cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
           {kpis.map((kpi) => (
-            <div key={kpi.label} className="card flex items-center gap-3 py-3">
-              <div className={`p-2 rounded-lg ${kpi.color}`}>
-                <kpi.icon size={16} className={kpi.iconColor} />
-              </div>
-              <div>
-                <p className="text-xl font-bold text-text-primary font-mono">
-                  {typeof kpi.value === "number"
-                    ? kpi.value.toLocaleString()
-                    : kpi.value}
-                </p>
-                <p className="text-[10px] text-text-muted uppercase tracking-wide">
-                  {kpi.label}
-                </p>
-              </div>
-            </div>
+            <StatCard
+              key={kpi.label}
+              label={kpi.label}
+              value={kpi.value}
+              icon={<kpi.icon size={16} className={kpi.iconColor} />}
+              color={kpi.color}
+              iconColor={kpi.iconColor}
+            />
           ))}
         </div>
 
@@ -171,22 +136,10 @@ export function SecurityReportPage() {
                       const pct = Math.round((count / total) * 100);
                       return (
                         <div key={severity} className="flex items-center gap-3">
-                          <span
-                            className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase border w-20 text-center ${riskBadgeBg(severity)}`}
-                          >
-                            {severity}
-                          </span>
+                          <SeverityBadge level={normalizeLevel(severity)} size="sm" className="w-20 text-center justify-center" />
                           <div className="flex-1 h-1.5 bg-surface-overlay rounded-full overflow-hidden">
                             <div
-                              className={`h-full rounded-full ${
-                                severity.toLowerCase() === "critical"
-                                  ? "bg-status-error"
-                                  : severity.toLowerCase() === "high"
-                                    ? "bg-chart-orange"
-                                    : severity.toLowerCase() === "medium"
-                                      ? "bg-status-warning"
-                                      : "bg-status-live"
-                              }`}
+                              className={`h-full rounded-full ${getSeverityColors(normalizeLevel(severity)).dot}`}
                               style={{ width: `${pct}%` }}
                             />
                           </div>
@@ -259,17 +212,13 @@ export function SecurityReportPage() {
                       </td>
                       <td className="text-right">
                         <span
-                          className={`font-mono font-semibold ${riskColor(agent.risk_level)}`}
+                          className={`font-mono font-semibold ${getSeverityColors(normalizeLevel(agent.risk_level)).text}`}
                         >
                           {agent.risk_score.toFixed(1)}
                         </span>
                       </td>
                       <td>
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase border ${riskBadgeBg(agent.risk_level)}`}
-                        >
-                          {agent.risk_level}
-                        </span>
+                        <SeverityBadge level={normalizeLevel(agent.risk_level)} size="sm" />
                       </td>
                       <td className="text-right font-mono text-text-muted">
                         {agent.findings_count}

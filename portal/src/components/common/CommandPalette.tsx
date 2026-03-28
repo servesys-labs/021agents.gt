@@ -69,10 +69,10 @@ const PAGE_ITEMS: Omit<ResultItem, "action">[] = [
 ];
 
 const PAGE_ROUTES: Record<string, string> = {
-  "p-canvas": "/",
-  "p-overview": "/overview",
-  "p-observability": "/observability",
-  "p-metrics": "/metrics",
+  "p-canvas": "/agents",
+  "p-overview": "/",
+  "p-observability": "/sessions",
+  "p-metrics": "/intelligence",
   "p-intelligence": "/intelligence",
   "p-compliance": "/compliance",
   "p-issues": "/issues",
@@ -80,7 +80,7 @@ const PAGE_ROUTES: Record<string, string> = {
   "p-autoresearch": "/autoresearch",
   "p-voice": "/voice",
   "p-settings": "/settings",
-  "p-billing": "/billing",
+  "p-billing": "/billing/pricing",
   "p-tools": "/tools",
   "p-a2a": "/a2a",
   "p-a2a-compose": "/a2a/compose",
@@ -98,8 +98,8 @@ const ACTION_ITEMS: Omit<ResultItem, "action">[] = [
 ];
 
 const ACTION_ROUTES: Record<string, string> = {
-  "a-create-agent": "/canvas",
-  "a-upload-doc": "/canvas",
+  "a-create-agent": "/agents/new",
+  "a-upload-doc": "/tools",
   "a-create-tool": "/tools?action=create",
   "a-compose-a2a": "/a2a/compose",
 };
@@ -148,7 +148,7 @@ export const CommandPalette = ({
         description: a.description?.slice(0, 50) || a.model || "Agent",
         icon: <Bot size={iconSize} strokeWidth={iconStroke} />,
         group: "agents" as const,
-        action: () => { navigate(`/canvas?agent=${a.name}`); onClose(); },
+        action: () => { navigate(`/agents/${a.name}`); onClose(); },
       }));
 
     const actionResults: ResultItem[] = ACTION_ITEMS

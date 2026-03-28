@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useApiQuery, apiPost } from "../../../lib/api";
+import { useApiQuery, apiPost, getToken } from "../../../lib/api";
 import {
   Zap, CheckCircle, XCircle, AlertTriangle, TrendingUp,
   Clock, DollarSign, Activity, Play, ChevronDown, ChevronRight,
@@ -46,6 +46,30 @@ interface LedgerEntry {
   created_at: number;
 }
 
+type ApplyBlockedPayload = {
+  error?: string;
+  message?: string;
+  details?: {
+    min_pass?: number;
+    min_eval_trials?: number;
+    min_report_sessions?: number;
+    eval_window?: { best_pass_rate?: number; best_total_trials?: number; runs_in_window?: number };
+    latest_report?: { session_count?: number; success_rate?: number } | null;
+  };
+  markers_preview?: {
+    gate_snapshot?: {
+      eval_window?: { best_pass_rate?: number; best_total_trials?: number; runs_in_window?: number };
+      latest_report?: { session_count?: number; success_rate?: number } | null;
+    };
+  };
+};
+
+type GateCheck = {
+  label: string;
+  passed: boolean;
+  detail: string;
+};
+
 const CATEGORY_ICONS: Record<string, typeof Zap> = {
   prompt: Brain, tools: Wrench, governance: Shield, model: Cpu, memory: Database,
 };
@@ -60,12 +84,55 @@ function priorityLabel(p: number): string {
   return "low";
 }
 
+function buildGateChecklist(
+  payload: ApplyBlockedPayload | null | undefined,
+  options: { autopilot: boolean; force: boolean },
+): GateCheck[] {
+  const details = payload?.details;
+  const minPass = Number(details?.min_pass ?? 0);
+  const minEvalTrials = Number(details?.min_eval_trials ?? 0);
+  const minReportSessions = Number(details?.min_report_sessions ?? 0);
+  const evalWindow = details?.eval_window;
+  const latestReport = details?.latest_report;
+
+  const evalPass =
+    Number(evalWindow?.best_total_trials ?? 0) >= minEvalTrials &&
+    Number(evalWindow?.best_pass_rate ?? 0) >= minPass;
+  const reportPass =
+    Number(latestReport?.session_count ?? 0) >= minReportSessions &&
+    Number(latestReport?.success_rate ?? 0) >= minPass;
+
+  return [
+    {
+      label: "Eval Gate",
+      passed: evalPass,
+      detail: `need trials>=${minEvalTrials}, pass>=${minPass}; got trials=${Number(evalWindow?.best_total_trials ?? 0)}, pass=${Number(evalWindow?.best_pass_rate ?? 0)}`,
+    },
+    {
+      label: "Report Gate",
+      passed: reportPass,
+      detail: `need sessions>=${minReportSessions}, success>=${minPass}; got sessions=${Number(latestReport?.session_count ?? 0)}, success=${Number(latestReport?.success_rate ?? 0)}`,
+    },
+    {
+      label: "Force Override",
+      passed: options.force === true,
+      detail: options.autopilot
+        ? (options.force ? "enabled" : "not enabled")
+        : "autopilot not requested",
+    },
+  ];
+}
+
 export const EvolveTab = ({ agentName }: { agentName: string }) => {
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisDays, setAnalysisDays] = useState(7);
   const [expandedProposal, setExpandedProposal] = useState<string | null>(null);
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
   const [confirmApply, setConfirmApply] = useState<string | null>(null);
+  const [applyError, setApplyError] = useState<Record<string, ApplyBlockedPayload | null>>({});
+  const [applyOptions, setApplyOptions] = useState<
+    Record<string, { autopilot: boolean; force: boolean; reason: string }>
+  >({});
 
   const reportQuery = useApiQuery<{ report: AnalysisReport | null; sessions_analyzed?: number }>(
     `/api/v1/evolve/${agentName}/report`,
@@ -113,11 +180,45 @@ export const EvolveTab = ({ agentName }: { agentName: string }) => {
     ledgerQuery.refetch();
   }
 
+  function getApplyOptions(proposalId: string) {
+    return applyOptions[proposalId] || { autopilot: false, force: false, reason: "" };
+  }
+
   async function applyProposal(proposalId: string) {
-    await apiPost(`/api/v1/evolve/${agentName}/proposals/${proposalId}/apply`);
-    setConfirmApply(null);
-    proposalsQuery.refetch();
-    ledgerQuery.refetch();
+    const options = getApplyOptions(proposalId);
+    try {
+      const token = getToken();
+      const resp = await fetch(`/api/v1/evolve/${agentName}/proposals/${proposalId}/apply`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          autopilot: options.autopilot,
+          evolution_apply_guard: options.force
+            ? { force: true, reason: options.reason || "manual_force" }
+            : undefined,
+        }),
+      });
+      if (!resp.ok) {
+        const payload = (await resp.json().catch(() => ({}))) as ApplyBlockedPayload;
+        const msg = payload.message || payload.error || `Apply failed (${resp.status})`;
+        throw { msg, payload };
+      }
+      setApplyError((prev) => {
+        const next = { ...prev };
+        delete next[proposalId];
+        return next;
+      });
+      setConfirmApply(null);
+      proposalsQuery.refetch();
+      ledgerQuery.refetch();
+    } catch (err: any) {
+      const payload = (err?.payload || null) as ApplyBlockedPayload | null;
+      const fallback = err?.msg ? { message: String(err.msg) } : { message: "Failed to apply proposal" };
+      setApplyError((prev) => ({ ...prev, [proposalId]: payload || fallback }));
+    }
   }
 
   return (
@@ -361,17 +462,122 @@ export const EvolveTab = ({ agentName }: { agentName: string }) => {
                     )}
                   </div>
                   {confirmApply === proposal.proposal_id ? (
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-status-error font-semibold">This will modify the agent config.</span>
-                      <button onClick={() => applyProposal(proposal.proposal_id)} className="btn btn-primary text-xs">
-                        Confirm
-                      </button>
-                      <button onClick={() => setConfirmApply(null)} className="btn btn-ghost text-xs">
-                        Cancel
-                      </button>
+                    <div className="flex flex-col items-end gap-1.5">
+                      <span className="text-[10px] text-status-error font-semibold">
+                        This will modify the agent config.
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <label className="text-[10px] text-text-muted flex items-center gap-1.5">
+                          <input
+                            type="checkbox"
+                            checked={getApplyOptions(proposal.proposal_id).autopilot}
+                            onChange={(e) =>
+                              setApplyOptions((prev) => ({
+                                ...prev,
+                                [proposal.proposal_id]: {
+                                  ...getApplyOptions(proposal.proposal_id),
+                                  autopilot: e.target.checked,
+                                },
+                              }))
+                            }
+                          />
+                          Autopilot gates
+                        </label>
+                        {getApplyOptions(proposal.proposal_id).autopilot ? (
+                          <label className="text-[10px] text-text-muted flex items-center gap-1.5">
+                            <input
+                              type="checkbox"
+                              checked={getApplyOptions(proposal.proposal_id).force}
+                              onChange={(e) =>
+                                setApplyOptions((prev) => ({
+                                  ...prev,
+                                  [proposal.proposal_id]: {
+                                    ...getApplyOptions(proposal.proposal_id),
+                                    force: e.target.checked,
+                                  },
+                                }))
+                              }
+                            />
+                            Force override
+                          </label>
+                        ) : null}
+                      </div>
+                      {getApplyOptions(proposal.proposal_id).autopilot &&
+                      getApplyOptions(proposal.proposal_id).force ? (
+                        <input
+                          type="text"
+                          placeholder="force reason (optional)"
+                          value={getApplyOptions(proposal.proposal_id).reason}
+                          onChange={(e) =>
+                            setApplyOptions((prev) => ({
+                              ...prev,
+                              [proposal.proposal_id]: {
+                                ...getApplyOptions(proposal.proposal_id),
+                                reason: e.target.value,
+                              },
+                            }))
+                          }
+                          className="text-xs bg-surface-base border border-border-default rounded px-2 py-1 w-[240px]"
+                        />
+                      ) : null}
+                      {applyError[proposal.proposal_id] ? (
+                        <div className="max-w-[420px] border border-status-error/30 bg-status-error/10 rounded p-2">
+                          <p className="text-[10px] text-status-error font-semibold">
+                            {applyError[proposal.proposal_id]?.message || applyError[proposal.proposal_id]?.error || "Apply blocked"}
+                          </p>
+                          {applyError[proposal.proposal_id]?.details ? (
+                            <div className="mt-1 text-[10px] text-text-secondary space-y-0.5">
+                              <p>
+                                Gate mins: pass {applyError[proposal.proposal_id]?.details?.min_pass ?? 0},
+                                eval trials {applyError[proposal.proposal_id]?.details?.min_eval_trials ?? 0},
+                                report sessions {applyError[proposal.proposal_id]?.details?.min_report_sessions ?? 0}
+                              </p>
+                              <p>
+                                Eval window: pass {applyError[proposal.proposal_id]?.details?.eval_window?.best_pass_rate ?? 0},
+                                trials {applyError[proposal.proposal_id]?.details?.eval_window?.best_total_trials ?? 0}
+                              </p>
+                              <p>
+                                Latest report: sessions {applyError[proposal.proposal_id]?.details?.latest_report?.session_count ?? 0},
+                                success {applyError[proposal.proposal_id]?.details?.latest_report?.success_rate ?? 0}
+                              </p>
+                              <div className="mt-1 border-t border-status-error/20 pt-1 space-y-1">
+                                {buildGateChecklist(
+                                  applyError[proposal.proposal_id],
+                                  getApplyOptions(proposal.proposal_id),
+                                ).map((gate) => (
+                                  <div key={gate.label} className="flex items-start justify-between gap-2">
+                                    <span className={`font-semibold ${gate.passed ? "text-status-live" : "text-status-error"}`}>
+                                      {gate.passed ? "PASS" : "FAIL"} {gate.label}
+                                    </span>
+                                    <span className="text-right text-text-muted">{gate.detail}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      <div className="flex items-center gap-1.5">
+                        <button onClick={() => applyProposal(proposal.proposal_id)} className="btn btn-primary text-xs">
+                          Confirm
+                        </button>
+                        <button onClick={() => setConfirmApply(null)} className="btn btn-ghost text-xs">
+                          Cancel
+                        </button>
+                      </div>
                     </div>
                   ) : (
-                    <button onClick={() => setConfirmApply(proposal.proposal_id)} className="btn btn-primary text-xs">
+                    <button
+                      onClick={() => {
+                        setApplyError((prev) => {
+                          const next = { ...prev };
+                          delete next[proposal.proposal_id];
+                          return next;
+                        });
+                        setConfirmApply(proposal.proposal_id);
+                      }}
+                      className="btn btn-primary text-xs"
+                    >
                       Apply
                     </button>
                   )}

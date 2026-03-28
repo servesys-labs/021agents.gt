@@ -59,6 +59,9 @@ export type SessionInfo = {
   session_id: string;
   agent_name?: string;
   status?: string;
+  trace_id?: string;
+  parent_session_id?: string | null;
+  depth?: number;
   step_count?: number;
   cost_total_usd?: number;
   wall_clock_seconds?: number;
@@ -120,6 +123,7 @@ export type AgentConfig = {
   timeout_seconds: number;
   plan: string;
   tags: string[];
+  deploy_policy?: Record<string, unknown>;
   governance: AgentGovernance;
 };
 

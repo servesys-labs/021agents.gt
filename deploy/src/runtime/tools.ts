@@ -490,14 +490,16 @@ export async function executeTools(
   parallel: boolean = true,
   enabledTools?: string[],
 ): Promise<ToolResult[]> {
+  const envelope = (env as any).__agentConfig as { enabled_tools?: string[] } | undefined;
+  const effectiveEnabledTools = enabledTools ?? envelope?.enabled_tools;
   if (parallel && toolCalls.length > 1) {
     return Promise.all(
-      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId, enabledTools)),
+      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId, effectiveEnabledTools)),
     );
   }
   const results: ToolResult[] = [];
   for (const tc of toolCalls) {
-    results.push(await executeSingleTool(env, tc, sessionId, enabledTools));
+    results.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools));
   }
   return results;
 }
@@ -541,6 +543,7 @@ async function executeSingleTool(
     | {
       allowed_domains?: string[];
       blocked_domains?: string[];
+      enabled_tools?: string[];
       require_confirmation_for_destructive?: boolean;
       max_tokens_per_turn?: number;
     }
@@ -1586,7 +1589,54 @@ async function dispatch(
       const task = String(args.task || "");
       if (!agentName || !task) return "run-agent requires agent_name and task";
       const channel = args.channel || "internal";
-      const orgId = args.org_id || "";
+      const lineage = (env as any).__delegationLineage as
+        | {
+            session_id?: string;
+            trace_id?: string;
+            agent_name?: string;
+            depth?: number;
+            org_id?: string;
+            project_id?: string;
+            budget_limit_usd?: number;
+            cumulative_cost_usd?: number;
+            turn?: number;
+            max_turns?: number;
+            policy_hints?: Record<string, unknown>;
+          }
+        | undefined;
+
+      const orgId = String(args.org_id || lineage?.org_id || "");
+      const parentDepth = Number(lineage?.depth) || 0;
+      const MAX_DELEGATION_DEPTH = 6;
+      if (parentDepth >= MAX_DELEGATION_DEPTH) {
+        return JSON.stringify({
+          output: "",
+          error: `delegation_depth_exceeded`,
+          delegation_trace: {
+            max_depth: MAX_DELEGATION_DEPTH,
+            parent_depth: parentDepth,
+          },
+        });
+      }
+
+      const budgetLimit = Number(lineage?.budget_limit_usd ?? 0);
+      const spent = Number(lineage?.cumulative_cost_usd ?? 0);
+      const budgetRemaining = budgetLimit > 0 ? Math.max(0, budgetLimit - spent) : undefined;
+
+      const delegation = lineage?.session_id
+        ? {
+            parent_session_id: String(lineage.session_id),
+            parent_trace_id: String(lineage.trace_id || ""),
+            parent_agent_name: String(lineage.agent_name || ""),
+            parent_depth: parentDepth,
+            inherited_budget_limit_usd: budgetLimit || undefined,
+            inherited_budget_remaining_usd: budgetRemaining,
+            inherited_turn: Number(lineage.turn) || undefined,
+            inherited_max_turns: Number(lineage.max_turns) || undefined,
+            policy_hints: lineage.policy_hints,
+          }
+        : undefined;
+
       try {
         // Internal fetch to the same worker — the DO namespace routes to the correct agent
         const runtimeUrl = (env as any).RUNTIME_URL || "https://runtime.agentos.workers.dev";
@@ -1596,10 +1646,52 @@ async function dispatch(
             "Content-Type": "application/json",
             "Authorization": `Bearer ${(env as any).SERVICE_TOKEN || ""}`,
           },
-          body: JSON.stringify({ agent_name: agentName, input: task, channel, org_id: orgId }),
+          body: JSON.stringify({
+            agent_name: agentName,
+            input: task,
+            channel,
+            org_id: orgId,
+            project_id: lineage?.project_id || "",
+            delegation,
+          }),
         });
-        const result = await resp.text();
-        return result.slice(0, 10000);
+        const raw = await resp.text();
+        let childOutput = raw;
+        let childSessionId = "";
+        let childTraceId = "";
+        try {
+          const parsed = JSON.parse(raw) as {
+            output?: string;
+            session_id?: string;
+            trace_id?: string;
+            success?: boolean;
+          };
+          if (typeof parsed.output === "string") childOutput = parsed.output;
+          if (typeof parsed.session_id === "string") childSessionId = parsed.session_id;
+          if (typeof parsed.trace_id === "string") childTraceId = parsed.trace_id;
+        } catch {
+          /* plain-text response */
+        }
+
+        const delegationTrace = {
+          parent_session_id: delegation?.parent_session_id,
+          parent_trace_id: delegation?.parent_trace_id,
+          parent_agent_name: delegation?.parent_agent_name,
+          parent_depth: delegation?.parent_depth,
+          child_session_id: childSessionId || undefined,
+          child_trace_id: childTraceId || undefined,
+          child_agent_name: agentName,
+          child_depth: delegation ? parentDepth + 1 : 0,
+          inherited_budget_limit_usd: delegation?.inherited_budget_limit_usd,
+          inherited_budget_remaining_usd: delegation?.inherited_budget_remaining_usd,
+          correlation_id: crypto.randomUUID().slice(0, 12),
+        };
+
+        const payload = {
+          output: childOutput.slice(0, 9500),
+          delegation_trace: delegationTrace,
+        };
+        return JSON.stringify(payload);
       } catch (err: any) {
         return `Failed to run agent: ${err.message || err}`;
       }
@@ -3862,13 +3954,16 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "run-agent",
-      description: "Delegate a task to another agent. The sub-agent runs independently and returns output.",
+      description:
+        "Delegate a task to another agent. Returns JSON with `output` (sub-agent text) and `delegation_trace` " +
+        "(parent/child session ids, depth, budget hints). Parent lineage is filled automatically when nested.",
       parameters: {
         type: "object",
         properties: {
           agent_name: { type: "string", description: "Agent to run" },
           task: { type: "string", description: "Task/message to send" },
           channel: { type: "string", description: "Channel (default internal)" },
+          org_id: { type: "string", description: "Org id (optional if same as caller)" },
         },
         required: ["agent_name", "task"],
       },

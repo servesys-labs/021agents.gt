@@ -48,6 +48,21 @@ jobs:
       - name: Check syntax
         run: python -m py_compile agentos/cli.py agentos/agent.py agentos/api/app.py
 
+  deploy-runtime:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install deploy dependencies
+        run: npm ci
+      - name: Run deploy runtime tests (governance parity harness)
+        run: npm test
+
   portal:
     runs-on: ubuntu-latest
     defaults:

@@ -892,13 +892,13 @@ function AgentSettingsContent({ section, data, nodeId, onUpdateNode }: {
           setChatInput("");
           setChatLoading(true);
           try {
-            const res = await apiRequest<{ response: string; session_id?: string; turns?: number; cost_usd?: number }>(
-              `/api/v1/agents/${data.name}/chat`,
+            const res = await apiRequest<{ output?: string; response?: string; session_id?: string; turns?: number; cost_usd?: number }>(
+              `/api/v1/runtime-proxy/agent/run`,
               "POST",
-              { message: userMsg, session_id: chatSessionId },
+              { agent_name: data.name, input: userMsg, session_id: chatSessionId },
             );
             if (res.session_id) setChatSessionId(res.session_id);
-            setChatMessages((prev) => [...prev, { role: "assistant", content: res.response }]);
+            setChatMessages((prev) => [...prev, { role: "assistant", content: res.output || res.response || "No response" }]);
           } catch (err) {
             setChatMessages((prev) => [...prev, {
               role: "assistant",

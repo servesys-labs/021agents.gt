@@ -12,7 +12,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { apiPost, apiPut, apiGet } from "../../lib/api";
+import { apiPost, apiPut, apiGet, ApiError } from "../../lib/api";
 import { CollapsibleSection } from "../../components/common/CollapsibleSection";
 
 /* ── Types ──────────────────────────────────────────────────────── */
@@ -105,6 +105,13 @@ const ALL_TOOLS = Object.values(TOOL_CATEGORIES).flat();
 /* ── Stage enum ─────────────────────────────────────────────────── */
 
 type Stage = "description" | "generating" | "review";
+const ALLOWED_REASONING = new Set([
+  "step-back",
+  "chain-of-thought",
+  "plan-then-execute",
+  "verify-then-respond",
+  "decompose",
+]);
 
 /* ── Component ──────────────────────────────────────────────────── */
 
@@ -262,11 +269,72 @@ export function CreateAgentPage() {
 
   /* ── Save handler ──────────────────────────────────────────────── */
 
+  const buildAgentSavePayload = useCallback((cfg: GeneratedConfig, opts?: { strict?: boolean }) => {
+    const name = String(cfg.name || "").trim();
+    const reasoning = cfg.reasoning_strategy && ALLOWED_REASONING.has(cfg.reasoning_strategy)
+      ? cfg.reasoning_strategy
+      : undefined;
+    return {
+      name,
+      description: String(cfg.description || ""),
+      system_prompt: String(cfg.system_prompt || ""),
+      model: String(cfg.model || ""),
+      tools: Array.isArray(cfg.tools) ? cfg.tools : [],
+      governance: cfg.governance ?? {
+        budget_limit_usd: 10,
+        blocked_tools: [],
+        require_confirmation_for_destructive: true,
+      },
+      reasoning_strategy: reasoning,
+      eval_config: cfg.eval_config,
+      release_strategy: cfg.release_strategy,
+      mcp_connectors: cfg.mcp_connectors,
+      sub_agents: cfg.sub_agents,
+      skills: cfg.skills,
+      codemode_snippets: cfg.codemode_snippets,
+      guardrails: cfg.guardrails,
+      // Backend expects object graph; UI graph array is only a local preview/editor shape.
+      graph: cfg.agent_graph ?? undefined,
+      // "Save" should allow draft persistence even when strict lint is not yet green.
+      strict_graph_lint: opts?.strict ?? true,
+      auto_graph: true,
+      draft_only: false,
+    };
+  }, []);
+
+  const upsertAgentByName = useCallback(async (payload: ReturnType<typeof buildAgentSavePayload>) => {
+    const path = `/api/v1/agents/${encodeURIComponent(payload.name)}`;
+    try {
+      await apiPut(path, payload);
+      return;
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : undefined;
+      if (status !== 404) throw err;
+    }
+
+    try {
+      await apiPost("/api/v1/agents", payload);
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : undefined;
+      // If another flow created it between PUT and POST, finalize with update.
+      if (status === 409) {
+        await apiPut(path, payload);
+        return;
+      }
+      throw err;
+    }
+  }, [buildAgentSavePayload]);
+
   const handleSaveAndTest = async () => {
     if (!config) return;
     try {
-      await apiPost("/api/v1/agents", { ...config, draft_only: false });
-      navigate(`/agents/${config.name}/playground`);
+      const payload = buildAgentSavePayload(config, { strict: true });
+      if (!payload.name) {
+        setError("Agent name is required before saving.");
+        return;
+      }
+      await upsertAgentByName(payload);
+      navigate(`/agents/${encodeURIComponent(payload.name)}/playground`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
     }
@@ -275,8 +343,13 @@ export function CreateAgentPage() {
   const handleDeploy = async () => {
     if (!config) return;
     try {
-      await apiPost("/api/v1/agents", { ...config, draft_only: false });
-      navigate(`/agents/${config.name}/deploy`);
+      const payload = buildAgentSavePayload(config, { strict: true });
+      if (!payload.name) {
+        setError("Agent name is required before saving.");
+        return;
+      }
+      await upsertAgentByName(payload);
+      navigate(`/agents/${encodeURIComponent(payload.name)}/deploy`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
     }
@@ -285,7 +358,12 @@ export function CreateAgentPage() {
   const handleSaveConfig = async () => {
     if (!config) return;
     try {
-      await apiPut(`/api/v1/agents/${config.name}`, config);
+      const payload = buildAgentSavePayload(config, { strict: false });
+      if (!payload.name) {
+        setError("Agent name is required before saving.");
+        return;
+      }
+      await upsertAgentByName(payload);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");

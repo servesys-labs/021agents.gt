@@ -31,6 +31,9 @@ type SessionDetail = {
   session_id: string;
   agent_name?: string;
   status?: string;
+  trace_id?: string;
+  parent_session_id?: string | null;
+  depth?: number;
   cost_total_usd?: number;
   wall_clock_seconds?: number;
   created_at?: string;
@@ -217,6 +220,39 @@ export function SessionTracePage() {
           </button>
         </div>
       </div>
+
+      {(session?.depth ?? 0) > 0 || session?.parent_session_id ? (
+        <div className="card mb-[var(--space-4)] py-[var(--space-3)]">
+          <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-2)]">
+            Delegation Lineage
+          </p>
+          <div className="flex items-center gap-[var(--space-4)] flex-wrap">
+            <div>
+              <p className="text-[10px] text-text-muted uppercase">Depth</p>
+              <p className="text-[var(--text-sm)] font-mono text-text-primary">{session?.depth ?? 0}</p>
+            </div>
+            <div>
+              <p className="text-[10px] text-text-muted uppercase">Parent Session</p>
+              {session?.parent_session_id ? (
+                <button
+                  className="text-[var(--text-xs)] font-mono text-accent hover:underline"
+                  onClick={() => navigate(`/sessions?q=${encodeURIComponent(session.parent_session_id || "")}`)}
+                >
+                  {truncateId(session.parent_session_id, 24)}
+                </button>
+              ) : (
+                <p className="text-[var(--text-xs)] text-text-muted">None</p>
+              )}
+            </div>
+            <div>
+              <p className="text-[10px] text-text-muted uppercase">Trace</p>
+              <p className="text-[var(--text-xs)] font-mono text-text-secondary">
+                {session?.trace_id ? truncateId(session.trace_id, 24) : "--"}
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {/* Replay Panel */}
       {replayMode && sessionId && (

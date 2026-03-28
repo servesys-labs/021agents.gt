@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint .",
+    "check:routes": "node scripts/check-route-integrity.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "preview": "vite preview",

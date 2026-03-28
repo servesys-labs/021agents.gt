@@ -59,7 +59,19 @@ export interface CurrentUser {
   env: string;
   role: string;
   scopes: string[];
-  auth_method: "jwt" | "api_key";
+  auth_method: "jwt" | "api_key" | "end_user_token";
+  /** Per-key rate limit: requests per minute (API key / end-user token auth). */
+  rateLimitRpm?: number;
+  /** Per-key rate limit: requests per day (API key / end-user token auth). */
+  rateLimitRpd?: number;
+  /** Agent names this key/token is allowed to access (empty = all). */
+  allowedAgents?: string[];
+  /** IP allowlist for API key auth (empty = allow all). Supports exact IPs and CIDR ranges. */
+  ipAllowlist?: string[];
+  /** API key ID (key_id column) for audit logging. */
+  apiKeyId?: string;
+  /** The parent API key ID that minted this end-user token. */
+  endUserApiKeyId?: string;
 }
 
 export function hasScope(user: CurrentUser, scope: string): boolean {

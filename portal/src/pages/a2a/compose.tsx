@@ -50,7 +50,11 @@ export function A2AComposePage() {
     "/api/v1/a2a/agents",
   );
 
-  const agents = useMemo(() => agentsData ?? [], [agentsData]);
+  const agents = useMemo(() => {
+    if (Array.isArray(agentsData)) return agentsData;
+    if (agentsData && typeof agentsData === "object" && Array.isArray((agentsData as any).agents)) return (agentsData as any).agents;
+    return [];
+  }, [agentsData]);
 
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [message, setMessage] = useState("");

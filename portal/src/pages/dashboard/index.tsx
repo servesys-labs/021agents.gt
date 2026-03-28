@@ -23,6 +23,7 @@ import { StatusBadge } from "../../components/common/StatusBadge";
 import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
 import { AssistPanel } from "../../components/common/AssistPanel";
 import { SkeletonDashboard } from "../../components/common/Skeleton";
+import { StatCard } from "../../components/common/StatCard";
 import { PageShell } from "../../components/layout/PageShell";
 import { useApiQuery } from "../../lib/api";
 import { safeArray, type AgentInfo } from "../../lib/adapters";
@@ -92,8 +93,8 @@ export const DashboardPage = () => {
     { label: "Total Agents", value: stats.total_agents ?? 0, icon: Bot, color: "bg-chart-purple/10", iconColor: "text-chart-purple", link: "/agents" },
     { label: "Live Agents", value: stats.live_agents ?? 0, icon: Zap, color: "bg-chart-green/10", iconColor: "text-chart-green", link: "/agents" },
     { label: "Active Sessions", value: stats.active_sessions ?? 0, icon: Activity, color: "bg-chart-blue/10", iconColor: "text-chart-blue", link: "/sessions" },
-    { label: "Total Runs", value: stats.total_runs ?? 0, icon: Play, color: "bg-accent/10", iconColor: "text-accent", link: "/runtime" },
-    { label: "Avg Latency", value: `${(stats.avg_latency_ms ?? 0).toFixed(0)}ms`, icon: Clock, color: "bg-chart-yellow/10", iconColor: "text-chart-yellow", link: "/evolution" },
+    { label: "Total Runs", value: stats.total_runs ?? 0, icon: Play, color: "bg-accent/10", iconColor: "text-accent", link: "/sessions" },
+    { label: "Avg Latency", value: `${(stats.avg_latency_ms ?? 0).toFixed(0)}ms`, icon: Clock, color: "bg-chart-yellow/10", iconColor: "text-chart-yellow", link: "/intelligence" },
     { label: "Error Rate", value: `${(stats.error_rate_pct ?? 0).toFixed(1)}%`, icon: AlertTriangle, color: "bg-status-error/10", iconColor: "text-status-error", link: "/sessions" },
     { label: "Avg Quality", value: `${Math.round((intel.avg_quality_score ?? 0) * 100)}%`, icon: Sparkles, color: "bg-chart-purple/10", iconColor: "text-chart-purple", link: "/intelligence" },
     { label: "Sentiment", value: `${(intel.avg_sentiment_score ?? 0) >= 0 ? "+" : ""}${(intel.avg_sentiment_score ?? 0).toFixed(2)}`, icon: ThumbsUp, color: "bg-chart-cyan/10", iconColor: "text-chart-cyan", link: "/intelligence" },
@@ -102,9 +103,9 @@ export const DashboardPage = () => {
 
   const quickActions = [
     { label: "Create Agent", icon: Bot, path: "/agents", desc: "Build and configure a new agent" },
-    { label: "Open Canvas", icon: Brain, path: "/canvas", desc: "Visual agent builder workspace" },
-    { label: "Run Eval", icon: TrendingUp, path: "/eval", desc: "Evaluate agent performance" },
-    { label: "Manage Integrations", icon: Server, path: "/integrations", desc: "Connect tools and MCP servers" },
+    { label: "Open Agent Builder", icon: Brain, path: "/agents/new", desc: "Create an agent from template or prompt" },
+    { label: "Run Eval", icon: TrendingUp, path: "/agents?tab=verify", desc: "Evaluate agent performance" },
+    { label: "Manage Integrations", icon: Server, path: "/connectors", desc: "Connect tools and MCP servers" },
     { label: "Browse Tools", icon: Wrench, path: "/tools", desc: "Explore the tool registry" },
     { label: "Discover Agents (A2A)", icon: Globe, path: "/a2a", desc: "Find and interact with A2A agents" },
   ];
@@ -155,22 +156,17 @@ export const DashboardPage = () => {
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {kpis.map((kpi, index) => (
-          <div
+          <StatCard
             key={kpi.label}
-            className="card flex items-center gap-3 py-3 cursor-pointer hover:border-accent/40 transition-colors stagger-item"
-            style={{ "--stagger-index": index } as CSSProperties}
+            label={kpi.label}
+            value={kpi.value}
+            icon={<kpi.icon size={16} className={kpi.iconColor} />}
+            color={kpi.color}
+            iconColor={kpi.iconColor}
             onClick={() => navigate(kpi.link)}
-          >
-            <div className={`p-2 rounded-lg ${kpi.color}`}>
-              <kpi.icon size={16} className={kpi.iconColor} />
-            </div>
-            <div>
-              <p className="text-xl font-bold text-text-primary font-mono">
-                {typeof kpi.value === "number" ? kpi.value.toLocaleString() : kpi.value}
-              </p>
-              <p className="text-[10px] text-text-muted uppercase tracking-wide">{kpi.label}</p>
-            </div>
-          </div>
+            className={"stagger-item"}
+            style={{ "--stagger-index": index } as CSSProperties}
+          />
         ))}
       </div>
 

@@ -207,6 +207,9 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
   const orgId = user.org_id;
   const agentName = c.req.param("agent_name");
   const proposalId = c.req.param("proposal_id");
+  const body = await c.req.json().catch(() => ({}));
+  const autopilotRequested = body.autopilot === true || body.scheduled === true;
+  const applyGuard = body.evolution_apply_guard as { force?: boolean; reason?: string } | undefined;
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -233,6 +236,22 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
 
   // ── Capture pre-apply baseline metrics (last 7 days) ──────
   const baselineMetrics = await computeAgentMetrics(sql, agentName, orgId, Date.now() / 1000 - 7 * 86400, Date.now() / 1000);
+
+  const gateSnapshot = await buildAutopilotGateSnapshot(sql, agentName, orgId);
+  if (autopilotRequested) {
+    const gate = evaluateAutopilotApplyGates(gateSnapshot, applyGuard);
+    if (!gate.ok) {
+      return c.json(
+        {
+          error: "autopilot_apply_blocked",
+          message: gate.reason,
+          details: gate.details,
+          markers_preview: { metrics_before: baselineMetrics, gate_snapshot: gateSnapshot },
+        },
+        403,
+      );
+    }
+  }
 
   // Apply modification to config (deep merge with special-case handling)
   const newConfig = deepMergeConfig(currentConfig, modification);
@@ -269,18 +288,41 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
     WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
   `;
 
+  const applyContext = {
+    autopilot_requested: autopilotRequested,
+    applied_by: user.user_id || "",
+    gates: autopilotRequested
+      ? evaluateAutopilotApplyGates(gateSnapshot, applyGuard)
+      : { ok: true as const, mode: "manual" },
+    markers_before: {
+      agent_metrics_7d: baselineMetrics,
+      latest_report: gateSnapshot.latest_report,
+      eval_window: gateSnapshot.eval_window,
+    },
+    markers_after_placeholder: {
+      note: "Run measure-impact to populate metrics_after on the ledger entry",
+    },
+  };
+
   // Record in ledger with before/after configs and baseline metrics
   await sql`
     INSERT INTO evolution_ledger (
       agent_name, org_id, proposal_id, action, note,
-      previous_config_json, new_config_json, metrics_before_json, created_at
+      previous_config_json, new_config_json, metrics_before_json, created_at, apply_context_json
     ) VALUES (
       ${agentName}, ${orgId}, ${proposalId}, 'applied',
       ${proposal.title || ""},
       ${JSON.stringify(currentConfig)}, ${JSON.stringify(newConfig)},
-      ${JSON.stringify(baselineMetrics)}, ${now}
+      ${JSON.stringify(baselineMetrics)}, ${now}, ${JSON.stringify(applyContext)}
     )
   `;
+
+  await mergeApplyMarkersIntoLatestReport(sql, agentName, orgId, {
+    proposal_id: proposalId,
+    applied_at: now,
+    autopilot: autopilotRequested,
+    markers_before: applyContext.markers_before,
+  });
 
   return c.json({
     applied: true,
@@ -288,6 +330,8 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
     title: proposal.title,
     changes: Object.keys(modification),
     metrics_before: baselineMetrics,
+    apply_markers: applyContext.markers_before,
+    autopilot: autopilotRequested,
   });
 });
 
@@ -566,6 +610,148 @@ async function computeAgentMetrics(
 function round(n: number, decimals: number): number {
   const f = Math.pow(10, decimals);
   return Math.round(n * f) / f;
+}
+
+type AutopilotGateSnapshot = {
+  latest_report: { success_rate: number; session_count: number; analyzed_at?: number } | null;
+  eval_qualifies: boolean;
+  eval_window: {
+    best_pass_rate: number;
+    best_total_trials: number;
+    runs_in_window: number;
+  };
+};
+
+async function buildAutopilotGateSnapshot(
+  sql: any,
+  agentName: string,
+  orgId: string,
+): Promise<AutopilotGateSnapshot> {
+  const windowStart = Date.now() / 1000 - 7 * 86400;
+  let latest_report: AutopilotGateSnapshot["latest_report"] = null;
+  const reportRows = await sql`
+    SELECT report_json, session_count, created_at FROM evolution_reports
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+    ORDER BY created_at DESC LIMIT 1
+  `.catch(() => []);
+  if (reportRows[0]) {
+    const r = safeJsonParse(reportRows[0].report_json) || {};
+    latest_report = {
+      success_rate: Number(r.success_rate ?? 0),
+      session_count: Number(reportRows[0].session_count ?? 0),
+      analyzed_at: Number(r.analyzed_at ?? 0) || undefined,
+    };
+  }
+
+  const evalRows = await sql`
+    SELECT pass_rate, total_trials, created_at, status
+    FROM eval_runs
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+      AND created_at > ${windowStart}
+    ORDER BY created_at DESC
+    LIMIT 20
+  `.catch(() => []);
+
+  const MIN_PASS = 0.85;
+  const MIN_EVAL_TRIALS = 3;
+  let bestPass = 0;
+  let bestTrials = 0;
+  let eval_qualifies = false;
+  for (const row of evalRows) {
+    const pr = Number(row.pass_rate || 0);
+    const tt = Number(row.total_trials || 0);
+    if (tt >= MIN_EVAL_TRIALS && pr >= MIN_PASS) eval_qualifies = true;
+    if (pr > bestPass || (pr === bestPass && tt > bestTrials)) {
+      bestPass = pr;
+      bestTrials = tt;
+    }
+  }
+
+  return {
+    latest_report,
+    eval_qualifies,
+    eval_window: {
+      best_pass_rate: round(bestPass, 4),
+      best_total_trials: bestTrials,
+      runs_in_window: evalRows.length,
+    },
+  };
+}
+
+function evaluateAutopilotApplyGates(
+  snap: AutopilotGateSnapshot,
+  guard?: { force?: boolean; reason?: string },
+):
+  | { ok: true; mode: string; detail?: string }
+  | { ok: false; reason: string; details: Record<string, unknown> } {
+  if (guard?.force === true) {
+    return { ok: true, mode: "guard_force", detail: String(guard.reason || "force_apply") };
+  }
+
+  const MIN_PASS = 0.85;
+  const MIN_EVAL_TRIALS = 3;
+  const MIN_REPORT_SESSIONS = 10;
+
+  const evalOk = snap.eval_qualifies;
+  const reportOk =
+    snap.latest_report != null &&
+    snap.latest_report.session_count >= MIN_REPORT_SESSIONS &&
+    snap.latest_report.success_rate >= MIN_PASS;
+
+  if (evalOk || reportOk) {
+    return {
+      ok: true,
+      mode: evalOk ? "eval_pass_threshold" : "report_success_threshold",
+    };
+  }
+
+  return {
+    ok: false,
+    reason:
+      "Autopilot apply requires recent eval (>=3 trials, pass_rate>=0.85 in 7d) OR latest analysis report " +
+      "(>=10 sessions, success_rate>=0.85), or evolution_apply_guard.force=true.",
+    details: {
+      min_pass: MIN_PASS,
+      min_eval_trials: MIN_EVAL_TRIALS,
+      min_report_sessions: MIN_REPORT_SESSIONS,
+      eval_window: snap.eval_window,
+      latest_report: snap.latest_report,
+    },
+  };
+}
+
+async function mergeApplyMarkersIntoLatestReport(
+  sql: any,
+  agentName: string,
+  orgId: string,
+  payload: {
+    proposal_id: string;
+    applied_at: string;
+    autopilot: boolean;
+    markers_before: Record<string, unknown>;
+  },
+): Promise<void> {
+  try {
+    const rows = await sql`
+      SELECT id, report_json FROM evolution_reports
+      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    if (rows.length === 0) return;
+    const report = safeJsonParse(rows[0].report_json) || {};
+    report.last_apply_markers = {
+      proposal_id: payload.proposal_id,
+      applied_at: payload.applied_at,
+      autopilot: payload.autopilot,
+      markers_before: payload.markers_before,
+    };
+    await sql`
+      UPDATE evolution_reports SET report_json = ${JSON.stringify(report)}
+      WHERE id = ${rows[0].id}
+    `;
+  } catch {
+    /* best-effort */
+  }
 }
 
 function safeJsonParse(val: unknown): any {

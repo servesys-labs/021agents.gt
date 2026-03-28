@@ -8,6 +8,8 @@
 
 import { callLLM } from "./llm";
 import { executeTools, getToolDefinitions } from "./tools";
+import { attachDelegationLineage } from "./delegation";
+import { attachToolPolicyEnvelope } from "./policy-envelope";
 import { resolvePlanRouting, writeTurn, writeSession } from "./db";
 import {
   createWorkingMemory,
@@ -937,12 +939,8 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         parent_node_id: `llm:${turn}`,
       });
 
-      // Attach governance config for domain allowlist + destructive detection
-      (env as any).__agentConfig = {
-        allowed_domains: config.allowed_domains || [],
-        require_confirmation_for_destructive: config.require_confirmation_for_destructive || false,
-        max_tokens_per_turn: config.max_tokens_per_turn || 0,
-      };
+      // Attach unified policy envelope before tool execution.
+      attachToolPolicyEnvelope(env, config);
       const toolResults = await executeTools(
         env,
         llm.tool_calls,
@@ -1187,6 +1185,12 @@ export function buildFreshGraphCtx(
   traceId: string,
   telemetryQueue?: Queue,
 ): FreshGraphCtx {
+  attachDelegationLineage(env, config, { session_id: sessionId, trace_id: traceId }, {
+    agent_name: config.agent_name || request.agent_name,
+    org_id: request.org_id,
+    project_id: request.project_id,
+    delegation: request.delegation,
+  });
   const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
@@ -1541,11 +1545,13 @@ const resumeNodes: Record<string, EdgeGraphNode<ResumeGraphCtx>> = {
         parent_graph_id: rootGraphId,
         parent_node_id: `llm:${turn}`,
       });
+      attachToolPolicyEnvelope(env, config);
       const toolResults = await executeTools(
         env,
         llm.tool_calls,
         resumedSessionId,
         config.parallel_tool_calls,
+        config.tools, // Keep fresh/resume tool allowlist parity for policy enforcement
       );
       ctx.totalToolCalls += toolResults.length;
       // Accumulate tool execution costs (search, crawl, etc.)
@@ -1672,6 +1678,14 @@ export function buildResumeGraphCtx(
   config: AgentConfig,
   telemetryQueue?: Queue,
 ): ResumeGraphCtx {
+  attachDelegationLineage(env, config, {
+    session_id: resumedSessionId,
+    trace_id: checkpoint.trace_id,
+  }, {
+    agent_name: config.agent_name || checkpoint.agent_name,
+    org_id: config.org_id,
+    project_id: config.project_id,
+  });
   const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
   const blockedSet = new Set(config.blocked_tools);
   const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
