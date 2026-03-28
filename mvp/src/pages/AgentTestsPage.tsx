@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Plus, Play, CheckCircle, XCircle, Clock, Trash2 } from "lucide-react";
+import { Plus, Play, CheckCircle, XCircle, Clock, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { AgentNav } from "../components/AgentNav";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -66,22 +67,14 @@ export default function AgentTestsPage() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-text">{agent.name} — Tests & Evals</h1>
-          <p className="text-sm text-text-secondary">Define test scenarios and evaluate your agent's behavior</p>
-        </div>
+      <AgentNav agentName={agent.name}>
         <Button size="sm" variant="secondary" onClick={() => setShowAdd(true)}>
           <Plus size={14} /> Add Test
         </Button>
         <Button size="sm" onClick={runTests} disabled={running || scenarios.length === 0}>
           <Play size={14} /> {running ? "Running..." : "Run All"}
         </Button>
-      </div>
+      </AgentNav>
 
       {/* Summary card */}
       {latestRun && (

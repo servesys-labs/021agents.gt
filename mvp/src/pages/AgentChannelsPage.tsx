@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Globe, MessageSquare, Instagram, Phone, Mail, MessageCircle, Copy, Check, ExternalLink, Code } from "lucide-react";
+import { Globe, MessageSquare, Instagram, Phone, Mail, MessageCircle, Copy, Check, ExternalLink, Code } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { AgentNav } from "../components/AgentNav";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -121,16 +122,7 @@ Content-Type: application/json
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-text">{agent.name} — Channels</h1>
-          <p className="text-sm text-text-secondary">Deploy your agent across multiple customer touchpoints</p>
-        </div>
-      </div>
+      <AgentNav agentName={agent.name} />
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">

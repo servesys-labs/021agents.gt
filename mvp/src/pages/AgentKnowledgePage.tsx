@@ -1,7 +1,8 @@
 import { useState, useRef, useCallback } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Upload, FileText, File, Trash2, Search, CheckCircle, Clock, AlertCircle, X } from "lucide-react";
+import { Upload, FileText, File, Trash2, Search, CheckCircle, Clock, AlertCircle, X } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { AgentNav } from "../components/AgentNav";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -129,23 +130,14 @@ export default function AgentKnowledgePage() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-text">{agent.name} — Knowledge Base</h1>
-          <p className="text-sm text-text-secondary">
-            Upload documents so your agent can answer questions about your business
-          </p>
-        </div>
+      <AgentNav agentName={agent.name}>
         <Button size="sm" variant="ghost" onClick={() => setShowSettings(true)}>
           Settings
         </Button>
         <Button size="sm" onClick={() => fileInputRef.current?.click()}>
           <Upload size={14} /> Upload
         </Button>
+      </AgentNav>
         <input
           ref={fileInputRef}
           type="file"
@@ -154,7 +146,6 @@ export default function AgentKnowledgePage() {
           className="hidden"
           onChange={(e) => handleFiles(e.target.files)}
         />
-      </div>
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">

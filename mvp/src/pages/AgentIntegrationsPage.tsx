@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, ExternalLink, ShoppingBag, CreditCard, Package, Search, RefreshCw, X, AlertCircle } from "lucide-react";
+import { Check, ExternalLink, ShoppingBag, CreditCard, Package, Search, RefreshCw, X, AlertCircle } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { AgentNav } from "../components/AgentNav";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -146,21 +147,13 @@ export default function AgentIntegrationsPage() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-text">{agent.name} — Integrations</h1>
-          <p className="text-sm text-text-secondary">Connect your business tools so your agent can take real actions</p>
-        </div>
+      <AgentNav agentName={agent.name}>
         {connected.some((c) => c.id === "shopify") && (
           <Button size="sm" variant="secondary" onClick={() => setShowOrders(true)}>
             <ShoppingBag size={14} /> Orders
           </Button>
         )}
-      </div>
+      </AgentNav>
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">

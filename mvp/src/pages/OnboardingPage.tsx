@@ -71,7 +71,7 @@ export default function OnboardingPage() {
                   </div>
                 </div>
                 <div className="flex justify-between pt-4">
-                  <Button variant="ghost" onClick={() => navigate("/")}>Skip</Button>
+                  <Button variant="ghost" onClick={() => navigate("/agents/new")}>Skip — go build an agent</Button>
                   <Button onClick={() => setStep(1)}>Continue</Button>
                 </div>
               </div>

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check } from "lucide-react";
+import { Check } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { AgentNav } from "../components/AgentNav";
 import { Input } from "../components/ui/Input";
 import { Textarea } from "../components/ui/Textarea";
 import { Card } from "../components/ui/Card";
@@ -61,12 +62,7 @@ export default function AgentSettingsPage() {
 
   return (
     <div>
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <h1 className="text-xl font-semibold text-text">{agent.name} — Settings</h1>
-      </div>
+      <AgentNav agentName={agent.name} />
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border mb-6">

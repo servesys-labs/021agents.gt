@@ -1,11 +1,11 @@
 import { useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, MessageSquare, Clock, TrendingUp, AlertTriangle, Play, Settings, GitBranch, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb } from "lucide-react";
-import { Button } from "../components/ui/Button";
+import { MessageSquare, Clock, TrendingUp, AlertTriangle } from "lucide-react";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { SimpleChart } from "../components/SimpleChart";
 import { Modal } from "../components/ui/Modal";
+import { AgentNav } from "../components/AgentNav";
 import { MOCK_AGENTS, MOCK_CONVERSATIONS, MOCK_DAILY_METRICS } from "../lib/mock-data";
 
 const statusVariant = { completed: "success", active: "info", escalated: "danger" } as const;
@@ -25,27 +25,7 @@ export default function AgentActivityPage() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate("/")} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-text">{agent.name}</h1>
-          <p className="text-sm text-text-secondary">{agent.description}</p>
-        </div>
-        <div className="flex gap-2">
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/play`)}><Play size={14} /> Test</Button>
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/flow`)}><GitBranch size={14} /> Flow</Button>
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/tests`)}><FlaskConical size={14} /> Evals</Button>
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/knowledge`)}><BookOpen size={14} /> Knowledge</Button>
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/voice`)}><Phone size={14} /> Voice</Button>
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/integrations`)}><ShoppingBag size={14} /> Integrations</Button>
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/channels`)}><Share2 size={14} /> Channels</Button>
-          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/insights`)}><Lightbulb size={14} /> Insights</Button>
-          <Button size="sm" variant="ghost" onClick={() => navigate(`/agents/${id}/settings`)}><Settings size={14} /></Button>
-        </div>
-      </div>
+      <AgentNav agentName={agent.name} />
 
       {/* Stats row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">

@@ -1,7 +1,8 @@
 import { useState, useCallback } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Plus, Trash2, Zap, Brain, Wrench, GitBranch, MessageSquare } from "lucide-react";
+import { Plus, Trash2, Zap, Brain, Wrench, GitBranch, MessageSquare } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { AgentNav } from "../components/AgentNav";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Card } from "../components/ui/Card";
@@ -87,20 +88,12 @@ export default function AgentFlowPage() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-text">{agent.name} — Behavior Flow</h1>
-          <p className="text-sm text-text-secondary">Customize how your agent processes and responds to messages</p>
-        </div>
+      <AgentNav agentName={agent.name}>
         <Button size="sm" variant="secondary" onClick={() => setShowAddNode(true)}>
           <Plus size={14} /> Add Step
         </Button>
         <Button size="sm" onClick={handleSave}>Save</Button>
-      </div>
+      </AgentNav>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Canvas */}

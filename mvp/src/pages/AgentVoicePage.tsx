@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, Phone, PhoneCall, PhoneOff, PhoneMissed, Settings, Volume2, Clock, Copy, Check, Plus } from "lucide-react";
+import { Phone, PhoneCall, PhoneOff, PhoneMissed, Settings, Volume2, Clock, Copy, Check, Plus } from "lucide-react";
 import { Button } from "../components/ui/Button";
+import { AgentNav } from "../components/AgentNav";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -140,22 +141,14 @@ export default function AgentVoicePage() {
 
   return (
     <div>
-      {/* Header */}
-      <div className="flex items-center gap-3 mb-6">
-        <button onClick={() => navigate(-1)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
-          <ArrowLeft size={18} />
-        </button>
-        <div className="flex-1">
-          <h1 className="text-xl font-semibold text-text">{agent.name} — Voice & Phone</h1>
-          <p className="text-sm text-text-secondary">Let customers call your agent directly via Vapi</p>
-        </div>
+      <AgentNav agentName={agent.name}>
         <Button size="sm" variant="ghost" onClick={() => setShowSettings(true)}>
           <Settings size={14} /> Voice Settings
         </Button>
         <Button size="sm" onClick={() => setShowSetup(true)}>
           <Plus size={14} /> Add Number
         </Button>
-      </div>
+      </AgentNav>
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
