@@ -142,7 +142,7 @@ export const Sidebar = ({ children }: { children: ReactNode }) => {
     });
   };
 
-  const isCanvasPage = pathname === "/" || pathname === "/canvas";
+  const isCanvasPage = pathname === "/canvas";
 
   const isActive = (path: string) => {
     if (path === "/") return pathname === "/" || pathname === "/canvas";
