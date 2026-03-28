@@ -29,8 +29,9 @@ export default function AgentBuilderPage() {
     setSelectedTools((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
 
   const handleCreate = () => {
-    // TODO: POST to /api/v1/agents
-    navigate("/agents/agent-1/play");
+    // TODO: POST to /api/v1/agents — use returned agent ID
+    const newAgentId = "agent-1"; // will be dynamic from API
+    navigate(`/agents/${newAgentId}/activity`);
   };
 
   return (

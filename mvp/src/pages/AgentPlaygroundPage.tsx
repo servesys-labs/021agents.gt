@@ -1,7 +1,8 @@
 import { useState, useCallback } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { ArrowLeft, Info } from "lucide-react";
+import { ArrowLeft, Info, GitBranch, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb, Settings, BarChart3 } from "lucide-react";
 import { ChatInterface, type Message } from "../components/ChatInterface";
+import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { MOCK_AGENTS } from "../lib/mock-data";
 
@@ -51,6 +52,17 @@ export default function AgentPlaygroundPage() {
             <h1 className="text-lg font-semibold text-text">{agent.name}</h1>
             <Badge variant="info">Playground</Badge>
           </div>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/activity`)}><BarChart3 size={14} /> Activity</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/flow`)}><GitBranch size={14} /> Flow</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/tests`)}><FlaskConical size={14} /> Evals</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/knowledge`)}><BookOpen size={14} /> Knowledge</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/voice`)}><Phone size={14} /> Voice</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/integrations`)}><ShoppingBag size={14} /> Integrations</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/channels`)}><Share2 size={14} /> Channels</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/insights`)}><Lightbulb size={14} /> Insights</Button>
+          <Button size="sm" variant="ghost" onClick={() => navigate(`/agents/${id}/settings`)}><Settings size={14} /></Button>
         </div>
       </div>
 
