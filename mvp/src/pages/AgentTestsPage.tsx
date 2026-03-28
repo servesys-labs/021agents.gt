@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { Plus, Play, CheckCircle, XCircle, Clock, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
+import { AgentNotFound } from "../components/AgentNotFound";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -61,9 +62,7 @@ export default function AgentTestsPage() {
     }, 2000);
   };
 
-  if (!agent) {
-    return <p className="text-text-secondary">Agent not found. <Link to="/" className="text-primary">Go back</Link></p>;
-  }
+  if (!agent) return <AgentNotFound />;
 
   return (
     <div>

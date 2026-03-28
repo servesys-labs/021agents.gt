@@ -1,8 +1,9 @@
 import { useState, useCallback } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { Plus, Trash2, Zap, Brain, Wrench, GitBranch, MessageSquare } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
+import { AgentNotFound } from "../components/AgentNotFound";
 import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Card } from "../components/ui/Card";
@@ -77,9 +78,7 @@ export default function AgentFlowPage() {
     toast("Flow saved");
   };
 
-  if (!agent) {
-    return <p className="text-text-secondary">Agent not found. <Link to="/" className="text-primary">Go back</Link></p>;
-  }
+  if (!agent) return <AgentNotFound />;
 
   const getNodeCenter = (node: FlowNode) => ({
     cx: OFFSET_X + node.x,

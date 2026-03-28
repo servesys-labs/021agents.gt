@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { Check } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
+import { AgentNotFound } from "../components/AgentNotFound";
+import { TabNav } from "../components/ui/TabNav";
 import { Input } from "../components/ui/Input";
 import { Textarea } from "../components/ui/Textarea";
 import { Card } from "../components/ui/Card";
@@ -48,9 +50,7 @@ export default function AgentSettingsPage() {
     toast("Settings saved");
   };
 
-  if (!agent) {
-    return <p className="text-text-secondary">Agent not found. <Link to="/" className="text-primary">Go back</Link></p>;
-  }
+  if (!agent) return <AgentNotFound />;
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "general", label: "General" },
@@ -64,20 +64,7 @@ export default function AgentSettingsPage() {
     <div>
       <AgentNav agentName={agent.name} />
 
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-border mb-6">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-              tab === t.key ? "border-primary text-primary" : "border-transparent text-text-secondary hover:text-text"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <TabNav tabs={tabs} active={tab} onChange={(k) => setTab(k as Tab)} />
 
       {tab === "general" && (
         <div className="space-y-4 max-w-lg">

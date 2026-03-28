@@ -20,7 +20,7 @@ export function StepWizard({ steps, currentStep, children }: StepWizardProps) {
                     ? "bg-success text-white"
                     : i === currentStep
                     ? "bg-primary text-white"
-                    : "bg-gray-100 text-text-muted"
+                    : "bg-neutral-light text-text-muted"
                 }`}
               >
                 {i < currentStep ? <Check size={14} /> : i + 1}

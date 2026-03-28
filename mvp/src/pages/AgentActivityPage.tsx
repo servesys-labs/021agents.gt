@@ -1,11 +1,14 @@
 import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { MessageSquare, Clock, TrendingUp, AlertTriangle } from "lucide-react";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
+import { StatCard } from "../components/ui/StatCard";
+import { EmptyState } from "../components/ui/EmptyState";
 import { SimpleChart } from "../components/SimpleChart";
 import { Modal } from "../components/ui/Modal";
 import { AgentNav } from "../components/AgentNav";
+import { AgentNotFound } from "../components/AgentNotFound";
 import { MOCK_AGENTS, MOCK_CONVERSATIONS, MOCK_DAILY_METRICS } from "../lib/mock-data";
 
 const statusVariant = { completed: "success", active: "info", escalated: "danger" } as const;
@@ -17,9 +20,7 @@ export default function AgentActivityPage() {
   const conversations = MOCK_CONVERSATIONS.filter((c) => c.agent_id === id);
   const [selectedConv, setSelectedConv] = useState<string | null>(null);
 
-  if (!agent) {
-    return <p className="text-text-secondary">Agent not found. <Link to="/" className="text-primary">Go back</Link></p>;
-  }
+  if (!agent) return <AgentNotFound />;
 
   const avgResponseMs = Math.round(MOCK_DAILY_METRICS.reduce((s, d) => s + d.avg_response_ms, 0) / MOCK_DAILY_METRICS.length);
 
@@ -29,34 +30,10 @@ export default function AgentActivityPage() {
 
       {/* Stats row */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <MessageSquare size={14} className="text-primary" />
-            <span className="text-xs text-text-secondary">Today</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{agent.conversations_today}</p>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <Clock size={14} className="text-warning" />
-            <span className="text-xs text-text-secondary">Avg response</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{avgResponseMs}ms</p>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <TrendingUp size={14} className="text-success" />
-            <span className="text-xs text-text-secondary">Success rate</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{Math.round(agent.success_rate * 100)}%</p>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <AlertTriangle size={14} className="text-danger" />
-            <span className="text-xs text-text-secondary">Escalations</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{conversations.filter((c) => c.status === "escalated").length}</p>
-        </Card>
+        <StatCard icon={<MessageSquare size={14} className="text-primary" />} label="Today" value={agent.conversations_today} />
+        <StatCard icon={<Clock size={14} className="text-warning" />} label="Avg response" value={`${avgResponseMs}ms`} />
+        <StatCard icon={<TrendingUp size={14} className="text-success" />} label="Success rate" value={`${Math.round(agent.success_rate * 100)}%`} />
+        <StatCard icon={<AlertTriangle size={14} className="text-danger" />} label="Escalations" value={conversations.filter((c) => c.status === "escalated").length} />
       </div>
 
       {/* Charts */}
@@ -83,7 +60,7 @@ export default function AgentActivityPage() {
       <h2 className="text-lg font-medium text-text mb-4">Recent Conversations</h2>
       <div className="bg-white rounded-xl border border-border divide-y divide-border">
         {conversations.length === 0 && (
-          <p className="p-6 text-sm text-text-muted text-center">No conversations yet</p>
+          <EmptyState icon={<MessageSquare size={24} />} title="No conversations yet" description="Conversations will appear here once customers start chatting" />
         )}
         {conversations.map((conv) => (
           <button
@@ -91,7 +68,7 @@ export default function AgentActivityPage() {
             onClick={() => setSelectedConv(conv.id)}
             className="w-full flex items-center gap-4 p-4 hover:bg-surface-alt transition-colors text-left"
           >
-            <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-text-secondary text-xs font-medium">
+            <div className="w-8 h-8 rounded-full bg-neutral-light flex items-center justify-center text-text-secondary text-xs font-medium">
               {conv.user_name[0]}
             </div>
             <div className="flex-1 min-w-0">

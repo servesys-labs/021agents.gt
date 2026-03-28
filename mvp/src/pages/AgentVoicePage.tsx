@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { Phone, PhoneCall, PhoneOff, PhoneMissed, Settings, Volume2, Clock, Copy, Check, Plus } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
+import { AgentNotFound } from "../components/AgentNotFound";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
@@ -131,9 +132,7 @@ export default function AgentVoicePage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  if (!agent) {
-    return <p className="text-text-secondary">Agent not found. <Link to="/" className="text-primary">Go back</Link></p>;
-  }
+  if (!agent) return <AgentNotFound />;
 
   const activeNumbers = numbers.filter((n) => n.status === "active");
   const completedCalls = calls.filter((c) => c.status === "completed");

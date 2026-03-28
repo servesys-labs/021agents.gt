@@ -1,11 +1,11 @@
 type Variant = "default" | "success" | "warning" | "danger" | "info";
 
 const styles: Record<Variant, string> = {
-  default: "bg-gray-100 text-gray-700",
-  success: "bg-emerald-50 text-emerald-700",
-  warning: "bg-amber-50 text-amber-700",
-  danger: "bg-red-50 text-red-700",
-  info: "bg-blue-50 text-blue-700",
+  default: "bg-neutral-light text-neutral-dark",
+  success: "bg-success-light text-success-dark",
+  warning: "bg-warning-light text-warning-dark",
+  danger: "bg-danger-light text-danger-dark",
+  info: "bg-info-light text-info-dark",
 };
 
 interface BadgeProps {
