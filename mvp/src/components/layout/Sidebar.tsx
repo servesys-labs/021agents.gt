@@ -142,7 +142,7 @@ export function Sidebar() {
       )}
 
       {/* Desktop sidebar */}
-      <aside className="hidden md:block w-60 bg-white border-r border-border h-screen sticky top-0 shrink-0">
+      <aside className="hidden md:block w-64 bg-white border-r border-border h-screen sticky top-0 shrink-0">
         {nav}
       </aside>
     </>

@@ -95,34 +95,10 @@ export default function AgentInsightsPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <MessageSquare size={14} className="text-primary" />
-            <span className="text-xs text-text-secondary">Questions this week</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{totalQuestions}</p>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <ThumbsUp size={14} className="text-success" />
-            <span className="text-xs text-text-secondary">Avg sentiment</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{avgSentiment}%</p>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <TrendingUp size={14} className="text-primary" />
-            <span className="text-xs text-text-secondary">Unique topics</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{MOCK_TOPICS.length}</p>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-2 mb-1">
-            <AlertCircle size={14} className="text-warning" />
-            <span className="text-xs text-text-secondary">Knowledge gaps</span>
-          </div>
-          <p className="text-xl font-semibold text-text">{MOCK_GAPS.length}</p>
-        </Card>
+        <StatCard icon={<MessageSquare size={14} className="text-primary" />} label="Questions this week" value={totalQuestions} />
+        <StatCard icon={<ThumbsUp size={14} className="text-success" />} label="Avg sentiment" value={`${avgSentiment}%`} />
+        <StatCard icon={<TrendingUp size={14} className="text-primary" />} label="Unique topics" value={MOCK_TOPICS.length} />
+        <StatCard icon={<AlertCircle size={14} className="text-warning" />} label="Knowledge gaps" value={MOCK_GAPS.length} />
       </div>
 
       {/* Charts */}
@@ -137,24 +113,15 @@ export default function AgentInsightsPage() {
         </Card>
       </div>
 
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-border mb-6">
-        {[
-          { key: "topics" as const, label: "Top Topics" },
-          { key: "gaps" as const, label: "Knowledge Gaps" },
-          { key: "sentiment" as const, label: "Sentiment Breakdown" },
-        ].map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-              tab === t.key ? "border-primary text-primary" : "border-transparent text-text-secondary"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <TabNav
+        tabs={[
+          { key: "topics", label: "Top Topics" },
+          { key: "gaps", label: "Knowledge Gaps" },
+          { key: "sentiment", label: "Sentiment Breakdown" },
+        ]}
+        active={tab}
+        onChange={(k) => setTab(k as typeof tab)}
+      />
 
       {/* Topics tab */}
       {tab === "topics" && (
