@@ -265,7 +265,7 @@ app.route("/", widgetServeRoutes);
 app.route("/", a2aRoutes);
 
 // ── Auto-generated OpenAPI spec + Scalar docs ────────────────────────────
-app.doc("/api/v1/openapi.json", {
+app.doc("/api/v1/_openapi-raw.json", {
   openapi: "3.1.0",
   info: {
     title: "AgentOS API",
@@ -360,9 +360,9 @@ app.doc("/api/v1/openapi.json", {
 } as any);
 
 // Post-process the generated spec to fix OAS 3.1 compliance issues
-app.get("/api/v1/openapi-clean.json", async (c) => {
-  // Get the auto-generated spec by calling the internal handler
-  const fakeReq = new Request("http://internal/api/v1/openapi.json");
+app.get("/api/v1/openapi.json", async (c) => {
+  // Get the auto-generated spec and post-process for OAS 3.1 compliance
+  const fakeReq = new Request("http://internal/api/v1/_openapi-raw.json");
   const rawResp = await app.fetch(fakeReq, c.env, c.executionCtx as any);
   const spec = await rawResp.json() as Record<string, any>;
 
@@ -451,7 +451,7 @@ app.get("/api/v1/docs", (c) => {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 </head>
 <body>
-  <script id="api-reference" data-url="/api/v1/openapi-clean.json"></script>
+  <script id="api-reference" data-url="/api/v1/openapi.json"></script>
   <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
 </body>
 </html>`;
