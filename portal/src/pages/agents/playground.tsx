@@ -552,7 +552,7 @@ export function PlaygroundPage() {
   }, [input]);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)]">
+    <div className="flex flex-col" style={{ height: "calc(100vh - 8rem)" }}>
       {/* ── Header bar ────────────────────────────────────────── */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-border-default bg-surface-raised/40">
         <div className="flex items-center gap-3">

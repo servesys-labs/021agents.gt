@@ -215,7 +215,7 @@ export const AgentDetailPage = () => {
   };
 
   return (
-    <div className="min-h-screen">
+    <div>
       {/* ── Back button ────────────────────────────────────────── */}
       <button
         onClick={() => navigate("/agents")}
