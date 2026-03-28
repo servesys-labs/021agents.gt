@@ -23,6 +23,7 @@ import { StatusBadge } from "../../components/common/StatusBadge";
 import { AgentCard, type AgentCardData } from "../../components/common/AgentCard";
 import { AssistPanel } from "../../components/common/AssistPanel";
 import { SkeletonDashboard } from "../../components/common/Skeleton";
+import { StatCard } from "../../components/common/StatCard";
 import { PageShell } from "../../components/layout/PageShell";
 import { useApiQuery } from "../../lib/api";
 import { safeArray, type AgentInfo } from "../../lib/adapters";
@@ -155,22 +156,17 @@ export const DashboardPage = () => {
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {kpis.map((kpi, index) => (
-          <div
+          <StatCard
             key={kpi.label}
-            className="card flex items-center gap-3 py-3 cursor-pointer hover:border-accent/40 transition-colors stagger-item"
-            style={{ "--stagger-index": index } as CSSProperties}
+            label={kpi.label}
+            value={kpi.value}
+            icon={<kpi.icon size={16} className={kpi.iconColor} />}
+            color={kpi.color}
+            iconColor={kpi.iconColor}
             onClick={() => navigate(kpi.link)}
-          >
-            <div className={`p-2 rounded-lg ${kpi.color}`}>
-              <kpi.icon size={16} className={kpi.iconColor} />
-            </div>
-            <div>
-              <p className="text-xl font-bold text-text-primary font-mono">
-                {typeof kpi.value === "number" ? kpi.value.toLocaleString() : kpi.value}
-              </p>
-              <p className="text-[10px] text-text-muted uppercase tracking-wide">{kpi.label}</p>
-            </div>
-          </div>
+            className={"stagger-item"}
+            style={{ "--stagger-index": index } as CSSProperties}
+          />
         ))}
       </div>
 

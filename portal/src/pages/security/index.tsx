@@ -13,8 +13,11 @@ import { PageHeader } from "../../components/common/PageHeader";
 import { QueryState } from "../../components/common/QueryState";
 import { EmptyState } from "../../components/common/EmptyState";
 import { AssistPanel } from "../../components/common/AssistPanel";
+import { SeverityBadge, normalizeLevel } from "../../components/common/SeverityBadge";
+import { ScoreGauge } from "../../components/common/ScoreGauge";
 import { useApiQuery, apiRequest } from "../../lib/api";
 import { useToast } from "../../components/common/ToastProvider";
+import { formatDateTime } from "../../lib/format";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -61,6 +64,7 @@ const AIVSS_COMPONENTS = [
 
 /* ── Helpers ─────────────────────────────────────────────────────── */
 
+/** Text color for risk levels — used in places where we only need the color */
 function riskColor(level: string) {
   switch (level?.toLowerCase()) {
     case "critical":
@@ -74,84 +78,6 @@ function riskColor(level: string) {
     default:
       return "text-text-muted";
   }
-}
-
-function riskBg(level: string) {
-  switch (level?.toLowerCase()) {
-    case "critical":
-      return "bg-status-error";
-    case "high":
-      return "bg-chart-orange";
-    case "medium":
-      return "bg-status-warning";
-    case "low":
-      return "bg-status-live";
-    default:
-      return "bg-text-muted";
-  }
-}
-
-function riskBadgeBg(level: string) {
-  switch (level?.toLowerCase()) {
-    case "critical":
-      return "bg-status-error/15 text-status-error border-status-error/20";
-    case "high":
-      return "bg-chart-orange/15 text-chart-orange border-chart-orange/20";
-    case "medium":
-      return "bg-status-warning/15 text-status-warning border-status-warning/20";
-    case "low":
-      return "bg-status-live/15 text-status-live border-status-live/20";
-    default:
-      return "bg-surface-overlay text-text-muted border-border-default";
-  }
-}
-
-function formatDate(ts?: number | string): string {
-  if (!ts) return "--";
-  const d = new Date(typeof ts === "number" && ts < 1e12 ? ts * 1000 : ts);
-  return d.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function ScoreGauge({
-  score,
-  size = "lg",
-}: {
-  score: number;
-  size?: "sm" | "lg";
-}) {
-  const level =
-    score >= 9
-      ? "critical"
-      : score >= 7
-        ? "high"
-        : score >= 4
-          ? "medium"
-          : score > 0
-            ? "low"
-            : "none";
-  const pct = Math.min(100, (score / 10) * 100);
-  return (
-    <div className="flex items-center gap-[var(--space-2)]">
-      <div
-        className={`${size === "lg" ? "w-20 h-2" : "w-12 h-1.5"} bg-surface-overlay rounded-full overflow-hidden`}
-      >
-        <div
-          className={`h-full rounded-full ${riskBg(level)}`}
-          style={{ width: `${pct}%` }}
-        />
-      </div>
-      <span
-        className={`font-mono font-semibold ${riskColor(level)} ${size === "lg" ? "text-[var(--text-sm)]" : "text-[10px]"}`}
-      >
-        {score.toFixed(1)}
-      </span>
-    </div>
-  );
 }
 
 /* Compute a simple AIVSS-style base score from vector components */
@@ -346,17 +272,13 @@ export function SecurityPage() {
                           </Link>
                         </td>
                         <td className="text-text-muted">
-                          {formatDate(scan.created_at)}
+                          {formatDateTime(scan.created_at)}
                         </td>
                         <td className="text-right">
                           <ScoreGauge score={scan.risk_score} size="sm" />
                         </td>
                         <td className="text-center">
-                          <span
-                            className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase border ${riskBadgeBg(scan.risk_level)}`}
-                          >
-                            {scan.risk_level}
-                          </span>
+                          <SeverityBadge level={normalizeLevel(scan.risk_level)} size="sm" />
                         </td>
                         <td className="text-right text-status-live font-mono">
                           {scan.passed}
@@ -472,11 +394,7 @@ export function SecurityPage() {
               <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
                 Risk Level
               </p>
-              <span
-                className={`inline-block px-2.5 py-1 rounded-full text-[var(--text-xs)] font-semibold uppercase border ${riskBadgeBg(aivssLevel.toLowerCase())}`}
-              >
-                {aivssLevel}
-              </span>
+              <SeverityBadge level={normalizeLevel(aivssLevel)} />
             </div>
             <div className="flex-1">
               <p className="text-[10px] text-text-muted uppercase tracking-wide mb-[var(--space-1)]">
@@ -502,20 +420,20 @@ export function SecurityPage() {
 
         {profiles.length > 0 ? (
           <div className="card">
-            <div className="space-y-[var(--space-4)]">
+            <div className="space-y-4">
               {profiles.map((profile) => (
                 <div
                   key={`trend-${profile.agent_name}`}
-                  className="flex items-center gap-[var(--space-4)]"
+                  className="flex items-center gap-4"
                 >
-                  <span className="text-[var(--text-xs)] text-text-primary w-32 truncate font-medium">
+                  <span className="text-xs text-text-primary w-32 truncate font-medium">
                     {profile.agent_name}
                   </span>
                   <div className="flex-1">
-                    <RiskSparkline score={profile.risk_score} />
+                    <ScoreGauge score={profile.risk_score} size="md" showLabel={false} />
                   </div>
                   <span
-                    className={`text-[var(--text-xs)] font-mono font-semibold ${riskColor(profile.risk_level)}`}
+                    className={`text-xs font-mono font-semibold ${riskColor(profile.risk_level)}`}
                   >
                     {profile.risk_score.toFixed(1)}
                   </span>
@@ -527,30 +445,6 @@ export function SecurityPage() {
           <EmptyState title="No risk data" description="Risk trend data will appear here once available." />
         )}
       </section>
-    </div>
-  );
-}
-
-/* ── Risk Sparkline (simple SVG bar showing relative risk) ────────── */
-
-function RiskSparkline({ score }: { score: number }) {
-  const pct = Math.min(100, (score / 10) * 100);
-  const level =
-    score >= 9
-      ? "critical"
-      : score >= 7
-        ? "high"
-        : score >= 4
-          ? "medium"
-          : score > 0
-            ? "low"
-            : "none";
-  return (
-    <div className="h-2 bg-surface-overlay rounded-full overflow-hidden">
-      <div
-        className={`h-full rounded-full ${riskBg(level)} transition-all`}
-        style={{ width: `${pct}%` }}
-      />
     </div>
   );
 }
