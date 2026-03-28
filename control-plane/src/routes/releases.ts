@@ -443,3 +443,264 @@ releaseRoutes.post("/:agent_name/canary/rollback", requireScope("releases:write"
     reason,
   });
 });
+
+// ── Canary Auto-Promote ─────────────────────────────────────
+
+releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("agent_name");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // 1. Read the canary_splits for the agent
+  const splits = await sql`
+    SELECT * FROM canary_splits
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    LIMIT 1
+  `;
+  if (splits.length === 0) {
+    return c.json({ error: "No active canary split found" }, 404);
+  }
+  const split = splits[0];
+  const primaryVersion = String(split.primary_version);
+  const canaryVersion = String(split.canary_version);
+  const canaryWeight = Number(split.canary_weight || 0);
+
+  if (canaryWeight <= 0) {
+    return c.json({ error: "Canary weight is already 0; no canary traffic to evaluate" }, 400);
+  }
+
+  // 2. Compare metrics between primary and canary versions (last 24h)
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+
+  const primaryRows = await sql`
+    SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE status = 'success')::int AS successes,
+      COALESCE(AVG(cost_total_usd), 0) AS avg_cost,
+      COALESCE(AVG(wall_clock_seconds), 0) AS avg_latency
+    FROM sessions
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+      AND version = ${primaryVersion} AND created_at > ${since}
+  `;
+  const canaryRows = await sql`
+    SELECT
+      COUNT(*)::int AS total,
+      COUNT(*) FILTER (WHERE status = 'success')::int AS successes,
+      COALESCE(AVG(cost_total_usd), 0) AS avg_cost,
+      COALESCE(AVG(wall_clock_seconds), 0) AS avg_latency
+    FROM sessions
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+      AND version = ${canaryVersion} AND created_at > ${since}
+  `;
+
+  const primary = primaryRows[0];
+  const canary = canaryRows[0];
+  const primaryTotal = Number(primary.total || 0);
+  const canaryTotal = Number(canary.total || 0);
+
+  const primarySuccessRate = primaryTotal > 0 ? Number(primary.successes) / primaryTotal : 1;
+  const canarySuccessRate = canaryTotal > 0 ? Number(canary.successes) / canaryTotal : 0;
+
+  const metrics = {
+    primary: {
+      version: primaryVersion,
+      total_sessions: primaryTotal,
+      success_rate: primarySuccessRate,
+      avg_cost: Number(primary.avg_cost),
+      avg_latency: Number(primary.avg_latency),
+    },
+    canary: {
+      version: canaryVersion,
+      total_sessions: canaryTotal,
+      success_rate: canarySuccessRate,
+      avg_cost: Number(canary.avg_cost),
+      avg_latency: Number(canary.avg_latency),
+    },
+  };
+
+  // 3. Check SLO targets if defined
+  const sloTargets = await sql`
+    SELECT metric, target FROM slo_definitions
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+  `.catch(() => []);
+
+  let canaryMeetsSlos = true;
+  const sloResults: Array<{ metric: string; target: number; actual: number; pass: boolean }> = [];
+
+  for (const slo of sloTargets) {
+    const metric = String(slo.metric);
+    const target = Number(slo.target);
+    let actual: number | null = null;
+
+    if (metric === "success_rate") {
+      actual = canarySuccessRate;
+    } else if (metric === "error_rate") {
+      actual = 1 - canarySuccessRate;
+    } else if (metric === "avg_latency") {
+      actual = Number(canary.avg_latency);
+    } else if (metric === "avg_cost") {
+      actual = Number(canary.avg_cost);
+    }
+
+    if (actual !== null) {
+      const higherIsBetter = ["success_rate", "eval_pass_rate"].includes(metric);
+      const pass = higherIsBetter ? actual >= target : actual <= target;
+      sloResults.push({ metric, target, actual, pass });
+      if (!pass) canaryMeetsSlos = false;
+    }
+  }
+
+  // If no SLO definitions, fall back to simple comparison: canary must not be worse than primary by >5pp
+  if (sloTargets.length === 0) {
+    const canaryErrorRate = 1 - canarySuccessRate;
+    const primaryErrorRate = 1 - primarySuccessRate;
+    canaryMeetsSlos = canaryTotal >= 3 && canaryErrorRate <= primaryErrorRate + 0.05;
+  }
+
+  const now = new Date().toISOString();
+
+  if (canaryMeetsSlos && canaryTotal >= 3) {
+    // 3a. Auto-promote: set canary_weight to 1.0 (full traffic to canary version)
+    await sql`
+      UPDATE canary_splits
+      SET canary_weight = 1.0
+      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    `;
+
+    // Update production channel to canary version
+    const updated = await sql`
+      UPDATE release_channels
+      SET version = ${canaryVersion}, promoted_at = ${now}, promoted_by = ${user.user_id}
+      WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND channel = 'production'
+    `;
+    const touched = Number((updated as { count?: number }).count ?? 0);
+    if (touched === 0) {
+      await sql`
+        INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+        VALUES (${user.org_id}, ${agentName}, 'production', ${canaryVersion}, '{}', ${user.user_id}, ${now})
+      `;
+    }
+
+    // Audit
+    try {
+      await sql`
+        INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+        VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_auto_promoted', 'agent', ${agentName},
+                ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, metrics, slo_results: sloResults })}, ${now})
+      `;
+    } catch {}
+
+    return c.json({
+      action: "promoted",
+      agent: agentName,
+      promoted_version: canaryVersion,
+      canary_weight: 1.0,
+      metrics,
+      slo_results: sloResults,
+    });
+  } else {
+    // 3b. Auto-rollback: set canary_weight to 0.0
+    await sql`
+      UPDATE canary_splits
+      SET canary_weight = 0.0, is_active = 0
+      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    `;
+
+    // Record rollback in evolution_ledger
+    await sql`
+      INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
+      VALUES (${agentName}, ${user.org_id}, NULL, 'canary_auto_rollback',
+              ${"Auto-rollback: canary version failed SLO targets"}, ${now})
+    `.catch(() => {});
+
+    // Audit
+    try {
+      await sql`
+        INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+        VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_auto_rollback', 'agent', ${agentName},
+                ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, metrics, slo_results: sloResults })}, ${now})
+      `;
+    } catch {}
+
+    return c.json({
+      action: "rolled_back",
+      agent: agentName,
+      reverted_to: primaryVersion,
+      canary_weight: 0.0,
+      reason: canaryTotal < 3
+        ? "Insufficient canary traffic (need at least 3 sessions)"
+        : "Canary version failed SLO targets",
+      metrics,
+      slo_results: sloResults,
+    });
+  }
+});
+
+// ── Explicit Auto-Rollback ─────────────────────────────────────
+
+releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"), async (c) => {
+  const user = c.get("user");
+  const agentName = c.req.param("agent_name");
+  const body = await c.req.json().catch(() => ({}));
+  const reason = String(body.reason || "explicit auto-rollback requested");
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Get active canary split
+  const splits = await sql`
+    SELECT * FROM canary_splits
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    LIMIT 1
+  `;
+  if (splits.length === 0) {
+    return c.json({ error: "No active canary split to roll back" }, 404);
+  }
+  const split = splits[0];
+  const primaryVersion = String(split.primary_version);
+  const canaryVersion = String(split.canary_version);
+
+  // Set canary_weight to 0.0 and deactivate
+  await sql`
+    UPDATE canary_splits
+    SET canary_weight = 0.0, is_active = 0
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+  `;
+
+  // Ensure production channel reflects primary version
+  const now = new Date().toISOString();
+  const updated = await sql`
+    UPDATE release_channels
+    SET version = ${primaryVersion}, promoted_at = ${now}, promoted_by = ${user.user_id}
+    WHERE org_id = ${user.org_id} AND agent_name = ${agentName} AND channel = 'production'
+  `;
+  const touched = Number((updated as { count?: number }).count ?? 0);
+  if (touched === 0) {
+    await sql`
+      INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+      VALUES (${user.org_id}, ${agentName}, 'production', ${primaryVersion}, '{}', ${user.user_id}, ${now})
+    `;
+  }
+
+  // Record in evolution_ledger
+  await sql`
+    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
+    VALUES (${agentName}, ${user.org_id}, NULL, 'explicit_auto_rollback', ${reason}, ${now})
+  `.catch(() => {});
+
+  // Audit
+  try {
+    await sql`
+      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      VALUES (${user.org_id}, ${user.user_id}, 'agent.explicit_auto_rollback', 'agent', ${agentName},
+              ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, reason })}, ${now})
+    `;
+  } catch {}
+
+  return c.json({
+    rolled_back: true,
+    agent: agentName,
+    reverted_to: primaryVersion,
+    canary_weight: 0.0,
+    reason,
+  });
+});

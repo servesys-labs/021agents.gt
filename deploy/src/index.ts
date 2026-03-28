@@ -1080,8 +1080,109 @@ async function authorizeAgentIngress(request: Request, env: Env): Promise<Respon
 // ---------------------------------------------------------------------------
 
 export class AgentOSMcpServer extends Agent<Env> {
+  // Cached agent config loaded from Supabase
+  private _agentConfig: Record<string, unknown> | null = null;
+  private _agentTools: Array<{ name: string; description: string; inputSchema: Record<string, unknown> }> = [];
+
   async onStart() {
-    // MCP tools are registered here
+    // Load agent config from Supabase via Hyperdrive on startup
+    await this._loadAgentConfig();
+  }
+
+  /**
+   * Load agent configuration and tool definitions from Supabase.
+   * The agent name is derived from this DO's name (set via idFromName).
+   */
+  private async _loadAgentConfig(): Promise<void> {
+    if (!this.env.HYPERDRIVE) return;
+    try {
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(this.env.HYPERDRIVE);
+      const agentName = this.name || "default";
+
+      const rows = await sql`
+        SELECT config_json, name, description FROM agents
+        WHERE name = ${agentName} AND is_active = true
+        LIMIT 1
+      `;
+      if (rows.length === 0) return;
+
+      let config: Record<string, unknown> = {};
+      try { config = JSON.parse(String(rows[0].config_json || "{}")); } catch {}
+      this._agentConfig = config;
+
+      // Build MCP tool definitions from agent's configured tools
+      const configuredTools = Array.isArray(config.tools) ? (config.tools as string[]) : [];
+      this._agentTools = [
+        // Always include the built-in run-agent tool
+        {
+          name: "run-agent",
+          description: `Run the ${agentName} agent on a task`,
+          inputSchema: {
+            type: "object",
+            properties: {
+              agent_name: { type: "string", description: "Agent name (defaults to this agent)" },
+              task: { type: "string", description: "Task to execute" },
+            },
+            required: ["task"],
+          },
+        },
+        // Always include knowledge search
+        {
+          name: "search-knowledge",
+          description: "Search the agent's knowledge base",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Search query" },
+            },
+            required: ["query"],
+          },
+        },
+        // Expose each configured tool as an MCP tool
+        ...configuredTools.map((toolName: string) => ({
+          name: toolName,
+          description: `Execute the '${toolName}' tool via AgentOS`,
+          inputSchema: {
+            type: "object" as const,
+            properties: {
+              input: { type: "string", description: "Input for the tool" },
+              parameters: { type: "object", description: "Additional parameters" },
+            },
+            required: ["input"],
+          },
+        })),
+      ];
+
+      // Load detailed tool schemas from tool_registry if available
+      if (configuredTools.length > 0) {
+        try {
+          const toolRows = await sql`
+            SELECT name, description, input_schema_json FROM tool_registry
+            WHERE name = ANY(${configuredTools})
+          `;
+          const schemaMap = new Map<string, { description: string; schema: Record<string, unknown> }>();
+          for (const row of toolRows) {
+            let schema: Record<string, unknown> = {};
+            try { schema = JSON.parse(String(row.input_schema_json || "{}")); } catch {}
+            schemaMap.set(String(row.name), {
+              description: String(row.description || ""),
+              schema,
+            });
+          }
+          // Enrich tool definitions with proper schemas
+          for (const tool of this._agentTools) {
+            const registered = schemaMap.get(tool.name);
+            if (registered) {
+              if (registered.description) tool.description = registered.description;
+              if (Object.keys(registered.schema).length > 0) tool.inputSchema = registered.schema;
+            }
+          }
+        } catch { /* tool_registry may not exist — use defaults */ }
+      }
+    } catch (err) {
+      console.error("[MCP] Failed to load agent config:", err);
+    }
   }
 
   async onRequest(request: Request): Promise<Response> {
@@ -1089,48 +1190,33 @@ export class AgentOSMcpServer extends Agent<Env> {
     if (request.method === "POST") {
       const body = await request.json() as any;
       const method = body.method;
+      const id = body.id;
 
       if (method === "initialize") {
+        // Reload config on each initialize to pick up changes
+        await this._loadAgentConfig();
         return Response.json({
-          jsonrpc: "2.0", id: body.id,
+          jsonrpc: "2.0", id,
           result: {
             protocolVersion: "2024-11-05",
-            capabilities: { tools: {} },
-            serverInfo: { name: "agentos-mcp", version: "0.2.0" },
+            capabilities: {
+              tools: { listChanged: true },
+            },
+            serverInfo: {
+              name: "agentos-mcp",
+              version: "0.2.0",
+              agentName: this.name || "default",
+            },
           },
         });
       }
 
       if (method === "tools/list") {
+        // Ensure config is loaded
+        if (this._agentTools.length === 0) await this._loadAgentConfig();
         return Response.json({
-          jsonrpc: "2.0", id: body.id,
-          result: {
-            tools: [
-              {
-                name: "run-agent",
-                description: "Run an AgentOS agent on a task",
-                inputSchema: {
-                  type: "object",
-                  properties: {
-                    agent_name: { type: "string", description: "Agent name" },
-                    task: { type: "string", description: "Task to execute" },
-                  },
-                  required: ["task"],
-                },
-              },
-              {
-                name: "search-knowledge",
-                description: "Search the agent's knowledge base",
-                inputSchema: {
-                  type: "object",
-                  properties: {
-                    query: { type: "string", description: "Search query" },
-                  },
-                  required: ["query"],
-                },
-              },
-            ],
-          },
+          jsonrpc: "2.0", id,
+          result: { tools: this._agentTools },
         });
       }
 
@@ -1140,29 +1226,40 @@ export class AgentOSMcpServer extends Agent<Env> {
 
         if (toolName === "run-agent") {
           // Delegate to the main agent
-          const agentId = this.env.AGENTOS_AGENT.idFromName(args.agent_name || "default");
-          const agent = this.env.AGENTOS_AGENT.get(agentId);
-          const resp = await agent.fetch(new Request("http://internal/run", {
-            method: "POST",
-            body: JSON.stringify({ input: args.task }),
-          }));
-          const result = await resp.json();
-          return Response.json({
-            jsonrpc: "2.0", id: body.id,
-            result: { content: [{ type: "text", text: JSON.stringify(result) }] },
-          });
+          try {
+            const targetAgent = args.agent_name || this.name || "default";
+            const agentId = this.env.AGENTOS_AGENT.idFromName(targetAgent);
+            const agent = this.env.AGENTOS_AGENT.get(agentId);
+            const resp = await agent.fetch(new Request("http://internal/run", {
+              method: "POST",
+              body: JSON.stringify({ input: args.task }),
+            }));
+            const result = await resp.json();
+            return Response.json({
+              jsonrpc: "2.0", id,
+              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
+            });
+          } catch (err: any) {
+            return Response.json({
+              jsonrpc: "2.0", id,
+              result: {
+                content: [{ type: "text", text: `run-agent failed: ${err?.message || err}` }],
+                isError: true,
+              },
+            });
+          }
         }
 
         if (toolName === "search-knowledge") {
           const query = String(args.query || "");
           if (!query.trim()) {
             return Response.json({
-              jsonrpc: "2.0", id: body.id,
+              jsonrpc: "2.0", id,
               result: { content: [{ type: "text", text: "query is required" }], isError: true },
             });
           }
           try {
-            const agentId = this.env.AGENTOS_AGENT.idFromName("default");
+            const agentId = this.env.AGENTOS_AGENT.idFromName(this.name || "default");
             const agent = this.env.AGENTOS_AGENT.get(agentId);
             const resp = await agent.fetch(new Request("http://internal/run", {
               method: "POST",
@@ -1170,12 +1267,12 @@ export class AgentOSMcpServer extends Agent<Env> {
             }));
             const result = await resp.json();
             return Response.json({
-              jsonrpc: "2.0", id: body.id,
+              jsonrpc: "2.0", id,
               result: { content: [{ type: "text", text: JSON.stringify(result) }] },
             });
           } catch (err: any) {
             return Response.json({
-              jsonrpc: "2.0", id: body.id,
+              jsonrpc: "2.0", id,
               result: {
                 content: [{ type: "text", text: `search-knowledge failed: ${err?.message || err}` }],
                 isError: true,
@@ -1184,19 +1281,57 @@ export class AgentOSMcpServer extends Agent<Env> {
           }
         }
 
+        // Dispatch configured tools via the agent DO
+        const configuredTools = Array.isArray(this._agentConfig?.tools) ? (this._agentConfig!.tools as string[]) : [];
+        if (configuredTools.includes(toolName)) {
+          try {
+            const agentId = this.env.AGENTOS_AGENT.idFromName(this.name || "default");
+            const agent = this.env.AGENTOS_AGENT.get(agentId);
+            const resp = await agent.fetch(new Request("http://internal/run", {
+              method: "POST",
+              body: JSON.stringify({
+                input: `Execute tool '${toolName}' with input: ${args.input || JSON.stringify(args)}`,
+                tool_override: toolName,
+                tool_args: args,
+              }),
+            }));
+            const result = await resp.json();
+            return Response.json({
+              jsonrpc: "2.0", id,
+              result: { content: [{ type: "text", text: JSON.stringify(result) }] },
+            });
+          } catch (err: any) {
+            return Response.json({
+              jsonrpc: "2.0", id,
+              result: {
+                content: [{ type: "text", text: `Tool '${toolName}' failed: ${err?.message || err}` }],
+                isError: true,
+              },
+            });
+          }
+        }
+
         return Response.json({
-          jsonrpc: "2.0", id: body.id,
-          result: { content: [{ type: "text", text: `Unknown tool: ${toolName}` }] },
+          jsonrpc: "2.0", id,
+          result: { content: [{ type: "text", text: `Unknown tool: ${toolName}` }], isError: true },
         });
       }
 
+      // Unsupported method
       return Response.json({
-        jsonrpc: "2.0", id: body.id,
+        jsonrpc: "2.0", id,
         error: { code: -32601, message: `Method not found: ${method}` },
       });
     }
 
-    return new Response("MCP Server — POST JSON-RPC requests here", { status: 200 });
+    // GET request — return server info
+    return Response.json({
+      name: "agentos-mcp",
+      version: "0.2.0",
+      agent: this.name || "default",
+      protocol: "MCP/2024-11-05",
+      endpoints: ["initialize", "tools/list", "tools/call"],
+    });
   }
 }
 

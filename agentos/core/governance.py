@@ -13,6 +13,7 @@ class GovernancePolicy:
     require_confirmation_for_destructive: bool = True
     budget_limit_usd: float = 10.0
     allowed_domains: list[str] = field(default_factory=list)
+    blocked_domains: list[str] = field(default_factory=list)
     blocked_tools: list[str] = field(default_factory=list)
     max_tokens_per_turn: int = 8192
 
@@ -49,6 +50,26 @@ class GovernanceLayer:
         return any(kw in action_str for kw in destructive_keywords)
 
     def check_domain(self, url: str) -> bool:
+        """Return True if the URL is allowed. Empty allowlist = allow all."""
         if not self.policy.allowed_domains:
+            if not self.policy.blocked_domains:
+                return True
+            # Check blocked domains
+            try:
+                from urllib.parse import urlparse
+                hostname = urlparse(url).hostname or ""
+                return not any(
+                    hostname == d or hostname.endswith(f".{d}")
+                    for d in self.policy.blocked_domains
+                )
+            except Exception:
+                return True
+        try:
+            from urllib.parse import urlparse
+            hostname = urlparse(url).hostname or ""
+            return any(
+                hostname == d or hostname.endswith(f".{d}")
+                for d in self.policy.allowed_domains
+            )
+        except Exception:
             return True
-        return any(domain in url for domain in self.policy.allowed_domains)

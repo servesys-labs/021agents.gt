@@ -19,6 +19,7 @@ import {
 } from "./memory";
 import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop, maybeSummarize } from "./middleware";
+import { loadSkills, formatSkillsPrompt } from "./skills";
 import type {
   AgentConfig,
   LLMMessage,
@@ -426,6 +427,20 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
           || (!strategyName ? autoSelectStrategy(request.task, ctx.activeTools.length) : null);
         if (strategyPrompt) {
           ctx.messages.push({ role: "system", content: strategyPrompt });
+        }
+      } catch {
+        /* best-effort */
+      }
+
+      // Load and inject skills into system prompt
+      try {
+        const skills = await loadSkills(hyperdrive, config.org_id, config.agent_name);
+        if (skills.length > 0) {
+          const skillsSection = formatSkillsPrompt(skills);
+          const sysMsg = ctx.messages.find((m) => m.role === "system");
+          if (sysMsg) {
+            sysMsg.content += skillsSection;
+          }
         }
       } catch {
         /* best-effort */

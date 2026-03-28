@@ -62,10 +62,29 @@ const TokenVerifyRequest = z.object({
   token: z.string().min(1),
 });
 
+const ForgotPasswordRequest = z.object({
+  email: z.string().min(1).email(),
+});
+
+const ResetPasswordRequest = z.object({
+  token: z.string().min(1),
+  new_password: z.string().min(8).max(128),
+});
+
+const VerifyEmailRequest = z.object({
+  token: z.string().min(1),
+});
+
 // ── Helpers ──────────────────────────────────────────────────────────────
 
 function generateId(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+}
+
+function generateSecureToken(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function getClientIp(c: any): string {
@@ -338,12 +357,27 @@ authRoutes.post("/signup", async (c) => {
 
   auditAuthEvent(sql, "auth.signup", userId, orgId, { email, provider: "local" });
 
+  // Generate email verification token (best-effort)
+  try {
+    const verifyToken = generateSecureToken();
+    const verifyExpires = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    await sql`
+      INSERT INTO email_verification_tokens (token, user_id, expires_at, created_at)
+      VALUES (${verifyToken}, ${userId}, ${verifyExpires}, now())
+    `;
+    // TODO: Send verification email via email service
+    console.log(`[auth/signup] Email verification token generated for ${email}`);
+  } catch (err) {
+    console.warn("[auth/signup] Email verification token failed:", err);
+  }
+
   return c.json({
     token,
     user_id: userId,
     email,
     org_id: orgId,
     provider: "local",
+    email_verified: false,
   });
 });
 
@@ -398,6 +432,7 @@ authRoutes.post("/login", async (c) => {
 
   const valid = await verifyPassword(password, user.password_hash);
   if (!valid) {
+    auditAuthEvent(sql, "auth.login_failed", user.user_id, "", { email, reason: "invalid_password" });
     logSecurityEvent(sql, {
       org_id: "",
       event_type: "login.failed",
@@ -460,6 +495,9 @@ authRoutes.get("/providers", (c) => {
 // ── POST /cf-access/exchange ─────────────────────────────────────────────
 
 authRoutes.post("/cf-access/exchange", async (c) => {
+  const cfExchangeLimit = checkRateLimit(c, `cf-exchange:${getClientIp(c)}`, 10, 60 * 60 * 1000);
+  if (cfExchangeLimit) return cfExchangeLimit;
+
   if (!cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
     return c.json({ error: "Cloudflare Access auth is not enabled" }, 400);
   }
@@ -560,6 +598,8 @@ authRoutes.post("/cf-access/exchange", async (c) => {
     provider: "cf_access",
     extra: { role },
   });
+
+  auditAuthEvent(sql, "auth.cf_access_exchange", userId, orgId, { email: cfClaims.email, provider: "cf_access" });
 
   return c.json({
     token,
@@ -674,5 +714,165 @@ authRoutes.post("/password", async (c) => {
     WHERE user_id = ${user.user_id}
   `;
 
+  auditAuthEvent(sql, "auth.password_change", user.user_id, user.org_id ?? "", { email: user.email });
+
   return c.json({ updated: true });
+});
+
+// ── POST /forgot-password ─────────────────────────────────────────────
+
+authRoutes.post("/forgot-password", async (c) => {
+  if (passwordAuthDisabled(c.env)) {
+    return c.json({ error: "Password authentication is disabled" }, 403);
+  }
+  const limit = checkRateLimit(c, `forgot:${getClientIp(c)}`, 3, 60 * 60 * 1000);
+  if (limit) return limit;
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = ForgotPasswordRequest.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "Valid email is required" }, 400);
+  }
+  const { email } = parsed.data;
+
+  const sql = await getDb(c.env.HYPERDRIVE);
+
+  // Always return success to prevent email enumeration
+  const successResponse = { message: "If that email exists, a reset link has been sent." };
+
+  const rows = await sql`SELECT user_id FROM users WHERE email = ${email} AND password_hash IS NOT NULL`;
+  if (rows.length === 0) {
+    return c.json(successResponse);
+  }
+
+  const userId = rows[0].user_id;
+  const token = generateSecureToken();
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+
+  // Invalidate any existing reset tokens for this user
+  await sql`DELETE FROM password_reset_tokens WHERE user_id = ${userId}`;
+
+  await sql`
+    INSERT INTO password_reset_tokens (token, user_id, expires_at, created_at)
+    VALUES (${token}, ${userId}, ${expiresAt}, now())
+  `;
+
+  auditAuthEvent(sql, "auth.forgot_password", userId, "", { email });
+
+  // TODO: Integrate email service to send reset link with token
+  // For now, token is stored and can be verified via POST /reset-password
+  console.log(`[auth] Password reset token generated for ${email}`);
+
+  return c.json(successResponse);
+});
+
+// ── POST /reset-password ──────────────────────────────────────────────
+
+authRoutes.post("/reset-password", async (c) => {
+  if (passwordAuthDisabled(c.env)) {
+    return c.json({ error: "Password authentication is disabled" }, 403);
+  }
+  const limit = checkRateLimit(c, `reset:${getClientIp(c)}`, 5, 60 * 60 * 1000);
+  if (limit) return limit;
+
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = ResetPasswordRequest.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
+  }
+  const { token, new_password } = parsed.data;
+
+  const sql = await getDb(c.env.HYPERDRIVE);
+
+  const rows = await sql`
+    SELECT user_id, expires_at FROM password_reset_tokens
+    WHERE token = ${token} LIMIT 1
+  `;
+
+  if (rows.length === 0) {
+    return c.json({ error: "Invalid or expired reset token" }, 400);
+  }
+
+  const { user_id, expires_at } = rows[0];
+  if (new Date(expires_at).getTime() < Date.now()) {
+    await sql`DELETE FROM password_reset_tokens WHERE token = ${token}`;
+    return c.json({ error: "Reset token has expired" }, 400);
+  }
+
+  const newHash = await hashPassword(new_password);
+  const now = new Date().toISOString();
+
+  await sql`UPDATE users SET password_hash = ${newHash}, updated_at = ${now} WHERE user_id = ${user_id}`;
+  await sql`DELETE FROM password_reset_tokens WHERE user_id = ${user_id}`;
+
+  auditAuthEvent(sql, "auth.password_reset", String(user_id), "", { method: "token" });
+
+  return c.json({ updated: true });
+});
+
+// ── POST /verify-email ────────────────────────────────────────────────
+
+authRoutes.post("/verify-email", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const parsed = VerifyEmailRequest.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: "token is required" }, 400);
+  }
+
+  const sql = await getDb(c.env.HYPERDRIVE);
+
+  const rows = await sql`
+    SELECT user_id, expires_at FROM email_verification_tokens
+    WHERE token = ${parsed.data.token} LIMIT 1
+  `;
+
+  if (rows.length === 0) {
+    return c.json({ error: "Invalid or expired verification token" }, 400);
+  }
+
+  const { user_id, expires_at } = rows[0];
+  if (new Date(expires_at).getTime() < Date.now()) {
+    await sql`DELETE FROM email_verification_tokens WHERE token = ${parsed.data.token}`;
+    return c.json({ error: "Verification token has expired" }, 400);
+  }
+
+  await sql`UPDATE users SET email_verified = true, updated_at = now() WHERE user_id = ${user_id}`;
+  await sql`DELETE FROM email_verification_tokens WHERE user_id = ${user_id}`;
+
+  auditAuthEvent(sql, "auth.email_verified", String(user_id), "", {});
+
+  return c.json({ verified: true });
+});
+
+// ── POST /resend-verification ─────────────────────────────────────────
+
+authRoutes.post("/resend-verification", async (c) => {
+  const limit = checkRateLimit(c, `verify:${getClientIp(c)}`, 3, 60 * 60 * 1000);
+  if (limit) return limit;
+
+  const user = await resolveUser(c);
+  if (!requireUser(user, c)) {
+    return c.json({ error: "Missing or invalid Authorization header" }, 401);
+  }
+
+  const sql = await getDb(c.env.HYPERDRIVE);
+
+  const rows = await sql`SELECT email_verified FROM users WHERE user_id = ${user.user_id}`;
+  if (rows.length > 0 && rows[0].email_verified) {
+    return c.json({ message: "Email already verified" });
+  }
+
+  const token = generateSecureToken();
+  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(); // 24 hours
+
+  await sql`DELETE FROM email_verification_tokens WHERE user_id = ${user.user_id}`;
+  await sql`
+    INSERT INTO email_verification_tokens (token, user_id, expires_at, created_at)
+    VALUES (${token}, ${user.user_id}, ${expiresAt}, now())
+  `;
+
+  // TODO: Integrate email service to send verification link
+  console.log(`[auth] Email verification token generated for ${user.email}`);
+
+  return c.json({ message: "Verification email sent" });
 });
