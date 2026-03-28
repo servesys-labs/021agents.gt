@@ -2,15 +2,15 @@
  * Projects router — org > project > agents hierarchy, canvas layout, meta-agent bootstrap.
  * Ported from agentos/api/routers/projects.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses, ProjectSummary } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { ORCHESTRATOR_SYSTEM_PROMPT, ORCHESTRATOR_TOOLS } from "../templates/orchestrator";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const projectRoutes = new Hono<R>();
+export const projectRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(8);
@@ -26,7 +26,23 @@ async function requireProjectOrg(sql: any, projectId: string, orgId: string): Pr
   return rows[0];
 }
 
-projectRoutes.get("/", requireScope("projects:read"), async (c) => {
+// ── GET / — list projects ───────────────────────────────────────────────
+
+const listProjectsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Projects"],
+  summary: "List projects for the current org",
+  middleware: [requireScope("projects:read")],
+  responses: {
+    200: {
+      description: "Project list",
+      content: { "application/json": { schema: z.object({ projects: z.array(z.record(z.unknown())) }) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+projectRoutes.openapi(listProjectsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -35,9 +51,38 @@ projectRoutes.get("/", requireScope("projects:read"), async (c) => {
   return c.json({ projects: rows });
 });
 
-projectRoutes.post("/", requireScope("projects:write"), async (c) => {
+// ── POST / — create a project ───────────────────────────────────────────
+
+const createProjectRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Projects"],
+  summary: "Create a new project with environments and meta-agent",
+  middleware: [requireScope("projects:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            description: z.string().default(""),
+            plan: z.string().default("standard"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Created project",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   const description = String(body.description || "");
   const plan = String(body.plan || "standard");
@@ -131,9 +176,28 @@ projectRoutes.post("/", requireScope("projects:write"), async (c) => {
   });
 });
 
-projectRoutes.get("/:project_id", requireScope("projects:read"), async (c) => {
+// ── GET /:project_id — get project details ──────────────────────────────
+
+const getProjectRoute = createRoute({
+  method: "get",
+  path: "/{project_id}",
+  tags: ["Projects"],
+  summary: "Get project details with environments",
+  middleware: [requireScope("projects:read")],
+  request: {
+    params: z.object({ project_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Project details",
+      content: { "application/json": { schema: z.object({ project: z.record(z.unknown()), environments: z.array(z.record(z.unknown())) }) } },
+    },
+    ...errorResponses(400, 401, 404, 500),
+  },
+});
+projectRoutes.openapi(getProjectRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const projectId = c.req.param("project_id");
+  const { project_id: projectId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let project: any;
@@ -147,9 +211,28 @@ projectRoutes.get("/:project_id", requireScope("projects:read"), async (c) => {
   return c.json({ project, environments: envs });
 });
 
-projectRoutes.get("/:project_id/envs", requireScope("projects:read"), async (c) => {
+// ── GET /:project_id/envs — list environments ──────────────────────────
+
+const listEnvsRoute = createRoute({
+  method: "get",
+  path: "/{project_id}/envs",
+  tags: ["Projects"],
+  summary: "List environments for a project",
+  middleware: [requireScope("projects:read")],
+  request: {
+    params: z.object({ project_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Environment list",
+      content: { "application/json": { schema: z.object({ environments: z.array(z.record(z.unknown())) }) } },
+    },
+    ...errorResponses(400, 401, 404, 500),
+  },
+});
+projectRoutes.openapi(listEnvsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const projectId = c.req.param("project_id");
+  const { project_id: projectId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
@@ -162,11 +245,39 @@ projectRoutes.get("/:project_id/envs", requireScope("projects:read"), async (c) 
   return c.json({ environments: rows });
 });
 
-projectRoutes.put("/:project_id/envs/:env_name", requireScope("projects:write"), async (c) => {
+// ── PUT /:project_id/envs/:env_name — update environment ───────────────
+
+const updateEnvRoute = createRoute({
+  method: "put",
+  path: "/{project_id}/envs/{env_name}",
+  tags: ["Projects"],
+  summary: "Update an environment's plan or provider config",
+  middleware: [requireScope("projects:write")],
+  request: {
+    params: z.object({ project_id: z.string(), env_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            plan: z.string().optional(),
+            provider_config: z.record(z.unknown()).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Environment updated",
+      content: { "application/json": { schema: z.object({ updated: z.string() }) } },
+    },
+    ...errorResponses(400, 401, 404, 500),
+  },
+});
+projectRoutes.openapi(updateEnvRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const projectId = c.req.param("project_id");
-  const envName = c.req.param("env_name");
-  const body = await c.req.json();
+  const { project_id: projectId, env_name: envName } = c.req.valid("param");
+  const body = c.req.valid("json");
   const plan = String(body.plan || "");
   const providerConfig = body.provider_config;
 
@@ -198,9 +309,37 @@ projectRoutes.put("/:project_id/envs/:env_name", requireScope("projects:write"),
   return c.json({ updated: envName });
 });
 
-projectRoutes.get("/:project_id/canvas-layout", requireScope("projects:read"), async (c) => {
+// ── GET /:project_id/canvas-layout — get canvas layout ─────────────────
+
+const getCanvasLayoutRoute = createRoute({
+  method: "get",
+  path: "/{project_id}/canvas-layout",
+  tags: ["Projects"],
+  summary: "Get project canvas layout",
+  middleware: [requireScope("projects:read")],
+  request: {
+    params: z.object({ project_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Canvas layout",
+      content: {
+        "application/json": {
+          schema: z.object({
+            nodes: z.array(z.record(z.unknown())),
+            edges: z.array(z.record(z.unknown())),
+            assignments: z.array(z.record(z.unknown())),
+            updated_at: z.union([z.string(), z.number()]),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 404, 500),
+  },
+});
+projectRoutes.openapi(getCanvasLayoutRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const projectId = c.req.param("project_id");
+  const { project_id: projectId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
@@ -235,10 +374,44 @@ projectRoutes.get("/:project_id/canvas-layout", requireScope("projects:read"), a
   });
 });
 
-projectRoutes.put("/:project_id/canvas-layout", requireScope("projects:write"), async (c) => {
+// ── PUT /:project_id/canvas-layout — save canvas layout ────────────────
+
+const saveCanvasLayoutRoute = createRoute({
+  method: "put",
+  path: "/{project_id}/canvas-layout",
+  tags: ["Projects"],
+  summary: "Save project canvas layout",
+  middleware: [requireScope("projects:write")],
+  request: {
+    params: z.object({ project_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            nodes: z.array(z.record(z.unknown())).optional(),
+            edges: z.array(z.record(z.unknown())).optional(),
+            assignments: z.array(z.record(z.unknown())).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Layout saved",
+      content: {
+        "application/json": {
+          schema: z.object({ saved: z.boolean(), project_id: z.string(), assignments: z.number() }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 404, 500),
+  },
+});
+projectRoutes.openapi(saveCanvasLayoutRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const projectId = c.req.param("project_id");
-  const body = await c.req.json();
+  const { project_id: projectId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const nodes = Array.isArray(body.nodes) ? body.nodes : [];
   const edges = Array.isArray(body.edges) ? body.edges : [];
   let assignments = body.assignments;

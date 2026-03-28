@@ -5,13 +5,12 @@
  * These endpoints are called by the runtime worker to persist telemetry.
  * Auth is via SERVICE_TOKEN, not user JWT.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDb } from "../db/client";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const edgeIngestRoutes = new Hono<R>();
+export const edgeIngestRoutes = createOpenAPIRouter();
 
 function requireServiceToken(c: any): boolean {
   const expected = (c.env.SERVICE_TOKEN || "").trim();
@@ -37,11 +36,53 @@ function ensureIngestAuth(c: any): Response | null {
   return null;
 }
 
-edgeIngestRoutes.post("/sessions", async (c) => {
+// ── POST /sessions — Ingest session data ────────────────────────────
+
+const ingestSessionRoute = createRoute({
+  method: "post",
+  path: "/sessions",
+  tags: ["Edge Ingest"],
+  summary: "Ingest session data from runtime worker",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            session_id: z.string().min(1).openapi({ example: "sess-abc123" }),
+            org_id: z.string().default("").openapi({ example: "org_abc" }),
+            project_id: z.string().default("").openapi({ example: "proj_abc" }),
+            agent_name: z.string().default("").openapi({ example: "my-agent" }),
+            status: z.string().default("completed"),
+            input_text: z.string().default(""),
+            output_text: z.string().default(""),
+            model: z.string().default(""),
+            trace_id: z.string().default(""),
+            parent_session_id: z.string().default(""),
+            depth: z.coerce.number().default(0),
+            step_count: z.coerce.number().default(0),
+            action_count: z.coerce.number().default(0),
+            wall_clock_seconds: z.coerce.number().default(0),
+            cost_total_usd: z.coerce.number().default(0),
+            created_at: z.coerce.number().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Session ingested",
+      content: { "application/json": { schema: z.object({ ingested: z.boolean(), session_id: z.string() }) } },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+edgeIngestRoutes.openapi(ingestSessionRoute, async (c): Promise<any> => {
   const authError = ensureIngestAuth(c);
   if (authError) return authError;
 
-  const payload = await c.req.json();
+  const payload = c.req.valid("json");
   const sessionId = String(payload.session_id || "").trim();
   if (!sessionId) return c.json({ error: "session_id required" }, 400);
 
@@ -95,11 +136,53 @@ edgeIngestRoutes.post("/sessions", async (c) => {
   return c.json({ ingested: true, session_id: sessionId });
 });
 
-edgeIngestRoutes.post("/turns", async (c) => {
+// ── POST /turns — Ingest turn data ──────────────────────────────────
+
+const ingestTurnRoute = createRoute({
+  method: "post",
+  path: "/turns",
+  tags: ["Edge Ingest"],
+  summary: "Ingest turn data from runtime worker",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            session_id: z.string().min(1).openapi({ example: "sess-abc123" }),
+            turn_number: z.coerce.number().int().min(1).openapi({ example: 1 }),
+            model_used: z.string().default(""),
+            input_tokens: z.coerce.number().default(0),
+            output_tokens: z.coerce.number().default(0),
+            latency_ms: z.coerce.number().default(0),
+            llm_content: z.string().default(""),
+            cost_total_usd: z.coerce.number().default(0),
+            tool_calls_json: z.string().default("[]"),
+            tool_results_json: z.string().default("[]"),
+            errors_json: z.string().default("[]"),
+            execution_mode: z.string().default("sequential"),
+            plan_json: z.string().default("{}"),
+            reflection_json: z.string().default("{}"),
+            started_at: z.coerce.number().optional(),
+            ended_at: z.coerce.number().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Turn ingested",
+      content: { "application/json": { schema: z.object({ ingested: z.boolean(), session_id: z.string(), turn_number: z.number() }) } },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+edgeIngestRoutes.openapi(ingestTurnRoute, async (c): Promise<any> => {
   const authError = ensureIngestAuth(c);
   if (authError) return authError;
 
-  const payload = await c.req.json();
+  const payload = c.req.valid("json");
   const sessionId = String(payload.session_id || "").trim();
   const turnNumber = Number(payload.turn_number || 0) || 0;
   if (!sessionId || turnNumber <= 0) {

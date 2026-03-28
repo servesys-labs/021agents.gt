@@ -2,14 +2,14 @@
  * Policies router — reusable governance policy templates.
  * Ported from agentos/api/routers/policies.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const policyRoutes = new Hono<R>();
+export const policyRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(6);
@@ -17,7 +17,32 @@ function genId(): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-policyRoutes.get("/", requireScope("policies:read"), async (c) => {
+// ── Zod schemas ─────────────────────────────────────────────────
+
+const policyCreateBody = z.object({
+  name: z.string().min(1),
+  budget_limit_usd: z.number().optional(),
+  blocked_tools: z.array(z.string()).optional(),
+  allowed_domains: z.array(z.string()).optional(),
+  require_confirmation: z.boolean().optional(),
+  max_turns: z.number().int().optional(),
+});
+
+// ── GET / ───────────────────────────────────────────────────────
+
+const listPoliciesRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Policies"],
+  summary: "List all policy templates",
+  middleware: [requireScope("policies:read")],
+  responses: {
+    200: { description: "List of policies", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+policyRoutes.openapi(listPoliciesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -26,9 +51,24 @@ policyRoutes.get("/", requireScope("policies:read"), async (c) => {
   return c.json({ policies: rows });
 });
 
-policyRoutes.post("/", requireScope("policies:write"), async (c) => {
+// ── POST / ──────────────────────────────────────────────────────
+
+const createPolicyRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Policies"],
+  summary: "Create a policy template",
+  middleware: [requireScope("policies:write")],
+  request: { body: { content: { "application/json": { schema: policyCreateBody } } } },
+  responses: {
+    200: { description: "Policy created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
+});
+
+policyRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   if (!name) return c.json({ error: "name is required" }, 400);
 
@@ -67,9 +107,26 @@ policyRoutes.post("/", requireScope("policies:write"), async (c) => {
   return c.json({ policy_id: policyId, name, policy });
 });
 
-policyRoutes.get("/:policy_id", requireScope("policies:read"), async (c) => {
+// ── GET /:policy_id ─────────────────────────────────────────────
+
+const getPolicyRoute = createRoute({
+  method: "get",
+  path: "/{policy_id}",
+  tags: ["Policies"],
+  summary: "Get a policy template by ID",
+  middleware: [requireScope("policies:read")],
+  request: {
+    params: z.object({ policy_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Policy detail", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+policyRoutes.openapi(getPolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const policyId = c.req.param("policy_id");
+  const { policy_id: policyId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT * FROM policy_templates WHERE policy_id = ${policyId}`;
   if (rows.length === 0) return c.json({ error: "Policy not found" }, 404);
@@ -83,9 +140,26 @@ policyRoutes.get("/:policy_id", requireScope("policies:read"), async (c) => {
   return c.json(d);
 });
 
-policyRoutes.delete("/:policy_id", requireScope("policies:write"), async (c) => {
+// ── DELETE /:policy_id ──────────────────────────────────────────
+
+const deletePolicyRoute = createRoute({
+  method: "delete",
+  path: "/{policy_id}",
+  tags: ["Policies"],
+  summary: "Delete a policy template",
+  middleware: [requireScope("policies:write")],
+  request: {
+    params: z.object({ policy_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Policy deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+policyRoutes.openapi(deletePolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const policyId = c.req.param("policy_id");
+  const { policy_id: policyId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM policy_templates WHERE policy_id = ${policyId} AND org_id = ${user.org_id}`;
   return c.json({ deleted: policyId });

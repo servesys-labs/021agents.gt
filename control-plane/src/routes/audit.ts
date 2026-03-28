@@ -4,25 +4,45 @@
  *
  * Hash chain export uses SHA-256 chaining for tamper evidence.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { getDb, getDbForOrg } from "../db/client";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const auditRoutes = new Hono<R>();
+export const auditRoutes = createOpenAPIRouter();
 
 async function sha256Hex(data: string): Promise<string> {
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-auditRoutes.get("/log", async (c) => {
+// ── GET /log — Query audit log ────────────────────────────────────────────
+const auditLogRoute = createRoute({
+  method: "get",
+  path: "/log",
+  tags: ["Audit"],
+  summary: "Query audit log",
+  request: {
+    query: z.object({
+      action: z.string().optional(),
+      user_id: z.string().optional(),
+      since_days: z.coerce.number().optional(),
+      limit: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Audit log entries", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+auditRoutes.openapi(auditLogRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const action = c.req.query("action") || "";
-  const userId = c.req.query("user_id") || "";
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
-  const limit = Math.min(10000, Math.max(1, Number(c.req.query("limit")) || 100));
+  const query = c.req.valid("query");
+  const action = query.action || "";
+  const userId = query.user_id || "";
+  const sinceDays = Math.max(1, Math.min(365, Number(query.since_days) || 30));
+  const limit = Math.min(10000, Math.max(1, Number(query.limit) || 100));
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -57,10 +77,28 @@ auditRoutes.get("/log", async (c) => {
   return c.json({ entries: rows, total: rows.length });
 });
 
-auditRoutes.get("/export", async (c) => {
+// ── GET /export — Export audit log with hash chain ────────────────────────
+const auditExportRoute = createRoute({
+  method: "get",
+  path: "/export",
+  tags: ["Audit"],
+  summary: "Export audit log with tamper-evident hash chain",
+  request: {
+    query: z.object({
+      since_days: z.coerce.number().optional(),
+      limit: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Audit export with integrity hash", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+auditRoutes.openapi(auditExportRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
-  const limit = Math.min(10000, Math.max(1, Number(c.req.query("limit")) || 10000));
+  const query = c.req.valid("query");
+  const sinceDays = Math.max(1, Math.min(365, Number(query.since_days) || 30));
+  const limit = Math.min(10000, Math.max(1, Number(query.limit) || 10000));
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -94,7 +132,22 @@ auditRoutes.get("/export", async (c) => {
 });
 
 // ── DELETE /log — Immutable audit mode guard ──────────────────────────────
-auditRoutes.delete("/log", async (c) => {
+const deleteAuditLogRoute = createRoute({
+  method: "delete",
+  path: "/log",
+  tags: ["Audit"],
+  summary: "Delete audit log entries (immutable mode guard)",
+  request: {
+    query: z.object({
+      since_days: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Deleted count", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403, 500),
+  },
+});
+auditRoutes.openapi(deleteAuditLogRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -117,7 +170,8 @@ auditRoutes.delete("/log", async (c) => {
   }
 
   // If not immutable, allow deletion with filters
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
+  const query = c.req.valid("query");
+  const sinceDays = Math.max(1, Math.min(365, Number(query.since_days) || 30));
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   const result = await sql`
@@ -128,10 +182,23 @@ auditRoutes.delete("/log", async (c) => {
   return c.json({ deleted: result.count ?? 0 });
 });
 
-// ── DELETE /log/:entry_id — Delete a single audit entry (immutable guard) ──
-auditRoutes.delete("/log/:entry_id", async (c) => {
+// ── DELETE /log/{entry_id} — Delete a single audit entry (immutable guard)
+const deleteAuditEntryRoute = createRoute({
+  method: "delete",
+  path: "/log/{entry_id}",
+  tags: ["Audit"],
+  summary: "Delete a single audit entry (immutable mode guard)",
+  request: {
+    params: z.object({ entry_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Deleted count", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403, 500),
+  },
+});
+auditRoutes.openapi(deleteAuditEntryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const entryId = c.req.param("entry_id");
+  const { entry_id: entryId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Check immutable_audit setting
@@ -159,7 +226,17 @@ auditRoutes.delete("/log/:entry_id", async (c) => {
   return c.json({ deleted: result.count ?? 0 });
 });
 
-auditRoutes.get("/events", async (c) => {
+// ── GET /events — List event types ────────────────────────────────────────
+const eventTypesRoute = createRoute({
+  method: "get",
+  path: "/events",
+  tags: ["Audit"],
+  summary: "List event types",
+  responses: {
+    200: { description: "Event type list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+auditRoutes.openapi(eventTypesRoute, async (c): Promise<any> => {
   const sql = await getDb(c.env.HYPERDRIVE);
   try {
     const rows = await sql`SELECT * FROM event_types ORDER BY category, event_type`;

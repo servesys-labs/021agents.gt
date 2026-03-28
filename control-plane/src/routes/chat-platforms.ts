@@ -2,14 +2,13 @@
  * Chat platforms router — Telegram bot setup, webhook handling.
  * Ported from agentos/api/routers/chat_platforms.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDb, getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const chatPlatformRoutes = new Hono<R>();
+export const chatPlatformRoutes = createOpenAPIRouter();
 
 async function getTelegramToken(sql: any): Promise<string> {
   try {
@@ -21,15 +20,47 @@ async function getTelegramToken(sql: any): Promise<string> {
   return "";
 }
 
-// ── Telegram Webhook (unauthenticated — receives Telegram updates) ──
+async function sendTelegramMessage(token: string, chatId: number, text: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, text };
+  if (replyTo) body.reply_to_message_id = replyTo;
+  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
 
-chatPlatformRoutes.post("/telegram/webhook", async (c) => {
+// ── POST /chat/telegram/webhook ────────────────────────────────────────
+
+const telegramWebhookRoute = createRoute({
+  method: "post",
+  path: "/telegram/webhook",
+  tags: ["Chat Platforms"],
+  summary: "Receive Telegram webhook updates",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.record(z.unknown()),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Webhook processed",
+      content: { "application/json": { schema: z.object({ ok: z.boolean() }) } },
+    },
+    503: { description: "Service unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
   const sql = await getDb(c.env.HYPERDRIVE);
   const botToken = await getTelegramToken(sql);
   if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
 
-  const payload = await c.req.json();
-  const message = payload?.message;
+  const payload = c.req.valid("json");
+  const message = (payload as any)?.message;
   if (!message || !message.text) return c.json({ ok: true });
 
   const chatId = message.chat?.id;
@@ -91,22 +122,48 @@ chatPlatformRoutes.post("/telegram/webhook", async (c) => {
   return c.json({ ok: true });
 });
 
-async function sendTelegramMessage(token: string, chatId: number, text: string, replyTo?: number) {
-  const body: any = { chat_id: chatId, text };
-  if (replyTo) body.reply_to_message_id = replyTo;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }).catch(() => {});
-}
+// ── POST /chat/telegram/connect ────────────────────────────────────────
 
-// ── Telegram Connect (one-click setup) ──────────────────────────────
-
-chatPlatformRoutes.post("/telegram/connect", requireScope("integrations:write"), async (c) => {
+const telegramConnectRoute = createRoute({
+  method: "post",
+  path: "/telegram/connect",
+  tags: ["Chat Platforms"],
+  summary: "Connect a Telegram bot (one-click setup)",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            bot_token: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Connection result",
+      content: {
+        "application/json": {
+          schema: z.object({
+            success: z.boolean(),
+            bot_username: z.string(),
+            deep_link: z.string(),
+            webhook_registered: z.boolean(),
+            webhook_url: z.string(),
+            secret_stored: z.boolean(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400),
+  },
+});
+chatPlatformRoutes.openapi(telegramConnectRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const botToken = String(body.bot_token || "").trim();
+  const body = c.req.valid("json");
+  const botToken = body.bot_token.trim();
   if (!botToken) return c.json({ error: "bot_token is required" }, 400);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -154,12 +211,39 @@ chatPlatformRoutes.post("/telegram/connect", requireScope("integrations:write"),
   });
 });
 
-// ── Telegram Setup (manual webhook override) ────────────────────────
+// ── POST /chat/telegram/setup ──────────────────────────────────────────
 
-chatPlatformRoutes.post("/telegram/setup", requireScope("integrations:write"), async (c) => {
+const telegramSetupRoute = createRoute({
+  method: "post",
+  path: "/telegram/setup",
+  tags: ["Chat Platforms"],
+  summary: "Set Telegram webhook URL manually",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            webhook_url: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Setup result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+    502: { description: "Bad gateway", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "Service unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+chatPlatformRoutes.openapi(telegramSetupRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const webhookUrl = String(body.webhook_url || "").trim();
+  const body = c.req.valid("json");
+  const webhookUrl = body.webhook_url.trim();
   if (!webhookUrl) return c.json({ error: "webhook_url is required" }, 400);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -178,9 +262,38 @@ chatPlatformRoutes.post("/telegram/setup", requireScope("integrations:write"), a
   }
 });
 
-// ── Telegram QR ─────────────────────────────────────────────────────
+// ── GET /chat/telegram/qr ──────────────────────────────────────────────
 
-chatPlatformRoutes.get("/telegram/qr", requireScope("integrations:read"), async (c) => {
+const telegramQrRoute = createRoute({
+  method: "get",
+  path: "/telegram/qr",
+  tags: ["Chat Platforms"],
+  summary: "Get Telegram bot deep link / QR data",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default("default").openapi({ description: "Agent name for deep link" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "QR / deep link data",
+      content: {
+        "application/json": {
+          schema: z.object({
+            deep_link: z.string(),
+            bot_username: z.string(),
+            agent_name: z.string(),
+            instructions: z.string(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(500),
+    503: { description: "Service unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+chatPlatformRoutes.openapi(telegramQrRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const botToken = await getTelegramToken(sql);
@@ -195,7 +308,7 @@ chatPlatformRoutes.get("/telegram/qr", requireScope("integrations:read"), async 
 
   if (!botUsername) return c.json({ error: "Could not retrieve bot username" }, 500);
 
-  const agentName = c.req.query("agent_name") || "default";
+  const { agent_name: agentName } = c.req.valid("query");
   const deepLink = `https://t.me/${botUsername}?start=${agentName}`;
 
   return c.json({
@@ -206,9 +319,24 @@ chatPlatformRoutes.get("/telegram/qr", requireScope("integrations:read"), async 
   });
 });
 
-// ── Telegram Delete Webhook ─────────────────────────────────────────
+// ── DELETE /chat/telegram/webhook ──────────────────────────────────────
 
-chatPlatformRoutes.delete("/telegram/webhook", requireScope("integrations:write"), async (c) => {
+const deleteTelegramWebhookRoute = createRoute({
+  method: "delete",
+  path: "/telegram/webhook",
+  tags: ["Chat Platforms"],
+  summary: "Delete Telegram webhook",
+  middleware: [requireScope("integrations:write")],
+  responses: {
+    200: {
+      description: "Webhook deleted",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    502: { description: "Bad gateway", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "Service unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+chatPlatformRoutes.openapi(deleteTelegramWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const botToken = await getTelegramToken(sql);

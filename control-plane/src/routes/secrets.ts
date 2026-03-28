@@ -4,15 +4,16 @@
  *
  * Uses Fernet encryption (AES-CBC + HMAC-SHA256) via Web Crypto.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
+import type { Env } from "../env";
 import { getDbForOrg } from "../db/client";
 import { fernetEncrypt } from "../logic/fernet";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const secretRoutes = new Hono<R>();
+export const secretRoutes = createOpenAPIRouter();
 
 function getKeySeed(env: Env): string {
   const key = env.SECRETS_ENCRYPTION_KEY;
@@ -20,10 +21,29 @@ function getKeySeed(env: Env): string {
   return key;
 }
 
-secretRoutes.get("/", requireScope("secrets:read"), async (c) => {
+// ── GET / — List secrets (metadata only) ────────────────────────────────────
+const listSecretsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Secrets"],
+  summary: "List secrets (metadata only)",
+  middleware: [requireScope("secrets:read")],
+  request: {
+    query: z.object({
+      project_id: z.string().optional(),
+      env: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Secrets list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+secretRoutes.openapi(listSecretsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const projectId = c.req.query("project_id") || "";
-  const envFilter = c.req.query("env") || "";
+  const query = c.req.valid("query");
+  const projectId = query.project_id || "";
+  const envFilter = query.env || "";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -55,9 +75,35 @@ secretRoutes.get("/", requireScope("secrets:read"), async (c) => {
   return c.json({ secrets: rows });
 });
 
-secretRoutes.post("/", requireScope("secrets:write"), async (c) => {
+// ── POST / — Create a secret ────────────────────────────────────────────────
+const createSecretRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Secrets"],
+  summary: "Create a secret",
+  middleware: [requireScope("secrets:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            value: z.string().min(1),
+            project_id: z.string().optional(),
+            env: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Secret created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403, 409),
+  },
+});
+secretRoutes.openapi(createSecretRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   const value = String(body.value || "");
   const projectId = String(body.project_id || "");
@@ -88,11 +134,31 @@ secretRoutes.post("/", requireScope("secrets:write"), async (c) => {
   return c.json({ created: name, project_id: projectId, env: envFilter });
 });
 
-secretRoutes.delete("/:name", requireScope("secrets:write"), async (c) => {
+// ── DELETE /{name} — Delete a secret ────────────────────────────────────────
+const deleteSecretRoute = createRoute({
+  method: "delete",
+  path: "/{name}",
+  tags: ["Secrets"],
+  summary: "Delete a secret",
+  middleware: [requireScope("secrets:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    query: z.object({
+      project_id: z.string().optional(),
+      env: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Secret deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403, 404),
+  },
+});
+secretRoutes.openapi(deleteSecretRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const name = c.req.param("name");
-  const projectId = c.req.query("project_id") || "";
-  const envFilter = c.req.query("env") || "";
+  const { name } = c.req.valid("param");
+  const query = c.req.valid("query");
+  const projectId = query.project_id || "";
+  const envFilter = query.env || "";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
@@ -103,10 +169,36 @@ secretRoutes.delete("/:name", requireScope("secrets:write"), async (c) => {
   return c.json({ deleted: name });
 });
 
-secretRoutes.post("/:name/rotate", requireScope("secrets:write"), async (c) => {
+// ── POST /{name}/rotate — Rotate a secret value ────────────────────────────
+const rotateSecretRoute = createRoute({
+  method: "post",
+  path: "/{name}/rotate",
+  tags: ["Secrets"],
+  summary: "Rotate a secret value",
+  middleware: [requireScope("secrets:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            new_value: z.string().min(1),
+            project_id: z.string().optional(),
+            env: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Secret rotated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403, 404),
+  },
+});
+secretRoutes.openapi(rotateSecretRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const name = c.req.param("name");
-  const body = await c.req.json();
+  const { name } = c.req.valid("param");
+  const body = c.req.valid("json");
   const newValue = String(body.new_value || "");
   const projectId = String(body.project_id || "");
   const envFilter = String(body.env || "");

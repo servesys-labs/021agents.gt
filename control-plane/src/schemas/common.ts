@@ -10,7 +10,7 @@ export const PaginationParams = z.object({
 export type PaginationParams = z.infer<typeof PaginationParams>;
 
 export const PaginatedResponse = z.object({
-  data: z.array(z.any()),
+  data: z.array(z.record(z.unknown())),
   total: z.number(),
   offset: z.number(),
   limit: z.number(),

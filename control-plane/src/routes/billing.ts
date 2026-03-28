@@ -2,19 +2,38 @@
  * Billing router — usage, daily breakdown, trace cost, invoices, pricing catalog.
  * Ported from agentos/api/routers/billing.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDb, getDbForOrg } from "../db/client";
 import { hasRole } from "../auth/types";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const billingRoutes = new Hono<R>();
+export const billingRoutes = createOpenAPIRouter();
 
-billingRoutes.get("/usage", requireScope("billing:read"), async (c) => {
+// ── GET /usage ──────────────────────────────────────────────────
+
+const getUsageRoute = createRoute({
+  method: "get",
+  path: "/usage",
+  tags: ["Billing"],
+  summary: "Get billing usage summary",
+  middleware: [requireScope("billing:read")],
+  request: {
+    query: z.object({
+      since_days: z.coerce.number().int().min(1).max(365).default(30),
+    }),
+  },
+  responses: {
+    200: { description: "Usage summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+billingRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
+  const { since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -78,9 +97,28 @@ billingRoutes.get("/usage", requireScope("billing:read"), async (c) => {
   });
 });
 
-billingRoutes.get("/usage/daily", requireScope("billing:read"), async (c) => {
+// ── GET /usage/daily ────────────────────────────────────────────
+
+const getDailyUsageRoute = createRoute({
+  method: "get",
+  path: "/usage/daily",
+  tags: ["Billing"],
+  summary: "Get daily billing breakdown",
+  middleware: [requireScope("billing:read")],
+  request: {
+    query: z.object({
+      days: z.coerce.number().int().min(1).max(365).default(30),
+    }),
+  },
+  responses: {
+    200: { description: "Daily breakdown", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+billingRoutes.openapi(getDailyUsageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const days = Math.max(1, Math.min(365, Number(c.req.query("days")) || 30));
+  const { days } = c.req.valid("query");
   const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -109,9 +147,27 @@ billingRoutes.get("/usage/daily", requireScope("billing:read"), async (c) => {
   return c.json({ days: out });
 });
 
-billingRoutes.get("/trace/:trace_id", requireScope("billing:read"), async (c) => {
+// ── GET /trace/:trace_id ────────────────────────────────────────
+
+const getTraceCostRoute = createRoute({
+  method: "get",
+  path: "/trace/{trace_id}",
+  tags: ["Billing"],
+  summary: "Get trace billing cost",
+  middleware: [requireScope("billing:read")],
+  request: {
+    params: z.object({ trace_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Trace cost", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+billingRoutes.openapi(getTraceCostRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const traceId = c.req.param("trace_id");
+  const { trace_id: traceId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const records = await sql`
@@ -135,12 +191,51 @@ billingRoutes.get("/trace/:trace_id", requireScope("billing:read"), async (c) =>
   });
 });
 
-billingRoutes.get("/invoices", requireScope("billing:read"), async (c) => {
+// ── GET /invoices ───────────────────────────────────────────────
+
+const listInvoicesRoute = createRoute({
+  method: "get",
+  path: "/invoices",
+  tags: ["Billing"],
+  summary: "List invoices",
+  middleware: [requireScope("billing:read")],
+  responses: {
+    200: { description: "Invoice list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+billingRoutes.openapi(listInvoicesRoute, async (c): Promise<any> => {
   return c.json({ invoices: [], note: "Stripe integration pending" });
 });
 
-billingRoutes.post("/checkout", requireScope("billing:write"), async (c) => {
-  const body = await c.req.json();
+// ── POST /checkout ──────────────────────────────────────────────
+
+const checkoutRoute = createRoute({
+  method: "post",
+  path: "/checkout",
+  tags: ["Billing"],
+  summary: "Create checkout session",
+  middleware: [requireScope("billing:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            plan: z.string().default("standard"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Checkout URL", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+billingRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const plan = String(body.plan || "standard");
   const allowed = new Set(["starter", "standard", "pro", "enterprise"]);
   if (!allowed.has(plan)) {
@@ -152,7 +247,21 @@ billingRoutes.post("/checkout", requireScope("billing:write"), async (c) => {
   });
 });
 
-billingRoutes.get("/quota", requireScope("billing:read"), async (c) => {
+// ── GET /quota ──────────────────────────────────────────────────
+
+const getQuotaRoute = createRoute({
+  method: "get",
+  path: "/quota",
+  tags: ["Billing"],
+  summary: "Get billing quota",
+  middleware: [requireScope("billing:read")],
+  responses: {
+    200: { description: "Quota info", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+billingRoutes.openapi(getQuotaRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -169,11 +278,30 @@ billingRoutes.get("/quota", requireScope("billing:read"), async (c) => {
   return c.json({ limit: 1000, used, unit: "credits" });
 });
 
-billingRoutes.get("/pricing", requireScope("billing:read"), async (c) => {
-  const resourceType = c.req.query("resource_type") || "";
-  const provider = c.req.query("provider") || "";
-  const model = c.req.query("model") || "";
-  const operation = c.req.query("operation") || "";
+// ── GET /pricing ────────────────────────────────────────────────
+
+const getPricingRoute = createRoute({
+  method: "get",
+  path: "/pricing",
+  tags: ["Billing"],
+  summary: "Get pricing catalog",
+  middleware: [requireScope("billing:read")],
+  request: {
+    query: z.object({
+      resource_type: z.string().default(""),
+      provider: z.string().default(""),
+      model: z.string().default(""),
+      operation: z.string().default(""),
+    }),
+  },
+  responses: {
+    200: { description: "Pricing catalog", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+billingRoutes.openapi(getPricingRoute, async (c): Promise<any> => {
+  const { resource_type: resourceType, provider, model, operation } = c.req.valid("query");
   const sql = await getDb(c.env.HYPERDRIVE);
 
   // Build query dynamically with filters
@@ -203,31 +331,65 @@ billingRoutes.get("/pricing", requireScope("billing:read"), async (c) => {
   return c.json({ pricing: rows, count: rows.length });
 });
 
-billingRoutes.post("/pricing", requireScope("billing:write"), async (c) => {
+// ── POST /pricing ───────────────────────────────────────────────
+
+const upsertPricingRoute = createRoute({
+  method: "post",
+  path: "/pricing",
+  tags: ["Billing"],
+  summary: "Create or update pricing entry",
+  middleware: [requireScope("billing:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            resource_type: z.string().min(1),
+            operation: z.string().min(1),
+            unit: z.string().min(1),
+            provider: z.string().default(""),
+            model: z.string().default(""),
+            unit_price_usd: z.number().default(0),
+            currency: z.string().default("USD"),
+            source: z.string().default("manual"),
+            pricing_version: z.string().default(""),
+            effective_from: z.string().nullable().optional(),
+            effective_to: z.string().nullable().optional(),
+            is_active: z.boolean().default(true),
+            metadata_json: z.string().default("{}"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Pricing entry created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403, 500),
+  },
+});
+
+billingRoutes.openapi(upsertPricingRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!hasRole(user, "admin")) {
     return c.json({ error: "Admin role required for pricing updates" }, 403);
   }
 
-  const body = await c.req.json();
-  const resourceType = String(body.resource_type || "");
-  const operation = String(body.operation || "");
-  const unit = String(body.unit || "");
-  if (!resourceType || !operation || !unit) {
-    return c.json({ error: "resource_type, operation, and unit are required" }, 400);
-  }
+  const body = c.req.valid("json");
+  const resourceType = body.resource_type;
+  const operation = body.operation;
+  const unit = body.unit;
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const provider = String(body.provider || "");
-  const model = String(body.model || "");
-  const unitPriceUsd = Number(body.unit_price_usd || 0);
-  const currency = String(body.currency || "USD");
-  const source = String(body.source || "manual");
-  const pricingVersion = String(body.pricing_version || "");
+  const provider = body.provider;
+  const model = body.model;
+  const unitPriceUsd = body.unit_price_usd;
+  const currency = body.currency;
+  const source = body.source;
+  const pricingVersion = body.pricing_version;
   const effectiveFrom = body.effective_from ?? null;
   const effectiveTo = body.effective_to ?? null;
-  const isActive = body.is_active !== false;
-  const metadataJson = String(body.metadata_json || "{}");
+  const isActive = body.is_active;
+  const metadataJson = body.metadata_json;
 
   // Deactivate existing active row for same key
   await sql`

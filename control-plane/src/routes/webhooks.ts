@@ -2,14 +2,13 @@
  * Webhooks router — CRUD + test delivery + delivery history + replay + secret rotation.
  * Ported from agentos/api/routers/webhooks.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses, WebhookCreateBody } from "../schemas/openapi";
 import { getDb, getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const webhookRoutes = new Hono<R>();
+export const webhookRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(6);
@@ -36,7 +35,22 @@ function validateCallbackUrl(url: string): string | null {
   }
 }
 
-webhookRoutes.get("/", requireScope("webhooks:read"), async (c) => {
+// ── GET /webhooks ───────────────────────────────────────────────────────
+
+const listWebhooksRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Webhooks"],
+  summary: "List all webhooks",
+  middleware: [requireScope("webhooks:read")],
+  responses: {
+    200: {
+      description: "List of webhooks",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+  },
+});
+webhookRoutes.openapi(listWebhooksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -54,9 +68,32 @@ webhookRoutes.get("/", requireScope("webhooks:read"), async (c) => {
   );
 });
 
-webhookRoutes.post("/", requireScope("webhooks:write"), async (c) => {
+// ── POST /webhooks ──────────────────────────────────────────────────────
+
+const createWebhookRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Webhooks"],
+  summary: "Create a webhook",
+  middleware: [requireScope("webhooks:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: WebhookCreateBody },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Webhook created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+webhookRoutes.openapi(createWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const url = String(body.url || "").trim();
   const events = Array.isArray(body.events) ? body.events : [];
   const codemodeHandlerId = body.codemode_handler_id || null;
@@ -80,10 +117,40 @@ webhookRoutes.post("/", requireScope("webhooks:write"), async (c) => {
   return c.json({ webhook_id: webhookId, url: url || null, events, codemode_handler_id: codemodeHandlerId });
 });
 
-webhookRoutes.put("/:webhook_id", requireScope("webhooks:write"), async (c) => {
+// ── PUT /webhooks/:webhook_id ───────────────────────────────────────────
+
+const updateWebhookRoute = createRoute({
+  method: "put",
+  path: "/{webhook_id}",
+  tags: ["Webhooks"],
+  summary: "Update a webhook",
+  middleware: [requireScope("webhooks:write")],
+  request: {
+    params: z.object({ webhook_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            url: z.string().optional(),
+            events: z.array(z.string()).optional(),
+            is_active: z.boolean().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Webhook updated",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+webhookRoutes.openapi(updateWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const webhookId = c.req.param("webhook_id");
-  const body = await c.req.json();
+  const { webhook_id: webhookId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const url = String(body.url || "").trim();
   const events = body.events;
   const isActive = body.is_active;
@@ -106,9 +173,28 @@ webhookRoutes.put("/:webhook_id", requireScope("webhooks:write"), async (c) => {
   return c.json({ updated: webhookId });
 });
 
-webhookRoutes.delete("/:webhook_id", requireScope("webhooks:write"), async (c) => {
+// ── DELETE /webhooks/:webhook_id ────────────────────────────────────────
+
+const deleteWebhookRoute = createRoute({
+  method: "delete",
+  path: "/{webhook_id}",
+  tags: ["Webhooks"],
+  summary: "Delete a webhook",
+  middleware: [requireScope("webhooks:write")],
+  request: {
+    params: z.object({ webhook_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Webhook deleted",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+webhookRoutes.openapi(deleteWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const webhookId = c.req.param("webhook_id");
+  const { webhook_id: webhookId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
@@ -118,9 +204,28 @@ webhookRoutes.delete("/:webhook_id", requireScope("webhooks:write"), async (c) =
   return c.json({ deleted: webhookId });
 });
 
-webhookRoutes.post("/:webhook_id/test", requireScope("webhooks:write"), async (c) => {
+// ── POST /webhooks/:webhook_id/test ─────────────────────────────────────
+
+const testWebhookRoute = createRoute({
+  method: "post",
+  path: "/{webhook_id}/test",
+  tags: ["Webhooks"],
+  summary: "Send a test delivery to a webhook",
+  middleware: [requireScope("webhooks:write")],
+  request: {
+    params: z.object({ webhook_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Test delivery result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+webhookRoutes.openapi(testWebhookRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const webhookId = c.req.param("webhook_id");
+  const { webhook_id: webhookId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -160,10 +265,33 @@ webhookRoutes.post("/:webhook_id/test", requireScope("webhooks:write"), async (c
   }
 });
 
-webhookRoutes.get("/:webhook_id/deliveries", requireScope("webhooks:read"), async (c) => {
+// ── GET /webhooks/:webhook_id/deliveries ────────────────────────────────
+
+const listDeliveriesRoute = createRoute({
+  method: "get",
+  path: "/{webhook_id}/deliveries",
+  tags: ["Webhooks"],
+  summary: "List delivery history for a webhook",
+  middleware: [requireScope("webhooks:read")],
+  request: {
+    params: z.object({ webhook_id: z.string() }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Delivery history",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+webhookRoutes.openapi(listDeliveriesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const webhookId = c.req.param("webhook_id");
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
+  const { webhook_id: webhookId } = c.req.valid("param");
+  const query = c.req.valid("query");
+  const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wh = await sql`
@@ -178,10 +306,31 @@ webhookRoutes.get("/:webhook_id/deliveries", requireScope("webhooks:read"), asyn
   return c.json({ deliveries: rows });
 });
 
-webhookRoutes.post("/:webhook_id/deliveries/:delivery_id/replay", requireScope("webhooks:write"), async (c) => {
+// ── POST /webhooks/:webhook_id/deliveries/:delivery_id/replay ───────────
+
+const replayDeliveryRoute = createRoute({
+  method: "post",
+  path: "/{webhook_id}/deliveries/{delivery_id}/replay",
+  tags: ["Webhooks"],
+  summary: "Replay a webhook delivery",
+  middleware: [requireScope("webhooks:write")],
+  request: {
+    params: z.object({
+      webhook_id: z.string(),
+      delivery_id: z.string(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Replay result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+webhookRoutes.openapi(replayDeliveryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const webhookId = c.req.param("webhook_id");
-  const deliveryId = c.req.param("delivery_id");
+  const { webhook_id: webhookId, delivery_id: deliveryId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wh = await sql`
@@ -228,9 +377,26 @@ webhookRoutes.post("/:webhook_id/deliveries/:delivery_id/replay", requireScope("
   }
 });
 
-// -- POST /webhooks/:webhook_id/incoming -- Process incoming webhook via codemode handler --
-webhookRoutes.post("/:webhook_id/incoming", async (c) => {
-  const webhookId = c.req.param("webhook_id");
+// ── POST /webhooks/:webhook_id/incoming ─────────────────────────────────
+
+const incomingWebhookRoute = createRoute({
+  method: "post",
+  path: "/{webhook_id}/incoming",
+  tags: ["Webhooks"],
+  summary: "Process incoming webhook via codemode handler",
+  request: {
+    params: z.object({ webhook_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Incoming webhook processed",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 401, 404),
+  },
+});
+webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
+  const { webhook_id: webhookId } = c.req.valid("param");
   const sql = await getDb(c.env.HYPERDRIVE);
 
   const rows = await sql`
@@ -308,9 +474,28 @@ webhookRoutes.post("/:webhook_id/incoming", async (c) => {
   }
 });
 
-webhookRoutes.post("/:webhook_id/rotate-secret", requireScope("webhooks:write"), async (c) => {
+// ── POST /webhooks/:webhook_id/rotate-secret ────────────────────────────
+
+const rotateSecretRoute = createRoute({
+  method: "post",
+  path: "/{webhook_id}/rotate-secret",
+  tags: ["Webhooks"],
+  summary: "Rotate webhook secret",
+  middleware: [requireScope("webhooks:write")],
+  request: {
+    params: z.object({ webhook_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Secret rotated",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+webhookRoutes.openapi(rotateSecretRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const webhookId = c.req.param("webhook_id");
+  const { webhook_id: webhookId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

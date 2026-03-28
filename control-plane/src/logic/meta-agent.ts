@@ -344,7 +344,7 @@ async function resolveDefaultModel(
   if (!orgId) return PLATFORM_DEFAULT;
 
   try {
-    const sql = getDb(hyperdrive);
+    const sql = await getDb(hyperdrive);
     const rows = await sql`
       SELECT config_json FROM projects
       WHERE org_id = ${orgId}

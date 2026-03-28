@@ -2,16 +2,41 @@
  * Connectors router — Pipedream hub abstraction, OAuth status, tool calls.
  * Ported from agentos/api/routers/connectors.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const connectorRoutes = new Hono<R>();
+export const connectorRoutes = createOpenAPIRouter();
 
-connectorRoutes.get("/providers", requireScope("integrations:read"), async (c) => {
+// ── GET /connectors/providers ──────────────────────────────────────────
+
+const listProvidersRoute = createRoute({
+  method: "get",
+  path: "/providers",
+  tags: ["Connectors"],
+  summary: "List supported connector providers",
+  middleware: [requireScope("integrations:read")],
+  responses: {
+    200: {
+      description: "Provider list",
+      content: {
+        "application/json": {
+          schema: z.object({
+            providers: z.array(z.object({
+              name: z.string(),
+              apps: z.string(),
+              status: z.string(),
+            })),
+            active: z.string(),
+          }),
+        },
+      },
+    },
+  },
+});
+connectorRoutes.openapi(listProvidersRoute, async (c): Promise<any> => {
   return c.json({
     providers: [
       { name: "pipedream", apps: "3,000+", status: "supported" },
@@ -22,12 +47,31 @@ connectorRoutes.get("/providers", requireScope("integrations:read"), async (c) =
   });
 });
 
-connectorRoutes.get("/tools", requireScope("integrations:read"), async (c) => {
+// ── GET /connectors/tools ──────────────────────────────────────────────
+
+const listToolsRoute = createRoute({
+  method: "get",
+  path: "/tools",
+  tags: ["Connectors"],
+  summary: "List connector tools",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    query: z.object({
+      app: z.string().optional().openapi({ description: "Filter by app name" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Tool list",
+      content: { "application/json": { schema: z.object({ tools: z.array(z.record(z.unknown())), total: z.number(), note: z.string().optional() }) } },
+    },
+  },
+});
+connectorRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const app = c.req.query("app") || "";
+  const { app } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // List tools from connector_tools table if available, otherwise return placeholder
   try {
     let rows;
     if (app) {
@@ -47,12 +91,42 @@ connectorRoutes.get("/tools", requireScope("integrations:read"), async (c) => {
   }
 });
 
-connectorRoutes.post("/tools/call", requireScope("integrations:write"), async (c) => {
+// ── POST /connectors/tools/call ────────────────────────────────────────
+
+const callToolRoute = createRoute({
+  method: "post",
+  path: "/tools/call",
+  tags: ["Connectors"],
+  summary: "Call a connector tool",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            tool_name: z.string().min(1),
+            arguments: z.record(z.unknown()).default({}),
+            app: z.string().default(""),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Tool call result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+    502: { description: "Bad gateway", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+connectorRoutes.openapi(callToolRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const toolName = String(body.tool_name || "").trim();
-  const args = body.arguments || {};
-  const app = String(body.app || "");
+  const body = c.req.valid("json");
+  const toolName = body.tool_name.trim();
+  const args = body.arguments;
+  const app = body.app;
 
   if (!toolName) return c.json({ error: "tool_name is required" }, 400);
 
@@ -99,9 +173,29 @@ connectorRoutes.post("/tools/call", requireScope("integrations:write"), async (c
   }
 });
 
-connectorRoutes.get("/usage", requireScope("integrations:read"), async (c) => {
+// ── GET /connectors/usage ──────────────────────────────────────────────
+
+const getUsageRoute = createRoute({
+  method: "get",
+  path: "/usage",
+  tags: ["Connectors"],
+  summary: "Get connector usage stats",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    query: z.object({
+      since_days: z.coerce.number().int().min(1).max(365).default(30).openapi({ description: "Lookback window in days" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Usage summary",
+      content: { "application/json": { schema: z.object({ total_calls: z.number(), total_cost_usd: z.number(), by_tool: z.array(z.record(z.unknown())), since_days: z.number() }) } },
+    },
+  },
+});
+connectorRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
+  const { since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -123,17 +217,49 @@ connectorRoutes.get("/usage", requireScope("integrations:read"), async (c) => {
   });
 });
 
-// ── POST /connectors/tokens — store OAuth token after OAuth flow ──────
-connectorRoutes.post("/tokens", requireScope("integrations:write"), async (c) => {
+// ── POST /connectors/tokens ────────────────────────────────────────────
+
+const storeTokenRoute = createRoute({
+  method: "post",
+  path: "/tokens",
+  tags: ["Connectors"],
+  summary: "Store OAuth token after OAuth flow",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            connector_name: z.string().min(1),
+            access_token: z.string().min(1),
+            refresh_token: z.string().default(""),
+            token_type: z.string().default("Bearer"),
+            expires_at: z.string().optional(),
+            scopes: z.string().default(""),
+            metadata: z.record(z.unknown()).default({}),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Token stored",
+      content: { "application/json": { schema: z.object({ connector_name: z.string(), stored: z.boolean() }) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const connectorName = String(body.connector_name || "").trim();
-  const accessToken = String(body.access_token || "").trim();
-  const refreshToken = String(body.refresh_token || "");
-  const tokenType = String(body.token_type || "Bearer");
+  const body = c.req.valid("json");
+  const connectorName = body.connector_name.trim();
+  const accessToken = body.access_token.trim();
+  const refreshToken = body.refresh_token;
+  const tokenType = body.token_type;
   const expiresAt = body.expires_at ? new Date(body.expires_at).toISOString() : null;
-  const scopes = String(body.scopes || "");
-  const metadataJson = JSON.stringify(body.metadata || {});
+  const scopes = body.scopes;
+  const metadataJson = JSON.stringify(body.metadata);
 
   if (!connectorName) return c.json({ error: "connector_name is required" }, 400);
   if (!accessToken) return c.json({ error: "access_token is required" }, 400);
@@ -176,10 +302,27 @@ connectorRoutes.post("/tokens", requireScope("integrations:write"), async (c) =>
   return c.json({ connector_name: connectorName, stored: true });
 });
 
-// ── DELETE /connectors/tokens/:connector — revoke a connector token ──
-connectorRoutes.delete("/tokens/:connector", requireScope("integrations:write"), async (c) => {
+// ── DELETE /connectors/tokens/{connector} ──────────────────────────────
+
+const revokeTokenRoute = createRoute({
+  method: "delete",
+  path: "/tokens/{connector}",
+  tags: ["Connectors"],
+  summary: "Revoke a connector token",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    params: z.object({ connector: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Token revoked",
+      content: { "application/json": { schema: z.object({ connector_name: z.string(), revoked: z.boolean() }) } },
+    },
+  },
+});
+connectorRoutes.openapi(revokeTokenRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const connectorName = c.req.param("connector");
+  const { connector: connectorName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   await sql`
@@ -190,11 +333,42 @@ connectorRoutes.delete("/tokens/:connector", requireScope("integrations:write"),
   return c.json({ connector_name: connectorName, revoked: true });
 });
 
-// ── POST /connectors/tools — register tools for a connector ──────────
-connectorRoutes.post("/tools", requireScope("integrations:write"), async (c) => {
+// ── POST /connectors/tools (register) ──────────────────────────────────
+
+const registerToolsRoute = createRoute({
+  method: "post",
+  path: "/tools",
+  tags: ["Connectors"],
+  summary: "Register tools for a connector",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            tools: z.array(z.object({
+              name: z.string().min(1),
+              description: z.string().default(""),
+              app: z.string().default(""),
+              provider: z.string().default("pipedream"),
+            })),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Registration result",
+      content: { "application/json": { schema: z.object({ registered: z.number(), total: z.number() }) } },
+    },
+    ...errorResponses(400),
+  },
+});
+connectorRoutes.openapi(registerToolsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const tools = Array.isArray(body.tools) ? body.tools : [];
+  const body = c.req.valid("json");
+  const tools = body.tools;
 
   if (tools.length === 0) return c.json({ error: "tools array is required" }, 400);
 
@@ -202,10 +376,10 @@ connectorRoutes.post("/tools", requireScope("integrations:write"), async (c) => 
   let inserted = 0;
 
   for (const tool of tools) {
-    const name = String(tool.name || "").trim();
-    const description = String(tool.description || "");
-    const app = String(tool.app || "");
-    const provider = String(tool.provider || "pipedream");
+    const name = tool.name.trim();
+    const description = tool.description;
+    const app = tool.app;
+    const provider = tool.provider;
 
     if (!name) continue;
 
@@ -225,8 +399,26 @@ connectorRoutes.post("/tools", requireScope("integrations:write"), async (c) => 
   return c.json({ registered: inserted, total: tools.length });
 });
 
-connectorRoutes.get("/auth/:app", requireScope("integrations:read"), async (c) => {
-  const app = c.req.param("app");
+// ── GET /connectors/auth/{app} ─────────────────────────────────────────
+
+const getAuthRoute = createRoute({
+  method: "get",
+  path: "/auth/{app}",
+  tags: ["Connectors"],
+  summary: "Get OAuth URL for a connector app",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    params: z.object({ app: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Auth URL",
+      content: { "application/json": { schema: z.object({ app: z.string(), auth_url: z.string(), error: z.string().optional() }) } },
+    },
+  },
+});
+connectorRoutes.openapi(getAuthRoute, async (c): Promise<any> => {
+  const { app } = c.req.valid("param");
   const user = c.get("user");
 
   // Proxy to runtime for OAuth URL generation

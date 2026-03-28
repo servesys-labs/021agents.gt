@@ -4,31 +4,16 @@
  *
  * All routes are protected (require authenticated user via c.var.user).
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses, ApiKeyCreateBody, ApiKeySummary } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { generateApiKey, hashApiKey } from "../auth/api-keys";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const apiKeyRoutes = new Hono<R>();
-
-// ── Zod schemas ──────────────────────────────────────────────────────────
-
-const CreateApiKeyRequest = z.object({
-  name: z.string().min(1).max(255).default("default"),
-  scopes: z.array(z.string()).default(["*"]),
-  project_id: z.string().default(""),
-  env: z.string().default(""),
-  expires_in_days: z.number().int().positive().nullable().optional(),
-  ip_allowlist: z.array(z.string()).default([]),
-  allowed_agents: z.array(z.string()).default([]),
-  rate_limit_rpm: z.number().int().positive().default(60),
-  rate_limit_rpd: z.number().int().positive().default(10000),
-});
+export const apiKeyRoutes = createOpenAPIRouter();
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -42,7 +27,21 @@ function ensureUser(user: CurrentUser): boolean {
 
 // ── GET / — List all API keys for the current user's org ─────────────────
 
-apiKeyRoutes.get("/", requireScope("api_keys:read"), async (c) => {
+const listApiKeysRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["API Keys"],
+  summary: "List all API keys for the current org",
+  middleware: [requireScope("api_keys:read")],
+  responses: {
+    200: {
+      description: "List of API keys",
+      content: { "application/json": { schema: z.array(ApiKeySummary) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+apiKeyRoutes.openapi(listApiKeysRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
@@ -91,18 +90,38 @@ apiKeyRoutes.get("/", requireScope("api_keys:read"), async (c) => {
 
 // ── POST / — Create a new API key ────────────────────────────────────────
 
-apiKeyRoutes.post("/", requireScope("api_keys:write"), async (c) => {
+const createApiKeyRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["API Keys"],
+  summary: "Create a new API key",
+  middleware: [requireScope("api_keys:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: ApiKeyCreateBody },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Created API key (includes full key, shown only once)",
+      content: {
+        "application/json": {
+          schema: ApiKeySummary.extend({ key: z.string() }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+apiKeyRoutes.openapi(createApiKeyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = CreateApiKeyRequest.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
-  }
-  const req = parsed.data;
+  const req = c.req.valid("json");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -176,13 +195,30 @@ apiKeyRoutes.post("/", requireScope("api_keys:write"), async (c) => {
 
 // ── DELETE /:key_id — Revoke an API key ──────────────────────────────────
 
-apiKeyRoutes.delete("/:key_id", requireScope("api_keys:write"), async (c) => {
+const revokeApiKeyRoute = createRoute({
+  method: "delete",
+  path: "/{key_id}",
+  tags: ["API Keys"],
+  summary: "Revoke an API key",
+  middleware: [requireScope("api_keys:write")],
+  request: {
+    params: z.object({ key_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "API key revoked",
+      content: { "application/json": { schema: z.object({ revoked: z.string() }) } },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+apiKeyRoutes.openapi(revokeApiKeyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const keyId = c.req.param("key_id");
+  const { key_id: keyId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
@@ -212,13 +248,34 @@ apiKeyRoutes.delete("/:key_id", requireScope("api_keys:write"), async (c) => {
 
 // ── POST /:key_id/rotate — Rotate an API key ────────────────────────────
 
-apiKeyRoutes.post("/:key_id/rotate", requireScope("api_keys:write"), async (c) => {
+const rotateApiKeyRoute = createRoute({
+  method: "post",
+  path: "/{key_id}/rotate",
+  tags: ["API Keys"],
+  summary: "Rotate an API key (revoke old, create new with same config)",
+  middleware: [requireScope("api_keys:write")],
+  request: {
+    params: z.object({ key_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Rotated API key (includes full key, shown only once)",
+      content: {
+        "application/json": {
+          schema: ApiKeySummary.extend({ key: z.string() }),
+        },
+      },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+apiKeyRoutes.openapi(rotateApiKeyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const keyId = c.req.param("key_id");
+  const { key_id: keyId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Fetch the existing key

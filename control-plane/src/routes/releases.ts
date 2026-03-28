@@ -2,9 +2,9 @@
  * Releases router — channels, canary splits, promotions.
  * Ported from agentos/api/routers/releases.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
@@ -12,8 +12,7 @@ import { lintGraphDesign } from "../logic/graph-lint";
 import { getThresholds } from "../logic/policies";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const releaseRoutes = new Hono<R>();
+export const releaseRoutes = createOpenAPIRouter();
 
 function extractGraphForLint(config: unknown): Record<string, unknown> | null {
   if (typeof config !== "object" || config === null || Array.isArray(config)) return null;
@@ -31,9 +30,27 @@ function extractGraphForLint(config: unknown): Record<string, unknown> | null {
   return null;
 }
 
-releaseRoutes.get("/:agent_name/channels", requireScope("releases:read"), async (c) => {
+// ── GET /releases/:agent_name/channels ──────────────────────────────────
+
+const listChannelsRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/channels",
+  tags: ["Releases"],
+  summary: "List release channels for an agent",
+  middleware: [requireScope("releases:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Release channels",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+releaseRoutes.openapi(listChannelsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM release_channels WHERE agent_name = ${agentName} AND org_id = ${user.org_id} ORDER BY channel
@@ -41,12 +58,43 @@ releaseRoutes.get("/:agent_name/channels", requireScope("releases:read"), async 
   return c.json({ channels: rows });
 });
 
-releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async (c) => {
+// ── POST /releases/:agent_name/promote ──────────────────────────────────
+
+const promoteRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/promote",
+  tags: ["Releases"],
+  summary: "Promote an agent between release channels",
+  middleware: [requireScope("releases:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            from_channel: z.string().optional(),
+            to_channel: z.string().optional(),
+            override: z.boolean().optional(),
+            approved_by: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Promotion result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 403, 404),
+  },
+});
+releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const body = await c.req.json().catch(() => ({}));
-  const fromChannel = String(body.from_channel || c.req.query("from_channel") || "draft");
-  const toChannel = String(body.to_channel || c.req.query("to_channel") || "staging");
+  const { agent_name: agentName } = c.req.valid("param");
+  const body = c.req.valid("json");
+  const fromChannel = String(body.from_channel || "draft");
+  const toChannel = String(body.to_channel || "staging");
 
   const override = body.override === true;
   const approvedBy = typeof body.approved_by === "string" ? body.approved_by : undefined;
@@ -211,11 +259,27 @@ releaseRoutes.post("/:agent_name/promote", requireScope("releases:write"), async
   return c.json({ promoted: agentName, from: fromChannel, to: toChannel, version });
 });
 
-// ── Canary Splits ──────────────────────────────────────────────────
+// ── GET /releases/:agent_name/canary ────────────────────────────────────
 
-releaseRoutes.get("/:agent_name/canary", requireScope("releases:read"), async (c) => {
+const getCanaryRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/canary",
+  tags: ["Releases"],
+  summary: "Get active canary split for an agent",
+  middleware: [requireScope("releases:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Canary split",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+releaseRoutes.openapi(getCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM canary_splits
@@ -225,10 +289,40 @@ releaseRoutes.get("/:agent_name/canary", requireScope("releases:read"), async (c
   return c.json({ canary: rows[0] });
 });
 
-releaseRoutes.post("/:agent_name/canary", requireScope("releases:write"), async (c) => {
+// ── POST /releases/:agent_name/canary ───────────────────────────────────
+
+const createCanaryRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/canary",
+  tags: ["Releases"],
+  summary: "Create a canary split for an agent",
+  middleware: [requireScope("releases:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            primary_version: z.string().optional(),
+            canary_version: z.string().optional(),
+            canary_weight: z.number().min(0).max(1).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Canary split created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+releaseRoutes.openapi(createCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const body = await c.req.json();
+  const { agent_name: agentName } = c.req.valid("param");
+  const body = c.req.valid("json");
   const primaryVersion = String(body.primary_version || "");
   const canaryVersion = String(body.canary_version || "");
   const canaryWeight = Number(body.canary_weight ?? 0.1);
@@ -256,9 +350,27 @@ releaseRoutes.post("/:agent_name/canary", requireScope("releases:write"), async 
   });
 });
 
-releaseRoutes.delete("/:agent_name/canary", requireScope("releases:write"), async (c) => {
+// ── DELETE /releases/:agent_name/canary ─────────────────────────────────
+
+const deleteCanaryRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}/canary",
+  tags: ["Releases"],
+  summary: "Remove canary split for an agent",
+  middleware: [requireScope("releases:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Canary removed",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+releaseRoutes.openapi(deleteCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE canary_splits
@@ -268,11 +380,28 @@ releaseRoutes.delete("/:agent_name/canary", requireScope("releases:write"), asyn
   return c.json({ removed: true });
 });
 
-// ── Canary Auto-Validation ───────────────────────────────────
+// ── POST /releases/:agent_name/canary/validate ──────────────────────────
 
-releaseRoutes.post("/:agent_name/canary/validate", requireScope("releases:read"), async (c) => {
+const validateCanaryRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/canary/validate",
+  tags: ["Releases"],
+  summary: "Auto-validate canary split metrics",
+  middleware: [requireScope("releases:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Canary validation result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+releaseRoutes.openapi(validateCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Get active canary split
@@ -361,12 +490,38 @@ releaseRoutes.post("/:agent_name/canary/validate", requireScope("releases:read")
   });
 });
 
-// ── Canary Auto-Rollback ─────────────────────────────────────
+// ── POST /releases/:agent_name/canary/rollback ──────────────────────────
 
-releaseRoutes.post("/:agent_name/canary/rollback", requireScope("releases:write"), async (c) => {
+const rollbackCanaryRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/canary/rollback",
+  tags: ["Releases"],
+  summary: "Auto-rollback canary split",
+  middleware: [requireScope("releases:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            reason: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Canary rolled back",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const body = await c.req.json().catch(() => ({}));
+  const { agent_name: agentName } = c.req.valid("param");
+  const body = c.req.valid("json");
   const reason = String(body.reason || "canary auto-rollback");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);

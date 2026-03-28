@@ -11,13 +11,12 @@
  *
  * All routes require API key auth (ak_...).
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const batchApiRoutes = new Hono<R>();
+export const batchApiRoutes = createOpenAPIRouter();
 
 const MAX_TASKS_PER_BATCH = 100;
 
@@ -66,12 +65,47 @@ async function checkAgentAccess(c: any, agentName: string, orgId: string): Promi
 
 // ── POST /agents/:name/run/batch — Submit a batch job ─────────────────────
 
-batchApiRoutes.post("/agents/:name/run/batch", async (c) => {
+const submitBatchRoute = createRoute({
+  method: "post",
+  path: "/agents/{name}/run/batch",
+  tags: ["Batch API"],
+  summary: "Submit a batch of tasks for async execution",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "my-agent" }) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            tasks: z.array(z.object({
+              input: z.string().min(1),
+              system_prompt: z.string().optional(),
+              response_format: z.string().optional(),
+              response_schema: z.record(z.unknown()).optional(),
+              file_ids: z.array(z.string()).optional(),
+            })).min(1).max(MAX_TASKS_PER_BATCH),
+            callback_url: z.string().optional(),
+            callback_secret: z.string().optional(),
+            metadata: z.record(z.unknown()).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    202: {
+      description: "Batch job submitted",
+      content: { "application/json": { schema: z.object({ batch_id: z.string(), status: z.string(), total_tasks: z.number() }) } },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+
+batchApiRoutes.openapi(submitBatchRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
   const orgId = resolveOrgId(c);
-  const agentName = c.req.param("name");
+  const { name: agentName } = c.req.valid("param");
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
@@ -90,7 +124,7 @@ batchApiRoutes.post("/agents/:name/run/batch", async (c) => {
   };
 
   try {
-    body = await c.req.json();
+    body = c.req.valid("json");
   } catch {
     return c.json({ error: "Invalid JSON body" }, 400);
   }
@@ -174,18 +208,38 @@ batchApiRoutes.post("/agents/:name/run/batch", async (c) => {
 
 // ── GET /agents/:name/batches — List batch jobs ───────────────────────────
 
-batchApiRoutes.get("/agents/:name/batches", async (c) => {
+const listBatchesRoute = createRoute({
+  method: "get",
+  path: "/agents/{name}/batches",
+  tags: ["Batch API"],
+  summary: "List batch jobs for an agent",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "my-agent" }) }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(20).openapi({ example: 20 }),
+      offset: z.coerce.number().int().min(0).default(0).openapi({ example: 0 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Batch job list",
+      content: { "application/json": { schema: z.object({ batches: z.array(z.record(z.unknown())), limit: z.number(), offset: z.number() }) } },
+    },
+    ...errorResponses(401, 403, 404, 500),
+  },
+});
+
+batchApiRoutes.openapi(listBatchesRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
   const orgId = resolveOrgId(c);
-  const agentName = c.req.param("name");
+  const { name: agentName } = c.req.valid("param");
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
-  const limit = Math.min(Number(c.req.query("limit")) || 20, 100);
-  const offset = Math.max(Number(c.req.query("offset")) || 0, 0);
+  const { limit, offset } = c.req.valid("query");
 
   let sql;
   try {
@@ -225,13 +279,32 @@ batchApiRoutes.get("/agents/:name/batches", async (c) => {
 
 // ── GET /agents/:name/batches/:batch_id — Get batch status + results ──────
 
-batchApiRoutes.get("/agents/:name/batches/:batch_id", async (c) => {
+const getBatchRoute = createRoute({
+  method: "get",
+  path: "/agents/{name}/batches/{batch_id}",
+  tags: ["Batch API"],
+  summary: "Get batch job status and results",
+  request: {
+    params: z.object({
+      name: z.string().openapi({ example: "my-agent" }),
+      batch_id: z.string().openapi({ example: "uuid-abc123" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Batch job details with tasks",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(401, 403, 404, 500),
+  },
+});
+
+batchApiRoutes.openapi(getBatchRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
   const orgId = resolveOrgId(c);
-  const agentName = c.req.param("name");
-  const batchId = c.req.param("batch_id");
+  const { name: agentName, batch_id: batchId } = c.req.valid("param");
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
@@ -301,13 +374,32 @@ batchApiRoutes.get("/agents/:name/batches/:batch_id", async (c) => {
 
 // ── DELETE /agents/:name/batches/:batch_id — Cancel a batch job ───────────
 
-batchApiRoutes.delete("/agents/:name/batches/:batch_id", async (c) => {
+const cancelBatchRoute = createRoute({
+  method: "delete",
+  path: "/agents/{name}/batches/{batch_id}",
+  tags: ["Batch API"],
+  summary: "Cancel a batch job",
+  request: {
+    params: z.object({
+      name: z.string().openapi({ example: "my-agent" }),
+      batch_id: z.string().openapi({ example: "uuid-abc123" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Batch job cancelled",
+      content: { "application/json": { schema: z.object({ batch_id: z.string(), status: z.string() }) } },
+    },
+    ...errorResponses(401, 403, 404, 409, 500),
+  },
+});
+
+batchApiRoutes.openapi(cancelBatchRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
   const orgId = resolveOrgId(c);
-  const agentName = c.req.param("name");
-  const batchId = c.req.param("batch_id");
+  const { name: agentName, batch_id: batchId } = c.req.valid("param");
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;

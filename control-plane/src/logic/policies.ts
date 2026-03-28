@@ -33,7 +33,7 @@ export async function getThresholds(
   agentName?: string,
 ): Promise<Thresholds> {
   try {
-    const sql = getDb(hyperdrive);
+    const sql = await getDb(hyperdrive);
 
     // Try agent-specific policy first
     if (agentName) {

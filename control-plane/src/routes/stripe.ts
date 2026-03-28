@@ -4,15 +4,15 @@
  *
  * Uses Stripe npm package via c.env.STRIPE_SECRET_KEY.
  */
-import { Hono } from "hono";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
 import { getDb } from "../db/client";
 import Stripe from "stripe";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const stripeRoutes = new Hono<R>();
+export const stripeRoutes = createOpenAPIRouter();
 
 const PLAN_PRICES: Record<string, string> = {
   basic: "price_basic_monthly",
@@ -28,9 +28,38 @@ function getStripe(env: Env): Stripe {
   return new Stripe(env.STRIPE_SECRET_KEY, { apiVersion: "2024-12-18.acacia" as any });
 }
 
-stripeRoutes.post("/checkout", requireScope("billing:write"), async (c) => {
+// ── POST /stripe/checkout ───────────────────────────────────────────────
+
+const checkoutRoute = createRoute({
+  method: "post",
+  path: "/checkout",
+  tags: ["Stripe"],
+  summary: "Create a Stripe checkout session",
+  middleware: [requireScope("billing:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            plan: z.string().optional(),
+            success_url: z.string().optional(),
+            cancel_url: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Checkout session created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+stripeRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json().catch(() => ({}));
+  const body = c.req.valid("json");
   const plan = String(body.plan || "standard");
   const successUrl = String(body.success_url || "http://localhost:3000/billing?success=true");
   const cancelUrl = String(body.cancel_url || "http://localhost:3000/billing?canceled=true");
@@ -73,9 +102,36 @@ stripeRoutes.post("/checkout", requireScope("billing:write"), async (c) => {
   return c.json({ checkout_url: session.url, session_id: session.id });
 });
 
-stripeRoutes.post("/portal", requireScope("billing:write"), async (c) => {
+// ── POST /stripe/portal ────────────────────────────────────────────────
+
+const portalRoute = createRoute({
+  method: "post",
+  path: "/portal",
+  tags: ["Stripe"],
+  summary: "Create a Stripe billing portal session",
+  middleware: [requireScope("billing:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            return_url: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Portal session created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+stripeRoutes.openapi(portalRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json().catch(() => ({}));
+  const body = c.req.valid("json");
   const returnUrl = String(body.return_url || "http://localhost:3000/billing");
 
   let stripe: Stripe;
@@ -98,7 +154,22 @@ stripeRoutes.post("/portal", requireScope("billing:write"), async (c) => {
   return c.json({ portal_url: session.url });
 });
 
-stripeRoutes.post("/webhook", async (c) => {
+// ── POST /stripe/webhook ───────────────────────────────────────────────
+
+const webhookRoute = createRoute({
+  method: "post",
+  path: "/webhook",
+  tags: ["Stripe"],
+  summary: "Handle Stripe webhook events",
+  responses: {
+    200: {
+      description: "Event processed",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+stripeRoutes.openapi(webhookRoute, async (c): Promise<any> => {
   let stripe: Stripe;
   try {
     stripe = getStripe(c.env);
@@ -159,7 +230,22 @@ stripeRoutes.post("/webhook", async (c) => {
   return c.json({ received: true });
 });
 
-stripeRoutes.get("/status", requireScope("billing:read"), async (c) => {
+// ── GET /stripe/status ─────────────────────────────────────────────────
+
+const statusRoute = createRoute({
+  method: "get",
+  path: "/status",
+  tags: ["Stripe"],
+  summary: "Get subscription status",
+  middleware: [requireScope("billing:read")],
+  responses: {
+    200: {
+      description: "Subscription status",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+stripeRoutes.openapi(statusRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDb(c.env.HYPERDRIVE);
   const orgs = await sql`

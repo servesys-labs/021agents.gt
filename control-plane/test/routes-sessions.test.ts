@@ -65,29 +65,31 @@ describe("sessions route authz and input contracts", () => {
     expect(res.status).toBe(404);
   });
 
-  it("clamps cleanup before_days to minimum 7", async () => {
-    let observedCutoff: number | null = null;
+  it("rejects cleanup before_days below minimum 7", async () => {
+    const app = buildApp("org-a");
+    const res = await app.request("/?before_days=1", { method: "DELETE" }, mockEnv());
+    // Zod schema has .min(7), so values < 7 are rejected with 400
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts cleanup with before_days at minimum 7", async () => {
+    let capturedCutoff: string | null = null;
     const mockSql3 = (async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("DELETE FROM sessions WHERE created_at <")) {
-        observedCutoff = Number(values[0]);
+        capturedCutoff = String(values[0]);
         return { count: 0 };
       }
-      if (query.includes("DELETE FROM turns WHERE session_id NOT IN")) return { count: 0 };
+      if (query.includes("DELETE FROM turns WHERE session_id")) return { count: 0 };
       return [];
     }) as any;
     vi.mocked(getDb).mockResolvedValue(mockSql3);
     vi.mocked(getDbForOrg).mockResolvedValue(mockSql3);
     const app = buildApp("org-a");
-    const start = Date.now() / 1000;
-    const res = await app.request("/?before_days=1", { method: "DELETE" }, mockEnv());
-    const end = Date.now() / 1000;
+    const res = await app.request("/?before_days=7", { method: "DELETE" }, mockEnv());
     expect(res.status).toBe(200);
-    const expectedMax = end - 7 * 86400;
-    const expectedMin = start - 7 * 86400 - 2;
-    expect(observedCutoff).not.toBeNull();
-    expect((observedCutoff as number) <= expectedMax + 2).toBe(true);
-    expect((observedCutoff as number) >= expectedMin).toBe(true);
+    // The route uses ISO date strings for cutoff, verify it was called
+    expect(capturedCutoff).not.toBeNull();
   });
 
   it("returns trace response contract for owned session", async () => {

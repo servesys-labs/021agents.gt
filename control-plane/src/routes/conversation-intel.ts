@@ -2,22 +2,39 @@
  * Conversation intelligence routes -- scoring, analytics, trends.
  * Ported from agentos/api/routers/conversation_intel.py.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { scoreSession } from "../logic/conversation-analytics";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const conversationIntelRoutes = new Hono<R>();
+export const conversationIntelRoutes = createOpenAPIRouter();
 
 // ── GET /summary ─────────────────────────────────────────────────
 
-conversationIntelRoutes.get("/summary", requireScope("intelligence:read"), async (c) => {
+const summaryRoute = createRoute({
+  method: "get",
+  path: "/summary",
+  tags: ["ConversationIntel"],
+  summary: "Get conversation intelligence summary",
+  middleware: [requireScope("intelligence:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      since_days: z.coerce.number().int().min(1).max(365).default(30),
+    }),
+  },
+  responses: {
+    200: { description: "Summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+conversationIntelRoutes.openapi(summaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
+  const { agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -68,12 +85,29 @@ conversationIntelRoutes.get("/summary", requireScope("intelligence:read"), async
 
 // ── GET /scores ──────────────────────────────────────────────────
 
-conversationIntelRoutes.get("/scores", requireScope("intelligence:read"), async (c) => {
+const scoresRoute = createRoute({
+  method: "get",
+  path: "/scores",
+  tags: ["ConversationIntel"],
+  summary: "List conversation scores",
+  middleware: [requireScope("intelligence:read")],
+  request: {
+    query: z.object({
+      session_id: z.string().default(""),
+      agent_name: z.string().default(""),
+      sentiment: z.string().default(""),
+      limit: z.coerce.number().int().min(1).max(200).default(100),
+    }),
+  },
+  responses: {
+    200: { description: "Scores", content: { "application/json": { schema: z.array(z.record(z.unknown())) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+conversationIntelRoutes.openapi(scoresRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.query("session_id") ?? "";
-  const agentName = c.req.query("agent_name") ?? "";
-  const sentiment = c.req.query("sentiment") ?? "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 100)));
+  const { session_id: sessionId, agent_name: agentName, sentiment, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -120,11 +154,28 @@ conversationIntelRoutes.get("/scores", requireScope("intelligence:read"), async 
 
 // ── GET /analytics ───────────────────────────────────────────────
 
-conversationIntelRoutes.get("/analytics", requireScope("intelligence:read"), async (c) => {
+const analyticsRoute = createRoute({
+  method: "get",
+  path: "/analytics",
+  tags: ["ConversationIntel"],
+  summary: "List conversation analytics",
+  middleware: [requireScope("intelligence:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      since_days: z.coerce.number().int().min(1).max(365).default(30),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }),
+  },
+  responses: {
+    200: { description: "Analytics", content: { "application/json": { schema: z.array(z.record(z.unknown())) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+conversationIntelRoutes.openapi(analyticsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
+  const { agent_name: agentName, since_days: sinceDays, limit } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -148,9 +199,25 @@ conversationIntelRoutes.get("/analytics", requireScope("intelligence:read"), asy
 
 // ── POST /score/:session_id ──────────────────────────────────────
 
-conversationIntelRoutes.post("/score/:session_id", requireScope("intelligence:write"), async (c) => {
+const scoreSessionRoute = createRoute({
+  method: "post",
+  path: "/score/{session_id}",
+  tags: ["ConversationIntel"],
+  summary: "Score a session",
+  middleware: [requireScope("intelligence:write")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Score result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+conversationIntelRoutes.openapi(scoreSessionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify session exists
@@ -280,10 +347,27 @@ conversationIntelRoutes.post("/score/:session_id", requireScope("intelligence:wr
 
 // ── GET /trends ──────────────────────────────────────────────────
 
-conversationIntelRoutes.get("/trends", requireScope("intelligence:read"), async (c) => {
+const trendsRoute = createRoute({
+  method: "get",
+  path: "/trends",
+  tags: ["ConversationIntel"],
+  summary: "Get conversation trends",
+  middleware: [requireScope("intelligence:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      since_days: z.coerce.number().int().min(1).max(365).default(30),
+    }),
+  },
+  responses: {
+    200: { description: "Trends", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+conversationIntelRoutes.openapi(trendsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
+  const { agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

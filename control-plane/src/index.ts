@@ -4,13 +4,13 @@
  * Hono HTTP framework + CF Queue consumer + Cron Triggers.
  * All portal API endpoints except agent runtime execution.
  */
-import { Hono } from "hono";
 import { cors } from "hono/cors";
 import type { Env } from "./env";
 import type { CurrentUser } from "./auth/types";
 import { errorHandler } from "./middleware/error-handler";
 import { authMiddleware } from "./middleware/auth";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
+import { createApp } from "./lib/openapi";
 
 // Route imports (added as phases are implemented)
 import { authRoutes } from "./routes/auth";
@@ -79,20 +79,13 @@ import { apiAuditLogMiddleware } from "./middleware/api-audit-log";
 import { securityHeadersMiddleware } from "./middleware/security-headers";
 import { endUserTokenRoutes } from "./routes/end-user-tokens";
 import { batchApiRoutes } from "./routes/batch-api";
-import { opsObservabilityRoutes } from "./routes/ops-observability";
 import { alertRoutes } from "./routes/alerts";
-import { complianceRoutes } from "./routes/compliance";
 import { sessionMgmtRoutes } from "./routes/session-mgmt";
 import { securityEventRoutes } from "./routes/security-events";
 import { secretsRotationRoutes } from "./routes/secrets-rotation";
 import { mfaEnforcementMiddleware } from "./middleware/mfa-enforcement";
 
-type AppType = {
-  Bindings: Env;
-  Variables: { user: CurrentUser };
-};
-
-const app = new Hono<AppType>();
+const app = createApp();
 
 // ── Global middleware ────────────────────────────────────────────────────
 app.use("*", securityHeadersMiddleware);
@@ -270,6 +263,39 @@ app.route("/", widgetServeRoutes);
 
 // A2A (Agent-to-Agent) protocol endpoints
 app.route("/", a2aRoutes);
+
+// ── Auto-generated OpenAPI spec + Scalar docs ────────────────────────────
+app.doc("/api/v1/openapi.json", {
+  openapi: "3.1.0",
+  info: {
+    title: "AgentOS API",
+    version: "1.0.0",
+    description:
+      "Full API for the AgentOS control plane — agents, eval, auth, governance, and more.\n\n" +
+      "Authenticate with `Authorization: Bearer ak_...`",
+    contact: { name: "AgentOS", url: "https://agentos.dev" },
+  },
+  servers: [
+    { url: "https://{org}.agentos.dev/api/v1", description: "Org subdomain", variables: { org: { default: "demo" } } },
+  ],
+  security: [{ bearerAuth: [] }],
+});
+
+app.get("/api/v1/docs", (c) => {
+  const html = `<!DOCTYPE html>
+<html>
+<head>
+  <title>AgentOS API Reference</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+</head>
+<body>
+  <script id="api-reference" data-url="/api/v1/openapi.json"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+</body>
+</html>`;
+  return c.html(html);
+});
 
 // ── Export ────────────────────────────────────────────────────────────────
 export default {
@@ -488,6 +514,7 @@ export default {
     const { getDb } = await import("./db/client");
     const sql = await getDb(env.HYPERDRIVE);
     const now = new Date().toISOString();
+    const nowEpoch = Math.floor(Date.now() / 1000);
 
     // 1. Check for due schedules
     try {
@@ -517,7 +544,7 @@ export default {
             SET run_count = run_count + 1,
                 last_run_at = ${now},
                 last_status = 'dispatched',
-                next_run_at = ${now + 60}
+                next_run_at = ${nowEpoch + 60}
             WHERE id = ${schedule.id}
           `;
         } catch (err) {
@@ -548,7 +575,7 @@ export default {
           const orgId = String(schedule.org_id);
           const intervalDays = Number(schedule.interval_days || 7);
           const minSessions = Number(schedule.min_sessions || 10);
-          const since = schedule.last_run_at ? Number(schedule.last_run_at) : now - intervalDays * 86400;
+          const since = schedule.last_run_at ? Number(schedule.last_run_at) : nowEpoch - intervalDays * 86400;
 
           // Count sessions since last run
           const countRows = await sql`
@@ -686,7 +713,7 @@ export default {
           `.catch(() => {});
 
           // Update schedule: set last_run_at, compute next_run_at
-          const nextRunAt = now + intervalDays * 86400;
+          const nextRunAt = nowEpoch + intervalDays * 86400;
           await sql`
             UPDATE evolution_schedules
             SET last_run_at = ${now}, next_run_at = ${nextRunAt}
@@ -709,8 +736,8 @@ export default {
         SELECT DISTINCT name, org_id FROM agents WHERE is_active = true LIMIT 100
       `;
 
-      const sevenDaysAgo = now - 7 * 86400;
-      const fourteenDaysAgo = now - 14 * 86400;
+      const sevenDaysAgo = nowEpoch - 7 * 86400;
+      const fourteenDaysAgo = nowEpoch - 14 * 86400;
 
       for (const agent of activeAgents) {
         const agentName = String(agent.name);
@@ -752,7 +779,7 @@ export default {
           // Check if we already ran analysis in the last 24 hours for this agent
           const recentReports = await sql`
             SELECT 1 FROM evolution_reports
-            WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${now - 86400}
+            WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${nowEpoch - 86400}
             LIMIT 1
           `.catch(() => []);
 
@@ -961,7 +988,7 @@ export default {
       for (const canary of canaries) {
         const agentName = String(canary.agent_name);
         const orgId = String(canary.org_id);
-        const since = now - 86400; // 24-hour window
+        const since = nowEpoch - 86400; // 24-hour window
 
         // Compare error rates
         const primarySessions = await sql`
@@ -1015,7 +1042,7 @@ export default {
         const agentName = String(slo.agent_name);
         const orgId = String(slo.org_id);
         const windowDays = Number(slo.window_days || 7);
-        const since = now - windowDays * 86400;
+        const since = nowEpoch - windowDays * 86400;
         const metric = String(slo.metric);
         const threshold = Number(slo.threshold);
         const comparison = String(slo.comparison || "gte"); // gte = actual must be >= threshold

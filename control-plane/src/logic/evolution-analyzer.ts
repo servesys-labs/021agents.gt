@@ -260,7 +260,7 @@ export function generateProposals(
     (c) => c.pattern === "governance:budget",
   );
   if (budgetExhausted && budgetExhausted.count >= 3) {
-    const currentBudget = Number(agentConfig.budget_limit_usd || agentConfig.governance?.budget_limit_usd || 10);
+    const currentBudget = Number(agentConfig.budget_limit_usd || (agentConfig.governance as Record<string, unknown>)?.budget_limit_usd || 10);
     proposals.push({
       id: `proposal-${Date.now()}-increase-budget`,
       title: "Increase session budget limit",

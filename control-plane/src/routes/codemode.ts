@@ -4,15 +4,14 @@
  * Snippets are stored in `codemode_snippets` table.
  * Execution is proxied to the runtime worker via service binding.
  */
-import { Hono } from "hono";
-import { z } from "zod";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const codemodeRoutes = new Hono<R>();
+export const codemodeRoutes = createOpenAPIRouter();
 
 // -- Helper: Notify runtime of snippet cache invalidation --
 
@@ -89,14 +88,27 @@ const ExecuteSnippetSchema = z.object({
 
 // -- POST /codemode/snippets -- Create snippet --
 
-codemodeRoutes.post("/snippets", requireScope("codemode:write"), async (c) => {
-  const body = await c.req.json();
-  const parsed = CreateSnippetSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
-
+const createSnippetRoute = createRoute({
+  method: "post",
+  path: "/snippets",
+  tags: ["Codemode"],
+  summary: "Create a codemode snippet",
+  middleware: [requireScope("codemode:write")],
+  request: {
+    body: { content: { "application/json": { schema: CreateSnippetSchema } } },
+  },
+  responses: {
+    201: {
+      description: "Snippet created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+codemodeRoutes.openapi(createSnippetRoute, async (c): Promise<any> => {
+  const req = c.req.valid("json");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const req = parsed.data;
   const id = crypto.randomUUID().slice(0, 12);
   const now = new Date().toISOString();
 
@@ -121,14 +133,37 @@ codemodeRoutes.post("/snippets", requireScope("codemode:write"), async (c) => {
 
 // -- GET /codemode/snippets -- List snippets --
 
-codemodeRoutes.get("/snippets", requireScope("codemode:read"), async (c) => {
+const listSnippetsRoute = createRoute({
+  method: "get",
+  path: "/snippets",
+  tags: ["Codemode"],
+  summary: "List codemode snippets",
+  middleware: [requireScope("codemode:read")],
+  request: {
+    query: z.object({
+      scope: z.string().optional(),
+      tag: z.string().optional(),
+      q: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(100).default(50).optional(),
+      offset: z.coerce.number().int().min(0).default(0).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Snippet list",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+  },
+});
+codemodeRoutes.openapi(listSnippetsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const scope = c.req.query("scope");
-  const tag = c.req.query("tag");
-  const search = c.req.query("q");
-  const limit = Math.min(Number(c.req.query("limit") || 50), 100);
-  const offset = Number(c.req.query("offset") || 0);
+  const q = c.req.valid("query");
+  const scope = q.scope;
+  const tag = q.tag;
+  const search = q.q;
+  const limit = Math.min(Number(q.limit || 50), 100);
+  const offset = Number(q.offset || 0);
 
   let rows;
   if (scope) {
@@ -162,15 +197,32 @@ codemodeRoutes.get("/snippets", requireScope("codemode:read"), async (c) => {
     `;
   }
 
-  return c.json(rows);
+  return c.json(rows as any);
 });
 
 // -- GET /codemode/snippets/:id -- Get snippet with code --
 
-codemodeRoutes.get("/snippets/:id", requireScope("codemode:read"), async (c) => {
+const getSnippetRoute = createRoute({
+  method: "get",
+  path: "/snippets/{id}",
+  tags: ["Codemode"],
+  summary: "Get a codemode snippet by ID",
+  middleware: [requireScope("codemode:read")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Snippet detail",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+codemodeRoutes.openapi(getSnippetRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const id = c.req.param("id");
+  const { id } = c.req.valid("param");
 
   const rows = await sql`
     SELECT * FROM codemode_snippets
@@ -179,20 +231,34 @@ codemodeRoutes.get("/snippets/:id", requireScope("codemode:read"), async (c) => 
   `;
 
   if (rows.length === 0) return c.json({ error: "Snippet not found" }, 404);
-  return c.json(rows[0]);
+  return c.json(rows[0] as any);
 });
 
 // -- PUT /codemode/snippets/:id -- Update snippet --
 
-codemodeRoutes.put("/snippets/:id", requireScope("codemode:write"), async (c) => {
+const updateSnippetRoute = createRoute({
+  method: "put",
+  path: "/snippets/{id}",
+  tags: ["Codemode"],
+  summary: "Update a codemode snippet",
+  middleware: [requireScope("codemode:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { "application/json": { schema: UpdateSnippetSchema } } },
+  },
+  responses: {
+    200: {
+      description: "Snippet updated",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404),
+  },
+});
+codemodeRoutes.openapi(updateSnippetRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = UpdateSnippetSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
-
+  const req = c.req.valid("json");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const id = c.req.param("id");
-  const req = parsed.data;
+  const { id } = c.req.valid("param");
   const now = new Date().toISOString();
 
   // Check ownership
@@ -224,15 +290,32 @@ codemodeRoutes.put("/snippets/:id", requireScope("codemode:write"), async (c) =>
   // Invalidate runtime snippet cache
   await notifyRuntimeOfSnippetInvalidation(c.env, id, user.org_id);
 
-  return c.json(updated[0] || { id });
+  return c.json(updated[0] as any || { id });
 });
 
 // -- DELETE /codemode/snippets/:id -- Delete snippet --
 
-codemodeRoutes.delete("/snippets/:id", requireScope("codemode:write"), async (c) => {
+const deleteSnippetRoute = createRoute({
+  method: "delete",
+  path: "/snippets/{id}",
+  tags: ["Codemode"],
+  summary: "Delete a codemode snippet",
+  middleware: [requireScope("codemode:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Snippet deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.boolean(), id: z.string() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+codemodeRoutes.openapi(deleteSnippetRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const id = c.req.param("id");
+  const { id } = c.req.valid("param");
 
   const rows = await sql`
     DELETE FROM codemode_snippets WHERE id = ${id} AND org_id = ${user.org_id} RETURNING id
@@ -247,13 +330,26 @@ codemodeRoutes.delete("/snippets/:id", requireScope("codemode:write"), async (c)
 
 // -- POST /codemode/execute -- Execute code or snippet --
 
-codemodeRoutes.post("/execute", requireScope("codemode:write"), async (c) => {
-  const body = await c.req.json();
-  const parsed = ExecuteSnippetSchema.safeParse(body);
-  if (!parsed.success) return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
-
+const executeRoute = createRoute({
+  method: "post",
+  path: "/execute",
+  tags: ["Codemode"],
+  summary: "Execute codemode snippet or inline code",
+  middleware: [requireScope("codemode:write")],
+  request: {
+    body: { content: { "application/json": { schema: ExecuteSnippetSchema } } },
+  },
+  responses: {
+    200: {
+      description: "Execution result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+codemodeRoutes.openapi(executeRoute, async (c): Promise<any> => {
+  const req = c.req.valid("json");
   const user = c.get("user");
-  const req = parsed.data;
 
   // If snippet_id, load the code
   let code = req.code;
@@ -309,7 +405,19 @@ codemodeRoutes.post("/execute", requireScope("codemode:write"), async (c) => {
 
 // -- GET /codemode/templates -- List built-in templates --
 
-codemodeRoutes.get("/templates", async (c) => {
+const listTemplatesRoute = createRoute({
+  method: "get",
+  path: "/templates",
+  tags: ["Codemode"],
+  summary: "List built-in codemode templates",
+  responses: {
+    200: {
+      description: "Template list",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+  },
+});
+codemodeRoutes.openapi(listTemplatesRoute, async (c): Promise<any> => {
   // Forward to runtime for templates (they live in codemode.ts CODEMODE_TEMPLATES)
   try {
     const resp = await c.env.RUNTIME.fetch(
@@ -322,7 +430,7 @@ codemodeRoutes.get("/templates", async (c) => {
       }),
     );
     const result = await resp.json();
-    return c.json(result as Record<string, unknown>);
+    return c.json(result as any);
   } catch {
     // Fallback: return minimal template list
     return c.json([
@@ -334,13 +442,25 @@ codemodeRoutes.get("/templates", async (c) => {
       { name: "intent-router", scope: "orchestrator", tags: ["routing", "multi-agent"] },
       { name: "latency-monitor", scope: "observability", tags: ["observability", "alerting"] },
       { name: "multi-tool-orchestrator", scope: "agent", tags: ["agent", "orchestration"] },
-    ]);
+    ] as any);
   }
 });
 
 // -- GET /codemode/scopes -- List available scopes with their default configs --
 
-codemodeRoutes.get("/scopes", async (c) => {
+const listScopesRoute = createRoute({
+  method: "get",
+  path: "/scopes",
+  tags: ["Codemode"],
+  summary: "List available codemode scopes",
+  responses: {
+    200: {
+      description: "Scope list",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+  },
+});
+codemodeRoutes.openapi(listScopesRoute, async (c): Promise<any> => {
   return c.json([
     { scope: "agent", description: "LLM-generated code during agent turn", defaultTimeout: 30000, defaultMaxTools: 50 },
     { scope: "graph_node", description: "Custom graph node logic", defaultTimeout: 60000, defaultMaxTools: 100 },
@@ -352,13 +472,30 @@ codemodeRoutes.get("/scopes", async (c) => {
     { scope: "observability", description: "Telemetry processing/alerting", defaultTimeout: 10000, defaultMaxTools: 10 },
     { scope: "test", description: "Self-test / eval execution", defaultTimeout: 120000, defaultMaxTools: 200 },
     { scope: "mcp_generator", description: "Dynamic MCP server generation", defaultTimeout: 15000, defaultMaxTools: 5 },
-  ]);
+  ] as any);
 });
 
 // -- GET /codemode/types/:scope -- Get TypeScript type defs for a scope --
 
-codemodeRoutes.get("/types/:scope", requireScope("codemode:read"), async (c) => {
-  const scope = c.req.param("scope");
+const getTypesRoute = createRoute({
+  method: "get",
+  path: "/types/{scope}",
+  tags: ["Codemode"],
+  summary: "Get TypeScript type definitions for a codemode scope",
+  middleware: [requireScope("codemode:read")],
+  request: {
+    params: z.object({ scope: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Type definitions",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+codemodeRoutes.openapi(getTypesRoute, async (c): Promise<any> => {
+  const { scope } = c.req.valid("param");
 
   try {
     const resp = await c.env.RUNTIME.fetch(
@@ -380,7 +517,20 @@ codemodeRoutes.get("/types/:scope", requireScope("codemode:read"), async (c) => 
 
 // -- GET /codemode/stats -- Codemode execution stats --
 
-codemodeRoutes.get("/stats", requireScope("codemode:read"), async (c) => {
+const statsRoute = createRoute({
+  method: "get",
+  path: "/stats",
+  tags: ["Codemode"],
+  summary: "Get codemode execution stats",
+  middleware: [requireScope("codemode:read")],
+  responses: {
+    200: {
+      description: "Codemode stats",
+      content: { "application/json": { schema: z.object({ snippets: z.record(z.unknown()), runtime: z.record(z.unknown()) }) } },
+    },
+  },
+});
+codemodeRoutes.openapi(statsRoute, async (c): Promise<any> => {
   const user = c.get("user");
 
   try {
@@ -420,10 +570,37 @@ codemodeRoutes.get("/stats", requireScope("codemode:read"), async (c) => {
 
 // -- POST /codemode/snippets/:id/clone -- Clone a snippet --
 
-codemodeRoutes.post("/snippets/:id/clone", requireScope("codemode:write"), async (c) => {
+const cloneSnippetRoute = createRoute({
+  method: "post",
+  path: "/snippets/{id}/clone",
+  tags: ["Codemode"],
+  summary: "Clone a codemode snippet",
+  middleware: [requireScope("codemode:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().optional(),
+          }),
+        },
+      },
+      required: false,
+    },
+  },
+  responses: {
+    201: {
+      description: "Snippet cloned",
+      content: { "application/json": { schema: z.object({ id: z.string(), name: z.string(), cloned_from: z.string() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+codemodeRoutes.openapi(cloneSnippetRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const sourceId = c.req.param("id");
+  const { id: sourceId } = c.req.valid("param");
   const body = await c.req.json().catch(() => ({})) as Record<string, unknown>;
 
   const source = await sql`

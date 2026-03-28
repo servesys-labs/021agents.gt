@@ -12,14 +12,12 @@
  *
  * See: https://a2a-protocol.org/latest/specification/
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { buildAgentCard, agentCardToJSON } from "../lib/a2a/card";
 import { parseAgentConfigJson } from "../schemas/common";
-
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
 
 // In-memory task storage (per-worker, for production consider using Durable Objects or DB)
 const taskStore = new Map<string, A2ATask>();
@@ -101,21 +99,29 @@ function generateId(): string {
   return crypto.randomUUID().slice(0, 16);
 }
 
-export const a2aRoutes = new Hono<R>();
+export const a2aRoutes = createOpenAPIRouter();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Agent Card Discovery Endpoint
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * GET /.well-known/agent.json
- * Serves the A2A Agent Card for discovery by other agents.
- */
-a2aRoutes.get("/.well-known/agent.json", async (c) => {
+const agentCardRoute = createRoute({
+  method: "get",
+  path: "/.well-known/agent.json",
+  tags: ["A2A"],
+  summary: "Get A2A agent card for discovery",
+  responses: {
+    200: {
+      description: "Agent card",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+a2aRoutes.openapi(agentCardRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Get the first active agent for this org
   const rows = await sql`
     SELECT name, description, config_json
     FROM agents
@@ -145,11 +151,21 @@ a2aRoutes.get("/.well-known/agent.json", async (c) => {
   return c.json(agentCardToJSON(card));
 });
 
-/**
- * GET /.well-known/agents.json
- * List all available agent cards for this org.
- */
-a2aRoutes.get("/.well-known/agents.json", async (c) => {
+// ─────────────────────────────────────────────────────────────────────────────
+
+const agentCardsRoute = createRoute({
+  method: "get",
+  path: "/.well-known/agents.json",
+  tags: ["A2A"],
+  summary: "List all available agent cards",
+  responses: {
+    200: {
+      description: "Agent cards list",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+  },
+});
+a2aRoutes.openapi(agentCardsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -183,11 +199,19 @@ a2aRoutes.get("/.well-known/agents.json", async (c) => {
 // Agents list for portal consumption
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * GET /agents
- * List all agents in the portal-expected format.
- */
-a2aRoutes.get("/api/v1/a2a/agents", async (c) => {
+const agentsListRoute = createRoute({
+  method: "get",
+  path: "/api/v1/a2a/agents",
+  tags: ["A2A"],
+  summary: "List all agents in portal format",
+  responses: {
+    200: {
+      description: "Agents list",
+      content: { "application/json": { schema: z.object({ agents: z.array(z.record(z.unknown())) }) } },
+    },
+  },
+});
+a2aRoutes.openapi(agentsListRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -222,22 +246,38 @@ a2aRoutes.get("/api/v1/a2a/agents", async (c) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JSON-RPC A2A Endpoint (legacy - supports both old and new task paths)
+// JSON-RPC A2A Endpoint
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * POST /a2a
- * JSON-RPC endpoint for A2A protocol methods.
- * Supports: SendMessage, SendStreamingMessage, GetTask, CancelTask, ListTasks
- */
-a2aRoutes.post("/a2a", async (c) => {
-  let body: JSONRPCRequest;
-
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json(jsonrpcError(null, -32700, "Parse error"), 400);
-  }
+const jsonrpcRoute = createRoute({
+  method: "post",
+  path: "/a2a",
+  tags: ["A2A"],
+  summary: "JSON-RPC endpoint for A2A protocol methods",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            jsonrpc: z.literal("2.0"),
+            id: z.union([z.string(), z.number(), z.null()]).optional(),
+            method: z.string(),
+            params: z.record(z.unknown()).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "JSON-RPC response",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
 
   const { method, params = {}, id } = body;
   const user = c.get("user");
@@ -485,15 +525,38 @@ a2aRoutes.post("/a2a", async (c) => {
 // Task-based REST Endpoints (A2A specification)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * POST /a2a/tasks/send
- * Send a task to an agent (non-streaming).
- */
-a2aRoutes.post("/a2a/tasks/send", async (c) => {
-  const body = await c.req.json().catch(() => ({}));
+const taskSendRoute = createRoute({
+  method: "post",
+  path: "/a2a/tasks/send",
+  tags: ["A2A"],
+  summary: "Send a task to an agent (non-streaming)",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            id: z.union([z.string(), z.number(), z.null()]).optional(),
+            message: z.record(z.unknown()).optional(),
+            agentName: z.string().optional(),
+            taskId: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Task result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const user = c.get("user");
 
-  const message = (body.message as A2AMessage) || { parts: [], role: "user" };
+  const message = (body.message as unknown as A2AMessage) || { parts: [], role: "user" };
   const parts = message.parts || [];
   const text = extractText(parts);
 
@@ -574,15 +637,40 @@ a2aRoutes.post("/a2a/tasks/send", async (c) => {
   }
 });
 
-/**
- * POST /a2a/tasks/sendSubscribe
- * Send a task with streaming response (SSE).
- */
-a2aRoutes.post("/a2a/tasks/sendSubscribe", async (c) => {
-  const body = await c.req.json().catch(() => ({}));
+// ─────────────────────────────────────────────────────────────────────────────
+
+const taskSendSubscribeRoute = createRoute({
+  method: "post",
+  path: "/a2a/tasks/sendSubscribe",
+  tags: ["A2A"],
+  summary: "Send a task with streaming response (SSE)",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            id: z.union([z.string(), z.number(), z.null()]).optional(),
+            message: z.record(z.unknown()).optional(),
+            agentName: z.string().optional(),
+            taskId: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "SSE stream",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const user = c.get("user");
 
-  const message = (body.message as A2AMessage) || { parts: [], role: "user" };
+  const message = (body.message as unknown as A2AMessage) || { parts: [], role: "user" };
   const parts = message.parts || [];
   const text = extractText(parts);
 
@@ -704,12 +792,26 @@ a2aRoutes.post("/a2a/tasks/sendSubscribe", async (c) => {
   });
 });
 
-/**
- * GET /a2a/tasks/:id
- * Get task status by ID.
- */
-a2aRoutes.get("/a2a/tasks/:id", async (c) => {
-  const taskId = c.req.param("id");
+// ─────────────────────────────────────────────────────────────────────────────
+
+const getTaskRoute = createRoute({
+  method: "get",
+  path: "/a2a/tasks/{id}",
+  tags: ["A2A"],
+  summary: "Get task status by ID",
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Task status",
+      content: { "application/json": { schema: z.object({ task: z.record(z.unknown()) }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+a2aRoutes.openapi(getTaskRoute, async (c): Promise<any> => {
+  const { id: taskId } = c.req.valid("param");
   const task = taskStore.get(taskId);
 
   if (!task) {
@@ -719,12 +821,26 @@ a2aRoutes.get("/a2a/tasks/:id", async (c) => {
   return c.json({ task });
 });
 
-/**
- * POST /a2a/tasks/:id/cancel
- * Cancel a running task.
- */
-a2aRoutes.post("/a2a/tasks/:id/cancel", async (c) => {
-  const taskId = c.req.param("id");
+// ─────────────────────────────────────────────────────────────────────────────
+
+const cancelTaskRoute = createRoute({
+  method: "post",
+  path: "/a2a/tasks/{id}/cancel",
+  tags: ["A2A"],
+  summary: "Cancel a running task",
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Task canceled",
+      content: { "application/json": { schema: z.object({ task: z.record(z.unknown()) }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+a2aRoutes.openapi(cancelTaskRoute, async (c): Promise<any> => {
+  const { id: taskId } = c.req.valid("param");
   const task = taskStore.get(taskId);
 
   if (!task) {

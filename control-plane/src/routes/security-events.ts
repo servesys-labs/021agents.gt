@@ -1,24 +1,44 @@
 /**
  * Security events router — query, summarize, and timeline security events.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const securityEventRoutes = new Hono<R>();
+export const securityEventRoutes = createOpenAPIRouter();
 
 // ── GET / — List security events ────────────────────────────────────────
-
-securityEventRoutes.get("/", requireScope("security:read"), async (c) => {
+const listSecurityEventsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Security Events"],
+  summary: "List security events",
+  middleware: [requireScope("security:read")],
+  request: {
+    query: z.object({
+      event_type: z.string().optional(),
+      severity: z.string().optional(),
+      actor_id: z.string().optional(),
+      since_hours: z.coerce.number().optional(),
+      limit: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Security events list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+securityEventRoutes.openapi(listSecurityEventsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const eventType = c.req.query("event_type") || "";
-  const severity = c.req.query("severity") || "";
-  const actorId = c.req.query("actor_id") || "";
-  const sinceHours = Math.max(1, Math.min(720, Number(c.req.query("since_hours")) || 24));
-  const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 50));
+  const query = c.req.valid("query");
+  const eventType = query.event_type || "";
+  const severity = query.severity || "";
+  const actorId = query.actor_id || "";
+  const sinceHours = Math.max(1, Math.min(720, Number(query.since_hours) || 24));
+  const limit = Math.min(500, Math.max(1, Number(query.limit) || 50));
   const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -87,10 +107,26 @@ securityEventRoutes.get("/", requireScope("security:read"), async (c) => {
 });
 
 // ── GET /summary — Aggregated security event summary ────────────────────
-
-securityEventRoutes.get("/summary", requireScope("security:read"), async (c) => {
+const securitySummaryRoute = createRoute({
+  method: "get",
+  path: "/summary",
+  tags: ["Security Events"],
+  summary: "Aggregated security event summary",
+  middleware: [requireScope("security:read")],
+  request: {
+    query: z.object({
+      since_hours: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Security summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+securityEventRoutes.openapi(securitySummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinceHours = Math.max(1, Math.min(720, Number(c.req.query("since_hours")) || 24));
+  const query = c.req.valid("query");
+  const sinceHours = Math.max(1, Math.min(720, Number(query.since_hours) || 24));
   const since = new Date(Date.now() - sinceHours * 3600 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -129,8 +165,18 @@ securityEventRoutes.get("/summary", requireScope("security:read"), async (c) => 
 });
 
 // ── GET /timeline — Hourly event counts for last 24 hours ───────────────
-
-securityEventRoutes.get("/timeline", requireScope("security:read"), async (c) => {
+const securityTimelineRoute = createRoute({
+  method: "get",
+  path: "/timeline",
+  tags: ["Security Events"],
+  summary: "Hourly event counts for last 24 hours",
+  middleware: [requireScope("security:read")],
+  responses: {
+    200: { description: "Hourly timeline", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+securityEventRoutes.openapi(securityTimelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
 

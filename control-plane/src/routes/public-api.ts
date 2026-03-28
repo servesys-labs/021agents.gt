@@ -19,15 +19,16 @@
  *   DELETE /agents/:name/conversations/:id — Delete conversation
  *   GET    /health                     — Org-scoped health check
  */
-import { Hono } from "hono";
+import { createRoute, z, OpenAPIHono } from "@hono/zod-openapi";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { dispatchRunCompletedWebhooks, type AgentRunEvent } from "../logic/webhook-delivery";
 import { redactPii } from "../logic/pii-redactor";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const publicAgentRoutes = new Hono<R>();
+type R = { Bindings: Env; Variables: { user: CurrentUser; custom_domain?: string } };
+export const publicAgentRoutes = new OpenAPIHono<R>();
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -74,7 +75,31 @@ async function checkAgentAccess(c: any, agentName: string, orgId: string): Promi
 
 // ── GET /health — Org-scoped health ──────────────────────────────────────
 
-publicAgentRoutes.get("/health", async (c) => {
+const healthRoute = createRoute({
+  method: "get",
+  path: "/health",
+  tags: ["Public API"],
+  summary: "Org-scoped health check",
+  responses: {
+    200: {
+      description: "Health status",
+      content: {
+        "application/json": {
+          schema: z.object({
+            status: z.string(),
+            service: z.string(),
+            version: z.string(),
+            org_id: z.string().optional(),
+            domain: z.string().optional(),
+            timestamp: z.number(),
+          }),
+        },
+      },
+    },
+  },
+});
+
+publicAgentRoutes.openapi(healthRoute, async (c): Promise<any> => {
   const orgId = resolveOrgId(c);
   const domain = c.get("custom_domain") || "";
   return c.json({
@@ -89,27 +114,51 @@ publicAgentRoutes.get("/health", async (c) => {
 
 // ── POST /agents/:name/run — Synchronous agent execution ─────────────────
 
-publicAgentRoutes.post("/agents/:name/run", async (c) => {
+const agentRunRoute = createRoute({
+  method: "post",
+  path: "/agents/{name}/run",
+  tags: ["Public API"],
+  summary: "Synchronous agent execution",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "my-agent" }) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            input: z.string().min(1).openapi({ example: "Hello, how can you help me?" }),
+            conversation_id: z.string().optional(),
+            user_id: z.string().optional(),
+            metadata: z.record(z.unknown()).optional(),
+            system_prompt: z.string().optional(),
+            response_format: z.enum(["text", "json_object", "json_schema"]).optional(),
+            response_schema: z.record(z.unknown()).optional(),
+            model: z.string().optional(),
+            idempotency_key: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Agent run result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+
+publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
-  const agentName = c.req.param("name");
+  const { name: agentName } = c.req.valid("param");
   const orgId = resolveOrgId(c);
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
-  const body = await c.req.json().catch(() => ({})) as {
-    input?: string;
-    conversation_id?: string;
-    user_id?: string;
-    metadata?: Record<string, unknown>;
-    system_prompt?: string;
-    response_format?: "text" | "json_object" | "json_schema";
-    response_schema?: Record<string, unknown>;
-    model?: string;
-    idempotency_key?: string;
-  };
+  const body = c.req.valid("json");
 
   if (!body.input || typeof body.input !== "string") {
     return c.json({ error: "input is required (string)" }, 400);
@@ -257,27 +306,51 @@ publicAgentRoutes.post("/agents/:name/run", async (c) => {
 
 // ── POST /agents/:name/run/stream — SSE streaming agent execution ────────
 
-publicAgentRoutes.post("/agents/:name/run/stream", async (c) => {
+const agentRunStreamRoute = createRoute({
+  method: "post",
+  path: "/agents/{name}/run/stream",
+  tags: ["Public API"],
+  summary: "Streaming agent execution (SSE)",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "my-agent" }) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            input: z.string().min(1).openapi({ example: "Hello" }),
+            conversation_id: z.string().optional(),
+            user_id: z.string().optional(),
+            metadata: z.record(z.unknown()).optional(),
+            system_prompt: z.string().optional(),
+            response_format: z.enum(["text", "json_object", "json_schema"]).optional(),
+            response_schema: z.record(z.unknown()).optional(),
+            model: z.string().optional(),
+            idempotency_key: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "SSE event stream",
+      content: { "text/event-stream": { schema: z.string() } },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+
+publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
-  const agentName = c.req.param("name");
+  const { name: agentName } = c.req.valid("param");
   const orgId = resolveOrgId(c);
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
-  const body = await c.req.json().catch(() => ({})) as {
-    input?: string;
-    conversation_id?: string;
-    user_id?: string;
-    metadata?: Record<string, unknown>;
-    system_prompt?: string;
-    response_format?: "text" | "json_object" | "json_schema";
-    response_schema?: Record<string, unknown>;
-    model?: string;
-    idempotency_key?: string;
-  };
+  const body = c.req.valid("json");
 
   if (!body.input || typeof body.input !== "string") {
     return c.json({ error: "input is required (string)" }, 400);
@@ -338,7 +411,7 @@ publicAgentRoutes.post("/agents/:name/run/stream", async (c) => {
           const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
           await sql`
             INSERT INTO conversation_messages (conversation_id, role, content, cost_usd, model)
-            VALUES (${body.conversation_id}, 'user', ${body.input}, 0, '')
+            VALUES (${body.conversation_id}, 'user', ${body.input!}, 0, '')
           `;
           await sql`
             INSERT INTO conversation_messages (conversation_id, role, content, cost_usd, model)
@@ -399,11 +472,28 @@ publicAgentRoutes.post("/agents/:name/run/stream", async (c) => {
 
 // ── POST /agents/:name/run/upload — File upload + agent execution ─────────
 
-publicAgentRoutes.post("/agents/:name/run/upload", async (c) => {
+const agentRunUploadRoute = createRoute({
+  method: "post",
+  path: "/agents/{name}/run/upload",
+  tags: ["Public API"],
+  summary: "File upload + sync agent execution (multipart/form-data)",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "my-agent" }) }),
+  },
+  responses: {
+    200: {
+      description: "Agent run result with file references",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+
+publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
-  const agentName = c.req.param("name");
+  const { name: agentName } = c.req.valid("param");
   const orgId = resolveOrgId(c);
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
@@ -591,22 +681,46 @@ publicAgentRoutes.post("/agents/:name/run/upload", async (c) => {
 
 // ── POST /agents/:name/conversations — Create a new conversation ─────────
 
-publicAgentRoutes.post("/agents/:name/conversations", async (c) => {
+const createConversationRoute = createRoute({
+  method: "post",
+  path: "/agents/{name}/conversations",
+  tags: ["Public API"],
+  summary: "Create a new conversation thread",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "my-agent" }) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            title: z.string().optional(),
+            user_id: z.string().optional(),
+            metadata: z.record(z.unknown()).optional(),
+            input: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Conversation created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(401, 403, 404, 500),
+  },
+});
+
+publicAgentRoutes.openapi(createConversationRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
-  const agentName = c.req.param("name");
+  const { name: agentName } = c.req.valid("param");
   const orgId = resolveOrgId(c);
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
-  const body = await c.req.json().catch(() => ({})) as {
-    title?: string;
-    user_id?: string;
-    metadata?: Record<string, unknown>;
-    input?: string;
-  };
+  const body = c.req.valid("json");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
   const convId = crypto.randomUUID();
@@ -682,15 +796,35 @@ publicAgentRoutes.post("/agents/:name/conversations", async (c) => {
 
 // ── GET /agents/:name/conversations — List conversations ──────────────────
 
-publicAgentRoutes.get("/agents/:name/conversations", async (c) => {
+const listConversationsRoute = createRoute({
+  method: "get",
+  path: "/agents/{name}/conversations",
+  tags: ["Public API"],
+  summary: "List conversations for an agent",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "my-agent" }) }),
+    query: z.object({
+      user_id: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(100).default(20).openapi({ example: 20 }),
+      offset: z.coerce.number().int().min(0).default(0).openapi({ example: 0 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Conversation list",
+      content: { "application/json": { schema: z.object({ conversations: z.array(z.record(z.unknown())) }) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+
+publicAgentRoutes.openapi(listConversationsRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
-  const agentName = c.req.param("name");
+  const { name: agentName } = c.req.valid("param");
   const orgId = resolveOrgId(c);
-  const userId = c.req.query("user_id") || "";
-  const limit = Math.min(Number(c.req.query("limit") || 20), 100);
-  const offset = Number(c.req.query("offset") || 0);
+  const { user_id: userId, limit, offset } = c.req.valid("query");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
 
@@ -731,14 +865,37 @@ publicAgentRoutes.get("/agents/:name/conversations", async (c) => {
 
 // ── GET /agents/:name/conversations/:id — Get conversation with messages ──
 
-publicAgentRoutes.get("/agents/:name/conversations/:id", async (c) => {
+const getConversationRoute = createRoute({
+  method: "get",
+  path: "/agents/{name}/conversations/{id}",
+  tags: ["Public API"],
+  summary: "Get conversation with messages",
+  request: {
+    params: z.object({
+      name: z.string().openapi({ example: "my-agent" }),
+      id: z.string().openapi({ example: "uuid-abc123" }),
+    }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50).openapi({ example: 50 }),
+      before: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Conversation with messages",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+
+publicAgentRoutes.openapi(getConversationRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
   const orgId = resolveOrgId(c);
-  const convId = c.req.param("id");
-  const limit = Math.min(Number(c.req.query("limit") || 50), 200);
-  const before = c.req.query("before") || "";
+  const { id: convId } = c.req.valid("param");
+  const { limit, before } = c.req.valid("query");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
 
@@ -798,12 +955,32 @@ publicAgentRoutes.get("/agents/:name/conversations/:id", async (c) => {
 
 // ── DELETE /agents/:name/conversations/:id — Delete conversation ──────────
 
-publicAgentRoutes.delete("/agents/:name/conversations/:id", async (c) => {
+const deleteConversationRoute = createRoute({
+  method: "delete",
+  path: "/agents/{name}/conversations/{id}",
+  tags: ["Public API"],
+  summary: "Delete a conversation",
+  request: {
+    params: z.object({
+      name: z.string().openapi({ example: "my-agent" }),
+      id: z.string().openapi({ example: "uuid-abc123" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Conversation deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.string() }) } },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+
+publicAgentRoutes.openapi(deleteConversationRoute, async (c): Promise<any> => {
   const authErr = requireAuth(c);
   if (authErr) return authErr;
 
   const orgId = resolveOrgId(c);
-  const convId = c.req.param("id");
+  const { id: convId } = c.req.valid("param");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
 

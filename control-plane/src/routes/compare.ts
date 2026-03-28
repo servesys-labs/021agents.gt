@@ -5,16 +5,45 @@
  * The actual eval logic (EvalGym, graders, agent invocation) lives in the
  * runtime worker. The control-plane validates input and proxies to RUNTIME.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const compareRoutes = new Hono<R>();
+export const compareRoutes = createOpenAPIRouter();
 
-compareRoutes.post("/", requireScope("compare:read"), async (c) => {
-  const body = await c.req.json();
+const compareRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Compare"],
+  summary: "Run A/B comparison between agent versions",
+  middleware: [requireScope("compare:read")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1).openapi({ example: "my-agent" }),
+            version_a: z.string().default("current").openapi({ example: "current" }),
+            version_b: z.string().default("current").openapi({ example: "current" }),
+            eval_file: z.string().default("eval/smoke-test.json").openapi({ example: "eval/smoke-test.json" }),
+            trials: z.coerce.number().int().min(1).max(20).default(3).openapi({ example: 3 }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Comparison results from runtime",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+compareRoutes.openapi(compareRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "").trim();
   const versionA = String(body.version_a || "current");
   const versionB = String(body.version_b || "current");

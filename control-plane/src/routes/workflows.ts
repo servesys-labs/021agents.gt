@@ -5,15 +5,16 @@
  * Topological sort + cycle detection in logic/workflow-validator.ts.
  * Run endpoint returns 410 (edge-only).
  */
-import { Hono } from "hono";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses, ApprovalRequest } from "../schemas/openapi";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { normalizeSteps, validateWorkflow, deriveRunMetadata } from "../logic/workflow-validator";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const workflowRoutes = new Hono<R>();
+export const workflowRoutes = createOpenAPIRouter();
 
 type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 type ApprovalDecision = "approved" | "rejected";
@@ -169,9 +170,32 @@ function genId(): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-workflowRoutes.post("/approval/start", requireScope("workflows:write"), async (c) => {
+// ── POST /workflows/approval/start ──────────────────────────────────────
+
+const approvalStartRoute = createRoute({
+  method: "post",
+  path: "/approval/start",
+  tags: ["Workflows"],
+  summary: "Start an approval workflow",
+  middleware: [requireScope("workflows:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: ApprovalRequest },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Approval workflow created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 409, 500),
+  },
+});
+workflowRoutes.openapi(approvalStartRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
 
   const agentName = String(body.agent_name || "").trim();
   const runId = String(body.run_id || "").trim();
@@ -273,9 +297,28 @@ workflowRoutes.post("/approval/start", requireScope("workflows:write"), async (c
   );
 });
 
-workflowRoutes.get("/approval/:approval_id", requireScope("workflows:read"), async (c) => {
+// ── GET /workflows/approval/:approval_id ────────────────────────────────
+
+const getApprovalRoute = createRoute({
+  method: "get",
+  path: "/approval/{approval_id}",
+  tags: ["Workflows"],
+  summary: "Get approval workflow status",
+  middleware: [requireScope("workflows:read")],
+  request: {
+    params: z.object({ approval_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Approval details",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+workflowRoutes.openapi(getApprovalRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const approvalId = c.req.param("approval_id");
+  const { approval_id: approvalId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await ensureApprovalTable(sql);
   const rows = await sql`
@@ -285,10 +328,40 @@ workflowRoutes.get("/approval/:approval_id", requireScope("workflows:read"), asy
   return c.json(decodeApprovalRow(rows[0] as ApprovalRow));
 });
 
-workflowRoutes.post("/approval/:approval_id/decision", requireScope("workflows:write"), async (c) => {
+// ── POST /workflows/approval/:approval_id/decision ──────────────────────
+
+const approvalDecisionRoute = createRoute({
+  method: "post",
+  path: "/approval/{approval_id}/decision",
+  tags: ["Workflows"],
+  summary: "Submit approval decision",
+  middleware: [requireScope("workflows:write")],
+  request: {
+    params: z.object({ approval_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            decision: z.string().min(1),
+            comment: z.string().optional(),
+            reviewer_id: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Decision recorded",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404, 409),
+  },
+});
+workflowRoutes.openapi(approvalDecisionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const approvalId = c.req.param("approval_id");
-  const body = await c.req.json();
+  const { approval_id: approvalId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const decision = String(body.decision || "").trim().toLowerCase();
   const comment = String(body.comment || "").trim();
   const reviewerId = String(body.reviewer_id || user.user_id).trim();
@@ -377,7 +450,22 @@ workflowRoutes.post("/approval/:approval_id/decision", requireScope("workflows:w
   );
 });
 
-workflowRoutes.get("/", requireScope("workflows:read"), async (c) => {
+// ── GET /workflows ──────────────────────────────────────────────────────
+
+const listWorkflowsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Workflows"],
+  summary: "List all workflows",
+  middleware: [requireScope("workflows:read")],
+  responses: {
+    200: {
+      description: "List of workflows",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+workflowRoutes.openapi(listWorkflowsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -396,9 +484,38 @@ workflowRoutes.get("/", requireScope("workflows:read"), async (c) => {
   return c.json({ workflows: result });
 });
 
-workflowRoutes.post("/", requireScope("workflows:write"), async (c) => {
+// ── POST /workflows ─────────────────────────────────────────────────────
+
+const createWorkflowRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Workflows"],
+  summary: "Create a workflow",
+  middleware: [requireScope("workflows:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            description: z.string().optional(),
+            steps: z.array(z.record(z.unknown())).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Workflow created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+workflowRoutes.openapi(createWorkflowRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   const description = String(body.description || "");
   const steps = Array.isArray(body.steps) ? body.steps : [];
@@ -407,7 +524,7 @@ workflowRoutes.post("/", requireScope("workflows:write"), async (c) => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const workflowId = genId();
-  const normalizedSteps = normalizeSteps(steps);
+  const normalizedSteps = normalizeSteps(steps as any);
   const stepsJson = JSON.stringify(normalizedSteps);
 
   await sql`
@@ -418,7 +535,25 @@ workflowRoutes.post("/", requireScope("workflows:write"), async (c) => {
   return c.json({ workflow_id: workflowId, name, steps: normalizedSteps.length });
 });
 
-workflowRoutes.post("/:workflow_id/run", requireScope("workflows:write"), (c) =>
+// ── POST /workflows/:workflow_id/run ────────────────────────────────────
+
+const runWorkflowRoute = createRoute({
+  method: "post",
+  path: "/{workflow_id}/run",
+  tags: ["Workflows"],
+  summary: "Run a workflow (edge-only, returns 410)",
+  middleware: [requireScope("workflows:write")],
+  request: {
+    params: z.object({ workflow_id: z.string() }),
+  },
+  responses: {
+    410: {
+      description: "Moved to edge runtime",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+workflowRoutes.openapi(runWorkflowRoute, (c): any =>
   c.json(
     {
       error: "Moved to edge runtime",
@@ -428,10 +563,33 @@ workflowRoutes.post("/:workflow_id/run", requireScope("workflows:write"), (c) =>
   ),
 );
 
-workflowRoutes.get("/:workflow_id/runs", requireScope("workflows:read"), async (c) => {
+// ── GET /workflows/:workflow_id/runs ────────────────────────────────────
+
+const listRunsRoute = createRoute({
+  method: "get",
+  path: "/{workflow_id}/runs",
+  tags: ["Workflows"],
+  summary: "List runs for a workflow",
+  middleware: [requireScope("workflows:read")],
+  request: {
+    params: z.object({ workflow_id: z.string() }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(20).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Workflow runs",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+workflowRoutes.openapi(listRunsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const workflowId = c.req.param("workflow_id");
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 20));
+  const { workflow_id: workflowId } = c.req.valid("param");
+  const query = c.req.valid("query");
+  const limit = Math.min(200, Math.max(1, Number(query.limit) || 20));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wf = await sql`
@@ -446,10 +604,31 @@ workflowRoutes.get("/:workflow_id/runs", requireScope("workflows:read"), async (
   return c.json({ runs: rows.map(decodeRunRow) });
 });
 
-workflowRoutes.get("/:workflow_id/runs/:run_id", requireScope("workflows:read"), async (c) => {
+// ── GET /workflows/:workflow_id/runs/:run_id ────────────────────────────
+
+const getRunRoute = createRoute({
+  method: "get",
+  path: "/{workflow_id}/runs/{run_id}",
+  tags: ["Workflows"],
+  summary: "Get a specific workflow run",
+  middleware: [requireScope("workflows:read")],
+  request: {
+    params: z.object({
+      workflow_id: z.string(),
+      run_id: z.string(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Workflow run details",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+workflowRoutes.openapi(getRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const workflowId = c.req.param("workflow_id");
-  const runId = c.req.param("run_id");
+  const { workflow_id: workflowId, run_id: runId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wf = await sql`
@@ -464,10 +643,31 @@ workflowRoutes.get("/:workflow_id/runs/:run_id", requireScope("workflows:read"),
   return c.json(decodeRunRow(rows[0]));
 });
 
-workflowRoutes.post("/:workflow_id/runs/:run_id/cancel", requireScope("workflows:write"), async (c) => {
+// ── POST /workflows/:workflow_id/runs/:run_id/cancel ────────────────────
+
+const cancelRunRoute = createRoute({
+  method: "post",
+  path: "/{workflow_id}/runs/{run_id}/cancel",
+  tags: ["Workflows"],
+  summary: "Cancel a workflow run",
+  middleware: [requireScope("workflows:write")],
+  request: {
+    params: z.object({
+      workflow_id: z.string(),
+      run_id: z.string(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Run cancelled",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404, 409),
+  },
+});
+workflowRoutes.openapi(cancelRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const workflowId = c.req.param("workflow_id");
-  const runId = c.req.param("run_id");
+  const { workflow_id: workflowId, run_id: runId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const wf = await sql`
@@ -490,15 +690,60 @@ workflowRoutes.post("/:workflow_id/runs/:run_id/cancel", requireScope("workflows
   return c.json({ cancelled: runId });
 });
 
-workflowRoutes.post("/validate", requireScope("workflows:read"), async (c) => {
-  const body = await c.req.json();
+// ── POST /workflows/validate ────────────────────────────────────────────
+
+const validateWorkflowRoute = createRoute({
+  method: "post",
+  path: "/validate",
+  tags: ["Workflows"],
+  summary: "Validate workflow steps",
+  middleware: [requireScope("workflows:read")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            steps: z.array(z.record(z.unknown())).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Validation result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+workflowRoutes.openapi(validateWorkflowRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const steps = Array.isArray(body.steps) ? body.steps : [];
-  return c.json(validateWorkflow(steps));
+  return c.json(validateWorkflow(steps as any));
 });
 
-workflowRoutes.delete("/:workflow_id", requireScope("workflows:write"), async (c) => {
+// ── DELETE /workflows/:workflow_id ──────────────────────────────────────
+
+const deleteWorkflowRoute = createRoute({
+  method: "delete",
+  path: "/{workflow_id}",
+  tags: ["Workflows"],
+  summary: "Delete a workflow",
+  middleware: [requireScope("workflows:write")],
+  request: {
+    params: z.object({ workflow_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Workflow deleted",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+workflowRoutes.openapi(deleteWorkflowRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const workflowId = c.req.param("workflow_id");
+  const { workflow_id: workflowId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`

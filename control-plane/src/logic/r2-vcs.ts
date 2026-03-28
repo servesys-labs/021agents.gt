@@ -276,7 +276,7 @@ export async function vcsLog(
   while (commitId && commits.length < limit) {
     const commitObj = await storage.get(`${prefix}/commits/${commitId}`);
     if (!commitObj) break;
-    const commit = await commitObj.json<VcsCommit>();
+    const commit = (await commitObj.json()) as VcsCommit;
     commits.push(commit);
     commitId = commit.parent_id;
   }
@@ -302,8 +302,8 @@ export async function vcsDiff(
     return { from_commit: fromCommitId, to_commit: toCommitId, entries: [], files_changed: 0 };
   }
 
-  const from = await fromCommit.json<VcsCommit>();
-  const to = await toCommit.json<VcsCommit>();
+  const from = (await fromCommit.json()) as VcsCommit;
+  const to = (await toCommit.json()) as VcsCommit;
 
   const fromTree = await loadTree(storage, prefix, from.tree_id);
   const toTree = await loadTree(storage, prefix, to.tree_id);
@@ -400,7 +400,7 @@ export async function vcsCheckout(
   const commitObj = await storage.get(`${prefix}/commits/${commitId}`);
   if (!commitObj) return null;
 
-  const commit = await commitObj.json<VcsCommit>();
+  const commit = (await commitObj.json()) as VcsCommit;
   const tree = await loadTree(storage, prefix, commit.tree_id);
 
   return { commit, tree };
@@ -426,7 +426,7 @@ export async function vcsStatus(
   while (cursor && count < 1000) {
     const c = await storage.get(`${prefix}/commits/${cursor}`);
     if (!c) break;
-    const commit = await c.json<VcsCommit>();
+    const commit = (await c.json()) as VcsCommit;
     count++;
     cursor = commit.parent_id;
   }
@@ -493,7 +493,7 @@ export async function vcsListTrash(
   for (const obj of listed.objects) {
     const data = await storage.get(obj.key);
     if (!data) continue;
-    const entry = await data.json<VcsTrashEntry>();
+    const entry = (await data.json()) as VcsTrashEntry;
     if (entry.expires_at > now) {
       entries.push(entry);
     } else {
@@ -518,7 +518,7 @@ export async function vcsRestore(
   const data = await storage.get(`${prefix}/trash/${trashId}`);
   if (!data) return null;
 
-  const entry = await data.json<VcsTrashEntry>();
+  const entry = (await data.json()) as VcsTrashEntry;
   // Remove from trash
   await storage.delete(`${prefix}/trash/${trashId}`);
   return { restored: true, path: entry.path };
@@ -542,7 +542,7 @@ export async function vcsPermanentDelete(
   const data = await storage.get(`${prefix}/trash/${trashId}`);
   if (!data) return { deleted: false, error: "Trash entry not found" };
 
-  const entry = await data.json<VcsTrashEntry>();
+  const entry = (await data.json()) as VcsTrashEntry;
   // Delete the trash entry and the underlying object
   await storage.delete(`${prefix}/trash/${trashId}`);
   await storage.delete(`${prefix}/objects/${entry.hash}`);
@@ -653,7 +653,7 @@ export async function getWorkspaceVersions(
 async function loadTree(storage: R2Bucket, prefix: string, treeId: string): Promise<VcsTree> {
   const obj = await storage.get(`${prefix}/trees/${treeId}`);
   if (!obj) return { id: treeId, entries: [] };
-  return obj.json<VcsTree>();
+  return (await obj.json()) as VcsTree;
 }
 
 async function sha256(data: Uint8Array): Promise<string> {

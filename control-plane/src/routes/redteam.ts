@@ -10,17 +10,16 @@
  * Ported from agentos/api/routers/redteam.py.
  */
 
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { RedTeamRunner, ScanResult } from "../lib/security";
 import { parseAgentConfigJson } from "../schemas/common";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const redteamRoutes = new Hono<R>();
+export const redteamRoutes = createOpenAPIRouter();
 
 // In-memory store for scan results (until persisted to DB)
 const scanResultsCache = new Map<string, ScanResult>();
@@ -36,28 +35,34 @@ const scanRequestSchema = z.object({
 
 // ── POST /redteam/scan ─────────────────────────────────────────────
 
-redteamRoutes.post("/scan", requireScope("security:write"), async (c) => {
+const startScanRoute = createRoute({
+  method: "post",
+  path: "/scan",
+  tags: ["RedTeam"],
+  summary: "Start a red team security scan",
+  middleware: [requireScope("security:write")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional(),
+    }),
+    body: { content: { "application/json": { schema: scanRequestSchema } } },
+  },
+  responses: {
+    201: { description: "Scan started", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 404, 500),
+  },
+});
+
+redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const body = await c.req.json();
-  const parsed = scanRequestSchema.safeParse(body);
-
-  if (!parsed.success) {
-    return c.json(
-      {
-        error: "Invalid request",
-        details: parsed.error.flatten(),
-      },
-      400,
-    );
-  }
-
-  const { scan_type, agent_config } = parsed.data;
+  const parsed = c.req.valid("json");
+  const { scan_type, agent_config } = parsed;
 
   // Get agent name from body, query param, or return error
-  const agentName =
-    parsed.data.agent_name ?? c.req.query("agent_name") ?? "";
+  const queryParams = c.req.valid("query");
+  const agentName = parsed.agent_name ?? queryParams.agent_name ?? "";
 
   if (!agentName) {
     return c.json({ error: "agent_name is required" }, 400);
@@ -80,7 +85,7 @@ redteamRoutes.post("/scan", requireScope("security:write"), async (c) => {
   }
 
   // Create runner and store reference
-  const runner = new RedTeamRunner(null); // No direct DB - use existing security routes for persistence
+  const runner = new RedTeamRunner(null);
   const scanId = generateScanId();
 
   // Run the appropriate scan type
@@ -92,7 +97,7 @@ redteamRoutes.post("/scan", requireScope("security:write"), async (c) => {
         result = await runner.scanRuntime(
           agentName,
           agentConfig,
-          null, // No runtime function in control plane
+          null,
           user.org_id,
           30.0,
         );
@@ -102,7 +107,7 @@ redteamRoutes.post("/scan", requireScope("security:write"), async (c) => {
         result = await runner.scanFull(
           agentName,
           agentConfig,
-          null, // No runtime function in control plane
+          null,
           user.org_id,
           30.0,
         );
@@ -207,19 +212,33 @@ redteamRoutes.post("/scan", requireScope("security:write"), async (c) => {
 
 // ── GET /redteam/scans ─────────────────────────────────────────────
 
-redteamRoutes.get("/scans", requireScope("security:read"), async (c) => {
+const listScansRoute = createRoute({
+  method: "get",
+  path: "/scans",
+  tags: ["RedTeam"],
+  summary: "List red team scans",
+  middleware: [requireScope("security:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }),
+  },
+  responses: {
+    200: { description: "Scan list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+redteamRoutes.openapi(listScansRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const limit = Math.min(
-    200,
-    Math.max(1, Number(c.req.query("limit") ?? 50)),
-  );
+  const { agent_name: agentName, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
   if (agentName) {
     rows = await sql`
-      SELECT 
+      SELECT
         scan_id, agent_name, scan_type, status,
         total_probes, passed, failed, risk_score, risk_level,
         started_at, completed_at
@@ -229,7 +248,7 @@ redteamRoutes.get("/scans", requireScope("security:read"), async (c) => {
     `;
   } else {
     rows = await sql`
-      SELECT 
+      SELECT
         scan_id, agent_name, scan_type, status,
         total_probes, passed, failed, risk_score, risk_level,
         started_at, completed_at
@@ -247,9 +266,25 @@ redteamRoutes.get("/scans", requireScope("security:read"), async (c) => {
 
 // ── GET /redteam/scans/:id ─────────────────────────────────────────
 
-redteamRoutes.get("/scans/:id", requireScope("security:read"), async (c) => {
+const getScanRoute = createRoute({
+  method: "get",
+  path: "/scans/{id}",
+  tags: ["RedTeam"],
+  summary: "Get scan results",
+  middleware: [requireScope("security:read")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: { description: "Scan result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+redteamRoutes.openapi(getScanRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scanId = c.req.param("id");
+  const { id: scanId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // First check cache for active/running scans with full details
@@ -315,48 +350,73 @@ redteamRoutes.get("/scans/:id", requireScope("security:read"), async (c) => {
 
 // ── POST /redteam/scans/:id/cancel ─────────────────────────────────
 
-redteamRoutes.post(
-  "/scans/:id/cancel",
-  requireScope("security:write"),
-  async (c) => {
-    const scanId = c.req.param("id");
-
-    // Get the runner for this scan
-    const runner = activeRunners.get(scanId);
-
-    if (!runner) {
-      return c.json(
-        {
-          error: "Scan not found or already completed",
-          scan_id: scanId,
-        },
-        404,
-      );
-    }
-
-    const cancelled = runner.cancelScan(scanId);
-
-    if (cancelled) {
-      return c.json({
-        success: true,
-        message: "Scan cancellation requested",
-        scan_id: scanId,
-      });
-    } else {
-      return c.json(
-        {
-          error: "Scan cannot be cancelled",
-          scan_id: scanId,
-        },
-        409,
-      );
-    }
+const cancelScanRoute = createRoute({
+  method: "post",
+  path: "/scans/{id}/cancel",
+  tags: ["RedTeam"],
+  summary: "Cancel a running scan",
+  middleware: [requireScope("security:write")],
+  request: {
+    params: z.object({ id: z.string() }),
   },
-);
+  responses: {
+    200: { description: "Cancellation result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Conflict", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+redteamRoutes.openapi(cancelScanRoute, async (c): Promise<any> => {
+  const { id: scanId } = c.req.valid("param");
+
+  // Get the runner for this scan
+  const runner = activeRunners.get(scanId);
+
+  if (!runner) {
+    return c.json(
+      {
+        error: "Scan not found or already completed",
+        scan_id: scanId,
+      },
+      404,
+    );
+  }
+
+  const cancelled = runner.cancelScan(scanId);
+
+  if (cancelled) {
+    return c.json({
+      success: true,
+      message: "Scan cancellation requested",
+      scan_id: scanId,
+    });
+  } else {
+    return c.json(
+      {
+        error: "Scan cannot be cancelled",
+        scan_id: scanId,
+      },
+      409,
+    );
+  }
+});
 
 // ── GET /redteam/probes ────────────────────────────────────────────
 
-redteamRoutes.get("/probes", requireScope("security:read"), (c) => {
+const listProbesRoute = createRoute({
+  method: "get",
+  path: "/probes",
+  tags: ["RedTeam"],
+  summary: "List available OWASP probes",
+  middleware: [requireScope("security:read")],
+  responses: {
+    200: { description: "Probe list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+redteamRoutes.openapi(listProbesRoute, async (c): Promise<any> => {
   const { OwaspProbeLibrary, probeToDict } = require("../lib/security");
   const lib = new OwaspProbeLibrary();
   return c.json({ probes: lib.getAll().map(probeToDict) });
