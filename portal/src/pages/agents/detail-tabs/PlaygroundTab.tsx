@@ -115,7 +115,7 @@ export const PlaygroundTab = ({ agentName }: PlaygroundTabProps) => {
   /* ── Render ─────────────────────────────────────────────────── */
 
   return (
-    <div className="card flex flex-col" style={{ height: "calc(100vh - 18rem)", minHeight: "24rem" }}>
+    <div className="card flex flex-col" style={{ height: "calc(100vh - 20rem)", minHeight: "24rem" }}>
       {/* Header */}
       <div className="flex items-center justify-between pb-3 border-b" style={{ borderColor: "var(--color-border-default)" }}>
         <div>
