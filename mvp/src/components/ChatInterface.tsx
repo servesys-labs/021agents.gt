@@ -63,7 +63,7 @@ export function ChatInterface({ messages, onSend, loading, placeholder }: ChatIn
               className={`max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
                 msg.role === "user"
                   ? "bg-primary text-white rounded-br-md"
-                  : "bg-gray-100 text-text rounded-bl-md"
+                  : "bg-neutral-light text-text rounded-bl-md"
               }`}
             >
               {msg.content}

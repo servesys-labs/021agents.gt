@@ -1,7 +1,10 @@
 import { useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { TrendingUp, TrendingDown, MessageSquare, AlertCircle, Lightbulb, ThumbsUp, ThumbsDown, Minus } from "lucide-react";
 import { AgentNav } from "../components/AgentNav";
+import { AgentNotFound } from "../components/AgentNotFound";
+import { StatCard } from "../components/ui/StatCard";
+import { TabNav } from "../components/ui/TabNav";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -80,9 +83,7 @@ export default function AgentInsightsPage() {
   const agent = MOCK_AGENTS.find((a) => a.id === id);
   const [tab, setTab] = useState<"topics" | "gaps" | "sentiment">("topics");
 
-  if (!agent) {
-    return <p className="text-text-secondary">Agent not found. <Link to="/" className="text-primary">Go back</Link></p>;
-  }
+  if (!agent) return <AgentNotFound />;
 
   const totalQuestions = MOCK_TOPICS.reduce((s, t) => s + t.count, 0);
   const positiveTopics = MOCK_TOPICS.filter((t) => t.sentiment === "positive").length;

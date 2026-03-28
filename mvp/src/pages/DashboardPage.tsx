@@ -3,6 +3,7 @@ import { Plus, MessageSquare, TrendingUp, Bot } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
+import { StatCard } from "../components/ui/StatCard";
 import { MOCK_AGENTS, MOCK_DAILY_METRICS } from "../lib/mock-data";
 
 const statusVariant = { active: "success", draft: "default", paused: "warning" } as const;
@@ -26,39 +27,9 @@ export default function DashboardPage() {
 
       {/* Stats */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-        <Card>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-blue-50 flex items-center justify-center">
-              <Bot size={20} className="text-primary" />
-            </div>
-            <div>
-              <p className="text-2xl font-semibold text-text">{MOCK_AGENTS.length}</p>
-              <p className="text-xs text-text-secondary">Total Agents</p>
-            </div>
-          </div>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-emerald-50 flex items-center justify-center">
-              <MessageSquare size={20} className="text-success" />
-            </div>
-            <div>
-              <p className="text-2xl font-semibold text-text">{today.conversations}</p>
-              <p className="text-xs text-text-secondary">Conversations Today</p>
-            </div>
-          </div>
-        </Card>
-        <Card>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-amber-50 flex items-center justify-center">
-              <TrendingUp size={20} className="text-warning" />
-            </div>
-            <div>
-              <p className="text-2xl font-semibold text-text">{totalConversations}</p>
-              <p className="text-xs text-text-secondary">This Week</p>
-            </div>
-          </div>
-        </Card>
+        <StatCard icon={<Bot size={16} className="text-primary" />} label="Total Agents" value={MOCK_AGENTS.length} />
+        <StatCard icon={<MessageSquare size={16} className="text-success" />} label="Conversations Today" value={today.conversations} />
+        <StatCard icon={<TrendingUp size={16} className="text-warning" />} label="This Week" value={totalConversations} />
       </div>
 
       {/* Agent list */}

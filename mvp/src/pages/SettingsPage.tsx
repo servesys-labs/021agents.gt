@@ -3,6 +3,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
+import { TabNav } from "../components/ui/TabNav";
 import { useToast } from "../components/ui/Toast";
 import { useAuth } from "../lib/auth";
 
@@ -33,20 +34,7 @@ export default function SettingsPage() {
       <h1 className="text-xl font-semibold text-text mb-1">Settings</h1>
       <p className="text-sm text-text-secondary mb-6">Manage your account and organization</p>
 
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-border mb-6">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-              tab === t.key ? "border-primary text-primary" : "border-transparent text-text-secondary hover:text-text"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
+      <TabNav tabs={tabs} active={tab} onChange={(k) => setTab(k as Tab)} />
 
       {tab === "account" && (
         <div className="space-y-4 max-w-lg">

@@ -1,9 +1,10 @@
 import { useState, useCallback } from "react";
-import { useParams, useNavigate, Link } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { Info } from "lucide-react";
 import { ChatInterface, type Message } from "../components/ChatInterface";
-import { Badge } from "../components/ui/Badge";
+import { InfoBox } from "../components/ui/InfoBox";
 import { AgentNav } from "../components/AgentNav";
+import { AgentNotFound } from "../components/AgentNotFound";
 import { MOCK_AGENTS } from "../lib/mock-data";
 
 let msgId = 0;
@@ -36,19 +37,16 @@ export default function AgentPlaygroundPage() {
     }, 800 + Math.random() * 600);
   }, []);
 
-  if (!agent) {
-    return <p className="text-text-secondary">Agent not found. <Link to="/" className="text-primary">Go back</Link></p>;
-  }
+  if (!agent) return <AgentNotFound />;
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
       <AgentNav agentName={agent.name} />
 
       {/* Info bar */}
-      <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 text-xs rounded-lg mt-3">
-        <Info size={14} />
+      <InfoBox variant="info" icon={<Info size={14} />} className="mt-3">
         This is a test environment. Messages here are not visible to your customers.
-      </div>
+      </InfoBox>
 
       {/* Chat */}
       <div className="flex-1 min-h-0 mt-2">
