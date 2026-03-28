@@ -11,7 +11,10 @@
 | `control-plane/` | API & business logic | Hono + Supabase (CF Workers) | `src/index.ts` |
 | `deploy/` | Edge agent runtime | Durable Objects + Agents SDK | `src/index.ts` |
 | `portal/` | Web dashboard | React + Refine + Tailwind | `src/App.tsx` |
+| `mvp/` | Slim product shell (personal + SMB) | React + Vite + Tailwind | `src/main.tsx` |
 | `agentos/` | **(deprecated)** Python backend | FastAPI + SQLite | — |
+
+**MVP product plan (personas, scope, API flows, telemetry):** `docs/mvp-product-plan.md`.
 
 ## Architecture Overview
 

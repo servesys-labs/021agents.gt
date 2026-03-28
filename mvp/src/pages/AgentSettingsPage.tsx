@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Check } from "lucide-react";
+import { Check, RefreshCw, Loader2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
@@ -10,45 +10,152 @@ import { Textarea } from "../components/ui/Textarea";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { useToast } from "../components/ui/Toast";
-import { MOCK_AGENTS, TOOLS } from "../lib/mock-data";
+import { api } from "../lib/api";
+import { agentPathSegment } from "../lib/agent-path";
 import { Mail, Calendar, CreditCard, MessageSquare, Table, Users, Phone, Camera } from "lucide-react";
 
 const iconMap: Record<string, React.ComponentType<any>> = {
   Mail, Calendar, CreditCard, MessageSquare, Table, Users, Phone, Camera,
 };
 
+const TOOLS = [
+  { id: "email", label: "Email", icon: "Mail" },
+  { id: "calendar", label: "Calendar", icon: "Calendar" },
+  { id: "stripe", label: "Stripe", icon: "CreditCard" },
+  { id: "slack", label: "Slack", icon: "MessageSquare" },
+  { id: "sheets", label: "Google Sheets", icon: "Table" },
+  { id: "crm", label: "CRM", icon: "Users" },
+  { id: "whatsapp", label: "WhatsApp", icon: "Phone" },
+  { id: "instagram", label: "Instagram", icon: "Camera" },
+];
+
+interface AgentDetail {
+  name: string;
+  description: string;
+  config_json: Record<string, any>;
+  is_active: boolean;
+  version: number;
+}
+
 type Tab = "general" | "behavior" | "tools" | "handoff" | "deploy";
 
 export default function AgentSettingsPage() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const agent = MOCK_AGENTS.find((a) => a.id === id);
+
+  const [agent, setAgent] = useState<AgentDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const [tab, setTab] = useState<Tab>("general");
-  const [name, setName] = useState(agent?.name || "");
-  const [description, setDescription] = useState(agent?.description || "");
-  const [persona, setPersona] = useState(agent?.persona || "");
-  const [tone, setTone] = useState(agent?.tone || "friendly");
-  const [responseLength, setResponseLength] = useState(agent?.response_length || "medium");
-  const [tools, setTools] = useState<string[]>(agent?.tools || []);
-  const [isLive, setIsLive] = useState(agent?.status === "active");
+  const [description, setDescription] = useState("");
+  const [persona, setPersona] = useState("");
+  const [tone, setTone] = useState("friendly");
+  const [responseLength, setResponseLength] = useState("medium");
+  const [tools, setTools] = useState<string[]>([]);
+  const [isLive, setIsLive] = useState(false);
 
   // Handoff settings
   const [handoffEnabled, setHandoffEnabled] = useState(true);
-  const [handoffEmail, setHandoffEmail] = useState("sarah@sarahsflowers.com");
-  const [handoffPhone, setHandoffPhone] = useState("+1 555 012 3456");
-  const [handoffSlack, setHandoffSlack] = useState("#support-alerts");
-  const [handoffTriggers, setHandoffTriggers] = useState(["angry_customer", "refund_request", "complex_order"]);
+  const [handoffEmail, setHandoffEmail] = useState("");
+  const [handoffPhone, setHandoffPhone] = useState("");
+  const [handoffSlack, setHandoffSlack] = useState("");
+  const [handoffTriggers, setHandoffTriggers] = useState<string[]>([]);
   const [handoffMessage, setHandoffMessage] = useState("I'm going to connect you with our team who can help you directly. One moment please!");
+
+  const fetchAgent = async () => {
+    if (!id) return;
+    setLoading(true);
+    setError(null);
+    const seg = agentPathSegment(id);
+    try {
+      const data = await api.get<AgentDetail>(`/agents/${seg}`);
+      setAgent(data);
+      // Populate form from config_json
+      const cfg = data.config_json || {};
+      setDescription(data.description || "");
+      setPersona(cfg.system_prompt || cfg.persona || "");
+      setTone(cfg.tone || "friendly");
+      setResponseLength(cfg.response_length || "medium");
+      setTools(cfg.tools || []);
+      setIsLive(data.is_active ?? false);
+      // Handoff
+      const handoff = cfg.handoff || {};
+      setHandoffEnabled(handoff.enabled ?? false);
+      setHandoffEmail(handoff.email || "");
+      setHandoffPhone(handoff.phone || "");
+      setHandoffSlack(handoff.slack || "");
+      setHandoffTriggers(handoff.triggers || []);
+      if (handoff.message) setHandoffMessage(handoff.message);
+    } catch (err: any) {
+      if (err.status === 404) {
+        setAgent(null);
+      } else {
+        setError(err.message || "Failed to load agent");
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (id) fetchAgent();
+  }, [id]);
 
   const toggleTool = (toolId: string) =>
     setTools((prev) => (prev.includes(toolId) ? prev.filter((t) => t !== toolId) : [...prev, toolId]));
 
-  const handleSave = () => {
-    // TODO: PUT to /api/v1/agents/:id
-    toast("Settings saved");
+  const handleSave = async () => {
+    if (!agent || !id) return;
+    setSaving(true);
+    try {
+      await api.put(`/agents/${agentPathSegment(id)}`, {
+        description,
+        is_active: isLive,
+        config_json: {
+          ...(agent.config_json || {}),
+          system_prompt: persona,
+          tone,
+          response_length: responseLength,
+          tools,
+          handoff: {
+            enabled: handoffEnabled,
+            email: handoffEmail,
+            phone: handoffPhone,
+            slack: handoffSlack,
+            triggers: handoffTriggers,
+            message: handoffMessage,
+          },
+        },
+      });
+      toast("Settings saved");
+    } catch (err: any) {
+      toast(err.message || "Failed to save");
+    } finally {
+      setSaving(false);
+    }
   };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-20">
+        <p className="text-text-secondary text-sm mb-4">{error}</p>
+        <Button variant="secondary" onClick={fetchAgent}>
+          <RefreshCw size={14} /> Retry
+        </Button>
+      </div>
+    );
+  }
 
   if (!agent) return <AgentNotFound />;
 
@@ -68,7 +175,7 @@ export default function AgentSettingsPage() {
 
       {tab === "general" && (
         <div className="space-y-4 max-w-lg">
-          <Input label="Agent name" value={name} onChange={(e) => setName(e.target.value)} />
+          <Input label="Agent name" value={agent.name} disabled />
           <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
       )}
@@ -221,18 +328,20 @@ export default function AgentSettingsPage() {
           <Card>
             <p className="text-sm font-medium text-text mb-2">Widget embed code</p>
             <code className="block bg-surface-alt rounded-lg p-3 text-xs text-text-secondary break-all">
-              {`<script src="https://agentos.dev/widget/${agent.id}.js"></script>`}
+              {`<script src="https://agentos.dev/widget/${id}.js"></script>`}
             </code>
           </Card>
           <Card>
             <p className="text-sm font-medium text-text mb-1">API endpoint</p>
-            <Badge variant="info">{`POST /api/v1/agents/${agent.id}/chat`}</Badge>
+            <Badge variant="info">{`POST /api/v1/agents/${id}/chat`}</Badge>
           </Card>
         </div>
       )}
 
       <div className="mt-8">
-        <Button onClick={handleSave}>Save Changes</Button>
+        <Button onClick={handleSave} disabled={saving}>
+          {saving ? <><Loader2 size={14} className="animate-spin" /> Saving...</> : "Save Changes"}
+        </Button>
       </div>
     </div>
   );

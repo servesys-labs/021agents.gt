@@ -1,44 +1,29 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Upload, FileText, File, Trash2, Search, CheckCircle, Clock, AlertCircle, X } from "lucide-react";
+import { Upload, FileText, File, Trash2, Search, CheckCircle, Clock, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
-import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/Toast";
-import { MOCK_AGENTS } from "../lib/mock-data";
+import { api } from "../lib/api";
+import { agentPathSegment } from "../lib/agent-path";
 
 interface KBDocument {
   id: string;
-  name: string;
-  type: string;
-  size: number;
+  filename: string;
   status: "processing" | "ready" | "error";
   chunks: number;
-  uploaded_at: string;
+  created_at: string;
 }
-
-const INITIAL_DOCS: KBDocument[] = [
-  { id: "doc-1", name: "FAQ - Delivery & Returns.pdf", type: "application/pdf", size: 245_000, status: "ready", chunks: 24, uploaded_at: "2026-03-25T10:00:00Z" },
-  { id: "doc-2", name: "Product Catalog Spring 2026.pdf", type: "application/pdf", size: 1_200_000, status: "ready", chunks: 87, uploaded_at: "2026-03-26T14:30:00Z" },
-  { id: "doc-3", name: "Wedding Packages.docx", type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", size: 89_000, status: "ready", chunks: 12, uploaded_at: "2026-03-27T09:15:00Z" },
-  { id: "doc-4", name: "Store Policies.txt", type: "text/plain", size: 15_000, status: "ready", chunks: 6, uploaded_at: "2026-03-27T11:00:00Z" },
-];
 
 const ACCEPTED_TYPES = ".pdf,.doc,.docx,.txt,.md,.csv,.json,.html";
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function fileIcon(type: string) {
-  if (type.includes("pdf")) return <FileText size={20} className="text-red-500" />;
+function fileIcon(name: string) {
+  if (name.endsWith(".pdf")) return <FileText size={20} className="text-red-500" />;
   return <File size={20} className="text-blue-500" />;
 }
 
@@ -49,13 +34,17 @@ const statusConfig = {
 };
 
 export default function AgentKnowledgePage() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const agent = MOCK_AGENTS.find((a) => a.id === id);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [docs, setDocs] = useState<KBDocument[]>(INITIAL_DOCS);
+  const [agentName, setAgentName] = useState<string | null>(null);
+  const [docs, setDocs] = useState<KBDocument[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+
   const [search, setSearch] = useState("");
   const [dragging, setDragging] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -63,44 +52,72 @@ export default function AgentKnowledgePage() {
   const [chunkOverlap, setChunkOverlap] = useState("50");
   const [selectedDoc, setSelectedDoc] = useState<KBDocument | null>(null);
 
+  const fetchDocs = useCallback(async () => {
+    if (!id) return;
+    try {
+      const documents = await api.get<KBDocument[]>(`/rag/documents?agent_name=${encodeURIComponent(id.trim())}`);
+      setDocs(documents || []);
+    } catch { /* silently ignore refresh failures */ }
+  }, [id]);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        const [agent, documents] = await Promise.all([
+          api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`),
+          api.get<KBDocument[]>(`/rag/documents?agent_name=${encodeURIComponent(id.trim())}`),
+        ]);
+        if (cancelled) return;
+
+        setAgentName(agent.name ?? id);
+        setDocs(documents || []);
+      } catch (err: any) {
+        if (!cancelled) setError(err.message || "Failed to load knowledge base");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [id]);
+
   const filteredDocs = docs.filter((d) =>
-    d.name.toLowerCase().includes(search.toLowerCase()),
+    d.filename.toLowerCase().includes(search.toLowerCase()),
   );
 
   const handleFiles = useCallback(
-    (files: FileList | null) => {
-      if (!files) return;
-      const newDocs: KBDocument[] = Array.from(files).map((f) => ({
-        id: `doc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-        name: f.name,
-        type: f.type,
-        size: f.size,
-        status: "processing" as const,
-        chunks: 0,
-        uploaded_at: new Date().toISOString(),
-      }));
+    async (files: FileList | null) => {
+      if (!files || !id) return;
+      setUploading(true);
+      try {
+        for (const file of Array.from(files)) {
+          const formData = new FormData();
+          formData.append("file", file);
+          formData.append("agent_name", id);
 
-      setDocs((prev) => [...newDocs, ...prev]);
-      toast(`Uploading ${newDocs.length} file${newDocs.length > 1 ? "s" : ""}...`);
-
-      // Simulate processing
-      newDocs.forEach((doc) => {
-        setTimeout(
-          () => {
-            setDocs((prev) =>
-              prev.map((d) =>
-                d.id === doc.id
-                  ? { ...d, status: "ready", chunks: Math.floor(doc.size / (parseInt(chunkSize) || 512)) + 1 }
-                  : d,
-              ),
-            );
-            toast(`${doc.name} processed`);
-          },
-          1500 + Math.random() * 2000,
-        );
-      });
+          const token = localStorage.getItem("agentos_token");
+          const BASE = (globalThis as any).__VITE_API_URL ?? "https://agentos-control-plane.servesys.workers.dev/api/v1";
+          await fetch(`${BASE}/rag/upload`, {
+            method: "POST",
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            body: formData,
+          });
+        }
+        toast(`Uploaded ${files.length} file${files.length > 1 ? "s" : ""}`);
+        await fetchDocs();
+      } catch (err: any) {
+        toast(err.message || "Upload failed");
+      } finally {
+        setUploading(false);
+      }
     },
-    [toast, chunkSize],
+    [id, toast, fetchDocs],
   );
 
   const handleDrop = useCallback(
@@ -112,25 +129,48 @@ export default function AgentKnowledgePage() {
     [handleFiles],
   );
 
-  const deleteDoc = (docId: string) => {
-    setDocs((prev) => prev.filter((d) => d.id !== docId));
-    setSelectedDoc(null);
-    toast("Document removed");
+  const deleteDoc = async (docId: string) => {
+    try {
+      await api.del(`/rag/documents/${docId}`);
+      setDocs((prev) => prev.filter((d) => d.id !== docId));
+      setSelectedDoc(null);
+      toast("Document removed");
+    } catch (err: any) {
+      toast(err.message || "Failed to delete document");
+    }
   };
 
-  if (!agent) return <AgentNotFound />;
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 size={24} className="animate-spin text-primary" />
+        <span className="ml-2 text-sm text-text-secondary">Loading knowledge base...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-24">
+        <p className="text-sm text-danger mb-2">{error}</p>
+        <Button size="sm" variant="secondary" onClick={() => window.location.reload()}>Retry</Button>
+      </div>
+    );
+  }
+
+  if (!agentName) return <AgentNotFound />;
 
   const totalChunks = docs.filter((d) => d.status === "ready").reduce((s, d) => s + d.chunks, 0);
-  const totalSize = docs.reduce((s, d) => s + d.size, 0);
 
   return (
     <div>
-      <AgentNav agentName={agent.name}>
+      <AgentNav agentName={agentName}>
         <Button size="sm" variant="ghost" onClick={() => setShowSettings(true)}>
           Settings
         </Button>
-        <Button size="sm" onClick={() => fileInputRef.current?.click()}>
-          <Upload size={14} /> Upload
+        <Button size="sm" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+          {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+          Upload
         </Button>
       </AgentNav>
         <input
@@ -153,8 +193,8 @@ export default function AgentKnowledgePage() {
           <p className="text-xl font-semibold text-text">{totalChunks}</p>
         </Card>
         <Card>
-          <p className="text-xs text-text-secondary">Total size</p>
-          <p className="text-xl font-semibold text-text">{formatSize(totalSize)}</p>
+          <p className="text-xs text-text-secondary">Total files</p>
+          <p className="text-xl font-semibold text-text">{docs.length}</p>
         </Card>
       </div>
 
@@ -205,9 +245,9 @@ export default function AgentKnowledgePage() {
         {filteredDocs.length === 0 && docs.length === 0 && (
           <div className="p-12 text-center">
             <FileText size={40} className="mx-auto text-text-muted mb-3" />
-            <p className="text-sm font-medium text-text mb-1">No documents yet</p>
+            <p className="text-sm font-medium text-text mb-1">No knowledge base documents</p>
             <p className="text-xs text-text-muted mb-4">
-              Upload your FAQs, product info, policies, or any docs your agent should know about.
+              Upload files to teach your agent
             </p>
             <Button size="sm" onClick={() => fileInputRef.current?.click()}>
               <Upload size={14} /> Upload first document
@@ -226,14 +266,12 @@ export default function AgentKnowledgePage() {
               onClick={() => setSelectedDoc(doc)}
               className="flex items-center gap-4 p-4 hover:bg-surface-alt transition-colors cursor-pointer"
             >
-              <div className="shrink-0">{fileIcon(doc.type)}</div>
+              <div className="shrink-0">{fileIcon(doc.filename)}</div>
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-medium text-text truncate">{doc.name}</p>
+                <p className="text-sm font-medium text-text truncate">{doc.filename}</p>
                 <p className="text-xs text-text-muted mt-0.5">
-                  {formatSize(doc.size)}
-                  {doc.status === "ready" && ` · ${doc.chunks} chunks`}
-                  {" · "}
-                  {new Date(doc.uploaded_at).toLocaleDateString()}
+                  {doc.status === "ready" && `${doc.chunks} chunks · `}
+                  {new Date(doc.created_at).toLocaleDateString()}
                 </p>
               </div>
               <Badge variant={status.variant}>
@@ -259,10 +297,9 @@ export default function AgentKnowledgePage() {
         {selectedDoc && (
           <div className="space-y-4">
             <div className="flex items-start gap-3">
-              {fileIcon(selectedDoc.type)}
+              {fileIcon(selectedDoc.filename)}
               <div>
-                <p className="text-sm font-semibold text-text">{selectedDoc.name}</p>
-                <p className="text-xs text-text-muted mt-0.5">{formatSize(selectedDoc.size)}</p>
+                <p className="text-sm font-semibold text-text">{selectedDoc.filename}</p>
               </div>
             </div>
 
@@ -282,34 +319,10 @@ export default function AgentKnowledgePage() {
               <div>
                 <dt className="text-text-secondary text-xs">Uploaded</dt>
                 <dd className="font-medium text-text">
-                  {new Date(selectedDoc.uploaded_at).toLocaleString()}
+                  {new Date(selectedDoc.created_at).toLocaleString()}
                 </dd>
               </div>
-              <div>
-                <dt className="text-text-secondary text-xs">Type</dt>
-                <dd className="font-medium text-text">{selectedDoc.type || "unknown"}</dd>
-              </div>
             </dl>
-
-            {selectedDoc.status === "ready" && (
-              <div>
-                <p className="text-xs font-medium text-text-secondary mb-2">Sample chunks</p>
-                <div className="space-y-2">
-                  {[
-                    "We deliver Monday through Friday, 9am to 6pm, and Saturdays 10am to 4pm. Delivery is free for orders over $50 within our service area...",
-                    "Our return policy: Fresh flowers can be returned or exchanged within 24 hours of delivery if they arrive damaged. Please contact us with photos...",
-                    "Wedding packages start at $500 for basic centerpieces. Premium packages include ceremony arch, bouquets, boutonnieres, and reception arrangements...",
-                  ]
-                    .slice(0, Math.min(3, selectedDoc.chunks))
-                    .map((chunk, i) => (
-                      <div key={i} className="bg-surface-alt rounded-lg p-3 text-xs text-text-secondary">
-                        <span className="text-text-muted font-mono mr-2">#{i + 1}</span>
-                        {chunk}
-                      </div>
-                    ))}
-                </div>
-              </div>
-            )}
 
             <div className="flex justify-between pt-2">
               <Button variant="danger" size="sm" onClick={() => deleteDoc(selectedDoc.id)}>

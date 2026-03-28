@@ -1,6 +1,6 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Plus, Trash2, Zap, Brain, Wrench, GitBranch, MessageSquare } from "lucide-react";
+import { Plus, Trash2, Zap, Brain, Wrench, GitBranch, MessageSquare, Loader2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
@@ -9,7 +9,24 @@ import { Select } from "../components/ui/Select";
 import { Card } from "../components/ui/Card";
 import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/Toast";
-import { MOCK_AGENTS, type FlowNode, type FlowEdge } from "../lib/mock-data";
+import { api } from "../lib/api";
+import { agentPathSegment } from "../lib/agent-path";
+
+interface FlowNode {
+  id: string;
+  type: "trigger" | "llm" | "tool" | "condition" | "response";
+  label: string;
+  config?: Record<string, string>;
+  x: number;
+  y: number;
+}
+
+interface FlowEdge {
+  id: string;
+  from: string;
+  to: string;
+  label?: string;
+}
 
 const nodeColors: Record<FlowNode["type"], { bg: string; border: string; icon: React.ComponentType<any> }> = {
   trigger: { bg: "#dbeafe", border: "#3b82f6", icon: Zap },
@@ -27,18 +44,56 @@ const OFFSET_X = CANVAS_W / 2;
 const OFFSET_Y = 20;
 
 export default function AgentFlowPage() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const agent = MOCK_AGENTS.find((a) => a.id === id);
 
-  const [nodes, setNodes] = useState<FlowNode[]>(agent?.nodes || []);
-  const [edges, setEdges] = useState<FlowEdge[]>(agent?.edges || []);
+  const [agentName, setAgentName] = useState<string | null>(null);
+  const [graphId, setGraphId] = useState<string | null>(null);
+  const [nodes, setNodes] = useState<FlowNode[]>([]);
+  const [edges, setEdges] = useState<FlowEdge[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
   const [showAddNode, setShowAddNode] = useState(false);
   const [newNodeType, setNewNodeType] = useState<FlowNode["type"]>("llm");
   const [newNodeLabel, setNewNodeLabel] = useState("");
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [connectFrom, setConnectFrom] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        const agent = await api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`);
+        if (cancelled) return;
+        setAgentName(agent.name ?? id);
+
+        const graphs = await api.get<any[]>(`/graphs?agent_name=${encodeURIComponent(id.trim())}`);
+        if (cancelled) return;
+
+        if (graphs && graphs.length > 0) {
+          const graph = graphs[0];
+          setGraphId(graph.id);
+          const json = typeof graph.graph_json === "string" ? JSON.parse(graph.graph_json) : graph.graph_json;
+          setNodes(json?.nodes || []);
+          setEdges(json?.edges || []);
+        }
+      } catch (err: any) {
+        if (!cancelled) setError(err.message || "Failed to load flow");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [id]);
 
   const addNode = useCallback(() => {
     if (!newNodeLabel.trim()) return;
@@ -73,12 +128,42 @@ export default function AgentFlowPage() {
     setEdges((prev) => prev.filter((e) => e.id !== edgeId));
   }, []);
 
-  const handleSave = () => {
-    // TODO: PUT to /api/v1/agents/:id/flow
-    toast("Flow saved");
+  const handleSave = async () => {
+    if (!id) return;
+    setSaving(true);
+    try {
+      const graphJson = { nodes, edges };
+      if (graphId) {
+        await api.put(`/graphs/${graphId}`, { graph_json: graphJson });
+      } else {
+        const created = await api.post<{ id: string }>(`/graphs`, { agent_name: id, graph_json: graphJson });
+        setGraphId(created.id);
+      }
+      toast("Flow saved");
+    } catch (err: any) {
+      toast(err.message || "Failed to save flow");
+    } finally {
+      setSaving(false);
+    }
   };
 
-  if (!agent) return <AgentNotFound />;
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 size={24} className="animate-spin text-primary" />
+        <span className="ml-2 text-sm text-text-secondary">Loading flow...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-24">
+        <p className="text-sm text-danger mb-2">{error}</p>
+        <Button size="sm" variant="secondary" onClick={() => window.location.reload()}>Retry</Button>
+      </div>
+    );
+  }
 
   const getNodeCenter = (node: FlowNode) => ({
     cx: OFFSET_X + node.x,
@@ -87,141 +172,157 @@ export default function AgentFlowPage() {
 
   return (
     <div>
-      <AgentNav agentName={agent.name}>
+      <AgentNav agentName={agentName || id || ""}>
         <Button size="sm" variant="secondary" onClick={() => setShowAddNode(true)}>
           <Plus size={14} /> Add Step
         </Button>
-        <Button size="sm" onClick={handleSave}>Save</Button>
+        <Button size="sm" onClick={handleSave} disabled={saving}>
+          {saving ? <Loader2 size={14} className="animate-spin" /> : null}
+          Save
+        </Button>
       </AgentNav>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Canvas */}
-        <div className="lg:col-span-2 bg-white rounded-xl border border-border overflow-hidden">
-          <svg viewBox={`0 0 ${CANVAS_W} ${CANVAS_H}`} className="w-full" style={{ minHeight: 400 }}>
-            {/* Grid dots */}
-            <defs>
-              <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
-                <circle cx="1" cy="1" r="0.5" fill="#e5e7eb" />
-              </pattern>
-            </defs>
-            <rect width={CANVAS_W} height={CANVAS_H} fill="url(#grid)" />
+      {nodes.length === 0 && edges.length === 0 ? (
+        <Card>
+          <div className="text-center py-12">
+            <GitBranch size={40} className="mx-auto text-text-muted mb-3" />
+            <p className="text-sm font-medium text-text mb-1">No flow configured</p>
+            <p className="text-xs text-text-muted mb-4">Create your agent's conversation flow</p>
+            <Button size="sm" onClick={() => setShowAddNode(true)}>
+              <Plus size={14} /> Add First Step
+            </Button>
+          </div>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Canvas */}
+          <div className="lg:col-span-2 bg-white rounded-xl border border-border overflow-hidden">
+            <svg viewBox={`0 0 ${CANVAS_W} ${CANVAS_H}`} className="w-full" style={{ minHeight: 400 }}>
+              {/* Grid dots */}
+              <defs>
+                <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+                  <circle cx="1" cy="1" r="0.5" fill="#e5e7eb" />
+                </pattern>
+              </defs>
+              <rect width={CANVAS_W} height={CANVAS_H} fill="url(#grid)" />
 
-            {/* Edges */}
-            {edges.map((edge) => {
-              const fromNode = nodes.find((n) => n.id === edge.from);
-              const toNode = nodes.find((n) => n.id === edge.to);
-              if (!fromNode || !toNode) return null;
-              const from = getNodeCenter(fromNode);
-              const to = getNodeCenter(toNode);
-              const midY = (from.cy + to.cy) / 2;
-              return (
-                <g key={edge.id} onClick={() => deleteEdge(edge.id)} className="cursor-pointer">
-                  <path
-                    d={`M ${from.cx} ${from.cy + NODE_H / 2} C ${from.cx} ${midY}, ${to.cx} ${midY}, ${to.cx} ${to.cy - NODE_H / 2}`}
-                    fill="none"
-                    stroke="#94a3b8"
-                    strokeWidth="1.5"
-                  />
-                  {edge.label && (
-                    <text x={(from.cx + to.cx) / 2 + 8} y={midY} className="text-[8px] fill-text-muted" textAnchor="start">
-                      {edge.label}
+              {/* Edges */}
+              {edges.map((edge) => {
+                const fromNode = nodes.find((n) => n.id === edge.from);
+                const toNode = nodes.find((n) => n.id === edge.to);
+                if (!fromNode || !toNode) return null;
+                const from = getNodeCenter(fromNode);
+                const to = getNodeCenter(toNode);
+                const midY = (from.cy + to.cy) / 2;
+                return (
+                  <g key={edge.id} onClick={() => deleteEdge(edge.id)} className="cursor-pointer">
+                    <path
+                      d={`M ${from.cx} ${from.cy + NODE_H / 2} C ${from.cx} ${midY}, ${to.cx} ${midY}, ${to.cx} ${to.cy - NODE_H / 2}`}
+                      fill="none"
+                      stroke="#94a3b8"
+                      strokeWidth="1.5"
+                    />
+                    {edge.label && (
+                      <text x={(from.cx + to.cx) / 2 + 8} y={midY} className="text-[8px] fill-text-muted" textAnchor="start">
+                        {edge.label}
+                      </text>
+                    )}
+                    {/* Arrow */}
+                    <circle cx={to.cx} cy={to.cy - NODE_H / 2} r="3" fill="#94a3b8" />
+                  </g>
+                );
+              })}
+
+              {/* Nodes */}
+              {nodes.map((node) => {
+                const style = nodeColors[node.type];
+                const x = OFFSET_X + node.x - NODE_W / 2;
+                const y = OFFSET_Y + node.y;
+                const isSelected = selectedNode === node.id;
+                const isConnecting = connectFrom === node.id;
+
+                return (
+                  <g
+                    key={node.id}
+                    onClick={() => handleNodeClick(node.id)}
+                    className="cursor-pointer"
+                  >
+                    <rect
+                      x={x}
+                      y={y}
+                      width={NODE_W}
+                      height={NODE_H}
+                      rx={8}
+                      fill={style.bg}
+                      stroke={isSelected || isConnecting ? style.border : "transparent"}
+                      strokeWidth={isSelected || isConnecting ? 2 : 0}
+                    />
+                    <text x={x + 32} y={y + NODE_H / 2 + 1} className="text-[10px] font-medium" fill="#111827" dominantBaseline="middle">
+                      {node.label}
                     </text>
-                  )}
-                  {/* Arrow */}
-                  <circle cx={to.cx} cy={to.cy - NODE_H / 2} r="3" fill="#94a3b8" />
-                </g>
-              );
-            })}
+                    {/* Type icon placeholder circle */}
+                    <circle cx={x + 16} cy={y + NODE_H / 2} r={8} fill={style.border} opacity={0.2} />
+                    <text x={x + 16} y={y + NODE_H / 2 + 1} className="text-[7px] font-bold" fill={style.border} textAnchor="middle" dominantBaseline="middle">
+                      {node.type[0].toUpperCase()}
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
 
-            {/* Nodes */}
-            {nodes.map((node) => {
-              const style = nodeColors[node.type];
-              const x = OFFSET_X + node.x - NODE_W / 2;
-              const y = OFFSET_Y + node.y;
-              const isSelected = selectedNode === node.id;
-              const isConnecting = connectFrom === node.id;
+            {connectFrom && (
+              <div className="px-4 py-2 bg-blue-50 text-blue-700 text-xs text-center">
+                Click a node to connect to, or press Escape to cancel
+              </div>
+            )}
+          </div>
 
+          {/* Side panel */}
+          <div className="space-y-4">
+            <Card>
+              <h3 className="text-sm font-medium text-text mb-3">Legend</h3>
+              <div className="space-y-2">
+                {(Object.entries(nodeColors) as [FlowNode["type"], typeof nodeColors[FlowNode["type"]]][]).map(([type, style]) => (
+                  <div key={type} className="flex items-center gap-2">
+                    <div className="w-3 h-3 rounded" style={{ backgroundColor: style.border }} />
+                    <span className="text-xs text-text-secondary capitalize">{type}</span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+
+            {selectedNode && (() => {
+              const node = nodes.find((n) => n.id === selectedNode);
+              if (!node) return null;
               return (
-                <g
-                  key={node.id}
-                  onClick={() => handleNodeClick(node.id)}
-                  className="cursor-pointer"
-                >
-                  <rect
-                    x={x}
-                    y={y}
-                    width={NODE_W}
-                    height={NODE_H}
-                    rx={8}
-                    fill={style.bg}
-                    stroke={isSelected || isConnecting ? style.border : "transparent"}
-                    strokeWidth={isSelected || isConnecting ? 2 : 0}
-                  />
-                  <text x={x + 32} y={y + NODE_H / 2 + 1} className="text-[10px] font-medium" fill="#111827" dominantBaseline="middle">
-                    {node.label}
-                  </text>
-                  {/* Type icon placeholder circle */}
-                  <circle cx={x + 16} cy={y + NODE_H / 2} r={8} fill={style.border} opacity={0.2} />
-                  <text x={x + 16} y={y + NODE_H / 2 + 1} className="text-[7px] font-bold" fill={style.border} textAnchor="middle" dominantBaseline="middle">
-                    {node.type[0].toUpperCase()}
-                  </text>
-                </g>
-              );
-            })}
-          </svg>
-
-          {connectFrom && (
-            <div className="px-4 py-2 bg-blue-50 text-blue-700 text-xs text-center">
-              Click a node to connect to, or press Escape to cancel
-            </div>
-          )}
-        </div>
-
-        {/* Side panel */}
-        <div className="space-y-4">
-          <Card>
-            <h3 className="text-sm font-medium text-text mb-3">Legend</h3>
-            <div className="space-y-2">
-              {(Object.entries(nodeColors) as [FlowNode["type"], typeof nodeColors[FlowNode["type"]]][]).map(([type, style]) => (
-                <div key={type} className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded" style={{ backgroundColor: style.border }} />
-                  <span className="text-xs text-text-secondary capitalize">{type}</span>
-                </div>
-              ))}
-            </div>
-          </Card>
-
-          {selectedNode && (() => {
-            const node = nodes.find((n) => n.id === selectedNode);
-            if (!node) return null;
-            return (
-              <Card>
-                <h3 className="text-sm font-medium text-text mb-3">Selected: {node.label}</h3>
-                <p className="text-xs text-text-secondary mb-3 capitalize">Type: {node.type}</p>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => { setConnectFrom(node.id); setSelectedNode(null); }}>
-                    Connect
-                  </Button>
-                  {node.type !== "trigger" && (
-                    <Button size="sm" variant="danger" onClick={() => deleteNode(node.id)}>
-                      <Trash2 size={14} /> Remove
+                <Card>
+                  <h3 className="text-sm font-medium text-text mb-3">Selected: {node.label}</h3>
+                  <p className="text-xs text-text-secondary mb-3 capitalize">Type: {node.type}</p>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="secondary" onClick={() => { setConnectFrom(node.id); setSelectedNode(null); }}>
+                      Connect
                     </Button>
-                  )}
-                </div>
-              </Card>
-            );
-          })()}
+                    {node.type !== "trigger" && (
+                      <Button size="sm" variant="danger" onClick={() => deleteNode(node.id)}>
+                        <Trash2 size={14} /> Remove
+                      </Button>
+                    )}
+                  </div>
+                </Card>
+              );
+            })()}
 
-          <Card>
-            <h3 className="text-sm font-medium text-text mb-2">How it works</h3>
-            <p className="text-xs text-text-secondary leading-relaxed">
-              Each step in the flow defines how your agent processes a message.
-              Click a node to select it, then click "Connect" to link it to another step.
-              The flow starts at the trigger and follows the connections you define.
-            </p>
-          </Card>
+            <Card>
+              <h3 className="text-sm font-medium text-text mb-2">How it works</h3>
+              <p className="text-xs text-text-secondary leading-relaxed">
+                Each step in the flow defines how your agent processes a message.
+                Click a node to select it, then click "Connect" to link it to another step.
+                The flow starts at the trigger and follows the connections you define.
+              </p>
+            </Card>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Add node modal */}
       <Modal open={showAddNode} onClose={() => setShowAddNode(false)} title="Add a step">

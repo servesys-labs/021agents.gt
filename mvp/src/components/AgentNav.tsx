@@ -1,5 +1,6 @@
 import { useNavigate, useLocation, useParams } from "react-router-dom";
 import { ArrowLeft, Play, GitBranch, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb, Settings, BarChart3 } from "lucide-react";
+import { agentPathSegment } from "../lib/agent-path";
 
 const tabs = [
   { path: "activity", icon: BarChart3, label: "Activity" },
@@ -24,18 +25,19 @@ export function AgentNav({ agentName, children }: AgentNavProps) {
   const { id } = useParams();
   const location = useLocation();
   const currentPath = location.pathname.split("/").pop() || "";
+  const pathSeg = id ? agentPathSegment(id) : agentPathSegment(agentName);
 
   return (
     <div className="mb-6">
       {/* Breadcrumb row */}
       <div className="flex items-center gap-3 mb-3">
-        <button onClick={() => navigate("/")} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
+        <button type="button" onClick={() => navigate("/")} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-secondary">
           <ArrowLeft size={18} />
         </button>
         <div className="flex items-center gap-1.5 text-sm">
-          <button onClick={() => navigate("/")} className="text-text-muted hover:text-primary transition-colors">Dashboard</button>
+          <button type="button" onClick={() => navigate("/")} className="text-text-muted hover:text-primary transition-colors">Dashboard</button>
           <span className="text-text-muted">/</span>
-          <button onClick={() => navigate(`/agents/${id}/activity`)} className="text-text-muted hover:text-primary transition-colors">{agentName}</button>
+          <button type="button" onClick={() => navigate(`/agents/${pathSeg}/activity`)} className="text-text-muted hover:text-primary transition-colors">{agentName}</button>
           <span className="text-text-muted">/</span>
           <span className="font-medium text-text capitalize">{tabs.find((t) => t.path === currentPath)?.label || currentPath}</span>
         </div>
@@ -49,7 +51,7 @@ export function AgentNav({ agentName, children }: AgentNavProps) {
           return (
             <button
               key={tab.path}
-              onClick={() => navigate(`/agents/${id}/${tab.path}`)}
+              onClick={() => navigate(`/agents/${pathSeg}/${tab.path}`)}
               className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium border-b-2 whitespace-nowrap transition-all duration-200 ${
                 active
                   ? "border-primary text-primary"

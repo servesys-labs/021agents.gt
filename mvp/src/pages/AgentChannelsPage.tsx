@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Globe, MessageSquare, Instagram, Phone, Mail, MessageCircle, Copy, Check, ExternalLink, Code } from "lucide-react";
+import { Globe, MessageSquare, Instagram, Phone, Mail, MessageCircle, Copy, Check, ExternalLink, Code, Loader2, Send, Hash } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
@@ -10,7 +10,9 @@ import { Input } from "../components/ui/Input";
 import { Select } from "../components/ui/Select";
 import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/Toast";
-import { MOCK_AGENTS } from "../lib/mock-data";
+import { api } from "../lib/api";
+import { agentPathSegment } from "../lib/agent-path";
+import { qrCodeImageUrl } from "../lib/chat-connect";
 
 interface Channel {
   id: string;
@@ -23,23 +25,35 @@ interface Channel {
 }
 
 export default function AgentChannelsPage() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const agent = MOCK_AGENTS.find((a) => a.id === id);
+
+  const [agentName, setAgentName] = useState<string | null>(null);
+  const [agentId, setAgentId] = useState<string>("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   const [channels, setChannels] = useState<Channel[]>([
     {
       id: "web_widget", name: "Web Widget", icon: <Globe size={20} className="text-blue-500" />,
       description: "Embed a chat widget on your website", status: "active",
       config: { position: "bottom-right", color: "#2563eb" },
-      stats: { conversations: 32, messages: 156 },
+    },
+    {
+      id: "telegram", name: "Telegram", icon: <Send size={20} className="text-sky-500" />,
+      description: "DM your assistant; scan a QR to open your bot in Telegram",
+      status: "setup_required",
     },
     {
       id: "whatsapp", name: "WhatsApp Business", icon: <MessageCircle size={20} className="text-green-500" />,
-      description: "Respond to customers on WhatsApp", status: "active",
-      config: { phone: "+1 (555) 012-3456" },
-      stats: { conversations: 18, messages: 89 },
+      description: "WhatsApp chat link + QR (Business API / Cloud API)",
+      status: "setup_required",
+    },
+    {
+      id: "slack", name: "Slack", icon: <Hash size={20} className="text-purple-600" />,
+      description: "OAuth install link + QR for your workspace",
+      status: "setup_required",
     },
     {
       id: "instagram", name: "Instagram DMs", icon: <Instagram size={20} className="text-pink-500" />,
@@ -55,7 +69,7 @@ export default function AgentChannelsPage() {
     },
     {
       id: "messenger", name: "Facebook Messenger", icon: <MessageSquare size={20} className="text-blue-600" />,
-      description: "Connect to your Facebook page's Messenger", status: "inactive",
+      description: "Connect to your Facebook Page's Messenger", status: "inactive",
     },
   ]);
 
@@ -71,12 +85,46 @@ export default function AgentChannelsPage() {
   const [waPhone, setWaPhone] = useState("");
   const [waApiKey, setWaApiKey] = useState("");
 
+  /** After POST /chat/telegram/connect + optional GET /chat/telegram/qr */
+  const [telegramInfo, setTelegramInfo] = useState<{
+    deep_link: string;
+    bot_username: string;
+    webhook_registered: boolean;
+    webhook_url: string;
+  } | null>(null);
+  const [telegramBotToken, setTelegramBotToken] = useState("");
+  const [telegramConnecting, setTelegramConnecting] = useState(false);
+  const [telegramConnectError, setTelegramConnectError] = useState<string | null>(null);
+  const [slackInstallUrl, setSlackInstallUrl] = useState("");
+
   // Instagram config
   const [igAccount, setIgAccount] = useState("");
 
   // Email config
   const [emailAddress, setEmailAddress] = useState("");
   const [emailProvider, setEmailProvider] = useState("gmail");
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        const agent = await api.get<{ name: string; id?: string }>(`/agents/${agentPathSegment(id)}`);
+        if (cancelled) return;
+        setAgentName(agent.name ?? id);
+        setAgentId(agent.id || id);
+      } catch (err: any) {
+        if (!cancelled) setError(err.message || "Failed to load agent");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [id]);
 
   const activeChannels = channels.filter((c) => c.status === "active");
   const totalConversations = activeChannels.reduce((s, c) => s + (c.stats?.conversations || 0), 0);
@@ -105,15 +153,110 @@ export default function AgentChannelsPage() {
     toast("Channel configured and activated!");
   };
 
-  if (!agent) return <AgentNotFound />;
+  const connectTelegramBot = async () => {
+    const token = telegramBotToken.trim();
+    if (!token) {
+      setTelegramConnectError("Paste the bot token from BotFather first.");
+      return;
+    }
+    if (!id) return;
+    setTelegramConnecting(true);
+    setTelegramConnectError(null);
+    try {
+      const res = await api.post<{
+        success: boolean;
+        bot_username: string;
+        deep_link: string;
+        webhook_registered: boolean;
+        webhook_url: string;
+      }>("/chat/telegram/connect", { bot_token: token });
 
-  const widgetSnippet = `<script src="https://agentos.dev/widget/${agent.id}.js"
+      let deepLink = res.deep_link;
+      let username = res.bot_username;
+      try {
+        const qr = await api.get<{ deep_link: string; bot_username: string }>(
+          `/chat/telegram/qr?agent_name=${encodeURIComponent(id)}`,
+        );
+        deepLink = qr.deep_link;
+        username = qr.bot_username || username;
+      } catch {
+        /* token stored but qr endpoint unavailable or scope — use connect response */
+      }
+
+      setTelegramInfo({
+        deep_link: deepLink,
+        bot_username: username,
+        webhook_registered: res.webhook_registered,
+        webhook_url: res.webhook_url,
+      });
+      setChannels((prev) => prev.map((c) => (c.id === "telegram" ? { ...c, status: "active" } : c)));
+      toast("Telegram bot connected — webhook registered with Telegram.");
+    } catch (err) {
+      setTelegramConnectError(err instanceof Error ? err.message : "Could not connect Telegram");
+    } finally {
+      setTelegramConnecting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (configuring !== "telegram" || !id) return;
+    let cancelled = false;
+    setTelegramConnectError(null);
+    (async () => {
+      try {
+        const qr = await api.get<{ deep_link: string; bot_username: string; instructions?: string }>(
+          `/chat/telegram/qr?agent_name=${encodeURIComponent(id)}`,
+        );
+        if (cancelled) return;
+        setTelegramInfo({
+          deep_link: qr.deep_link,
+          bot_username: qr.bot_username,
+          webhook_registered: true,
+          webhook_url: "",
+        });
+      } catch {
+        if (!cancelled) setTelegramInfo(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [configuring, id]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 size={24} className="animate-spin text-primary" />
+        <span className="ml-2 text-sm text-text-secondary">Loading channels...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-24">
+        <p className="text-sm text-danger mb-2">{error}</p>
+        <Button size="sm" variant="secondary" onClick={() => window.location.reload()}>Retry</Button>
+      </div>
+    );
+  }
+
+  if (!agentName) return <AgentNotFound />;
+
+  const telegramDeepLink = telegramInfo?.deep_link ?? "";
+  const waDigits = waPhone.replace(/\D/g, "");
+  const whatsappDeepLink = waDigits
+    ? `https://wa.me/${waDigits}?text=${encodeURIComponent("Hi — I'd like to use my AgentOS assistant.")}`
+    : "";
+  const slackUrlTrimmed = slackInstallUrl.trim();
+
+  const widgetSnippet = `<script src="https://agentos.dev/widget/${id}.js"
   data-position="${widgetPosition}"
   data-color="${widgetColor}"
   data-greeting="${widgetGreeting}">
 </script>`;
 
-  const apiEndpoint = `POST https://api.agentos.dev/v1/agents/${agent.id}/chat
+  const apiEndpoint = `POST https://api.agentos.dev/v1/agents/${id}/chat
 Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
 
@@ -121,7 +264,7 @@ Content-Type: application/json
 
   return (
     <div>
-      <AgentNav agentName={agent.name} />
+      <AgentNav agentName={agentName} />
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-4 mb-6">
@@ -248,15 +391,138 @@ Content-Type: application/json
         </div>
       </Modal>
 
-      {/* WhatsApp config modal */}
-      <Modal open={configuring === "whatsapp"} onClose={() => setConfiguring(null)} title="WhatsApp Business Setup">
+      {/* Telegram — BotFather token → control plane stores + setWebhook; QR uses real t.me link */}
+      <Modal
+        open={configuring === "telegram"}
+        onClose={() => {
+          setConfiguring(null);
+          setTelegramConnectError(null);
+        }}
+        title="Telegram setup"
+        wide
+      >
         <div className="space-y-4">
-          <Input label="WhatsApp Business phone" placeholder="+1 555 000 0000" value={waPhone} onChange={(e) => setWaPhone(e.target.value)} />
-          <Input label="WhatsApp Business API key" type="password" placeholder="Your API key" value={waApiKey} onChange={(e) => setWaApiKey(e.target.value)} />
-          <p className="text-xs text-text-muted">Connect via the WhatsApp Business API. You'll need a verified business account.</p>
+          <p className="text-sm text-text-secondary leading-relaxed">
+            In <strong>@BotFather</strong>, create a bot and copy the <strong>HTTP API token</strong> (long string like{" "}
+            <code className="text-xs bg-surface-alt px-1 rounded">123456:ABC...</code>). AgentOS saves it securely, calls Telegram{" "}
+            <code className="text-xs bg-surface-alt px-1 rounded">setWebhook</code>, then you can open the bot from the link or QR.
+            The username alone is not enough—Telegram needs the token on the server to receive and send messages.
+          </p>
+          <Input
+            label="Bot token (from BotFather)"
+            type="password"
+            autoComplete="off"
+            placeholder="Paste token here"
+            value={telegramBotToken}
+            onChange={(e) => setTelegramBotToken(e.target.value)}
+          />
+          {telegramConnectError && (
+            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{telegramConnectError}</p>
+          )}
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={connectTelegramBot} disabled={telegramConnecting}>
+              {telegramConnecting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> Connecting…
+                </>
+              ) : (
+                "Save token & register webhook"
+              )}
+            </Button>
+          </div>
+          {telegramInfo?.bot_username && (
+            <p className="text-xs text-text-secondary">
+              Bot @{telegramInfo.bot_username}
+              {telegramInfo.webhook_url ? (
+                <>
+                  {" "}
+                  · Webhook URL: <code className="break-all">{telegramInfo.webhook_url}</code>
+                </>
+              ) : null}
+              {telegramInfo.webhook_url && telegramInfo.webhook_registered === false ? (
+                <span className="text-amber-700"> · Webhook may not have registered—check control plane logs and RUNTIME_WORKER_URL.</span>
+              ) : null}
+            </p>
+          )}
+          {telegramDeepLink ? (
+            <div className="flex flex-col sm:flex-row gap-6 items-start pt-2 border-t border-border">
+              <div className="rounded-lg border border-border p-2 bg-white shrink-0">
+                <img src={qrCodeImageUrl(telegramDeepLink, 180)} width={180} height={180} className="rounded" alt="Telegram QR" />
+              </div>
+              <div className="flex-1 min-w-0 space-y-2">
+                <p className="text-xs font-medium text-text-secondary">Open on your phone</p>
+                <code className="block text-xs bg-surface-alt rounded-lg p-3 break-all">{telegramDeepLink}</code>
+                <Button size="sm" variant="secondary" onClick={() => handleCopy(telegramDeepLink, "tg")}>
+                  {copied === "tg" ? <Check size={14} /> : <Copy size={14} />} Copy link
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-text-muted">After you save the token, the chat link and QR appear here (or reload this panel if a token is already stored).</p>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={() => setConfiguring(null)}>Close</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* WhatsApp — wa.me + QR + API key */}
+      <Modal open={configuring === "whatsapp"} onClose={() => setConfiguring(null)} title="WhatsApp setup" wide>
+        <div className="space-y-4">
+          <Input label="WhatsApp Business phone (E.164)" placeholder="+15550000000" value={waPhone} onChange={(e) => setWaPhone(e.target.value)} />
+          <Input label="WhatsApp Cloud / Business API token (optional)" type="password" placeholder="For server-side routing" value={waApiKey} onChange={(e) => setWaApiKey(e.target.value)} />
+          {whatsappDeepLink ? (
+            <div className="flex flex-col sm:flex-row gap-6 items-start">
+              <div className="rounded-lg border border-border p-2 bg-white shrink-0">
+                <img src={qrCodeImageUrl(whatsappDeepLink, 180)} width={180} height={180} className="rounded" alt="WhatsApp QR" />
+              </div>
+              <div className="flex-1 min-w-0 space-y-2">
+                <p className="text-xs text-text-secondary">Scan to open WhatsApp with a prefilled message. Complete Cloud API credentials in the control plane for automation.</p>
+                <code className="block text-xs bg-surface-alt rounded-lg p-3 break-all">{whatsappDeepLink}</code>
+                <Button size="sm" variant="secondary" onClick={() => handleCopy(whatsappDeepLink, "wa")}>
+                  {copied === "wa" ? <Check size={14} /> : <Copy size={14} />} Copy link
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-text-muted">Enter a phone number including country code to generate a wa.me link and QR.</p>
+          )}
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={() => setConfiguring(null)}>Cancel</Button>
-            <Button onClick={() => saveConfig("whatsapp")}>Connect WhatsApp</Button>
+            <Button onClick={() => saveConfig("whatsapp")}>Save &amp; activate</Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Slack — OAuth URL + QR */}
+      <Modal open={configuring === "slack"} onClose={() => setConfiguring(null)} title="Slack setup" wide>
+        <div className="space-y-4">
+          <p className="text-sm text-text-secondary">
+            Paste the Slack OAuth / app install URL from your AgentOS control plane. Scan the QR on your phone to open the same link (handy on desktop-first workspaces).
+          </p>
+          <Input
+            label="Slack install URL"
+            placeholder="https://slack.com/oauth/v2/authorize?..."
+            value={slackInstallUrl}
+            onChange={(e) => setSlackInstallUrl(e.target.value)}
+          />
+          {slackUrlTrimmed ? (
+            <div className="flex flex-col sm:flex-row gap-6 items-start">
+              <div className="rounded-lg border border-border p-2 bg-white shrink-0">
+                <img src={qrCodeImageUrl(slackUrlTrimmed, 180)} width={180} height={180} className="rounded" alt="Slack OAuth QR" />
+              </div>
+              <div className="flex-1 space-y-2">
+                <Button size="sm" variant="secondary" onClick={() => handleCopy(slackUrlTrimmed, "slack")}>
+                  {copied === "slack" ? <Check size={14} /> : <Copy size={14} />} Copy install URL
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-text-muted">Add a URL to generate a QR code.</p>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={() => setConfiguring(null)}>Close</Button>
+            <Button onClick={() => saveConfig("slack")}>Mark configured</Button>
           </div>
         </div>
       </Modal>

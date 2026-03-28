@@ -91,10 +91,12 @@ const app = createApp();
 app.use("*", securityHeadersMiddleware);
 app.use("*", cors({
   origin: (origin) => {
-    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://agentos-portal.servesys.workers.dev").split(",");
+    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://agentos-portal.servesys.workers.dev,https://agentos-mvp.servesys.workers.dev").split(",");
     if (!origin || allowed.includes(origin) || allowed.includes("*")) return origin;
     // Allow any *.agentos.dev subdomain (custom org domains)
     if (origin && /^https:\/\/[a-z0-9-]+\.agentos\.dev$/.test(origin)) return origin;
+    // Allow any *.servesys.workers.dev subdomain (internal services)
+    if (origin && /^https:\/\/[a-z0-9-]+\.servesys\.workers\.dev$/.test(origin)) return origin;
     return null;
   },
   allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],

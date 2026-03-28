@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { PRODUCT } from "../lib/product";
 
 export default function LoginPage() {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -38,11 +39,15 @@ export default function LoginPage() {
     <div className="min-h-screen bg-surface-alt flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         {/* Logo */}
-        <div className="flex items-center justify-center gap-2.5 mb-8">
-          <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center">
-            <span className="text-white text-sm font-bold">A</span>
+        <div className="text-center mb-8">
+          <div className="flex items-center justify-center gap-2.5 mb-2">
+            <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center">
+              <span className="text-white text-sm font-bold">A</span>
+            </div>
+            <span className="text-xl font-semibold text-text">{PRODUCT.name}</span>
           </div>
-          <span className="text-xl font-semibold text-text">AgentOS</span>
+          <p className="text-xs font-medium text-text-muted uppercase tracking-wider">{PRODUCT.edition}</p>
+          <p className="text-sm text-text-secondary mt-2 max-w-xs mx-auto leading-relaxed">{PRODUCT.editionTagline}</p>
         </div>
 
         <div className="bg-white rounded-xl border border-border p-6 shadow-lg overflow-hidden relative">

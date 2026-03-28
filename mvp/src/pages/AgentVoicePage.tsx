@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Phone, PhoneCall, PhoneOff, PhoneMissed, Settings, Volume2, Clock, Copy, Check, Plus } from "lucide-react";
+import { Phone, PhoneCall, PhoneOff, PhoneMissed, Settings, Volume2, Clock, Copy, Check, Plus, Loader2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
@@ -11,13 +11,23 @@ import { Select } from "../components/ui/Select";
 import { Textarea } from "../components/ui/Textarea";
 import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/Toast";
-import { MOCK_AGENTS } from "../lib/mock-data";
+import { api } from "../lib/api";
+import { agentPathSegment } from "../lib/agent-path";
+
+interface VoiceConfig {
+  voice?: string;
+  greeting?: string;
+  language?: string;
+  max_duration?: number;
+  numbers?: PhoneNumber[];
+  calls?: CallLog[];
+}
 
 interface PhoneNumber {
   id: string;
   number: string;
   label: string;
-  provider: "vapi";
+  provider: string;
   status: "active" | "inactive";
   assigned_at: string;
 }
@@ -30,18 +40,6 @@ interface CallLog {
   started_at: string;
   summary?: string;
 }
-
-const MOCK_NUMBERS: PhoneNumber[] = [
-  { id: "ph-1", number: "+1 (555) 012-3456", label: "Main line", provider: "vapi", status: "active", assigned_at: "2026-03-25T10:00:00Z" },
-];
-
-const MOCK_CALLS: CallLog[] = [
-  { id: "call-1", caller: "+1 (555) 987-6543", duration_seconds: 185, status: "completed", started_at: "2026-03-28T09:15:00Z", summary: "Customer asked about delivery to West Side. Agent confirmed delivery area and scheduled for Thursday." },
-  { id: "call-2", caller: "+1 (555) 111-2222", duration_seconds: 72, status: "completed", started_at: "2026-03-28T09:42:00Z", summary: "Price inquiry for sympathy arrangement. Agent quoted $55-85 range and offered same-day delivery." },
-  { id: "call-3", caller: "+1 (555) 333-4444", duration_seconds: 0, status: "missed", started_at: "2026-03-28T10:05:00Z" },
-  { id: "call-4", caller: "+1 (555) 555-6666", duration_seconds: 310, status: "completed", started_at: "2026-03-28T10:30:00Z", summary: "Wedding consultation request. Agent collected date (June 14), venue (The Grand Ballroom), budget ($2,000). Booked a 30-min consultation for Friday." },
-  { id: "call-5", caller: "+1 (555) 777-8888", duration_seconds: 45, status: "voicemail", started_at: "2026-03-28T11:00:00Z", summary: "Caller left voicemail asking about store hours." },
-];
 
 const VOICES = [
   { value: "alloy", label: "Alloy — Warm & friendly" },
@@ -65,13 +63,17 @@ function formatDuration(seconds: number): string {
 }
 
 export default function AgentVoicePage() {
-  const { id } = useParams();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const agent = MOCK_AGENTS.find((a) => a.id === id);
 
-  const [numbers, setNumbers] = useState<PhoneNumber[]>(MOCK_NUMBERS);
-  const [calls] = useState<CallLog[]>(MOCK_CALLS);
+  const [agentName, setAgentName] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  const [numbers, setNumbers] = useState<PhoneNumber[]>([]);
+  const [calls, setCalls] = useState<CallLog[]>([]);
   const [showSetup, setShowSetup] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
@@ -79,9 +81,7 @@ export default function AgentVoicePage() {
 
   // Voice settings
   const [voice, setVoice] = useState("alloy");
-  const [greeting, setGreeting] = useState(
-    "Hi, thanks for calling Sarah's Flower Shop! I'm an AI assistant and I can help you with orders, delivery questions, or booking a consultation. How can I help you today?",
-  );
+  const [greeting, setGreeting] = useState("");
   const [language, setLanguage] = useState("en");
   const [maxDuration, setMaxDuration] = useState("600");
   const [vapiKey, setVapiKey] = useState("");
@@ -90,6 +90,39 @@ export default function AgentVoicePage() {
   const [setupStep, setSetupStep] = useState<"key" | "number">("key");
   const [newNumber, setNewNumber] = useState("");
   const [newLabel, setNewLabel] = useState("Main line");
+
+  useEffect(() => {
+    if (!id) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        const [agent, voiceConfig] = await Promise.all([
+          api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`),
+          api.get<VoiceConfig>(`/voice/config?agent_name=${encodeURIComponent(id.trim())}`).catch(() => ({} as VoiceConfig)),
+        ]);
+        if (cancelled) return;
+
+        setAgentName(agent.name ?? id);
+
+        if (voiceConfig.voice) setVoice(voiceConfig.voice);
+        if (voiceConfig.greeting) setGreeting(voiceConfig.greeting);
+        if (voiceConfig.language) setLanguage(voiceConfig.language);
+        if (voiceConfig.max_duration) setMaxDuration(String(voiceConfig.max_duration));
+        if (voiceConfig.numbers) setNumbers(voiceConfig.numbers);
+        if (voiceConfig.calls) setCalls(voiceConfig.calls);
+      } catch (err: any) {
+        if (!cancelled) setError(err.message || "Failed to load voice config");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [id]);
 
   const handleConnect = () => {
     if (!vapiKey.trim()) return;
@@ -132,7 +165,44 @@ export default function AgentVoicePage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  if (!agent) return <AgentNotFound />;
+  const saveVoiceSettings = async () => {
+    setSavingSettings(true);
+    try {
+      await api.put("/voice/config", {
+        agent_name: id,
+        voice,
+        greeting,
+        language,
+        max_duration: parseInt(maxDuration),
+      });
+      setShowSettings(false);
+      toast("Voice settings saved");
+    } catch (err: any) {
+      toast(err.message || "Failed to save voice settings");
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 size={24} className="animate-spin text-primary" />
+        <span className="ml-2 text-sm text-text-secondary">Loading voice config...</span>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="text-center py-24">
+        <p className="text-sm text-danger mb-2">{error}</p>
+        <Button size="sm" variant="secondary" onClick={() => window.location.reload()}>Retry</Button>
+      </div>
+    );
+  }
+
+  if (!agentName) return <AgentNotFound />;
 
   const activeNumbers = numbers.filter((n) => n.status === "active");
   const completedCalls = calls.filter((c) => c.status === "completed");
@@ -140,7 +210,7 @@ export default function AgentVoicePage() {
 
   return (
     <div>
-      <AgentNav agentName={agent.name}>
+      <AgentNav agentName={agentName}>
         <Button size="sm" variant="ghost" onClick={() => setShowSettings(true)}>
           <Settings size={14} /> Voice Settings
         </Button>
@@ -209,7 +279,7 @@ export default function AgentVoicePage() {
                       {copied ? <Check size={12} /> : <Copy size={12} />}
                     </button>
                   </div>
-                  <p className="text-xs text-text-muted">{num.label} · via {num.provider.toUpperCase()}</p>
+                  <p className="text-xs text-text-muted">{num.label} · via {(num.provider || "vapi").toUpperCase()}</p>
                 </div>
                 <Badge variant={num.status === "active" ? "success" : "default"}>{num.status}</Badge>
                 <div className="flex gap-2">
@@ -399,7 +469,10 @@ export default function AgentVoicePage() {
           />
           <div className="flex justify-end gap-2 pt-2">
             <Button variant="ghost" onClick={() => setShowSettings(false)}>Cancel</Button>
-            <Button onClick={() => { setShowSettings(false); toast("Voice settings saved"); }}>Save</Button>
+            <Button onClick={saveVoiceSettings} disabled={savingSettings}>
+              {savingSettings ? <Loader2 size={14} className="animate-spin" /> : null}
+              Save
+            </Button>
           </div>
         </div>
       </Modal>
