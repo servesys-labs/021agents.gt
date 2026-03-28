@@ -276,9 +276,170 @@ app.doc("/api/v1/openapi.json", {
     contact: { name: "AgentOS", url: "https://agentos.dev" },
   },
   servers: [
-    { url: "https://{org}.agentos.dev/api/v1", description: "Org subdomain", variables: { org: { default: "demo" } } },
+    { url: "https://agentos-control-plane.servesys.workers.dev", description: "Production" },
   ],
   security: [{ bearerAuth: [] }],
+  tags: [
+    { name: "Auth", description: "Authentication and user management" },
+    { name: "Agents", description: "Agent CRUD, configuration, and lifecycle" },
+    { name: "Runtime Proxy", description: "Forward execution requests to runtime worker" },
+    { name: "Sessions", description: "Session and trace management" },
+    { name: "Eval", description: "Evaluation datasets, runs, and experiments" },
+    { name: "Issues", description: "Issue detection, triage, and auto-fix" },
+    { name: "Security", description: "OWASP scanning, risk profiles, AIVSS" },
+    { name: "Redteam", description: "Red team probes and security testing" },
+    { name: "Graphs", description: "Graph validation, linting, autofix, gate-pack" },
+    { name: "Observability", description: "Traces, spans, annotations, meta-reports" },
+    { name: "Ops Observability", description: "Operational monitoring and incidents" },
+    { name: "ConversationIntel", description: "Conversation quality and sentiment" },
+    { name: "Intelligence", description: "Cross-agent intelligence dashboard" },
+    { name: "Billing", description: "Usage, costs, and invoices" },
+    { name: "Stripe", description: "Stripe payment integration" },
+    { name: "Evolve", description: "Agent evolution proposals and ledger" },
+    { name: "Workflows", description: "Multi-agent DAG workflows" },
+    { name: "Releases", description: "Release channels and canary deployments" },
+    { name: "Gold Images", description: "Compliance baselines and drift detection" },
+    { name: "Compliance", description: "Compliance policies and checks" },
+    { name: "Policies", description: "Governance policy templates" },
+    { name: "SLOs", description: "Service level objectives" },
+    { name: "Guardrails", description: "PII detection, prompt injection, output safety" },
+    { name: "DLP", description: "Data loss prevention classifications" },
+    { name: "Feedback", description: "User feedback collection and analytics" },
+    { name: "Memory", description: "Agent memory (episodic, semantic, procedural)" },
+    { name: "RAG", description: "Document ingestion and knowledge base" },
+    { name: "Pipelines", description: "Data pipeline streams, sinks, and transforms" },
+    { name: "Codemode", description: "Code snippets, execution, and templates" },
+    { name: "Components", description: "Reusable agent components" },
+    { name: "Connectors", description: "Pipedream connectors and OAuth" },
+    { name: "MCP", description: "MCP server registry" },
+    { name: "Skills", description: "Skill library management" },
+    { name: "Tools", description: "Tool registry" },
+    { name: "Schedules", description: "Cron-based scheduled runs" },
+    { name: "Jobs", description: "Async job queue and dead letter" },
+    { name: "Webhooks", description: "Webhook CRUD and delivery" },
+    { name: "Alerts", description: "Alert rules and history" },
+    { name: "Orgs", description: "Organization and team management" },
+    { name: "Projects", description: "Project hierarchy and canvas" },
+    { name: "API Keys", description: "API key lifecycle" },
+    { name: "Secrets", description: "Encrypted secrets vault" },
+    { name: "Secrets Rotation", description: "Automated secret rotation" },
+    { name: "Retention", description: "Data retention policies" },
+    { name: "Audit", description: "Tamper-evident audit log" },
+    { name: "Deploy", description: "Agent deployment management" },
+    { name: "Config", description: "Platform configuration" },
+    { name: "AutoResearch", description: "Autonomous improvement loops" },
+    { name: "Compare", description: "A/B agent comparison" },
+    { name: "Sandbox", description: "Code execution sandbox" },
+    { name: "GPU", description: "GPU endpoint provisioning" },
+    { name: "Voice", description: "Voice/Vapi integration" },
+    { name: "Chat Platforms", description: "Telegram, Discord integration" },
+    { name: "Plans", description: "LLM routing plans" },
+    { name: "Middleware", description: "Middleware chain status" },
+    { name: "Edge Ingest", description: "Telemetry ingestion from runtime" },
+    { name: "Batch API", description: "Batch operations" },
+    { name: "Dashboard", description: "Dashboard aggregations" },
+    { name: "Domains", description: "Custom domain management" },
+    { name: "End User Tokens", description: "End-user authentication tokens" },
+    { name: "Session Management", description: "Session lifecycle" },
+    { name: "Security Events", description: "Security event log" },
+    { name: "Public API", description: "Public-facing API endpoints" },
+    { name: "A2A", description: "Agent-to-Agent protocol" },
+    { name: "System", description: "Health and system status" },
+    { name: "Widget", description: "Embeddable chat widget" },
+  ],
+  components: {
+    securitySchemes: {
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "API Key or JWT",
+        description: "API key (ak_...) or JWT token from /api/v1/auth/login",
+      },
+    },
+  },
+} as any);
+
+// Post-process the generated spec to fix OAS 3.1 compliance issues
+app.get("/api/v1/openapi-clean.json", async (c) => {
+  // Get the auto-generated spec by calling the internal handler
+  const fakeReq = new Request("http://internal/api/v1/openapi.json");
+  const rawResp = await app.fetch(fakeReq, c.env, c.executionCtx as any);
+  const spec = await rawResp.json() as Record<string, any>;
+
+  // Fix: convert nullable to OAS 3.1 format (type array with "null")
+  // Fix: convert exclusiveMinimum boolean to number
+  // Fix: add operationId where missing
+  function fixSchema(obj: any, path = ""): void {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj)) { obj.forEach((v, i) => fixSchema(v, `${path}[${i}]`)); return; }
+
+    // Fix nullable: { type: "string", nullable: true } → { type: ["string", "null"] }
+    if (obj.nullable === true && obj.type) {
+      obj.type = [obj.type, "null"];
+      delete obj.nullable;
+    }
+    // Fix nullable without type: { nullable: true } → { type: "null" }
+    if (obj.nullable === true && !obj.type) {
+      obj.type = "null";
+      delete obj.nullable;
+    }
+
+    // Fix exclusiveMinimum: boolean → number (use minimum value)
+    if (typeof obj.exclusiveMinimum === "boolean") {
+      if (obj.minimum !== undefined) {
+        obj.exclusiveMinimum = obj.minimum;
+        delete obj.minimum;
+      } else {
+        delete obj.exclusiveMinimum;
+      }
+    }
+    if (typeof obj.exclusiveMaximum === "boolean") {
+      if (obj.maximum !== undefined) {
+        obj.exclusiveMaximum = obj.maximum;
+        delete obj.maximum;
+      } else {
+        delete obj.exclusiveMaximum;
+      }
+    }
+
+    for (const key of Object.keys(obj)) fixSchema(obj[key], `${path}.${key}`);
+  }
+
+  // Add operationId to operations that don't have one
+  let opCounter = 0;
+  const paths = (spec as any).paths || {};
+  for (const [pathStr, methods] of Object.entries(paths)) {
+    if (!methods || typeof methods !== "object") continue;
+    for (const [method, op] of Object.entries(methods as Record<string, any>)) {
+      if (!["get", "post", "put", "delete", "patch"].includes(method)) continue;
+      if (!op.operationId) {
+        // Generate: GET /api/v1/agents → getAgents, POST /api/v1/agents → postAgents
+        const parts = pathStr.replace(/^\/api\/v1\//, "").replace(/\{[^}]+\}/g, "ById").split("/").filter(Boolean);
+        const name = parts.map((p, i) => i === 0 ? p : p.charAt(0).toUpperCase() + p.slice(1)).join("");
+        op.operationId = `${method}${name.charAt(0).toUpperCase() + name.slice(1)}_${opCounter++}`;
+      }
+      if (!op.description) {
+        op.description = op.summary || `${method.toUpperCase()} ${pathStr}`;
+      }
+    }
+  }
+
+  fixSchema(spec);
+
+  // Inject securitySchemes (app.doc() doesn't merge components properly)
+  if (!spec.components) spec.components = {};
+  if (!spec.components.securitySchemes) {
+    spec.components.securitySchemes = {
+      bearerAuth: {
+        type: "http",
+        scheme: "bearer",
+        bearerFormat: "API Key or JWT",
+        description: "API key (ak_...) or JWT token from /api/v1/auth/login",
+      },
+    };
+  }
+
+  return c.json(spec as any);
 });
 
 app.get("/api/v1/docs", (c) => {
@@ -290,7 +451,7 @@ app.get("/api/v1/docs", (c) => {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 </head>
 <body>
-  <script id="api-reference" data-url="/api/v1/openapi.json"></script>
+  <script id="api-reference" data-url="/api/v1/openapi-clean.json"></script>
   <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
 </body>
 </html>`;

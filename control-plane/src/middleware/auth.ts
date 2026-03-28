@@ -110,6 +110,7 @@ const PUBLIC_PATHS = new Set([
   "/v1/openapi.json",
   "/v1/docs",
   "/api/v1/openapi.json",
+  "/api/v1/openapi-clean.json",
   "/api/v1/docs",
   "/widget.js",
 ]);
