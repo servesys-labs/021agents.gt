@@ -3,12 +3,22 @@ import puppeteer from 'puppeteer-core';
 const BASE = 'http://localhost:3001';
 const DIR = '/home/user/one-shot/screenshots';
 
-// Only retake pages that were fixed
 const pages = [
+  { name: '01-login', path: '/login', noAuth: true },
   { name: '02-dashboard', path: '/' },
+  { name: '03-agent-activity', path: '/agents/agent-1/activity' },
   { name: '04-agent-playground', path: '/agents/agent-1/play' },
+  { name: '05-agent-flow', path: '/agents/agent-1/flow' },
+  { name: '06-agent-tests', path: '/agents/agent-1/tests' },
+  { name: '07-agent-knowledge', path: '/agents/agent-1/knowledge' },
+  { name: '08-agent-voice', path: '/agents/agent-1/voice' },
+  { name: '09-agent-integrations', path: '/agents/agent-1/integrations' },
+  { name: '10-agent-channels', path: '/agents/agent-1/channels' },
   { name: '11-agent-insights', path: '/agents/agent-1/insights' },
   { name: '12-agent-settings', path: '/agents/agent-1/settings' },
+  { name: '13-settings', path: '/settings' },
+  { name: '14-onboarding', path: '/onboarding', noAuth: true },
+  { name: '15-agent-builder', path: '/agents/new' },
 ];
 
 async function run() {
@@ -38,13 +48,21 @@ async function run() {
     };
   });
 
-  // Set token
+  // No-auth pages first
+  for (const p of pages.filter(p => p.noAuth)) {
+    await page.goto(`${BASE}${p.path}`, { waitUntil: 'networkidle0' });
+    await new Promise(r => setTimeout(r, 300));
+    await page.screenshot({ path: `${DIR}/${p.name}.png`, fullPage: p.name !== '01-login' });
+    console.log(`✓ ${p.name}`);
+  }
+
+  // Set token for auth pages
   await page.goto(`${BASE}/login`, { waitUntil: 'networkidle0' });
   await page.evaluate(() => {
     localStorage.setItem('agentos_token', 'mock-token-for-screenshots');
   });
 
-  for (const p of pages) {
+  for (const p of pages.filter(p => !p.noAuth)) {
     await page.goto(`${BASE}${p.path}`, { waitUntil: 'networkidle0' });
     await new Promise(r => setTimeout(r, 300));
     await page.screenshot({ path: `${DIR}/${p.name}.png`, fullPage: true });
