@@ -7,24 +7,46 @@
  *   GET    /:id        — Single feedback detail
  *   DELETE /:id        — Delete feedback
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const feedbackRoutes = new Hono<R>();
+export const feedbackRoutes = createOpenAPIRouter();
 
 /* ── List feedback ──────────────────────────────────────────────── */
 
-feedbackRoutes.get("/", requireScope("sessions:read"), async (c) => {
+const listFeedbackRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Feedback"],
+  summary: "List feedback entries (org-scoped, filterable)",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional(),
+      rating: z.string().optional(),
+      since_days: z.coerce.number().int().min(1).max(365).default(30).optional(),
+      limit: z.coerce.number().int().min(1).max(500).default(50).optional(),
+      offset: z.coerce.number().int().min(0).default(0).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Feedback list",
+      content: { "application/json": { schema: z.object({ feedback: z.array(z.record(z.unknown())), count: z.number() }) } },
+    },
+  },
+});
+feedbackRoutes.openapi(listFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") || "";
-  const rating = c.req.query("rating") || "";
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
-  const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 50));
-  const offset = Math.max(0, Number(c.req.query("offset")) || 0);
+  const q = c.req.valid("query");
+  const agentName = q.agent_name || "";
+  const rating = q.rating || "";
+  const sinceDays = Math.max(1, Math.min(365, Number(q.since_days) || 30));
+  const limit = Math.min(500, Math.max(1, Number(q.limit) || 50));
+  const offset = Math.max(0, Number(q.offset) || 0);
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -69,10 +91,30 @@ feedbackRoutes.get("/", requireScope("sessions:read"), async (c) => {
 
 /* ── Aggregate stats ────────────────────────────────────────────── */
 
-feedbackRoutes.get("/stats", requireScope("sessions:read"), async (c) => {
+const feedbackStatsRoute = createRoute({
+  method: "get",
+  path: "/stats",
+  tags: ["Feedback"],
+  summary: "Aggregate feedback stats",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional(),
+      since_days: z.coerce.number().int().min(1).max(365).default(30).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Feedback stats",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+feedbackRoutes.openapi(feedbackStatsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") || "";
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
+  const q = c.req.valid("query");
+  const agentName = q.agent_name || "";
+  const sinceDays = Math.max(1, Math.min(365, Number(q.since_days) || 30));
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const prevSince = new Date(Date.now() - sinceDays * 2 * 86400 * 1000).toISOString();
 
@@ -171,9 +213,26 @@ feedbackRoutes.get("/stats", requireScope("sessions:read"), async (c) => {
 
 /* ── Single feedback detail ─────────────────────────────────────── */
 
-feedbackRoutes.get("/:id", requireScope("sessions:read"), async (c) => {
+const getFeedbackRoute = createRoute({
+  method: "get",
+  path: "/{id}",
+  tags: ["Feedback"],
+  summary: "Get a single feedback entry",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Feedback detail",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+feedbackRoutes.openapi(getFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const id = c.req.param("id");
+  const { id } = c.req.valid("param");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -184,14 +243,30 @@ feedbackRoutes.get("/:id", requireScope("sessions:read"), async (c) => {
   `;
 
   if (rows.length === 0) return c.json({ error: "not_found" }, 404);
-  return c.json(rows[0]);
+  return c.json(rows[0] as any);
 });
 
 /* ── Delete feedback ────────────────────────────────────────────── */
 
-feedbackRoutes.delete("/:id", requireScope("sessions:write"), async (c) => {
+const deleteFeedbackRoute = createRoute({
+  method: "delete",
+  path: "/{id}",
+  tags: ["Feedback"],
+  summary: "Delete a feedback entry",
+  middleware: [requireScope("sessions:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Feedback deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.boolean(), id: z.string() }) } },
+    },
+  },
+});
+feedbackRoutes.openapi(deleteFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const id = c.req.param("id");
+  const { id } = c.req.valid("param");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`

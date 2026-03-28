@@ -117,8 +117,9 @@ describe("codemode input validation", () => {
       body: JSON.stringify({ code: "return 1;", scope: "agent" }),
     }, mockEnv());
     expect(res.status).toBe(400);
-    const body = await res.json() as { error?: string };
-    expect(body.error).toMatch(/[Vv]alidation/);
+    const body = await res.json() as { success?: boolean; error?: unknown };
+    // Zod-OpenAPI returns structured validation errors
+    expect(body.success === false || body.error !== undefined).toBe(true);
   });
 
   it("rejects snippet creation with missing code", async () => {

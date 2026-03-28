@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { deriveDisplayName } from "../src/auth/clerk";
+import { deriveDisplayName } from "../src/auth/cf-access";
 
 describe("deriveDisplayName", () => {
   it("uses explicit name when present", () => {

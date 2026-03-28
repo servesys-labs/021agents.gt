@@ -2,9 +2,10 @@
  * Observability router — summary, daily cost, traces, annotations, feedback, lineage, meta-control-plane.
  * Ported from agentos/api/routers/observability.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
@@ -19,8 +20,7 @@ import {
   type ObservabilityIncident,
 } from "../logic/observability-incidents";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const observabilityRoutes = new Hono<R>();
+export const observabilityRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(6);
@@ -40,9 +40,28 @@ function parseJsonSafe(raw: unknown): Record<string, unknown> {
   }
 }
 
-observabilityRoutes.get("/summary", requireScope("observability:read"), async (c) => {
+// ── GET /summary ────────────────────────────────────────────────
+
+const summaryRoute = createRoute({
+  method: "get",
+  path: "/summary",
+  tags: ["Observability"],
+  summary: "Get observability summary",
+  middleware: [requireScope("observability:read")],
+  request: {
+    query: z.object({
+      since_days: z.coerce.number().int().min(1).max(365).default(30),
+    }),
+  },
+  responses: {
+    200: { description: "Summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(summaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinceDays = Math.max(1, Math.min(365, Number(c.req.query("since_days")) || 30));
+  const { since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -71,11 +90,30 @@ observabilityRoutes.get("/summary", requireScope("observability:read"), async (c
   });
 });
 
-observabilityRoutes.get("/integrity/breaches", requireScope("observability:read"), async (c) => {
+// ── GET /integrity/breaches ─────────────────────────────────────
+
+const integrityBreachesRoute = createRoute({
+  method: "get",
+  path: "/integrity/breaches",
+  tags: ["Observability"],
+  summary: "List integrity breaches",
+  middleware: [requireScope("observability:read")],
+  request: {
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      trace_id: z.string().default(""),
+    }),
+  },
+  responses: {
+    200: { description: "Breach list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(integrityBreachesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
-  const traceId = String(c.req.query("trace_id") || "").trim();
+  const { limit, trace_id: traceId } = c.req.valid("query");
 
   const rows = traceId
     ? await sql`
@@ -135,21 +173,39 @@ observabilityRoutes.get("/integrity/breaches", requireScope("observability:read"
   });
 });
 
+// ── GET /incidents ──────────────────────────────────────────────
+
 const INCIDENT_KINDS = new Set<IncidentKind>(["integrity_breach", "loop_halt", "loop_warn", "circuit_block"]);
 
-observabilityRoutes.get("/incidents", requireScope("observability:read"), async (c) => {
+const incidentsRoute = createRoute({
+  method: "get",
+  path: "/incidents",
+  tags: ["Observability"],
+  summary: "List observability incidents",
+  middleware: [requireScope("observability:read")],
+  request: {
+    query: z.object({
+      since_hours: z.coerce.number().int().min(1).max(168).default(24),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      dedupe_window_sec: z.coerce.number().int().min(0).max(3600).default(300),
+      include_suppressed: z.string().default("true"),
+      min_severity: z.string().default(""),
+      kinds: z.string().default(""),
+    }),
+  },
+  responses: {
+    200: { description: "Incident list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+observabilityRoutes.openapi(incidentsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const sinceHours = Math.max(1, Math.min(168, Number(c.req.query("since_hours")) || 24));
-  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
-  const dedupeRaw = c.req.query("dedupe_window_sec");
-  const dedupeParsed = dedupeRaw !== undefined && dedupeRaw !== "" ? Number(dedupeRaw) : 300;
-  const dedupeWindowSec = Math.max(0, Math.min(3600, Number.isFinite(dedupeParsed) ? dedupeParsed : 300));
-  const includeSuppressed = c.req.query("include_suppressed") !== "false";
-  const minSeverity = String(c.req.query("min_severity") || "").trim().toLowerCase();
+  const { since_hours: sinceHours, limit, dedupe_window_sec: dedupeWindowSec, include_suppressed: includeSuppressedRaw, min_severity: minSeverity, kinds: kindsParam } = c.req.valid("query");
+  const includeSuppressed = includeSuppressedRaw !== "false";
 
-  const kindsParam = String(c.req.query("kinds") || "").trim();
   const kindFilter: Set<IncidentKind> | null = kindsParam
     ? new Set(
         kindsParam
@@ -332,9 +388,28 @@ observabilityRoutes.get("/incidents", requireScope("observability:read"), async 
   });
 });
 
-observabilityRoutes.get("/daily-cost", requireScope("observability:read"), async (c) => {
+// ── GET /daily-cost ─────────────────────────────────────────────
+
+const dailyCostRoute = createRoute({
+  method: "get",
+  path: "/daily-cost",
+  tags: ["Observability"],
+  summary: "Get daily cost breakdown",
+  middleware: [requireScope("observability:read")],
+  request: {
+    query: z.object({
+      days: z.coerce.number().int().min(1).max(365).default(30),
+    }),
+  },
+  responses: {
+    200: { description: "Daily cost", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(dailyCostRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const days = Math.max(1, Math.min(365, Number(c.req.query("days")) || 30));
+  const { days } = c.req.valid("query");
   const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -357,11 +432,21 @@ observabilityRoutes.get("/daily-cost", requireScope("observability:read"), async
   });
 });
 
-/**
- * GET /cost-ledger
- * Per-agent cost breakdown from billing_records or sessions.
- */
-observabilityRoutes.get("/cost-ledger", requireScope("observability:read"), async (c) => {
+// ── GET /cost-ledger ────────────────────────────────────────────
+
+const costLedgerRoute = createRoute({
+  method: "get",
+  path: "/cost-ledger",
+  tags: ["Observability"],
+  summary: "Per-agent cost breakdown",
+  middleware: [requireScope("observability:read")],
+  responses: {
+    200: { description: "Cost ledger", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(costLedgerRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -398,9 +483,27 @@ observabilityRoutes.get("/cost-ledger", requireScope("observability:read"), asyn
   return c.json({ entries });
 });
 
-observabilityRoutes.get("/trace/:trace_id", requireScope("observability:read"), async (c) => {
+// ── GET /trace/:trace_id ────────────────────────────────────────
+
+const getTraceRoute = createRoute({
+  method: "get",
+  path: "/trace/{trace_id}",
+  tags: ["Observability"],
+  summary: "Get trace detail",
+  middleware: [requireScope("observability:read")],
+  request: {
+    params: z.object({ trace_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Trace detail", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(getTraceRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const traceId = c.req.param("trace_id");
+  const { trace_id: traceId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify org ownership
@@ -420,11 +523,34 @@ observabilityRoutes.get("/trace/:trace_id", requireScope("observability:read"), 
   return c.json({ trace_id: traceId, sessions, events });
 });
 
-observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observability:read"), async (c) => {
+// ── GET /trace/:trace_id/integrity ──────────────────────────────
+
+const traceIntegrityRoute = createRoute({
+  method: "get",
+  path: "/trace/{trace_id}/integrity",
+  tags: ["Observability"],
+  summary: "Check trace integrity",
+  middleware: [requireScope("observability:read")],
+  request: {
+    params: z.object({ trace_id: z.string() }),
+    query: z.object({
+      strict: z.string().default("false"),
+      alert_on_breach: z.string().default("false"),
+    }),
+  },
+  responses: {
+    200: { description: "Integrity check result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const traceId = c.req.param("trace_id");
-  const strict = c.req.query("strict") === "true";
-  const alertOnBreach = c.req.query("alert_on_breach") === "true";
+  const { trace_id: traceId } = c.req.valid("param");
+  const { strict: strictRaw, alert_on_breach: alertOnBreachRaw } = c.req.valid("query");
+  const strict = strictRaw === "true";
+  const alertOnBreach = alertOnBreachRaw === "true";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const sessions = await sql`
@@ -482,7 +608,7 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
   const maxCreatedAtMs = Math.max(
     ...sessions.map((s: any) => new Date(String(s.created_at || "")).getTime()).filter((n: number) => Number.isFinite(n)),
   );
-  const recentWindowMs = 90_000; // allow async ingest/queue fanout to settle
+  const recentWindowMs = 90_000;
   const isRecentTrace = Number.isFinite(maxCreatedAtMs) && (Date.now() - maxCreatedAtMs < recentWindowMs);
 
   const warnings: string[] = [];
@@ -542,17 +668,49 @@ observabilityRoutes.get("/trace/:trace_id/integrity", requireScope("observabilit
   });
 });
 
-observabilityRoutes.post("/annotations", requireScope("observability:write"), async (c) => {
+// ── POST /annotations ───────────────────────────────────────────
+
+const postAnnotationsRoute = createRoute({
+  method: "post",
+  path: "/annotations",
+  tags: ["Observability"],
+  summary: "Create trace annotation",
+  middleware: [requireScope("observability:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            trace_id: z.string().min(1),
+            annotation_type: z.string().default("note"),
+            message: z.string().min(1),
+            severity: z.string().default("info"),
+            span_id: z.string().default(""),
+            node_id: z.string().default(""),
+            turn: z.number().default(0),
+            metadata: z.record(z.unknown()).default({}),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Annotation created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+observabilityRoutes.openapi(postAnnotationsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const traceId = String(body.trace_id || "").trim();
-  const annotationType = String(body.annotation_type || "note");
-  const message = String(body.message || "").trim();
-  const severity = String(body.severity || "info");
-  const spanId = String(body.span_id || "");
-  const nodeId = String(body.node_id || "");
-  const turn = Number(body.turn || 0);
-  const metadata = body.metadata || {};
+  const body = c.req.valid("json");
+  const traceId = body.trace_id.trim();
+  const annotationType = body.annotation_type;
+  const message = body.message.trim();
+  const severity = body.severity;
+  const spanId = body.span_id;
+  const nodeId = body.node_id;
+  const turn = body.turn;
+  const metadata = body.metadata;
 
   if (!traceId) return c.json({ error: "trace_id is required" }, 400);
   if (!message) return c.json({ error: "message is required" }, 400);
@@ -569,17 +727,49 @@ observabilityRoutes.post("/annotations", requireScope("observability:write"), as
   return c.json({ annotation_id: annotationId, created: true });
 });
 
-observabilityRoutes.post("/feedback", requireScope("observability:write"), async (c) => {
+// ── POST /feedback ──────────────────────────────────────────────
+
+const postFeedbackRoute = createRoute({
+  method: "post",
+  path: "/feedback",
+  tags: ["Observability"],
+  summary: "Submit span feedback",
+  middleware: [requireScope("observability:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            span_id: z.string().min(1),
+            rating: z.number().default(0),
+            score: z.number().default(0),
+            comment: z.string().default(""),
+            labels: z.array(z.string()).default([]),
+            session_id: z.string().default(""),
+            turn: z.number().default(0),
+            source: z.string().default("human"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Feedback submitted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+observabilityRoutes.openapi(postFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const spanId = String(body.span_id || "").trim();
-  const rating = Number(body.rating || 0);
-  const score = Number(body.score || 0);
-  const comment = String(body.comment || "");
-  const labels = Array.isArray(body.labels) ? body.labels : [];
-  const sessionId = String(body.session_id || "");
-  const turn = Number(body.turn || 0);
-  const source = String(body.source || "human");
+  const body = c.req.valid("json");
+  const spanId = body.span_id.trim();
+  const rating = body.rating;
+  const score = body.score;
+  const comment = body.comment;
+  const labels = body.labels;
+  const sessionId = body.session_id;
+  const turn = body.turn;
+  const source = body.source;
 
   if (!spanId) return c.json({ error: "span_id is required" }, 400);
 
@@ -595,10 +785,44 @@ observabilityRoutes.post("/feedback", requireScope("observability:write"), async
   return c.json({ feedback_id: feedbackId, created: true });
 });
 
-observabilityRoutes.post("/lineage", requireScope("observability:write"), async (c) => {
+// ── POST /lineage ───────────────────────────────────────────────
+
+const postLineageRoute = createRoute({
+  method: "post",
+  path: "/lineage",
+  tags: ["Observability"],
+  summary: "Upsert trace lineage",
+  middleware: [requireScope("observability:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            trace_id: z.string().min(1),
+            session_id: z.string().default(""),
+            agent_version: z.string().default(""),
+            model: z.string().default(""),
+            prompt_hash: z.string().default(""),
+            eval_run_id: z.number().default(0),
+            experiment_id: z.string().default(""),
+            dataset_id: z.string().default(""),
+            commit_sha: z.string().default(""),
+            metadata: z.record(z.unknown()).default({}),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Lineage updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+observabilityRoutes.openapi(postLineageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const traceId = String(body.trace_id || "").trim();
+  const body = c.req.valid("json");
+  const traceId = body.trace_id.trim();
   if (!traceId) return c.json({ error: "trace_id is required" }, 400);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -606,7 +830,7 @@ observabilityRoutes.post("/lineage", requireScope("observability:write"), async 
 
   await sql`
     INSERT INTO trace_lineage (trace_id, org_id, session_id, agent_version, model, prompt_hash, eval_run_id, experiment_id, dataset_id, commit_sha, metadata_json, created_at)
-    VALUES (${traceId}, ${user.org_id}, ${body.session_id || ""}, ${body.agent_version || ""}, ${body.model || ""}, ${body.prompt_hash || ""}, ${Number(body.eval_run_id || 0)}, ${body.experiment_id || ""}, ${body.dataset_id || ""}, ${body.commit_sha || ""}, ${JSON.stringify(body.metadata || {})}, ${now})
+    VALUES (${traceId}, ${user.org_id}, ${body.session_id}, ${body.agent_version}, ${body.model}, ${body.prompt_hash}, ${body.eval_run_id}, ${body.experiment_id}, ${body.dataset_id}, ${body.commit_sha}, ${JSON.stringify(body.metadata)}, ${now})
     ON CONFLICT (trace_id) DO UPDATE SET
       session_id = EXCLUDED.session_id,
       agent_version = EXCLUDED.agent_version,
@@ -618,8 +842,25 @@ observabilityRoutes.post("/lineage", requireScope("observability:write"), async 
   return c.json({ trace_id: traceId, updated: true });
 });
 
-observabilityRoutes.get("/agents/:agent_name/meta-control-plane", requireScope("observability:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+// ── GET /agents/:agent_name/meta-control-plane ──────────────────
+
+const metaControlPlaneRoute = createRoute({
+  method: "get",
+  path: "/agents/{agent_name}/meta-control-plane",
+  tags: ["Observability"],
+  summary: "Get agent meta-control-plane",
+  middleware: [requireScope("observability:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Meta-control-plane", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(metaControlPlaneRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -685,7 +926,6 @@ observabilityRoutes.get("/agents/:agent_name/meta-control-plane", requireScope("
 });
 
 // ── Proposal generation from telemetry signals ──────────────────────
-// Ported from Python _meta_proposals_from_report()
 
 interface MetaProposal {
   id: string;
@@ -765,7 +1005,6 @@ function generateProposalsFromSignals(
     });
   }
 
-  // Default: if all signals are healthy, suggest optimization
   if (proposals.length === 0) {
     proposals.push({
       id: id(), agent_name: agentName,
@@ -779,7 +1018,6 @@ function generateProposalsFromSignals(
     });
   }
 
-  // Sort by priority descending, cap at maxProposals
   proposals.sort((a, b) => b.priority - a.priority);
   return proposals.slice(0, maxProposals);
 }
@@ -802,8 +1040,30 @@ async function agentIsOwned(sql: any, agentName: string, orgId: string): Promise
   return false;
 }
 
-observabilityRoutes.get("/agents/:agent_name/meta-proposals", requireScope("observability:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+// ── GET /agents/:agent_name/meta-proposals ──────────────────────
+
+const getMetaProposalsRoute = createRoute({
+  method: "get",
+  path: "/agents/{agent_name}/meta-proposals",
+  tags: ["Observability"],
+  summary: "List meta-proposals for agent",
+  middleware: [requireScope("observability:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    query: z.object({
+      status: z.string().default(""),
+      limit: z.coerce.number().int().min(1).max(500).default(100),
+    }),
+  },
+  responses: {
+    200: { description: "Meta-proposals", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(getMetaProposalsRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -811,8 +1071,7 @@ observabilityRoutes.get("/agents/:agent_name/meta-proposals", requireScope("obse
     return c.json({ error: "Agent not found" }, 404);
   }
 
-  const status = c.req.query("status") || "";
-  const limit = Math.max(1, Math.min(500, Number(c.req.query("limit")) || 100));
+  const { status, limit } = c.req.valid("query");
 
   const rows = status
     ? await sql`SELECT * FROM meta_proposals WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND status = ${status} ORDER BY created_at DESC LIMIT ${limit}`.catch(() => [])
@@ -821,9 +1080,36 @@ observabilityRoutes.get("/agents/:agent_name/meta-proposals", requireScope("obse
   return c.json({ agent_name: agentName, proposals: rows });
 });
 
-// Generate proposals from telemetry signals (matches Python POST /meta-proposals/generate)
-observabilityRoutes.post("/agents/:agent_name/meta-proposals/generate", requireScope("observability:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+// ── POST /agents/:agent_name/meta-proposals/generate ────────────
+
+const generateMetaProposalsRoute = createRoute({
+  method: "post",
+  path: "/agents/{agent_name}/meta-proposals/generate",
+  tags: ["Observability"],
+  summary: "Generate meta-proposals from telemetry",
+  middleware: [requireScope("observability:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            persist: z.boolean().default(true),
+            max_proposals: z.number().int().min(1).max(20).default(8),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Generated proposals", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(generateMetaProposalsRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -831,9 +1117,9 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/generate", requireS
     return c.json({ error: "Agent not found" }, 404);
   }
 
-  const body = await c.req.json().catch(() => ({}));
-  const persist = body.persist !== false;
-  const maxProposals = Math.max(1, Math.min(20, Number(body.max_proposals) || 8));
+  const body = c.req.valid("json");
+  const persist = body.persist;
+  const maxProposals = body.max_proposals;
 
   // Gather signals
   const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
@@ -887,9 +1173,26 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/generate", requireS
   });
 });
 
-// Meta-report endpoint (matches Python GET /agents/{agent_name}/meta-report)
-observabilityRoutes.get("/agents/:agent_name/meta-report", requireScope("observability:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+// ── GET /agents/:agent_name/meta-report ─────────────────────────
+
+const metaReportRoute = createRoute({
+  method: "get",
+  path: "/agents/{agent_name}/meta-report",
+  tags: ["Observability"],
+  summary: "Get agent meta-report",
+  middleware: [requireScope("observability:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Meta-report", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(metaReportRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -944,9 +1247,36 @@ observabilityRoutes.get("/agents/:agent_name/meta-report", requireScope("observa
   });
 });
 
-observabilityRoutes.post("/agents/:agent_name/meta-proposals/:proposal_id/review", requireScope("observability:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
-  const proposalId = c.req.param("proposal_id");
+// ── POST /agents/:agent_name/meta-proposals/:proposal_id/review ──
+
+const reviewProposalRoute = createRoute({
+  method: "post",
+  path: "/agents/{agent_name}/meta-proposals/{proposal_id}/review",
+  tags: ["Observability"],
+  summary: "Review a meta-proposal",
+  middleware: [requireScope("observability:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), proposal_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            approved: z.boolean().default(true),
+            note: z.string().default(""),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Review result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(reviewProposalRoute, async (c): Promise<any> => {
+  const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -954,9 +1284,9 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/:proposal_id/review
     return c.json({ error: "Agent not found" }, 404);
   }
 
-  const body = await c.req.json().catch(() => ({}));
-  const approved = body.approved !== false;
-  const note = String(body.note || "");
+  const body = c.req.valid("json");
+  const approved = body.approved;
+  const note = body.note;
   const status = approved ? "approved" : "rejected";
 
   const rows = await sql`
@@ -972,9 +1302,31 @@ observabilityRoutes.post("/agents/:agent_name/meta-proposals/:proposal_id/review
 
 // ── Trace Replay (Time Travel) ──────────────────────────────────────
 
-observabilityRoutes.get("/trace/:trace_id/replay", requireScope("observability:read"), async (c) => {
+const traceReplayRoute = createRoute({
+  method: "get",
+  path: "/trace/{trace_id}/replay",
+  tags: ["Observability"],
+  summary: "Replay trace state at a cursor",
+  middleware: [requireScope("observability:read")],
+  request: {
+    params: z.object({ trace_id: z.string() }),
+    query: z.object({
+      cursor_index: z.string().optional(),
+      event_id: z.string().optional(),
+      up_to_id: z.string().optional(),
+      include_events: z.string().default("false"),
+    }),
+  },
+  responses: {
+    200: { description: "Replay state", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(traceReplayRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const traceId = c.req.param("trace_id");
+  const { trace_id: traceId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify org ownership
@@ -983,10 +1335,8 @@ observabilityRoutes.get("/trace/:trace_id/replay", requireScope("observability:r
   `;
   if (Number(check[0]?.cnt) === 0) return c.json({ error: "Trace not found" }, 404);
 
-  const cursorIndex = c.req.query("cursor_index");
-  const eventId = c.req.query("event_id");
-  const upToId = c.req.query("up_to_id");
-  const includeEvents = c.req.query("include_events") === "true";
+  const { cursor_index: cursorIndex, event_id: eventId, up_to_id: upToId, include_events: includeEventsRaw } = c.req.valid("query");
+  const includeEvents = includeEventsRaw === "true";
 
   // Load all events for this trace ordered by id
   const events = await sql`
@@ -1077,9 +1427,27 @@ observabilityRoutes.get("/trace/:trace_id/replay", requireScope("observability:r
   });
 });
 
-observabilityRoutes.get("/trace/:trace_id/run-tree", requireScope("observability:read"), async (c) => {
+// ── GET /trace/:trace_id/run-tree ───────────────────────────────
+
+const runTreeRoute = createRoute({
+  method: "get",
+  path: "/trace/{trace_id}/run-tree",
+  tags: ["Observability"],
+  summary: "Get trace run tree",
+  middleware: [requireScope("observability:read")],
+  request: {
+    params: z.object({ trace_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Run tree", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(runTreeRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const traceId = c.req.param("trace_id");
+  const { trace_id: traceId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify org ownership
@@ -1122,28 +1490,58 @@ observabilityRoutes.get("/trace/:trace_id/run-tree", requireScope("observability
   return c.json({ trace_id: traceId, tree });
 });
 
-// ── End Trace Replay ────────────────────────────────────────────────
+// ── POST /agents/:agent_name/autonomous-maintenance-run ─────────
 
-observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requireScope("observability:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const autonomousMaintenanceRoute = createRoute({
+  method: "post",
+  path: "/agents/{agent_name}/autonomous-maintenance-run",
+  tags: ["Observability"],
+  summary: "Run autonomous maintenance for agent",
+  middleware: [requireScope("observability:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            dry_run: z.boolean().default(false),
+            persist_proposals: z.boolean().default(false),
+            max_proposals: z.number().int().min(1).max(20).default(8),
+            min_eval_pass_rate: z.number().min(0).max(1).default(0.85),
+            min_eval_trials: z.number().int().min(1).default(3),
+            target_channel: z.string().default("staging"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Maintenance result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  // Strict org ownership — no filesystem fallback
+  // Strict org ownership
   if (!(await agentIsOwned(sql, agentName, user.org_id))) {
     return c.json({ error: "Agent not found" }, 404);
   }
 
-  const body = await c.req.json().catch(() => ({}));
-  const dryRun = !!body.dry_run;
-  const persistProposals = !!body.persist_proposals;
-  const maxProposals = Math.max(1, Math.min(20, Number(body.max_proposals) || 8));
-  const minEvalPassRate = Number(body.min_eval_pass_rate) || 0.85;
-  const minEvalTrials = Number(body.min_eval_trials) || 3;
-  const targetChannel = String(body.target_channel || "staging");
+  const body = c.req.valid("json");
+  const dryRun = body.dry_run;
+  const persistProposals = body.persist_proposals;
+  const maxProposals = body.max_proposals;
+  const minEvalPassRate = body.min_eval_pass_rate;
+  const minEvalTrials = body.min_eval_trials;
+  const targetChannel = body.target_channel;
 
-  // ── 1. Gather telemetry signals ─────────────────────────────────
-  const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString(); // last 7 days
+  // 1. Gather telemetry signals
+  const since = new Date(Date.now() - 7 * 86400 * 1000).toISOString();
   let signals: Record<string, unknown> = {};
   try {
     const [stats] = await sql`
@@ -1175,10 +1573,10 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
     };
   } catch { /* best-effort */ }
 
-  // ── 2. Generate proposals from signals ──────────────────────────
+  // 2. Generate proposals from signals
   const proposals = generateProposalsFromSignals(agentName, signals, maxProposals);
 
-  // ── 3. Persist proposals (unless dry_run) ───────────────────────
+  // 3. Persist proposals (unless dry_run)
   const actuallyPersisted = persistProposals && !dryRun;
   if (actuallyPersisted) {
     for (const proposal of proposals) {
@@ -1197,7 +1595,7 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
     }
   }
 
-  // ── 4. Graph checks ─────────────────────────────────────────────
+  // 4. Graph checks
   let graphAvailable = false;
   let graphLint: Record<string, unknown> | null = null;
   let graphAutofix: Record<string, unknown> | null = null;
@@ -1232,7 +1630,7 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
     }
   } catch { /* best-effort */ }
 
-  // ── 5. Eval gate ────────────────────────────────────────────────
+  // 5. Eval gate
   const { latestEvalGate, rolloutRecommendation } = await import("../logic/gate-pack");
   const evalGate = await latestEvalGate(sql, agentName, {
     minEvalPassRate,
@@ -1240,7 +1638,7 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
     orgId: user.org_id,
   });
 
-  // ── 6. Rollout recommendation ───────────────────────────────────
+  // 6. Rollout recommendation
   const lintValid = Boolean((graphLint as any)?.valid);
   const rollout = rolloutRecommendation({
     agentName,
@@ -1254,7 +1652,7 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
     blockingReasons.push(rollout.reason || "Hold decision");
   }
 
-  // ── 7. Build eval plan from signals + proposals ─────────────────
+  // 7. Build eval plan from signals + proposals
   const focusAreas: string[] = [];
   if (Number(signals.node_error_rate ?? 0) > 0.03) focusAreas.push("node_reliability");
   if (Number(signals.checkpoint_pending ?? 0) > 0) focusAreas.push("approval_resume_flow");

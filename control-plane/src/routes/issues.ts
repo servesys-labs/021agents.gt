@@ -2,18 +2,17 @@
  * Issues routes -- CRUD, detection, classification, remediation.
  * Ported from agentos/api/routers/issues.py.
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { classifyIssue } from "../logic/issue-classifier";
 import { suggestFix, autoRemediate } from "../logic/issue-remediation";
 import { detectFromSession } from "../logic/issue-detector";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const issueRoutes = new Hono<R>();
+export const issueRoutes = createOpenAPIRouter();
 
 // ── Zod schemas ──────────────────────────────────────────────────
 
@@ -46,9 +45,26 @@ function randomId(): string {
 
 // ── GET /summary ─────────────────────────────────────────────────
 
-issueRoutes.get("/summary", requireScope("issues:read"), async (c) => {
+const issueSummaryRoute = createRoute({
+  method: "get",
+  path: "/summary",
+  tags: ["Issues"],
+  summary: "Get issues summary",
+  middleware: [requireScope("issues:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+    }),
+  },
+  responses: {
+    200: { description: "Issue summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+issueRoutes.openapi(issueSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
+  const { agent_name: agentName } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -104,13 +120,30 @@ issueRoutes.get("/summary", requireScope("issues:read"), async (c) => {
 
 // ── GET / ────────────────────────────────────────────────────────
 
-issueRoutes.get("/", requireScope("issues:read"), async (c) => {
+const listIssuesRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Issues"],
+  summary: "List issues",
+  middleware: [requireScope("issues:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      status: z.string().default(""),
+      category: z.string().default(""),
+      severity: z.string().default(""),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }),
+  },
+  responses: {
+    200: { description: "Issue list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+issueRoutes.openapi(listIssuesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const status = c.req.query("status") ?? "";
-  const category = c.req.query("category") ?? "";
-  const severity = c.req.query("severity") ?? "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
+  const { agent_name: agentName, status, category, severity, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Build query based on filters present
@@ -183,15 +216,25 @@ issueRoutes.get("/", requireScope("issues:read"), async (c) => {
 
 // ── POST / ───────────────────────────────────────────────────────
 
-issueRoutes.post("/", requireScope("issues:write"), async (c) => {
-  const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = createIssueSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
-  }
+const createIssueRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Issues"],
+  summary: "Create an issue",
+  middleware: [requireScope("issues:write")],
+  request: {
+    body: { content: { "application/json": { schema: createIssueSchema } } },
+  },
+  responses: {
+    200: { description: "Issue created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
 
-  const req = parsed.data;
+issueRoutes.openapi(createIssueRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const req = c.req.valid("json");
+
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const issueId = randomId();
 
@@ -235,9 +278,25 @@ issueRoutes.post("/", requireScope("issues:write"), async (c) => {
 
 // ── POST /detect/:session_id ─────────────────────────────────────
 
-issueRoutes.post("/detect/:session_id", requireScope("issues:write"), async (c) => {
+const detectIssuesRoute = createRoute({
+  method: "post",
+  path: "/detect/{session_id}",
+  tags: ["Issues"],
+  summary: "Detect issues from a session",
+  middleware: [requireScope("issues:write")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Detected issues", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+issueRoutes.openapi(detectIssuesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load session
@@ -299,9 +358,25 @@ issueRoutes.post("/detect/:session_id", requireScope("issues:write"), async (c) 
 
 // ── GET /:issue_id ───────────────────────────────────────────────
 
-issueRoutes.get("/:issue_id", requireScope("issues:read"), async (c) => {
+const getIssueRoute = createRoute({
+  method: "get",
+  path: "/{issue_id}",
+  tags: ["Issues"],
+  summary: "Get issue detail",
+  middleware: [requireScope("issues:read")],
+  request: {
+    params: z.object({ issue_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Issue detail", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+issueRoutes.openapi(getIssueRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const issueId = c.req.param("issue_id");
+  const { issue_id: issueId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1
@@ -314,14 +389,27 @@ issueRoutes.get("/:issue_id", requireScope("issues:read"), async (c) => {
 
 // ── PUT /:issue_id ───────────────────────────────────────────────
 
-issueRoutes.put("/:issue_id", requireScope("issues:write"), async (c) => {
+const updateIssueRoute = createRoute({
+  method: "put",
+  path: "/{issue_id}",
+  tags: ["Issues"],
+  summary: "Update an issue",
+  middleware: [requireScope("issues:write")],
+  request: {
+    params: z.object({ issue_id: z.string() }),
+    body: { content: { "application/json": { schema: updateIssueSchema } } },
+  },
+  responses: {
+    200: { description: "Updated issue", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+issueRoutes.openapi(updateIssueRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const issueId = c.req.param("issue_id");
-  const body = await c.req.json();
-  const parsed = updateIssueSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
-  }
+  const { issue_id: issueId } = c.req.valid("param");
+  const req = c.req.valid("json");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;
@@ -329,7 +417,6 @@ issueRoutes.put("/:issue_id", requireScope("issues:write"), async (c) => {
     return c.json({ error: "Issue not found" }, 404);
   }
 
-  const req = parsed.data;
   const now = new Date().toISOString();
 
   // Build update -- apply each field if provided
@@ -363,9 +450,25 @@ issueRoutes.put("/:issue_id", requireScope("issues:write"), async (c) => {
 
 // ── POST /:issue_id/resolve ──────────────────────────────────────
 
-issueRoutes.post("/:issue_id/resolve", requireScope("issues:write"), async (c) => {
+const resolveIssueRoute = createRoute({
+  method: "post",
+  path: "/{issue_id}/resolve",
+  tags: ["Issues"],
+  summary: "Resolve an issue",
+  middleware: [requireScope("issues:write")],
+  request: {
+    params: z.object({ issue_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Resolved", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+issueRoutes.openapi(resolveIssueRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const issueId = c.req.param("issue_id");
+  const { issue_id: issueId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;
@@ -387,9 +490,25 @@ issueRoutes.post("/:issue_id/resolve", requireScope("issues:write"), async (c) =
 
 // ── POST /:issue_id/triage ───────────────────────────────────────
 
-issueRoutes.post("/:issue_id/triage", requireScope("issues:write"), async (c) => {
+const triageIssueRoute = createRoute({
+  method: "post",
+  path: "/{issue_id}/triage",
+  tags: ["Issues"],
+  summary: "Triage an issue",
+  middleware: [requireScope("issues:write")],
+  request: {
+    params: z.object({ issue_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Triaged", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+issueRoutes.openapi(triageIssueRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const issueId = c.req.param("issue_id");
+  const { issue_id: issueId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;
@@ -428,9 +547,26 @@ issueRoutes.post("/:issue_id/triage", requireScope("issues:write"), async (c) =>
 
 // ── POST /:issue_id/auto-fix ─────────────────────────────────────
 
-issueRoutes.post("/:issue_id/auto-fix", requireScope("issues:write"), async (c) => {
+const autoFixIssueRoute = createRoute({
+  method: "post",
+  path: "/{issue_id}/auto-fix",
+  tags: ["Issues"],
+  summary: "Auto-fix an issue",
+  middleware: [requireScope("issues:write")],
+  request: {
+    params: z.object({ issue_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Auto-fix result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+issueRoutes.openapi(autoFixIssueRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const issueId = c.req.param("issue_id");
+  const { issue_id: issueId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existing = await sql`SELECT * FROM issues WHERE issue_id = ${issueId} AND org_id = ${user.org_id} LIMIT 1`;

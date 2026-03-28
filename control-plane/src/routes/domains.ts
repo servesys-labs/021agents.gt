@@ -2,20 +2,44 @@
  * Domains router — custom domain management per org.
  * Supports auto-provisioned subdomains ({slug}.agentos.dev) and custom CNAME domains.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const domainRoutes = new Hono<R>();
+export const domainRoutes = createOpenAPIRouter();
 
 const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
 
-// ── GET / — list all custom domains for the org ──────────────────────────────
+const DomainSummary = z.object({
+  id: z.string(),
+  hostname: z.string(),
+  type: z.string(),
+  status: z.string(),
+  ssl_status: z.string(),
+  verified_at: z.string().nullable().optional(),
+  created_at: z.string(),
+  updated_at: z.string().optional(),
+});
 
-domainRoutes.get("/", requireScope("domains:read"), async (c) => {
+// ── GET / — list all custom domains for the org ─────────────────────────
+
+const listDomainsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Domains"],
+  summary: "List all custom domains for the org",
+  middleware: [requireScope("domains:read")],
+  responses: {
+    200: {
+      description: "Domain list",
+      content: { "application/json": { schema: z.object({ domains: z.array(DomainSummary) }) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+domainRoutes.openapi(listDomainsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -29,11 +53,48 @@ domainRoutes.get("/", requireScope("domains:read"), async (c) => {
   return c.json({ domains: rows });
 });
 
-// ── POST / — add a custom domain ────────────────────────────────────────────
+// ── POST / — add a custom domain ────────────────────────────────────────
 
-domainRoutes.post("/", requireScope("domains:write"), async (c) => {
+const addDomainRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Domains"],
+  summary: "Add a custom domain or auto-provision a subdomain",
+  middleware: [requireScope("domains:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            type: z.enum(["subdomain", "custom"]).default("subdomain"),
+            hostname: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Domain created",
+      content: {
+        "application/json": {
+          schema: z.object({
+            id: z.string(),
+            hostname: z.string(),
+            type: z.string(),
+            status: z.string(),
+            ssl_status: z.string(),
+            created_at: z.string(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 404, 409, 500),
+  },
+});
+domainRoutes.openapi(addDomainRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const type = String(body.type || "subdomain");
 
   if (!["subdomain", "custom"].includes(type)) {
@@ -107,11 +168,28 @@ domainRoutes.post("/", requireScope("domains:write"), async (c) => {
   }, 201);
 });
 
-// ── GET /:domain_id — get domain details ─────────────────────────────────────
+// ── GET /:domain_id — get domain details ────────────────────────────────
 
-domainRoutes.get("/:domain_id", requireScope("domains:read"), async (c) => {
+const getDomainRoute = createRoute({
+  method: "get",
+  path: "/{domain_id}",
+  tags: ["Domains"],
+  summary: "Get domain details",
+  middleware: [requireScope("domains:read")],
+  request: {
+    params: z.object({ domain_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Domain details",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+domainRoutes.openapi(getDomainRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const domainId = c.req.param("domain_id");
+  const { domain_id: domainId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -129,11 +207,28 @@ domainRoutes.get("/:domain_id", requireScope("domains:read"), async (c) => {
   return c.json(rows[0]);
 });
 
-// ── DELETE /:domain_id — remove a custom domain ─────────────────────────────
+// ── DELETE /:domain_id — remove a custom domain ─────────────────────────
 
-domainRoutes.delete("/:domain_id", requireScope("domains:write"), async (c) => {
+const deleteDomainRoute = createRoute({
+  method: "delete",
+  path: "/{domain_id}",
+  tags: ["Domains"],
+  summary: "Remove a custom domain",
+  middleware: [requireScope("domains:write")],
+  request: {
+    params: z.object({ domain_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Domain deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.string() }) } },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+domainRoutes.openapi(deleteDomainRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const domainId = c.req.param("domain_id");
+  const { domain_id: domainId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -165,11 +260,40 @@ domainRoutes.delete("/:domain_id", requireScope("domains:write"), async (c) => {
   return c.json({ deleted: domainId });
 });
 
-// ── POST /:domain_id/verify — check DNS/SSL status ─────────────────────────
+// ── POST /:domain_id/verify — check DNS/SSL status ─────────────────────
 
-domainRoutes.post("/:domain_id/verify", requireScope("domains:write"), async (c) => {
+const verifyDomainRoute = createRoute({
+  method: "post",
+  path: "/{domain_id}/verify",
+  tags: ["Domains"],
+  summary: "Verify domain DNS and SSL status",
+  middleware: [requireScope("domains:write")],
+  request: {
+    params: z.object({ domain_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Verification result",
+      content: {
+        "application/json": {
+          schema: z.object({
+            id: z.string(),
+            hostname: z.string(),
+            status: z.string(),
+            ssl_status: z.string(),
+            dns_valid: z.boolean().optional(),
+            verified_at: z.string().nullable().optional(),
+            cname_target: z.string().optional(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+domainRoutes.openapi(verifyDomainRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const domainId = c.req.param("domain_id");
+  const { domain_id: domainId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

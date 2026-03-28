@@ -2,20 +2,29 @@
  * Session management routes — active sessions, revocation, timeout settings.
  * Mounted at /api/v1/session-management.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { hasRole } from "../auth/types";
 import { getDb } from "../db/client";
 import { logSecurityEvent } from "../auth/security-events";
 import { invalidateMfaCache } from "../middleware/mfa-enforcement";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const sessionMgmtRoutes = new Hono<R>();
+export const sessionMgmtRoutes = createOpenAPIRouter();
 
 // ── GET /active — List active sessions for the current user ──────────
-
-sessionMgmtRoutes.get("/active", async (c) => {
+const listActiveSessionsRoute = createRoute({
+  method: "get",
+  path: "/active",
+  tags: ["Session Management"],
+  summary: "List active sessions for the current user",
+  responses: {
+    200: { description: "Active sessions", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+sessionMgmtRoutes.openapi(listActiveSessionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!user.user_id) return c.json({ error: "Unauthorized" }, 401);
 
@@ -37,13 +46,25 @@ sessionMgmtRoutes.get("/active", async (c) => {
   return c.json({ sessions: rows });
 });
 
-// ── DELETE /:session_id — Revoke a specific session ──────────────────
-
-sessionMgmtRoutes.delete("/:session_id", async (c) => {
+// ── DELETE /{session_id} — Revoke a specific session ──────────────────
+const revokeSessionRoute = createRoute({
+  method: "delete",
+  path: "/{session_id}",
+  tags: ["Session Management"],
+  summary: "Revoke a specific session",
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Session revoked", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+sessionMgmtRoutes.openapi(revokeSessionRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!user.user_id) return c.json({ error: "Unauthorized" }, 401);
 
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDb(c.env.HYPERDRIVE);
 
   const result = await sql`
@@ -68,8 +89,29 @@ sessionMgmtRoutes.delete("/:session_id", async (c) => {
 });
 
 // ── POST /revoke-all — Revoke all sessions except current ────────────
-
-sessionMgmtRoutes.post("/revoke-all", async (c) => {
+const revokeAllSessionsRoute = createRoute({
+  method: "post",
+  path: "/revoke-all",
+  tags: ["Session Management"],
+  summary: "Revoke all sessions except current",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            keep_session_id: z.string().optional(),
+          }),
+        },
+      },
+      required: false,
+    },
+  },
+  responses: {
+    200: { description: "Sessions revoked", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+sessionMgmtRoutes.openapi(revokeAllSessionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!user.user_id) return c.json({ error: "Unauthorized" }, 401);
 
@@ -78,7 +120,7 @@ sessionMgmtRoutes.post("/revoke-all", async (c) => {
   // Alternatively, the client can pass { keep_session_id } in the body.
   let keepSessionId: string | undefined;
   try {
-    const body = await c.req.json<{ keep_session_id?: string }>();
+    const body = c.req.valid("json");
     keepSessionId = body.keep_session_id;
   } catch {
     // No body — revoke all (including current)
@@ -112,8 +154,17 @@ sessionMgmtRoutes.post("/revoke-all", async (c) => {
 });
 
 // ── GET /settings — Get session timeout settings for the org ─────────
-
-sessionMgmtRoutes.get("/settings", async (c) => {
+const getSessionSettingsRoute = createRoute({
+  method: "get",
+  path: "/settings",
+  tags: ["Session Management"],
+  summary: "Get session timeout settings for the org",
+  responses: {
+    200: { description: "Session settings", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
+});
+sessionMgmtRoutes.openapi(getSessionSettingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!user.org_id) return c.json({ error: "No org context" }, 400);
 
@@ -145,8 +196,30 @@ sessionMgmtRoutes.get("/settings", async (c) => {
 });
 
 // ── PUT /settings — Update session timeout settings (admin only) ─────
-
-sessionMgmtRoutes.put("/settings", async (c) => {
+const updateSessionSettingsRoute = createRoute({
+  method: "put",
+  path: "/settings",
+  tags: ["Session Management"],
+  summary: "Update session timeout settings (admin only)",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            idle_timeout_minutes: z.number().optional(),
+            max_session_hours: z.number().optional(),
+            mfa_enforcement: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Settings updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403),
+  },
+});
+sessionMgmtRoutes.openapi(updateSessionSettingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!user.org_id) return c.json({ error: "No org context" }, 400);
 
@@ -154,11 +227,7 @@ sessionMgmtRoutes.put("/settings", async (c) => {
     return c.json({ error: "Admin role required to update session settings" }, 403);
   }
 
-  const body = await c.req.json<{
-    idle_timeout_minutes?: number;
-    max_session_hours?: number;
-    mfa_enforcement?: string;
-  }>();
+  const body = c.req.valid("json");
 
   // Validate inputs
   const idleTimeout = body.idle_timeout_minutes;

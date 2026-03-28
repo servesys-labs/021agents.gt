@@ -4,15 +4,36 @@
  *
  * In edge architecture, config is stored in Supabase, not filesystem.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const configRoutes = new Hono<R>();
+export const configRoutes = createOpenAPIRouter();
 
-configRoutes.get("/yaml", async (c) => {
+// ── GET /yaml — read project config ─────────────────────────────────────
+
+const getConfigRoute = createRoute({
+  method: "get",
+  path: "/yaml",
+  tags: ["Config"],
+  summary: "Read project configuration",
+  responses: {
+    200: {
+      description: "Project config",
+      content: {
+        "application/json": {
+          schema: z.object({
+            config: z.record(z.unknown()),
+            exists: z.boolean(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+configRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -28,9 +49,35 @@ configRoutes.get("/yaml", async (c) => {
   }
 });
 
-configRoutes.put("/yaml", async (c) => {
+// ── PUT /yaml — update project config ───────────────────────────────────
+
+const updateConfigRoute = createRoute({
+  method: "put",
+  path: "/yaml",
+  tags: ["Config"],
+  summary: "Update project configuration (merge with existing)",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            updates: z.record(z.unknown()).optional(),
+          }).passthrough(),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Config updated",
+      content: { "application/json": { schema: z.object({ updated: z.boolean() }) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+configRoutes.openapi(updateConfigRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const updates = body.updates || body;
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -58,7 +105,22 @@ configRoutes.put("/yaml", async (c) => {
   return c.json({ updated: true });
 });
 
-configRoutes.get("/a2a/remotes", async (c) => {
+// ── GET /a2a/remotes — list A2A remote agents ───────────────────────────
+
+const listA2aRemotesRoute = createRoute({
+  method: "get",
+  path: "/a2a/remotes",
+  tags: ["Config"],
+  summary: "List configured A2A remote agents",
+  responses: {
+    200: {
+      description: "Remote agent list",
+      content: { "application/json": { schema: z.object({ remotes: z.array(z.record(z.unknown())) }) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+configRoutes.openapi(listA2aRemotesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -74,8 +136,45 @@ configRoutes.get("/a2a/remotes", async (c) => {
   }
 });
 
-configRoutes.post("/a2a/test", async (c) => {
-  const body = await c.req.json();
+// ── POST /a2a/test — test connectivity to a remote A2A agent ────────────
+
+const testA2aRoute = createRoute({
+  method: "post",
+  path: "/a2a/test",
+  tags: ["Config"],
+  summary: "Test connectivity to a remote A2A agent",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            url: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Connectivity test result",
+      content: {
+        "application/json": {
+          schema: z.object({
+            reachable: z.boolean(),
+            agent: z.string().optional(),
+            description: z.string().optional(),
+            capabilities: z.record(z.unknown()).optional(),
+            skills: z.number().optional(),
+            error: z.string().optional(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+configRoutes.openapi(testA2aRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const url = String(body.url || "").trim();
   if (!url) return c.json({ error: "url is required" }, 400);
 

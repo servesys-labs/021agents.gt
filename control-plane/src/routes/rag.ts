@@ -2,14 +2,12 @@
  * RAG router — document ingestion via R2, chunking, vectorize embedding.
  * Ported from agentos/api/routers/rag.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
-import { getDbForOrg } from "../db/client";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const ragRoutes = new Hono<R>();
+export const ragRoutes = createOpenAPIRouter();
 
 /**
  * Simple text chunker — splits by paragraphs then by size.
@@ -37,8 +35,35 @@ function chunkText(text: string, chunkSize: number): string[] {
   return chunks.filter(Boolean);
 }
 
-ragRoutes.post("/:agent_name/ingest", requireScope("rag:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+// ── POST /:agent_name/ingest — ingest documents ──────────────────────
+
+const ingestRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/ingest",
+  tags: ["RAG"],
+  summary: "Ingest documents for RAG (multipart/form-data)",
+  middleware: [requireScope("rag:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Ingestion result",
+      content: {
+        "application/json": {
+          schema: z.object({
+            documents: z.number(),
+            chunks: z.number(),
+            sources: z.array(z.string()),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400),
+  },
+});
+ragRoutes.openapi(ingestRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const formData = await c.req.formData();
   const chunkSize = Number(formData.get("chunk_size")) || 512;
@@ -137,8 +162,26 @@ ragRoutes.post("/:agent_name/ingest", requireScope("rag:write"), async (c) => {
   });
 });
 
-ragRoutes.get("/:agent_name/status", requireScope("rag:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+// ── GET /:agent_name/status — RAG index status ──────────────────────
+
+const statusRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/status",
+  tags: ["RAG"],
+  summary: "Get RAG index status for an agent",
+  middleware: [requireScope("rag:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "RAG status",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+ragRoutes.openapi(statusRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const indexObj = await c.env.STORAGE.get(`rag/${agentName}/index.json`);
   if (!indexObj) {
     return c.json({ indexed: false, documents: 0, chunks: 0 });
@@ -159,8 +202,26 @@ ragRoutes.get("/:agent_name/status", requireScope("rag:read"), async (c) => {
   }
 });
 
-ragRoutes.get("/:agent_name/documents", requireScope("rag:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+// ── GET /:agent_name/documents — list indexed documents ─────────────
+
+const listDocumentsRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/documents",
+  tags: ["RAG"],
+  summary: "List indexed documents for an agent",
+  middleware: [requireScope("rag:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Document list",
+      content: { "application/json": { schema: z.object({ documents: z.array(z.record(z.unknown())) }) } },
+    },
+  },
+});
+ragRoutes.openapi(listDocumentsRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const indexObj = await c.env.STORAGE.get(`rag/${agentName}/index.json`);
   if (!indexObj) return c.json({ documents: [] });
 

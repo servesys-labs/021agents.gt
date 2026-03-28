@@ -2,15 +2,15 @@
  * Retention router — data lifecycle, redaction policies.
  * Ported from agentos/api/routers/retention.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const retentionRoutes = new Hono<R>();
+export const retentionRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(6);
@@ -22,7 +22,19 @@ const VALID_RESOURCE_TYPES = new Set([
   "sessions", "turns", "episodes", "billing_records", "audit_log", "cost_ledger",
 ]);
 
-retentionRoutes.get("/", requireScope("retention:read"), async (c) => {
+// ── GET / — List retention policies ────────────────────────────────────────
+const listRetentionRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Retention"],
+  summary: "List retention policies",
+  middleware: [requireScope("retention:read")],
+  responses: {
+    200: { description: "Retention policy list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+retentionRoutes.openapi(listRetentionRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -36,9 +48,36 @@ retentionRoutes.get("/", requireScope("retention:read"), async (c) => {
   return c.json({ policies: result });
 });
 
-retentionRoutes.post("/", requireScope("retention:write"), async (c) => {
+// ── POST / — Create retention policy ───────────────────────────────────────
+const createRetentionRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Retention"],
+  summary: "Create retention policy",
+  middleware: [requireScope("retention:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            resource_type: z.string(),
+            retention_days: z.number().optional(),
+            redact_pii: z.boolean().optional(),
+            redact_fields: z.array(z.string()).optional(),
+            archive_before_delete: z.boolean().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Policy created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403),
+  },
+});
+retentionRoutes.openapi(createRetentionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const resourceType = String(body.resource_type || "");
   const retentionDays = Number(body.retention_days || 90);
   const redactPii = Boolean(body.redact_pii);
@@ -63,15 +102,42 @@ retentionRoutes.post("/", requireScope("retention:write"), async (c) => {
   return c.json({ policy_id: policyId, resource_type: resourceType, retention_days: retentionDays });
 });
 
-retentionRoutes.delete("/:policy_id", requireScope("retention:write"), async (c) => {
+// ── DELETE /{policy_id} — Delete retention policy ──────────────────────────
+const deleteRetentionRoute = createRoute({
+  method: "delete",
+  path: "/{policy_id}",
+  tags: ["Retention"],
+  summary: "Delete retention policy",
+  middleware: [requireScope("retention:write")],
+  request: {
+    params: z.object({ policy_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Policy deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+retentionRoutes.openapi(deleteRetentionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const policyId = c.req.param("policy_id");
+  const { policy_id: policyId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM retention_policies WHERE policy_id = ${policyId} AND org_id = ${user.org_id}`;
   return c.json({ deleted: policyId });
 });
 
-retentionRoutes.post("/apply", requireScope("retention:write"), async (c) => {
+// ── POST /apply — Apply retention policies ─────────────────────────────────
+const applyRetentionRoute = createRoute({
+  method: "post",
+  path: "/apply",
+  tags: ["Retention"],
+  summary: "Apply retention policies",
+  middleware: [requireScope("retention:write")],
+  responses: {
+    200: { description: "Applied results", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

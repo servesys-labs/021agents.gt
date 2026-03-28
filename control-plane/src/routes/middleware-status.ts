@@ -2,15 +2,30 @@
  * Middleware status router — status, stats, and event history.
  * Ported from agentos/api/routers/middleware.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const middlewareStatusRoutes = new Hono<R>();
+export const middlewareStatusRoutes = createOpenAPIRouter();
 
-middlewareStatusRoutes.get("/status", async (c) => {
+// ── GET /status — Middleware chain status ────────────────────────────
+
+const statusRoute = createRoute({
+  method: "get",
+  path: "/status",
+  tags: ["Middleware"],
+  summary: "Get middleware chain status and stats",
+  responses: {
+    200: {
+      description: "Middleware status",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+middlewareStatusRoutes.openapi(statusRoute, async (c): Promise<any> => {
   // Return the known middleware chain with their types
   // In edge architecture, actual stats come from RUNTIME
   const middlewares = [
@@ -30,12 +45,34 @@ middlewareStatusRoutes.get("/status", async (c) => {
   return c.json(middlewares);
 });
 
-middlewareStatusRoutes.get("/events", async (c) => {
+// ── GET /events — Middleware event history ───────────────────────────
+
+const eventsRoute = createRoute({
+  method: "get",
+  path: "/events",
+  tags: ["Middleware"],
+  summary: "List middleware events",
+  request: {
+    query: z.object({
+      session_id: z.string().optional().openapi({ example: "sess-abc123" }),
+      middleware_name: z.string().optional().openapi({ example: "loop_detection" }),
+      limit: z.coerce.number().int().min(1).max(500).default(100).openapi({ example: 100 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Middleware events",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+middlewareStatusRoutes.openapi(eventsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const sessionId = c.req.query("session_id") || "";
-  const middlewareName = c.req.query("middleware_name") || "";
-  const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 100));
+  const { session_id: sessionId, middleware_name: middlewareName, limit: rawLimit } = c.req.valid("query");
+  const limit = Math.min(500, Math.max(1, Number(rawLimit) || 100));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {

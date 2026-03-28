@@ -2,15 +2,15 @@
  * Compliance routes — GDPR Art. 17 account deletion, Art. 20 data portability.
  * Provides full account erasure and data export endpoints for regulatory compliance.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
 import { hasRole } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const complianceRoutes = new Hono<R>();
+export const complianceRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(12);
@@ -52,13 +52,32 @@ async function auditLog(
   } catch { /* non-critical */ }
 }
 
+// ── Zod schemas ─────────────────────────────────────────────────
+
+const deleteAccountBody = z.object({
+  user_id: z.string().min(1),
+  reason: z.string().optional(),
+});
+
 // ── DELETE /account — Full account deletion (GDPR Art. 17) ──────────────
 
-complianceRoutes.delete("/account", requireScope("admin"), async (c) => {
+const deleteAccountRoute = createRoute({
+  method: "delete",
+  path: "/account",
+  tags: ["Compliance"],
+  summary: "Delete a user account (GDPR Art. 17 erasure)",
+  middleware: [requireScope("admin")],
+  request: { body: { content: { "application/json": { schema: deleteAccountBody } } } },
+  responses: {
+    200: { description: "Account deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403, 500),
+  },
+});
+
+complianceRoutes.openapi(deleteAccountRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json<{ user_id: string; reason?: string }>();
-  const targetUserId = body.user_id;
-  const reason = body.reason ?? "GDPR Art. 17 erasure request";
+  const { user_id: targetUserId, reason: rawReason } = c.req.valid("json");
+  const reason = rawReason ?? "GDPR Art. 17 erasure request";
 
   if (!targetUserId) {
     return c.json({ error: "user_id is required" }, 400);
@@ -232,7 +251,19 @@ complianceRoutes.delete("/account", requireScope("admin"), async (c) => {
 
 // ── POST /data-export — Request full data export (GDPR Art. 20) ─────────
 
-complianceRoutes.post("/data-export", requireScope("admin"), async (c) => {
+const dataExportRoute = createRoute({
+  method: "post",
+  path: "/data-export",
+  tags: ["Compliance"],
+  summary: "Request full data export (GDPR Art. 20 portability)",
+  middleware: [requireScope("admin")],
+  responses: {
+    200: { description: "Data export result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const orgId = user.org_id;
@@ -358,9 +389,24 @@ complianceRoutes.post("/data-export", requireScope("admin"), async (c) => {
 
 // ── GET /data-export/:export_id — Download data export ──────────────────
 
-complianceRoutes.get("/data-export/:export_id", requireScope("admin"), async (c) => {
+const downloadExportRoute = createRoute({
+  method: "get",
+  path: "/data-export/{export_id}",
+  tags: ["Compliance"],
+  summary: "Download a data export by ID",
+  middleware: [requireScope("admin")],
+  request: {
+    params: z.object({ export_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Export file (JSON)", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 404),
+  },
+});
+
+complianceRoutes.openapi(downloadExportRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const exportId = c.req.param("export_id");
+  const { export_id: exportId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -399,7 +445,19 @@ complianceRoutes.get("/data-export/:export_id", requireScope("admin"), async (c)
 
 // ── GET /data-export — List export requests ─────────────────────────────
 
-complianceRoutes.get("/data-export", requireScope("admin"), async (c) => {
+const listExportsRoute = createRoute({
+  method: "get",
+  path: "/data-export",
+  tags: ["Compliance"],
+  summary: "List data export requests",
+  middleware: [requireScope("admin")],
+  responses: {
+    200: { description: "List of exports", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+complianceRoutes.openapi(listExportsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -416,7 +474,19 @@ complianceRoutes.get("/data-export", requireScope("admin"), async (c) => {
 
 // ── GET /deletion-requests — List deletion requests ─────────────────────
 
-complianceRoutes.get("/deletion-requests", requireScope("admin"), async (c) => {
+const listDeletionRequestsRoute = createRoute({
+  method: "get",
+  path: "/deletion-requests",
+  tags: ["Compliance"],
+  summary: "List account deletion requests",
+  middleware: [requireScope("admin")],
+  responses: {
+    200: { description: "List of deletion requests", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+complianceRoutes.openapi(listDeletionRequestsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

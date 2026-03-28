@@ -6,8 +6,7 @@
  * (signup, login, providers) work without tokens. Protected routes (me, logout,
  * password) must manually resolve the user from the Authorization header.
  */
-import { Hono } from "hono";
-import { z } from "zod";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { Env } from "../env";
 import type { CurrentUser, TokenClaims } from "../auth/types";
 import { createToken, verifyToken } from "../auth/jwt";
@@ -15,13 +14,14 @@ import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { getDb } from "../db/client";
 import { logSecurityEvent } from "../logic/security-events";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, RateLimitErrorSchema, AuthTokenResponse, UserProfile, TokenVerifyResponse, errorResponses } from "../schemas/openapi";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const authRoutes = new Hono<R>();
+export const authRoutes = createOpenAPIRouter();
 
 /** Fire-and-forget audit log for auth events */
 async function auditAuthEvent(
-  sql: ReturnType<typeof getDb>,
+  sql: Awaited<ReturnType<typeof getDb>>,
   action: string,
   userId: string,
   orgId: string,
@@ -202,19 +202,32 @@ function passwordAuthDisabled(env: Env): boolean {
 
 // ── POST /signup ─────────────────────────────────────────────────────────
 
-authRoutes.post("/signup", async (c) => {
+const signupRoute = createRoute({
+  method: "post",
+  path: "/signup",
+  tags: ["Auth"],
+  summary: "Create a new account",
+  description: "Register a new user with email and password. Creates a personal org automatically.",
+  security: [],
+  request: {
+    body: { content: { "application/json": { schema: SignupRequest } } },
+  },
+  responses: {
+    200: { description: "Account created", content: { "application/json": { schema: AuthTokenResponse } } },
+    ...errorResponses(400, 429, 500),
+    403: { description: "Password auth disabled", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Email already registered", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+authRoutes.openapi(signupRoute, async (c): Promise<any> => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
   const signupLimit = checkRateLimit(c, `signup:${getClientIp(c)}`, 5, 24 * 60 * 60 * 1000);
-  if (signupLimit) return signupLimit;
+  if (signupLimit) return signupLimit as any;
 
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = SignupRequest.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
-  }
-  const { email, password, name } = parsed.data;
+  const { email, password, name } = c.req.valid("json");
 
   let sql;
   try {
@@ -383,19 +396,30 @@ authRoutes.post("/signup", async (c) => {
 
 // ── POST /login ──────────────────────────────────────────────────────────
 
-authRoutes.post("/login", async (c) => {
+const loginRoute = createRoute({
+  method: "post",
+  path: "/login",
+  tags: ["Auth"],
+  summary: "Log in with email and password",
+  security: [],
+  request: {
+    body: { content: { "application/json": { schema: LoginRequest } } },
+  },
+  responses: {
+    200: { description: "Login successful", content: { "application/json": { schema: AuthTokenResponse } } },
+    ...errorResponses(400, 401, 429, 500),
+    403: { description: "Password auth disabled", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+authRoutes.openapi(loginRoute, async (c): Promise<any> => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
   const loginLimit = checkRateLimit(c, `login:${getClientIp(c)}`, 10, 60 * 60 * 1000);
-  if (loginLimit) return loginLimit;
+  if (loginLimit) return loginLimit as any;
 
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = LoginRequest.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
-  }
-  const { email, password } = parsed.data;
+  const { email, password } = c.req.valid("json");
 
   const sql = await getDb(c.env.HYPERDRIVE);
 
@@ -482,7 +506,30 @@ authRoutes.post("/login", async (c) => {
 
 // ── GET /providers ───────────────────────────────────────────────────────
 
-authRoutes.get("/providers", (c) => {
+const providersRoute = createRoute({
+  method: "get",
+  path: "/providers",
+  tags: ["Auth"],
+  summary: "List available auth providers",
+  security: [],
+  responses: {
+    200: {
+      description: "Auth provider configuration",
+      content: {
+        "application/json": {
+          schema: z.object({
+            active_provider: z.string(),
+            cf_access_enabled: z.boolean(),
+            cf_access_team_domain: z.string().optional(),
+            password_enabled: z.boolean(),
+          }),
+        },
+      },
+    },
+  },
+});
+
+authRoutes.openapi(providersRoute, (c) => {
   const cfAccessIsEnabled = cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN);
   return c.json({
     active_provider: cfAccessIsEnabled ? "cf_access" : "local",
@@ -494,21 +541,37 @@ authRoutes.get("/providers", (c) => {
 
 // ── POST /cf-access/exchange ─────────────────────────────────────────────
 
-authRoutes.post("/cf-access/exchange", async (c) => {
-  const cfExchangeLimit = checkRateLimit(c, `cf-exchange:${getClientIp(c)}`, 10, 60 * 60 * 1000);
-  if (cfExchangeLimit) return cfExchangeLimit;
+const cfAccessExchangeRoute = createRoute({
+  method: "post",
+  path: "/cf-access/exchange",
+  tags: ["Auth"],
+  summary: "Exchange CF Access token for JWT",
+  description: "Exchange a Cloudflare Access token for an AgentOS JWT. Auto-provisions users on first login.",
+  security: [],
+  request: {
+    body: { content: { "application/json": { schema: CfAccessExchangeRequest } } },
+  },
+  responses: {
+    200: {
+      description: "Token exchange successful",
+      content: {
+        "application/json": {
+          schema: AuthTokenResponse.extend({ name: z.string().optional() }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
 
+authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
   if (!cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
     return c.json({ error: "Cloudflare Access auth is not enabled" }, 400);
   }
 
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = CfAccessExchangeRequest.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "cf_access_token is required" }, 400);
-  }
+  const { cf_access_token } = c.req.valid("json");
 
-  const cfClaims = await verifyCfAccessToken(parsed.data.cf_access_token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
+  const cfClaims = await verifyCfAccessToken(cf_access_token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
     aud: c.env.CF_ACCESS_AUD,
   });
 
@@ -613,18 +676,30 @@ authRoutes.post("/cf-access/exchange", async (c) => {
 
 // ── POST /token/verify ───────────────────────────────────────────────────
 
-authRoutes.post("/token/verify", async (c) => {
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = TokenVerifyRequest.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "token is required" }, 400);
-  }
+const tokenVerifyRoute = createRoute({
+  method: "post",
+  path: "/token/verify",
+  tags: ["Auth"],
+  summary: "Verify a JWT token",
+  security: [],
+  request: {
+    body: { content: { "application/json": { schema: TokenVerifyRequest } } },
+  },
+  responses: {
+    200: { description: "Token is valid", content: { "application/json": { schema: TokenVerifyResponse } } },
+    401: { description: "Token is invalid", content: { "application/json": { schema: z.object({ valid: z.literal(false) }) } } },
+    ...errorResponses(400),
+  },
+});
 
-  let claims = await verifyToken(c.env.AUTH_JWT_SECRET, parsed.data.token);
+authRoutes.openapi(tokenVerifyRoute, async (c): Promise<any> => {
+  const { token } = c.req.valid("json");
+
+  let claims = await verifyToken(c.env.AUTH_JWT_SECRET, token);
 
   // Fallback to CF Access
   if (!claims && cfAccessEnabled(c.env.CF_ACCESS_TEAM_DOMAIN)) {
-    claims = await verifyCfAccessToken(parsed.data.token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
+    claims = await verifyCfAccessToken(token, c.env.CF_ACCESS_TEAM_DOMAIN!, {
       aud: c.env.CF_ACCESS_AUD,
     });
   }
@@ -644,7 +719,18 @@ authRoutes.post("/token/verify", async (c) => {
 
 // ── GET /me (protected) ──────────────────────────────────────────────────
 
-authRoutes.get("/me", async (c) => {
+const meRoute = createRoute({
+  method: "get",
+  path: "/me",
+  tags: ["Auth"],
+  summary: "Get current user profile",
+  responses: {
+    200: { description: "Current user", content: { "application/json": { schema: UserProfile } } },
+    ...errorResponses(401),
+  },
+});
+
+authRoutes.openapi(meRoute, async (c): Promise<any> => {
   const user = await resolveUser(c);
   if (!requireUser(user, c)) {
     return c.json({ error: "Missing or invalid Authorization header" }, 401);
@@ -661,14 +747,25 @@ authRoutes.get("/me", async (c) => {
 
 // ── POST /logout (protected) ────────────────────────────────────────────
 
-authRoutes.post("/logout", async (c) => {
+const logoutRoute = createRoute({
+  method: "post",
+  path: "/logout",
+  tags: ["Auth"],
+  summary: "Log out (invalidate client token)",
+  responses: {
+    200: { description: "Logged out", content: { "application/json": { schema: z.object({ logged_out: z.boolean() }) } } },
+    ...errorResponses(401),
+  },
+});
+
+authRoutes.openapi(logoutRoute, async (c): Promise<any> => {
   const user = await resolveUser(c);
   if (!requireUser(user, c)) {
     return c.json({ error: "Missing or invalid Authorization header" }, 401);
   }
 
   // Stateless JWT — client discards the token. Server acknowledges.
-  const sql = getDb(c.env.HYPERDRIVE);
+  const sql = await getDb(c.env.HYPERDRIVE);
   auditAuthEvent(sql, "auth.logout", user.user_id, user.org_id ?? "", { email: user.email });
 
   return c.json({ logged_out: true });
@@ -676,7 +773,22 @@ authRoutes.post("/logout", async (c) => {
 
 // ── POST /password (protected) ──────────────────────────────────────────
 
-authRoutes.post("/password", async (c) => {
+const changePasswordRoute = createRoute({
+  method: "post",
+  path: "/password",
+  tags: ["Auth"],
+  summary: "Change password",
+  request: {
+    body: { content: { "application/json": { schema: ChangePasswordRequest } } },
+  },
+  responses: {
+    200: { description: "Password updated", content: { "application/json": { schema: z.object({ updated: z.boolean() }) } } },
+    ...errorResponses(400, 401, 500),
+    403: { description: "Password auth disabled", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+authRoutes.openapi(changePasswordRoute, async (c): Promise<any> => {
   if (passwordAuthDisabled(c.env)) {
     return c.json({ error: "Password authentication is disabled" }, 403);
   }
@@ -685,12 +797,7 @@ authRoutes.post("/password", async (c) => {
     return c.json({ error: "Missing or invalid Authorization header" }, 401);
   }
 
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = ChangePasswordRequest.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
-  }
-  const { current_password, new_password } = parsed.data;
+  const { current_password, new_password } = c.req.valid("json");
 
   const sql = await getDb(c.env.HYPERDRIVE);
 

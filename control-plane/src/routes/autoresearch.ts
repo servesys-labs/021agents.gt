@@ -5,18 +5,42 @@
  * Start/stop/status are edge-only (return 410 for start/stop).
  * DB-backed endpoints for dashboard/UI work from Supabase.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const autoresearchRoutes = new Hono<R>();
+export const autoresearchRoutes = createOpenAPIRouter();
 
-autoresearchRoutes.post("/start", requireScope("autoresearch:write"), async (c) => {
-  // Autoresearch start is a long-running process — forward to RUNTIME
-  const body = await c.req.json();
+// ── POST /start — Start autoresearch (proxied to runtime) ──────────
+
+const startRoute = createRoute({
+  method: "post",
+  path: "/start",
+  tags: ["AutoResearch"],
+  summary: "Start an autoresearch run",
+  middleware: [requireScope("autoresearch:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.record(z.unknown()),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Autoresearch started",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(startRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   try {
     const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/autoresearch/start", {
       method: "POST",
@@ -29,8 +53,34 @@ autoresearchRoutes.post("/start", requireScope("autoresearch:write"), async (c) 
   }
 });
 
-autoresearchRoutes.post("/stop", requireScope("autoresearch:write"), async (c) => {
-  const body = await c.req.json().catch(() => ({}));
+// ── POST /stop — Stop autoresearch (proxied to runtime) ─────────────
+
+const stopRoute = createRoute({
+  method: "post",
+  path: "/stop",
+  tags: ["AutoResearch"],
+  summary: "Stop an autoresearch run",
+  middleware: [requireScope("autoresearch:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.record(z.unknown()),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Autoresearch stopped",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(stopRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   try {
     const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/autoresearch/stop", {
       method: "POST",
@@ -43,17 +93,39 @@ autoresearchRoutes.post("/stop", requireScope("autoresearch:write"), async (c) =
   }
 });
 
-autoresearchRoutes.get("/status", requireScope("autoresearch:read"), async (c) => {
-  const workspace = c.req.query("workspace") || ".";
+// ── GET /status — Autoresearch status (proxied to runtime) ──────────
+
+const statusRoute = createRoute({
+  method: "get",
+  path: "/status",
+  tags: ["AutoResearch"],
+  summary: "Get autoresearch status",
+  middleware: [requireScope("autoresearch:read")],
+  request: {
+    query: z.object({
+      workspace: z.string().default(".").openapi({ example: "." }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Autoresearch status",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(statusRoute, async (c): Promise<any> => {
+  const { workspace } = c.req.valid("query");
   try {
     const resp = await c.env.RUNTIME.fetch(
-      `https://runtime/api/v1/autoresearch/status?workspace=${encodeURIComponent(workspace)}`,
+      `https://runtime/api/v1/autoresearch/status?workspace=${encodeURIComponent(workspace || ".")}`,
     );
     return c.json(await resp.json(), resp.status as any);
   } catch {
     return c.json({
       running: false,
-      workspace,
+      workspace: workspace || ".",
       iteration: 0,
       best_bpb: null,
       total_experiments: 0,
@@ -64,12 +136,34 @@ autoresearchRoutes.get("/status", requireScope("autoresearch:read"), async (c) =
   }
 });
 
-autoresearchRoutes.get("/results", requireScope("autoresearch:read"), async (c) => {
-  const workspace = c.req.query("workspace") || ".";
-  const last = Number(c.req.query("last")) || 0;
+// ── GET /results — Autoresearch results (proxied to runtime) ────────
+
+const resultsRoute = createRoute({
+  method: "get",
+  path: "/results",
+  tags: ["AutoResearch"],
+  summary: "Get autoresearch results",
+  middleware: [requireScope("autoresearch:read")],
+  request: {
+    query: z.object({
+      workspace: z.string().default(".").openapi({ example: "." }),
+      last: z.coerce.number().default(0).openapi({ example: 0 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Autoresearch results",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(resultsRoute, async (c): Promise<any> => {
+  const { workspace, last } = c.req.valid("query");
   try {
     const resp = await c.env.RUNTIME.fetch(
-      `https://runtime/api/v1/autoresearch/results?workspace=${encodeURIComponent(workspace)}&last=${last}`,
+      `https://runtime/api/v1/autoresearch/results?workspace=${encodeURIComponent(workspace || ".")}&last=${last || 0}`,
     );
     return c.json(await resp.json(), resp.status as any);
   } catch {
@@ -79,10 +173,40 @@ autoresearchRoutes.get("/results", requireScope("autoresearch:read"), async (c) 
 
 // ── Database-backed endpoints (for dashboard/UI) ────────────────────
 
-// POST /autoresearch/runs — create a new autoresearch run record
-autoresearchRoutes.post("/runs", requireScope("autoresearch:write"), async (c) => {
+// POST /runs — create a new autoresearch run record
+
+const createRunRoute = createRoute({
+  method: "post",
+  path: "/runs",
+  tags: ["AutoResearch"],
+  summary: "Create a new autoresearch run record",
+  middleware: [requireScope("autoresearch:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1).openapi({ example: "my-agent" }),
+            status: z.string().default("running"),
+            config: z.record(z.unknown()).default({}),
+            workspace: z.string().default("."),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Run created",
+      content: { "application/json": { schema: z.object({ run_id: z.string(), agent_name: z.string(), status: z.string(), created: z.boolean() }) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+autoresearchRoutes.openapi(createRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "").trim();
   const status = String(body.status || "running");
   const configJson = JSON.stringify(body.config || {});
@@ -113,11 +237,45 @@ autoresearchRoutes.post("/runs", requireScope("autoresearch:write"), async (c) =
   return c.json({ run_id: runId, agent_name: agentName, status, created: true }, 201);
 });
 
-// PUT /autoresearch/runs/:run_id — update run status/metrics
-autoresearchRoutes.put("/runs/:run_id", requireScope("autoresearch:write"), async (c) => {
+// ── PUT /runs/:run_id — update run status/metrics ───────────────────
+
+const updateRunRoute = createRoute({
+  method: "put",
+  path: "/runs/{run_id}",
+  tags: ["AutoResearch"],
+  summary: "Update run status and metrics",
+  middleware: [requireScope("autoresearch:write")],
+  request: {
+    params: z.object({ run_id: z.string().openapi({ example: "uuid-abc123" }) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            status: z.string().optional(),
+            iteration: z.number().optional(),
+            best_bpb: z.number().nullable().optional(),
+            total_experiments: z.number().optional(),
+            kept: z.number().optional(),
+            discarded: z.number().optional(),
+            crashed: z.number().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Run updated",
+      content: { "application/json": { schema: z.object({ run_id: z.string(), updated: z.boolean() }) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(updateRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const runId = c.req.param("run_id");
-  const body = await c.req.json();
+  const { run_id: runId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = new Date().toISOString();
 
@@ -137,11 +295,44 @@ autoresearchRoutes.put("/runs/:run_id", requireScope("autoresearch:write"), asyn
   return c.json({ run_id: runId, updated: true });
 });
 
-// POST /autoresearch/runs/:run_id/experiments — record an experiment
-autoresearchRoutes.post("/runs/:run_id/experiments", requireScope("autoresearch:write"), async (c) => {
+// ── POST /runs/:run_id/experiments — record an experiment ───────────
+
+const createExperimentRoute = createRoute({
+  method: "post",
+  path: "/runs/{run_id}/experiments",
+  tags: ["AutoResearch"],
+  summary: "Record an experiment in a run",
+  middleware: [requireScope("autoresearch:write")],
+  request: {
+    params: z.object({ run_id: z.string().openapi({ example: "uuid-abc123" }) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().default(""),
+            experiment_name: z.string().min(1).openapi({ example: "exp-001" }),
+            status: z.string().default("completed"),
+            bpb: z.number().nullable().optional(),
+            config: z.record(z.unknown()).default({}),
+            results: z.record(z.unknown()).default({}),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Experiment created",
+      content: { "application/json": { schema: z.object({ experiment_id: z.string(), run_id: z.string(), created: z.boolean() }) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+autoresearchRoutes.openapi(createExperimentRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const runId = c.req.param("run_id");
-  const body = await c.req.json();
+  const { run_id: runId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "").trim();
   const experimentName = String(body.experiment_name || "").trim();
   const status = String(body.status || "completed");
@@ -172,10 +363,33 @@ autoresearchRoutes.post("/runs/:run_id/experiments", requireScope("autoresearch:
   return c.json({ experiment_id: experimentId, run_id: runId, created: true }, 201);
 });
 
-autoresearchRoutes.get("/runs", requireScope("autoresearch:read"), async (c) => {
+// ── GET /runs — List autoresearch runs ──────────────────────────────
+
+const listRunsRoute = createRoute({
+  method: "get",
+  path: "/runs",
+  tags: ["AutoResearch"],
+  summary: "List autoresearch runs",
+  middleware: [requireScope("autoresearch:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional().openapi({ example: "my-agent" }),
+      limit: z.coerce.number().int().min(1).max(200).default(50).openapi({ example: 50 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Autoresearch runs",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(listRunsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") || "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
+  const { agent_name: agentName, limit: rawLimit } = c.req.valid("query");
+  const limit = Math.min(200, Math.max(1, Number(rawLimit) || 50));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -192,9 +406,29 @@ autoresearchRoutes.get("/runs", requireScope("autoresearch:read"), async (c) => 
   return c.json(rows);
 });
 
-autoresearchRoutes.get("/runs/:run_id", requireScope("autoresearch:read"), async (c) => {
+// ── GET /runs/:run_id — Get a specific autoresearch run ─────────────
+
+const getRunRoute = createRoute({
+  method: "get",
+  path: "/runs/{run_id}",
+  tags: ["AutoResearch"],
+  summary: "Get a specific autoresearch run with experiments",
+  middleware: [requireScope("autoresearch:read")],
+  request: {
+    params: z.object({ run_id: z.string().openapi({ example: "uuid-abc123" }) }),
+  },
+  responses: {
+    200: {
+      description: "Autoresearch run with experiments",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404, 500),
+  },
+});
+
+autoresearchRoutes.openapi(getRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const runId = c.req.param("run_id");
+  const { run_id: runId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const runs = await sql`SELECT * FROM autoresearch_runs WHERE run_id = ${runId}`;
@@ -208,10 +442,34 @@ autoresearchRoutes.get("/runs/:run_id", requireScope("autoresearch:read"), async
   return c.json({ ...runs[0], experiments });
 });
 
-autoresearchRoutes.get("/runs/:run_id/experiments", requireScope("autoresearch:read"), async (c) => {
+// ── GET /runs/:run_id/experiments — List experiments for a run ──────
+
+const listExperimentsRoute = createRoute({
+  method: "get",
+  path: "/runs/{run_id}/experiments",
+  tags: ["AutoResearch"],
+  summary: "List experiments for an autoresearch run",
+  middleware: [requireScope("autoresearch:read")],
+  request: {
+    params: z.object({ run_id: z.string().openapi({ example: "uuid-abc123" }) }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(500).default(100).openapi({ example: 100 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Experiments list",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(listExperimentsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const runId = c.req.param("run_id");
-  const limit = Math.min(500, Math.max(1, Number(c.req.query("limit")) || 100));
+  const { run_id: runId } = c.req.valid("param");
+  const { limit: rawLimit } = c.req.valid("query");
+  const limit = Math.min(500, Math.max(1, Number(rawLimit) || 100));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -221,10 +479,34 @@ autoresearchRoutes.get("/runs/:run_id/experiments", requireScope("autoresearch:r
   return c.json(rows);
 });
 
-autoresearchRoutes.get("/agent/:agent_name/history", requireScope("autoresearch:read"), async (c) => {
+// ── GET /agent/:agent_name/history — Agent experiment history ───────
+
+const agentHistoryRoute = createRoute({
+  method: "get",
+  path: "/agent/{agent_name}/history",
+  tags: ["AutoResearch"],
+  summary: "Get agent autoresearch history",
+  middleware: [requireScope("autoresearch:read")],
+  request: {
+    params: z.object({ agent_name: z.string().openapi({ example: "my-agent" }) }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(20).openapi({ example: 20 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Agent experiment history",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+autoresearchRoutes.openapi(agentHistoryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 20));
+  const { agent_name: agentName } = c.req.valid("param");
+  const { limit: rawLimit } = c.req.valid("query");
+  const limit = Math.min(200, Math.max(1, Number(rawLimit) || 20));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const runs = await sql`

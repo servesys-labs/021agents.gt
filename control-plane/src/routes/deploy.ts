@@ -5,18 +5,36 @@
  * "Deploying" an agent = ensuring its config exists in Supabase.
  * Each agent is a Durable Object instance in the main worker.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const deployRoutes = new Hono<R>();
+export const deployRoutes = createOpenAPIRouter();
 
-deployRoutes.post("/:agent_name", requireScope("deploy:write"), async (c) => {
+// ── POST /deploy/:agent_name ────────────────────────────────────────────
+
+const deployAgentRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}",
+  tags: ["Deploy"],
+  summary: "Deploy an agent",
+  middleware: [requireScope("deploy:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Agent deployed",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+deployRoutes.openapi(deployAgentRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify agent config exists
@@ -36,9 +54,27 @@ deployRoutes.post("/:agent_name", requireScope("deploy:write"), async (c) => {
   });
 });
 
-deployRoutes.delete("/:agent_name", requireScope("deploy:write"), async (c) => {
+// ── DELETE /deploy/:agent_name ──────────────────────────────────────────
+
+const undeployAgentRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}",
+  tags: ["Deploy"],
+  summary: "Undeploy an agent",
+  middleware: [requireScope("deploy:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Agent undeployed",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+deployRoutes.openapi(undeployAgentRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const now = new Date().toISOString();
@@ -49,9 +85,27 @@ deployRoutes.delete("/:agent_name", requireScope("deploy:write"), async (c) => {
   return c.json({ removed: true, agent: agentName });
 });
 
-deployRoutes.get("/:agent_name/status", requireScope("deploy:read"), async (c) => {
+// ── GET /deploy/:agent_name/status ──────────────────────────────────────
+
+const deployStatusRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/status",
+  tags: ["Deploy"],
+  summary: "Get deploy status for an agent",
+  middleware: [requireScope("deploy:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Deploy status",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+deployRoutes.openapi(deployStatusRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {

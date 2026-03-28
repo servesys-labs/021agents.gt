@@ -1,20 +1,47 @@
 /**
  * Dashboard router — aggregated stats and recent activity for the portal.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const dashboardRoutes = new Hono<R>();
+export const dashboardRoutes = createOpenAPIRouter();
 
 /**
  * GET /stats
  * Aggregated dashboard statistics from agents, sessions, and billing tables.
  */
-dashboardRoutes.get("/stats", requireScope("observability:read"), async (c) => {
+const statsRoute = createRoute({
+  method: "get",
+  path: "/stats",
+  tags: ["Dashboard"],
+  summary: "Aggregated dashboard statistics",
+  middleware: [requireScope("observability:read")],
+  responses: {
+    200: {
+      description: "Dashboard stats",
+      content: {
+        "application/json": {
+          schema: z.object({
+            total_agents: z.number(),
+            live_agents: z.number(),
+            total_sessions: z.number(),
+            active_sessions: z.number(),
+            total_runs: z.number(),
+            avg_latency_ms: z.number(),
+            total_cost_usd: z.number(),
+            error_rate_pct: z.number(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(500),
+  },
+});
+
+dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -84,9 +111,42 @@ dashboardRoutes.get("/stats", requireScope("observability:read"), async (c) => {
  * GET /activity?limit=10
  * Recent activity feed from sessions table.
  */
-dashboardRoutes.get("/activity", requireScope("observability:read"), async (c) => {
+const activityRoute = createRoute({
+  method: "get",
+  path: "/activity",
+  tags: ["Dashboard"],
+  summary: "Recent activity feed",
+  middleware: [requireScope("observability:read")],
+  request: {
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(10).openapi({ example: 10 }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Activity feed",
+      content: {
+        "application/json": {
+          schema: z.object({
+            activity: z.array(z.object({
+              id: z.string(),
+              type: z.string(),
+              message: z.string(),
+              agent_name: z.string(),
+              timestamp: z.number(),
+            })),
+          }),
+        },
+      },
+    },
+    ...errorResponses(500),
+  },
+});
+
+dashboardRoutes.openapi(activityRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const limit = Math.max(1, Math.min(100, Number(c.req.query("limit")) || 10));
+  const { limit: rawLimit } = c.req.valid("query");
+  const limit = Math.max(1, Math.min(100, Number(rawLimit) || 10));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let activity: Array<{

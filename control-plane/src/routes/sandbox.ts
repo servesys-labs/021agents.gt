@@ -5,13 +5,12 @@
  * All sandbox operations are proxied to the RUNTIME service binding.
  * Agent code NEVER runs on the control-plane worker.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const sandboxRoutes = new Hono<R>();
+export const sandboxRoutes = createOpenAPIRouter();
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -41,8 +40,35 @@ async function forwardResponse(c: any, resp: Response) {
 
 // ── Create sandbox ───────────────────────────────────────────────────
 
-sandboxRoutes.post("/create", requireScope("sandbox:write"), async (c) => {
-  const body = await c.req.json();
+const createSandboxRoute = createRoute({
+  method: "post",
+  path: "/create",
+  tags: ["Sandbox"],
+  summary: "Create a new sandbox",
+  middleware: [requireScope("sandbox:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            template: z.string().default("base").openapi({ example: "base" }),
+            timeout_sec: z.coerce.number().int().min(10).max(3600).default(300).openapi({ example: 300 }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Sandbox created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+sandboxRoutes.openapi(createSandboxRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const template = String(body.template || "base");
   const timeoutSec = Math.max(10, Math.min(3600, Number(body.timeout_sec) || 300));
 
@@ -59,8 +85,36 @@ sandboxRoutes.post("/create", requireScope("sandbox:write"), async (c) => {
 
 // ── Execute command ──────────────────────────────────────────────────
 
-sandboxRoutes.post("/exec", requireScope("sandbox:write"), async (c) => {
-  const body = await c.req.json();
+const execSandboxRoute = createRoute({
+  method: "post",
+  path: "/exec",
+  tags: ["Sandbox"],
+  summary: "Execute a command in a sandbox",
+  middleware: [requireScope("sandbox:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            command: z.string().min(1).openapi({ example: "echo hello" }),
+            sandbox_id: z.string().default("").openapi({ example: "sb-abc123" }),
+            timeout_ms: z.coerce.number().int().min(1000).max(120000).default(30000).openapi({ example: 30000 }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Command execution result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+sandboxRoutes.openapi(execSandboxRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const command = String(body.command || "");
   const sandboxId = String(body.sandbox_id || "");
   const timeoutMs = Math.max(1000, Math.min(120000, Number(body.timeout_ms) || 30000));
@@ -83,7 +137,22 @@ sandboxRoutes.post("/exec", requireScope("sandbox:write"), async (c) => {
 
 // ── List sandboxes ───────────────────────────────────────────────────
 
-sandboxRoutes.get("/list", requireScope("sandbox:read"), async (c) => {
+const listSandboxesRoute = createRoute({
+  method: "get",
+  path: "/list",
+  tags: ["Sandbox"],
+  summary: "List all sandboxes",
+  middleware: [requireScope("sandbox:read")],
+  responses: {
+    200: {
+      description: "List of sandboxes",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+sandboxRoutes.openapi(listSandboxesRoute, async (c): Promise<any> => {
   try {
     const resp = await proxyToRuntime(c.env.RUNTIME, "/list", "GET");
     return forwardResponse(c, resp);
@@ -94,8 +163,34 @@ sandboxRoutes.get("/list", requireScope("sandbox:read"), async (c) => {
 
 // ── Kill sandbox ─────────────────────────────────────────────────────
 
-sandboxRoutes.post("/kill", requireScope("sandbox:write"), async (c) => {
-  const body = await c.req.json();
+const killSandboxRoute = createRoute({
+  method: "post",
+  path: "/kill",
+  tags: ["Sandbox"],
+  summary: "Kill a running sandbox",
+  middleware: [requireScope("sandbox:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            sandbox_id: z.string().min(1).openapi({ example: "sb-abc123" }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Sandbox killed",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+sandboxRoutes.openapi(killSandboxRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
   const sandboxId = String(body.sandbox_id || "");
 
   if (!sandboxId) {
@@ -114,12 +209,31 @@ sandboxRoutes.post("/kill", requireScope("sandbox:write"), async (c) => {
 
 // ── List files in sandbox ────────────────────────────────────────────
 
-sandboxRoutes.get("/:sandbox_id/files", requireScope("sandbox:read"), async (c) => {
-  const sandboxId = c.req.param("sandbox_id");
-  const path = c.req.query("path") || "/";
+const listFilesRoute = createRoute({
+  method: "get",
+  path: "/{sandbox_id}/files",
+  tags: ["Sandbox"],
+  summary: "List files in a sandbox",
+  middleware: [requireScope("sandbox:read")],
+  request: {
+    params: z.object({ sandbox_id: z.string().openapi({ example: "sb-abc123" }) }),
+    query: z.object({ path: z.string().default("/").openapi({ example: "/" }) }),
+  },
+  responses: {
+    200: {
+      description: "File listing",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+sandboxRoutes.openapi(listFilesRoute, async (c): Promise<any> => {
+  const { sandbox_id: sandboxId } = c.req.valid("param");
+  const { path } = c.req.valid("query");
 
   try {
-    const url = `/${sandboxId}/files?path=${encodeURIComponent(path)}`;
+    const url = `/${sandboxId}/files?path=${encodeURIComponent(path || "/")}`;
     const resp = await proxyToRuntime(c.env.RUNTIME, url, "GET");
     return forwardResponse(c, resp);
   } catch (e: any) {
@@ -129,9 +243,37 @@ sandboxRoutes.get("/:sandbox_id/files", requireScope("sandbox:read"), async (c) 
 
 // ── Upload file to sandbox ───────────────────────────────────────────
 
-sandboxRoutes.post("/:sandbox_id/files/upload", requireScope("sandbox:write"), async (c) => {
-  const sandboxId = c.req.param("sandbox_id");
-  const body = await c.req.json();
+const uploadFileRoute = createRoute({
+  method: "post",
+  path: "/{sandbox_id}/files/upload",
+  tags: ["Sandbox"],
+  summary: "Upload a file to a sandbox",
+  middleware: [requireScope("sandbox:write")],
+  request: {
+    params: z.object({ sandbox_id: z.string().openapi({ example: "sb-abc123" }) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            dest_path: z.string().min(1).openapi({ example: "/app/main.py" }),
+            content: z.string().default("").openapi({ example: "print('hello')" }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "File uploaded",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+sandboxRoutes.openapi(uploadFileRoute, async (c): Promise<any> => {
+  const { sandbox_id: sandboxId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const destPath = String(body.dest_path || "");
   const content = String(body.content || "");
 
@@ -152,12 +294,32 @@ sandboxRoutes.post("/:sandbox_id/files/upload", requireScope("sandbox:write"), a
 
 // ── Sandbox logs ─────────────────────────────────────────────────────
 
-sandboxRoutes.get("/:sandbox_id/logs", requireScope("sandbox:read"), async (c) => {
-  const sandboxId = c.req.param("sandbox_id");
-  const lines = Math.max(1, Math.min(1000, Number(c.req.query("lines")) || 100));
+const sandboxLogsRoute = createRoute({
+  method: "get",
+  path: "/{sandbox_id}/logs",
+  tags: ["Sandbox"],
+  summary: "Get sandbox logs",
+  middleware: [requireScope("sandbox:read")],
+  request: {
+    params: z.object({ sandbox_id: z.string().openapi({ example: "sb-abc123" }) }),
+    query: z.object({ lines: z.coerce.number().int().min(1).max(1000).default(100).openapi({ example: 100 }) }),
+  },
+  responses: {
+    200: {
+      description: "Sandbox log output",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(500),
+  },
+});
+
+sandboxRoutes.openapi(sandboxLogsRoute, async (c): Promise<any> => {
+  const { sandbox_id: sandboxId } = c.req.valid("param");
+  const { lines } = c.req.valid("query");
+  const lineCount = Math.max(1, Math.min(1000, Number(lines) || 100));
 
   try {
-    const url = `/${sandboxId}/logs?lines=${lines}`;
+    const url = `/${sandboxId}/logs?lines=${lineCount}`;
     const resp = await proxyToRuntime(c.env.RUNTIME, url, "GET");
     return forwardResponse(c, resp);
   } catch (e: any) {

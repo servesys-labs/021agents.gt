@@ -2,14 +2,14 @@
  * SLOs router — success rate, latency, cost thresholds.
  * Ported from agentos/api/routers/slos.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const sloRoutes = new Hono<R>();
+export const sloRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(6);
@@ -20,9 +20,45 @@ function genId(): string {
 const VALID_METRICS = new Set(["success_rate", "p95_latency_ms", "cost_per_run_usd", "avg_turns"]);
 const VALID_OPERATORS = new Set(["gte", "lte", "eq"]);
 
-sloRoutes.get("/", requireScope("slos:read"), async (c) => {
+// ── Zod schemas ─────────────────────────────────────────────────
+
+const sloCreateBody = z.object({
+  metric: z.enum(["success_rate", "p95_latency_ms", "cost_per_run_usd", "avg_turns"]),
+  threshold: z.number(),
+  agent_name: z.string().min(1),
+  env: z.string().default(""),
+  operator: z.enum(["gte", "lte", "eq"]).default("gte"),
+  window_hours: z.number().int().positive().default(24),
+});
+
+const sloListQuery = z.object({
+  agent_name: z.string().optional(),
+});
+
+const sloHistoryQuery = z.object({
+  slo_id: z.string().optional(),
+  since_days: z.coerce.number().int().min(1).max(365).default(30),
+  limit: z.coerce.number().int().min(1).max(1000).default(100),
+});
+
+// ── GET / ───────────────────────────────────────────────────────
+
+const listSlosRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["SLOs"],
+  summary: "List SLO definitions",
+  middleware: [requireScope("slos:read")],
+  request: { query: sloListQuery },
+  responses: {
+    200: { description: "List of SLOs", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+sloRoutes.openapi(listSlosRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") || "";
+  const { agent_name: agentName } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -36,15 +72,25 @@ sloRoutes.get("/", requireScope("slos:read"), async (c) => {
   return c.json({ slos: rows });
 });
 
-sloRoutes.post("/", requireScope("slos:write"), async (c) => {
+// ── POST / ──────────────────────────────────────────────────────
+
+const createSloRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["SLOs"],
+  summary: "Create an SLO definition",
+  middleware: [requireScope("slos:write")],
+  request: { body: { content: { "application/json": { schema: sloCreateBody } } } },
+  responses: {
+    200: { description: "SLO created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
+});
+
+sloRoutes.openapi(createSloRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const metric = String(body.metric || "");
-  const threshold = Number(body.threshold || 0);
-  const agentName = String(body.agent_name || "");
-  const env = String(body.env || "");
-  const operator = String(body.operator || "gte");
-  const windowHours = Number(body.window_hours || 24);
+  const body = c.req.valid("json");
+  const { metric, threshold, agent_name: agentName, env, operator, window_hours: windowHours } = body;
 
   if (!VALID_METRICS.has(metric)) return c.json({ error: `Unknown metric: ${metric}` }, 400);
   if (!VALID_OPERATORS.has(operator)) return c.json({ error: `Unknown operator: ${operator}` }, 400);
@@ -60,15 +106,46 @@ sloRoutes.post("/", requireScope("slos:write"), async (c) => {
   return c.json({ slo_id: sloId, metric, threshold, operator });
 });
 
-sloRoutes.delete("/:slo_id", requireScope("slos:write"), async (c) => {
+// ── DELETE /:slo_id ─────────────────────────────────────────────
+
+const deleteSloRoute = createRoute({
+  method: "delete",
+  path: "/{slo_id}",
+  tags: ["SLOs"],
+  summary: "Delete an SLO definition",
+  middleware: [requireScope("slos:write")],
+  request: {
+    params: z.object({ slo_id: z.string() }),
+  },
+  responses: {
+    200: { description: "SLO deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+sloRoutes.openapi(deleteSloRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sloId = c.req.param("slo_id");
+  const { slo_id: sloId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM slo_definitions WHERE slo_id = ${sloId} AND org_id = ${user.org_id}`;
   return c.json({ deleted: sloId });
 });
 
-sloRoutes.get("/status", requireScope("slos:read"), async (c) => {
+// ── GET /status ─────────────────────────────────────────────────
+
+const sloStatusRoute = createRoute({
+  method: "get",
+  path: "/status",
+  tags: ["SLOs"],
+  summary: "Evaluate all SLOs and return current status",
+  middleware: [requireScope("slos:read")],
+  responses: {
+    200: { description: "SLO status", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+sloRoutes.openapi(sloStatusRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -169,14 +246,25 @@ sloRoutes.get("/status", requireScope("slos:read"), async (c) => {
   return c.json({ slos: results, breached_count: results.filter((r) => r.breached).length });
 });
 
-// ── SLO evaluation history ────────────────────────────────────────────────
-sloRoutes.get("/history", requireScope("slos:read"), async (c) => {
-  const user = c.get("user");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+// ── GET /history ────────────────────────────────────────────────
 
-  const sloId = c.req.query("slo_id") || "";
-  const sinceDays = Math.min(Math.max(Number(c.req.query("since_days") || 30), 1), 365);
-  const limit = Math.min(Math.max(Number(c.req.query("limit") || 100), 1), 1000);
+const sloHistoryRoute = createRoute({
+  method: "get",
+  path: "/history",
+  tags: ["SLOs"],
+  summary: "Get SLO evaluation history",
+  middleware: [requireScope("slos:read")],
+  request: { query: sloHistoryQuery },
+  responses: {
+    200: { description: "SLO evaluation history", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+sloRoutes.openapi(sloHistoryRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { slo_id: sloId, since_days: sinceDays, limit } = c.req.valid("query");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
 
   let rows;
@@ -199,8 +287,21 @@ sloRoutes.get("/history", requireScope("slos:read"), async (c) => {
   return c.json({ evaluations: rows, count: rows.length });
 });
 
-// ── Error budgets (all SLOs) ──────────────────────────────────────────────
-sloRoutes.get("/error-budgets", requireScope("slos:read"), async (c) => {
+// ── GET /error-budgets ──────────────────────────────────────────
+
+const errorBudgetsRoute = createRoute({
+  method: "get",
+  path: "/error-budgets",
+  tags: ["SLOs"],
+  summary: "Get error budgets for all SLOs",
+  middleware: [requireScope("slos:read")],
+  responses: {
+    200: { description: "Error budgets", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+sloRoutes.openapi(errorBudgetsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -215,10 +316,26 @@ sloRoutes.get("/error-budgets", requireScope("slos:read"), async (c) => {
   return c.json({ error_budgets: rows });
 });
 
-// ── Error budget for a specific SLO (across months) ───────────────────────
-sloRoutes.get("/error-budgets/:slo_id", requireScope("slos:read"), async (c) => {
+// ── GET /error-budgets/:slo_id ──────────────────────────────────
+
+const errorBudgetBySloRoute = createRoute({
+  method: "get",
+  path: "/error-budgets/{slo_id}",
+  tags: ["SLOs"],
+  summary: "Get error budget for a specific SLO",
+  middleware: [requireScope("slos:read")],
+  request: {
+    params: z.object({ slo_id: z.string() }),
+  },
+  responses: {
+    200: { description: "SLO error budget", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+sloRoutes.openapi(errorBudgetBySloRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sloId = c.req.param("slo_id");
+  const { slo_id: sloId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const slo = await sql`

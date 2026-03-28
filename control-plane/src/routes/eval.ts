@@ -5,15 +5,13 @@
  * Datasets/evaluators stored in R2 (c.env.STORAGE).
  * Eval runs stored in Supabase. POST /run proxies to RUNTIME service binding.
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { EvalRunSummary, ErrorSchema, errorResponses } from "../schemas/openapi";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const evalRoutes = new Hono<R>();
+export const evalRoutes = createOpenAPIRouter();
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -36,11 +34,27 @@ async function r2ListPrefix(storage: R2Bucket, prefix: string): Promise<string[]
 
 // ── Eval Runs ────────────────────────────────────────────────────────
 
-evalRoutes.get("/runs", requireScope("eval:read"), async (c) => {
+const listRunsRoute = createRoute({
+  method: "get",
+  path: "/runs",
+  tags: ["Eval"],
+  summary: "List eval runs",
+  middleware: [requireScope("eval:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional().openapi({ description: "Filter by agent name" }),
+      limit: z.coerce.number().int().min(1).max(200).default(20).openapi({ description: "Max results" }),
+    }),
+  },
+  responses: {
+    200: { description: "Eval runs", content: { "application/json": { schema: z.array(EvalRunSummary) } } },
+  },
+});
+
+evalRoutes.openapi(listRunsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const agentName = c.req.query("agent_name") || "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 20));
+  const { agent_name: agentName, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = agentName
@@ -61,10 +75,23 @@ evalRoutes.get("/runs", requireScope("eval:read"), async (c) => {
   );
 });
 
-evalRoutes.get("/runs/:run_id", requireScope("eval:read"), async (c) => {
+const getRunRoute = createRoute({
+  method: "get",
+  path: "/runs/{run_id}",
+  tags: ["Eval"],
+  summary: "Get eval run with trials",
+  middleware: [requireScope("eval:read")],
+  request: { params: z.object({ run_id: z.string() }) },
+  responses: {
+    200: { description: "Eval run detail", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+
+evalRoutes.openapi(getRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const runId = Number(c.req.param("run_id"));
+  const runId = Number(c.req.valid("param").run_id);
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT * FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
   if (rows.length === 0) return c.json({ error: "Eval run not found" }, 404);
@@ -88,10 +115,23 @@ evalRoutes.get("/runs/:run_id", requireScope("eval:read"), async (c) => {
   return c.json(data);
 });
 
-evalRoutes.get("/runs/:run_id/trials", requireScope("eval:read"), async (c) => {
+const getTrialsRoute = createRoute({
+  method: "get",
+  path: "/runs/{run_id}/trials",
+  tags: ["Eval"],
+  summary: "List trials for an eval run",
+  middleware: [requireScope("eval:read")],
+  request: { params: z.object({ run_id: z.string() }) },
+  responses: {
+    200: { description: "Trial list", content: { "application/json": { schema: z.object({ run_id: z.number(), trials: z.array(z.record(z.unknown())) }) } } },
+    ...errorResponses(404),
+  },
+});
+
+evalRoutes.openapi(getTrialsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const runId = Number(c.req.param("run_id"));
+  const runId = Number(c.req.valid("param").run_id);
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const check = await sql`SELECT id FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
   if (check.length === 0) return c.json({ error: "Eval run not found" }, 404);
@@ -105,15 +145,45 @@ evalRoutes.get("/runs/:run_id/trials", requireScope("eval:read"), async (c) => {
   return c.json({ run_id: runId, trials });
 });
 
-evalRoutes.post("/run", requireScope("eval:run"), async (c) => {
-  const body = await c.req.json();
-  const agentName = String(body.agent_name || "").trim();
-  const evalName = String(body.eval_name || "eval").trim();
-  const trials = Math.max(1, Math.min(20, Number(body.trials) || 3));
-  const tasks = Array.isArray(body.tasks) ? body.tasks : [];
+const startRunRoute = createRoute({
+  method: "post",
+  path: "/run",
+  tags: ["Eval"],
+  summary: "Start an eval run",
+  description: "Proxies to the runtime service to execute eval tasks against an agent.",
+  middleware: [requireScope("eval:run")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1).openapi({ example: "support-agent" }),
+            eval_name: z.string().default("eval"),
+            trials: z.number().int().min(1).max(20).default(3),
+            tasks: z.array(z.object({
+              name: z.string().optional(),
+              input: z.string(),
+              expected: z.string().optional(),
+              grader: z.string().default("contains"),
+            })).min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Eval run result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 500),
+    502: { description: "Runtime proxy failed", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
 
-  if (!agentName) return c.json({ error: "agent_name is required" }, 400);
-  if (tasks.length === 0) return c.json({ error: "tasks array is required" }, 400);
+evalRoutes.openapi(startRunRoute, async (c): Promise<any> => {
+  const body = c.req.valid("json");
+  const agentName = body.agent_name;
+  const evalName = body.eval_name;
+  const trials = body.trials;
+  const tasks = body.tasks;
 
   // Normalize tasks
   const edgeTasks = tasks.map((t: any) => ({
@@ -139,7 +209,7 @@ evalRoutes.post("/run", requireScope("eval:run"), async (c) => {
       const text = await resp.text();
       return c.json({ error: text.slice(0, 500) }, resp.status as any);
     }
-    return c.json(await resp.json());
+    return c.json(await resp.json() as Record<string, unknown>);
   } catch (e: any) {
     return c.json({ error: `Runtime eval proxy failed: ${e.message}` }, 502);
   }
@@ -147,20 +217,55 @@ evalRoutes.post("/run", requireScope("eval:run"), async (c) => {
 
 // ── Tasks (stored in R2) ─────────────────────────────────────────────
 
-evalRoutes.post("/tasks", requireScope("eval:run"), async (c) => {
+const createTasksRoute = createRoute({
+  method: "post",
+  path: "/tasks",
+  tags: ["Eval"],
+  summary: "Create a named task set",
+  middleware: [requireScope("eval:run")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            tasks: z.array(z.record(z.unknown())),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Tasks created", content: { "application/json": { schema: z.object({ created: z.string(), task_count: z.number() }) } } },
+    ...errorResponses(400),
+  },
+});
+
+evalRoutes.openapi(createTasksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const body = await c.req.json();
-  const name = String(body.name || "").trim();
-  const tasks = Array.isArray(body.tasks) ? body.tasks : [];
-  if (!name) return c.json({ error: "name is required" }, 400);
+  const { name, tasks } = c.req.valid("json");
 
   const key = `${orgId}/eval/tasks/${name}.json`;
   await r2PutJson(c.env.STORAGE, key, tasks);
   return c.json({ created: key, task_count: tasks.length });
 });
 
-evalRoutes.post("/tasks/upload", requireScope("eval:run"), async (c) => {
+const uploadTasksRoute = createRoute({
+  method: "post",
+  path: "/tasks/upload",
+  tags: ["Eval"],
+  summary: "Upload task files (JSON/JSONL)",
+  middleware: [requireScope("eval:run")],
+  request: {
+    body: { content: { "multipart/form-data": { schema: z.record(z.unknown()) } } },
+  },
+  responses: {
+    200: { description: "Upload result", content: { "application/json": { schema: z.object({ uploaded: z.array(z.record(z.unknown())), count: z.number() }) } } },
+  },
+});
+
+evalRoutes.openapi(uploadTasksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
   const formData = await c.req.formData();
@@ -193,16 +298,39 @@ evalRoutes.post("/tasks/upload", requireScope("eval:run"), async (c) => {
   return c.json({ uploaded, count: uploaded.length });
 });
 
-evalRoutes.delete("/runs/:run_id", requireScope("eval:run"), async (c) => {
+const deleteRunRoute = createRoute({
+  method: "delete",
+  path: "/runs/{run_id}",
+  tags: ["Eval"],
+  summary: "Delete an eval run",
+  middleware: [requireScope("eval:run")],
+  request: { params: z.object({ run_id: z.string() }) },
+  responses: {
+    200: { description: "Run deleted", content: { "application/json": { schema: z.object({ deleted: z.number() }) } } },
+  },
+});
+
+evalRoutes.openapi(deleteRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const runId = Number(c.req.param("run_id"));
+  const runId = Number(c.req.valid("param").run_id);
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`DELETE FROM eval_runs WHERE id = ${runId} AND org_id = ${orgId}`;
   return c.json({ deleted: runId });
 });
 
-evalRoutes.get("/tasks", requireScope("eval:read"), async (c) => {
+const listTasksRoute = createRoute({
+  method: "get",
+  path: "/tasks",
+  tags: ["Eval"],
+  summary: "List task sets",
+  middleware: [requireScope("eval:read")],
+  responses: {
+    200: { description: "Task list", content: { "application/json": { schema: z.object({ tasks: z.array(z.record(z.unknown())) }) } } },
+  },
+});
+
+evalRoutes.openapi(listTasksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
   const keys = await r2ListPrefix(c.env.STORAGE, `${orgId}/eval/tasks/`);
@@ -231,7 +359,18 @@ evalRoutes.get("/tasks", requireScope("eval:read"), async (c) => {
 
 // ── Datasets (R2) ───────────────────────────────────────────────────
 
-evalRoutes.get("/datasets", requireScope("eval:read"), async (c) => {
+const listDatasetsRoute = createRoute({
+  method: "get",
+  path: "/datasets",
+  tags: ["Eval"],
+  summary: "List eval datasets",
+  middleware: [requireScope("eval:read")],
+  responses: {
+    200: { description: "Dataset list", content: { "application/json": { schema: z.object({ datasets: z.array(z.record(z.unknown())) }) } } },
+  },
+});
+
+evalRoutes.openapi(listDatasetsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
   const keys = await r2ListPrefix(c.env.STORAGE, `${orgId}/eval/datasets/`);
@@ -252,33 +391,79 @@ evalRoutes.get("/datasets", requireScope("eval:read"), async (c) => {
   return c.json({ datasets });
 });
 
-evalRoutes.post("/datasets", requireScope("eval:run"), async (c) => {
+const createDatasetRoute = createRoute({
+  method: "post",
+  path: "/datasets",
+  tags: ["Eval"],
+  summary: "Create a dataset",
+  middleware: [requireScope("eval:run")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            items: z.array(z.record(z.unknown())),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Dataset saved", content: { "application/json": { schema: z.object({ saved: z.string(), items: z.number(), file: z.string() }) } } },
+    ...errorResponses(400),
+  },
+});
+
+evalRoutes.openapi(createDatasetRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const body = await c.req.json();
-  const name = String(body.name || "").trim();
-  const items = Array.isArray(body.items) ? body.items : [];
-  if (!name) return c.json({ error: "name is required" }, 400);
+  const { name, items } = c.req.valid("json");
 
   const key = `${orgId}/eval/datasets/${name}.json`;
   await r2PutJson(c.env.STORAGE, key, items);
   return c.json({ saved: name, items: items.length, file: key });
 });
 
-evalRoutes.get("/datasets/:name", requireScope("eval:read"), async (c) => {
+const getDatasetRoute = createRoute({
+  method: "get",
+  path: "/datasets/{name}",
+  tags: ["Eval"],
+  summary: "Get a dataset by name",
+  middleware: [requireScope("eval:read")],
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Dataset contents", content: { "application/json": { schema: z.object({ name: z.string(), items: z.array(z.record(z.unknown())) }) } } },
+    ...errorResponses(404),
+  },
+});
+
+evalRoutes.openapi(getDatasetRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const name = c.req.param("name");
+  const { name } = c.req.valid("param");
   const key = `${orgId}/eval/datasets/${name}.json`;
   const data = await r2GetJson(c.env.STORAGE, key);
   if (data === null) return c.json({ error: "Dataset not found" }, 404);
   return c.json({ name, items: data });
 });
 
-evalRoutes.delete("/datasets/:name", requireScope("eval:run"), async (c) => {
+const deleteDatasetRoute = createRoute({
+  method: "delete",
+  path: "/datasets/{name}",
+  tags: ["Eval"],
+  summary: "Delete a dataset",
+  middleware: [requireScope("eval:run")],
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Dataset deleted", content: { "application/json": { schema: z.object({ deleted: z.string() }) } } },
+  },
+});
+
+evalRoutes.openapi(deleteDatasetRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const name = c.req.param("name");
+  const { name } = c.req.valid("param");
   await c.env.STORAGE.delete(`${orgId}/eval/datasets/${name}.json`);
   return c.json({ deleted: name });
 });
@@ -289,21 +474,53 @@ function evaluatorsKey(orgId: string): string {
   return `${orgId}/eval/evaluators.json`;
 }
 
-evalRoutes.get("/evaluators", requireScope("eval:read"), async (c) => {
+const listEvaluatorsRoute = createRoute({
+  method: "get",
+  path: "/evaluators",
+  tags: ["Eval"],
+  summary: "List evaluators",
+  middleware: [requireScope("eval:read")],
+  responses: {
+    200: { description: "Evaluator list", content: { "application/json": { schema: z.object({ evaluators: z.array(z.record(z.unknown())) }) } } },
+  },
+});
+
+evalRoutes.openapi(listEvaluatorsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const key = evaluatorsKey(user.org_id);
   const data = (await r2GetJson(c.env.STORAGE, key)) || [];
   return c.json({ evaluators: Array.isArray(data) ? data : [] });
 });
 
-evalRoutes.post("/evaluators", requireScope("eval:run"), async (c) => {
+const createEvaluatorRoute = createRoute({
+  method: "post",
+  path: "/evaluators",
+  tags: ["Eval"],
+  summary: "Create or update an evaluator",
+  middleware: [requireScope("eval:run")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            kind: z.string().default("rule"),
+            config: z.record(z.unknown()).default({}),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Evaluator saved", content: { "application/json": { schema: z.object({ saved: z.string() }) } } },
+    ...errorResponses(400),
+  },
+});
+
+evalRoutes.openapi(createEvaluatorRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const key = evaluatorsKey(user.org_id);
-  const body = await c.req.json();
-  const name = String(body.name || "").trim();
-  const kind = String(body.kind || "rule");
-  const config = body.config || {};
-  if (!name) return c.json({ error: "name is required" }, 400);
+  const { name, kind, config } = c.req.valid("json");
 
   let list = ((await r2GetJson(c.env.STORAGE, key)) || []) as any[];
   if (!Array.isArray(list)) list = [];
@@ -313,10 +530,22 @@ evalRoutes.post("/evaluators", requireScope("eval:run"), async (c) => {
   return c.json({ saved: name });
 });
 
-evalRoutes.delete("/evaluators/:name", requireScope("eval:run"), async (c) => {
+const deleteEvaluatorRoute = createRoute({
+  method: "delete",
+  path: "/evaluators/{name}",
+  tags: ["Eval"],
+  summary: "Delete an evaluator",
+  middleware: [requireScope("eval:run")],
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Evaluator deleted", content: { "application/json": { schema: z.object({ deleted: z.string() }) } } },
+  },
+});
+
+evalRoutes.openapi(deleteEvaluatorRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const key = evaluatorsKey(user.org_id);
-  const name = c.req.param("name");
+  const { name } = c.req.valid("param");
   let list = ((await r2GetJson(c.env.STORAGE, key)) || []) as any[];
   if (!Array.isArray(list)) list = [];
   list = list.filter((e: any) => e?.name !== name);
@@ -330,26 +559,55 @@ function experimentsKey(orgId: string): string {
   return `${orgId}/eval/experiments.json`;
 }
 
-evalRoutes.get("/experiments", requireScope("eval:read"), async (c) => {
+const listExperimentsRoute = createRoute({
+  method: "get",
+  path: "/experiments",
+  tags: ["Eval"],
+  summary: "List experiments",
+  middleware: [requireScope("eval:read")],
+  responses: {
+    200: { description: "Experiment list", content: { "application/json": { schema: z.object({ experiments: z.array(z.record(z.unknown())) }) } } },
+  },
+});
+
+evalRoutes.openapi(listExperimentsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const key = experimentsKey(user.org_id);
   const data = (await r2GetJson(c.env.STORAGE, key)) || [];
   return c.json({ experiments: Array.isArray(data) ? data : [] });
 });
 
-evalRoutes.post("/experiments", requireScope("eval:run"), async (c) => {
+const createExperimentRoute = createRoute({
+  method: "post",
+  path: "/experiments",
+  tags: ["Eval"],
+  summary: "Create an experiment",
+  middleware: [requireScope("eval:run")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            agent_name: z.string().min(1),
+            dataset: z.string().min(1),
+            evaluator: z.string().min(1),
+            metadata: z.record(z.unknown()).default({}),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Experiment created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400),
+  },
+});
+
+evalRoutes.openapi(createExperimentRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const key = experimentsKey(user.org_id);
-  const body = await c.req.json();
-  const name = String(body.name || "").trim();
-  const agentName = String(body.agent_name || "").trim();
-  const dataset = String(body.dataset || "").trim();
-  const evaluator = String(body.evaluator || "").trim();
-  const metadata = body.metadata || {};
-
-  if (!name || !agentName || !dataset || !evaluator) {
-    return c.json({ error: "name, agent_name, dataset, and evaluator are required" }, 400);
-  }
+  const { name, agent_name: agentName, dataset, evaluator, metadata } = c.req.valid("json");
 
   let list = ((await r2GetJson(c.env.STORAGE, key)) || []) as any[];
   if (!Array.isArray(list)) list = [];

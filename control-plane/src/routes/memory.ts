@@ -2,14 +2,13 @@
  * Memory router — episodic, semantic (facts), procedural, working memory.
  * Ported from agentos/api/routers/memory.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const memoryRoutes = new Hono<R>();
+export const memoryRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(16);
@@ -19,11 +18,33 @@ function genId(): string {
 
 // ── Episodic Memory ──────────────────────────────────────────────────
 
-memoryRoutes.get("/:agent_name/episodes", requireScope("memory:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const listEpisodesRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/episodes",
+  tags: ["Memory"],
+  summary: "List episodic memories for an agent",
+  middleware: [requireScope("memory:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+      query: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Episode list",
+      content: { "application/json": { schema: z.object({ episodes: z.array(z.record(z.unknown())), total: z.number() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(listEpisodesRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
+  const q = c.req.valid("query");
   const user = c.get("user");
-  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
-  const query = c.req.query("query") || "";
+  const limit = Math.max(1, Math.min(200, Number(q.limit) || 50));
+  const query = q.query || "";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
@@ -48,10 +69,38 @@ memoryRoutes.get("/:agent_name/episodes", requireScope("memory:read"), async (c)
   return c.json({ episodes: rows, total: rows.length });
 });
 
-memoryRoutes.post("/:agent_name/episodes", requireScope("memory:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const createEpisodeRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/episodes",
+  tags: ["Memory"],
+  summary: "Create an episodic memory entry",
+  middleware: [requireScope("memory:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            input_text: z.string().default(""),
+            output_text: z.string().default(""),
+            outcome: z.string().default(""),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Episode created",
+      content: { "application/json": { schema: z.object({ id: z.string(), created: z.boolean() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(createEpisodeRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const inputText = String(body.input_text || "");
   const outputText = String(body.output_text || "");
   const outcome = String(body.outcome || "");
@@ -75,8 +124,25 @@ memoryRoutes.post("/:agent_name/episodes", requireScope("memory:write"), async (
   return c.json({ id: episodeId, created: true });
 });
 
-memoryRoutes.delete("/:agent_name/episodes", requireScope("memory:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const clearEpisodesRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}/episodes",
+  tags: ["Memory"],
+  summary: "Clear all episodic memories for an agent",
+  middleware: [requireScope("memory:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Episodes cleared",
+      content: { "application/json": { schema: z.object({ cleared: z.boolean() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(clearEpisodesRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -91,11 +157,33 @@ memoryRoutes.delete("/:agent_name/episodes", requireScope("memory:write"), async
 
 // ── Semantic Memory (Facts) ──────────────────────────────────────────
 
-memoryRoutes.get("/:agent_name/facts", requireScope("memory:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const listFactsRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/facts",
+  tags: ["Memory"],
+  summary: "List semantic memory facts for an agent",
+  middleware: [requireScope("memory:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    query: z.object({
+      query: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Fact list",
+      content: { "application/json": { schema: z.object({ facts: z.array(z.record(z.unknown())), total: z.number() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(listFactsRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
+  const q = c.req.valid("query");
   const user = c.get("user");
-  const query = c.req.query("query") || "";
-  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
+  const query = q.query || "";
+  const limit = Math.max(1, Math.min(200, Number(q.limit) || 50));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
@@ -125,10 +213,37 @@ memoryRoutes.get("/:agent_name/facts", requireScope("memory:read"), async (c) =>
   return c.json({ facts, total: facts.length });
 });
 
-memoryRoutes.post("/:agent_name/facts", requireScope("memory:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const createFactRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/facts",
+  tags: ["Memory"],
+  summary: "Store a semantic memory fact",
+  middleware: [requireScope("memory:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            key: z.string().min(1),
+            value: z.string().default(""),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Fact stored",
+      content: { "application/json": { schema: z.object({ key: z.string(), stored: z.boolean() }) } },
+    },
+    ...errorResponses(400, 404),
+  },
+});
+memoryRoutes.openapi(createFactRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const key = String(body.key || "").trim();
   const value = String(body.value || "");
   if (!key) return c.json({ error: "key is required" }, 400);
@@ -150,10 +265,26 @@ memoryRoutes.post("/:agent_name/facts", requireScope("memory:write"), async (c) 
   return c.json({ key, stored: true });
 });
 
-memoryRoutes.delete("/:agent_name/facts/:key", requireScope("memory:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const deleteFactRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}/facts/{key}",
+  tags: ["Memory"],
+  summary: "Delete a single semantic memory fact",
+  middleware: [requireScope("memory:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), key: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Fact deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.string() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(deleteFactRoute, async (c): Promise<any> => {
+  const { agent_name: agentName, key } = c.req.valid("param");
   const user = c.get("user");
-  const key = c.req.param("key");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
@@ -165,8 +296,25 @@ memoryRoutes.delete("/:agent_name/facts/:key", requireScope("memory:write"), asy
   return c.json({ deleted: key });
 });
 
-memoryRoutes.delete("/:agent_name/facts", requireScope("memory:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const clearFactsRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}/facts",
+  tags: ["Memory"],
+  summary: "Clear all semantic memory facts for an agent",
+  middleware: [requireScope("memory:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Facts cleared",
+      content: { "application/json": { schema: z.object({ cleared: z.boolean() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(clearFactsRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -181,10 +329,31 @@ memoryRoutes.delete("/:agent_name/facts", requireScope("memory:write"), async (c
 
 // ── Procedural Memory ────────────────────────────────────────────────
 
-memoryRoutes.get("/:agent_name/procedures", requireScope("memory:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const listProceduresRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/procedures",
+  tags: ["Memory"],
+  summary: "List procedural memories for an agent",
+  middleware: [requireScope("memory:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Procedure list",
+      content: { "application/json": { schema: z.object({ procedures: z.array(z.record(z.unknown())), total: z.number() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(listProceduresRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
+  const q = c.req.valid("query");
   const user = c.get("user");
-  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
+  const limit = Math.max(1, Math.min(200, Number(q.limit) || 50));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const agentCheck = await sql`
@@ -210,8 +379,25 @@ memoryRoutes.get("/:agent_name/procedures", requireScope("memory:read"), async (
   return c.json({ procedures, total: procedures.length });
 });
 
-memoryRoutes.delete("/:agent_name/procedures", requireScope("memory:write"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const clearProceduresRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}/procedures",
+  tags: ["Memory"],
+  summary: "Clear all procedural memories for an agent",
+  middleware: [requireScope("memory:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Procedures cleared",
+      content: { "application/json": { schema: z.object({ cleared: z.boolean() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(clearProceduresRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -226,8 +412,25 @@ memoryRoutes.delete("/:agent_name/procedures", requireScope("memory:write"), asy
 
 // ── Working Memory (not persisted, returns empty for edge architecture) ──
 
-memoryRoutes.get("/:agent_name/working", requireScope("memory:read"), async (c) => {
-  const agentName = c.req.param("agent_name");
+const getWorkingMemoryRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/working",
+  tags: ["Memory"],
+  summary: "Get working memory snapshot for an agent",
+  middleware: [requireScope("memory:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Working memory snapshot",
+      content: { "application/json": { schema: z.object({ agent: z.string(), working_memory: z.record(z.unknown()), note: z.string().optional() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+memoryRoutes.openapi(getWorkingMemoryRoute, async (c): Promise<any> => {
+  const { agent_name: agentName } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

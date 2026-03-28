@@ -5,15 +5,15 @@
  * webhook_failures, and batch_failures. When a threshold is breached,
  * a webhook is fired and an alert_history row is recorded.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { deliverWebhook } from "../logic/webhook-delivery";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const alertRoutes = new Hono<R>();
+export const alertRoutes = createOpenAPIRouter();
 
 const VALID_TYPES = new Set([
   "error_rate",
@@ -26,7 +26,18 @@ const VALID_TYPES = new Set([
 const VALID_COMPARISONS = new Set(["gte", "lte", "gt", "lt"]);
 
 // ── GET / — List alert configs for the org ────────────────────────────────
-alertRoutes.get("/", requireScope("observability:write"), async (c) => {
+const listAlertsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Alerts"],
+  summary: "List alert configs for the org",
+  middleware: [requireScope("observability:write")],
+  responses: {
+    200: { description: "Alert config list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+alertRoutes.openapi(listAlertsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -40,9 +51,39 @@ alertRoutes.get("/", requireScope("observability:write"), async (c) => {
 });
 
 // ── POST / — Create alert config ──────────────────────────────────────────
-alertRoutes.post("/", requireScope("observability:write"), async (c) => {
+const createAlertRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Alerts"],
+  summary: "Create alert config",
+  middleware: [requireScope("observability:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            type: z.string(),
+            threshold: z.number(),
+            comparison: z.string().optional(),
+            window_minutes: z.number().optional(),
+            webhook_url: z.string().optional(),
+            webhook_secret: z.string().optional(),
+            agent_name: z.string().optional(),
+            cooldown_minutes: z.number().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: { description: "Alert config created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403),
+  },
+});
+alertRoutes.openapi(createAlertRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
 
   const name = String(body.name || "").trim();
   const type = String(body.type || "");
@@ -70,11 +111,43 @@ alertRoutes.post("/", requireScope("observability:write"), async (c) => {
   return c.json({ alert: rows[0] }, 201);
 });
 
-// ── PUT /:id — Update alert config ────────────────────────────────────────
-alertRoutes.put("/:id", requireScope("observability:write"), async (c) => {
+// ── PUT /{id} — Update alert config ────────────────────────────────────────
+const updateAlertRoute = createRoute({
+  method: "put",
+  path: "/{id}",
+  tags: ["Alerts"],
+  summary: "Update alert config",
+  middleware: [requireScope("observability:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().optional(),
+            type: z.string().optional(),
+            threshold: z.number().optional(),
+            comparison: z.string().optional(),
+            window_minutes: z.number().optional(),
+            webhook_url: z.string().optional(),
+            webhook_secret: z.string().optional(),
+            agent_name: z.string().optional(),
+            cooldown_minutes: z.number().optional(),
+            enabled: z.boolean().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Alert config updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403, 404),
+  },
+});
+alertRoutes.openapi(updateAlertRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const id = c.req.param("id");
-  const body = await c.req.json();
+  const { id } = c.req.valid("param");
+  const body = c.req.valid("json");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -133,10 +206,24 @@ alertRoutes.put("/:id", requireScope("observability:write"), async (c) => {
   return c.json({ alert: rows[0] });
 });
 
-// ── DELETE /:id — Delete alert config ─────────────────────────────────────
-alertRoutes.delete("/:id", requireScope("observability:write"), async (c) => {
+// ── DELETE /{id} — Delete alert config ─────────────────────────────────────
+const deleteAlertRoute = createRoute({
+  method: "delete",
+  path: "/{id}",
+  tags: ["Alerts"],
+  summary: "Delete alert config",
+  middleware: [requireScope("observability:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: { description: "Alert config deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+alertRoutes.openapi(deleteAlertRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const id = c.req.param("id");
+  const { id } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   await sql`DELETE FROM alert_configs WHERE id = ${id} AND org_id = ${user.org_id}`;
@@ -145,11 +232,28 @@ alertRoutes.delete("/:id", requireScope("observability:write"), async (c) => {
 });
 
 // ── GET /history — Recent alert history (last 7 days) ─────────────────────
-alertRoutes.get("/history", requireScope("observability:write"), async (c) => {
+const alertHistoryRoute = createRoute({
+  method: "get",
+  path: "/history",
+  tags: ["Alerts"],
+  summary: "Recent alert history (last 7 days)",
+  middleware: [requireScope("observability:write")],
+  request: {
+    query: z.object({
+      limit: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Alert history", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 403),
+  },
+});
+alertRoutes.openapi(alertHistoryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-  const limit = Math.min(Number(c.req.query("limit") || 100), 500);
+  const query = c.req.valid("query");
+  const limit = Math.min(Number(query.limit || 100), 500);
   const since = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
 
   const rows = await sql`
@@ -165,10 +269,24 @@ alertRoutes.get("/history", requireScope("observability:write"), async (c) => {
   return c.json({ history: rows });
 });
 
-// ── POST /:id/test — Fire a test alert ────────────────────────────────────
-alertRoutes.post("/:id/test", requireScope("observability:write"), async (c) => {
+// ── POST /{id}/test — Fire a test alert ────────────────────────────────────
+const testAlertRoute = createRoute({
+  method: "post",
+  path: "/{id}/test",
+  tags: ["Alerts"],
+  summary: "Fire a test alert",
+  middleware: [requireScope("observability:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: { description: "Test alert result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403, 404),
+  },
+});
+alertRoutes.openapi(testAlertRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const id = c.req.param("id");
+  const { id } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

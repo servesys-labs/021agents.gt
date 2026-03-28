@@ -2,12 +2,13 @@
  * Agents router — CRUD, versions, clone, import/export, create-from-description.
  * Ported from agentos/api/routers/agents.py.
  */
-import { Hono } from "hono";
-import { z } from "zod";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
 import { requireScope } from "../middleware/auth";
-import { getDbForOrg } from "../db/client";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, AgentCreateBody, AgentTemplate, AgentSummary, errorResponses } from "../schemas/openapi";
+import { getDb, getDbForOrg } from "../db/client";
 import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from "../logic/graph-lint";
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
@@ -15,12 +16,20 @@ import { defaultNoCodeGraph, buildFromDescription, recommendTools } from "../log
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const agentRoutes = new Hono<R>();
+export const agentRoutes = createOpenAPIRouter();
 
 // ── GET /agents/templates — list pre-built agent templates ────────────
 
-agentRoutes.get("/templates", (c) => {
+const listTemplatesRoute = createRoute({
+  method: "get",
+  path: "/templates",
+  tags: ["Agents"],
+  summary: "List agent templates",
+  responses: {
+    200: { description: "Template list", content: { "application/json": { schema: z.object({ templates: z.array(AgentTemplate) }) } } },
+  },
+});
+agentRoutes.openapi(listTemplatesRoute, (c) => {
   return c.json({
     templates: AGENT_TEMPLATES.map((t) => ({
       id: t.id,
@@ -33,10 +42,22 @@ agentRoutes.get("/templates", (c) => {
   });
 });
 
-agentRoutes.get("/templates/:id", (c) => {
-  const template = getTemplateById(c.req.param("id"));
+const getTemplateRoute = createRoute({
+  method: "get",
+  path: "/templates/{id}",
+  tags: ["Agents"],
+  summary: "Get agent template by ID",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: { description: "Template details", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+agentRoutes.openapi(getTemplateRoute, (c): any => {
+  const { id } = c.req.valid("param");
+  const template = getTemplateById(id);
   if (!template) return c.json({ error: "Template not found" }, 404);
-  return c.json(template);
+  return c.json(template as any);
 });
 
 // ── Helper: Notify runtime of config changes ─────────────────────────
@@ -98,41 +119,7 @@ async function listAgentsViaDataProxy(
   }
 }
 
-// ── Zod schemas ──────────────────────────────────────────────────────
-
-const VALID_REASONING_STRATEGIES = [
-  "step-back", "chain-of-thought", "plan-then-execute",
-  "verify-then-respond", "decompose",
-] as const;
-
-const AgentCreateSchema = z.object({
-  name: z.string().min(1).max(128),
-  description: z.string().max(2000).default(""),
-  system_prompt: z.string().max(50000).default("You are a helpful AI assistant."),
-  personality: z.string().max(2000).default(""),
-  model: z.string().max(128).default(""),
-  max_tokens: z.number().int().min(1).max(200000).optional(),
-  temperature: z.number().min(0).max(2).optional(),
-  tools: z.array(z.string()).default([]),
-  max_turns: z.number().int().min(1).max(1000).default(50),
-  timeout_seconds: z.number().int().min(1).max(3600).optional(),
-  budget_limit_usd: z.number().min(0).max(10000).default(10),
-  tags: z.array(z.string()).default([]),
-  graph: z.record(z.unknown()).nullable().optional().default(null),
-  strict_graph_lint: z.boolean().default(true),
-  auto_graph: z.boolean().default(false),
-  reasoning_strategy: z.enum(VALID_REASONING_STRATEGIES).optional(),
-  // Full package fields (from meta-agent)
-  sub_agents: z.array(z.record(z.unknown())).optional(),
-  skills: z.array(z.record(z.unknown())).optional(),
-  codemode_snippets: z.array(z.record(z.unknown())).optional(),
-  guardrails: z.array(z.record(z.unknown())).optional(),
-  governance: z.record(z.unknown()).optional(),
-  eval_config: z.record(z.unknown()).optional(),
-  release_strategy: z.record(z.unknown()).optional(),
-  mcp_connectors: z.array(z.record(z.unknown())).optional(),
-  deploy_policy: z.record(z.unknown()).optional(),
-});
+// ── Zod schemas (local-only — shared schemas imported from schemas/openapi) ──
 
 const CreateFromDescriptionSchema = z.object({
   description: z.string().min(1).max(5000),
@@ -270,11 +257,20 @@ function parseConfig(raw: unknown): Record<string, unknown> {
 // ── Routes ───────────────────────────────────────────────────────────
 
 // GET /agents — list all agents for the org
-agentRoutes.get("/", async (c) => {
+const listAgentsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Agents"],
+  summary: "List all agents for the org",
+  responses: {
+    200: { description: "Agent list", content: { "application/json": { schema: z.array(AgentSummary) } } },
+  },
+});
+agentRoutes.openapi(listAgentsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const proxied = await listAgentsViaDataProxy(c.env, user);
   if (proxied) {
-    return c.json(proxied.map((r) => agentResponse(r as Record<string, unknown>)));
+    return c.json(proxied.map((r) => agentResponse(r as Record<string, unknown>)) as any);
   }
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -286,12 +282,23 @@ agentRoutes.get("/", async (c) => {
     ORDER BY created_at DESC
   `;
 
-  return c.json(rows.map((r) => agentResponse(r as Record<string, unknown>)));
+  return c.json(rows.map((r) => agentResponse(r as Record<string, unknown>)) as any);
 });
 
 // GET /agents/:name — get single agent
-agentRoutes.get("/:name", async (c) => {
-  const { name } = c.req.param();
+const getAgentRoute = createRoute({
+  method: "get",
+  path: "/{name}",
+  tags: ["Agents"],
+  summary: "Get a single agent by name",
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Agent details", content: { "application/json": { schema: AgentSummary } } },
+    ...errorResponses(404),
+  },
+});
+agentRoutes.openapi(getAgentRoute, async (c): Promise<any> => {
+  const { name } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -306,21 +313,27 @@ agentRoutes.get("/:name", async (c) => {
     return c.json({ error: `Agent '${name}' not found` }, 404);
   }
 
-  return c.json(agentResponse(rows[0] as Record<string, unknown>));
+  return c.json(agentResponse(rows[0] as Record<string, unknown>) as any);
 });
 
 // POST /agents — create agent
-agentRoutes.post(
-  "/",
-  requireScope("agents:write"),
-  async (c) => {
-    const body = await c.req.json();
-    const parsed = AgentCreateSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
-    }
-
-    const req = parsed.data;
+const createAgentRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Agents"],
+  summary: "Create a new agent",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: { content: { "application/json": { schema: AgentCreateBody } } },
+  },
+  responses: {
+    201: { description: "Agent created", content: { "application/json": { schema: AgentSummary } } },
+    ...errorResponses(400, 500),
+    409: { description: "Agent already exists", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
+    const req = c.req.valid("json");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -440,23 +453,28 @@ agentRoutes.post(
     };
     if (req.reasoning_strategy) response.reasoning_strategy = req.reasoning_strategy;
     if (packageErrors.length > 0) response.package_errors = packageErrors;
-    return c.json(response, 201);
-  },
-);
+    return c.json(response as any, 201);
+});
 
 // PUT /agents/:name — update agent
-agentRoutes.put(
-  "/:name",
-  requireScope("agents:write"),
-  async (c) => {
-    const { name } = c.req.param();
-    const body = await c.req.json();
-    const parsed = AgentCreateSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
-    }
-
-    const req = parsed.data;
+const updateAgentRoute = createRoute({
+  method: "put",
+  path: "/{name}",
+  tags: ["Agents"],
+  summary: "Update an existing agent",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    body: { content: { "application/json": { schema: AgentCreateBody } } },
+  },
+  responses: {
+    200: { description: "Agent updated", content: { "application/json": { schema: AgentSummary } } },
+    ...errorResponses(400, 404, 500),
+  },
+});
+agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
+    const { name } = c.req.valid("param");
+    const req = c.req.valid("json");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -556,16 +574,26 @@ agentRoutes.put(
       tools: Array.isArray(existingConfig.tools) ? existingConfig.tools : [],
       tags: Array.isArray(existingConfig.tags) ? existingConfig.tags : [],
       version: newVersion,
-    });
-  },
-);
+    } as any);
+});
 
 // DELETE /agents/:name — delete agent with cascading cleanup
-agentRoutes.delete(
-  "/:name",
-  requireScope("agents:write"),
-  async (c) => {
-    const { name } = c.req.param();
+const deleteAgentRoute = createRoute({
+  method: "delete",
+  path: "/{name}",
+  tags: ["Agents"],
+  summary: "Delete an agent with cascading cleanup",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+  },
+  responses: {
+    200: { description: "Agent deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
+    const { name } = c.req.valid("param");
     const hardDelete = c.req.query("hard_delete") === "true";
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -661,16 +689,23 @@ agentRoutes.delete(
       hard_delete: hardDelete,
       db_cleanup: counts,
       total_records_affected: totalRecords,
-    });
-  },
-);
+    } as any);
+});
 
 // GET /agents/:name/versions — list versions
-agentRoutes.get(
-  "/:name/versions",
-  requireScope("agents:read"),
-  async (c) => {
-    const agentName = c.req.param("name");
+const listVersionsRoute = createRoute({
+  method: "get",
+  path: "/{name}/versions",
+  tags: ["Agents"],
+  summary: "List agent versions",
+  middleware: [requireScope("agents:read")],
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Version list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+agentRoutes.openapi(listVersionsRoute, async (c): Promise<any> => {
+    const { name: agentName } = c.req.valid("param");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -692,13 +727,23 @@ agentRoutes.get(
       metadata: { version: row.version, source: "agent_versions" },
     }));
 
-    return c.json({ versions, total: versions.length });
-  },
-);
+    return c.json({ versions, total: versions.length } as any);
+});
 
 // GET /agents/:name/tools — list tools for agent
-agentRoutes.get("/:name/tools", async (c) => {
-  const { name } = c.req.param();
+const listToolsRoute = createRoute({
+  method: "get",
+  path: "/{name}/tools",
+  tags: ["Agents"],
+  summary: "List tools for an agent",
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Tool list", content: { "application/json": { schema: z.object({ tools: z.array(z.string()) }) } } },
+    ...errorResponses(404),
+  },
+});
+agentRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
+  const { name } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -716,8 +761,19 @@ agentRoutes.get("/:name/tools", async (c) => {
 });
 
 // GET /agents/:name/config — get raw config
-agentRoutes.get("/:name/config", async (c) => {
-  const { name } = c.req.param();
+const getConfigRoute = createRoute({
+  method: "get",
+  path: "/{name}/config",
+  tags: ["Agents"],
+  summary: "Get raw agent config",
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Agent config", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+agentRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
+  const { name } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -730,17 +786,29 @@ agentRoutes.get("/:name/config", async (c) => {
     return c.json({ error: `Agent '${name}' not found` }, 404);
   }
 
-  return c.json(parseConfig((rows[0] as Record<string, unknown>).config_json));
+  return c.json(parseConfig((rows[0] as Record<string, unknown>).config_json) as any);
 });
 
 // POST /agents/:name/clone — clone agent with new name
-agentRoutes.post("/:name/clone", requireScope("agents:write"), async (c) => {
-  const { name } = c.req.param();
-  const body = await c.req.json();
-  const newName = z.string().min(1).max(128).safeParse(body.new_name);
-  if (!newName.success) {
-    return c.json({ error: "new_name is required (1-128 chars)" }, 400);
-  }
+const cloneAgentRoute = createRoute({
+  method: "post",
+  path: "/{name}/clone",
+  tags: ["Agents"],
+  summary: "Clone an agent with a new name",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ new_name: z.string().min(1).max(128) }) } } },
+  },
+  responses: {
+    201: { description: "Agent cloned", content: { "application/json": { schema: AgentSummary } } },
+    ...errorResponses(400, 404),
+    409: { description: "Agent already exists", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
+  const { name } = c.req.valid("param");
+  const { new_name: newNameValue } = c.req.valid("json");
 
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -757,14 +825,14 @@ agentRoutes.post("/:name/clone", requireScope("agents:write"), async (c) => {
 
   // Check target name doesn't exist
   const existCheck = await sql`
-    SELECT name FROM agents WHERE name = ${newName.data} AND org_id = ${user.org_id} LIMIT 1
+    SELECT name FROM agents WHERE name = ${newNameValue} AND org_id = ${user.org_id} LIMIT 1
   `;
   if (existCheck.length > 0) {
-    return c.json({ error: `Agent '${newName.data}' already exists` }, 409);
+    return c.json({ error: `Agent '${newNameValue}' already exists` }, 409);
   }
 
   const config = parseConfig((rows[0] as Record<string, unknown>).config_json);
-  config.name = newName.data;
+  config.name = newNameValue;
   config.version = "0.1.0";
 
   const clonePolicy = applyDeployPolicyToConfigJson(config);
@@ -783,7 +851,7 @@ agentRoutes.post("/:name/clone", requireScope("agents:write"), async (c) => {
     INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
     VALUES (
       ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
-      ${newName.data},
+      ${newNameValue},
       ${user.org_id},
       ${user.project_id || ""},
       ${JSON.stringify(config)},
@@ -795,27 +863,33 @@ agentRoutes.post("/:name/clone", requireScope("agents:write"), async (c) => {
   `;
 
   return c.json({
-    name: newName.data,
+    name: newNameValue,
     description: config.description ?? "",
     model: config.model ?? "",
     tools: Array.isArray(config.tools) ? config.tools : [],
     tags: Array.isArray(config.tags) ? config.tags : [],
     version: "0.1.0",
-  }, 201);
+  } as any, 201);
 });
 
 // POST /agents/import — import agent from JSON config
-agentRoutes.post(
-  "/import",
-  requireScope("agents:write"),
-  async (c) => {
-    const body = await c.req.json();
-    const parsed = ImportAgentSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
-    }
-
-    const config = parsed.data.config;
+const importAgentRoute = createRoute({
+  method: "post",
+  path: "/import",
+  tags: ["Agents"],
+  summary: "Import agent from JSON config",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: { content: { "application/json": { schema: ImportAgentSchema } } },
+  },
+  responses: {
+    200: { description: "Agent imported", content: { "application/json": { schema: AgentSummary } } },
+    ...errorResponses(400, 500),
+    422: { description: "Graph lint failed", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
+    const { config } = c.req.valid("json");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -879,13 +953,23 @@ agentRoutes.post(
       tools: Array.isArray(config.tools) ? config.tools : [],
       tags: Array.isArray(config.tags) ? config.tags : [],
       version: config.version ?? "0.1.0",
-    });
-  },
-);
+    } as any);
+});
 
 // GET /agents/:name/export — export agent config
-agentRoutes.get("/:name/export", async (c) => {
-  const { name } = c.req.param();
+const exportAgentRoute = createRoute({
+  method: "get",
+  path: "/{name}/export",
+  tags: ["Agents"],
+  summary: "Export agent config as JSON",
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Agent config export", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+agentRoutes.openapi(exportAgentRoute, async (c): Promise<any> => {
+  const { name } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -898,7 +982,7 @@ agentRoutes.get("/:name/export", async (c) => {
     return c.json({ error: `Agent '${name}' not found` }, 404);
   }
 
-  return c.json({ agent: parseConfig((rows[0] as Record<string, unknown>).config_json) });
+  return c.json({ agent: parseConfig((rows[0] as Record<string, unknown>).config_json) } as any);
 });
 
 /* ── persistAgentPackage ─────────────────────────────────────────── */
@@ -909,7 +993,7 @@ agentRoutes.get("/:name/export", async (c) => {
  */
 
 async function persistAgentPackage(
-  sql: ReturnType<typeof getDb>,
+  sql: Awaited<ReturnType<typeof getDb>>,
   agentName: string,
   orgId: string,
   projectId: string,
@@ -1017,17 +1101,25 @@ async function persistAgentPackage(
 }
 
 // POST /agents/create-from-description — LLM-powered agent creation
-agentRoutes.post(
-  "/create-from-description",
-  requireScope("agents:write"),
-  async (c) => {
-    const body = await c.req.json();
-    const parsed = CreateFromDescriptionSchema.safeParse(body);
-    if (!parsed.success) {
-      return c.json({ error: "Validation failed", details: parsed.error.flatten() }, 400);
-    }
-
-    const req = parsed.data;
+const createFromDescriptionRoute = createRoute({
+  method: "post",
+  path: "/create-from-description",
+  tags: ["Agents"],
+  summary: "Create agent from natural language description",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: { content: { "application/json": { schema: CreateFromDescriptionSchema } } },
+  },
+  responses: {
+    201: { description: "Agent created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    200: { description: "Draft returned", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 500),
+    409: { description: "Gate-pack hold", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    422: { description: "Graph lint or validation failed", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
+    const req = c.req.valid("json");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -1241,7 +1333,7 @@ agentRoutes.post(
       if (req.include_autofix) payload.graph_autofix = graphAutofix;
       if (req.include_gate_pack) payload.gate_pack = gatePack;
       if (req.include_contracts_validate) payload.contracts_validate = contractsValidate;
-      return c.json(payload);
+      return c.json(payload as any);
     }
 
     // Gate-pack hold enforcement
@@ -1349,9 +1441,8 @@ agentRoutes.post(
     if (req.include_contracts_validate) payload.contracts_validate = contractsValidate;
     payload.hold_override_applied = holdOverrideApplied;
 
-    return c.json(payload, 201);
-  },
-);
+    return c.json(payload as any, 201);
+});
 
 // ── Runtime endpoints — moved to edge ────────────────────────────────
 
@@ -1381,13 +1472,22 @@ agentRoutes.post("/:name/run/:session_id/cancel", (c) => {
 
 // ── Version Restore (auth-protected) ───────────────────────────────────────
 
-agentRoutes.post(
-  "/:name/versions/:commitId/restore",
-  requireScope("agents:write"),
-  async (c) => {
+const restoreVersionRoute = createRoute({
+  method: "post",
+  path: "/{name}/versions/{commitId}/restore",
+  tags: ["Agents"],
+  summary: "Restore agent to a previous version",
+  middleware: [requireScope("agents:write")],
+  request: { params: z.object({ name: z.string(), commitId: z.string() }) },
+  responses: {
+    200: { description: "Version restored", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 404),
+    422: { description: "Deploy policy validation failed", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const agentName = c.req.param("name");
-    const commitId = c.req.param("commitId");
+    const { name: agentName, commitId } = c.req.valid("param");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     const rows = await sql`
@@ -1434,18 +1534,25 @@ agentRoutes.post(
       user.user_id,
     );
 
-    return c.json({ restored: true, version: rows[0].version });
-  },
-);
+    return c.json({ restored: true, version: rows[0].version } as any);
+});
 
 // ── Trash / Soft Delete (auth-protected) ──────────────────────────────────
 
-agentRoutes.get(
-  "/:name/trash",
-  requireScope("agents:read"),
-  async (c) => {
+const listTrashRoute = createRoute({
+  method: "get",
+  path: "/{name}/trash",
+  tags: ["Agents"],
+  summary: "List soft-deleted versions of an agent",
+  middleware: [requireScope("agents:read")],
+  request: { params: z.object({ name: z.string() }) },
+  responses: {
+    200: { description: "Trash list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+agentRoutes.openapi(listTrashRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const agentName = c.req.param("name");
+    const { name: agentName } = c.req.valid("param");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     const rows = await sql`
@@ -1464,17 +1571,23 @@ agentRoutes.get(
       reason: "Soft-deleted",
     }));
 
-    return c.json({ trash });
-  },
-);
+    return c.json({ trash } as any);
+});
 
-agentRoutes.post(
-  "/:name/trash/:trashId/restore",
-  requireScope("agents:write"),
-  async (c) => {
+const restoreTrashRoute = createRoute({
+  method: "post",
+  path: "/{name}/trash/{trashId}/restore",
+  tags: ["Agents"],
+  summary: "Restore a soft-deleted agent from trash",
+  middleware: [requireScope("agents:write")],
+  request: { params: z.object({ name: z.string(), trashId: z.string() }) },
+  responses: {
+    200: { description: "Agent restored", content: { "application/json": { schema: z.record(z.unknown()) } } },
+  },
+});
+agentRoutes.openapi(restoreTrashRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const agentName = c.req.param("name");
-    const trashId = c.req.param("trashId");
+    const { name: agentName, trashId } = c.req.valid("param");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     await sql`
@@ -1482,6 +1595,5 @@ agentRoutes.post(
       WHERE agent_id = ${trashId} AND org_id = ${user.org_id} AND is_active = 0
     `;
 
-    return c.json({ restored: true });
-  },
-);
+    return c.json({ restored: true } as any);
+});

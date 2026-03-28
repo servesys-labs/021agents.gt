@@ -1,14 +1,14 @@
 /**
  * Runtime proxy router — forward tool calls to RUNTIME service binding.
  * Ported from agentos/api/routers/runtime_proxy.py
- * 
+ *
  * Includes: health checks, graceful degradation, circuit breaker patterns
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
+export const runtimeProxyRoutes = createOpenAPIRouter();
 
 // Runtime health state (in-memory, per-worker)
 const runtimeHealth = {
@@ -27,37 +27,37 @@ const CIRCUIT_BREAKER_TIMEOUT_MS = 60_000; // 1 minute cooldown
  */
 async function checkRuntimeHealth(runtime: Fetcher): Promise<{ healthy: boolean; latencyMs: number }> {
   const now = Date.now();
-  
+
   // Return cached health if recent
   if (now - runtimeHealth.lastCheck < HEALTH_CHECK_INTERVAL_MS) {
     return { healthy: runtimeHealth.healthy, latencyMs: runtimeHealth.latencyMs };
   }
-  
+
   runtimeHealth.lastCheck = now;
-  
+
   try {
     const start = Date.now();
-    const resp = await runtime.fetch("https://runtime/health", { 
+    const resp = await runtime.fetch("https://runtime/health", {
       method: "GET",
       // Short timeout for health check
       cf: { cacheTtl: 0 },
     });
     const latencyMs = Date.now() - start;
-    
+
     runtimeHealth.latencyMs = latencyMs;
     runtimeHealth.consecutiveFailures = 0;
     runtimeHealth.healthy = resp.status === 200;
-    
+
     return { healthy: runtimeHealth.healthy, latencyMs };
   } catch (e) {
     runtimeHealth.consecutiveFailures++;
     runtimeHealth.healthy = false;
-    
+
     // Circuit breaker: if too many failures, stay "unhealthy" for cooldown period
     if (runtimeHealth.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
       runtimeHealth.lastCheck = now + CIRCUIT_BREAKER_TIMEOUT_MS;
     }
-    
+
     return { healthy: false, latencyMs: Infinity };
   }
 }
@@ -70,30 +70,28 @@ async function executeWithRetry<T>(
   options: { maxRetries?: number; retryDelayMs?: number; fallback?: T }
 ): Promise<{ result?: T; error?: string; fromFallback: boolean }> {
   const { maxRetries = 2, retryDelayMs = 500, fallback } = options;
-  
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       const result = await operation();
       return { result, fromFallback: false };
     } catch (e: any) {
       const isLastAttempt = attempt === maxRetries;
-      
+
       if (isLastAttempt) {
         if (fallback !== undefined) {
           return { result: fallback, error: e.message, fromFallback: true };
         }
         return { error: e.message, fromFallback: false };
       }
-      
+
       // Exponential backoff
       await new Promise(r => setTimeout(r, retryDelayMs * Math.pow(2, attempt)));
     }
   }
-  
+
   return { error: "Max retries exceeded", fromFallback: false };
 }
-
-export const runtimeProxyRoutes = new Hono<R>();
 
 function requireServiceTokenForEdge(
   c: any,
@@ -116,13 +114,35 @@ function requireServiceTokenForEdge(
   return { ok: true };
 }
 
-/**
- * GET /runtime-proxy/health — Runtime health status
- * Returns cached health status with latency metrics
- */
-runtimeProxyRoutes.get("/health", async (c) => {
+// ── GET /health — Runtime health status ─────────────────────────────
+
+const healthRoute = createRoute({
+  method: "get",
+  path: "/health",
+  tags: ["Runtime Proxy"],
+  summary: "Runtime health status",
+  responses: {
+    200: {
+      description: "Runtime is healthy",
+      content: {
+        "application/json": {
+          schema: z.object({
+            runtime: z.string(),
+            latency_ms: z.number(),
+            cached: z.boolean(),
+            consecutive_failures: z.number(),
+            timestamp: z.string(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(500),
+  },
+});
+
+runtimeProxyRoutes.openapi(healthRoute, async (c): Promise<any> => {
   const health = await checkRuntimeHealth(c.env.RUNTIME);
-  
+
   return c.json({
     runtime: health.healthy ? "healthy" : "unhealthy",
     latency_ms: health.latencyMs,
@@ -132,13 +152,40 @@ runtimeProxyRoutes.get("/health", async (c) => {
   }, health.healthy ? 200 : 503);
 });
 
-/** 
- * Parity with FastAPI `runtime_proxy.py` — backend execution removed (edge-only).
- * Also returns health status to help debug routing issues.
- */
-runtimeProxyRoutes.post("/agent/run", async (c) => {
+// ── POST /agent/run — Agent execution ───────────────────────────────
+
+const agentRunRoute = createRoute({
+  method: "post",
+  path: "/agent/run",
+  tags: ["Runtime Proxy"],
+  summary: "Execute an agent run via runtime proxy",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1).openapi({ example: "my-agent" }),
+            input: z.string().min(1).openapi({ example: "Hello" }),
+            message: z.string().optional(),
+            task: z.string().optional(),
+            history: z.array(z.record(z.unknown())).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Agent run result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "");
   const input = String(body.input || body.message || body.task || "");
 
@@ -173,9 +220,38 @@ runtimeProxyRoutes.post("/agent/run", async (c) => {
   }
 });
 
-runtimeProxyRoutes.post("/batch", async (c) => {
+// ── POST /batch — Batch agent execution ─────────────────────────────
+
+const batchRoute = createRoute({
+  method: "post",
+  path: "/batch",
+  tags: ["Runtime Proxy"],
+  summary: "Batch agent execution with retry logic",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1).openapi({ example: "my-agent" }),
+            inputs: z.array(z.string()).min(1).openapi({ example: ["Hello", "World"] }),
+            max_concurrency: z.coerce.number().int().min(1).max(20).default(5).openapi({ example: 5 }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Batch execution results",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "").trim();
   const inputs = Array.isArray(body.inputs) ? body.inputs.map(String) : [];
   const maxConcurrency = Math.max(1, Math.min(20, Number(body.max_concurrency) || 5));
@@ -228,17 +304,17 @@ runtimeProxyRoutes.post("/batch", async (c) => {
             }
             return await resp.json() as Record<string, unknown>;
           },
-          { 
-            maxRetries: 2, 
+          {
+            maxRetries: 2,
             retryDelayMs: 500,
-            fallback: { 
-              error: "Failed after retries", 
+            fallback: {
+              error: "Failed after retries",
               input,
-              fallback: true 
+              fallback: true
             }
           }
         );
-        
+
         if (fromFallback) fromFallbackCount++;
         if (error && !result) throw new Error(error);
         return result!;
@@ -262,7 +338,7 @@ runtimeProxyRoutes.post("/batch", async (c) => {
 
   const totalLatencyMs = Date.now() - batchStart;
   const failedCount = results.filter(r => r.error || r.status === "failed").length;
-  
+
   return c.json({
     results,
     total_cost_usd: totalCostUsd,
@@ -274,13 +350,42 @@ runtimeProxyRoutes.post("/batch", async (c) => {
   });
 });
 
-runtimeProxyRoutes.post("/tool/call", async (c) => {
+// ── POST /tool/call — Forward tool call to runtime ──────────────────
+
+const toolCallRoute = createRoute({
+  method: "post",
+  path: "/tool/call",
+  tags: ["Runtime Proxy"],
+  summary: "Forward a tool call to the runtime",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            tool: z.string().optional().openapi({ example: "web_search" }),
+            name: z.string().optional().openapi({ example: "web_search" }),
+            args: z.record(z.unknown()).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Tool call result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+runtimeProxyRoutes.openapi(toolCallRoute, async (c): Promise<any> => {
   const auth = requireServiceTokenForEdge(c);
   if (!auth.ok) {
     return c.json({ error: auth.error }, auth.status as any);
   }
 
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const toolName = String(body.tool || body.name || "").trim();
   if (!toolName) return c.json({ error: "tool (or name) is required" }, 400);
 
@@ -303,20 +408,40 @@ runtimeProxyRoutes.post("/tool/call", async (c) => {
   }
 });
 
-/**
- * POST /runtime-proxy/runnable/stream — SSE streaming for agent runs
- * Forwards to runtime worker and returns text/event-stream
- * 
- * Features:
- * - Health check before streaming
- * - Graceful degradation with error events
- * - Automatic retries with exponential backoff
- */
-runtimeProxyRoutes.post("/runnable/stream", async (c) => {
+// ── POST /runnable/stream — SSE streaming for agent runs ────────────
+
+const streamRoute = createRoute({
+  method: "post",
+  path: "/runnable/stream",
+  tags: ["Runtime Proxy"],
+  summary: "SSE streaming for agent runs",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1).openapi({ example: "my-agent" }),
+            input: z.string().optional(),
+            task: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "SSE event stream",
+      content: { "text/event-stream": { schema: z.string() } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "").trim();
-  
+
   if (!agentName) {
     return c.json({ error: "agent_name is required" }, 400);
   }
@@ -329,8 +454,8 @@ runtimeProxyRoutes.post("/runnable/stream", async (c) => {
     const errorStream = new ReadableStream({
       start(controller) {
         controller.enqueue(encoder.encode(
-          `data: ${JSON.stringify({ 
-            type: "error", 
+          `data: ${JSON.stringify({
+            type: "error",
             message: "Runtime service temporarily unavailable. Please try again in 30 seconds.",
             code: "RUNTIME_UNAVAILABLE",
             retry_after: 30
@@ -339,7 +464,7 @@ runtimeProxyRoutes.post("/runnable/stream", async (c) => {
         controller.close();
       },
     });
-    
+
     return new Response(errorStream, {
       headers: {
         "Content-Type": "text/event-stream",
@@ -360,7 +485,7 @@ runtimeProxyRoutes.post("/runnable/stream", async (c) => {
     // Forward to RUNTIME service binding with timeout
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s connection timeout
-    
+
     const resp = await c.env.RUNTIME.fetch(
       "https://runtime/api/v1/runtime-proxy/runnable/stream",
       {
@@ -383,8 +508,8 @@ runtimeProxyRoutes.post("/runnable/stream", async (c) => {
       const errorStream = new ReadableStream({
         start(controller) {
           controller.enqueue(encoder.encode(
-            `data: ${JSON.stringify({ 
-              type: "error", 
+            `data: ${JSON.stringify({
+              type: "error",
               message: text.slice(0, 500),
               code: "RUNTIME_ERROR"
             })}\n\n`
@@ -392,7 +517,7 @@ runtimeProxyRoutes.post("/runnable/stream", async (c) => {
           controller.close();
         },
       });
-      
+
       return new Response(errorStream, {
         headers: {
           "Content-Type": "text/event-stream",
@@ -417,13 +542,13 @@ runtimeProxyRoutes.post("/runnable/stream", async (c) => {
     // Return SSE error for connection failures
     runtimeHealth.consecutiveFailures++;
     runtimeHealth.healthy = false;
-    
+
     const encoder = new TextEncoder();
     const errorStream = new ReadableStream({
       start(controller) {
         controller.enqueue(encoder.encode(
-          `data: ${JSON.stringify({ 
-            type: "error", 
+          `data: ${JSON.stringify({
+            type: "error",
             message: `Runtime connection failed: ${e.message}`,
             code: "CONNECTION_FAILED",
             retry_after: 30
@@ -432,7 +557,7 @@ runtimeProxyRoutes.post("/runnable/stream", async (c) => {
         controller.close();
       },
     });
-    
+
     return new Response(errorStream, {
       headers: {
         "Content-Type": "text/event-stream",

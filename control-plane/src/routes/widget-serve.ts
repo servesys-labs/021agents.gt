@@ -7,12 +7,14 @@
  * The widget script is loaded from R2 storage (bucket: agentos-storage,
  * key: "widget/widget.js"). Falls back to a minimal stub if not found.
  */
-import { Hono } from "hono";
+import { createRoute, z } from "@hono/zod-openapi";
+import { OpenAPIHono } from "@hono/zod-openapi";
 import type { Env } from "../env";
 import type { CurrentUser } from "../auth/types";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const widgetServeRoutes = new Hono<R>();
+type WidgetEnv = { Bindings: Env; Variables: { user: CurrentUser } };
+export const widgetServeRoutes = new OpenAPIHono<WidgetEnv>();
 
 // In-memory cache to avoid R2 reads on every request
 let cachedWidget: { script: string; etag: string; ts: number } | null = null;
@@ -20,7 +22,36 @@ const CACHE_TTL = 300_000; // 5 min
 
 const STUB_SCRIPT = `(function(){console.error("[AgentOS Widget] Widget bundle not deployed yet. Run: npx wrangler r2 object put agentos-storage/widget/widget.js --file widget/dist/widget.js")})();`;
 
-widgetServeRoutes.get("/widget.js", async (c) => {
+function widgetHeaders(etag: string, maxAge = 3600): Record<string, string> {
+  return {
+    "Content-Type": "application/javascript; charset=utf-8",
+    "Cache-Control": `public, max-age=${maxAge}, stale-while-revalidate=86400`,
+    "ETag": etag,
+    "Access-Control-Allow-Origin": "*",
+    "X-Content-Type-Options": "nosniff",
+  };
+}
+
+// ── GET /widget.js — Serve widget JS bundle ─────────────────────────
+
+const widgetJsRoute = createRoute({
+  method: "get",
+  path: "/widget.js",
+  tags: ["Widget"],
+  summary: "Serve the compiled chat widget JS bundle",
+  responses: {
+    200: {
+      description: "Widget JavaScript bundle",
+      content: { "application/javascript": { schema: z.string() } },
+    },
+    304: {
+      description: "Not modified (ETag match)",
+    },
+    ...errorResponses(500),
+  },
+});
+
+widgetServeRoutes.openapi(widgetJsRoute, async (c): Promise<any> => {
   const now = Date.now();
 
   // Check in-memory cache
@@ -57,13 +88,3 @@ widgetServeRoutes.get("/widget.js", async (c) => {
     headers: widgetHeaders('"stub"', 60),
   });
 });
-
-function widgetHeaders(etag: string, maxAge = 3600): Record<string, string> {
-  return {
-    "Content-Type": "application/javascript; charset=utf-8",
-    "Cache-Control": `public, max-age=${maxAge}, stale-while-revalidate=86400`,
-    "ETag": etag,
-    "Access-Control-Allow-Origin": "*",
-    "X-Content-Type-Options": "nosniff",
-  };
-}

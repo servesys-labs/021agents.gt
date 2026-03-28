@@ -2,16 +2,15 @@
  * DLP (Data Loss Prevention) Router — data classification, agent DLP policies,
  * exposure reports, and retroactive session scanning.
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { detectPii, type PiiMatch } from "../logic/pii-detector";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const dlpRoutes = new Hono<R>();
+export const dlpRoutes = createOpenAPIRouter();
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -29,9 +28,42 @@ type DataLevel = (typeof DATA_LEVELS)[number];
 const PII_HANDLING_MODES = ["block", "redact", "allow"] as const;
 type PiiHandling = (typeof PII_HANDLING_MODES)[number];
 
+// ── Zod schemas ─────────────────────────────────────────────────
+
+const classificationBodySchema = z.object({
+  name: z.string().min(1).max(200),
+  level: z.enum(DATA_LEVELS),
+  description: z.string().max(2000).default(""),
+  patterns: z.array(z.string()).min(1),
+});
+
+const agentPolicySchema = z.object({
+  allowed_data_levels: z.array(z.enum(DATA_LEVELS)).default(["public", "internal"]),
+  required_redactions: z.array(z.string()).default([]),
+  pii_handling: z.enum(PII_HANDLING_MODES).default("redact"),
+  audit_all_access: z.boolean().default(false),
+});
+
+const exposureReportQuerySchema = z.object({
+  since_days: z.coerce.number().int().min(1).max(365).default(30),
+  agent_name: z.string().optional(),
+});
+
 // ── GET /classifications ────────────────────────────────────────
 
-dlpRoutes.get("/classifications", requireScope("dlp:read"), async (c) => {
+const listClassificationsRoute = createRoute({
+  method: "get",
+  path: "/classifications",
+  tags: ["DLP"],
+  summary: "List data classifications",
+  middleware: [requireScope("dlp:read")],
+  responses: {
+    200: { description: "List of classifications", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+dlpRoutes.openapi(listClassificationsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -61,22 +93,22 @@ dlpRoutes.get("/classifications", requireScope("dlp:read"), async (c) => {
 
 // ── POST /classifications ───────────────────────────────────────
 
-const classificationBodySchema = z.object({
-  name: z.string().min(1).max(200),
-  level: z.enum(DATA_LEVELS),
-  description: z.string().max(2000).default(""),
-  patterns: z.array(z.string()).min(1),
+const createClassificationRoute = createRoute({
+  method: "post",
+  path: "/classifications",
+  tags: ["DLP"],
+  summary: "Create a data classification",
+  middleware: [requireScope("dlp:write")],
+  request: { body: { content: { "application/json": { schema: classificationBodySchema } } } },
+  responses: {
+    201: { description: "Classification created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
 });
 
-dlpRoutes.post("/classifications", requireScope("dlp:write"), async (c) => {
+dlpRoutes.openapi(createClassificationRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = classificationBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid body", details: parsed.error.flatten() }, 400);
-  }
-
-  const { name, level, description, patterns } = parsed.data;
+  const { name, level, description, patterns } = c.req.valid("json");
   const id = genId();
   const now = Date.now();
 
@@ -91,9 +123,24 @@ dlpRoutes.post("/classifications", requireScope("dlp:write"), async (c) => {
 
 // ── DELETE /classifications/:id ─────────────────────────────────
 
-dlpRoutes.delete("/classifications/:id", requireScope("dlp:write"), async (c) => {
+const deleteClassificationRoute = createRoute({
+  method: "delete",
+  path: "/classifications/{id}",
+  tags: ["DLP"],
+  summary: "Delete a data classification",
+  middleware: [requireScope("dlp:write")],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: { description: "Classification deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+dlpRoutes.openapi(deleteClassificationRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const classId = c.req.param("id");
+  const { id: classId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
@@ -110,9 +157,24 @@ dlpRoutes.delete("/classifications/:id", requireScope("dlp:write"), async (c) =>
 
 // ── GET /agents/:agent_name/policy ──────────────────────────────
 
-dlpRoutes.get("/agents/:agent_name/policy", requireScope("dlp:read"), async (c) => {
+const getAgentPolicyRoute = createRoute({
+  method: "get",
+  path: "/agents/{agent_name}/policy",
+  tags: ["DLP"],
+  summary: "Get DLP policy for an agent",
+  middleware: [requireScope("dlp:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Agent DLP policy", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+dlpRoutes.openapi(getAgentPolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -143,23 +205,28 @@ dlpRoutes.get("/agents/:agent_name/policy", requireScope("dlp:read"), async (c) 
 
 // ── PUT /agents/:agent_name/policy ──────────────────────────────
 
-const agentPolicySchema = z.object({
-  allowed_data_levels: z.array(z.enum(DATA_LEVELS)).default(["public", "internal"]),
-  required_redactions: z.array(z.string()).default([]),
-  pii_handling: z.enum(PII_HANDLING_MODES).default("redact"),
-  audit_all_access: z.boolean().default(false),
+const updateAgentPolicyRoute = createRoute({
+  method: "put",
+  path: "/agents/{agent_name}/policy",
+  tags: ["DLP"],
+  summary: "Set DLP policy for an agent",
+  middleware: [requireScope("dlp:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: { content: { "application/json": { schema: agentPolicySchema } } },
+  },
+  responses: {
+    200: { description: "Agent DLP policy updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
 });
 
-dlpRoutes.put("/agents/:agent_name/policy", requireScope("dlp:write"), async (c) => {
+dlpRoutes.openapi(updateAgentPolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const body = await c.req.json();
-  const parsed = agentPolicySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid body", details: parsed.error.flatten() }, 400);
-  }
+  const { agent_name: agentName } = c.req.valid("param");
+  const data = c.req.valid("json");
 
-  const policyJson = JSON.stringify(parsed.data);
+  const policyJson = JSON.stringify(data);
   const now = Date.now();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -172,15 +239,29 @@ dlpRoutes.put("/agents/:agent_name/policy", requireScope("dlp:write"), async (c)
       updated_at = EXCLUDED.updated_at
   `;
 
-  return c.json({ agent_name: agentName, ...parsed.data, updated_at: now });
+  return c.json({ agent_name: agentName, ...data, updated_at: now });
 });
 
 // ── GET /exposure-report ────────────────────────────────────────
 
-dlpRoutes.get("/exposure-report", requireScope("dlp:read"), async (c) => {
+const exposureReportRoute = createRoute({
+  method: "get",
+  path: "/exposure-report",
+  tags: ["DLP"],
+  summary: "Get data exposure report",
+  middleware: [requireScope("dlp:read")],
+  request: {
+    query: exposureReportQuerySchema,
+  },
+  responses: {
+    200: { description: "Exposure report", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+dlpRoutes.openapi(exposureReportRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 30)));
-  const agentName = c.req.query("agent_name");
+  const { since_days: sinceDays, agent_name: agentName } = c.req.valid("query");
   const sinceMs = Date.now() - sinceDays * 86_400_000;
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -247,9 +328,24 @@ dlpRoutes.get("/exposure-report", requireScope("dlp:read"), async (c) => {
 
 // ── POST /scan-session/:session_id ──────────────────────────────
 
-dlpRoutes.post("/scan-session/:session_id", requireScope("dlp:write"), async (c) => {
+const scanSessionRoute = createRoute({
+  method: "post",
+  path: "/scan-session/{session_id}",
+  tags: ["DLP"],
+  summary: "Retroactively scan a session for PII",
+  middleware: [requireScope("dlp:write")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Session scan result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+dlpRoutes.openapi(scanSessionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load session turns from the sessions/turns table

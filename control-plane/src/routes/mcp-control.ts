@@ -2,14 +2,13 @@
  * MCP control plane router — register, monitor, and sync MCP servers.
  * Ported from agentos/api/routers/mcp_control.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const mcpControlRoutes = new Hono<R>();
+export const mcpControlRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(8);
@@ -35,7 +34,22 @@ function validateRemoteUrl(url: string): string | null {
   }
 }
 
-mcpControlRoutes.get("/servers", requireScope("integrations:read"), async (c) => {
+// ── GET /mcp/servers ───────────────────────────────────────────────────
+
+const listServersRoute = createRoute({
+  method: "get",
+  path: "/servers",
+  tags: ["MCP"],
+  summary: "List registered MCP servers",
+  middleware: [requireScope("integrations:read")],
+  responses: {
+    200: {
+      description: "Server list",
+      content: { "application/json": { schema: z.object({ servers: z.array(z.record(z.unknown())) }) } },
+    },
+  },
+});
+mcpControlRoutes.openapi(listServersRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -45,14 +59,45 @@ mcpControlRoutes.get("/servers", requireScope("integrations:read"), async (c) =>
   return c.json({ servers: rows });
 });
 
-mcpControlRoutes.post("/servers", requireScope("integrations:write"), async (c) => {
+// ── POST /mcp/servers ──────────────────────────────────────────────────
+
+const createServerRoute = createRoute({
+  method: "post",
+  path: "/servers",
+  tags: ["MCP"],
+  summary: "Register a new MCP server",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            url: z.string().min(1),
+            transport: z.string().default("stdio"),
+            auth_token: z.string().default(""),
+            metadata: z.record(z.unknown()).default({}),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Server registered",
+      content: { "application/json": { schema: z.object({ server_id: z.string(), name: z.string(), status: z.string() }) } },
+    },
+    ...errorResponses(400),
+  },
+});
+mcpControlRoutes.openapi(createServerRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const name = String(body.name || "").trim();
-  const url = String(body.url || "").trim();
-  const transport = String(body.transport || "stdio");
-  const authToken = String(body.auth_token || "");
-  const metadata = body.metadata || {};
+  const body = c.req.valid("json");
+  const name = body.name.trim();
+  const url = body.url.trim();
+  const transport = body.transport;
+  const authToken = body.auth_token;
+  const metadata = body.metadata;
 
   if (!name) return c.json({ error: "name is required" }, 400);
   if (!url) return c.json({ error: "url is required" }, 400);
@@ -72,9 +117,38 @@ mcpControlRoutes.post("/servers", requireScope("integrations:write"), async (c) 
   return c.json({ server_id: serverId, name, status: "registered" });
 });
 
-mcpControlRoutes.get("/servers/:server_id/status", requireScope("integrations:read"), async (c) => {
+// ── GET /mcp/servers/{server_id}/status ────────────────────────────────
+
+const getServerStatusRoute = createRoute({
+  method: "get",
+  path: "/servers/{server_id}/status",
+  tags: ["MCP"],
+  summary: "Get MCP server health status",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    params: z.object({ server_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Server status",
+      content: {
+        "application/json": {
+          schema: z.object({
+            server_id: z.string(),
+            name: z.string(),
+            status: z.string(),
+            healthy: z.boolean(),
+            error: z.string().nullable(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(404),
+  },
+});
+mcpControlRoutes.openapi(getServerStatusRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const serverId = c.req.param("server_id");
+  const { server_id: serverId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -108,9 +182,38 @@ mcpControlRoutes.get("/servers/:server_id/status", requireScope("integrations:re
   });
 });
 
-mcpControlRoutes.post("/servers/:server_id/sync", requireScope("integrations:write"), async (c) => {
+// ── POST /mcp/servers/{server_id}/sync ─────────────────────────────────
+
+const syncServerRoute = createRoute({
+  method: "post",
+  path: "/servers/{server_id}/sync",
+  tags: ["MCP"],
+  summary: "Sync tools from an MCP server",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    params: z.object({ server_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Sync result",
+      content: {
+        "application/json": {
+          schema: z.object({
+            server_id: z.string(),
+            synced_tools: z.number(),
+            tools: z.array(z.record(z.unknown())),
+            error: z.string().nullable(),
+            synced_at: z.string(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(404),
+  },
+});
+mcpControlRoutes.openapi(syncServerRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const serverId = c.req.param("server_id");
+  const { server_id: serverId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -146,9 +249,28 @@ mcpControlRoutes.post("/servers/:server_id/sync", requireScope("integrations:wri
   });
 });
 
-mcpControlRoutes.delete("/servers/:server_id", requireScope("integrations:write"), async (c) => {
+// ── DELETE /mcp/servers/{server_id} ────────────────────────────────────
+
+const deleteServerRoute = createRoute({
+  method: "delete",
+  path: "/servers/{server_id}",
+  tags: ["MCP"],
+  summary: "Delete an MCP server",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    params: z.object({ server_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Server deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.string() }) } },
+    },
+    ...errorResponses(404),
+  },
+});
+mcpControlRoutes.openapi(deleteServerRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const serverId = c.req.param("server_id");
+  const { server_id: serverId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`

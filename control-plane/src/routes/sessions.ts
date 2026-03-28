@@ -2,19 +2,38 @@
  * Sessions router — list, detail, turns, traces, feedback.
  * Ported from agentos/api/routers/sessions.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const sessionRoutes = new Hono<R>();
+export const sessionRoutes = createOpenAPIRouter();
 
-sessionRoutes.get("/runtime/insights", requireScope("sessions:read"), async (c) => {
+// ── Route definitions ───────────────────────────────────────────────
+
+const getRuntimeInsightsRoute = createRoute({
+  method: "get",
+  path: "/runtime/insights",
+  tags: ["Sessions"],
+  summary: "Get runtime insights",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    query: z.object({
+      since_days: z.coerce.number().int().min(1).max(90).default(30),
+      limit_sessions: z.coerce.number().int().min(10).max(200).default(200),
+    }),
+  },
+  responses: {
+    200: { description: "Runtime insights", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getRuntimeInsightsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinceDays = Math.max(1, Math.min(90, Number(c.req.query("since_days")) || 30));
-  const limitSessions = Math.max(10, Math.min(200, Number(c.req.query("limit_sessions")) || 200));
+  const { since_days: sinceDays, limit_sessions: limitSessions } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -37,10 +56,27 @@ sessionRoutes.get("/runtime/insights", requireScope("sessions:read"), async (c) 
   });
 });
 
-sessionRoutes.get("/stats/summary", requireScope("sessions:read"), async (c) => {
+const getStatsSummaryRoute = createRoute({
+  method: "get",
+  path: "/stats/summary",
+  tags: ["Sessions"],
+  summary: "Get session stats summary",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      since_days: z.coerce.number().int().min(1).max(90).default(30),
+    }),
+  },
+  responses: {
+    200: { description: "Stats summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getStatsSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") || "";
-  const sinceDays = Math.max(1, Math.min(90, Number(c.req.query("since_days")) || 30));
+  const { agent_name: agentName, since_days: sinceDays } = c.req.valid("query");
   const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -84,12 +120,29 @@ sessionRoutes.get("/stats/summary", requireScope("sessions:read"), async (c) => 
   });
 });
 
-sessionRoutes.get("/", requireScope("sessions:read"), async (c) => {
+const listSessionsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Sessions"],
+  summary: "List sessions",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      status: z.string().default(""),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+      offset: z.coerce.number().int().min(0).default(0),
+    }),
+  },
+  responses: {
+    200: { description: "Session list", content: { "application/json": { schema: z.array(z.record(z.unknown())) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(listSessionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") || "";
-  const status = c.req.query("status") || "";
-  const limit = Math.max(1, Math.min(200, Number(c.req.query("limit")) || 50));
-  const offset = Math.max(0, Number(c.req.query("offset")) || 0);
+  const { agent_name: agentName, status, limit, offset } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -133,9 +186,25 @@ sessionRoutes.get("/", requireScope("sessions:read"), async (c) => {
   );
 });
 
-sessionRoutes.get("/:session_id", requireScope("sessions:read"), async (c) => {
+const getSessionRoute = createRoute({
+  method: "get",
+  path: "/{session_id}",
+  tags: ["Sessions"],
+  summary: "Get session detail",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Session detail", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getSessionRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
   if (rows.length === 0) return c.json({ error: "Session not found" }, 404);
@@ -156,9 +225,25 @@ sessionRoutes.get("/:session_id", requireScope("sessions:read"), async (c) => {
   });
 });
 
-sessionRoutes.get("/:session_id/turns", requireScope("sessions:read"), async (c) => {
+const getSessionTurnsRoute = createRoute({
+  method: "get",
+  path: "/{session_id}/turns",
+  tags: ["Sessions"],
+  summary: "Get session turns",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Turn list", content: { "application/json": { schema: z.array(z.record(z.unknown())) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify session belongs to org before querying turns
@@ -199,9 +284,25 @@ sessionRoutes.get("/:session_id/turns", requireScope("sessions:read"), async (c)
   );
 });
 
-sessionRoutes.get("/:session_id/runtime", requireScope("sessions:read"), async (c) => {
+const getSessionRuntimeRoute = createRoute({
+  method: "get",
+  path: "/{session_id}/runtime",
+  tags: ["Sessions"],
+  summary: "Get session runtime profile",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Runtime profile", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getSessionRuntimeRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const check = await sql`SELECT session_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
   if (check.length === 0) return c.json({ error: "Session not found" }, 404);
@@ -225,9 +326,25 @@ sessionRoutes.get("/:session_id/runtime", requireScope("sessions:read"), async (
   });
 });
 
-sessionRoutes.get("/:session_id/trace", requireScope("sessions:read"), async (c) => {
+const getSessionTraceRoute = createRoute({
+  method: "get",
+  path: "/{session_id}/trace",
+  tags: ["Sessions"],
+  summary: "Get session trace with cost rollup",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Trace detail", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getSessionTraceRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const sessionRows = await sql`SELECT trace_id FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}`;
@@ -261,10 +378,37 @@ sessionRoutes.get("/:session_id/trace", requireScope("sessions:read"), async (c)
   });
 });
 
-sessionRoutes.post("/:session_id/feedback", requireScope("sessions:write"), async (c) => {
+const postSessionFeedbackRoute = createRoute({
+  method: "post",
+  path: "/{session_id}/feedback",
+  tags: ["Sessions"],
+  summary: "Submit session feedback",
+  middleware: [requireScope("sessions:write")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            rating: z.number().default(0),
+            comment: z.string().default(""),
+            tags: z.string().default(""),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Feedback submitted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(postSessionFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
-  const body = await c.req.json();
+  const { session_id: sessionId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const rating = Number(body.rating || 0);
   const comment = String(body.comment || "");
   const tags = String(body.tags || "");
@@ -281,9 +425,25 @@ sessionRoutes.post("/:session_id/feedback", requireScope("sessions:write"), asyn
   return c.json({ submitted: true, session_id: sessionId });
 });
 
-sessionRoutes.get("/:session_id/feedback", requireScope("sessions:read"), async (c) => {
+const getSessionFeedbackRoute = createRoute({
+  method: "get",
+  path: "/{session_id}/feedback",
+  tags: ["Sessions"],
+  summary: "Get session feedback",
+  middleware: [requireScope("sessions:read")],
+  request: {
+    params: z.object({ session_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Feedback list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(getSessionFeedbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sessionId = c.req.param("session_id");
+  const { session_id: sessionId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify session belongs to org before returning feedback
@@ -298,9 +458,26 @@ sessionRoutes.get("/:session_id/feedback", requireScope("sessions:read"), async 
   return c.json({ feedback: rows });
 });
 
-sessionRoutes.delete("/", requireScope("sessions:write"), async (c) => {
+const deleteSessionsRoute = createRoute({
+  method: "delete",
+  path: "/",
+  tags: ["Sessions"],
+  summary: "Purge old sessions",
+  middleware: [requireScope("sessions:write")],
+  request: {
+    query: z.object({
+      before_days: z.coerce.number().int().min(7).default(90),
+    }),
+  },
+  responses: {
+    200: { description: "Deleted count", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+sessionRoutes.openapi(deleteSessionsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const beforeDays = Math.max(7, Number(c.req.query("before_days")) || 90);
+  const { before_days: beforeDays } = c.req.valid("query");
   const cutoff = new Date(Date.now() - beforeDays * 86400 * 1000).toISOString();
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

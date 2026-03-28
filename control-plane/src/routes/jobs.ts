@@ -4,14 +4,13 @@
  *
  * Queue submission via c.env.JOB_QUEUE, status tracking in DB.
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const jobRoutes = new Hono<R>();
+export const jobRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(8);
@@ -19,9 +18,41 @@ function genId(): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-jobRoutes.post("/", requireScope("jobs:write"), async (c) => {
+// ── POST /jobs ──────────────────────────────────────────────────────────
+
+const createJobRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Jobs"],
+  summary: "Submit a new job",
+  middleware: [requireScope("jobs:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1),
+            task: z.string().min(1),
+            idempotency_key: z.string().optional(),
+            max_retries: z.number().int().min(0).max(10).optional(),
+            priority: z.number().optional(),
+            scheduled_at: z.number().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Job submitted",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+jobRoutes.openapi(createJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "").trim();
   const task = String(body.task || "").trim();
   const idempotencyKey = String(body.idempotency_key || "");
@@ -58,10 +89,32 @@ jobRoutes.post("/", requireScope("jobs:write"), async (c) => {
   return c.json({ job_id: jobId, status: "pending" });
 });
 
-jobRoutes.get("/", requireScope("jobs:read"), async (c) => {
+// ── GET /jobs ───────────────────────────────────────────────────────────
+
+const listJobsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Jobs"],
+  summary: "List jobs",
+  middleware: [requireScope("jobs:read")],
+  request: {
+    query: z.object({
+      status: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "List of jobs",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+jobRoutes.openapi(listJobsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const status = c.req.query("status") || "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
+  const query = c.req.valid("query");
+  const status = query.status || "";
+  const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -79,9 +132,30 @@ jobRoutes.get("/", requireScope("jobs:read"), async (c) => {
   return c.json({ jobs: rows });
 });
 
-jobRoutes.get("/dlq", requireScope("jobs:read"), async (c) => {
+// ── GET /jobs/dlq ───────────────────────────────────────────────────────
+
+const listDlqRoute = createRoute({
+  method: "get",
+  path: "/dlq",
+  tags: ["Jobs"],
+  summary: "List dead-letter queue jobs",
+  middleware: [requireScope("jobs:read")],
+  request: {
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Dead-letter queue jobs",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+  },
+});
+jobRoutes.openapi(listDlqRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit")) || 50));
+  const query = c.req.valid("query");
+  const limit = Math.min(200, Math.max(1, Number(query.limit) || 50));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -91,9 +165,28 @@ jobRoutes.get("/dlq", requireScope("jobs:read"), async (c) => {
   return c.json({ jobs: rows });
 });
 
-jobRoutes.get("/:job_id", requireScope("jobs:read"), async (c) => {
+// ── GET /jobs/:job_id ───────────────────────────────────────────────────
+
+const getJobRoute = createRoute({
+  method: "get",
+  path: "/{job_id}",
+  tags: ["Jobs"],
+  summary: "Get a job by ID",
+  middleware: [requireScope("jobs:read")],
+  request: {
+    params: z.object({ job_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Job details",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+jobRoutes.openapi(getJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const jobId = c.req.param("job_id");
+  const { job_id: jobId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -103,9 +196,28 @@ jobRoutes.get("/:job_id", requireScope("jobs:read"), async (c) => {
   return c.json(rows[0]);
 });
 
-jobRoutes.post("/:job_id/retry", requireScope("jobs:write"), async (c) => {
+// ── POST /jobs/:job_id/retry ────────────────────────────────────────────
+
+const retryJobRoute = createRoute({
+  method: "post",
+  path: "/{job_id}/retry",
+  tags: ["Jobs"],
+  summary: "Retry a failed job",
+  middleware: [requireScope("jobs:write")],
+  request: {
+    params: z.object({ job_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Job retried",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+jobRoutes.openapi(retryJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const jobId = c.req.param("job_id");
+  const { job_id: jobId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -119,9 +231,28 @@ jobRoutes.post("/:job_id/retry", requireScope("jobs:write"), async (c) => {
   return c.json({ retried: jobId });
 });
 
-jobRoutes.post("/:job_id/cancel", requireScope("jobs:write"), async (c) => {
+// ── POST /jobs/:job_id/cancel ───────────────────────────────────────────
+
+const cancelJobRoute = createRoute({
+  method: "post",
+  path: "/{job_id}/cancel",
+  tags: ["Jobs"],
+  summary: "Cancel a pending or running job",
+  middleware: [requireScope("jobs:write")],
+  request: {
+    params: z.object({ job_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Job cancelled",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404, 409),
+  },
+});
+jobRoutes.openapi(cancelJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const jobId = c.req.param("job_id");
+  const { job_id: jobId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -138,9 +269,28 @@ jobRoutes.post("/:job_id/cancel", requireScope("jobs:write"), async (c) => {
   return c.json({ cancelled: jobId });
 });
 
-jobRoutes.post("/:job_id/pause", requireScope("jobs:write"), async (c) => {
+// ── POST /jobs/:job_id/pause ────────────────────────────────────────────
+
+const pauseJobRoute = createRoute({
+  method: "post",
+  path: "/{job_id}/pause",
+  tags: ["Jobs"],
+  summary: "Pause a pending job",
+  middleware: [requireScope("jobs:write")],
+  request: {
+    params: z.object({ job_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Job paused",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404, 409),
+  },
+});
+jobRoutes.openapi(pauseJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const jobId = c.req.param("job_id");
+  const { job_id: jobId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -157,9 +307,28 @@ jobRoutes.post("/:job_id/pause", requireScope("jobs:write"), async (c) => {
   return c.json({ paused: jobId });
 });
 
-jobRoutes.post("/:job_id/resume", requireScope("jobs:write"), async (c) => {
+// ── POST /jobs/:job_id/resume ───────────────────────────────────────────
+
+const resumeJobRoute = createRoute({
+  method: "post",
+  path: "/{job_id}/resume",
+  tags: ["Jobs"],
+  summary: "Resume a paused job",
+  middleware: [requireScope("jobs:write")],
+  request: {
+    params: z.object({ job_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Job resumed",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404, 409),
+  },
+});
+jobRoutes.openapi(resumeJobRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const jobId = c.req.param("job_id");
+  const { job_id: jobId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

@@ -5,14 +5,13 @@
  * Built-in plans are read from repo config/default.json. Custom plans persist in
  * project_configs (edge parity for agentos.yaml plans).
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import rawDefault from "../../../config/default.json";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const plansRoutes = new Hono<R>();
+export const plansRoutes = createOpenAPIRouter();
 
 const ALL_TIERS = [
   "simple",
@@ -62,26 +61,92 @@ function getBuiltinPlans(): Record<string, unknown> {
   return raw.llm?.plans ?? {};
 }
 
-plansRoutes.get("/", (c) => {
+// ── GET / — List all built-in plans ─────────────────────────────────
+
+const listPlansRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Plans"],
+  summary: "List all built-in LLM plans",
+  responses: {
+    200: {
+      description: "Plan list",
+      content: { "application/json": { schema: z.object({ plans: z.record(z.unknown()) }) } },
+    },
+  },
+});
+
+plansRoutes.openapi(listPlansRoute, (c): Promise<any> => {
   const plans = getBuiltinPlans();
   const result: Record<string, ReturnType<typeof summarizePlan>> = {};
   for (const [name, plan] of Object.entries(plans)) {
     if (!isRecord(plan)) continue;
     result[name] = summarizePlan(plan);
   }
-  return c.json({ plans: result });
+  return c.json({ plans: result }) as any;
 });
 
-plansRoutes.get("/:name", (c) => {
-  const name = c.req.param("name");
+// ── GET /:name — Get a specific plan by name ────────────────────────
+
+const getPlanRoute = createRoute({
+  method: "get",
+  path: "/{name}",
+  tags: ["Plans"],
+  summary: "Get a specific LLM plan by name",
+  request: {
+    params: z.object({ name: z.string().openapi({ example: "default" }) }),
+  },
+  responses: {
+    200: {
+      description: "Plan details",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+
+plansRoutes.openapi(getPlanRoute, (c): Promise<any> => {
+  const { name } = c.req.valid("param");
   const builtin = getBuiltinPlans()[name];
   if (isRecord(builtin)) {
-    return c.json({ name, plan: builtin });
+    return c.json({ name, plan: builtin }) as any;
   }
-  return c.json({ error: `Plan '${name}' not found` });
+  return c.json({ error: `Plan '${name}' not found` }) as any;
 });
 
-plansRoutes.post("/", async (c) => {
+// ── POST / — Create a custom plan ───────────────────────────────────
+
+const createPlanRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Plans"],
+  summary: "Create a custom LLM plan",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1).openapi({ example: "my-custom-plan" }),
+            simple_model: z.string().min(1).openapi({ example: "gpt-4o-mini" }),
+            moderate_model: z.string().min(1).openapi({ example: "gpt-4o" }),
+            complex_model: z.string().min(1).openapi({ example: "claude-sonnet-4-20250514" }),
+            tool_call_model: z.string().optional().openapi({ example: "gpt-4o" }),
+            provider: z.string().default("openrouter").openapi({ example: "openrouter" }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Plan created",
+      content: { "application/json": { schema: z.object({ created: z.string() }) } },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+
+plansRoutes.openapi(createPlanRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!user.org_id) {
     return c.json({ error: "Organization required to save a custom plan" }, 400);
@@ -97,12 +162,12 @@ plansRoutes.post("/", async (c) => {
   const contentType = c.req.header("Content-Type") ?? "";
   if (contentType.includes("application/json")) {
     try {
-      const body = (await c.req.json()) as Record<string, unknown>;
+      const body = c.req.valid("json");
       name = String(body.name ?? "");
-      simpleModel = String(body.simple_model ?? body.simple ?? "");
-      moderateModel = String(body.moderate_model ?? body.moderate ?? "");
-      complexModel = String(body.complex_model ?? body.complex ?? "");
-      toolCallModel = String(body.tool_call_model ?? body.tool_call ?? "");
+      simpleModel = String(body.simple_model ?? "");
+      moderateModel = String(body.moderate_model ?? "");
+      complexModel = String(body.complex_model ?? "");
+      toolCallModel = String(body.tool_call_model ?? "");
       if (body.provider !== undefined && body.provider !== null) {
         provider = String(body.provider);
       }

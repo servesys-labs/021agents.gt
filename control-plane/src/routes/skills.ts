@@ -4,15 +4,28 @@
  *
  * Skills are stored in Supabase (skills table).
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const skillRoutes = new Hono<R>();
+export const skillRoutes = createOpenAPIRouter();
 
-skillRoutes.get("/", async (c) => {
+// ── GET /skills ────────────────────────────────────────────────────────
+
+const listSkillsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Skills"],
+  summary: "List all skills",
+  responses: {
+    200: {
+      description: "Skill list",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+  },
+});
+skillRoutes.openapi(listSkillsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   try {
@@ -23,9 +36,27 @@ skillRoutes.get("/", async (c) => {
   }
 });
 
-skillRoutes.get("/:name", async (c) => {
+// ── GET /skills/{name} ────────────────────────────────────────────────
+
+const getSkillRoute = createRoute({
+  method: "get",
+  path: "/{name}",
+  tags: ["Skills"],
+  summary: "Get a skill by name",
+  request: {
+    params: z.object({ name: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Skill details",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+skillRoutes.openapi(getSkillRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const name = c.req.param("name");
+  const { name } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`SELECT * FROM skills WHERE name = ${name}`;
@@ -33,10 +64,37 @@ skillRoutes.get("/:name", async (c) => {
   return c.json(rows[0]);
 });
 
-skillRoutes.put("/:name", async (c) => {
+// ── PUT /skills/{name} ────────────────────────────────────────────────
+
+const updateSkillRoute = createRoute({
+  method: "put",
+  path: "/{name}",
+  tags: ["Skills"],
+  summary: "Enable or disable a skill",
+  request: {
+    params: z.object({ name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            enabled: z.boolean(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Updated skill",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+skillRoutes.openapi(updateSkillRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const name = c.req.param("name");
-  const body = await c.req.json();
+  const { name } = c.req.valid("param");
+  const body = c.req.valid("json");
   const enabled = Boolean(body.enabled);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
@@ -49,7 +107,29 @@ skillRoutes.put("/:name", async (c) => {
   return c.json(updated[0]);
 });
 
-skillRoutes.post("/reload", async (c) => {
+// ── POST /skills/reload ────────────────────────────────────────────────
+
+const reloadSkillsRoute = createRoute({
+  method: "post",
+  path: "/reload",
+  tags: ["Skills"],
+  summary: "Reload skills from database",
+  responses: {
+    200: {
+      description: "Reload result",
+      content: {
+        "application/json": {
+          schema: z.object({
+            total: z.number(),
+            enabled: z.number(),
+            skills: z.array(z.string()),
+          }),
+        },
+      },
+    },
+  },
+});
+skillRoutes.openapi(reloadSkillsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

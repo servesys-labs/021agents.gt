@@ -9,13 +9,17 @@ vi.mock("../src/db/client", () => ({
   getDbForOrg: vi.fn(),
 }));
 
-vi.mock("../src/auth/clerk", () => ({
-  clerkEnabled: () => true,
-  verifyClerkToken: vi.fn(),
-}));
+vi.mock("../src/auth/cf-access", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/auth/cf-access")>();
+  return {
+    ...actual,
+    cfAccessEnabled: () => true,
+    verifyCfAccessToken: vi.fn(),
+  };
+});
 
 import { getDb, getDbForOrg } from "../src/db/client";
-import { verifyClerkToken } from "../src/auth/clerk";
+import { verifyCfAccessToken } from "../src/auth/cf-access";
 import { authRoutes } from "../src/routes/auth";
 
 type AppType = { Bindings: Env; Variables: { user: CurrentUser } };
@@ -26,17 +30,17 @@ function buildApp() {
   return app;
 }
 
-describe("auth clerk exchange parity", () => {
-  it("maps Clerk org role and upserts org membership", async () => {
+describe("auth cf-access exchange parity", () => {
+  it("maps CF Access identity and upserts org membership", async () => {
     let insertedRole: string | null = null;
 
-    vi.mocked(verifyClerkToken).mockResolvedValue({
-      sub: "clerk-user-1",
-      email: "clerk@test.com",
-      name: "Clerk User",
-      provider: "clerk",
-      org_id: "org_ext_1",
-      role: "org:admin",
+    vi.mocked(verifyCfAccessToken).mockResolvedValue({
+      sub: "cf-user-1",
+      email: "cfuser@test.com",
+      name: "CF User",
+      provider: "cf_access",
+      org_id: "",
+      role: "member",
       iat: 1,
       exp: 9999999999,
     });
@@ -46,12 +50,13 @@ describe("auth clerk exchange parity", () => {
       if (query.includes("SELECT user_id, email, name FROM users WHERE user_id")) return [];
       if (query.includes("SELECT user_id, email, name FROM users WHERE email")) return [];
       if (query.includes("INSERT INTO users")) return [];
-      if (query.includes("SELECT org_id FROM orgs WHERE slug")) return [{ org_id: "org-internal-1" }];
-      if (query.includes("SELECT role FROM org_members WHERE org_id")) return [];
+      if (query.includes("SELECT org_id, role FROM org_members WHERE user_id")) return [];
+      if (query.includes("INSERT INTO orgs")) return [];
       if (query.includes("INSERT INTO org_members")) {
         insertedRole = String(values[2] || "");
         return [];
       }
+      if (query.includes("INSERT INTO org_settings")) return [];
       return [];
     }) as any;
     vi.mocked(getDb).mockResolvedValue(mockSql);
@@ -60,24 +65,25 @@ describe("auth clerk exchange parity", () => {
     const app = buildApp();
     const env = mockEnv({
       AUTH_JWT_SECRET: "test-secret",
-      CLERK_ISSUER: "https://clerk.example.com",
-      CLERK_AUDIENCE: "aud-1",
+      CF_ACCESS_TEAM_DOMAIN: "test.cloudflareaccess.com",
+      CF_ACCESS_AUD: "aud-1",
     });
 
     const res = await app.request(
-      "/clerk/exchange",
+      "/cf-access/exchange",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ clerk_token: "clerk-token" }),
+        body: JSON.stringify({ cf_access_token: "cf-token" }),
       },
       env,
     );
     expect(res.status).toBe(200);
     const payload = await res.json() as { provider?: string; org_id?: string; token?: string };
-    expect(payload.provider).toBe("clerk");
-    expect(payload.org_id).toBe("org-internal-1");
+    expect(payload.provider).toBe("cf_access");
+    expect(typeof payload.org_id).toBe("string");
     expect(typeof payload.token).toBe("string");
-    expect(insertedRole).toBe("admin");
+    // New user auto-provision creates org with "owner" role
+    expect(insertedRole).toBe("owner");
   });
 });

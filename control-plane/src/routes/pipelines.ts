@@ -5,14 +5,14 @@
  * Pipeline configs stored in `pipelines` table; actual CF resources
  * created via CLOUDFLARE_API_TOKEN when developer clicks "Deploy".
  */
-import { Hono } from "hono";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { Env } from "../env";
-import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const pipelineRoutes = new Hono<R>();
+export const pipelineRoutes = createOpenAPIRouter();
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -59,7 +59,20 @@ async function cfApi(
 
 // ── Streams ──────────────────────────────────────────────────────────
 
-pipelineRoutes.get("/streams", requireScope("pipelines:read"), async (c) => {
+const listStreamsRoute = createRoute({
+  method: "get",
+  path: "/streams",
+  tags: ["Pipelines"],
+  summary: "List streams",
+  middleware: [requireScope("pipelines:read")],
+  responses: {
+    200: {
+      description: "Stream list",
+      content: { "application/json": { schema: z.object({ streams: z.array(z.record(z.unknown())), total: z.number() }) } },
+    },
+  },
+});
+pipelineRoutes.openapi(listStreamsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -71,9 +84,38 @@ pipelineRoutes.get("/streams", requireScope("pipelines:read"), async (c) => {
   return c.json({ streams: rows, total: rows.length });
 });
 
-pipelineRoutes.post("/streams", requireScope("pipelines:write"), async (c) => {
+const createStreamRoute = createRoute({
+  method: "post",
+  path: "/streams",
+  tags: ["Pipelines"],
+  summary: "Create a stream",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            description: z.string().default(""),
+            schema: z.record(z.unknown()).optional(),
+            http_enabled: z.boolean().default(true),
+            http_auth: z.boolean().default(true),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Stream created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+pipelineRoutes.openapi(createStreamRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   if (!name) return c.json({ error: "name is required" }, 400);
 
@@ -95,9 +137,26 @@ pipelineRoutes.post("/streams", requireScope("pipelines:write"), async (c) => {
   return c.json({ id, name, type: "stream", status: "draft", config }, 201);
 });
 
-pipelineRoutes.get("/streams/:stream_id", requireScope("pipelines:read"), async (c) => {
+const getStreamRoute = createRoute({
+  method: "get",
+  path: "/streams/{stream_id}",
+  tags: ["Pipelines"],
+  summary: "Get a single stream",
+  middleware: [requireScope("pipelines:read")],
+  request: {
+    params: z.object({ stream_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Stream detail",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+pipelineRoutes.openapi(getStreamRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const streamId = c.req.param("stream_id");
+  const { stream_id: streamId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
@@ -106,12 +165,28 @@ pipelineRoutes.get("/streams/:stream_id", requireScope("pipelines:read"), async 
     LIMIT 1
   `;
   if (rows.length === 0) return c.json({ error: "Stream not found" }, 404);
-  return c.json(rows[0]);
+  return c.json(rows[0] as any);
 });
 
-pipelineRoutes.delete("/streams/:stream_id", requireScope("pipelines:write"), async (c) => {
+const deleteStreamRoute = createRoute({
+  method: "delete",
+  path: "/streams/{stream_id}",
+  tags: ["Pipelines"],
+  summary: "Delete a stream",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    params: z.object({ stream_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Stream deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.boolean(), id: z.string() }) } },
+    },
+  },
+});
+pipelineRoutes.openapi(deleteStreamRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const streamId = c.req.param("stream_id");
+  const { stream_id: streamId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
@@ -120,10 +195,36 @@ pipelineRoutes.delete("/streams/:stream_id", requireScope("pipelines:write"), as
   return c.json({ deleted: true, id: streamId });
 });
 
-pipelineRoutes.post("/streams/:stream_id/send", requireScope("pipelines:write"), async (c) => {
+const sendToStreamRoute = createRoute({
+  method: "post",
+  path: "/streams/{stream_id}/send",
+  tags: ["Pipelines"],
+  summary: "Send events to a stream",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    params: z.object({ stream_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            events: z.array(z.record(z.unknown())).min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Events sent",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+pipelineRoutes.openapi(sendToStreamRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const streamId = c.req.param("stream_id");
-  const body = await c.req.json();
+  const { stream_id: streamId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const events = body.events;
   if (!Array.isArray(events) || events.length === 0) {
     return c.json({ error: "events array is required" }, 400);
@@ -169,7 +270,20 @@ pipelineRoutes.post("/streams/:stream_id/send", requireScope("pipelines:write"),
 
 // ── Sinks ────────────────────────────────────────────────────────────
 
-pipelineRoutes.get("/sinks", requireScope("pipelines:read"), async (c) => {
+const listSinksRoute = createRoute({
+  method: "get",
+  path: "/sinks",
+  tags: ["Pipelines"],
+  summary: "List sinks",
+  middleware: [requireScope("pipelines:read")],
+  responses: {
+    200: {
+      description: "Sink list",
+      content: { "application/json": { schema: z.object({ sinks: z.array(z.record(z.unknown())), total: z.number() }) } },
+    },
+  },
+});
+pipelineRoutes.openapi(listSinksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -181,9 +295,46 @@ pipelineRoutes.get("/sinks", requireScope("pipelines:read"), async (c) => {
   return c.json({ sinks: rows, total: rows.length });
 });
 
-pipelineRoutes.post("/sinks", requireScope("pipelines:write"), async (c) => {
+const createSinkRoute = createRoute({
+  method: "post",
+  path: "/sinks",
+  tags: ["Pipelines"],
+  summary: "Create a sink",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            description: z.string().default(""),
+            type: z.string().default("r2_json"),
+            bucket: z.string().default(""),
+            path: z.string().default(""),
+            format: z.string().optional(),
+            compression: z.string().default("none"),
+            partitioning: z.string().default(""),
+            vectorize_index: z.string().optional(),
+            embedding_model: z.string().optional(),
+            text_field: z.string().optional(),
+            chunk_size: z.number().optional(),
+            chunk_overlap: z.number().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Sink created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+pipelineRoutes.openapi(createSinkRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   if (!name) return c.json({ error: "name is required" }, 400);
 
@@ -208,8 +359,8 @@ pipelineRoutes.post("/sinks", requireScope("pipelines:write"), async (c) => {
   if (sinkType === "vectorize" || sinkType === "dual") {
     config.vectorize_index = body.vectorize_index || "agentos-knowledge";
     config.embedding_model = body.embedding_model || "@cf/baai/bge-base-en-v1.5";
-    config.text_field = body.text_field || "text"; // Which event field to embed
-    config.chunk_size = body.chunk_size || 500;     // Chars per chunk
+    config.text_field = body.text_field || "text";
+    config.chunk_size = body.chunk_size || 500;
     config.chunk_overlap = body.chunk_overlap || 50;
   }
 
@@ -230,9 +381,26 @@ pipelineRoutes.post("/sinks", requireScope("pipelines:write"), async (c) => {
   return c.json({ id, name, type: "sink", status: "draft", config }, 201);
 });
 
-pipelineRoutes.get("/sinks/:sink_id", requireScope("pipelines:read"), async (c) => {
+const getSinkRoute = createRoute({
+  method: "get",
+  path: "/sinks/{sink_id}",
+  tags: ["Pipelines"],
+  summary: "Get a single sink",
+  middleware: [requireScope("pipelines:read")],
+  request: {
+    params: z.object({ sink_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Sink detail",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+pipelineRoutes.openapi(getSinkRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinkId = c.req.param("sink_id");
+  const { sink_id: sinkId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
@@ -241,12 +409,28 @@ pipelineRoutes.get("/sinks/:sink_id", requireScope("pipelines:read"), async (c) 
     LIMIT 1
   `;
   if (rows.length === 0) return c.json({ error: "Sink not found" }, 404);
-  return c.json(rows[0]);
+  return c.json(rows[0] as any);
 });
 
-pipelineRoutes.delete("/sinks/:sink_id", requireScope("pipelines:write"), async (c) => {
+const deleteSinkRoute = createRoute({
+  method: "delete",
+  path: "/sinks/{sink_id}",
+  tags: ["Pipelines"],
+  summary: "Delete a sink",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    params: z.object({ sink_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Sink deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.boolean(), id: z.string() }) } },
+    },
+  },
+});
+pipelineRoutes.openapi(deleteSinkRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const sinkId = c.req.param("sink_id");
+  const { sink_id: sinkId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
@@ -257,7 +441,20 @@ pipelineRoutes.delete("/sinks/:sink_id", requireScope("pipelines:write"), async 
 
 // ── Pipelines ────────────────────────────────────────────────────────
 
-pipelineRoutes.get("/", requireScope("pipelines:read"), async (c) => {
+const listPipelinesRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Pipelines"],
+  summary: "List pipelines",
+  middleware: [requireScope("pipelines:read")],
+  responses: {
+    200: {
+      description: "Pipeline list",
+      content: { "application/json": { schema: z.object({ pipelines: z.array(z.record(z.unknown())), total: z.number() }) } },
+    },
+  },
+});
+pipelineRoutes.openapi(listPipelinesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -269,9 +466,38 @@ pipelineRoutes.get("/", requireScope("pipelines:read"), async (c) => {
   return c.json({ pipelines: rows, total: rows.length });
 });
 
-pipelineRoutes.post("/", requireScope("pipelines:write"), async (c) => {
+const createPipelineRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Pipelines"],
+  summary: "Create a pipeline",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            description: z.string().default(""),
+            stream_id: z.string().min(1),
+            sink_id: z.string().min(1),
+            sql: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Pipeline created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404),
+  },
+});
+pipelineRoutes.openapi(createPipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   if (!name) return c.json({ error: "name is required" }, 400);
   if (!body.stream_id) return c.json({ error: "stream_id is required" }, 400);
@@ -320,11 +546,28 @@ pipelineRoutes.post("/", requireScope("pipelines:write"), async (c) => {
   }, 201);
 });
 
-pipelineRoutes.get("/:pipeline_id", requireScope("pipelines:read"), async (c) => {
+const getPipelineRoute = createRoute({
+  method: "get",
+  path: "/{pipeline_id}",
+  tags: ["Pipelines"],
+  summary: "Get a single pipeline",
+  middleware: [requireScope("pipelines:read")],
+  request: {
+    params: z.object({ pipeline_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Pipeline detail",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+pipelineRoutes.openapi(getPipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const pipelineId = c.req.param("pipeline_id");
+  const { pipeline_id: pipelineId } = c.req.valid("param");
 
-  // Guard: skip template/stream/sink sub-routes that would match /:pipeline_id
+  // Guard: skip template/stream/sink sub-routes that would match /{pipeline_id}
   if (["templates", "streams", "sinks"].includes(pipelineId)) {
     return c.notFound();
   }
@@ -358,13 +601,40 @@ pipelineRoutes.get("/:pipeline_id", requireScope("pipelines:read"), async (c) =>
     ...pipeline,
     stream_name: streamName,
     sink_name: sinkName,
-  });
+  } as any);
 });
 
-pipelineRoutes.put("/:pipeline_id", requireScope("pipelines:write"), async (c) => {
+const updatePipelineRoute = createRoute({
+  method: "put",
+  path: "/{pipeline_id}",
+  tags: ["Pipelines"],
+  summary: "Update a pipeline",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    params: z.object({ pipeline_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            sql: z.string().optional(),
+            description: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Pipeline updated",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+pipelineRoutes.openapi(updatePipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const pipelineId = c.req.param("pipeline_id");
-  const body = await c.req.json();
+  const { pipeline_id: pipelineId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -395,9 +665,25 @@ pipelineRoutes.put("/:pipeline_id", requireScope("pipelines:write"), async (c) =
   return c.json({ updated: true, id: pipelineId, config });
 });
 
-pipelineRoutes.delete("/:pipeline_id", requireScope("pipelines:write"), async (c) => {
+const deletePipelineRoute = createRoute({
+  method: "delete",
+  path: "/{pipeline_id}",
+  tags: ["Pipelines"],
+  summary: "Delete a pipeline",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    params: z.object({ pipeline_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Pipeline deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.boolean(), id: z.string() }) } },
+    },
+  },
+});
+pipelineRoutes.openapi(deletePipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const pipelineId = c.req.param("pipeline_id");
+  const { pipeline_id: pipelineId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE pipelines SET status = 'deleted', updated_at = ${nowEpoch()}
@@ -461,16 +747,56 @@ const PIPELINE_TEMPLATES = [
   },
 ];
 
-pipelineRoutes.get("/templates", requireScope("pipelines:read"), async (c) => {
+const listTemplatesRoute = createRoute({
+  method: "get",
+  path: "/templates",
+  tags: ["Pipelines"],
+  summary: "List pipeline templates",
+  middleware: [requireScope("pipelines:read")],
+  responses: {
+    200: {
+      description: "Template list",
+      content: { "application/json": { schema: z.object({ templates: z.array(z.record(z.unknown())) }) } },
+    },
+  },
+});
+pipelineRoutes.openapi(listTemplatesRoute, async (c): Promise<any> => {
   return c.json({ templates: PIPELINE_TEMPLATES });
 });
 
 // ── Query ────────────────────────────────────────────────────────────
 
-pipelineRoutes.post("/:pipeline_id/query", requireScope("pipelines:read"), async (c) => {
+const queryPipelineRoute = createRoute({
+  method: "post",
+  path: "/{pipeline_id}/query",
+  tags: ["Pipelines"],
+  summary: "Query pipeline data",
+  middleware: [requireScope("pipelines:read")],
+  request: {
+    params: z.object({ pipeline_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            sql: z.string().min(1),
+            limit: z.number().int().max(1000).default(100).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Query results",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+pipelineRoutes.openapi(queryPipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const pipelineId = c.req.param("pipeline_id");
-  const body = await c.req.json();
+  const { pipeline_id: pipelineId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const querySql = String(body.sql || "").trim();
   const limit = Math.min(Number(body.limit) || 100, 1000);
 
@@ -530,9 +856,30 @@ pipelineRoutes.post("/:pipeline_id/query", requireScope("pipelines:read"), async
 
 // ── Deploy (trigger CF API resource creation) ────────────────────────
 
-pipelineRoutes.post("/:pipeline_id/deploy", requireScope("pipelines:write"), async (c) => {
+const deployPipelineRoute = createRoute({
+  method: "post",
+  path: "/{pipeline_id}/deploy",
+  tags: ["Pipelines"],
+  summary: "Deploy a pipeline to Cloudflare",
+  middleware: [requireScope("pipelines:write")],
+  request: {
+    params: z.object({ pipeline_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Deployment result",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    202: {
+      description: "CF API unavailable, deploy manually",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const pipelineId = c.req.param("pipeline_id");
+  const { pipeline_id: pipelineId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

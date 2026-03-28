@@ -2,10 +2,10 @@
  * Security scanning routes -- OWASP probes, AIVSS, risk profiles.
  * Ported from agentos/api/routers/redteam.py.
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import {
   allProbesDicts,
@@ -21,21 +21,49 @@ import {
 import { parseAgentConfigJson } from "../schemas/common";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const securityRoutes = new Hono<R>();
+export const securityRoutes = createOpenAPIRouter();
 
 // ── GET /probes ──────────────────────────────────────────────────
 
-securityRoutes.get("/probes", requireScope("security:read"), (c) => {
+const listProbesRoute = createRoute({
+  method: "get",
+  path: "/probes",
+  tags: ["Security"],
+  summary: "List all security probes",
+  middleware: [requireScope("security:read")],
+  responses: {
+    200: { description: "Probe list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(listProbesRoute, async (c): Promise<any> => {
   return c.json({ probes: allProbesDicts() });
 });
 
 // ── GET /scans ───────────────────────────────────────────────────
 
-securityRoutes.get("/scans", requireScope("security:read"), async (c) => {
+const listScansRoute = createRoute({
+  method: "get",
+  path: "/scans",
+  tags: ["Security"],
+  summary: "List security scans",
+  middleware: [requireScope("security:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().default(""),
+      limit: z.coerce.number().int().min(1).max(200).default(50),
+    }),
+  },
+  responses: {
+    200: { description: "Scan list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(listScansRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
+  const { agent_name: agentName, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -57,12 +85,29 @@ securityRoutes.get("/scans", requireScope("security:read"), async (c) => {
 
 // ── GET /findings ────────────────────────────────────────────────
 
-securityRoutes.get("/findings", requireScope("security:read"), async (c) => {
+const listFindingsRoute = createRoute({
+  method: "get",
+  path: "/findings",
+  tags: ["Security"],
+  summary: "List security findings",
+  middleware: [requireScope("security:read")],
+  request: {
+    query: z.object({
+      scan_id: z.string().default(""),
+      agent_name: z.string().default(""),
+      severity: z.string().default(""),
+      limit: z.coerce.number().int().min(1).max(500).default(100),
+    }),
+  },
+  responses: {
+    200: { description: "Findings list", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(listFindingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scanId = c.req.query("scan_id") ?? "";
-  const agentName = c.req.query("agent_name") ?? "";
-  const severity = c.req.query("severity") ?? "";
-  const limit = Math.min(500, Math.max(1, Number(c.req.query("limit") ?? 100)));
+  const { scan_id: scanId, agent_name: agentName, severity, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Use separate queries to avoid SQL injection with dynamic WHERE
@@ -122,7 +167,19 @@ securityRoutes.get("/findings", requireScope("security:read"), async (c) => {
 
 // ── GET /risk-profiles ───────────────────────────────────────────
 
-securityRoutes.get("/risk-profiles", requireScope("security:read"), async (c) => {
+const listRiskProfilesRoute = createRoute({
+  method: "get",
+  path: "/risk-profiles",
+  tags: ["Security"],
+  summary: "List risk profiles",
+  middleware: [requireScope("security:read")],
+  responses: {
+    200: { description: "Risk profiles", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(listRiskProfilesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -134,9 +191,24 @@ securityRoutes.get("/risk-profiles", requireScope("security:read"), async (c) =>
 
 // ── GET /risk-profiles/:agent_name ───────────────────────────────
 
-securityRoutes.get("/risk-profiles/:agent_name", requireScope("security:read"), async (c) => {
+const getAgentRiskProfileRoute = createRoute({
+  method: "get",
+  path: "/risk-profiles/{agent_name}",
+  tags: ["Security"],
+  summary: "Get agent risk profile",
+  middleware: [requireScope("security:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Risk profile", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(getAgentRiskProfileRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM risk_profiles WHERE agent_name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
@@ -149,10 +221,29 @@ securityRoutes.get("/risk-profiles/:agent_name", requireScope("security:read"), 
 
 // ── POST /scan/:agent_name ───────────────────────────────────────
 
-securityRoutes.post("/scan/:agent_name", requireScope("security:write"), async (c) => {
+const scanAgentRoute = createRoute({
+  method: "post",
+  path: "/scan/{agent_name}",
+  tags: ["Security"],
+  summary: "Run security scan on an agent",
+  middleware: [requireScope("security:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    query: z.object({
+      scan_type: z.string().default("config"),
+    }),
+  },
+  responses: {
+    200: { description: "Scan result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(scanAgentRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const scanType = c.req.query("scan_type") ?? "config";
+  const { agent_name: agentName } = c.req.valid("param");
+  const { scan_type: scanType } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config from DB (config_json is canonical; same column as agents router)
@@ -246,7 +337,22 @@ securityRoutes.post("/scan/:agent_name", requireScope("security:write"), async (
 
 // ── POST /scan/:agent_name/runtime ───────────────────────────────
 
-securityRoutes.post("/scan/:agent_name/runtime", requireScope("security:write"), (c) => {
+const scanAgentRuntimeRoute = createRoute({
+  method: "post",
+  path: "/scan/{agent_name}/runtime",
+  tags: ["Security"],
+  summary: "Runtime security scan (edge-only)",
+  middleware: [requireScope("security:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    410: { description: "Gone", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(scanAgentRuntimeRoute, async (c): Promise<any> => {
   return c.json(
     {
       error: "Runtime scanning is edge-only. Invoke probes against worker runtime and persist findings via control plane.",
@@ -257,9 +363,25 @@ securityRoutes.post("/scan/:agent_name/runtime", requireScope("security:write"),
 
 // ── GET /scan/:scan_id/report ────────────────────────────────────
 
-securityRoutes.get("/scan/:scan_id/report", requireScope("security:read"), async (c) => {
+const getScanReportRoute = createRoute({
+  method: "get",
+  path: "/scan/{scan_id}/report",
+  tags: ["Security"],
+  summary: "Get scan report",
+  middleware: [requireScope("security:read")],
+  request: {
+    params: z.object({ scan_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Scan report", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(getScanReportRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scanId = c.req.param("scan_id");
+  const { scan_id: scanId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const scanRows = await sql`
@@ -311,14 +433,25 @@ const aivssBodySchema = z.object({
   availability_impact: z.string().default("none"),
 });
 
-securityRoutes.post("/aivss/calculate", requireScope("security:write"), async (c) => {
-  const body = await c.req.json();
-  const parsed = aivssBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid AIVSS vector", details: parsed.error.flatten() }, 400);
-  }
+const calculateAivssRoute = createRoute({
+  method: "post",
+  path: "/aivss/calculate",
+  tags: ["Security"],
+  summary: "Calculate AIVSS score",
+  middleware: [requireScope("security:write")],
+  request: {
+    body: { content: { "application/json": { schema: aivssBodySchema } } },
+  },
+  responses: {
+    200: { description: "AIVSS score", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
 
-  const vector = defaultVector(parsed.data);
+securityRoutes.openapi(calculateAivssRoute, async (c): Promise<any> => {
+  const parsed = c.req.valid("json");
+
+  const vector = defaultVector(parsed);
   const score = calculateAivss(vector);
   return c.json({
     score,
@@ -329,10 +462,28 @@ securityRoutes.post("/aivss/calculate", requireScope("security:write"), async (c
 
 // ── GET /risk-trends/:agent_name ─────────────────────────────────
 
-securityRoutes.get("/risk-trends/:agent_name", requireScope("security:read"), async (c) => {
+const getRiskTrendsRoute = createRoute({
+  method: "get",
+  path: "/risk-trends/{agent_name}",
+  tags: ["Security"],
+  summary: "Get risk trend history for an agent",
+  middleware: [requireScope("security:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(100).default(20),
+    }),
+  },
+  responses: {
+    200: { description: "Risk trends", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+securityRoutes.openapi(getRiskTrendsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const limit = Math.min(100, Math.max(1, Number(c.req.query("limit") ?? 20)));
+  const { agent_name: agentName } = c.req.valid("param");
+  const { limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

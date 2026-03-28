@@ -65,7 +65,7 @@ describe("agents route contracts", () => {
   it("lists agents with response-shape parity", async () => {
     const mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
-      if (query.includes("FROM agents") && query.includes("is_active = true")) {
+      if (query.includes("FROM agents") && query.includes("is_active")) {
         return [
           {
             name: "agent-a",

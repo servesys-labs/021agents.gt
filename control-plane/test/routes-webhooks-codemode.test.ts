@@ -69,7 +69,10 @@ describe("webhook creation with codemode_handler_id", () => {
     }, mockEnv());
     expect(res.status).toBe(400);
     const body = await res.json() as any;
-    expect(body.error).toMatch(/[Ii]nvalid webhook URL/);
+    // Zod-OpenAPI schema validates url with z.string().url(), so the error
+    // may be a Zod validation object rather than a plain string
+    const errorStr = typeof body.error === "string" ? body.error : JSON.stringify(body.error ?? body);
+    expect(errorStr).toMatch(/[Ii]nvalid|url|URL/i);
   });
 
   it("rejects localhost URLs", async () => {
@@ -84,7 +87,8 @@ describe("webhook creation with codemode_handler_id", () => {
     }, mockEnv());
     expect(res.status).toBe(400);
     const body = await res.json() as any;
-    expect(body.error).toMatch(/not allowed/);
+    const errorStr = typeof body.error === "string" ? body.error : JSON.stringify(body.error ?? body);
+    expect(errorStr).toMatch(/not allowed/);
   });
 
   it("rejects private IP URLs", async () => {

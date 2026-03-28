@@ -6,16 +6,15 @@
  *
  * All routes require API key auth (the SaaS customer's key).
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { createToken } from "../auth/jwt";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const endUserTokenRoutes = new Hono<R>();
+export const endUserTokenRoutes = createOpenAPIRouter();
 
 // ── Zod schemas ──────────────────────────────────────────────────────────
 
@@ -25,6 +24,18 @@ const MintTokenRequest = z.object({
   expires_in_seconds: z.number().int().positive().max(86400).optional(), // max 24h
   rate_limit_rpm: z.number().int().positive().optional(),
   rate_limit_rpd: z.number().int().positive().optional(),
+});
+
+const EndUserTokenSummary = z.object({
+  token_id: z.string(),
+  end_user_id: z.string(),
+  api_key_id: z.string(),
+  allowed_agents: z.array(z.string()),
+  rate_limit_rpm: z.number(),
+  rate_limit_rpd: z.number(),
+  expires_at: z.string(),
+  is_revoked: z.boolean(),
+  created_at: z.string(),
 });
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -42,18 +53,46 @@ const MAX_EXPIRY_SECONDS = 86400; // 24 hours
 
 // ── POST / — Mint a new end-user token ───────────────────────────────────
 
-endUserTokenRoutes.post("/", requireScope("api_keys:write"), async (c) => {
+const mintTokenRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["End User Tokens"],
+  summary: "Mint a new end-user session token",
+  middleware: [requireScope("api_keys:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: MintTokenRequest },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Minted token",
+      content: {
+        "application/json": {
+          schema: z.object({
+            token: z.string(),
+            token_id: z.string(),
+            end_user_id: z.string(),
+            expires_at: z.string(),
+            allowed_agents: z.array(z.string()),
+            rate_limit_rpm: z.number(),
+            rate_limit_rpd: z.number(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+endUserTokenRoutes.openapi(mintTokenRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const body = await c.req.json().catch(() => ({}));
-  const parsed = MintTokenRequest.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
-  }
-  const req = parsed.data;
+  const req = c.req.valid("json");
 
   const expirySeconds = Math.min(req.expires_in_seconds ?? DEFAULT_EXPIRY_SECONDS, MAX_EXPIRY_SECONDS);
   const now = Math.floor(Date.now() / 1000);
@@ -99,15 +138,37 @@ endUserTokenRoutes.post("/", requireScope("api_keys:write"), async (c) => {
 
 // ── GET / — List active end-user tokens for the org ──────────────────────
 
-endUserTokenRoutes.get("/", requireScope("api_keys:read"), async (c) => {
+const listTokensRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["End User Tokens"],
+  summary: "List active end-user tokens",
+  middleware: [requireScope("api_keys:read")],
+  request: {
+    query: z.object({
+      limit: z.coerce.number().int().min(1).max(200).default(50).optional(),
+      offset: z.coerce.number().int().min(0).default(0).optional(),
+      end_user_id: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Token list",
+      content: { "application/json": { schema: z.object({ tokens: z.array(EndUserTokenSummary) }) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+endUserTokenRoutes.openapi(listTokensRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const limit = Math.min(Number(c.req.query("limit") || 50), 200);
-  const offset = Number(c.req.query("offset") || 0);
-  const endUserId = c.req.query("end_user_id") || "";
+  const query = c.req.valid("query");
+  const limit = Math.min(Number(query.limit || 50), 200);
+  const offset = Number(query.offset || 0);
+  const endUserId = query.end_user_id || "";
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -159,13 +220,30 @@ endUserTokenRoutes.get("/", requireScope("api_keys:read"), async (c) => {
 
 // ── DELETE /:token_id — Revoke a token ───────────────────────────────────
 
-endUserTokenRoutes.delete("/:token_id", requireScope("api_keys:write"), async (c) => {
+const revokeTokenRoute = createRoute({
+  method: "delete",
+  path: "/{token_id}",
+  tags: ["End User Tokens"],
+  summary: "Revoke an end-user token",
+  middleware: [requireScope("api_keys:write")],
+  request: {
+    params: z.object({ token_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Token revoked",
+      content: { "application/json": { schema: z.object({ revoked: z.string() }) } },
+    },
+    ...errorResponses(401, 404, 500),
+  },
+});
+endUserTokenRoutes.openapi(revokeTokenRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const tokenId = c.req.param("token_id");
+  const { token_id: tokenId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
@@ -183,14 +261,52 @@ endUserTokenRoutes.delete("/:token_id", requireScope("api_keys:write"), async (c
 
 // ── GET /usage/:end_user_id — Get usage stats for a specific end-user ────
 
-endUserTokenRoutes.get("/usage/:end_user_id", requireScope("api_keys:read"), async (c) => {
+const getUsageRoute = createRoute({
+  method: "get",
+  path: "/usage/{end_user_id}",
+  tags: ["End User Tokens"],
+  summary: "Get usage stats for a specific end-user",
+  middleware: [requireScope("api_keys:read")],
+  request: {
+    params: z.object({ end_user_id: z.string() }),
+    query: z.object({
+      days: z.coerce.number().int().min(1).max(90).default(30).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Usage statistics",
+      content: {
+        "application/json": {
+          schema: z.object({
+            end_user_id: z.string(),
+            period_days: z.number(),
+            total_requests: z.number(),
+            total_cost_usd: z.number(),
+            total_tokens: z.number(),
+            by_agent: z.array(z.object({
+              agent_name: z.string(),
+              requests: z.number(),
+              cost_usd: z.number(),
+              tokens: z.number(),
+              avg_latency_ms: z.number(),
+            })),
+          }),
+        },
+      },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+endUserTokenRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
   const user = c.get("user");
   if (!ensureUser(user)) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const endUserId = c.req.param("end_user_id");
-  const days = Math.min(Number(c.req.query("days") || 30), 90);
+  const { end_user_id: endUserId } = c.req.valid("param");
+  const query = c.req.valid("query");
+  const days = Math.min(Number(query.days || 30), 90);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 

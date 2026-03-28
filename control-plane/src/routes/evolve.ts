@@ -12,9 +12,10 @@
  *   GET  /:agent_name/ledger    → evolution history
  *   GET  /:agent_name/report    → latest analysis report
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
@@ -26,15 +27,59 @@ import {
   type AnalysisReport,
 } from "../logic/evolution-analyzer";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const evolveRoutes = new Hono<R>();
+export const evolveRoutes = createOpenAPIRouter();
 
-// ── Analyze: run the evolution analyzer on recent sessions ────
+// ── Zod schemas ─────────────────────────────────────────────────
 
-evolveRoutes.post("/:agent_name/analyze", requireScope("evolve:write"), async (c) => {
+const analyzeBody = z.object({
+  days: z.number().int().min(1).max(90).optional(),
+}).optional();
+
+const applyBody = z.object({
+  autopilot: z.boolean().optional(),
+  scheduled: z.boolean().optional(),
+  evolution_apply_guard: z.object({
+    force: z.boolean().optional(),
+    reason: z.string().optional(),
+  }).optional(),
+}).optional();
+
+const rollbackBody = z.object({
+  reason: z.string().optional(),
+}).optional();
+
+const approveRejectBody = z.object({
+  note: z.string().optional(),
+}).optional();
+
+const scheduleBody = z.object({
+  interval_days: z.number().int().min(1).max(365).optional(),
+  min_sessions: z.number().int().min(1).max(1000).optional(),
+  enabled: z.boolean().optional(),
+}).optional();
+
+// ── POST /:agent_name/analyze ───────────────────────────────────
+
+const analyzeRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/analyze",
+  tags: ["Evolve"],
+  summary: "Run evolution analyzer on recent sessions",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ days: z.number().int().min(1).max(90).optional() }) } }, required: false as const },
+  },
+  responses: {
+    200: { description: "Analysis result with proposals", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const body = await c.req.json().catch(() => ({}));
   const days = Math.min(90, Math.max(1, Number(body.days) || 7));
 
@@ -175,12 +220,27 @@ evolveRoutes.post("/:agent_name/analyze", requireScope("evolve:write"), async (c
   });
 });
 
-// ── Latest analysis report ────────────────────────────────────
+// ── GET /:agent_name/report ─────────────────────────────────────
 
-evolveRoutes.get("/:agent_name/report", requireScope("evolve:read"), async (c) => {
+const reportRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/report",
+  tags: ["Evolve"],
+  summary: "Get latest analysis report for an agent",
+  middleware: [requireScope("evolve:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Latest report", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+evolveRoutes.openapi(reportRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -200,13 +260,32 @@ evolveRoutes.get("/:agent_name/report", requireScope("evolve:read"), async (c) =
   });
 });
 
-// ── Apply an approved proposal to the agent config ────────────
+// ── POST /:agent_name/proposals/:proposal_id/apply ──────────────
 
-evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evolve:write"), async (c) => {
+const applyRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/proposals/{proposal_id}/apply",
+  tags: ["Evolve"],
+  summary: "Apply an approved proposal to the agent config",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), proposal_id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({
+      autopilot: z.boolean().optional(),
+      scheduled: z.boolean().optional(),
+      evolution_apply_guard: z.object({ force: z.boolean().optional(), reason: z.string().optional() }).optional(),
+    }) } }, required: false as const },
+  },
+  responses: {
+    200: { description: "Proposal applied", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 403, 404),
+  },
+});
+
+evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const proposalId = c.req.param("proposal_id");
+  const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
   const body = await c.req.json().catch(() => ({}));
   const autopilotRequested = body.autopilot === true || body.scheduled === true;
   const applyGuard = body.evolution_apply_guard as { force?: boolean; reason?: string } | undefined;
@@ -335,13 +414,27 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/apply", requireScope("evo
   });
 });
 
-// ── Measure impact of an applied proposal ─────────────────────
+// ── POST /:agent_name/proposals/:proposal_id/measure-impact ─────
 
-evolveRoutes.post("/:agent_name/proposals/:proposal_id/measure-impact", requireScope("evolve:write"), async (c) => {
+const measureImpactRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/proposals/{proposal_id}/measure-impact",
+  tags: ["Evolve"],
+  summary: "Measure impact of an applied proposal",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), proposal_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Impact measurement", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 404),
+  },
+});
+
+evolveRoutes.openapi(measureImpactRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const proposalId = c.req.param("proposal_id");
+  const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -438,13 +531,28 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/measure-impact", requireS
   });
 });
 
-// ── Auto-rollback on regression ───────────────────────────────
+// ── POST /:agent_name/proposals/:proposal_id/auto-rollback ──────
 
-evolveRoutes.post("/:agent_name/proposals/:proposal_id/auto-rollback", requireScope("evolve:write"), async (c) => {
+const autoRollbackRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/proposals/{proposal_id}/auto-rollback",
+  tags: ["Evolve"],
+  summary: "Auto-rollback an applied proposal on regression",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), proposal_id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ reason: z.string().optional() }) } }, required: false as const },
+  },
+  responses: {
+    200: { description: "Rollback result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 404),
+  },
+});
+
+evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const proposalId = c.req.param("proposal_id");
+  const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
   const body = await c.req.json().catch(() => ({}));
   const reason = String(body.reason || "Auto-rollback due to metric regression");
 
@@ -494,7 +602,7 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/auto-rollback", requireSc
       reason,
       config: previousConfig,
       rolled_back_at: now,
-      rolled_back_by: user.sub || user.user_id || "system",
+      rolled_back_by: user.user_id || "system",
     });
     await c.env.STORAGE.put(vcsKey, vcsPayload, {
       customMetadata: {
@@ -535,9 +643,23 @@ evolveRoutes.post("/:agent_name/proposals/:proposal_id/auto-rollback", requireSc
   });
 });
 
-// ── Legacy run endpoint ────────────────────────────────────────
+// ── POST /:agent_name/run (legacy) ──────────────────────────────
 
-evolveRoutes.post("/:agent_name/run", requireScope("evolve:write"), (c) =>
+const legacyRunRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/run",
+  tags: ["Evolve"],
+  summary: "Legacy run endpoint (deprecated)",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    410: { description: "Gone — use /analyze instead", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+evolveRoutes.openapi(legacyRunRoute, async (c): Promise<any> =>
   c.json(
     {
       error: "Use POST /:agent_name/analyze instead",
@@ -546,6 +668,359 @@ evolveRoutes.post("/:agent_name/run", requireScope("evolve:write"), (c) =>
     410,
   ),
 );
+
+// ── GET /:agent_name/proposals ──────────────────────────────────
+
+const listProposalsRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/proposals",
+  tags: ["Evolve"],
+  summary: "List evolution proposals for an agent",
+  middleware: [requireScope("evolve:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "List of proposals", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(listProposalsRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const { agent_name: agentName } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  try {
+    const rows = await sql`
+      SELECT * FROM evolution_proposals
+      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+      ORDER BY created_at DESC
+    `;
+
+    // Enrich applied/rolled_back proposals with impact data
+    const proposals = rows.map((row: any) => {
+      const base: any = { ...row };
+      if ((row.status === "applied" || row.status === "rolled_back") && row.impact_json) {
+        const impact = safeJsonParse(row.impact_json);
+        if (impact) {
+          base.impact = impact;
+        }
+      }
+      if (row.status === "rolled_back" && row.rollback_reason) {
+        base.rollback_reason = row.rollback_reason;
+      }
+      return base;
+    });
+
+    return c.json({ proposals });
+  } catch {
+    return c.json({ proposals: [] });
+  }
+});
+
+// ── POST /:agent_name/proposals/:proposal_id/approve ────────────
+
+const approveRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/proposals/{proposal_id}/approve",
+  tags: ["Evolve"],
+  summary: "Approve an evolution proposal",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), proposal_id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ note: z.string().optional() }) } }, required: false as const },
+  },
+  responses: {
+    200: { description: "Proposal approved", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(approveRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
+  const body = await c.req.json().catch(() => ({}));
+  const note = String(body.note || "");
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const rows = await sql`
+    SELECT * FROM evolution_proposals
+    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
+  `;
+  if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+
+  const now = new Date().toISOString();
+  await sql`
+    UPDATE evolution_proposals
+    SET status = 'approved', review_note = ${note}, reviewed_at = ${now}
+    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
+  `;
+
+  // Add ledger entry
+  await sql`
+    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
+    VALUES (${agentName}, ${orgId}, ${proposalId}, 'approved', ${note}, ${now})
+  `;
+
+  return c.json({ approved: proposalId, title: rows[0].title || "" });
+});
+
+// ── POST /:agent_name/proposals/:proposal_id/reject ─────────────
+
+const rejectRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/proposals/{proposal_id}/reject",
+  tags: ["Evolve"],
+  summary: "Reject an evolution proposal",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), proposal_id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ note: z.string().optional() }) } }, required: false as const },
+  },
+  responses: {
+    200: { description: "Proposal rejected", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(rejectRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const { agent_name: agentName, proposal_id: proposalId } = c.req.valid("param");
+  const body = await c.req.json().catch(() => ({}));
+  const note = String(body.note || "");
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const rows = await sql`
+    SELECT * FROM evolution_proposals
+    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
+  `;
+  if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
+
+  const now = new Date().toISOString();
+  await sql`
+    UPDATE evolution_proposals
+    SET status = 'rejected', review_note = ${note}, reviewed_at = ${now}
+    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
+  `;
+
+  await sql`
+    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
+    VALUES (${agentName}, ${orgId}, ${proposalId}, 'rejected', ${note}, ${now})
+  `;
+
+  return c.json({ rejected: proposalId, title: rows[0].title || "" });
+});
+
+// ── GET /:agent_name/ledger ─────────────────────────────────────
+
+const ledgerRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/ledger",
+  tags: ["Evolve"],
+  summary: "Get evolution ledger for an agent",
+  middleware: [requireScope("evolve:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Ledger entries", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(ledgerRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const { agent_name: agentName } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  try {
+    const rows = await sql`
+      SELECT * FROM evolution_ledger
+      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+      ORDER BY created_at DESC
+    `;
+    return c.json({ entries: rows, current_version: "0.1.0" });
+  } catch {
+    return c.json({ entries: [], current_version: "0.1.0" });
+  }
+});
+
+// ── GET /:agent_name/schedule ───────────────────────────────────
+
+const getScheduleRoute = createRoute({
+  method: "get",
+  path: "/{agent_name}/schedule",
+  tags: ["Evolve"],
+  summary: "Get evolution schedule for an agent",
+  middleware: [requireScope("evolve:read")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Schedule config", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(getScheduleRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const { agent_name: agentName } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const rows = await sql`
+    SELECT * FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (rows.length === 0) {
+    return c.json({ schedule: null, message: "No evolution schedule configured for this agent." });
+  }
+
+  return c.json({ schedule: rows[0] });
+});
+
+// ── POST /:agent_name/schedule ──────────────────────────────────
+
+const createScheduleRoute = createRoute({
+  method: "post",
+  path: "/{agent_name}/schedule",
+  tags: ["Evolve"],
+  summary: "Create or update evolution schedule for an agent",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    body: { content: { "application/json": { schema: z.object({
+      interval_days: z.number().int().min(1).max(365).optional(),
+      min_sessions: z.number().int().min(1).max(1000).optional(),
+      enabled: z.boolean().optional(),
+    }) } }, required: false as const },
+  },
+  responses: {
+    200: { description: "Schedule created/updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const { agent_name: agentName } = c.req.valid("param");
+  const body = await c.req.json().catch(() => ({}));
+
+  const intervalDays = Math.min(365, Math.max(1, Number(body.interval_days) || 7));
+  const minSessions = Math.min(1000, Math.max(1, Number(body.min_sessions) || 10));
+  const enabled = body.enabled !== false;
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const now = Date.now() / 1000;
+  const nextRunAt = now + intervalDays * 86400;
+  const id = `evosched-${crypto.randomUUID().slice(0, 12)}`;
+
+  // Upsert: create or update existing schedule for this agent+org
+  await sql`
+    INSERT INTO evolution_schedules (id, agent_name, org_id, enabled, interval_days, min_sessions, next_run_at, created_at)
+    VALUES (${id}, ${agentName}, ${orgId}, ${enabled}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
+    ON CONFLICT (id) DO NOTHING
+  `;
+
+  // If a row already exists for this agent+org, update it instead
+  const existing = await sql`
+    SELECT id FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId} AND id != ${id}
+    LIMIT 1
+  `.catch(() => []);
+
+  if (existing.length > 0) {
+    await sql`
+      UPDATE evolution_schedules
+      SET enabled = ${enabled},
+          interval_days = ${intervalDays},
+          min_sessions = ${minSessions},
+          next_run_at = CASE WHEN next_run_at IS NULL THEN ${nextRunAt} ELSE next_run_at END
+      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+    `;
+    // Remove the duplicate we just inserted
+    await sql`DELETE FROM evolution_schedules WHERE id = ${id}`.catch(() => {});
+  }
+
+  const rows = await sql`
+    SELECT * FROM evolution_schedules
+    WHERE agent_name = ${agentName} AND org_id = ${orgId} LIMIT 1
+  `.catch(() => []);
+
+  return c.json({ schedule: rows[0] || null, created: existing.length === 0 });
+});
+
+// ── DELETE /:agent_name/schedule ────────────────────────────────
+
+const deleteScheduleRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}/schedule",
+  tags: ["Evolve"],
+  summary: "Disable evolution schedule for an agent",
+  middleware: [requireScope("evolve:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Schedule disabled", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+evolveRoutes.openapi(deleteScheduleRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const orgId = user.org_id;
+  const { agent_name: agentName } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent belongs to this org
+  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  // Soft-disable rather than delete, so history is preserved
+  await sql`
+    UPDATE evolution_schedules
+    SET enabled = false
+    WHERE agent_name = ${agentName} AND org_id = ${orgId}
+  `.catch(() => {});
+
+  return c.json({ disabled: true, agent_name: agentName });
+});
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -810,234 +1285,3 @@ function deepMergeConfig(
 
   return result;
 }
-
-evolveRoutes.get("/:agent_name/proposals", requireScope("evolve:read"), async (c) => {
-  const user = c.get("user");
-  const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  try {
-    const rows = await sql`
-      SELECT * FROM evolution_proposals
-      WHERE agent_name = ${agentName} AND org_id = ${orgId}
-      ORDER BY created_at DESC
-    `;
-
-    // Enrich applied/rolled_back proposals with impact data
-    const proposals = rows.map((row: any) => {
-      const base: any = { ...row };
-      if ((row.status === "applied" || row.status === "rolled_back") && row.impact_json) {
-        const impact = safeJsonParse(row.impact_json);
-        if (impact) {
-          base.impact = impact;
-        }
-      }
-      if (row.status === "rolled_back" && row.rollback_reason) {
-        base.rollback_reason = row.rollback_reason;
-      }
-      return base;
-    });
-
-    return c.json({ proposals });
-  } catch {
-    return c.json({ proposals: [] });
-  }
-});
-
-evolveRoutes.post("/:agent_name/proposals/:proposal_id/approve", requireScope("evolve:write"), async (c) => {
-  const user = c.get("user");
-  const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const proposalId = c.req.param("proposal_id");
-  const body = await c.req.json().catch(() => ({}));
-  const note = String(body.note || "");
-
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM evolution_proposals
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
-
-  const now = new Date().toISOString();
-  await sql`
-    UPDATE evolution_proposals
-    SET status = 'approved', review_note = ${note}, reviewed_at = ${now}
-    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
-  `;
-
-  // Add ledger entry
-  await sql`
-    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-    VALUES (${agentName}, ${orgId}, ${proposalId}, 'approved', ${note}, ${now})
-  `;
-
-  return c.json({ approved: proposalId, title: rows[0].title || "" });
-});
-
-evolveRoutes.post("/:agent_name/proposals/:proposal_id/reject", requireScope("evolve:write"), async (c) => {
-  const user = c.get("user");
-  const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const proposalId = c.req.param("proposal_id");
-  const body = await c.req.json().catch(() => ({}));
-  const note = String(body.note || "");
-
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM evolution_proposals
-    WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
-  `;
-  if (rows.length === 0) return c.json({ error: "Proposal not found" }, 404);
-
-  const now = new Date().toISOString();
-  await sql`
-    UPDATE evolution_proposals
-    SET status = 'rejected', review_note = ${note}, reviewed_at = ${now}
-    WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
-  `;
-
-  await sql`
-    INSERT INTO evolution_ledger (agent_name, org_id, proposal_id, action, note, created_at)
-    VALUES (${agentName}, ${orgId}, ${proposalId}, 'rejected', ${note}, ${now})
-  `;
-
-  return c.json({ rejected: proposalId, title: rows[0].title || "" });
-});
-
-evolveRoutes.get("/:agent_name/ledger", requireScope("evolve:read"), async (c) => {
-  const user = c.get("user");
-  const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  try {
-    const rows = await sql`
-      SELECT * FROM evolution_ledger
-      WHERE agent_name = ${agentName} AND org_id = ${orgId}
-      ORDER BY created_at DESC
-    `;
-    return c.json({ entries: rows, current_version: "0.1.0" });
-  } catch {
-    return c.json({ entries: [], current_version: "0.1.0" });
-  }
-});
-
-// ── Evolution Schedule Management ─────────────────────────────
-
-evolveRoutes.get("/:agent_name/schedule", requireScope("evolve:read"), async (c) => {
-  const user = c.get("user");
-  const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  const rows = await sql`
-    SELECT * FROM evolution_schedules
-    WHERE agent_name = ${agentName} AND org_id = ${orgId}
-    LIMIT 1
-  `.catch(() => []);
-
-  if (rows.length === 0) {
-    return c.json({ schedule: null, message: "No evolution schedule configured for this agent." });
-  }
-
-  return c.json({ schedule: rows[0] });
-});
-
-evolveRoutes.post("/:agent_name/schedule", requireScope("evolve:write"), async (c) => {
-  const user = c.get("user");
-  const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const body = await c.req.json().catch(() => ({}));
-
-  const intervalDays = Math.min(365, Math.max(1, Number(body.interval_days) || 7));
-  const minSessions = Math.min(1000, Math.max(1, Number(body.min_sessions) || 10));
-  const enabled = body.enabled !== false;
-
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  const now = Date.now() / 1000;
-  const nextRunAt = now + intervalDays * 86400;
-  const id = `evosched-${crypto.randomUUID().slice(0, 12)}`;
-
-  // Upsert: create or update existing schedule for this agent+org
-  await sql`
-    INSERT INTO evolution_schedules (id, agent_name, org_id, enabled, interval_days, min_sessions, next_run_at, created_at)
-    VALUES (${id}, ${agentName}, ${orgId}, ${enabled}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
-    ON CONFLICT (id) DO NOTHING
-  `;
-
-  // If a row already exists for this agent+org, update it instead
-  const existing = await sql`
-    SELECT id FROM evolution_schedules
-    WHERE agent_name = ${agentName} AND org_id = ${orgId} AND id != ${id}
-    LIMIT 1
-  `.catch(() => []);
-
-  if (existing.length > 0) {
-    await sql`
-      UPDATE evolution_schedules
-      SET enabled = ${enabled},
-          interval_days = ${intervalDays},
-          min_sessions = ${minSessions},
-          next_run_at = CASE WHEN next_run_at IS NULL THEN ${nextRunAt} ELSE next_run_at END
-      WHERE agent_name = ${agentName} AND org_id = ${orgId}
-    `;
-    // Remove the duplicate we just inserted
-    await sql`DELETE FROM evolution_schedules WHERE id = ${id}`.catch(() => {});
-  }
-
-  const rows = await sql`
-    SELECT * FROM evolution_schedules
-    WHERE agent_name = ${agentName} AND org_id = ${orgId} LIMIT 1
-  `.catch(() => []);
-
-  return c.json({ schedule: rows[0] || null, created: existing.length === 0 });
-});
-
-evolveRoutes.delete("/:agent_name/schedule", requireScope("evolve:write"), async (c) => {
-  const user = c.get("user");
-  const orgId = user.org_id;
-  const agentName = c.req.param("agent_name");
-  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-  // Verify agent belongs to this org
-  const agentCheck = await sql`SELECT 1 FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
-  if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
-
-  // Soft-disable rather than delete, so history is preserved
-  await sql`
-    UPDATE evolution_schedules
-    SET enabled = false
-    WHERE agent_name = ${agentName} AND org_id = ${orgId}
-  `.catch(() => {});
-
-  return c.json({ disabled: true, agent_name: agentName });
-});

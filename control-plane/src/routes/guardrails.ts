@@ -1,10 +1,10 @@
 /**
  * Guardrails Router — scan, redact, policy CRUD, event log, stats, test.
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { detectPii, redactPii, scanAndRedact, PII_CATEGORIES } from "../logic/pii-detector";
@@ -18,8 +18,7 @@ import {
 } from "../logic/guardrail-engine";
 import { logSecurityEvent } from "../logic/security-events";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const guardrailRoutes = new Hono<R>();
+export const guardrailRoutes = createOpenAPIRouter();
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -36,7 +35,7 @@ function textPreview(text: string, maxLen = 100): string {
   return text.slice(0, maxLen) + "...";
 }
 
-// ── POST /scan ──────────────────────────────────────────────────
+// ── Zod schemas ─────────────────────────────────────────────────
 
 const scanBodySchema = z.object({
   text: z.string().min(1).max(200_000),
@@ -45,15 +44,52 @@ const scanBodySchema = z.object({
   system_prompt: z.string().optional(),
 });
 
-guardrailRoutes.post("/scan", requireScope("guardrails:write"), async (c) => {
-  const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = scanBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid body", details: parsed.error.flatten() }, 400);
-  }
+const redactBodySchema = z.object({
+  text: z.string().min(1).max(200_000),
+  categories: z.array(z.string()).optional(),
+});
 
-  const { text, scan_type, agent_name, system_prompt } = parsed.data;
+const policyBodySchema = z.object({
+  name: z.string().min(1).max(200),
+  agent_name: z.string().optional(),
+  pii_detection: z.boolean().default(true),
+  pii_redaction: z.boolean().default(true),
+  injection_check: z.boolean().default(true),
+  output_safety: z.boolean().default(true),
+  max_input_length: z.number().int().min(0).default(50_000),
+  blocked_topics: z.array(z.string()).default([]),
+});
+
+const testBodySchema = z.object({
+  text: z.string().min(1).max(200_000),
+  policy_id: z.string(),
+});
+
+const eventsQuerySchema = z.object({
+  agent_name: z.string().optional(),
+  event_type: z.string().optional(),
+  since_days: z.coerce.number().int().min(1).max(365).default(7),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+});
+
+// ── POST /scan ──────────────────────────────────────────────────
+
+const scanRoute = createRoute({
+  method: "post",
+  path: "/scan",
+  tags: ["Guardrails"],
+  summary: "Scan text for policy violations",
+  middleware: [requireScope("guardrails:write")],
+  request: { body: { content: { "application/json": { schema: scanBodySchema } } } },
+  responses: {
+    200: { description: "Scan result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
+});
+
+guardrailRoutes.openapi(scanRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { text, scan_type, agent_name, system_prompt } = c.req.valid("json");
 
   // Load agent-specific policy if agent_name is provided, otherwise use defaults
   let policy = DEFAULT_GUARDRAIL_POLICY;
@@ -148,19 +184,21 @@ guardrailRoutes.post("/scan", requireScope("guardrails:write"), async (c) => {
 
 // ── POST /redact ────────────────────────────────────────────────
 
-const redactBodySchema = z.object({
-  text: z.string().min(1).max(200_000),
-  categories: z.array(z.string()).optional(),
+const redactRoute = createRoute({
+  method: "post",
+  path: "/redact",
+  tags: ["Guardrails"],
+  summary: "Redact PII from text",
+  middleware: [requireScope("guardrails:write")],
+  request: { body: { content: { "application/json": { schema: redactBodySchema } } } },
+  responses: {
+    200: { description: "Redacted text", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
 });
 
-guardrailRoutes.post("/redact", requireScope("guardrails:write"), async (c) => {
-  const body = await c.req.json();
-  const parsed = redactBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid body", details: parsed.error.flatten() }, 400);
-  }
-
-  const { text, categories } = parsed.data;
+guardrailRoutes.openapi(redactRoute, async (c): Promise<any> => {
+  const { text, categories } = c.req.valid("json");
   let matches = detectPii(text);
 
   // Filter by categories if provided
@@ -181,7 +219,19 @@ guardrailRoutes.post("/redact", requireScope("guardrails:write"), async (c) => {
 
 // ── GET /policies ───────────────────────────────────────────────
 
-guardrailRoutes.get("/policies", requireScope("guardrails:read"), async (c) => {
+const listPoliciesRoute = createRoute({
+  method: "get",
+  path: "/policies",
+  tags: ["Guardrails"],
+  summary: "List guardrail policies",
+  middleware: [requireScope("guardrails:read")],
+  responses: {
+    200: { description: "List of policies", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+guardrailRoutes.openapi(listPoliciesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -208,26 +258,22 @@ guardrailRoutes.get("/policies", requireScope("guardrails:read"), async (c) => {
 
 // ── POST /policies ──────────────────────────────────────────────
 
-const policyBodySchema = z.object({
-  name: z.string().min(1).max(200),
-  agent_name: z.string().optional(),
-  pii_detection: z.boolean().default(true),
-  pii_redaction: z.boolean().default(true),
-  injection_check: z.boolean().default(true),
-  output_safety: z.boolean().default(true),
-  max_input_length: z.number().int().min(0).default(50_000),
-  blocked_topics: z.array(z.string()).default([]),
+const createPolicyRoute = createRoute({
+  method: "post",
+  path: "/policies",
+  tags: ["Guardrails"],
+  summary: "Create a guardrail policy",
+  middleware: [requireScope("guardrails:write")],
+  request: { body: { content: { "application/json": { schema: policyBodySchema } } } },
+  responses: {
+    201: { description: "Policy created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
 });
 
-guardrailRoutes.post("/policies", requireScope("guardrails:write"), async (c) => {
+guardrailRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = policyBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid body", details: parsed.error.flatten() }, 400);
-  }
-
-  const { name, agent_name, ...policyFields } = parsed.data;
+  const { name, agent_name, ...policyFields } = c.req.valid("json");
   const id = genId();
   const now = Date.now();
   const policyJson = JSON.stringify({
@@ -246,16 +292,26 @@ guardrailRoutes.post("/policies", requireScope("guardrails:write"), async (c) =>
 
 // ── PUT /policies/:policy_id ────────────────────────────────────
 
-guardrailRoutes.put("/policies/:policy_id", requireScope("guardrails:write"), async (c) => {
-  const user = c.get("user");
-  const policyId = c.req.param("policy_id");
-  const body = await c.req.json();
-  const parsed = policyBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid body", details: parsed.error.flatten() }, 400);
-  }
+const updatePolicyRoute = createRoute({
+  method: "put",
+  path: "/policies/{policy_id}",
+  tags: ["Guardrails"],
+  summary: "Update a guardrail policy",
+  middleware: [requireScope("guardrails:write")],
+  request: {
+    params: z.object({ policy_id: z.string() }),
+    body: { content: { "application/json": { schema: policyBodySchema } } },
+  },
+  responses: {
+    200: { description: "Policy updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 404),
+  },
+});
 
-  const { name, agent_name, ...policyFields } = parsed.data;
+guardrailRoutes.openapi(updatePolicyRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { policy_id: policyId } = c.req.valid("param");
+  const { name, agent_name, ...policyFields } = c.req.valid("json");
   const now = Date.now();
   const policyJson = JSON.stringify({
     ...policyFields,
@@ -279,9 +335,24 @@ guardrailRoutes.put("/policies/:policy_id", requireScope("guardrails:write"), as
 
 // ── DELETE /policies/:policy_id ─────────────────────────────────
 
-guardrailRoutes.delete("/policies/:policy_id", requireScope("guardrails:write"), async (c) => {
+const deletePolicyRoute = createRoute({
+  method: "delete",
+  path: "/policies/{policy_id}",
+  tags: ["Guardrails"],
+  summary: "Delete a guardrail policy",
+  middleware: [requireScope("guardrails:write")],
+  request: {
+    params: z.object({ policy_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Policy deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+guardrailRoutes.openapi(deletePolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const policyId = c.req.param("policy_id");
+  const { policy_id: policyId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
@@ -298,13 +369,25 @@ guardrailRoutes.delete("/policies/:policy_id", requireScope("guardrails:write"),
 
 // ── GET /events ─────────────────────────────────────────────────
 
-guardrailRoutes.get("/events", requireScope("guardrails:read"), async (c) => {
+const listEventsRoute = createRoute({
+  method: "get",
+  path: "/events",
+  tags: ["Guardrails"],
+  summary: "List guardrail events",
+  middleware: [requireScope("guardrails:read")],
+  request: {
+    query: eventsQuerySchema,
+  },
+  responses: {
+    200: { description: "List of events", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+guardrailRoutes.openapi(listEventsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name");
-  const eventType = c.req.query("event_type");
-  const sinceDays = Math.min(365, Math.max(1, Number(c.req.query("since_days") ?? 7)));
+  const { agent_name: agentName, event_type: eventType, since_days: sinceDays, limit } = c.req.valid("query");
   const sinceMs = Date.now() - sinceDays * 86_400_000;
-  const limit = Math.min(500, Math.max(1, Number(c.req.query("limit") ?? 100)));
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -342,7 +425,19 @@ guardrailRoutes.get("/events", requireScope("guardrails:read"), async (c) => {
 
 // ── GET /stats ──────────────────────────────────────────────────
 
-guardrailRoutes.get("/stats", requireScope("guardrails:read"), async (c) => {
+const statsRoute = createRoute({
+  method: "get",
+  path: "/stats",
+  tags: ["Guardrails"],
+  summary: "Get guardrail statistics",
+  middleware: [requireScope("guardrails:read")],
+  responses: {
+    200: { description: "Guardrail stats", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+guardrailRoutes.openapi(statsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -394,20 +489,22 @@ guardrailRoutes.get("/stats", requireScope("guardrails:read"), async (c) => {
 
 // ── POST /test ──────────────────────────────────────────────────
 
-const testBodySchema = z.object({
-  text: z.string().min(1).max(200_000),
-  policy_id: z.string(),
+const testRoute = createRoute({
+  method: "post",
+  path: "/test",
+  tags: ["Guardrails"],
+  summary: "Test text against a specific guardrail policy",
+  middleware: [requireScope("guardrails:write")],
+  request: { body: { content: { "application/json": { schema: testBodySchema } } } },
+  responses: {
+    200: { description: "Test result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 404),
+  },
 });
 
-guardrailRoutes.post("/test", requireScope("guardrails:write"), async (c) => {
+guardrailRoutes.openapi(testRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = testBodySchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid body", details: parsed.error.flatten() }, 400);
-  }
-
-  const { text, policy_id } = parsed.data;
+  const { text, policy_id } = c.req.valid("json");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

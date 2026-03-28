@@ -2,15 +2,15 @@
  * Schedules router — CRUD for scheduled agent runs with cron parsing.
  * Ported from agentos/api/routers/schedules.py
  */
-import { Hono } from "hono";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses, ScheduleCreateBody } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { parseCron } from "../logic/cron-parser";
 import { requireScope } from "../middleware/auth";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const scheduleRoutes = new Hono<R>();
+export const scheduleRoutes = createOpenAPIRouter();
 
 function genId(): string {
   const arr = new Uint8Array(8);
@@ -18,7 +18,22 @@ function genId(): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-scheduleRoutes.get("/", requireScope("schedules:read"), async (c) => {
+// ── GET /schedules ──────────────────────────────────────────────────────
+
+const listSchedulesRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Schedules"],
+  summary: "List all schedules",
+  middleware: [requireScope("schedules:read")],
+  responses: {
+    200: {
+      description: "List of schedules",
+      content: { "application/json": { schema: z.array(z.record(z.unknown())) } },
+    },
+  },
+});
+scheduleRoutes.openapi(listSchedulesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -37,9 +52,32 @@ scheduleRoutes.get("/", requireScope("schedules:read"), async (c) => {
   );
 });
 
-scheduleRoutes.post("/", requireScope("schedules:write"), async (c) => {
+// ── POST /schedules ─────────────────────────────────────────────────────
+
+const createScheduleRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Schedules"],
+  summary: "Create a schedule",
+  middleware: [requireScope("schedules:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": { schema: ScheduleCreateBody },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Schedule created",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400),
+  },
+});
+scheduleRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const agentName = String(body.agent_name || "").trim();
   const task = String(body.task || "").trim();
   const cron = String(body.cron || "").trim();
@@ -65,10 +103,39 @@ scheduleRoutes.post("/", requireScope("schedules:write"), async (c) => {
   return c.json({ schedule_id: scheduleId, agent_name: agentName, cron, task });
 });
 
-scheduleRoutes.put("/:schedule_id", requireScope("schedules:write"), async (c) => {
+// ── PUT /schedules/:schedule_id ─────────────────────────────────────────
+
+const updateScheduleRoute = createRoute({
+  method: "put",
+  path: "/{schedule_id}",
+  tags: ["Schedules"],
+  summary: "Update a schedule",
+  middleware: [requireScope("schedules:write")],
+  request: {
+    params: z.object({ schedule_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            cron: z.string().optional(),
+            task: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Schedule updated",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 404),
+  },
+});
+scheduleRoutes.openapi(updateScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scheduleId = c.req.param("schedule_id");
-  const body = await c.req.json();
+  const { schedule_id: scheduleId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const cron = String(body.cron || "").trim();
   const task = String(body.task || "").trim();
 
@@ -107,9 +174,28 @@ scheduleRoutes.put("/:schedule_id", requireScope("schedules:write"), async (c) =
   });
 });
 
-scheduleRoutes.get("/:schedule_id/history", requireScope("schedules:read"), async (c) => {
+// ── GET /schedules/:schedule_id/history ─────────────────────────────────
+
+const scheduleHistoryRoute = createRoute({
+  method: "get",
+  path: "/{schedule_id}/history",
+  tags: ["Schedules"],
+  summary: "Get schedule run history",
+  middleware: [requireScope("schedules:read")],
+  request: {
+    params: z.object({ schedule_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Schedule history",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+scheduleRoutes.openapi(scheduleHistoryRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scheduleId = c.req.param("schedule_id");
+  const { schedule_id: scheduleId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -127,9 +213,28 @@ scheduleRoutes.get("/:schedule_id/history", requireScope("schedules:read"), asyn
   });
 });
 
-scheduleRoutes.delete("/:schedule_id", requireScope("schedules:write"), async (c) => {
+// ── DELETE /schedules/:schedule_id ──────────────────────────────────────
+
+const deleteScheduleRoute = createRoute({
+  method: "delete",
+  path: "/{schedule_id}",
+  tags: ["Schedules"],
+  summary: "Delete a schedule",
+  middleware: [requireScope("schedules:write")],
+  request: {
+    params: z.object({ schedule_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Schedule deleted",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+scheduleRoutes.openapi(deleteScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scheduleId = c.req.param("schedule_id");
+  const { schedule_id: scheduleId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
@@ -139,9 +244,28 @@ scheduleRoutes.delete("/:schedule_id", requireScope("schedules:write"), async (c
   return c.json({ deleted: scheduleId });
 });
 
-scheduleRoutes.post("/:schedule_id/enable", requireScope("schedules:write"), async (c) => {
+// ── POST /schedules/:schedule_id/enable ─────────────────────────────────
+
+const enableScheduleRoute = createRoute({
+  method: "post",
+  path: "/{schedule_id}/enable",
+  tags: ["Schedules"],
+  summary: "Enable a schedule",
+  middleware: [requireScope("schedules:write")],
+  request: {
+    params: z.object({ schedule_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Schedule enabled",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+scheduleRoutes.openapi(enableScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scheduleId = c.req.param("schedule_id");
+  const { schedule_id: scheduleId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -153,9 +277,28 @@ scheduleRoutes.post("/:schedule_id/enable", requireScope("schedules:write"), asy
   return c.json({ enabled: true });
 });
 
-scheduleRoutes.post("/:schedule_id/disable", requireScope("schedules:write"), async (c) => {
+// ── POST /schedules/:schedule_id/disable ────────────────────────────────
+
+const disableScheduleRoute = createRoute({
+  method: "post",
+  path: "/{schedule_id}/disable",
+  tags: ["Schedules"],
+  summary: "Disable a schedule",
+  middleware: [requireScope("schedules:write")],
+  request: {
+    params: z.object({ schedule_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Schedule disabled",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(404),
+  },
+});
+scheduleRoutes.openapi(disableScheduleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const scheduleId = c.req.param("schedule_id");
+  const { schedule_id: scheduleId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`

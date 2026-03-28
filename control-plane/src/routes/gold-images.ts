@@ -2,10 +2,10 @@
  * Gold images routes -- CRUD, drift detection, compliance, audit.
  * Ported from agentos/api/routers/gold_images.py.
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
 import type { CurrentUser } from "../auth/types";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import {
@@ -14,8 +14,7 @@ import {
   complianceSummaryFromChecks,
 } from "../logic/compliance-checker";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const goldImageRoutes = new Hono<R>();
+export const goldImageRoutes = createOpenAPIRouter();
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -44,11 +43,43 @@ const updateGoldImageSchema = z.object({
   version: z.string().optional(),
 });
 
+const auditQuerySchema = z.object({
+  agent_name: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(100),
+});
+
+const complianceChecksQuerySchema = z.object({
+  agent_name: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+const listQuerySchema = z.object({
+  active_only: z.string().optional().default("true"),
+});
+
+const complianceCheckQuerySchema = z.object({
+  image_id: z.string().optional(),
+});
+
 // ── GET / ────────────────────────────────────────────────────────
 
-goldImageRoutes.get("/", requireScope("gold_images:read"), async (c) => {
+const listGoldImagesRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Gold Images"],
+  summary: "List gold images",
+  middleware: [requireScope("gold_images:read")],
+  request: { query: listQuerySchema },
+  responses: {
+    200: { description: "List of gold images", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+goldImageRoutes.openapi(listGoldImagesRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const activeOnly = c.req.query("active_only") !== "false";
+  const { active_only } = c.req.valid("query");
+  const activeOnly = active_only !== "false";
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -75,15 +106,23 @@ goldImageRoutes.get("/", requireScope("gold_images:read"), async (c) => {
 
 // ── POST / ───────────────────────────────────────────────────────
 
-goldImageRoutes.post("/", requireScope("gold_images:write"), async (c) => {
-  const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = createGoldImageSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
-  }
+const createGoldImageRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Gold Images"],
+  summary: "Create a gold image",
+  middleware: [requireScope("gold_images:write")],
+  request: { body: { content: { "application/json": { schema: createGoldImageSchema } } } },
+  responses: {
+    200: { description: "Gold image created", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401),
+  },
+});
 
-  const req = parsed.data;
+goldImageRoutes.openapi(createGoldImageRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const req = c.req.valid("json");
+
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const imageId = randomId();
   const configJson = JSON.stringify(req.config, Object.keys(req.config).sort());
@@ -123,10 +162,22 @@ goldImageRoutes.post("/", requireScope("gold_images:write"), async (c) => {
 
 // ── GET /audit ───────────────────────────────────────────────────
 
-goldImageRoutes.get("/audit", requireScope("gold_images:read"), async (c) => {
+const auditRoute = createRoute({
+  method: "get",
+  path: "/audit",
+  tags: ["Gold Images"],
+  summary: "List config audit entries",
+  middleware: [requireScope("gold_images:read")],
+  request: { query: auditQuerySchema },
+  responses: {
+    200: { description: "Audit entries", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+goldImageRoutes.openapi(auditRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 100)));
+  const { agent_name: agentName, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -149,9 +200,24 @@ goldImageRoutes.get("/audit", requireScope("gold_images:read"), async (c) => {
 
 // ── POST /from-agent/:agent_name ─────────────────────────────────
 
-goldImageRoutes.post("/from-agent/:agent_name", requireScope("gold_images:write"), async (c) => {
+const fromAgentRoute = createRoute({
+  method: "post",
+  path: "/from-agent/{agent_name}",
+  tags: ["Gold Images"],
+  summary: "Create a gold image from an agent config",
+  middleware: [requireScope("gold_images:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+  },
+  responses: {
+    200: { description: "Gold image created from agent", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+goldImageRoutes.openapi(fromAgentRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
+  const { agent_name: agentName } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config
@@ -209,7 +275,19 @@ goldImageRoutes.post("/from-agent/:agent_name", requireScope("gold_images:write"
 
 // ── GET /compliance/summary ──────────────────────────────────────
 
-goldImageRoutes.get("/compliance/summary", requireScope("gold_images:read"), async (c) => {
+const complianceSummaryRoute = createRoute({
+  method: "get",
+  path: "/compliance/summary",
+  tags: ["Gold Images"],
+  summary: "Get compliance summary across all agents",
+  middleware: [requireScope("gold_images:read")],
+  responses: {
+    200: { description: "Compliance summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+goldImageRoutes.openapi(complianceSummaryRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -227,10 +305,22 @@ goldImageRoutes.get("/compliance/summary", requireScope("gold_images:read"), asy
 
 // ── GET /compliance/checks ───────────────────────────────────────
 
-goldImageRoutes.get("/compliance/checks", requireScope("gold_images:read"), async (c) => {
+const complianceChecksRoute = createRoute({
+  method: "get",
+  path: "/compliance/checks",
+  tags: ["Gold Images"],
+  summary: "List compliance checks",
+  middleware: [requireScope("gold_images:read")],
+  request: { query: complianceChecksQuerySchema },
+  responses: {
+    200: { description: "Compliance checks", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401),
+  },
+});
+
+goldImageRoutes.openapi(complianceChecksRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.query("agent_name") ?? "";
-  const limit = Math.min(200, Math.max(1, Number(c.req.query("limit") ?? 50)));
+  const { agent_name: agentName, limit } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   let rows;
@@ -253,10 +343,26 @@ goldImageRoutes.get("/compliance/checks", requireScope("gold_images:read"), asyn
 
 // ── POST /compliance/check/:agent_name ───────────────────────────
 
-goldImageRoutes.post("/compliance/check/:agent_name", requireScope("gold_images:write"), async (c) => {
+const complianceCheckRoute = createRoute({
+  method: "post",
+  path: "/compliance/check/{agent_name}",
+  tags: ["Gold Images"],
+  summary: "Run compliance check for an agent against gold images",
+  middleware: [requireScope("gold_images:write")],
+  request: {
+    params: z.object({ agent_name: z.string() }),
+    query: complianceCheckQuerySchema,
+  },
+  responses: {
+    200: { description: "Compliance check result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+goldImageRoutes.openapi(complianceCheckRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const imageId = c.req.query("image_id") ?? "";
+  const { agent_name: agentName } = c.req.valid("param");
+  const { image_id: imageId } = c.req.valid("query");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config
@@ -419,10 +525,24 @@ async function persistComplianceCheck(
 
 // ── POST /drift/:agent_name/:image_id ────────────────────────────
 
-goldImageRoutes.post("/drift/:agent_name/:image_id", requireScope("gold_images:write"), async (c) => {
+const driftRoute = createRoute({
+  method: "post",
+  path: "/drift/{agent_name}/{image_id}",
+  tags: ["Gold Images"],
+  summary: "Detect drift between agent config and gold image",
+  middleware: [requireScope("gold_images:write")],
+  request: {
+    params: z.object({ agent_name: z.string(), image_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Drift report", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+goldImageRoutes.openapi(driftRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const agentName = c.req.param("agent_name");
-  const imageId = c.req.param("image_id");
+  const { agent_name: agentName, image_id: imageId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Load agent config
@@ -467,9 +587,24 @@ goldImageRoutes.post("/drift/:agent_name/:image_id", requireScope("gold_images:w
 
 // ── GET /:image_id ───────────────────────────────────────────────
 
-goldImageRoutes.get("/:image_id", requireScope("gold_images:read"), async (c) => {
+const getGoldImageRoute = createRoute({
+  method: "get",
+  path: "/{image_id}",
+  tags: ["Gold Images"],
+  summary: "Get a gold image by ID",
+  middleware: [requireScope("gold_images:read")],
+  request: {
+    params: z.object({ image_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Gold image detail", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+goldImageRoutes.openapi(getGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const imageId = c.req.param("image_id");
+  const { image_id: imageId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
@@ -494,14 +629,26 @@ goldImageRoutes.get("/:image_id", requireScope("gold_images:read"), async (c) =>
 
 // ── PUT /:image_id ───────────────────────────────────────────────
 
-goldImageRoutes.put("/:image_id", requireScope("gold_images:write"), async (c) => {
+const updateGoldImageRoute = createRoute({
+  method: "put",
+  path: "/{image_id}",
+  tags: ["Gold Images"],
+  summary: "Update a gold image",
+  middleware: [requireScope("gold_images:write")],
+  request: {
+    params: z.object({ image_id: z.string() }),
+    body: { content: { "application/json": { schema: updateGoldImageSchema } } },
+  },
+  responses: {
+    200: { description: "Gold image updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 404),
+  },
+});
+
+goldImageRoutes.openapi(updateGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const imageId = c.req.param("image_id");
-  const body = await c.req.json();
-  const parsed = updateGoldImageSchema.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Invalid request", details: parsed.error.flatten() }, 400);
-  }
+  const { image_id: imageId } = c.req.valid("param");
+  const req = c.req.valid("json");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -513,7 +660,6 @@ goldImageRoutes.put("/:image_id", requireScope("gold_images:write"), async (c) =
   }
 
   const existing = existingRows[0] as Record<string, unknown>;
-  const req = parsed.data;
   const now = new Date().toISOString();
   const changedFields: string[] = [];
 
@@ -569,9 +715,24 @@ goldImageRoutes.put("/:image_id", requireScope("gold_images:write"), async (c) =
 
 // ── POST /:image_id/approve ──────────────────────────────────────
 
-goldImageRoutes.post("/:image_id/approve", requireScope("gold_images:write"), async (c) => {
+const approveGoldImageRoute = createRoute({
+  method: "post",
+  path: "/{image_id}/approve",
+  tags: ["Gold Images"],
+  summary: "Approve a gold image",
+  middleware: [requireScope("gold_images:write")],
+  request: {
+    params: z.object({ image_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Gold image approved", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+goldImageRoutes.openapi(approveGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const imageId = c.req.param("image_id");
+  const { image_id: imageId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existingRows = await sql`
@@ -604,9 +765,24 @@ goldImageRoutes.post("/:image_id/approve", requireScope("gold_images:write"), as
 
 // ── DELETE /:image_id ────────────────────────────────────────────
 
-goldImageRoutes.delete("/:image_id", requireScope("gold_images:write"), async (c) => {
+const deleteGoldImageRoute = createRoute({
+  method: "delete",
+  path: "/{image_id}",
+  tags: ["Gold Images"],
+  summary: "Delete (soft) a gold image",
+  middleware: [requireScope("gold_images:write")],
+  request: {
+    params: z.object({ image_id: z.string() }),
+  },
+  responses: {
+    200: { description: "Gold image deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 404),
+  },
+});
+
+goldImageRoutes.openapi(deleteGoldImageRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const imageId = c.req.param("image_id");
+  const { image_id: imageId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const existingRows = await sql`

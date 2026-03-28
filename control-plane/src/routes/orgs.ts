@@ -2,17 +2,16 @@
  * Orgs router — organization CRUD, member management, RBAC.
  * Ported from agentos/api/routers/orgs.py
  */
-import { Hono } from "hono";
-import { z } from "zod";
-import type { Env } from "../env";
+import { createRoute, z } from "@hono/zod-openapi";
+import { createOpenAPIRouter } from "../lib/openapi";
+import { ErrorSchema, errorResponses, OrgSummary, OrgMember } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import type { Sql } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
 
-type R = { Bindings: Env; Variables: { user: CurrentUser } };
-export const orgRoutes = new Hono<R>();
+export const orgRoutes = createOpenAPIRouter();
 
 const ROLE_HIERARCHY: Record<string, number> = { owner: 4, admin: 3, member: 2, viewer: 1 };
 const ALLOWED_PLAN_TYPES = ["free", "starter", "pro", "enterprise"] as const;
@@ -48,7 +47,23 @@ function genId(): string {
   return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-orgRoutes.get("/", requireScope("orgs:read"), async (c) => {
+// ── GET / — list orgs for the current user ──────────────────────────────
+
+const listOrgsRoute = createRoute({
+  method: "get",
+  path: "/",
+  tags: ["Orgs"],
+  summary: "List organizations for the current user",
+  middleware: [requireScope("orgs:read")],
+  responses: {
+    200: {
+      description: "List of organizations",
+      content: { "application/json": { schema: z.array(OrgSummary) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+orgRoutes.openapi(listOrgsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
@@ -70,9 +85,37 @@ orgRoutes.get("/", requireScope("orgs:read"), async (c) => {
   );
 });
 
-orgRoutes.post("/", requireScope("orgs:write"), async (c) => {
+// ── POST / — create a new organization ──────────────────────────────────
+
+const createOrgRoute = createRoute({
+  method: "post",
+  path: "/",
+  tags: ["Orgs"],
+  summary: "Create a new organization",
+  middleware: [requireScope("orgs:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().min(1),
+            slug: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Created organization",
+      content: { "application/json": { schema: OrgSummary } },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+orgRoutes.openapi(createOrgRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   if (!name) return c.json({ error: "name is required" }, 400);
   const slug = String(body.slug || "").trim() || name.toLowerCase().replace(/\s+/g, "-");
@@ -107,9 +150,28 @@ orgRoutes.post("/", requireScope("orgs:write"), async (c) => {
   return c.json({ org_id: orgId, name, slug, plan: "free", member_count: 1 });
 });
 
-orgRoutes.get("/:org_id/members", requireScope("orgs:read"), async (c) => {
+// ── GET /:org_id/members — list members ─────────────────────────────────
+
+const listMembersRoute = createRoute({
+  method: "get",
+  path: "/{org_id}/members",
+  tags: ["Orgs"],
+  summary: "List members of an organization",
+  middleware: [requireScope("orgs:read")],
+  request: {
+    params: z.object({ org_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Member list",
+      content: { "application/json": { schema: z.object({ members: z.array(OrgMember) }) } },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+orgRoutes.openapi(listMembersRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = c.req.param("org_id");
+  const { org_id: orgId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
@@ -126,10 +188,43 @@ orgRoutes.get("/:org_id/members", requireScope("orgs:read"), async (c) => {
   return c.json({ members: rows });
 });
 
-orgRoutes.post("/:org_id/members", requireScope("orgs:write"), async (c) => {
+// ── POST /:org_id/members — invite a member ────────────────────────────
+
+const addMemberRoute = createRoute({
+  method: "post",
+  path: "/{org_id}/members",
+  tags: ["Orgs"],
+  summary: "Invite a member to an organization",
+  middleware: [requireScope("orgs:write")],
+  request: {
+    params: z.object({ org_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            email: z.string().email(),
+            role: z.enum(["owner", "admin", "member", "viewer"]).default("member"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Member invited",
+      content: {
+        "application/json": {
+          schema: z.object({ invited: z.string(), role: z.string() }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+orgRoutes.openapi(addMemberRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = c.req.param("org_id");
-  const body = await c.req.json();
+  const { org_id: orgId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const email = String(body.email || "").trim();
   const role = String(body.role || "member");
 
@@ -176,10 +271,39 @@ orgRoutes.post("/:org_id/members", requireScope("orgs:write"), async (c) => {
   return c.json({ invited: email, role });
 });
 
-orgRoutes.put("/:org_id", requireScope("orgs:write"), async (c) => {
+// ── PUT /:org_id — update an organization ───────────────────────────────
+
+const updateOrgRoute = createRoute({
+  method: "put",
+  path: "/{org_id}",
+  tags: ["Orgs"],
+  summary: "Update an organization",
+  middleware: [requireScope("orgs:write")],
+  request: {
+    params: z.object({ org_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().optional(),
+            plan: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Organization updated",
+      content: { "application/json": { schema: z.object({ updated: z.string() }) } },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+orgRoutes.openapi(updateOrgRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = c.req.param("org_id");
-  const body = await c.req.json();
+  const { org_id: orgId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const name = String(body.name || "").trim();
   const plan = String(body.plan || "").trim();
 
@@ -217,9 +341,28 @@ orgRoutes.put("/:org_id", requireScope("orgs:write"), async (c) => {
   return c.json({ updated: orgId });
 });
 
-orgRoutes.delete("/:org_id", requireScope("orgs:write"), async (c) => {
+// ── DELETE /:org_id — delete an organization ────────────────────────────
+
+const deleteOrgRoute = createRoute({
+  method: "delete",
+  path: "/{org_id}",
+  tags: ["Orgs"],
+  summary: "Delete an organization",
+  middleware: [requireScope("orgs:write")],
+  request: {
+    params: z.object({ org_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Organization deleted",
+      content: { "application/json": { schema: z.object({ deleted: z.string() }) } },
+    },
+    ...errorResponses(401, 403, 404, 500),
+  },
+});
+orgRoutes.openapi(deleteOrgRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = c.req.param("org_id");
+  const { org_id: orgId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
@@ -233,11 +376,42 @@ orgRoutes.delete("/:org_id", requireScope("orgs:write"), async (c) => {
   return c.json({ deleted: orgId });
 });
 
-orgRoutes.put("/:org_id/members/:member_user_id", requireScope("orgs:write"), async (c) => {
+// ── PUT /:org_id/members/:member_user_id — update member role ───────────
+
+const updateMemberRoleRoute = createRoute({
+  method: "put",
+  path: "/{org_id}/members/{member_user_id}",
+  tags: ["Orgs"],
+  summary: "Update a member's role",
+  middleware: [requireScope("orgs:write")],
+  request: {
+    params: z.object({ org_id: z.string(), member_user_id: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            role: z.enum(["owner", "admin", "member", "viewer"]),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Role updated",
+      content: {
+        "application/json": {
+          schema: z.object({ updated: z.string(), role: z.string() }),
+        },
+      },
+    },
+    ...errorResponses(400, 401, 403, 404, 500),
+  },
+});
+orgRoutes.openapi(updateMemberRoleRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = c.req.param("org_id");
-  const memberUserId = c.req.param("member_user_id");
-  const body = await c.req.json();
+  const { org_id: orgId, member_user_id: memberUserId } = c.req.valid("param");
+  const body = c.req.valid("json");
   const role = String(body.role || "");
 
   if (!["owner", "admin", "member", "viewer"].includes(role)) {
@@ -270,10 +444,28 @@ orgRoutes.put("/:org_id/members/:member_user_id", requireScope("orgs:write"), as
   return c.json({ updated: memberUserId, role });
 });
 
-orgRoutes.delete("/:org_id/members/:member_user_id", requireScope("orgs:write"), async (c) => {
+// ── DELETE /:org_id/members/:member_user_id — remove a member ───────────
+
+const removeMemberRoute = createRoute({
+  method: "delete",
+  path: "/{org_id}/members/{member_user_id}",
+  tags: ["Orgs"],
+  summary: "Remove a member from an organization",
+  middleware: [requireScope("orgs:write")],
+  request: {
+    params: z.object({ org_id: z.string(), member_user_id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: "Member removed",
+      content: { "application/json": { schema: z.object({ removed: z.string() }) } },
+    },
+    ...errorResponses(401, 403, 404, 500),
+  },
+});
+orgRoutes.openapi(removeMemberRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const orgId = c.req.param("org_id");
-  const memberUserId = c.req.param("member_user_id");
+  const { org_id: orgId, member_user_id: memberUserId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   try {
@@ -299,9 +491,22 @@ orgRoutes.delete("/:org_id/members/:member_user_id", requireScope("orgs:write"),
   return c.json({ removed: memberUserId });
 });
 
-// ── GET /org/settings — read org settings + onboarding state ─────────────────
+// ── GET /settings — read org settings + onboarding state ────────────────
 
-orgRoutes.get("/settings", async (c) => {
+const getSettingsRoute = createRoute({
+  method: "get",
+  path: "/settings",
+  tags: ["Orgs"],
+  summary: "Get organization settings and onboarding state",
+  responses: {
+    200: {
+      description: "Org settings",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(401, 500),
+  },
+});
+orgRoutes.openapi(getSettingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -323,15 +528,33 @@ orgRoutes.get("/settings", async (c) => {
   });
 });
 
-// ── POST /org/settings — save org settings (onboarding, connectors, name) ────
+// ── POST /settings — save org settings (onboarding, connectors, name) ───
 
-orgRoutes.post("/settings", async (c) => {
+const updateSettingsRoute = createRoute({
+  method: "post",
+  path: "/settings",
+  tags: ["Orgs"],
+  summary: "Save organization settings",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: OrgSettingsPatch,
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Settings saved",
+      content: { "application/json": { schema: z.object({ saved: z.boolean(), settings: z.record(z.unknown()) }) } },
+    },
+    ...errorResponses(400, 401, 500),
+  },
+});
+orgRoutes.openapi(updateSettingsRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const body = await c.req.json();
-  const parsed = OrgSettingsPatch.safeParse(body);
-  if (!parsed.success) {
-    return c.json({ error: "Validation failed", detail: parsed.error.issues[0]?.message }, 400);
-  }
+  const parsed = c.req.valid("json");
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -345,7 +568,7 @@ orgRoutes.post("/settings", async (c) => {
 
   const merged = {
     ...current,
-    ...parsed.data,
+    ...parsed,
   };
 
   const settingsJson = JSON.stringify(merged);
@@ -360,9 +583,9 @@ orgRoutes.post("/settings", async (c) => {
   `;
 
   // Also update org name if provided
-  if (parsed.data.org_name) {
+  if (parsed.org_name) {
     await sql`
-      UPDATE orgs SET name = ${parsed.data.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
+      UPDATE orgs SET name = ${parsed.org_name}, updated_at = now() WHERE org_id = ${user.org_id}
     `.catch(() => {});
   }
 
