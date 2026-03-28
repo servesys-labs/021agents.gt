@@ -10,6 +10,7 @@ import AgentSettingsPage from "./pages/AgentSettingsPage";
 import AgentActivityPage from "./pages/AgentActivityPage";
 import AgentFlowPage from "./pages/AgentFlowPage";
 import AgentTestsPage from "./pages/AgentTestsPage";
+import AgentKnowledgePage from "./pages/AgentKnowledgePage";
 
 export default function App() {
   return (
@@ -42,6 +43,7 @@ export default function App() {
         <Route path="agents/:id/activity" element={<AgentActivityPage />} />
         <Route path="agents/:id/flow" element={<AgentFlowPage />} />
         <Route path="agents/:id/tests" element={<AgentTestsPage />} />
+        <Route path="agents/:id/knowledge" element={<AgentKnowledgePage />} />
       </Route>
 
       {/* Catch-all */}
