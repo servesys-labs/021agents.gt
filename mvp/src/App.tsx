@@ -12,6 +12,9 @@ import AgentFlowPage from "./pages/AgentFlowPage";
 import AgentTestsPage from "./pages/AgentTestsPage";
 import AgentKnowledgePage from "./pages/AgentKnowledgePage";
 import AgentVoicePage from "./pages/AgentVoicePage";
+import AgentIntegrationsPage from "./pages/AgentIntegrationsPage";
+import AgentChannelsPage from "./pages/AgentChannelsPage";
+import AgentInsightsPage from "./pages/AgentInsightsPage";
 
 export default function App() {
   return (
@@ -46,6 +49,9 @@ export default function App() {
         <Route path="agents/:id/tests" element={<AgentTestsPage />} />
         <Route path="agents/:id/knowledge" element={<AgentKnowledgePage />} />
         <Route path="agents/:id/voice" element={<AgentVoicePage />} />
+        <Route path="agents/:id/integrations" element={<AgentIntegrationsPage />} />
+        <Route path="agents/:id/channels" element={<AgentChannelsPage />} />
+        <Route path="agents/:id/insights" element={<AgentInsightsPage />} />
       </Route>
 
       {/* Catch-all */}

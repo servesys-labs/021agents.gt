@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { ArrowLeft, MessageSquare, Clock, TrendingUp, AlertTriangle, Play, Settings, GitBranch, FlaskConical, BookOpen, Phone } from "lucide-react";
+import { ArrowLeft, MessageSquare, Clock, TrendingUp, AlertTriangle, Play, Settings, GitBranch, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -40,6 +40,9 @@ export default function AgentActivityPage() {
           <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/tests`)}><FlaskConical size={14} /> Evals</Button>
           <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/knowledge`)}><BookOpen size={14} /> Knowledge</Button>
           <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/voice`)}><Phone size={14} /> Voice</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/integrations`)}><ShoppingBag size={14} /> Integrations</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/channels`)}><Share2 size={14} /> Channels</Button>
+          <Button size="sm" variant="secondary" onClick={() => navigate(`/agents/${id}/insights`)}><Lightbulb size={14} /> Insights</Button>
           <Button size="sm" variant="ghost" onClick={() => navigate(`/agents/${id}/settings`)}><Settings size={14} /></Button>
         </div>
       </div>
