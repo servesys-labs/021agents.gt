@@ -1,11 +1,12 @@
 import { NavLink, useNavigate } from "react-router-dom";
-import { Home, Bot, Settings, LogOut, Menu, X } from "lucide-react";
+import { Home, Bot, Settings, LogOut, Menu, X, Plus } from "lucide-react";
 import { useState } from "react";
 import { useAuth } from "../../lib/auth";
+import { MOCK_AGENTS } from "../../lib/mock-data";
 
 const navItems = [
   { to: "/", icon: Home, label: "Dashboard" },
-  { to: "/agents/new", icon: Bot, label: "New Agent" },
+  { to: "/agents/new", icon: Plus, label: "New Agent" },
   { to: "/settings", icon: Settings, label: "Settings" },
 ];
 
@@ -30,8 +31,8 @@ export function Sidebar() {
       </div>
 
       {/* Nav links */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
-        {navItems.map((item) => (
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+        {navItems.slice(0, 2).map((item) => (
           <NavLink
             key={item.to}
             to={item.to}
@@ -49,6 +50,51 @@ export function Sidebar() {
             {item.label}
           </NavLink>
         ))}
+
+        {/* Agent list */}
+        {MOCK_AGENTS.length > 0 && (
+          <div className="pt-3 mt-3 border-t border-border">
+            <p className="px-3 py-1 text-xs font-medium text-text-muted uppercase tracking-wider">Agents</p>
+            {MOCK_AGENTS.map((agent) => (
+              <NavLink
+                key={agent.id}
+                to={`/agents/${agent.id}/activity`}
+                onClick={() => setMobileOpen(false)}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    isActive
+                      ? "bg-primary-light text-primary"
+                      : "text-text-secondary hover:bg-surface-alt hover:text-text"
+                  }`
+                }
+              >
+                <Bot size={16} />
+                <span className="truncate">{agent.name}</span>
+                {agent.status === "active" && (
+                  <span className="ml-auto w-2 h-2 rounded-full bg-success shrink-0" />
+                )}
+              </NavLink>
+            ))}
+          </div>
+        )}
+
+        {/* Settings at bottom of nav */}
+        <div className="pt-3 mt-3 border-t border-border">
+          <NavLink
+            to="/settings"
+            onClick={() => setMobileOpen(false)}
+            className={({ isActive }) =>
+              `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                isActive
+                  ? "bg-primary-light text-primary"
+                  : "text-text-secondary hover:bg-surface-alt hover:text-text"
+              }`
+            }
+          >
+            <Settings size={18} />
+            Settings
+          </NavLink>
+        </div>
       </nav>
 
       {/* User */}
