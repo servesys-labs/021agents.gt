@@ -266,7 +266,7 @@ app.route("/", a2aRoutes);
 
 // ── Auto-generated OpenAPI spec + Scalar docs ────────────────────────────
 app.doc("/api/v1/_openapi-raw.json", {
-  openapi: "3.1.0",
+  openapi: "3.0.3",
   info: {
     title: "AgentOS API",
     version: "1.0.0",
@@ -373,33 +373,19 @@ app.get("/api/v1/openapi.json", async (c) => {
     if (!obj || typeof obj !== "object") return;
     if (Array.isArray(obj)) { obj.forEach((v, i) => fixSchema(v, `${path}[${i}]`)); return; }
 
-    // Fix nullable: { type: "string", nullable: true } → { type: ["string", "null"] }
-    if (obj.nullable === true && obj.type) {
-      obj.type = [obj.type, "null"];
-      delete obj.nullable;
-    }
-    // Fix nullable without type: { nullable: true } → { type: "null" }
+    // OAS 3.0: nullable without type is invalid — add type: "object"
     if (obj.nullable === true && !obj.type) {
-      obj.type = "null";
-      delete obj.nullable;
+      obj.type = "object";
     }
 
-    // Fix exclusiveMinimum: boolean → number (use minimum value)
-    if (typeof obj.exclusiveMinimum === "boolean") {
-      if (obj.minimum !== undefined) {
-        obj.exclusiveMinimum = obj.minimum;
-        delete obj.minimum;
-      } else {
-        delete obj.exclusiveMinimum;
-      }
+    // OAS 3.0: exclusiveMinimum must be boolean (Zod sometimes emits number)
+    if (typeof obj.exclusiveMinimum === "number") {
+      obj.minimum = obj.exclusiveMinimum;
+      obj.exclusiveMinimum = true;
     }
-    if (typeof obj.exclusiveMaximum === "boolean") {
-      if (obj.maximum !== undefined) {
-        obj.exclusiveMaximum = obj.maximum;
-        delete obj.maximum;
-      } else {
-        delete obj.exclusiveMaximum;
-      }
+    if (typeof obj.exclusiveMaximum === "number") {
+      obj.maximum = obj.exclusiveMaximum;
+      obj.exclusiveMaximum = true;
     }
 
     for (const key of Object.keys(obj)) fixSchema(obj[key], `${path}.${key}`);
