@@ -1312,3 +1312,209 @@ observabilityRoutes.post("/agents/:agent_name/autonomous-maintenance-run", requi
     ],
   });
 });
+
+// ── OTLP Trace Export ─────────────────────────────────────────────────
+
+observabilityRoutes.get("/export/otlp", requireScope("observability:read"), async (c) => {
+  const user = c.get("user");
+  const traceId = c.req.query("trace_id");
+
+  if (!traceId) {
+    return c.json({ error: "trace_id query parameter is required" }, 400);
+  }
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify org ownership
+  const check = await sql`
+    SELECT COUNT(*) as cnt FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+  `;
+  if (Number(check[0]?.cnt) === 0) {
+    return c.json({ error: "Trace not found" }, 404);
+  }
+
+  // Fetch sessions for this trace
+  const sessions = await sql`
+    SELECT session_id, agent_name, status, version, wall_clock_seconds, created_at, trace_id
+    FROM sessions
+    WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    ORDER BY created_at
+  `;
+
+  // Fetch runtime_events (spans) for this trace
+  const events = await sql`
+    SELECT event_id, session_id, trace_id, span_id, parent_span_id,
+           event_type, event_name, status_code, start_time, end_time,
+           attributes_json, resource_json
+    FROM runtime_events
+    WHERE trace_id = ${traceId} AND org_id = ${user.org_id}
+    ORDER BY start_time
+  `.catch(() => []);
+
+  // Fetch turns for each session to enrich spans
+  const sessionIds = sessions.map((s: any) => String(s.session_id));
+  const turns = sessionIds.length > 0
+    ? await sql`
+        SELECT session_id, turn_number, tool_calls_json, tool_results_json, error, created_at
+        FROM turns
+        WHERE session_id = ANY(${sessionIds})
+        ORDER BY session_id, turn_number
+      `.catch(() => [])
+    : [];
+
+  // Convert to OTLP JSON format
+  // https://opentelemetry.io/docs/specs/otlp/#json-protobuf-encoding
+
+  // Build a hex trace ID (pad to 32 hex chars)
+  const hexTraceId = traceId.replace(/-/g, "").padEnd(32, "0").slice(0, 32);
+
+  // Group spans by resource (agent_name)
+  const resourceSpansMap = new Map<string, any[]>();
+
+  // Convert runtime_events to OTLP spans
+  for (const event of events) {
+    const agentName = String(
+      sessions.find((s: any) => s.session_id === event.session_id)?.agent_name || "unknown"
+    );
+
+    let attributes: Record<string, unknown> = {};
+    try { attributes = JSON.parse(String(event.attributes_json || "{}")); } catch {}
+
+    let resource: Record<string, unknown> = {};
+    try { resource = JSON.parse(String(event.resource_json || "{}")); } catch {}
+
+    const spanId = String(event.span_id || genId() + genId()).padEnd(16, "0").slice(0, 16);
+    const parentSpanId = event.parent_span_id ? String(event.parent_span_id).padEnd(16, "0").slice(0, 16) : "";
+
+    const startTimeUnixNano = String(BigInt(Math.floor(Number(event.start_time || 0) * 1e9)));
+    const endTimeUnixNano = String(BigInt(Math.floor(Number(event.end_time || event.start_time || 0) * 1e9)));
+
+    const statusCode = String(event.status_code || "STATUS_CODE_UNSET");
+    const otlpStatus: Record<string, unknown> = {
+      code: statusCode === "error" || statusCode === "STATUS_CODE_ERROR" ? 2 : statusCode === "ok" || statusCode === "STATUS_CODE_OK" ? 1 : 0,
+    };
+
+    const otlpAttributes = Object.entries(attributes).map(([key, value]) => ({
+      key,
+      value: typeof value === "number"
+        ? { intValue: String(Math.floor(value)) }
+        : typeof value === "boolean"
+          ? { boolValue: value }
+          : { stringValue: String(value ?? "") },
+    }));
+
+    // Add standard OTLP attributes
+    otlpAttributes.push(
+      { key: "agentos.session_id", value: { stringValue: String(event.session_id || "") } },
+      { key: "agentos.event_type", value: { stringValue: String(event.event_type || "") } },
+    );
+
+    const span = {
+      traceId: hexTraceId,
+      spanId,
+      parentSpanId: parentSpanId || undefined,
+      name: String(event.event_name || event.event_type || "span"),
+      kind: 1, // SPAN_KIND_INTERNAL
+      startTimeUnixNano,
+      endTimeUnixNano,
+      attributes: otlpAttributes,
+      status: otlpStatus,
+    };
+
+    if (!resourceSpansMap.has(agentName)) {
+      resourceSpansMap.set(agentName, []);
+    }
+    resourceSpansMap.get(agentName)!.push(span);
+  }
+
+  // If no runtime_events exist, synthesize spans from sessions + turns
+  if (events.length === 0) {
+    for (const session of sessions) {
+      const agentName = String(session.agent_name);
+      const sessionSpanId = genId() + genId().slice(0, 4);
+      const startNs = String(BigInt(Math.floor(Number(session.created_at || 0) * 1e9)));
+      const endNs = String(BigInt(Math.floor((Number(session.created_at || 0) + Number(session.wall_clock_seconds || 0)) * 1e9)));
+
+      const sessionSpan = {
+        traceId: hexTraceId,
+        spanId: sessionSpanId.padEnd(16, "0").slice(0, 16),
+        name: `session:${String(session.session_id).slice(0, 8)}`,
+        kind: 1,
+        startTimeUnixNano: startNs,
+        endTimeUnixNano: endNs,
+        attributes: [
+          { key: "agentos.session_id", value: { stringValue: String(session.session_id) } },
+          { key: "agentos.agent_name", value: { stringValue: agentName } },
+          { key: "agentos.status", value: { stringValue: String(session.status || "") } },
+          { key: "agentos.version", value: { stringValue: String(session.version || "") } },
+        ],
+        status: { code: session.status === "success" ? 1 : session.status === "error" ? 2 : 0 },
+      };
+
+      if (!resourceSpansMap.has(agentName)) {
+        resourceSpansMap.set(agentName, []);
+      }
+      resourceSpansMap.get(agentName)!.push(sessionSpan);
+
+      // Add turn-level child spans
+      const sessionTurns = (turns as any[]).filter((t: any) => t.session_id === session.session_id);
+      for (const turn of sessionTurns) {
+        const turnSpanId = genId() + genId().slice(0, 4);
+        const turnStartNs = String(BigInt(Math.floor(Number(turn.created_at || session.created_at || 0) * 1e9)));
+
+        const turnAttrs: any[] = [
+          { key: "agentos.turn_number", value: { intValue: String(Number(turn.turn_number || 0)) } },
+          { key: "agentos.session_id", value: { stringValue: String(session.session_id) } },
+        ];
+
+        if (turn.error) {
+          turnAttrs.push({ key: "error.message", value: { stringValue: String(turn.error).slice(0, 500) } });
+        }
+
+        let toolCalls: any[] = [];
+        try { toolCalls = JSON.parse(String(turn.tool_calls_json || "[]")); } catch {}
+        if (toolCalls.length > 0) {
+          turnAttrs.push({ key: "agentos.tool_call_count", value: { intValue: String(toolCalls.length) } });
+          turnAttrs.push({ key: "agentos.tool_names", value: { stringValue: toolCalls.map((tc: any) => tc.name || tc.tool || "").join(",") } });
+        }
+
+        resourceSpansMap.get(agentName)!.push({
+          traceId: hexTraceId,
+          spanId: turnSpanId.padEnd(16, "0").slice(0, 16),
+          parentSpanId: sessionSpan.spanId,
+          name: `turn:${turn.turn_number}`,
+          kind: 1,
+          startTimeUnixNano: turnStartNs,
+          endTimeUnixNano: turnStartNs, // No separate end time for turns
+          attributes: turnAttrs,
+          status: { code: turn.error ? 2 : 1 },
+        });
+      }
+    }
+  }
+
+  // Build OTLP JSON response
+  const resourceSpans = [...resourceSpansMap.entries()].map(([agentName, spans]) => ({
+    resource: {
+      attributes: [
+        { key: "service.name", value: { stringValue: `agentos-agent-${agentName}` } },
+        { key: "service.version", value: { stringValue: "0.2.0" } },
+        { key: "agentos.agent_name", value: { stringValue: agentName } },
+        { key: "agentos.org_id", value: { stringValue: user.org_id } },
+      ],
+    },
+    scopeSpans: [
+      {
+        scope: {
+          name: "agentos",
+          version: "0.2.0",
+        },
+        spans,
+      },
+    ],
+  }));
+
+  return c.json({
+    resourceSpans,
+  });
+});

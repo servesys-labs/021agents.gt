@@ -91,6 +91,7 @@ agents/quick-*.json
 # Node / frontend artifacts (deploy/)
 # ------------------------------
 node_modules/
+screenshots/
 deploy/node_modules/
 deploy/.wrangler/
 npm-debug.log*

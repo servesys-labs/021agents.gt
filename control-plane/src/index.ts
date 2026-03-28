@@ -807,7 +807,121 @@ export default {
       console.error("[cron] Alert evaluation failed:", err);
     }
 
-    // 4. Apply retention policies (delete old data)
+    // 4. SLO breach detection — check all SLO definitions and raise issues on breach
+    try {
+      const sloDefs = await sql`
+        SELECT id, org_id, agent_name, metric, target, window_seconds, alert_on_breach
+        FROM slo_definitions
+        WHERE alert_on_breach = true
+        LIMIT 100
+      `;
+
+      for (const slo of sloDefs) {
+        try {
+          const orgId = String(slo.org_id);
+          const agentName = String(slo.agent_name);
+          const metric = String(slo.metric);
+          const target = Number(slo.target);
+          const windowSeconds = Number(slo.window_seconds || 3600);
+          const windowStart = new Date(Date.now() - windowSeconds * 1000).toISOString();
+
+          let actualValue: number | null = null;
+
+          if (metric === "success_rate") {
+            const rows = await sql`
+              SELECT COUNT(*) as total,
+                     SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successes
+              FROM sessions
+              WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${windowStart}
+            `;
+            const total = Number(rows[0]?.total || 0);
+            if (total >= 5) {
+              actualValue = Number(rows[0]?.successes || 0) / total;
+            }
+          } else if (metric === "p99_latency" || metric === "avg_latency") {
+            const rows = await sql`
+              SELECT COALESCE(AVG(wall_clock_seconds), 0) as avg_latency,
+                     COALESCE(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY wall_clock_seconds), 0) as p99_latency
+              FROM sessions
+              WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${windowStart}
+            `.catch(() => []);
+            if (rows.length > 0) {
+              actualValue = Number(rows[0]?.[metric] || 0);
+            }
+          } else if (metric === "eval_pass_rate") {
+            const rows = await sql`
+              SELECT pass_rate FROM eval_runs
+              WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${windowStart}
+              ORDER BY created_at DESC LIMIT 1
+            `.catch(() => []);
+            if (rows.length > 0) {
+              actualValue = Number(rows[0]?.pass_rate || 0);
+            }
+          } else if (metric === "error_rate") {
+            const rows = await sql`
+              SELECT COUNT(*) as total,
+                     SUM(CASE WHEN status IN ('error', 'timeout') THEN 1 ELSE 0 END) as errors
+              FROM sessions
+              WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${windowStart}
+            `;
+            const total = Number(rows[0]?.total || 0);
+            if (total >= 5) {
+              actualValue = Number(rows[0]?.errors || 0) / total;
+            }
+          } else if (metric === "avg_cost") {
+            const rows = await sql`
+              SELECT COALESCE(AVG(cost_total_usd), 0) as avg_cost
+              FROM sessions
+              WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${windowStart}
+            `.catch(() => []);
+            if (rows.length > 0) {
+              actualValue = Number(rows[0]?.avg_cost || 0);
+            }
+          }
+
+          if (actualValue === null) continue; // Not enough data
+
+          // Determine breach: for "higher is better" metrics (success_rate, eval_pass_rate), breach = actual < target
+          // For "lower is better" metrics (error_rate, latency, cost), breach = actual > target
+          const higherIsBetter = ["success_rate", "eval_pass_rate"].includes(metric);
+          const breached = higherIsBetter ? actualValue < target : actualValue > target;
+
+          if (breached) {
+            // Check for recent duplicate issue (avoid spamming)
+            const recentIssues = await sql`
+              SELECT 1 FROM issues
+              WHERE org_id = ${orgId} AND agent_name = ${agentName}
+                AND issue_type = 'slo_breach' AND metadata_json::text LIKE ${"%" + metric + "%"}
+                AND created_at > ${new Date(Date.now() - windowSeconds * 1000).toISOString()}
+              LIMIT 1
+            `.catch(() => []);
+
+            if (recentIssues.length > 0) continue; // Already reported within window
+
+            const issueId = crypto.randomUUID().slice(0, 12);
+            const direction = higherIsBetter ? "below" : "above";
+            await sql`
+              INSERT INTO issues (issue_id, org_id, agent_name, issue_type, severity, title, description, metadata_json, status, created_at)
+              VALUES (
+                ${issueId}, ${orgId}, ${agentName}, 'slo_breach', 'high',
+                ${`SLO breach: ${metric} ${direction} target for ${agentName}`},
+                ${`The ${metric} metric is ${actualValue.toFixed(4)} which is ${direction} the SLO target of ${target}. Window: ${windowSeconds}s.`},
+                ${JSON.stringify({ slo_id: slo.id, metric, target, actual: actualValue, window_seconds: windowSeconds })},
+                'open', ${now}
+              )
+            `.catch(() => {});
+
+            console.log(`[cron] SLO breach: ${agentName} ${metric}=${actualValue.toFixed(4)} (target=${target})`);
+          }
+        } catch (err) {
+          console.error(`[cron] SLO check for ${slo.agent_name}/${slo.metric} failed:`, err);
+        }
+      }
+    } catch (err) {
+      console.error("[cron] SLO breach detection failed:", err);
+    }
+
+    // 5. Apply retention policies (delete old data)
     try {
       const policies = await sql`
         SELECT id, resource_type, retention_days, org_id, redact_pii, archive_before_delete
