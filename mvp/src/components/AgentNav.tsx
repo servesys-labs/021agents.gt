@@ -1,5 +1,5 @@
 import { useNavigate, useLocation, useParams } from "react-router-dom";
-import { ArrowLeft, Play, GitBranch, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb, Settings, BarChart3 } from "lucide-react";
+import { ArrowLeft, Play, GitBranch, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb, Settings, BarChart3, Bot } from "lucide-react";
 import { agentPathSegment } from "../lib/agent-path";
 
 const tabs = [
@@ -12,6 +12,7 @@ const tabs = [
   { path: "integrations", icon: ShoppingBag, label: "Integrations" },
   { path: "channels", icon: Share2, label: "Channels" },
   { path: "insights", icon: Lightbulb, label: "Insights" },
+  { path: "manager", icon: Bot, label: "Manager" },
   { path: "settings", icon: Settings, label: "Settings" },
 ];
 

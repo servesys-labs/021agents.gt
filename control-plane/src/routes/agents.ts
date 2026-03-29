@@ -12,7 +12,8 @@ import { getDb, getDbForOrg } from "../db/client";
 import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from "../logic/graph-lint";
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
-import { defaultNoCodeGraph, buildFromDescription, recommendTools } from "../logic/meta-agent";
+import { defaultNoCodeGraph, buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
+import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
@@ -125,6 +126,7 @@ const CreateFromDescriptionSchema = z.object({
   description: z.string().min(1).max(5000),
   name: z.string().max(128).default(""),
   tools: z.string().default("auto"),
+  plan: z.enum(["basic", "standard", "premium"]).default("standard"),
   draft_only: z.boolean().default(false),
   strict_graph_lint: z.boolean().default(true),
   auto_graph: z.boolean().default(true),
@@ -233,13 +235,38 @@ async function snapshotVersion(
 function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
   const config = parseConfig(row.config_json);
   return {
+    agent_id: row.agent_id ?? "",
     name: row.name ?? config.name ?? "",
     description: row.description ?? config.description ?? "",
     model: config.model ?? "",
+    plan: config.plan ?? "standard",
     tools: Array.isArray(config.tools) ? config.tools : [],
     tags: Array.isArray(config.tags) ? config.tags : [],
     version: config.version ?? "0.1.0",
   };
+}
+
+/**
+ * Resolve an agent identifier (either agent_id or name) to the agent's name.
+ * This allows frontend URLs to use agent_id while backend routes still key on name.
+ */
+async function resolveAgentName(
+  sql: Awaited<ReturnType<typeof getDbForOrg>>,
+  identifier: string,
+  orgId: string,
+): Promise<string | null> {
+  // First try as agent_id (short hex string, no spaces/special chars)
+  if (/^[a-f0-9]{8,32}$/i.test(identifier)) {
+    const rows = await sql`
+      SELECT name FROM agents WHERE agent_id = ${identifier} AND org_id = ${orgId} AND is_active = 1 LIMIT 1
+    `;
+    if (rows.length > 0) return String(rows[0].name);
+  }
+  // Fall back to treating it as a name (backwards compatible)
+  const rows = await sql`
+    SELECT name FROM agents WHERE name = ${identifier} AND org_id = ${orgId} LIMIT 1
+  `;
+  return rows.length > 0 ? String(rows[0].name) : null;
 }
 
 function parseConfig(raw: unknown): Record<string, unknown> {
@@ -276,7 +303,7 @@ agentRoutes.openapi(listAgentsRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT name, description, config_json, is_active, created_at, updated_at
+    SELECT agent_id, name, description, config_json, is_active, created_at, updated_at
     FROM agents
     WHERE org_id = ${user.org_id} AND is_active = 1
     ORDER BY created_at DESC
@@ -298,19 +325,24 @@ const getAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(getAgentRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
+  const agentName = await resolveAgentName(sql, identifier, user.org_id);
+  if (!agentName) {
+    return c.json({ error: `Agent '${identifier}' not found` }, 404);
+  }
+
   const rows = await sql`
-    SELECT name, description, config_json, is_active, created_at, updated_at
+    SELECT agent_id, name, description, config_json, is_active, created_at, updated_at
     FROM agents
-    WHERE name = ${name} AND org_id = ${user.org_id}
+    WHERE name = ${agentName} AND org_id = ${user.org_id}
     LIMIT 1
   `;
 
   if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
+    return c.json({ error: `Agent '${identifier}' not found` }, 404);
   }
 
   return c.json(agentResponse(rows[0] as Record<string, unknown>) as any);
@@ -352,6 +384,7 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       system_prompt: req.system_prompt,
       personality: req.personality,
       model: req.model || "anthropic/claude-sonnet-4-6",
+      plan: req.plan || "standard",
       max_tokens: req.max_tokens,
       temperature: req.temperature,
       tools: req.tools,
@@ -412,10 +445,11 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     }
 
     // Insert into DB
+    const newAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     await sql`
       INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
-        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
+        ${newAgentId},
         ${req.name},
         ${user.org_id},
         ${user.project_id || ""},
@@ -444,6 +478,7 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     }
 
     const response: Record<string, unknown> = {
+      agent_id: newAgentId,
       name: req.name,
       description: req.description,
       model: configJson.model,
@@ -473,10 +508,15 @@ const updateAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
-    const { name } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const req = c.req.valid("json");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const name = await resolveAgentName(sql, identifier, user.org_id);
+    if (!name) {
+      return c.json({ error: `Agent '${identifier}' not found` }, 404);
+    }
 
     // Fetch existing
     const rows = await sql`
@@ -484,9 +524,6 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
       WHERE name = ${name} AND org_id = ${user.org_id}
       LIMIT 1
     `;
-    if (rows.length === 0) {
-      return c.json({ error: `Agent '${name}' not found` }, 404);
-    }
 
     const existingConfig = parseConfig((rows[0] as Record<string, unknown>).config_json);
 
@@ -603,17 +640,14 @@ const deleteAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
-    const { name } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const hardDelete = c.req.query("hard_delete") === "true";
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-    // Check existence
-    const rows = await sql`
-      SELECT name FROM agents WHERE name = ${name} AND org_id = ${user.org_id} LIMIT 1
-    `;
-    if (rows.length === 0) {
-      return c.json({ error: `Agent '${name}' not found` }, 404);
+    const name = await resolveAgentName(sql, identifier, user.org_id);
+    if (!name) {
+      return c.json({ error: `Agent '${identifier}' not found` }, 404);
     }
 
     const counts: Record<string, number> = {};
@@ -715,9 +749,11 @@ const listVersionsRoute = createRoute({
   },
 });
 agentRoutes.openapi(listVersionsRoute, async (c): Promise<any> => {
-    const { name: agentName } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
       SELECT id, agent_name, version, config_json, created_by, created_at
@@ -753,18 +789,18 @@ const listToolsRoute = createRoute({
   },
 });
 agentRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
     SELECT config_json FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
-  if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
-  }
 
   const config = parseConfig((rows[0] as Record<string, unknown>).config_json);
   return c.json({ tools: Array.isArray(config.tools) ? config.tools : [] });
@@ -783,18 +819,18 @@ const getConfigRoute = createRoute({
   },
 });
 agentRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
     SELECT config_json FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
-  if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
-  }
 
   return c.json(parseConfig((rows[0] as Record<string, unknown>).config_json) as any);
 });
@@ -817,11 +853,14 @@ const cloneAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const { new_name: newNameValue } = c.req.valid("json");
 
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   // Fetch source agent
   const rows = await sql`
@@ -829,9 +868,6 @@ agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
-  if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
-  }
 
   // Check target name doesn't exist
   const existCheck = await sql`
@@ -979,9 +1015,12 @@ const exportAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(exportAgentRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
     SELECT config_json FROM agents
@@ -1159,6 +1198,9 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     });
 
     if (req.name) config.name = req.name;
+
+    // Apply LLM plan
+    config.plan = req.plan;
 
     // Tool selection
     if (req.tools === "auto") {
@@ -1397,10 +1439,11 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     }
 
     // Save agent
+    const generatedAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     await sql`
       INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
-        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
+        ${generatedAgentId},
         ${String(config.name)},
         ${user.org_id},
         ${user.project_id || ""},
@@ -1413,6 +1456,13 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       ON CONFLICT (name, org_id) DO UPDATE
       SET config_json = ${JSON.stringify(cfgRecord)}, updated_at = now()
     `;
+
+    // Retrieve the actual agent_id (may differ on conflict/update)
+    let agentId = generatedAgentId;
+    try {
+      const idRows = await sql`SELECT agent_id FROM agents WHERE name = ${String(config.name)} AND org_id = ${user.org_id} LIMIT 1`;
+      if (idRows.length > 0) agentId = String(idRows[0].agent_id);
+    } catch {}
 
     await snapshotVersion(sql, String(config.name), String(config.version), cfgRecord, user.user_id);
 
@@ -1429,8 +1479,58 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     // Notify runtime of new agent (fire-and-forget)
     notifyRuntimeOfConfigChange(c.env, String(config.name), String(config.version)).catch(() => {});
 
+    // ── Auto-Eval: expand eval_config into executable test cases ──────
+    // This runs after agent creation so the agent exists before we test it.
+    let autoEvalTasks: EvalTestCase[] = [];
+    let autoEvalRubric: EvalRubric | null = null;
+    const evalCfg = (pkg?.eval_config ?? (config as Record<string, unknown>).eval_config) as Record<string, unknown> | null;
+
+    if (evalCfg) {
+      try {
+        const expanded = await expandEvalConfig(
+          evalCfg,
+          String(config.description || req.description),
+          String(config.name),
+          { openrouterApiKey: c.env.OPENROUTER_API_KEY },
+        );
+        autoEvalTasks = expanded.tasks;
+        autoEvalRubric = expanded.rubric;
+
+        // Persist auto-generated eval tasks for later re-runs
+        if (autoEvalTasks.length > 0) {
+          const evalConfigWithTasks = {
+            ...evalCfg,
+            test_cases: autoEvalTasks,
+            rubric: autoEvalRubric,
+            auto_generated: true,
+            generated_at: new Date().toISOString(),
+          };
+          // Update agent config with expanded eval_config
+          await sql`
+            UPDATE agents SET config_json = jsonb_set(
+              config_json::jsonb,
+              '{eval_config}',
+              ${JSON.stringify(evalConfigWithTasks)}::jsonb
+            )
+            WHERE name = ${String(config.name)} AND org_id = ${user.org_id}
+          `.catch(() => {
+            // Fallback: re-write the whole config if jsonb_set isn't available
+            const updatedConfig = { ...cfgRecord, eval_config: evalConfigWithTasks };
+            return sql`
+              UPDATE agents SET config_json = ${JSON.stringify(updatedConfig)}
+              WHERE name = ${String(config.name)} AND org_id = ${user.org_id}
+            `;
+          });
+        }
+      } catch (err) {
+        console.error("[auto-eval] Failed to expand eval config:", err);
+        // Non-fatal — agent is already created
+      }
+    }
+
     const payload: Record<string, unknown> = {
       created: true,
+      agent_id: agentId,
       name: config.name,
       description: config.description,
       model: config.model,
@@ -1445,6 +1545,13 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       payload.guardrails_created = (Array.isArray(pkg.guardrails) ? pkg.guardrails : []).length;
       payload.mcp_connectors = pkg.mcp_connectors;
     }
+    if (autoEvalTasks.length > 0) {
+      payload.auto_eval = {
+        test_cases_generated: autoEvalTasks.length,
+        rubric: autoEvalRubric,
+        tasks: autoEvalTasks,
+      };
+    }
     if (packageErrors.length > 0) payload.package_errors = packageErrors;
     if (req.include_autofix) payload.graph_autofix = graphAutofix;
     if (req.include_gate_pack) payload.gate_pack = gatePack;
@@ -1452,6 +1559,218 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     payload.hold_override_applied = holdOverrideApplied;
 
     return c.json(payload as any, 201);
+});
+
+// ── Evolution: analyze eval results and suggest improvements ──────────
+
+const evolveRoute = createRoute({
+  method: "post",
+  path: "/{name}/evolve",
+  tags: ["Agents"],
+  summary: "Analyze eval results and suggest agent improvements",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            eval_run_id: z.string().optional().openapi({ description: "Specific eval run to analyze (defaults to latest)" }),
+            auto_apply: z.boolean().default(false).openapi({ description: "Auto-apply low-risk suggestions" }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Evolution suggestions", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404, 500),
+  },
+});
+
+agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { name: identifier } = c.req.valid("param");
+  const req = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const agentName = await resolveAgentName(sql, identifier, user.org_id);
+  if (!agentName) return c.json({ error: "Agent not found" }, 404);
+
+  // Load agent config
+  const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1`;
+  if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
+  const agentConfig = JSON.parse(String(agentRows[0].config_json || "{}"));
+
+  // Load eval results (latest run or specific run)
+  let evalRows: any[];
+  if (req.eval_run_id) {
+    evalRows = await sql`SELECT * FROM eval_runs WHERE id = ${req.eval_run_id} AND org_id = ${user.org_id} LIMIT 1`;
+  } else {
+    evalRows = await sql`SELECT * FROM eval_runs WHERE agent_name = ${agentName} AND org_id = ${user.org_id} ORDER BY created_at DESC LIMIT 1`;
+  }
+
+  if (evalRows.length === 0) {
+    return c.json({
+      suggestions: [{
+        area: "test_cases",
+        severity: "high",
+        suggestion: "No eval runs found. Run the auto-generated tests first to get improvement suggestions.",
+        auto_applicable: false,
+      }],
+      eval_run: null,
+    });
+  }
+
+  const evalRun = evalRows[0];
+  // Load trial failures
+  let failures: any[] = [];
+  try {
+    const trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${evalRun.id} AND pass = false ORDER BY trial_number`;
+    failures = trials.map((t: any) => ({
+      input: String(t.input || ""),
+      expected: String(t.expected || ""),
+      actual: String(t.actual || ""),
+      reasoning: String(t.reasoning || ""),
+    }));
+  } catch {}
+
+  const suggestions = await generateEvolutionSuggestions(
+    agentName,
+    agentConfig,
+    {
+      pass_rate: Number(evalRun.pass_rate) || 0,
+      failures,
+      avg_latency_ms: Number(evalRun.avg_latency_ms) || undefined,
+      total_cost_usd: Number(evalRun.total_cost_usd) || undefined,
+    },
+    { openrouterApiKey: c.env.OPENROUTER_API_KEY },
+  );
+
+  // Auto-apply safe suggestions if requested
+  let appliedCount = 0;
+  if (req.auto_apply) {
+    for (const sug of suggestions) {
+      if (!sug.auto_applicable || !sug.patch) continue;
+      try {
+        if (sug.area === "prompt" && sug.patch.system_prompt_append) {
+          const currentPrompt = String(agentConfig.system_prompt || "");
+          const appendText = String(sug.patch.system_prompt_append);
+          agentConfig.system_prompt = currentPrompt + "\n\n" + appendText;
+          appliedCount++;
+        }
+        if (sug.area === "tools" && Array.isArray(sug.patch.add_tools)) {
+          const currentTools = new Set(Array.isArray(agentConfig.tools) ? agentConfig.tools : []);
+          for (const t of sug.patch.add_tools) currentTools.add(String(t));
+          agentConfig.tools = [...currentTools];
+          appliedCount++;
+        }
+      } catch {}
+    }
+
+    if (appliedCount > 0) {
+      await sql`
+        UPDATE agents SET config_json = ${JSON.stringify(agentConfig)}, updated_at = now()
+        WHERE name = ${agentName} AND org_id = ${user.org_id}
+      `;
+      notifyRuntimeOfConfigChange(c.env, agentName, String(agentConfig.version || "")).catch(() => {});
+    }
+  }
+
+  return c.json({
+    suggestions,
+    auto_applied: appliedCount,
+    eval_run: {
+      id: evalRun.id,
+      pass_rate: evalRun.pass_rate,
+      total_tasks: evalRun.total_tasks,
+      failures_analyzed: failures.length,
+    },
+  });
+});
+
+// ── Meta-agent conversational chat ──────────────────────────────────
+
+const metaChatRoute = createRoute({
+  method: "post",
+  path: "/{name}/meta-chat",
+  tags: ["Agents"],
+  summary: "Chat with the meta-agent about this agent's configuration, performance, and improvements",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            messages: z.array(
+              z.object({
+                role: z.enum(["user", "assistant", "system", "tool"]),
+                content: z.string(),
+                tool_call_id: z.string().optional(),
+                tool_calls: z.array(z.record(z.unknown())).optional(),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Meta-agent response",
+      content: {
+        "application/json": {
+          schema: z.object({
+            response: z.string(),
+            messages: z.array(z.record(z.unknown())),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
+  const { name: identifier } = c.req.valid("param");
+  const { messages } = c.req.valid("json");
+  const user = c.get("user");
+
+  // Resolve agent identifier (supports both agent_id and name)
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const agentName = await resolveAgentName(sql, identifier, user.org_id);
+  if (!agentName) {
+    return c.json({ error: `Agent '${identifier}' not found` }, 404);
+  }
+
+  if (!c.env.OPENROUTER_API_KEY) {
+    return c.json({ error: "OPENROUTER_API_KEY not configured" }, 500);
+  }
+
+  try {
+    const result = await runMetaChat(messages as MetaChatMessage[], {
+      agentName,
+      orgId: user.org_id,
+      userId: user.user_id,
+      hyperdrive: c.env.HYPERDRIVE,
+      openrouterApiKey: c.env.OPENROUTER_API_KEY,
+      env: {
+        RUNTIME: c.env.RUNTIME,
+        SERVICE_TOKEN: c.env.SERVICE_TOKEN,
+      },
+    });
+
+    return c.json({
+      response: result.response,
+      messages: result.messages,
+    });
+  } catch (err: any) {
+    console.error(`[meta-chat] Error for agent ${agentName}:`, err);
+    return c.json(
+      { error: err.message || "Meta-agent chat failed" },
+      500,
+    );
+  }
 });
 
 // ── Runtime endpoints — moved to edge ────────────────────────────────
@@ -1497,8 +1816,10 @@ const restoreVersionRoute = createRoute({
 });
 agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const { name: agentName, commitId } = c.req.valid("param");
+    const { name: identifier, commitId } = c.req.valid("param");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
       SELECT config_json, version FROM agent_versions
@@ -1562,8 +1883,10 @@ const listTrashRoute = createRoute({
 });
 agentRoutes.openapi(listTrashRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const { name: agentName } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
       SELECT agent_id, name, config_json, updated_at, created_by
@@ -1597,7 +1920,9 @@ const restoreTrashRoute = createRoute({
 });
 agentRoutes.openapi(restoreTrashRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const { name: agentName, trashId } = c.req.valid("param");
+    const { name: identifier, trashId } = c.req.valid("param");
+    const sql2 = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+    const agentName = await resolveAgentName(sql2, identifier, user.org_id) || identifier;
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     await sql`

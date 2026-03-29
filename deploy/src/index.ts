@@ -55,6 +55,7 @@ export interface Env extends Cloudflare.Env {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_AGENT_NAME?: string;
   ENABLE_LANGCHAIN_TOOLS?: string;
+  VAPI_API_KEY?: string;         // Vapi API key (for make-voice-call tool)
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,19 @@ function normalizePlan(value?: string): string {
 // ---------------------------------------------------------------------------
 
 export class AgentOSAgent extends Agent<Env, AgentState> {
+  // Concurrency guard: prevent overlapping runs from corrupting conversation state.
+  // DOs are single-threaded but async yields allow interleaving.
+  private _runLock: Promise<void> = Promise.resolve();
+
+  /** Acquire a serial execution lock — only one run at a time per DO. */
+  private _withRunLock<T>(fn: () => Promise<T>): Promise<T> {
+    let release: () => void;
+    const next = new Promise<void>((r) => { release = r; });
+    const prev = this._runLock;
+    this._runLock = next;
+    return prev.then(fn).finally(() => release!());
+  }
+
   initialState: AgentState = {
     config: {
       plan: "standard",
@@ -169,11 +183,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     )`;
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
+    // Load 100 to match the local retention cap — not just 24 (the per-request window)
     const localCount = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
     if ((localCount[0]?.cnt || 0) === 0 && this.env.HYPERDRIVE) {
       try {
         const { loadConversationHistory } = await import("./runtime/db");
-        const messages = await loadConversationHistory(this.env.HYPERDRIVE, this.name, 24);
+        const messages = await loadConversationHistory(this.env.HYPERDRIVE, this.name, 100);
         for (const msg of messages) {
           this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
             VALUES (${msg.role}, ${msg.content.slice(0, 8000)}, ${msg.channel}, ${msg.created_at || new Date().toISOString()})`;
@@ -428,6 +443,15 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     };
   }
 
+  private _getConversationCount(): number {
+    try {
+      const rows = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
+      return rows[0]?.cnt || 0;
+    } catch {
+      return 0;
+    }
+  }
+
   private _loadConversationHistory(limit: number = 24): Array<{
     role: "user" | "assistant";
     content: string;
@@ -465,17 +489,32 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     this.sql`DELETE FROM conversation_messages WHERE id NOT IN (
       SELECT id FROM conversation_messages ORDER BY id DESC LIMIT 100
     )`;
-    // 2. Supabase (durable, survives deploys) — fire-and-forget
+    // 2. Supabase (durable, survives deploys) — retry up to 3 times with backoff
     if (this.env.HYPERDRIVE) {
-      import("./runtime/db").then(({ writeConversationMessage }) =>
-        writeConversationMessage(this.env.HYPERDRIVE, {
-          agent_name: this.state.config.agentName || this.name,
-          instance_id: this.name,
-          role,
-          content: clean.slice(0, 8000),
-          channel: channel || "",
-        }),
-      ).catch(() => {});
+      const msg = {
+        agent_name: this.state.config.agentName || this.name,
+        instance_id: this.name,
+        role,
+        content: clean.slice(0, 8000),
+        channel: channel || "",
+      };
+      const hyperdrive = this.env.HYPERDRIVE;
+      (async () => {
+        const { writeConversationMessage } = await import("./runtime/db");
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await writeConversationMessage(hyperdrive, msg);
+            return; // success
+          } catch (err) {
+            if (attempt < 2) {
+              // Exponential backoff: 500ms, 1500ms
+              await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+            } else {
+              console.error("[conversation] Supabase write failed after 3 attempts:", err);
+            }
+          }
+        }
+      })().catch(() => {});
     }
   }
 
@@ -514,10 +553,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   //   Server → { type: "error", message }                 — error
 
   async onConnect(connection: Connection) {
+    // Use DO name as the source of truth — this.state.config may still be the
+    // default initialState if the DO was just created and hasn't run yet.
+    const agentName = this.state.config.agentName !== "agentos"
+      ? this.state.config.agentName
+      : this.name; // DO name encodes org-agent-user, always accurate
     connection.send(JSON.stringify({
       type: "connected",
-      agent: this.state.config.agentName,
+      agent: agentName,
+      instance_id: this.name,
       session_affinity: true,
+      history_count: this._getConversationCount(),
     }));
   }
 
@@ -568,6 +614,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
 
     if (data.type === "run") {
+      await this._withRunLock(async () => {
       const config = this.state.config;
       const runtimeEnv: RuntimeEnv = {
         AI: this.env.AI,
@@ -593,8 +640,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const inputText = String(data.input || "");
       const history = this._loadConversationHistory(24);
       let finalOutput = "";
+      let clientDisconnected = false;
 
-      // Create backpressure-controlled send function
+      // Create backpressure-controlled send function with disconnect detection
       const { send } = createWebSocketSendWithBackpressure(connection, {
         highWatermarkBytes: 100 * 1024, // 100KB
         lowWatermarkBytes: 20 * 1024,   // 20KB
@@ -602,6 +650,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       });
 
       const sendAndCapture = async (msg: string) => {
+        // Check if client is still connected before sending
+        if (clientDisconnected || connection.readyState !== 1 /* OPEN */) {
+          clientDisconnected = true;
+          return; // silently skip — run will still complete and persist
+        }
         try {
           await send(msg);
           try {
@@ -613,45 +666,61 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             // ignore malformed ws payloads
           }
         } catch (err) {
-          // Backpressure overflow - log and continue
-          console.warn("[AgentOSAgent] WebSocket backpressure overflow:", err);
+          // Backpressure overflow or connection closed mid-send
+          if (connection.readyState !== 1) {
+            clientDisconnected = true;
+          } else {
+            console.warn("[AgentOSAgent] WebSocket backpressure overflow:", err);
+          }
         }
       };
 
       // Check for declarative graph execution
       const hasDeclarativeGraph = data.graph || (config as any).declarative_graph || (config as any).graph;
-      
-      if (hasDeclarativeGraph && data.use_declarative !== false) {
-        // Use unified declarative executor
-        await this._runDeclarativeGraph(
-          runtimeEnv,
-          inputText,
-          data.graph || (config as any).declarative_graph || (config as any).graph,
-          sendAndCapture,
-          {
-            org_id: data.org_id || config.orgId || "",
-            project_id: data.project_id || config.projectId || "",
-            channel: data.channel || "websocket",
-          }
-        );
-      } else {
-        // Stream the run — tokens flow to client in real-time
-        await streamRun(
-          runtimeEnv,
-          this.env.HYPERDRIVE,
-          inputText,
-          data.agent_name || config.agentName || "agentos",
-          sendAndCapture,
-          {
-            org_id: data.org_id || config.orgId || "",
-            project_id: data.project_id || config.projectId || "",
-            channel: data.channel || "websocket",
-            channel_user_id: data.channel_user_id,
-            api_key_id: data.api_key_id,
-            history_messages: history,
-            delegation: data.delegation,
-          },
-        );
+
+      try {
+        if (hasDeclarativeGraph && data.use_declarative !== false) {
+          // Use unified declarative executor
+          await this._runDeclarativeGraph(
+            runtimeEnv,
+            inputText,
+            data.graph || (config as any).declarative_graph || (config as any).graph,
+            sendAndCapture,
+            {
+              org_id: data.org_id || config.orgId || "",
+              project_id: data.project_id || config.projectId || "",
+              channel: data.channel || "websocket",
+            }
+          );
+        } else {
+          // Stream the run — tokens flow to client in real-time
+          await streamRun(
+            runtimeEnv,
+            this.env.HYPERDRIVE,
+            inputText,
+            data.agent_name || config.agentName || "agentos",
+            sendAndCapture,
+            {
+              org_id: data.org_id || config.orgId || "",
+              project_id: data.project_id || config.projectId || "",
+              channel: data.channel || "websocket",
+              channel_user_id: data.channel_user_id,
+              api_key_id: data.api_key_id,
+              history_messages: history,
+              delegation: data.delegation,
+            },
+          );
+        }
+      } catch (err) {
+        // Notify client of the error
+        try {
+          connection.send(JSON.stringify({ type: "error", message: String(err) }));
+        } catch {}
+        // Still persist the user message with an error marker so context isn't silently lost
+        const channel = data.channel || "websocket";
+        this._appendConversationMessage("user", inputText, channel);
+        this._appendConversationMessage("assistant", "[Error: response failed]", channel);
+        return;
       }
 
       // Start periodic checkpoint alarm for hibernation safety
@@ -659,8 +728,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         this.schedule(Date.now() + 30_000, "checkpointWorkspace");
       } catch {}
 
-      this._appendConversationMessage("user", inputText, data.channel || "websocket");
-      this._appendConversationMessage("assistant", finalOutput, data.channel || "websocket");
+      // Only persist both messages atomically — skip if assistant produced nothing
+      const channel = data.channel || "websocket";
+      if (finalOutput.trim()) {
+        this._appendConversationMessage("user", inputText, channel);
+        this._appendConversationMessage("assistant", finalOutput, channel);
+      } else {
+        // Assistant produced no output (e.g. empty response) — still save user msg
+        // with a marker so the LLM doesn't see an orphaned user turn next time
+        this._appendConversationMessage("user", inputText, channel);
+        this._appendConversationMessage("assistant", "[No response generated]", channel);
+      }
+      }); // end _withRunLock
     }
   }
 
@@ -749,6 +828,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
       const data = await request.json() as any;
+      return this._withRunLock(async () => {
       const config = this.state.config;
       const inputText = String(data.input || "");
       const history = this._loadConversationHistory(24);
@@ -780,54 +860,67 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       };
 
       // Run in DO context (no Worker timeout) — result written to Supabase
-      await streamRun(
-        runtimeEnv,
-        this.env.HYPERDRIVE,
-        inputText,
-        data.agent_name || config.agentName || "agentos",
-        (msg) => {
-          try {
-            const parsed = JSON.parse(msg) as {
-              type?: string;
-              output?: string;
-              session_id?: string;
-              trace_id?: string;
-              turns?: number;
-              tool_calls?: number;
-              cost_usd?: number;
-              latency_ms?: number;
-            };
-            if (parsed.type === "done") {
-              if (typeof parsed.output === "string") finalOutput = parsed.output;
-              if (typeof parsed.session_id === "string") finalSessionId = parsed.session_id;
-              if (typeof parsed.trace_id === "string") finalTraceId = parsed.trace_id;
-              finalTurns = Number(parsed.turns) || 0;
-              finalToolCalls = Number(parsed.tool_calls) || 0;
-              finalCostUsd = Number(parsed.cost_usd) || 0;
-              finalLatencyMs = Number(parsed.latency_ms) || 0;
+      try {
+        await streamRun(
+          runtimeEnv,
+          this.env.HYPERDRIVE,
+          inputText,
+          data.agent_name || config.agentName || "agentos",
+          (msg) => {
+            try {
+              const parsed = JSON.parse(msg) as {
+                type?: string;
+                output?: string;
+                session_id?: string;
+                trace_id?: string;
+                turns?: number;
+                tool_calls?: number;
+                cost_usd?: number;
+                latency_ms?: number;
+              };
+              if (parsed.type === "done") {
+                if (typeof parsed.output === "string") finalOutput = parsed.output;
+                if (typeof parsed.session_id === "string") finalSessionId = parsed.session_id;
+                if (typeof parsed.trace_id === "string") finalTraceId = parsed.trace_id;
+                finalTurns = Number(parsed.turns) || 0;
+                finalToolCalls = Number(parsed.tool_calls) || 0;
+                finalCostUsd = Number(parsed.cost_usd) || 0;
+                finalLatencyMs = Number(parsed.latency_ms) || 0;
+              }
+            } catch {
+              // ignore malformed payload
             }
-          } catch {
-            // ignore malformed payload
-          }
-        },
-        {
-          org_id: data.org_id || config.orgId || "",
-          project_id: data.project_id || config.projectId || "",
-          channel: data.channel || "async_rest",
-          channel_user_id: data.channel_user_id,
-          api_key_id: data.api_key_id,
-          history_messages: history,
-          delegation: data.delegation,
-        },
-      );
+          },
+          {
+            org_id: data.org_id || config.orgId || "",
+            project_id: data.project_id || config.projectId || "",
+            channel: data.channel || "async_rest",
+            channel_user_id: data.channel_user_id,
+            api_key_id: data.api_key_id,
+            history_messages: history,
+            delegation: data.delegation,
+          },
+        );
+      } catch (err) {
+        const channel = data.channel || "async_rest";
+        this._appendConversationMessage("user", inputText, channel);
+        this._appendConversationMessage("assistant", "[Error: response failed]", channel);
+        return Response.json({ status: "error", success: false, error: String(err) }, { status: 500 });
+      }
 
       // Start periodic checkpoint alarm for hibernation safety
       try {
         this.schedule(Date.now() + 30_000, "checkpointWorkspace");
       } catch {}
 
-      this._appendConversationMessage("user", inputText, data.channel || "async_rest");
-      this._appendConversationMessage("assistant", finalOutput, data.channel || "async_rest");
+      const restChannel = data.channel || "async_rest";
+      if (finalOutput.trim()) {
+        this._appendConversationMessage("user", inputText, restChannel);
+        this._appendConversationMessage("assistant", finalOutput, restChannel);
+      } else {
+        this._appendConversationMessage("user", inputText, restChannel);
+        this._appendConversationMessage("assistant", "[No response generated]", restChannel);
+      }
 
       return Response.json({
         status: "completed",
@@ -840,6 +933,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         cost_usd: finalCostUsd,
         latency_ms: finalLatencyMs,
       });
+      }); // end _withRunLock
     }
     // POST /run/stream — SSE streaming for REST clients (portal, curl, etc.)
     // Returns text/event-stream with real-time token/tool/turn events.
