@@ -37,6 +37,8 @@ export interface Env {
   VAPI_WEBHOOK_SECRET?: string;
   TAVUS_API_KEY?: string;
   TAVUS_WEBHOOK_SECRET?: string;
+  TWILIO_ACCOUNT_SID?: string;
+  TWILIO_AUTH_TOKEN?: string;
 
   /** Chat platform integrations (optional secrets) */
   WHATSAPP_VERIFY_TOKEN?: string;

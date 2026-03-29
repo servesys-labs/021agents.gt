@@ -1607,6 +1607,189 @@ function runnableInputToTask(input: unknown, task?: string): string {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Voice Pipeline — Audio conversion utilities for Twilio Media Streams
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * Decode an array of base64-encoded audio chunks into a single Uint8Array.
+ */
+function base64ChunksToUint8Array(chunks: string[]): Uint8Array {
+  const decoded: Uint8Array[] = [];
+  let totalLen = 0;
+  for (const chunk of chunks) {
+    const raw = atob(chunk);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    decoded.push(bytes);
+    totalLen += bytes.length;
+  }
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const buf of decoded) {
+    result.set(buf, offset);
+    offset += buf.length;
+  }
+  return result;
+}
+
+/**
+ * Encode a Uint8Array to base64 string.
+ */
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/**
+ * mu-law decoding table (8-bit mu-law to 16-bit linear PCM).
+ * ITU-T G.711 standard.
+ */
+const MULAW_DECODE_TABLE = new Int16Array(256);
+(() => {
+  for (let i = 0; i < 256; i++) {
+    const mu = ~i & 0xff;
+    const sign = mu & 0x80;
+    let exponent = (mu >> 4) & 0x07;
+    let mantissa = mu & 0x0f;
+    let magnitude = ((mantissa << 1) + 33) << (exponent + 2);
+    magnitude -= 0x84;
+    MULAW_DECODE_TABLE[i] = sign ? -magnitude : magnitude;
+  }
+})();
+
+/**
+ * mu-law encoding: 16-bit linear PCM sample to 8-bit mu-law.
+ */
+function linearToMulaw(sample: number): number {
+  const MULAW_MAX = 32635;
+  const MULAW_BIAS = 0x84;
+  let sign = 0;
+  if (sample < 0) {
+    sign = 0x80;
+    sample = -sample;
+  }
+  if (sample > MULAW_MAX) sample = MULAW_MAX;
+  sample += MULAW_BIAS;
+
+  let exponent = 0;
+  let mask = 0x4000;
+  for (exponent = 13; exponent >= 0; exponent--) {
+    if (sample & mask) break;
+    mask >>= 1;
+  }
+
+  const mantissa = (sample >> (exponent + 3)) & 0x0f;
+  const mulawByte = ~(sign | (exponent << 4) | mantissa) & 0xff;
+  return mulawByte;
+}
+
+/**
+ * Convert mulaw (8-bit, 8kHz) audio to WAV format for Whisper STT.
+ * Returns a complete WAV file with PCM16 data.
+ */
+function mulawToWav(mulaw: Uint8Array, sampleRate: number): Uint8Array {
+  const numSamples = mulaw.length;
+  const pcmDataLen = numSamples * 2; // 16-bit PCM
+  const wavHeaderLen = 44;
+  const wav = new Uint8Array(wavHeaderLen + pcmDataLen);
+  const view = new DataView(wav.buffer);
+
+  // RIFF header
+  wav.set([0x52, 0x49, 0x46, 0x46], 0); // "RIFF"
+  view.setUint32(4, 36 + pcmDataLen, true);  // File size - 8
+  wav.set([0x57, 0x41, 0x56, 0x45], 8); // "WAVE"
+
+  // fmt chunk
+  wav.set([0x66, 0x6d, 0x74, 0x20], 12); // "fmt "
+  view.setUint32(16, 16, true);            // Chunk size
+  view.setUint16(20, 1, true);             // PCM format
+  view.setUint16(22, 1, true);             // Mono
+  view.setUint32(24, sampleRate, true);    // Sample rate
+  view.setUint32(28, sampleRate * 2, true); // Byte rate (sampleRate * channels * bitsPerSample/8)
+  view.setUint16(32, 2, true);             // Block align
+  view.setUint16(34, 16, true);            // Bits per sample
+
+  // data chunk
+  wav.set([0x64, 0x61, 0x74, 0x61], 36); // "data"
+  view.setUint32(40, pcmDataLen, true);
+
+  // Decode mulaw to PCM16
+  for (let i = 0; i < numSamples; i++) {
+    view.setInt16(wavHeaderLen + i * 2, MULAW_DECODE_TABLE[mulaw[i]], true);
+  }
+
+  return wav;
+}
+
+/**
+ * Convert PCM audio (from TTS output, typically WAV) to mulaw 8kHz for Twilio.
+ *
+ * Handles two cases:
+ *   - Raw PCM16 bytes (if TTS returns raw audio)
+ *   - WAV file (skips the 44-byte header)
+ *
+ * If the TTS sample rate differs from 8kHz, a basic nearest-neighbor
+ * resample is applied. This is intentionally simple to avoid external
+ * dependencies; production deployments may want linear interpolation.
+ */
+function pcmToMulaw(audioData: Uint8Array): Uint8Array {
+  let pcmStart = 0;
+  let srcSampleRate = 8000;
+
+  // Detect WAV header
+  if (
+    audioData.length > 44 &&
+    audioData[0] === 0x52 && // R
+    audioData[1] === 0x49 && // I
+    audioData[2] === 0x46 && // F
+    audioData[3] === 0x46    // F
+  ) {
+    const view = new DataView(audioData.buffer, audioData.byteOffset, audioData.byteLength);
+    srcSampleRate = view.getUint32(24, true);
+    const bitsPerSample = view.getUint16(34, true);
+    // Find "data" chunk
+    let offset = 12;
+    while (offset + 8 < audioData.length) {
+      const chunkId = String.fromCharCode(
+        audioData[offset], audioData[offset + 1],
+        audioData[offset + 2], audioData[offset + 3],
+      );
+      const chunkSize = view.getUint32(offset + 4, true);
+      if (chunkId === "data") {
+        pcmStart = offset + 8;
+        break;
+      }
+      offset += 8 + chunkSize;
+    }
+    // If 8-bit, no conversion (unlikely from TTS)
+    if (bitsPerSample !== 16) {
+      // Treat the whole thing as raw
+      pcmStart = 0;
+    }
+  }
+
+  const pcmData = audioData.subarray(pcmStart);
+  const numSamples = Math.floor(pcmData.length / 2);
+  const srcView = new DataView(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength);
+
+  // Resample to 8kHz if needed
+  const ratio = srcSampleRate / 8000;
+  const outSamples = Math.floor(numSamples / ratio);
+  const mulaw = new Uint8Array(outSamples);
+
+  for (let i = 0; i < outSamples; i++) {
+    const srcIdx = Math.min(Math.floor(i * ratio), numSamples - 1);
+    const sample = srcView.getInt16(srcIdx * 2, true);
+    mulaw[i] = linearToMulaw(sample);
+  }
+
+  return mulaw;
+}
+
 function extractRunnableConfig(config?: Record<string, unknown>): {
   run_name: string;
   tags: string[];
@@ -1764,6 +1947,153 @@ export default {
       }, { status: degraded ? 503 : 200 });
     }
     
+    // ── Voice WebSocket — Twilio Media Streams → STT → Agent → TTS → Twilio ──
+    if (url.pathname === "/voice/stream") {
+      const upgradeHeader = request.headers.get("Upgrade") || "";
+      if (upgradeHeader.toLowerCase() !== "websocket") {
+        return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+
+      const agentName = url.searchParams.get("agent") || "agentos";
+      const orgId = url.searchParams.get("org_id") || "";
+
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+
+      // State for the voice session
+      let audioChunks: string[] = []; // base64 mulaw chunks from Twilio
+      let streamSid = "";
+      let callSid = "";
+      let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+      let processing = false;
+
+      server.addEventListener("message", (event) => {
+        let msg: any;
+        try {
+          msg = JSON.parse(event.data as string);
+        } catch {
+          return;
+        }
+
+        switch (msg.event) {
+          case "connected":
+            // Twilio connected — no-op
+            break;
+
+          case "start":
+            streamSid = msg.start?.streamSid || "";
+            callSid = msg.start?.callSid || "";
+            audioChunks = [];
+            break;
+
+          case "media": {
+            // Accumulate mulaw audio chunks (base64-encoded)
+            const payload = msg.media?.payload;
+            if (typeof payload === "string" && payload.length > 0) {
+              audioChunks.push(payload);
+            }
+
+            // Reset silence timer — process after 1.5s of silence
+            if (silenceTimer) clearTimeout(silenceTimer);
+            silenceTimer = setTimeout(async () => {
+              if (audioChunks.length === 0 || processing) return;
+              processing = true;
+
+              const chunksToProcess = audioChunks.splice(0);
+
+              try {
+                // 1. Decode base64 mulaw chunks and convert to WAV for Whisper
+                const mulawBytes = base64ChunksToUint8Array(chunksToProcess);
+                const wavBytes = mulawToWav(mulawBytes, 8000); // Twilio sends 8kHz mulaw
+
+                // 2. STT via Workers AI Whisper
+                const transcription = await env.AI.run(
+                  "@cf/openai/whisper-large-v3-turbo" as any,
+                  { audio: [...wavBytes] },
+                ) as { text?: string };
+                const userText = (transcription.text || "").trim();
+
+                if (!userText) {
+                  processing = false;
+                  return;
+                }
+
+                // 3. Run the agent
+                const result = await runViaAgent(env, agentName, userText, {
+                  org_id: orgId,
+                  channel: "voice",
+                  channel_user_id: `twilio-${callSid}`,
+                });
+
+                const responseText = result.output || "I didn't catch that.";
+
+                // 4. TTS via Workers AI
+                const ttsAudio = await env.AI.run(
+                  "@cf/deepgram/aura-2-en" as any,
+                  { text: responseText },
+                );
+
+                // 5. Convert TTS output (PCM/WAV) to mulaw and stream back
+                const ttsBytes = new Uint8Array(ttsAudio as ArrayBuffer);
+                const mulawOut = pcmToMulaw(ttsBytes);
+
+                // Stream audio back in chunks (~20ms frames = 160 bytes at 8kHz mulaw)
+                const CHUNK_SIZE = 160;
+                for (let i = 0; i < mulawOut.length; i += CHUNK_SIZE) {
+                  const chunk = mulawOut.slice(i, i + CHUNK_SIZE);
+                  const b64 = uint8ArrayToBase64(chunk);
+                  try {
+                    server.send(JSON.stringify({
+                      event: "media",
+                      streamSid,
+                      media: { payload: b64 },
+                    }));
+                  } catch {
+                    break; // WebSocket closed
+                  }
+                }
+
+                // Send a mark event so Twilio knows when playback finishes
+                try {
+                  server.send(JSON.stringify({
+                    event: "mark",
+                    streamSid,
+                    mark: { name: `response-${Date.now()}` },
+                  }));
+                } catch {
+                  // ignore
+                }
+              } catch (err) {
+                console.error("[VoiceStream] Processing error:", err);
+              } finally {
+                processing = false;
+              }
+            }, 1500);
+            break;
+          }
+
+          case "stop":
+            if (silenceTimer) clearTimeout(silenceTimer);
+            try { server.close(); } catch {}
+            break;
+
+          default:
+            break;
+        }
+      });
+
+      server.addEventListener("close", () => {
+        if (silenceTimer) clearTimeout(silenceTimer);
+      });
+
+      server.addEventListener("error", () => {
+        if (silenceTimer) clearTimeout(silenceTimer);
+      });
+
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     // POST /run — route to Durable Object for agent execution
     if (url.pathname === "/run" && request.method === "POST") {
       try {
