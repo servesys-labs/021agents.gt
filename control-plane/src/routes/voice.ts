@@ -1698,18 +1698,16 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
 
   const { org_id: orgId, agent_name: agentName } = rows[0] as { org_id: string; agent_name: string };
 
-  // Return TwiML that opens a bidirectional media stream to the runtime DO
+  // Return TwiML that uses ConversationRelay — Twilio handles STT/TTS/VAD
+  // We just receive text and send text back over WebSocket
   const runtimeWsUrl = String(c.env.RUNTIME_WORKER_URL || "https://runtime.oneshots.co")
-    .replace(/^http/, "ws"); // https -> wss, http -> ws
-  const streamUrl = `${runtimeWsUrl}/voice/stream?agent=${encodeURIComponent(agentName)}&org_id=${encodeURIComponent(orgId)}`;
+    .replace(/^http/, "ws");
+  const relayUrl = `${runtimeWsUrl}/voice/relay?agent=${encodeURIComponent(agentName)}&amp;org_id=${encodeURIComponent(orgId)}`;
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <Stream url="${streamUrl}">
-      <Parameter name="agent_name" value="${agentName}" />
-      <Parameter name="org_id" value="${orgId}" />
-    </Stream>
+    <ConversationRelay url="${relayUrl}" welcomeGreeting="Hello! How can I help you today?" voice="Google.en-US-Journey-F" />
   </Connect>
 </Response>`;
 
@@ -1864,4 +1862,493 @@ voiceRoutes.openapi(twilioIntegrationStatusRoute, async (c): Promise<any> => {
     Boolean(String(c.env.TWILIO_ACCOUNT_SID ?? "").trim()) &&
     Boolean(String(c.env.TWILIO_AUTH_TOKEN ?? "").trim());
   return c.json({ configured });
+});
+
+// ── POST /realtime/start — Create RTK meeting + dispatch voice agent ──
+
+const realtimeStartRoute = createRoute({
+  method: "post",
+  path: "/realtime/start",
+  tags: ["Voice", "Realtime"],
+  summary: "Start a realtime voice agent session (CF Realtime Agents)",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: { content: { "application/json": { schema: z.object({
+      agent_name: z.string(),
+      org_id: z.string().optional(),
+    }) } } },
+  },
+  responses: {
+    200: { description: "Voice session started", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 401, 500),
+  },
+});
+
+voiceRoutes.openapi(realtimeStartRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const body = c.req.valid("json") as { agent_name: string; org_id?: string };
+  const agentName = body.agent_name;
+  const orgId = body.org_id || user.org_id;
+  const callSid = crypto.randomUUID().slice(0, 12);
+
+  const accountId = c.env.CLOUDFLARE_ACCOUNT_ID || "";
+  const cfToken = c.env.CLOUDFLARE_API_TOKEN || "";
+  const appId = (c.env as any).RTK_APP_ID || "f9f880c7-2c1e-4cca-a203-712bdbe5e854";
+
+  if (!accountId || !cfToken) {
+    return c.json({ error: "Cloudflare API not configured" }, 500);
+  }
+
+  const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/realtime/kit/${appId}`;
+
+  // 1. Create meeting
+  const meetingResp = await fetch(`${baseUrl}/meetings`, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${cfToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ title: `voice-${agentName}-${callSid}` }),
+  });
+  if (!meetingResp.ok) {
+    return c.json({ error: `Failed to create meeting: ${await meetingResp.text()}` }, 500);
+  }
+  const meetingData = (await meetingResp.json()) as any;
+  const meetingId = meetingData.data.id;
+
+  // 2. Add agent participant
+  const partResp = await fetch(`${baseUrl}/meetings/${meetingId}/participants`, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${cfToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "AI Agent", preset_name: "group_call_host", custom_participant_id: `agent-${callSid}` }),
+  });
+  if (!partResp.ok) {
+    return c.json({ error: `Failed to add participant: ${await partResp.text()}` }, 500);
+  }
+  const partData = (await partResp.json()) as any;
+  const authToken = partData.data.token;
+
+  // 3. Add caller participant (for the user to join)
+  const callerResp = await fetch(`${baseUrl}/meetings/${meetingId}/participants`, {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${cfToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "Caller", preset_name: "group_call_participant", custom_participant_id: `caller-${callSid}` }),
+  });
+  const callerData = callerResp.ok ? (await callerResp.json()) as any : null;
+  const callerToken = callerData?.data?.token || "";
+
+  // 4. Dispatch to voice agent worker
+  const voiceAgentUrl = (c.env as any).VOICE_AGENT_URL || "https://oneshots-voice-agent.servesys.workers.dev";
+  const agentResp = await fetch(`${voiceAgentUrl}/init?meetingId=${meetingId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      auth_token: authToken,
+      agent_name: agentName,
+      org_id: orgId,
+    }),
+  });
+  const agentResult = agentResp.ok ? await agentResp.json() : { error: await agentResp.text() };
+
+  return c.json({
+    meeting_id: meetingId,
+    caller_token: callerToken,
+    agent_name: agentName,
+    call_sid: callSid,
+    voice_agent: agentResult,
+    status: "started",
+  });
+});
+
+// ── GET /twilio/available-numbers — Search available numbers to buy ──
+
+const twilioAvailableNumbersRoute = createRoute({
+  method: "get",
+  path: "/twilio/available-numbers",
+  tags: ["Voice", "Twilio"],
+  summary: "Search Twilio for available phone numbers",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    query: z.object({
+      country: z.string().default("US"),
+      area_code: z.string().optional(),
+      contains: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(50).default(20),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Available phone numbers",
+      content: {
+        "application/json": {
+          schema: z.object({
+            numbers: z.array(z.object({
+              phone_number: z.string(),
+              friendly_name: z.string(),
+              locality: z.string(),
+              region: z.string(),
+              postal_code: z.string(),
+              capabilities: z.record(z.boolean()),
+            })),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+voiceRoutes.openapi(twilioAvailableNumbersRoute, async (c): Promise<any> => {
+  const { country, area_code: areaCode, contains, limit } = c.req.valid("query");
+
+  const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!accountSid || !authToken) {
+    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+  }
+
+  const searchParams = new URLSearchParams({
+    VoiceEnabled: "true",
+    Limit: String(limit),
+  });
+  if (areaCode) searchParams.set("AreaCode", areaCode);
+  if (contains) searchParams.set("Contains", contains);
+
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+  const searchResp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/${country}/Local.json?${searchParams}`,
+    { headers: { Authorization: `Basic ${basicAuth}` } },
+  );
+
+  if (!searchResp.ok) {
+    const errText = await searchResp.text().catch(() => "");
+    return c.json({ error: `Twilio search failed (${searchResp.status})`, detail: errText.slice(0, 300) }, 400);
+  }
+
+  const searchData = (await searchResp.json()) as {
+    available_phone_numbers?: Array<{
+      phone_number: string;
+      friendly_name: string;
+      locality: string;
+      region: string;
+      postal_code: string;
+      capabilities: Record<string, boolean>;
+    }>;
+  };
+
+  const numbers = (searchData.available_phone_numbers ?? []).map((n) => ({
+    phone_number: n.phone_number,
+    friendly_name: n.friendly_name || n.phone_number,
+    locality: n.locality || "",
+    region: n.region || "",
+    postal_code: n.postal_code || "",
+    capabilities: n.capabilities || {},
+  }));
+
+  return c.json({ numbers });
+});
+
+// ── POST /twilio/buy — Buy a specific number and assign to agent ──
+
+const twilioBuyRoute = createRoute({
+  method: "post",
+  path: "/twilio/buy",
+  tags: ["Voice", "Twilio"],
+  summary: "Buy a specific Twilio phone number and assign to an agent",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            phone_number: z.string().min(1),
+            agent_name: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Number purchased and assigned",
+      content: {
+        "application/json": {
+          schema: z.object({
+            phone_number: z.string(),
+            agent_name: z.string(),
+            provider_sid: z.string(),
+            status: z.string(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+voiceRoutes.openapi(twilioBuyRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { phone_number: phoneNumber, agent_name: agentName } = c.req.valid("json");
+
+  const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!accountSid || !authToken) {
+    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+  }
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent exists
+  const agentRows = await sql`
+    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+  `;
+  if (agentRows.length === 0) {
+    return c.json({ error: `Agent '${agentName}' not found` }, 400);
+  }
+
+  // Check if number is already owned
+  const existing = await sql`
+    SELECT id FROM voice_numbers
+    WHERE phone_number = ${phoneNumber} AND org_id = ${user.org_id} AND provider = 'twilio'
+    LIMIT 1
+  `;
+  if (existing.length > 0) {
+    return c.json({ error: "You already own this number" }, 400);
+  }
+
+  // Buy the specific number from Twilio
+  const voiceWebhookUrl = "https://api.oneshots.co/api/v1/voice/twilio/incoming";
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+
+  const buyBody = new URLSearchParams({
+    PhoneNumber: phoneNumber,
+    VoiceUrl: voiceWebhookUrl,
+    VoiceMethod: "POST",
+  });
+  const buyResp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: buyBody.toString(),
+    },
+  );
+
+  if (!buyResp.ok) {
+    const errText = await buyResp.text().catch(() => "");
+    return c.json({ error: `Twilio purchase failed (${buyResp.status})`, detail: errText.slice(0, 300) }, 400);
+  }
+
+  const buyData = (await buyResp.json()) as { sid: string; phone_number: string };
+
+  // Store in DB
+  await sql`
+    INSERT INTO voice_numbers (org_id, agent_name, phone_number, provider, provider_sid, status, config)
+    VALUES (
+      ${user.org_id},
+      ${agentName},
+      ${buyData.phone_number},
+      'twilio',
+      ${buyData.sid},
+      'active',
+      ${JSON.stringify({})}
+    )
+    ON CONFLICT (phone_number) DO UPDATE SET
+      agent_name = EXCLUDED.agent_name,
+      provider_sid = EXCLUDED.provider_sid,
+      status = 'active',
+      config = EXCLUDED.config
+  `;
+
+  // Deduct credits for number cost ($1.00 flat)
+  try {
+    await sql`
+      INSERT INTO usage_events (org_id, event_type, description, credits, created_at)
+      VALUES (
+        ${user.org_id},
+        'voice_number_purchase',
+        ${'Phone number purchase: ' + buyData.phone_number},
+        -100,
+        now()
+      )
+    `;
+  } catch {
+    /* best-effort — usage_events table may not exist */
+  }
+
+  return c.json({
+    phone_number: buyData.phone_number,
+    agent_name: agentName,
+    provider_sid: buyData.sid,
+    status: "active",
+  });
+});
+
+// ── POST /twilio/test-call — Initiate outbound test call from agent's number ──
+
+const twilioTestCallRoute = createRoute({
+  method: "post",
+  path: "/twilio/test-call",
+  tags: ["Voice", "Twilio"],
+  summary: "Initiate an outbound test call from the agent's Twilio number",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            phone_number: z.string().min(1).describe("The agent's Twilio phone number (From)"),
+            to: z.string().min(1).describe("Destination phone number to call (E.164)"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Call initiated",
+      content: {
+        "application/json": {
+          schema: z.object({
+            call_sid: z.string(),
+            status: z.string(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+voiceRoutes.openapi(twilioTestCallRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { phone_number: fromNumber, to: toNumber } = c.req.valid("json");
+
+  const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!accountSid || !authToken) {
+    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+  }
+
+  // Verify the from number belongs to this org
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const numRows = await sql`
+    SELECT agent_name FROM voice_numbers
+    WHERE phone_number = ${fromNumber} AND org_id = ${user.org_id} AND provider = 'twilio' AND status = 'active'
+    LIMIT 1
+  `;
+  if (numRows.length === 0) {
+    return c.json({ error: "Phone number not found or not owned by this org" }, 404);
+  }
+
+  // Initiate call via Twilio — TwiML URL points to our incoming webhook
+  // so the test call goes through the full voice pipeline
+  const voiceWebhookUrl = "https://api.oneshots.co/api/v1/voice/twilio/incoming";
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+
+  const callBody = new URLSearchParams({
+    From: fromNumber,
+    To: toNumber,
+    Url: voiceWebhookUrl,
+    Method: "POST",
+  });
+
+  const callResp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Calls.json`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: callBody.toString(),
+    },
+  );
+
+  if (!callResp.ok) {
+    const errText = await callResp.text().catch(() => "");
+    return c.json({ error: `Twilio call failed (${callResp.status})`, detail: errText.slice(0, 300) }, 400);
+  }
+
+  const callData = (await callResp.json()) as { sid: string; status: string };
+
+  // Log the call
+  const agentName = String((numRows[0] as Record<string, unknown>).agent_name ?? "");
+  try {
+    await sql`
+      INSERT INTO voice_calls (
+        call_id, platform, org_id, agent_name, phone_number, direction, status,
+        platform_agent_id, started_at
+      ) VALUES (
+        ${callData.sid}, 'twilio', ${user.org_id}, ${agentName}, ${toNumber},
+        'outbound', 'pending', ${fromNumber}, ${nowSec()}
+      )
+      ON CONFLICT (call_id) DO UPDATE SET
+        status = EXCLUDED.status,
+        phone_number = EXCLUDED.phone_number
+    `;
+  } catch {
+    /* best-effort */
+  }
+
+  return c.json({ call_sid: callData.sid, status: "initiated" });
+});
+
+// ── PUT /twilio/numbers/:number_sid/assign — Reassign number to different agent ──
+
+const twilioReassignNumberRoute = createRoute({
+  method: "put",
+  path: "/twilio/numbers/{number_sid}/assign",
+  tags: ["Voice", "Twilio"],
+  summary: "Reassign a Twilio phone number to a different agent",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    params: z.object({ number_sid: z.string().min(1) }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Number reassigned",
+      content: { "application/json": { schema: z.object({ updated: z.boolean(), agent_name: z.string() }) } },
+    },
+    ...errorResponses(400, 404),
+  },
+});
+voiceRoutes.openapi(twilioReassignNumberRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { number_sid: numberSid } = c.req.valid("param");
+  const { agent_name: agentName } = c.req.valid("json");
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify agent exists
+  const agentRows = await sql`
+    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+  `;
+  if (agentRows.length === 0) {
+    return c.json({ error: `Agent '${agentName}' not found` }, 400);
+  }
+
+  // Verify number ownership
+  const numRows = await sql`
+    SELECT id FROM voice_numbers
+    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
+    LIMIT 1
+  `;
+  if (numRows.length === 0) {
+    return c.json({ error: "Number not found or not owned by this org" }, 404);
+  }
+
+  // Update assignment
+  await sql`
+    UPDATE voice_numbers SET agent_name = ${agentName}
+    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
+  `;
+
+  return c.json({ updated: true, agent_name: agentName });
 });

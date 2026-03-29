@@ -1,0 +1,28 @@
+{
+  "name": "@oneshots/voice-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node --env-file=../.env src/index.ts",
+    "start": "node --env-file=../.env dist/index.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@cloudflare/realtime-agents": "^0.0.6",
+    "@livekit/agents": "^1.0.0",
+    "@livekit/agents-plugin-livekit": "^1.0.0",
+    "@livekit/agents-plugin-silero": "^1.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260329.1",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  },
+  "description": "",
+  "main": "index.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

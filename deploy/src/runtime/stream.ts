@@ -327,9 +327,22 @@ export async function streamRun(
     const loopState = createLoopState();
 
     // Build messages
+    const isVoiceChannel = opts?.channel === "voice";
     const messages: LLMMessage[] = [];
     if (config.system_prompt) {
-      messages.push({ role: "system", content: config.system_prompt });
+      let sysPrompt = config.system_prompt;
+      if (isVoiceChannel) {
+        sysPrompt += `\n\n[VOICE MODE — The user is on a phone call. You MUST follow these rules:
+1. Keep every response to 1-2 sentences MAX. Be extremely concise.
+2. Speak naturally — use contractions, casual tone. Say "I'll" not "I will".
+3. NEVER use markdown, asterisks, hashes, bullet points, code blocks, or any formatting.
+4. NEVER read out URLs, file paths, or technical syntax.
+5. If you need to share details, summarize them verbally — don't list them.
+6. Ask one question at a time. Don't give multiple options in one turn.
+7. Use filler phrases naturally: "Sure thing", "Got it", "Let me check that for you".
+8. If a tool call takes time, say "One moment" before running it.]`;
+      }
+      messages.push({ role: "system", content: sysPrompt });
     }
 
     // Memory context

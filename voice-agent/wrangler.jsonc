@@ -1,0 +1,27 @@
+{
+  "name": "oneshots-voice-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "VOICE_AGENT",
+        "class_name": "VoiceAgent"
+      }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["VoiceAgent"] }
+  ],
+
+  "ai": { "binding": "AI" },
+
+  "vars": {
+    "ONESHOTS_API_URL": "https://api.oneshots.co",
+    "ACCOUNT_ID": "ae92d4bf7c6c448f442d084a2358dcd5",
+    "RTK_APP_ID": "f9f880c7-2c1e-4cca-a203-712bdbe5e854"
+  }
+}

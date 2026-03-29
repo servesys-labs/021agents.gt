@@ -28,6 +28,7 @@ export interface Env {
   AI_GATEWAY_ID: string;
   AI_GATEWAY_TOKEN: string;
   CLOUDFLARE_ACCOUNT_ID: string;
+  CLOUDFLARE_API_TOKEN?: string;
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   SERVICE_TOKEN: string;

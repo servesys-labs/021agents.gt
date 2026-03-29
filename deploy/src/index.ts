@@ -571,6 +571,61 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   async onMessage(connection: Connection, message: string | ArrayBuffer) {
     const data = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 
+    // ── Twilio ConversationRelay voice handling ──────────────────────
+    console.log("[onMessage] Received type:", data.type, "keys:", Object.keys(data).join(","));
+
+    if (data.type === "setup" && data.callSid) {
+      // ConversationRelay connected — store call metadata on the connection
+      (connection as any).__voiceMode = true;
+      (connection as any).__voiceCallSid = data.callSid || "";
+      return;
+    }
+
+    if (data.type === "prompt" && (connection as any).__voiceMode) {
+      const userText = (data.voicePrompt || "").trim();
+      if (!userText) return;
+
+      try {
+        const config = this.state.config;
+        const runtimeEnv: RuntimeEnv = {
+          AI: this.env.AI, HYPERDRIVE: this.env.HYPERDRIVE, VECTORIZE: this.env.VECTORIZE,
+          STORAGE: this.env.STORAGE, SANDBOX: this.env.SANDBOX, LOADER: this.env.LOADER,
+          TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE, BROWSER: this.env.BROWSER,
+          AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+          BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+          CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+          CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+          OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
+          DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
+          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+          DO_SQL: this.sql.bind(this), DO_SESSION_ID: this.name,
+        };
+
+        const result = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, {
+          agent_name: config.agentName || "agentos",
+          task: userText,
+          org_id: config.orgId || "",
+          project_id: config.projectId || "",
+        }, this.env.TELEMETRY_QUEUE);
+
+        let response = result.output || "I didn't catch that.";
+        // Strip markdown for voice
+        response = response.replace(/#{1,6}\s*/g, "").replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
+          .replace(/`{1,3}[^`]*`{1,3}/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+          .replace(/^[-*•]\s*/gm, "").replace(/\n/g, " ").trim();
+
+        connection.send(JSON.stringify({ type: "text", token: response, last: true }));
+      } catch (err) {
+        console.error("[VoiceRelay] Error:", err);
+        connection.send(JSON.stringify({ type: "text", token: "Sorry, something went wrong.", last: true }));
+      }
+      return;
+    }
+
+    if (data.type === "interrupt" && (connection as any).__voiceMode) {
+      return; // Twilio interruption — no action needed
+    }
+
     // Reset conversation history
     if (data.type === "reset" || data.type === "new") {
       this.sql`DELETE FROM conversation_messages`;
@@ -824,6 +879,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
+
+    // Voice relay — WebSocket upgrade for Twilio ConversationRelay
+    if (url.pathname === "/voice/relay") {
+      const upgradeHeader = request.headers.get("Upgrade") || "";
+      if (upgradeHeader.toLowerCase() === "websocket") {
+        return this._handleVoiceRelay(request);
+      }
+      return Response.json({ error: "WebSocket upgrade required" }, { status: 426 });
+    }
+
     if (url.pathname === "/run" && request.method === "POST") {
       if (!(await this._isAuthorized(request))) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -1089,6 +1154,109 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           details_json: detailsJson, created_at: new Date().toISOString(),
         },
       }).catch(() => {});
+    }
+  }
+
+  /** Handle voice relay WebSocket — Twilio ConversationRelay sends text, we run agent and reply with text */
+  private _handleVoiceRelay(request: Request): Response {
+    const url = new URL(request.url);
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+
+    this.ctx.acceptWebSocket(server);
+
+    // Store voice session state in transient storage
+    const agentName = url.searchParams.get("agent") || this.state.config.agentName || "agentos";
+    const orgId = url.searchParams.get("org_id") || this.state.config.orgId || "";
+
+    // Use the DO's own webSocketMessage handler for messages
+    (server as any).__voiceAgent = agentName;
+    (server as any).__voiceOrgId = orgId;
+    (server as any).__voiceCallSid = "";
+    (server as any).__voiceProcessing = false;
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: string): Promise<void> {
+    // Only handle voice relay messages (tagged WebSockets)
+    if (!(ws as any).__voiceAgent) return;
+
+    let msg: any;
+    try { msg = JSON.parse(message); } catch { return; }
+
+    const agentName = (ws as any).__voiceAgent;
+    const orgId = (ws as any).__voiceOrgId;
+
+    if (msg.type === "setup") {
+      (ws as any).__voiceCallSid = msg.callSid || "";
+      return;
+    }
+
+    if (msg.type === "prompt") {
+      const userText = (msg.voicePrompt || "").trim();
+      if (!userText || (ws as any).__voiceProcessing) return;
+
+      (ws as any).__voiceProcessing = true;
+      const callSid = (ws as any).__voiceCallSid;
+
+      try {
+        const config = this.state.config;
+        const runtimeEnv: RuntimeEnv = {
+          AI: this.env.AI,
+          HYPERDRIVE: this.env.HYPERDRIVE,
+          VECTORIZE: this.env.VECTORIZE,
+          STORAGE: this.env.STORAGE,
+          SANDBOX: this.env.SANDBOX,
+          LOADER: this.env.LOADER,
+          TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
+          BROWSER: this.env.BROWSER,
+          AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
+          AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+          BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+          CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
+          CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+          OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
+          DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
+          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+          DO_SQL: this.sql.bind(this),
+          DO_SESSION_ID: this.name,
+        };
+
+        const request: RunRequest = {
+          agent_name: agentName,
+          task: userText,
+          org_id: orgId,
+          project_id: config.projectId || "",
+        };
+
+        const result = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, request, this.env.TELEMETRY_QUEUE);
+
+        let response = result.output || "I didn't catch that. Could you say that again?";
+
+        // Strip markdown for voice
+        response = response
+          .replace(/#{1,6}\s*/g, "")
+          .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
+          .replace(/`{1,3}[^`]*`{1,3}/g, "")
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+          .replace(/^[-*•]\s*/gm, "")
+          .replace(/\n/g, " ")
+          .trim();
+
+        ws.send(JSON.stringify({ type: "text", token: response, last: true }));
+      } catch (err) {
+        console.error("[VoiceRelay DO] Error:", err instanceof Error ? err.message : err);
+        try {
+          ws.send(JSON.stringify({ type: "text", token: "Sorry, something went wrong.", last: true }));
+        } catch {}
+      } finally {
+        (ws as any).__voiceProcessing = false;
+      }
+    }
+
+    if (msg.type === "interrupt") {
+      (ws as any).__voiceProcessing = false;
     }
   }
 }
@@ -1947,8 +2115,8 @@ export default {
       }, { status: degraded ? 503 : 200 });
     }
     
-    // ── Voice WebSocket — Twilio Media Streams → STT → Agent → TTS → Twilio ──
-    if (url.pathname === "/voice/stream") {
+    // ── Voice: ConversationRelay WebSocket with ctx.waitUntil for async ──
+    if (url.pathname === "/voice/relay") {
       const upgradeHeader = request.headers.get("Upgrade") || "";
       if (upgradeHeader.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket upgrade", { status: 426 });
@@ -1961,134 +2129,38 @@ export default {
       const [client, server] = Object.values(pair);
       server.accept();
 
-      // State for the voice session
-      let audioChunks: string[] = []; // base64 mulaw chunks from Twilio
-      let streamSid = "";
       let callSid = "";
-      let silenceTimer: ReturnType<typeof setTimeout> | null = null;
-      let processing = false;
 
       server.addEventListener("message", (event) => {
         let msg: any;
-        try {
-          msg = JSON.parse(event.data as string);
-        } catch {
+        try { msg = JSON.parse(event.data as string); } catch { return; }
+
+        if (msg.type === "setup") {
+          callSid = msg.callSid || "";
           return;
         }
 
-        switch (msg.event) {
-          case "connected":
-            // Twilio connected — no-op
-            break;
+        if (msg.type === "prompt") {
+          const userText = (msg.voicePrompt || "").trim();
+          if (!userText) return;
 
-          case "start":
-            streamSid = msg.start?.streamSid || "";
-            callSid = msg.start?.callSid || "";
-            audioChunks = [];
-            break;
-
-          case "media": {
-            // Accumulate mulaw audio chunks (base64-encoded)
-            const payload = msg.media?.payload;
-            if (typeof payload === "string" && payload.length > 0) {
-              audioChunks.push(payload);
+          // Use ctx.waitUntil to keep the worker alive for the async agent call
+          ctx.waitUntil((async () => {
+            try {
+              const result = await runViaAgent(env, agentName, userText, {
+                org_id: orgId, channel: "voice", channel_user_id: `twilio-${callSid}`,
+              });
+              let response = result.output || "I didn't catch that.";
+              response = response.replace(/#{1,6}\s*/g, "").replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
+                .replace(/`{1,3}[^`]*`{1,3}/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                .replace(/^[-*•]\s*/gm, "").replace(/\n/g, " ").trim();
+              server.send(JSON.stringify({ type: "text", token: response, last: true }));
+            } catch (err) {
+              console.error("[VoiceRelay] Error:", err);
+              try { server.send(JSON.stringify({ type: "text", token: "Sorry, something went wrong.", last: true })); } catch {}
             }
-
-            // Reset silence timer — process after 1.5s of silence
-            if (silenceTimer) clearTimeout(silenceTimer);
-            silenceTimer = setTimeout(async () => {
-              if (audioChunks.length === 0 || processing) return;
-              processing = true;
-
-              const chunksToProcess = audioChunks.splice(0);
-
-              try {
-                // 1. Decode base64 mulaw chunks and convert to WAV for Whisper
-                const mulawBytes = base64ChunksToUint8Array(chunksToProcess);
-                const wavBytes = mulawToWav(mulawBytes, 8000); // Twilio sends 8kHz mulaw
-
-                // 2. STT via Workers AI Whisper
-                const transcription = await env.AI.run(
-                  "@cf/openai/whisper-large-v3-turbo" as any,
-                  { audio: [...wavBytes] },
-                ) as { text?: string };
-                const userText = (transcription.text || "").trim();
-
-                if (!userText) {
-                  processing = false;
-                  return;
-                }
-
-                // 3. Run the agent
-                const result = await runViaAgent(env, agentName, userText, {
-                  org_id: orgId,
-                  channel: "voice",
-                  channel_user_id: `twilio-${callSid}`,
-                });
-
-                const responseText = result.output || "I didn't catch that.";
-
-                // 4. TTS via Workers AI
-                const ttsAudio = await env.AI.run(
-                  "@cf/deepgram/aura-2-en" as any,
-                  { text: responseText },
-                );
-
-                // 5. Convert TTS output (PCM/WAV) to mulaw and stream back
-                const ttsBytes = new Uint8Array(ttsAudio as ArrayBuffer);
-                const mulawOut = pcmToMulaw(ttsBytes);
-
-                // Stream audio back in chunks (~20ms frames = 160 bytes at 8kHz mulaw)
-                const CHUNK_SIZE = 160;
-                for (let i = 0; i < mulawOut.length; i += CHUNK_SIZE) {
-                  const chunk = mulawOut.slice(i, i + CHUNK_SIZE);
-                  const b64 = uint8ArrayToBase64(chunk);
-                  try {
-                    server.send(JSON.stringify({
-                      event: "media",
-                      streamSid,
-                      media: { payload: b64 },
-                    }));
-                  } catch {
-                    break; // WebSocket closed
-                  }
-                }
-
-                // Send a mark event so Twilio knows when playback finishes
-                try {
-                  server.send(JSON.stringify({
-                    event: "mark",
-                    streamSid,
-                    mark: { name: `response-${Date.now()}` },
-                  }));
-                } catch {
-                  // ignore
-                }
-              } catch (err) {
-                console.error("[VoiceStream] Processing error:", err);
-              } finally {
-                processing = false;
-              }
-            }, 1500);
-            break;
-          }
-
-          case "stop":
-            if (silenceTimer) clearTimeout(silenceTimer);
-            try { server.close(); } catch {}
-            break;
-
-          default:
-            break;
+          })());
         }
-      });
-
-      server.addEventListener("close", () => {
-        if (silenceTimer) clearTimeout(silenceTimer);
-      });
-
-      server.addEventListener("error", () => {
-        if (silenceTimer) clearTimeout(silenceTimer);
       });
 
       return new Response(null, { status: 101, webSocket: client });
