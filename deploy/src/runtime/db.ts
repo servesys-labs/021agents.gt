@@ -133,28 +133,33 @@ export async function loadAgentConfig(
 //   OpenAI:      openai/model-name
 //   Google:      google-ai-studio/model-name
 //   DeepSeek:    deepseek/model-name
-// Provider field is kept for reference but all routes go through /compat/.
+// All paid models route through AI Gateway → OpenRouter (single OPENROUTER key).
+// Workers AI models (@cf/) route through AI Gateway directly (CF account token).
+// No max_tokens — let models decide their output length.
 
-const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string; max_tokens: number }>>> = {
+const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
+  // ── Basic: Workers AI on-edge (lowest cost, lowest latency) ────────────
   basic: {
-    general:    { simple: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 2048 }, moderate: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 4096 }, complex: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 }, tool_call: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 2048 } },
-    coding:     { planner: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 }, implementer: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 8192 }, reviewer: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 }, debugger: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 } },
-    research:   { search: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 2048 }, analyze: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 }, synthesize: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 } },
-    creative:   { write: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 } },
+    general:    { simple: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, moderate: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, complex: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, tool_call: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" } },
+    coding:     { planner: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, implementer: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, reviewer: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, debugger: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
+    research:   { search: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, analyze: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, synthesize: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
+    creative:   { write: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
   },
+  // ── Standard: GPT-5.4 + Gemini 3.1 + Claude Sonnet 4.6 (via OpenRouter) ──
   standard: {
-    general:    { simple: { model: "google-ai-studio/gemini-2.5-flash", provider: "google", max_tokens: 4096 }, moderate: { model: "openai/gpt-5-mini", provider: "openai", max_tokens: 8192 }, complex: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 }, tool_call: { model: "google-ai-studio/gemini-2.5-flash", provider: "google", max_tokens: 4096 } },
-    coding:     { planner: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 }, implementer: { model: "openai/gpt-5-mini", provider: "openai", max_tokens: 8192 }, reviewer: { model: "anthropic/claude-sonnet-4-6", provider: "anthropic", max_tokens: 8192 }, debugger: { model: "openai/o4-mini", provider: "openai", max_tokens: 16384 } },
-    research:   { search: { model: "google-ai-studio/gemini-2.5-flash", provider: "google", max_tokens: 4096 }, analyze: { model: "openai/gpt-5-mini", provider: "openai", max_tokens: 16384 }, synthesize: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 } },
-    creative:   { write: { model: "anthropic/claude-sonnet-4-6", provider: "anthropic", max_tokens: 8192 } },
-    multimodal: { vision: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 8192 } },
+    general:    { simple: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" }, moderate: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, complex: { model: "openai/gpt-5.4", provider: "openrouter" }, tool_call: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" } },
+    coding:     { planner: { model: "openai/gpt-5.4", provider: "openrouter" }, implementer: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, reviewer: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" }, debugger: { model: "openai/gpt-5.4", provider: "openrouter" } },
+    research:   { search: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" }, analyze: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, synthesize: { model: "openai/gpt-5.4", provider: "openrouter" } },
+    creative:   { write: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" } },
+    multimodal: { vision: { model: "openai/gpt-5.4", provider: "openrouter" } },
   },
+  // ── Premium: GPT-5.4 Pro + Claude Opus 4.6 + Gemini 3.1 Pro (via OpenRouter) ──
   premium: {
-    general:    { simple: { model: "openai/gpt-5-nano", provider: "openai", max_tokens: 8192 }, moderate: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 }, complex: { model: "anthropic/claude-opus-4-6", provider: "anthropic", max_tokens: 16384 }, tool_call: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 } },
-    coding:     { planner: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 }, implementer: { model: "anthropic/claude-sonnet-4-6", provider: "anthropic", max_tokens: 16384 }, reviewer: { model: "anthropic/claude-opus-4-6", provider: "anthropic", max_tokens: 16384 }, debugger: { model: "openai/o3", provider: "openai", max_tokens: 16384 } },
-    research:   { search: { model: "google-ai-studio/gemini-2.5-flash", provider: "google", max_tokens: 8192 }, analyze: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 }, synthesize: { model: "anthropic/claude-opus-4-6", provider: "anthropic", max_tokens: 16384 } },
-    creative:   { write: { model: "anthropic/claude-opus-4-6", provider: "anthropic", max_tokens: 16384 } },
-    multimodal: { vision: { model: "google-ai-studio/gemini-2.5-pro", provider: "google", max_tokens: 16384 } },
+    general:    { simple: { model: "openai/gpt-5.4-nano", provider: "openrouter" }, moderate: { model: "openai/gpt-5.4", provider: "openrouter" }, complex: { model: "anthropic/claude-opus-4.6", provider: "openrouter" }, tool_call: { model: "openai/gpt-5.4", provider: "openrouter" } },
+    coding:     { planner: { model: "openai/gpt-5.4-pro", provider: "openrouter" }, implementer: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" }, reviewer: { model: "anthropic/claude-opus-4.6", provider: "openrouter" }, debugger: { model: "openai/gpt-5.4-pro", provider: "openrouter" } },
+    research:   { search: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" }, analyze: { model: "openai/gpt-5.4", provider: "openrouter" }, synthesize: { model: "anthropic/claude-opus-4.6", provider: "openrouter" } },
+    creative:   { write: { model: "anthropic/claude-opus-4.6", provider: "openrouter" } },
+    multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
   },
 };
 

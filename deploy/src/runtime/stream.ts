@@ -94,22 +94,30 @@ async function streamLLM(
     stream: true,
   };
 
-  if (model.includes("openai/") || model.includes("gpt-") || model.includes("/o3") || model.includes("/o4")) {
-    payload.max_completion_tokens = opts.max_tokens || 2048;
-  } else {
-    payload.max_tokens = opts.max_tokens || 2048;
+  // Only set max_tokens if explicitly provided — let models decide output length by default
+  if (opts.max_tokens) {
+    if (model.includes("openai/") || model.includes("gpt-") ) {
+      payload.max_completion_tokens = opts.max_tokens;
+    } else {
+      payload.max_tokens = opts.max_tokens;
+    }
   }
 
   if (tools.length > 0) {
     payload.tools = tools;
   }
 
-  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/compat/chat/completions`;
+  // Workers AI models use /compat/ (direct CF), everything else uses /openrouter/ (via OpenRouter)
+  const providerPath = isWorkersAI ? "compat" : "openrouter";
+  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  if (env.AI_GATEWAY_TOKEN) {
-    headers["cf-aig-authorization"] = `Bearer ${env.AI_GATEWAY_TOKEN}`;
+  // CF gateway auth — gateway routes to OpenRouter (paid models) or Workers AI (@cf/)
+  // OpenRouter API key is configured on the AI Gateway, not passed from code
+  const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
+  if (cfToken) {
+    headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
   }
 
   const resp = await fetch(endpoint, {

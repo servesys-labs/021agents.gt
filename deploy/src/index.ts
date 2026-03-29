@@ -319,6 +319,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
       CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
       CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
+      OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
       DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
       DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "deepseek/deepseek-chat-v3-0324",
       DO_SQL: this.sql.bind(this),

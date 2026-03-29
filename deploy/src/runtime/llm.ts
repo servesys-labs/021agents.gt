@@ -63,12 +63,13 @@ export async function callLLM(
     payload.temperature = opts.temperature;
   }
 
-  // OpenAI models use max_completion_tokens (not max_tokens)
-  // Google AI Studio and Workers AI use max_tokens
-  if (model.includes("openai/") || model.includes("gpt-") || model.includes("/o3") || model.includes("/o4")) {
-    payload.max_completion_tokens = opts.max_tokens || 2048;
-  } else {
-    payload.max_tokens = opts.max_tokens || 2048;
+  // Only set max_tokens if explicitly provided — let models decide output length by default
+  if (opts.max_tokens) {
+    if (model.includes("openai/") || model.includes("gpt-") ) {
+      payload.max_completion_tokens = opts.max_tokens;
+    } else {
+      payload.max_tokens = opts.max_tokens;
+    }
   }
 
   if (tools.length > 0) {
@@ -76,7 +77,10 @@ export async function callLLM(
   }
 
   // Single endpoint for everything
-  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/compat/chat/completions`;
+  // Workers AI (@cf/) uses /compat/ (direct CF), everything else uses /openrouter/
+  const isWorkersAI = model.startsWith("@cf/") || model.startsWith("workers-ai/");
+  const providerPath = isWorkersAI ? "compat" : "openrouter";
+  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -87,8 +91,11 @@ export async function callLLM(
     headers["cf-aig-metadata"] = JSON.stringify(opts.metadata);
   }
 
-  if (env.AI_GATEWAY_TOKEN) {
-    headers["cf-aig-authorization"] = `Bearer ${env.AI_GATEWAY_TOKEN}`;
+  // CF gateway auth — gateway routes to OpenRouter (paid models) or Workers AI (@cf/)
+  // OpenRouter API key is configured on the AI Gateway, not passed from code
+  const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
+  if (cfToken) {
+    headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
   }
 
   const resp = await fetch(endpoint, {
@@ -137,7 +144,7 @@ export async function callLLM(
   const costUsd = providerCost > 0 ? providerCost : estimateTokenCost(data.model || model, inputTokens, outputTokens);
 
   return {
-    content: msg.content || "",
+    content: msg.content || msg.reasoning || (choice as any).text || "",
     model: data.model || model,
     tool_calls: parseToolCalls(msg.tool_calls || []),
     usage: { input_tokens: inputTokens, output_tokens: outputTokens },
