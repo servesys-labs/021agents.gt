@@ -2159,25 +2159,23 @@ export default {
 4. NEVER read URLs, file paths, or technical syntax.
 5. Summarize verbally. Ask one question at a time.]`;
 
-              // Stream LLM tokens directly to Twilio — per-token, no buffering
+              // Voice uses fastest available model via AI Gateway
+              // OpenRouter gpt-5.4-nano: fast + smart enough for 1-2 sentence voice responses
               const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
               const gatewayId = env.AI_GATEWAY_ID || "";
-              const model = config?.model || env.DEFAULT_MODEL || "@cf/moonshotai/kimi-k2.5";
-              const isWorkersAI = model.startsWith("@cf/");
-              const providerPath = isWorkersAI ? "compat" : "openrouter";
-              const gatewayModel = isWorkersAI ? `workers-ai/${model}` : model;
+              const voiceModel = "openai/gpt-5.4-nano";
 
               const headers: Record<string, string> = { "Content-Type": "application/json" };
               const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
               if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
 
               const llmResp = await fetch(
-                `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`,
+                `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`,
                 {
                   method: "POST",
                   headers,
                   body: JSON.stringify({
-                    model: gatewayModel,
+                    model: voiceModel,
                     messages: [
                       { role: "system", content: systemPrompt },
                       { role: "user", content: userText },
@@ -2192,18 +2190,18 @@ export default {
                 return;
               }
 
-              // Stream each token directly to Twilio as it arrives
+              // Stream each token directly to Twilio
               const reader = llmResp.body.getReader();
               const decoder = new TextDecoder();
-              let buffer = "";
+              let sseBuffer = "";
 
               while (true) {
                 const { done, value } = await reader.read();
                 if (done) break;
 
-                buffer += decoder.decode(value, { stream: true });
-                const lines = buffer.split("\n");
-                buffer = lines.pop() || "";
+                sseBuffer += decoder.decode(value, { stream: true });
+                const lines = sseBuffer.split("\n");
+                sseBuffer = lines.pop() || "";
 
                 for (const line of lines) {
                   if (!line.startsWith("data:")) continue;
@@ -2214,17 +2212,12 @@ export default {
                     const chunk = JSON.parse(data);
                     let token = chunk.choices?.[0]?.delta?.content || "";
                     if (!token) continue;
-
-                    // Strip markdown inline
                     token = token.replace(/[*#`]/g, "");
-
-                    // Send each token immediately — Twilio buffers and speaks smoothly
                     server.send(JSON.stringify({ type: "text", token, last: false }));
                   } catch {}
                 }
               }
 
-              // Signal completion
               server.send(JSON.stringify({ type: "text", token: "", last: true }));
             } catch (err) {
               console.error("[VoiceRelay] Error:", err);
