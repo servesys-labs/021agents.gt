@@ -13,6 +13,7 @@ import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from 
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
 import { defaultNoCodeGraph, buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
+import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
@@ -1633,6 +1634,92 @@ agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
       failures_analyzed: failures.length,
     },
   });
+});
+
+// ── Meta-agent conversational chat ──────────────────────────────────
+
+const metaChatRoute = createRoute({
+  method: "post",
+  path: "/{name}/meta-chat",
+  tags: ["Agents"],
+  summary: "Chat with the meta-agent about this agent's configuration, performance, and improvements",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            messages: z.array(
+              z.object({
+                role: z.enum(["user", "assistant", "system", "tool"]),
+                content: z.string(),
+                tool_call_id: z.string().optional(),
+                tool_calls: z.array(z.record(z.unknown())).optional(),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Meta-agent response",
+      content: {
+        "application/json": {
+          schema: z.object({
+            response: z.string(),
+            messages: z.array(z.record(z.unknown())),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
+  const { name: agentName } = c.req.valid("param");
+  const { messages } = c.req.valid("json");
+  const user = c.get("user");
+
+  // Verify agent exists
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const rows = await sql`
+    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+  `;
+  if (rows.length === 0) {
+    return c.json({ error: `Agent '${agentName}' not found` }, 404);
+  }
+
+  if (!c.env.OPENROUTER_API_KEY) {
+    return c.json({ error: "OPENROUTER_API_KEY not configured" }, 500);
+  }
+
+  try {
+    const result = await runMetaChat(messages as MetaChatMessage[], {
+      agentName,
+      orgId: user.org_id,
+      userId: user.user_id,
+      hyperdrive: c.env.HYPERDRIVE,
+      openrouterApiKey: c.env.OPENROUTER_API_KEY,
+      env: {
+        RUNTIME: c.env.RUNTIME,
+        SERVICE_TOKEN: c.env.SERVICE_TOKEN,
+      },
+    });
+
+    return c.json({
+      response: result.response,
+      messages: result.messages,
+    });
+  } catch (err: any) {
+    console.error(`[meta-chat] Error for agent ${agentName}:`, err);
+    return c.json(
+      { error: err.message || "Meta-agent chat failed" },
+      500,
+    );
+  }
 });
 
 // ── Runtime endpoints — moved to edge ────────────────────────────────
