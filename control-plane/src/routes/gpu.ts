@@ -7,6 +7,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { deductCredits } from "../logic/credits";
 
 export const gpuRoutes = createOpenAPIRouter();
 
@@ -167,6 +168,12 @@ gpuRoutes.openapi(deleteEndpointRoute, async (c): Promise<any> => {
       VALUES (${user.org_id}, 'gpu_compute', ${costUsd}, ${endpoint.gpu_type || "h200"}, ${hours}, ${costUsd},
               ${`Dedicated GPU endpoint ${endpointId}`}, ${now})
     `;
+
+    // Fire-and-forget credit deduction for GPU compute cost
+    if (costUsd > 0) {
+      const costCents = Math.max(1, Math.round(costUsd * 100));
+      deductCredits(sql, user.org_id, costCents, `GPU compute: ${endpointId}`, "", "").catch(() => {});
+    }
   } catch {}
 
   return c.json({
