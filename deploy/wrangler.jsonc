@@ -39,16 +39,15 @@
   // See: https://blog.cloudflare.com/dynamic-workers/
   "worker_loaders": [{ "binding": "LOADER" }],
 
-  // Sandbox SDK (Containers) — requires Docker for image build
-  // Uncomment when Docker is available:
-  // "containers": [
-  //   {
-  //     "class_name": "AgentSandbox",
-  //     "image": "./sandbox.Dockerfile",
-  //     "instance_type": "lite",
-  //     "max_instances": 10
-  //   }
-  // ],
+  // Sandbox SDK (Containers) — Python/Bash execution environment
+  "containers": [
+    {
+      "class_name": "AgentSandbox",
+      "image": "./sandbox.Dockerfile",
+      "instance_type": "lite",
+      "max_instances": 10
+    }
+  ],
 
   // Queues — guaranteed delivery telemetry pipeline (DO → Queue → Supabase)
   "queues": {

@@ -116,6 +116,43 @@ function clampSandboxTimeout(timeoutSeconds?: number): number {
   return Math.max(1, Math.min(Math.ceil(fallback), MAX_SANDBOX_TIMEOUT_SECONDS));
 }
 
+/**
+ * Get a sandbox instance with a cold-start guard.
+ * Wraps exec() and writeFile() so they never hang indefinitely — if the
+ * container takes more than 45s to start, the call rejects instead of blocking
+ * the entire DO request.
+ */
+function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
+  const raw = getSandbox(env.SANDBOX, sandboxId);
+  const COLD_START_BUDGET_MS = 45_000;
+
+  const wrapWithTimeout = <T>(fn: () => Promise<T>, label: string, timeoutMs?: number): Promise<T> => {
+    const budget = timeoutMs ?? COLD_START_BUDGET_MS;
+    return Promise.race([
+      fn(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Sandbox ${label} timed out after ${budget / 1000}s — container may be cold-starting. Retry in a few seconds.`)), budget),
+      ),
+    ]);
+  };
+
+  return {
+    exec: (cmd: string, opts?: any) => wrapWithTimeout(
+      () => raw.exec(cmd, opts),
+      `exec(${cmd.slice(0, 40)})`,
+      opts?.timeout ? (opts.timeout + 30) * 1000 : undefined,
+    ),
+    writeFile: (path: string, content: string) => wrapWithTimeout(
+      () => raw.writeFile(path, content),
+      `writeFile(${path})`,
+    ),
+    readFile: (path: string) => wrapWithTimeout(
+      () => (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || ""),
+      `readFile(${path})`,
+    ),
+  };
+}
+
 async function sandboxExecWithLimits(
   env: RuntimeEnv,
   sessionId: string,
@@ -123,14 +160,21 @@ async function sandboxExecWithLimits(
   timeoutSeconds?: number,
 ): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> {
   const timeout = clampSandboxTimeout(timeoutSeconds);
-  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
   const options: { timeout: number } & Record<string, number> = {
     timeout,
-    // Best-effort resource hints; ignored by runtimes that do not support them.
     memoryLimitMb: DEFAULT_SANDBOX_MEMORY_LIMIT_MB,
     cpuLimitMs: timeout * 1000,
   };
-  return sandbox.exec(command, options);
+  // Guard against container cold-start hanging indefinitely.
+  // Total budget: exec timeout + 30s for container startup.
+  const totalTimeoutMs = (timeout + 30) * 1000;
+  return Promise.race([
+    sandbox.exec(command, options),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Sandbox timeout after ${totalTimeoutMs / 1000}s (container may be cold-starting)`)), totalTimeoutMs),
+    ),
+  ]);
 }
 
 async function getCachedDynamicWorker(env: RuntimeEnv, workerCode: string): Promise<any> {
@@ -674,34 +718,72 @@ async function dispatch(
     case "http-request":
       return httpRequest(args);
 
-    case "bash":
-      return sandboxExec(env, args.command || "", sessionId, args.timeout_seconds);
+    case "bash": {
+      // Try container sandbox first, fall back to Dynamic Worker
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15000);
+        const result = await Promise.race([
+          sandboxExec(env, args.command || "", sessionId, args.timeout_seconds),
+          new Promise<string>((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("Container timeout")))),
+        ]);
+        clearTimeout(timeout);
+        return result;
+      } catch {
+        // Container unavailable — execute via Dynamic Worker (JS only)
+        if (env.LOADER) {
+          const jsCode = `console.log("bash not available in Dynamic Worker mode. Command: ${(args.command || "").replace(/"/g, '\\"').slice(0, 200)}")`;
+          const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${jsCode};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
+          try {
+            const w = await env.LOADER.load("bash-fallback", { modules: [{ name: "worker.mjs", content: workerCode, type: "esm" }] });
+            const r = await w.fetch(new Request("http://internal/"));
+            return JSON.stringify(await r.json());
+          } catch {}
+        }
+        return JSON.stringify({ stdout: "", stderr: "Sandbox containers not available. Use execute-code tool for JavaScript, or codemode-run for sandboxed code.", exit_code: 1 });
+      }
+    }
 
     case "python-exec": {
       const code = String(args.code || "");
-      const deps = extractPythonImportCandidates(code);
-      const missing = await checkMissingPythonModules(env, sessionId, deps);
-      if (missing.length > 0) {
-        return JSON.stringify({
-          stdout: "",
-          stderr: pythonMissingModuleError(missing),
-          exit_code: 1,
-          missing_modules: missing,
-        });
-      }
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
-      const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
-      await sandbox.writeFile(tmpFile, code);
+      // Try container sandbox first with timeout
       try {
-        const r = await sandboxExecWithLimits(env, sessionId, `python3 ${tmpFile}`, args.timeout_seconds);
-        return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
-      } finally {
-        await sandboxExecWithLimits(env, sessionId, `rm -f ${tmpFile}`, 5).catch(() => {});
+        const deps = extractPythonImportCandidates(code);
+        const missing = await checkMissingPythonModules(env, sessionId, deps);
+        if (missing.length > 0) {
+          return JSON.stringify({ stdout: "", stderr: pythonMissingModuleError(missing), exit_code: 1, missing_modules: missing });
+        }
+        const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+        const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
+        // Timeout: 15s for container startup + execution
+        const execPromise = (async () => {
+          await sandbox.writeFile(tmpFile, code);
+          const r = await sandboxExecWithLimits(env, sessionId, `python3 ${tmpFile}`, args.timeout_seconds);
+          await sandboxExecWithLimits(env, sessionId, `rm -f ${tmpFile}`, 5).catch(() => {});
+          return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
+        })();
+        const result = await Promise.race([
+          execPromise,
+          new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Container timeout")), 20000)),
+        ]);
+        return result;
+      } catch {
+        // Container unavailable — fall back to Dynamic Worker (transpile Python to JS-like execution)
+        if (env.LOADER) {
+          // Execute Python-like logic as JavaScript in Dynamic Worker
+          const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code.replace(/print\s*\(/g, "console.log(").replace(/"/g, '\\"')};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:"Python container unavailable. Error: "+e.message,exit_code:1})}}}`;
+          try {
+            const w = await env.LOADER.load("python-fallback", { modules: [{ name: "worker.mjs", content: workerCode, type: "esm" }] });
+            const r = await w.fetch(new Request("http://internal/"));
+            return JSON.stringify(await r.json());
+          } catch {}
+        }
+        return JSON.stringify({ stdout: "", stderr: "Python sandbox not available. Container startup timed out. The code was not executed. Use execute-code tool for JavaScript instead.", exit_code: 1 });
       }
     }
 
     case "read-file": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       let readPath = args.path || "";
       if (readPath && !readPath.startsWith("/")) readPath = `/workspace/${readPath}`;
       const offset = Math.max(1, Number(args.offset) || 1);
@@ -720,7 +802,7 @@ async function dispatch(
 
     case "view-file": {
       // Stateful file viewer (SWE-agent ACI pattern) — 100-line window with cursor
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       let viewPath = args.path || "";
       if (viewPath && !viewPath.startsWith("/")) viewPath = `/workspace/${viewPath}`;
       const line = Math.max(1, Number(args.line) || 1);
@@ -735,7 +817,7 @@ async function dispatch(
     }
 
     case "write-file": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       // Enforce safe default path — always resolve to /workspace/
       let filePath = args.path || "output.txt";
       if (!filePath.startsWith("/")) filePath = `/workspace/${filePath}`;
@@ -773,7 +855,7 @@ async function dispatch(
     }
 
     case "edit-file": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const editPath = args.path || "";
       const read = await sandbox.exec(`cat "${editPath}"`, { timeout: 10 });
       const content = read.stdout || "";
@@ -846,7 +928,7 @@ async function dispatch(
 
     case "grep": {
       // Smart search with refinement forcing (SWE-agent ACI pattern)
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const maxResults = Math.min(50, Number(args.max_results) || 20);
       const escapedPattern = (args.pattern || "").replace(/"/g, '\\"');
       const searchPath = args.path || ".";
@@ -873,7 +955,7 @@ async function dispatch(
 
     case "glob": {
       // Smart file search with capping (SWE-agent ACI pattern)
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const searchPath = args.path || ".";
       const escapedPattern = (args.pattern || "*").replace(/"/g, '\\"');
       // Count total first
@@ -898,7 +980,7 @@ async function dispatch(
 
     case "search-file": {
       // Search within a specific file (SWE-agent ACI pattern)
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       let filePath = args.path || "";
       if (filePath && !filePath.startsWith("/")) filePath = `/workspace/${filePath}`;
       const term = (args.term || args.pattern || "").replace(/"/g, '\\"');
@@ -913,7 +995,7 @@ async function dispatch(
 
     case "find-file": {
       // Find a file by name (SWE-agent ACI pattern)
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const name = (args.name || args.filename || "").replace(/"/g, '\\"');
       const searchPath = args.path || "/workspace";
       const r = await sandbox.exec(
@@ -944,14 +1026,14 @@ async function dispatch(
 
     case "sandbox_file_write":
     case "sandbox-file-write": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       await sandbox.writeFile(args.path || "/tmp/file", args.content || "");
       return `Written to ${args.path}`;
     }
 
     case "sandbox_file_read":
     case "sandbox-file-read": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const r = await sandbox.exec(`cat "${args.path || "/tmp/file"}"`, { timeout: 10 });
       return r.stdout || "";
     }
@@ -2459,7 +2541,7 @@ async function dispatch(
     // All git tools check for git availability first and return a helpful error if not installed.
 
     case "git-init": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const gitCheck = await sandbox.exec("which git 2>/dev/null", { timeout: 5 }).catch(() => ({ stdout: "" }));
       if (!gitCheck.stdout?.trim()) return "Error: git is not installed in this sandbox. Ask your admin to add git to the sandbox base image.";
       const workDir = args.path || "/workspace";
@@ -2471,14 +2553,14 @@ async function dispatch(
     }
 
     case "git-status": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const workDir = args.path || "/workspace";
       const r = await sandbox.exec(`cd "${workDir}" && git status 2>&1`, { timeout: 10 });
       return r.stdout || r.stderr || "Not a git repository";
     }
 
     case "git-diff": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const workDir = args.path || "/workspace";
       const target = args.target || "";
       const r = await sandbox.exec(
@@ -2492,7 +2574,7 @@ async function dispatch(
     }
 
     case "git-commit": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const workDir = args.path || "/workspace";
       const message = args.message || "checkpoint";
       const r = await sandbox.exec(
@@ -2503,7 +2585,7 @@ async function dispatch(
     }
 
     case "git-log": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const workDir = args.path || "/workspace";
       const count = Math.min(30, Number(args.count) || 10);
       const r = await sandbox.exec(
@@ -2514,7 +2596,7 @@ async function dispatch(
     }
 
     case "git-branch": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const workDir = args.path || "/workspace";
       const action = args.action || "list";
       const name = args.name || "";
@@ -2531,7 +2613,7 @@ async function dispatch(
     }
 
     case "git-stash": {
-      const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       const workDir = args.path || "/workspace";
       const action = args.action || "push";
       const r = await sandbox.exec(`cd "${workDir}" && git stash ${action} 2>&1`, { timeout: 10 });
@@ -2565,11 +2647,11 @@ async function dispatch(
               COUNT(*) as total_sessions,
               COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0), 0) as success_rate,
               COALESCE(AVG(cost_total_usd), 0) as avg_cost,
-              COALESCE(AVG(turns), 0) as avg_turns,
+              COALESCE(AVG(step_count), 0) as avg_turns,
               COALESCE(AVG(wall_clock_seconds), 0) as avg_latency,
               COALESCE(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END), 0) as error_count
             FROM (
-              SELECT status, cost_total_usd, turns, wall_clock_seconds
+              SELECT status, cost_total_usd, step_count, wall_clock_seconds
               FROM sessions
               WHERE org_id = ${orgId} AND agent_name = ${agentName}
               ORDER BY created_at DESC
@@ -3132,7 +3214,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
 async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const audioPath = args.audio_path || args.path || "";
   if (!audioPath) return "speech-to-text requires audio_path";
-  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
   const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
   if (catResult.exitCode !== 0) return `Could not read audio file: ${catResult.stderr}`;
   const audioBytes = Uint8Array.from(atob(catResult.stdout.trim()), (c) => c.charCodeAt(0));
@@ -3181,7 +3263,7 @@ async function dynamicExec(env: RuntimeEnv, args: Record<string, any>, sessionId
         missing_modules: missing,
       });
     }
-    const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+    const sandbox = getSafeSandbox(env, `session-${sessionId}`);
     const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
     await sandbox.writeFile(tmpFile, code);
     try {
@@ -3255,7 +3337,7 @@ async function saveProject(env: RuntimeEnv, args: Record<string, any>, sessionId
   // Default org_id and agent_name from session context — agent shouldn't need to specify these
   const orgId = args.org_id || "default";
   const agentName = args.agent_name || sessionId.split("-")[0] || "agent";
-  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
   const tarResult = await sandbox.exec(`cd ${workspace} 2>/dev/null && tar czf /tmp/workspace.tar.gz . 2>/dev/null || echo "__EMPTY__"`, { timeout: 30 });
   if (tarResult.stdout?.includes("__EMPTY__")) return `No files found in ${workspace}`;
   const b64Result = await sandbox.exec(`base64 /tmp/workspace.tar.gz`, { timeout: 30 });
@@ -3280,7 +3362,7 @@ async function loadProject(env: RuntimeEnv, args: Record<string, any>, sessionId
   const r2Key = version === "latest"
     ? `workspaces/${orgId}/${projectId}/${agentName}/latest.tar.gz`
     : `workspaces/${orgId}/${projectId}/${agentName}/${version}.tar.gz`;
-  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
   const obj = await env.STORAGE.get(r2Key);
   if (!obj) return JSON.stringify({ loaded: false, reason: "No saved workspace found." });
   const buf = await obj.arrayBuffer();
@@ -3306,7 +3388,7 @@ async function listProjectVersions(env: RuntimeEnv, args: Record<string, any>): 
 
 async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const action = args.action || "list";
-  const sandbox = getSandbox(env.SANDBOX, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
   const todoFile = "/tmp/todos.json";
   let todos: any[] = [];
   try {
