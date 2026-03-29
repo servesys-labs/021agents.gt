@@ -2144,81 +2144,30 @@ export default {
           const userText = (msg.voicePrompt || "").trim();
           if (!userText) return;
 
+          // Full agent pipeline — tools, memory, conversation history, plan routing
+          // channel: "voice" triggers voice-optimized system prompt in engine.ts/stream.ts
           ctx.waitUntil((async () => {
             try {
-              // Load agent config for system prompt
-              const { loadAgentConfig } = await import("./runtime/db");
-              const config = await loadAgentConfig(env.HYPERDRIVE, agentName, orgId);
-              let systemPrompt = config?.system_prompt || "You are a helpful assistant.";
+              const result = await runViaAgent(env, agentName, userText, {
+                org_id: orgId,
+                channel: "voice",
+                channel_user_id: `twilio-${callSid}`,
+              });
 
-              // Voice mode instructions
-              systemPrompt += `\n\n[VOICE MODE — You are on a phone call. Rules:
-1. Keep responses to 1-2 sentences MAX. Be concise.
-2. Speak naturally with contractions. Say "I'll" not "I will".
-3. NEVER use markdown, asterisks, hashes, bullets, code blocks, or formatting.
-4. NEVER read URLs, file paths, or technical syntax.
-5. Summarize verbally. Ask one question at a time.]`;
+              let response = result.output || "I didn't catch that. Could you say that again?";
 
-              // Voice uses fastest available model via AI Gateway
-              // OpenRouter gpt-5.4-nano: fast + smart enough for 1-2 sentence voice responses
-              const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
-              const gatewayId = env.AI_GATEWAY_ID || "";
-              const voiceModel = "openai/gpt-5.4-nano";
+              // Strip any markdown that slipped through
+              response = response
+                .replace(/#{1,6}\s*/g, "")
+                .replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
+                .replace(/`{1,3}[^`]*`{1,3}/g, "")
+                .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+                .replace(/^[-*•]\s*/gm, "")
+                .replace(/\n/g, " ")
+                .trim();
 
-              const headers: Record<string, string> = { "Content-Type": "application/json" };
-              const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
-              if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
-
-              const llmResp = await fetch(
-                `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`,
-                {
-                  method: "POST",
-                  headers,
-                  body: JSON.stringify({
-                    model: voiceModel,
-                    messages: [
-                      { role: "system", content: systemPrompt },
-                      { role: "user", content: userText },
-                    ],
-                    stream: true,
-                  }),
-                },
-              );
-
-              if (!llmResp.ok || !llmResp.body) {
-                server.send(JSON.stringify({ type: "text", token: "Sorry, I couldn't process that.", last: true }));
-                return;
-              }
-
-              // Stream each token directly to Twilio
-              const reader = llmResp.body.getReader();
-              const decoder = new TextDecoder();
-              let sseBuffer = "";
-
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                sseBuffer += decoder.decode(value, { stream: true });
-                const lines = sseBuffer.split("\n");
-                sseBuffer = lines.pop() || "";
-
-                for (const line of lines) {
-                  if (!line.startsWith("data:")) continue;
-                  const data = line.slice(5).trim();
-                  if (data === "[DONE]") continue;
-
-                  try {
-                    const chunk = JSON.parse(data);
-                    let token = chunk.choices?.[0]?.delta?.content || "";
-                    if (!token) continue;
-                    token = token.replace(/[*#`]/g, "");
-                    server.send(JSON.stringify({ type: "text", token, last: false }));
-                  } catch {}
-                }
-              }
-
-              server.send(JSON.stringify({ type: "text", token: "", last: true }));
+              // Send full response as one piece — Twilio renders smooth TTS
+              server.send(JSON.stringify({ type: "text", token: response, last: true }));
             } catch (err) {
               console.error("[VoiceRelay] Error:", err);
               try { server.send(JSON.stringify({ type: "text", token: "Sorry, something went wrong.", last: true })); } catch {}
