@@ -223,7 +223,7 @@ export default function AgentVoicePage() {
     }
     setSavingLink(true);
     try {
-      await api.put("/voice/config", {
+      const res = await api.put<{ ok: boolean; vapi_configured?: boolean; vapi_config_error?: string }>("/voice/config", {
         agent_name: agentName,
         voice,
         greeting,
@@ -235,7 +235,13 @@ export default function AgentVoicePage() {
       setVapiAssistantId(pickAssistant);
       setVapiPhoneNumberId(pickPhone);
       setShowSetup(false);
-      toast("Voice linked — inbound calls to this Vapi number can use this assistant.");
+      if (res?.vapi_configured) {
+        toast("Voice linked — your agent's brain is now connected to voice calls.");
+      } else if (res?.vapi_config_error) {
+        toast(`Voice linked, but Vapi auto-config failed: ${res.vapi_config_error}`);
+      } else {
+        toast("Voice linked — inbound calls to this Vapi number will use this agent.");
+      }
       await loadVoicePage();
     } catch (err: unknown) {
       toast(err instanceof Error ? err.message : "Failed to save");

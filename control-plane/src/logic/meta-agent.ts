@@ -120,6 +120,9 @@ const PLATFORM_TOOLS = {
   "manage-mcp": "Manage MCP server connections",
   "manage-secrets": "Manage encrypted secrets",
   "discover-api": "Discover available API endpoints and their schemas",
+
+  // Voice / Telephony
+  "make-voice-call": "Initiate an outbound voice call via the agent's linked phone number",
 } as const;
 
 /** All platform tool names. */
@@ -318,6 +321,7 @@ export function recommendTools(description: string): string[] {
     "text-to-speech": ["voice", "speak", "audio", "tts", "podcast"],
     "todo": ["task", "checklist", "plan", "organize"],
     "conversation-intel": ["sentiment", "quality", "analytics", "conversation"],
+    "make-voice-call": ["call", "phone", "dial", "ring", "outbound call", "voice call", "telephony"],
     "manage-workflows": ["workflow", "pipeline", "orchestrate", "multi-step"],
   };
 

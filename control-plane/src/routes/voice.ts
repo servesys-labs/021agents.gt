@@ -15,6 +15,7 @@ import {
   VOICE_GENERIC_PLATFORMS,
 } from "../logic/voice-webhook";
 import { extractVapiCallIds, resolveVapiVoiceTenant } from "../logic/voice-tenant";
+import type { Env } from "../env";
 
 export const voiceRoutes = createOpenAPIRouter();
 
@@ -202,7 +203,26 @@ voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
     WHERE name = ${agentName} AND org_id = ${user.org_id}
   `;
 
-  return c.json({ ok: true, agent_name: agentName });
+  // Auto-configure Vapi assistant with Server URL when linking
+  let vapiConfigResult: { ok: boolean; error?: string } | null = null;
+  const newAssistantId = String(nextVoice.vapi_assistant_id ?? "").trim();
+  if (newAssistantId && c.env.VAPI_API_KEY) {
+    const serverUrl = `https://api.oneshots.co/api/v1/voice/vapi/server-url`;
+    vapiConfigResult = await configureVapiAssistant(c.env as Env, newAssistantId, {
+      serverUrl,
+      voice: String(nextVoice.voice ?? "") || undefined,
+      greeting: String(nextVoice.greeting ?? "") || undefined,
+      language: String(nextVoice.language ?? "") || undefined,
+      maxDuration: Number(nextVoice.max_duration) || undefined,
+    });
+  }
+
+  return c.json({
+    ok: true,
+    agent_name: agentName,
+    vapi_configured: vapiConfigResult?.ok ?? false,
+    vapi_config_error: vapiConfigResult?.error,
+  });
 });
 
 // ── Vapi integration status (no secrets) ─────────────────────────────
@@ -395,6 +415,360 @@ voiceRoutes.openapi(vapiWebhookRoute, async (c): Promise<any> => {
   const out = await processVapiWebhook(payload, sql, tenant);
   return c.json(out);
 });
+
+// ── Vapi Server URL — agent LLM integration ────────────────────────────
+// This is the endpoint Vapi calls on each conversation turn when an assistant
+// has a serverUrl configured. It routes the call to the AgentOS agent's brain.
+
+const vapiServerUrlRoute = createRoute({
+  method: "post",
+  path: "/vapi/server-url",
+  tags: ["Voice"],
+  summary: "Vapi Server URL endpoint — connects voice calls to AgentOS agents",
+  responses: {
+    200: {
+      description: "Server URL response",
+      content: { "application/json": { schema: z.record(z.unknown()) } },
+    },
+    ...errorResponses(400, 401),
+  },
+});
+voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
+  // Verify webhook signature
+  const body = await c.req.arrayBuffer();
+  const secret = c.env.VAPI_WEBHOOK_SECRET ?? "";
+  const sig = c.req.header("x-vapi-signature") ?? "";
+  if (!(await verifyWebhookHmac(secret, body, sig))) {
+    return c.json({ error: "Invalid webhook signature" }, 401);
+  }
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid JSON" }, 400);
+  }
+
+  const message = (payload.message ?? payload) as Record<string, unknown>;
+  const eventType = String(message.type ?? payload.type ?? "");
+
+  // Resolve which agent this call belongs to
+  const { assistantId, phoneNumberId } = extractVapiCallIds(payload);
+  const sql = await getDb(c.env.HYPERDRIVE);
+  const tenant = await resolveVapiVoiceTenant(sql, assistantId, phoneNumberId);
+
+  if (!tenant) {
+    // Can't resolve agent — return minimal assistant config
+    return c.json({
+      messageResponse: {
+        assistant: {
+          firstMessage: "Hello, I'm sorry but I couldn't connect to the agent. Please try again later.",
+          model: { provider: "openai", model: "gpt-4o-mini", messages: [] },
+        },
+      },
+    });
+  }
+
+  // Load agent config
+  const agentRows = await sql`
+    SELECT config_json FROM agents
+    WHERE name = ${tenant.agent_name} AND org_id = ${tenant.org_id} LIMIT 1
+  `;
+  if (agentRows.length === 0) {
+    return c.json({
+      messageResponse: {
+        assistant: {
+          firstMessage: "Hello, the agent is currently unavailable.",
+          model: { provider: "openai", model: "gpt-4o-mini", messages: [] },
+        },
+      },
+    });
+  }
+
+  const config = parseAgentConfigJson((agentRows[0] as Record<string, unknown>).config_json);
+  const voiceConfig = (config.voice && typeof config.voice === "object" && !Array.isArray(config.voice))
+    ? (config.voice as Record<string, unknown>)
+    : {};
+
+  // ── assistant-request: Return full assistant configuration ──
+  if (eventType === "assistant-request") {
+    const systemPrompt = String(config.system_prompt || config.persona || "You are a helpful assistant.");
+    const greeting = String(voiceConfig.greeting || "Hello! How can I help you today?");
+    const voiceName = String(voiceConfig.voice || "alloy");
+    const language = String(voiceConfig.language || "en");
+    const maxDuration = Number(voiceConfig.max_duration) || 600;
+
+    // Map agent model to Vapi-compatible provider/model
+    const agentModel = String(config.model || "anthropic/claude-sonnet-4-6");
+    const { provider: vapiProvider, model: vapiModel } = mapModelToVapi(agentModel);
+
+    // Build tool definitions for Vapi (subset safe for voice)
+    const agentTools = Array.isArray(config.tools) ? config.tools as string[] : [];
+    const vapiTools = buildVapiToolDefs(agentTools);
+
+    return c.json({
+      messageResponse: {
+        assistant: {
+          firstMessage: greeting,
+          model: {
+            provider: vapiProvider,
+            model: vapiModel,
+            messages: [
+              {
+                role: "system",
+                content: systemPrompt + "\n\nYou are speaking on a voice call. Keep responses concise and conversational. Avoid markdown, code blocks, or long lists.",
+              },
+            ],
+            ...(vapiTools.length > 0 ? { tools: vapiTools, toolIds: [] } : {}),
+          },
+          voice: {
+            provider: "openai",
+            voiceId: voiceName,
+          },
+          transcriber: {
+            provider: "deepgram",
+            language,
+          },
+          maxDurationSeconds: maxDuration,
+          silenceTimeoutSeconds: 30,
+          endCallFunctionEnabled: true,
+        },
+      },
+    });
+  }
+
+  // ── function-call: Execute agent tool via runtime ──
+  if (eventType === "function-call") {
+    const fnCall = (message.functionCall ?? {}) as Record<string, unknown>;
+    const toolName = String(fnCall.name ?? "");
+    const toolParams = (fnCall.parameters ?? {}) as Record<string, unknown>;
+
+    if (!toolName) {
+      return c.json({ results: [{ result: "No function name provided" }] });
+    }
+
+    try {
+      // Call the runtime to execute the tool
+      const runtimeResp = await c.env.RUNTIME.fetch(
+        new Request("https://runtime/run", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+          },
+          body: JSON.stringify({
+            input: `Execute the tool "${toolName}" with parameters: ${JSON.stringify(toolParams)}`,
+            agent_name: tenant.agent_name,
+            org_id: tenant.org_id,
+            channel: "voice",
+            channel_user_id: "voice-caller",
+          }),
+        }),
+      );
+
+      const runtimeResult = (await runtimeResp.json().catch(() => ({}))) as Record<string, unknown>;
+      const output = String(runtimeResult.output || "Tool execution completed.");
+
+      return c.json({
+        results: [{ toolCallId: String(fnCall.id ?? ""), result: output }],
+      });
+    } catch (err: any) {
+      return c.json({
+        results: [{ toolCallId: String(fnCall.id ?? ""), result: `Error: ${err.message || "Tool execution failed"}` }],
+      });
+    }
+  }
+
+  // ── end-of-call-report + other events: process normally ──
+  const tenantCtx = { org_id: tenant.org_id, agent_name: tenant.agent_name };
+  const out = await processVapiWebhook(payload, sql, tenantCtx);
+  return c.json(out);
+});
+
+/**
+ * Map AgentOS model identifiers to Vapi-compatible provider/model pairs.
+ */
+function mapModelToVapi(agentModel: string): { provider: string; model: string } {
+  const lower = agentModel.toLowerCase();
+
+  if (lower.includes("claude")) {
+    return { provider: "anthropic", model: lower.replace("anthropic/", "") };
+  }
+  if (lower.includes("gpt-4o")) {
+    return { provider: "openai", model: lower.replace("openai/", "") };
+  }
+  if (lower.includes("gpt-4")) {
+    return { provider: "openai", model: "gpt-4o" };
+  }
+  if (lower.includes("gemini")) {
+    return { provider: "google", model: lower.replace("google/", "") };
+  }
+
+  // Default for unknown models
+  return { provider: "openai", model: "gpt-4o" };
+}
+
+/**
+ * Build Vapi-compatible tool definitions from AgentOS tool names.
+ * Only includes tools that make sense in a voice context.
+ */
+function buildVapiToolDefs(
+  agentTools: string[],
+): Array<Record<string, unknown>> {
+  // Tools that are useful and safe in voice calls
+  const VOICE_SAFE_TOOLS: Record<string, {
+    description: string;
+    parameters: Record<string, unknown>;
+  }> = {
+    "web-search": {
+      description: "Search the web for information",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+        },
+        required: ["query"],
+      },
+    },
+    "knowledge-search": {
+      description: "Search the agent's knowledge base for relevant information",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+        },
+        required: ["query"],
+      },
+    },
+    "http-request": {
+      description: "Make an API request to fetch data",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "API URL" },
+          method: { type: "string", description: "HTTP method (GET, POST)" },
+        },
+        required: ["url"],
+      },
+    },
+    "db-query": {
+      description: "Query the database for information",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "SQL query" },
+        },
+        required: ["query"],
+      },
+    },
+    "send-email": {
+      description: "Send an email notification",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Recipient email" },
+          subject: { type: "string", description: "Email subject" },
+          body: { type: "string", description: "Email body" },
+        },
+        required: ["to", "subject", "body"],
+      },
+    },
+    "create-schedule": {
+      description: "Schedule a follow-up or reminder",
+      parameters: {
+        type: "object",
+        properties: {
+          description: { type: "string", description: "What to schedule" },
+          when: { type: "string", description: "When (e.g., 'tomorrow at 2pm')" },
+        },
+        required: ["description", "when"],
+      },
+    },
+  };
+
+  const tools: Array<Record<string, unknown>> = [];
+  for (const name of agentTools) {
+    const def = VOICE_SAFE_TOOLS[name];
+    if (def) {
+      tools.push({
+        type: "function",
+        function: {
+          name,
+          description: def.description,
+          parameters: def.parameters,
+        },
+      });
+    }
+  }
+  return tools;
+}
+
+/**
+ * Update a Vapi assistant's serverUrl and voice settings.
+ * Called when linking an agent to a Vapi assistant.
+ */
+async function configureVapiAssistant(
+  env: Env,
+  assistantId: string,
+  opts: {
+    serverUrl: string;
+    voice?: string;
+    greeting?: string;
+    language?: string;
+    maxDuration?: number;
+  },
+): Promise<{ ok: boolean; error?: string }> {
+  const apiKey = String(env.VAPI_API_KEY ?? "").trim();
+  if (!apiKey || !assistantId) {
+    return { ok: false, error: "VAPI_API_KEY or assistant ID missing" };
+  }
+
+  const patchBody: Record<string, unknown> = {
+    serverUrl: opts.serverUrl,
+  };
+
+  if (opts.voice) {
+    patchBody.voice = {
+      provider: "openai",
+      voiceId: opts.voice,
+    };
+  }
+
+  if (opts.greeting) {
+    patchBody.firstMessage = opts.greeting;
+  }
+
+  if (opts.language) {
+    patchBody.transcriber = {
+      provider: "deepgram",
+      language: opts.language,
+    };
+  }
+
+  if (opts.maxDuration && opts.maxDuration > 0) {
+    patchBody.maxDurationSeconds = opts.maxDuration;
+  }
+
+  try {
+    const resp = await fetch(`https://api.vapi.ai/assistant/${encodeURIComponent(assistantId)}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(patchBody),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      return { ok: false, error: `Vapi API ${resp.status}: ${text.slice(0, 200)}` };
+    }
+
+    return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err.message || "Failed to update Vapi assistant" };
+  }
+}
 
 // ── Vapi Calls ─────────────────────────────────────────────────────────
 

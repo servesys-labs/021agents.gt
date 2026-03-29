@@ -55,6 +55,7 @@ export interface Env extends Cloudflare.Env {
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_AGENT_NAME?: string;
   ENABLE_LANGCHAIN_TOOLS?: string;
+  VAPI_API_KEY?: string;         // Vapi API key (for make-voice-call tool)
 }
 
 // ---------------------------------------------------------------------------
