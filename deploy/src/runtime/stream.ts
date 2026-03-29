@@ -397,7 +397,7 @@ export async function streamRun(
       }
 
       // Route model
-      const route = selectModel(task, planRouting as PlanRouting | undefined, config.model, config.provider);
+      const route = await selectModel(task, planRouting as PlanRouting | undefined, config.model, config.provider, env);
 
       send(serializeForWebSocket({ type: "turn_start", turn, model: route.model }));
 

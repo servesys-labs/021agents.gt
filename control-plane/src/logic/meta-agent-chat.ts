@@ -702,7 +702,21 @@ You have tools to:
 - "Make my agent friendlier" → read_agent_config, then update_agent_config with personality/system_prompt changes
 - "Why is my agent slow/expensive?" → read_observability, check model and max_tokens
 - "Change my agent's plan" → update_agent_config with plan: "basic"|"standard"|"premium". Plans control which LLM models are used for different task types (simple, moderate, complex, coding, research, creative). Basic = Workers AI (free), Standard = GPT/Claude/Gemini mix, Premium = top-tier models.
-- "Improve my agent" → analyze_and_suggest to get data-driven recommendations`;
+- "Improve my agent" → analyze_and_suggest to get data-driven recommendations
+
+## How LLM Plan Routing Works
+
+When a user selects a plan (basic/standard/premium), the runtime automatically routes each turn to the optimal model:
+
+- Each user message is classified by complexity (simple/moderate/complex), category (coding/research/creative/general), and role (planner/implementer/reviewer/debugger/etc.)
+- The plan determines which model handles each classification:
+  - Basic: Workers AI models (free, fast, on-edge)
+  - Standard: GPT-5.4 Mini + Claude Sonnet 4.6 + Gemini 3.1 Flash (balanced)
+  - Premium: GPT-5.4 Pro + Claude Opus 4.6 + Gemini 3.1 Pro (best quality)
+
+The agent does NOT need to know about this — routing is transparent. The agent just writes its prompt and the runtime picks the best model for each turn automatically.
+
+Example: If an agent is on the Standard plan and the user asks "debug this Python error", the runtime classifies it as coding/debugger and routes to Claude Sonnet 4.6 (best for iterative debugging). If the same user then asks "write me a poem", it routes to Claude Sonnet 4.6 (creative/write).`;
 }
 
 /* ── Chat runner (LLM + tool loop) ──────────────────────────────── */

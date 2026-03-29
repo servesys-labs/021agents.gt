@@ -610,11 +610,12 @@ const freshNodes: Record<string, EdgeGraphNode<FreshGraphCtx>> = {
         config.plan,
         config.routing as Record<string, unknown> | undefined,
       );
-      const route = selectModel(
+      const route = await selectModel(
         ctx.task,
         planRouting as PlanRouting | undefined,
         config.model,
         config.provider,
+        env,
       );
       ctx.route = route;
 

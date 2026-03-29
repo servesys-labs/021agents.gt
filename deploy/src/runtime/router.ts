@@ -4,6 +4,9 @@
  * Classifies task complexity and category, then selects the optimal
  * model from the agent's plan routing table.
  *
+ * Classification uses a fast LLM call (Workers AI glm-4.7-flash, free, ~200ms)
+ * to classify all 3 dimensions in one call. Falls back to regex if LLM fails.
+ *
  * Routing hierarchy:
  *   1. Category-specific route (coding.planner, research.synthesize, etc.)
  *   2. General route for complexity tier (general.simple, general.complex)
@@ -12,6 +15,8 @@
  *
  * Plans are loaded from agent config_json.plan or config/default.json.
  */
+
+import type { RuntimeEnv } from "./types";
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -25,6 +30,12 @@ export type TaskRole =
   | "write" | "image" | "voice"                            // creative
   | "simple" | "moderate" | "complex" | "tool_call"        // general
   | "image_gen" | "vision" | "tts" | "stt";               // multimodal
+
+export interface RouteClassification {
+  complexity: "simple" | "moderate" | "complex";
+  category: "general" | "coding" | "research" | "creative" | "multimodal";
+  role: string;
+}
 
 export interface RouteDecision {
   model: string;
@@ -45,7 +56,114 @@ export interface PlanRouting {
   };
 }
 
-// ── Complexity Classification ─────────────────────────────────
+// ── LLM Classifier ────────────────────────────────────────────
+
+const VALID_COMPLEXITIES = new Set(["simple", "moderate", "complex"]);
+const VALID_CATEGORIES = new Set(["general", "coding", "research", "creative", "multimodal"]);
+const VALID_ROLES = new Set([
+  "planner", "implementer", "reviewer", "debugger",
+  "search", "analyze", "synthesize",
+  "write", "image", "voice",
+  "simple", "moderate", "complex",
+]);
+
+/**
+ * Classify a user message across all 3 dimensions in a single fast LLM call.
+ * Uses Workers AI glm-4.7-flash (free, ~200ms). Falls back to regex classifiers
+ * if the LLM call fails or env.AI is unavailable.
+ *
+ * Results are cached per session via an optional sessionCache Map.
+ */
+export async function classifyTurn(
+  input: string,
+  env: RuntimeEnv,
+  sessionCache?: Map<string, RouteClassification>,
+): Promise<RouteClassification> {
+  // Check session cache first
+  if (sessionCache) {
+    const cached = sessionCache.get(input);
+    if (cached) return cached;
+  }
+
+  // Fall back to regex if no AI binding
+  if (!env.AI) {
+    return classifyTurnRegex(input);
+  }
+
+  try {
+    const classifierPrompt = `Classify this user message into exactly 3 dimensions. Return ONLY valid JSON.
+
+Message: "${input.slice(0, 500)}"
+
+Respond with:
+{"complexity":"simple|moderate|complex","category":"general|coding|research|creative|multimodal","role":"<role>"}
+
+Rules:
+- complexity: "simple" = greeting/yes/no/short factual, "moderate" = normal question/task, "complex" = multi-step analysis/comparison/design
+- category: "coding" = writing/debugging/reviewing code, "research" = searching/analyzing data, "creative" = writing prose/stories/marketing, "multimodal" = images/audio/video, "general" = everything else
+- role: for coding = planner|implementer|reviewer|debugger, for research = search|analyze|synthesize, for creative = write, for general = use complexity value`;
+
+    const response = await env.AI.run("@cf/zai-org/glm-4.7-flash" as any, {
+      messages: [{ role: "user", content: classifierPrompt }],
+      max_tokens: 50,
+    });
+
+    const text = typeof response === "string"
+      ? response
+      : (response as any)?.response || (response as any)?.result || "";
+
+    // Extract JSON from response (handle markdown fences, leading text, etc.)
+    const jsonMatch = text.match(/\{[^}]+\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      const complexity = VALID_COMPLEXITIES.has(parsed.complexity) ? parsed.complexity : "moderate";
+      const category = VALID_CATEGORIES.has(parsed.category) ? parsed.category : "general";
+      const role = VALID_ROLES.has(parsed.role) ? parsed.role : complexity;
+
+      const result: RouteClassification = { complexity, category, role };
+
+      // Cache the result
+      if (sessionCache) {
+        sessionCache.set(input, result);
+      }
+
+      return result;
+    }
+  } catch {
+    // LLM call failed — fall through to regex
+  }
+
+  // Regex fallback
+  const result = classifyTurnRegex(input);
+  if (sessionCache) {
+    sessionCache.set(input, result);
+  }
+  return result;
+}
+
+/**
+ * Regex-based fallback classifier. Returns all 3 dimensions using
+ * the original pattern-matching heuristics.
+ */
+function classifyTurnRegex(input: string): RouteClassification {
+  const complexity = classifyComplexity(input);
+  const category = classifyCategory(input);
+  const role = classifyRole(input, category);
+
+  // Normalize multimodal complexity tiers to simple/moderate/complex for RouteClassification
+  const normalizedComplexity: "simple" | "moderate" | "complex" =
+    complexity === "simple" ? "simple"
+    : complexity === "complex" ? "complex"
+    : "moderate";
+
+  return {
+    complexity: normalizedComplexity,
+    category,
+    role: role as string,
+  };
+}
+
+// ── Complexity Classification (regex fallback) ────────────────
 
 const COMPLEX_SIGNALS = [
   /\b(analyze|explain|compare|evaluate|design|architect|plan|review|debug|refactor)\b/i,
@@ -156,21 +274,46 @@ export function classifyRole(input: string, category: TaskCategory): TaskRole {
 
 /**
  * Select the optimal model for a task based on plan routing.
+ * Uses the LLM classifier (classifyTurn) for accurate classification,
+ * with regex fallback.
  *
  * @param input — user's task text
  * @param planRouting — plan routing table from agent config
  * @param defaultModel — fallback model
  * @param defaultProvider — fallback provider
+ * @param env — runtime environment (for AI binding)
+ * @param sessionCache — optional per-session cache to avoid re-classifying
  */
-export function selectModel(
+export async function selectModel(
   input: string,
   planRouting: PlanRouting | undefined,
   defaultModel: string,
   defaultProvider: string,
-): RouteDecision {
-  const complexity = classifyComplexity(input);
-  const category = classifyCategory(input);
-  const role = classifyRole(input, category);
+  env?: RuntimeEnv,
+  sessionCache?: Map<string, RouteClassification>,
+): Promise<RouteDecision> {
+  // Use LLM classifier if env is available, otherwise regex fallback
+  let complexity: ComplexityTier;
+  let category: TaskCategory;
+  let role: TaskRole;
+
+  if (env) {
+    const classification = await classifyTurn(input, env, sessionCache);
+    complexity = classification.complexity as ComplexityTier;
+    category = classification.category as TaskCategory;
+    role = classification.role as TaskRole;
+
+    // Still check for multimodal-specific tiers via regex (image_gen, vision, tts, stt)
+    // since the LLM classifier returns simple/moderate/complex
+    const regexComplexity = classifyComplexity(input);
+    if (["image_gen", "vision", "tts", "stt", "tool_call"].includes(regexComplexity)) {
+      complexity = regexComplexity;
+    }
+  } else {
+    complexity = classifyComplexity(input);
+    category = classifyCategory(input);
+    role = classifyRole(input, category);
+  }
 
   if (!planRouting || Object.keys(planRouting).length === 0) {
     return {

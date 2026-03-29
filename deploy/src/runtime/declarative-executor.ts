@@ -447,11 +447,12 @@ async function executeLLMNode(
 
   const planRouting = resolvePlanRouting(ctx.config.plan, ctx.config.routing as Record<string, unknown> | undefined);
 
-  const route = selectModel(
+  const route = await selectModel(
     ctx.request.task,
     planRouting as PlanRouting | undefined,
     (node.config?.model as string) || ctx.config.model,
-    ctx.config.provider
+    ctx.config.provider,
+    ctx.env,
   );
 
   const messages = [...ctx.messages];
@@ -983,8 +984,36 @@ export async function executeDeclarativeGraph(
       }
       
       currentInput = result.output;
-      currentNodeId = result.nextNodeId || findNextNode(currentNodeId, prepared) || "";
-      
+
+      // DAG parallel execution: check if current node forks into multiple branches
+      const nextNodes = findAllNextNodes(currentNodeId, prepared);
+
+      if (nextNodes.length > 1) {
+        // Fork: execute all branches in parallel
+        const branchResults = await Promise.all(
+          nextNodes.map((nodeId) => executeBranch(ctx, nodeId, prepared, currentInput)),
+        );
+
+        // Merge branch results using state snapshot merge
+        const branchStates = branchResults.map((br, i) => ({
+          branch_id: nextNodes[i],
+          state: { output: br.output, cost: br.costUsd, latency: br.latencyMs } as Record<string, unknown>,
+        }));
+        const merged = mergeStateSnapshots(branchStates, ctx.stateReducerOverrides);
+        currentInput = merged.output;
+
+        // Accumulate costs from all branches
+        for (const br of branchResults) {
+          ctx.cumulativeCost += br.costUsd;
+        }
+
+        // Advance to the merge node (first node that all branches converge on)
+        const mergeNode = findMergeNode(nextNodes, prepared);
+        currentNodeId = mergeNode || "";
+      } else {
+        currentNodeId = result.nextNodeId || nextNodes[0] || "";
+      }
+
       if (node.type === "tool" || node.kind === "tool") {
         const loopResult = detectLoop(ctx.loopState, (currentInput as any)?.tool_calls || []);
         if (loopResult?.halt) {
@@ -992,7 +1021,7 @@ export async function executeDeclarativeGraph(
           break;
         }
       }
-      
+
       ctx.turn++;
     }
     
@@ -1098,6 +1127,123 @@ function findNextNode(currentNodeId: string, prepared: PreparedGraph): string | 
   if (idx >= 0 && idx < prepared.executionOrder.length - 1) {
     return prepared.executionOrder[idx + 1];
   }
+  return undefined;
+}
+
+/**
+ * Find ALL nodes reachable via outgoing edges from a given node.
+ * Used for DAG fork detection: if more than one next node exists, execute in parallel.
+ */
+function findAllNextNodes(nodeId: string, prepared: PreparedGraph): string[] {
+  const targets: string[] = [];
+  for (const edge of prepared.expanded.edges) {
+    const source = (edge as any).source || (edge as any).from;
+    const target = (edge as any).target || (edge as any).to;
+    if (source === nodeId && target) {
+      targets.push(target);
+    }
+  }
+  // If no explicit edges found, fall back to linear execution order
+  if (targets.length === 0) {
+    const next = findNextNode(nodeId, prepared);
+    if (next) targets.push(next);
+  }
+  return targets;
+}
+
+/**
+ * Execute a single branch of a DAG fork. Walks nodes sequentially until
+ * reaching a node with multiple incoming edges (merge point) or end of graph.
+ */
+async function executeBranch(
+  ctx: DeclarativeGraphContext,
+  startNodeId: string,
+  prepared: PreparedGraph,
+  initialInput: unknown,
+): Promise<{ output: unknown; costUsd: number; latencyMs: number }> {
+  const started = Date.now();
+  let currentNodeId: string | undefined = startNodeId;
+  let currentInput = initialInput;
+  let branchCost = 0;
+
+  while (currentNodeId) {
+    const node = prepared.nodeMap.get(currentNodeId);
+    if (!node) break;
+
+    // Stop if this node is a merge point (has multiple incoming edges)
+    const incomingCount = prepared.expanded.edges.filter((e) => {
+      const target = (e as any).target || (e as any).to;
+      return target === currentNodeId;
+    }).length;
+    if (incomingCount > 1) {
+      // This is a merge node — stop branch here; caller will execute it after all branches complete
+      break;
+    }
+
+    const result = await executeDeclarativeNode(ctx, node, prepared, currentInput);
+    branchCost += result.costUsd;
+
+    if (!result.success) break;
+
+    currentInput = result.output;
+
+    // Move to next node in this branch (single next only)
+    const nextNodes = findAllNextNodes(currentNodeId, prepared);
+    currentNodeId = nextNodes.length === 1 ? nextNodes[0] : undefined;
+  }
+
+  return {
+    output: currentInput,
+    costUsd: branchCost,
+    latencyMs: Date.now() - started,
+  };
+}
+
+/**
+ * Find the merge node where parallel branches converge.
+ * A merge node is the first node that has incoming edges from multiple branch nodes.
+ * Falls back to the first shared downstream node.
+ */
+function findMergeNode(branchStartNodes: string[], prepared: PreparedGraph): string | undefined {
+  // Build a map: target -> set of source branch roots that can reach it
+  const reachable = new Map<string, Set<string>>();
+
+  for (const startId of branchStartNodes) {
+    // BFS from each branch to find all reachable nodes
+    const visited = new Set<string>();
+    const queue = [startId];
+
+    while (queue.length > 0) {
+      const nodeId = queue.shift()!;
+      if (visited.has(nodeId)) continue;
+      visited.add(nodeId);
+
+      // Track which branch roots can reach each node
+      if (!reachable.has(nodeId)) reachable.set(nodeId, new Set());
+      reachable.get(nodeId)!.add(startId);
+
+      // Follow outgoing edges
+      for (const edge of prepared.expanded.edges) {
+        const source = (edge as any).source || (edge as any).from;
+        const target = (edge as any).target || (edge as any).to;
+        if (source === nodeId && target && !visited.has(target)) {
+          queue.push(target);
+        }
+      }
+    }
+  }
+
+  // The merge node is the first node in execution order reachable from ALL branches
+  for (const nodeId of prepared.executionOrder) {
+    const sources = reachable.get(nodeId);
+    if (sources && sources.size === branchStartNodes.length) {
+      // Ensure it's not one of the branch start nodes themselves
+      if (!branchStartNodes.includes(nodeId)) {
+        return nodeId;
+      }
+    }
+  }
+
   return undefined;
 }
 
