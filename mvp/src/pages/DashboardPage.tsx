@@ -67,14 +67,14 @@ export default function DashboardPage() {
 
   const removeAgent = async (e: React.MouseEvent, agent: ApiAgent) => {
     e.stopPropagation();
-    if (!window.confirm(`Remove “${agent.name}” from your workspace?`)) return;
+    if (!window.confirm(`Remove "${agent.name}" from your workspace?`)) return;
     setRemovingName(agent.name);
     try {
       await api.del(`/agents/${agentPathSegment(agent.agent_id || agent.name)}`);
-      toast(“Assistant removed”);
+      toast("Assistant removed");
       await fetchData();
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : “Could not remove assistant”);
+      toast(err instanceof Error ? err.message : "Could not remove assistant");
     } finally {
       setRemovingName(null);
     }

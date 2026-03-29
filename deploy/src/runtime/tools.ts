@@ -1130,12 +1130,12 @@ async function dispatch(
         return JSON.stringify({
           success: true,
           spec_id: specId,
-          title: specObj.info?.title || "API",
-          version: specObj.info?.version || "1.0",
+          title: (specObj.info as any)?.title || "API",
+          version: (specObj.info as any)?.version || "1.0",
           operations_count: operations.length,
           operations: operations.slice(0, 20),
           message:
-            `Wrapped OpenAPI spec "${specObj.info?.title || "API"}" with ${operations.length} operations. ` +
+            `Wrapped OpenAPI spec "${(specObj.info as any)?.title || "API"}" with ${operations.length} operations. ` +
             `The spec is stored as ${specId}. Use codemode to call these APIs — ` +
             `each operation is available as a typed method.`,
         });
@@ -2346,7 +2346,7 @@ async function dispatch(
       const sql = await getDb(hyperdrive);
       const orgId = args.org_id || "";
       const customerPhone = String(args.phone_number || "").trim();
-      const agentName = String(args.agent_name || sessionMeta?.agent_name || "").trim();
+      const agentName = String(args.agent_name || "").trim();
       const firstMessage = String(args.first_message || "").trim() || undefined;
 
       if (!customerPhone) return "phone_number is required (E.164 format, e.g. +15551234567)";

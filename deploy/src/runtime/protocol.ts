@@ -46,6 +46,7 @@ export interface SessionStartEvent extends BaseEvent {
   session_id: string;
   trace_id: string;
   agent_name: string;
+  delegation?: Record<string, unknown>;
 }
 
 // ── Turn Lifecycle Events ────────────────────────────────────────────

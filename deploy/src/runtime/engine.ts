@@ -80,7 +80,7 @@ export async function edgeRun(
   // Load assigned skills and inject into system prompt
   try {
     const { getDb } = await import("./db");
-    const sql = getDb(hyperdrive);
+    const sql = await getDb(hyperdrive);
     const skills = await sql`
       SELECT name, content, category FROM skills
       WHERE (assigned_agents @> ${JSON.stringify([config.agent_name])}::jsonb
@@ -90,7 +90,7 @@ export async function edgeRun(
     `;
     if (skills.length > 0) {
       const skillBlock = skills
-        .map((s) => `### Skill: ${s.name} (${s.category})\n${s.content}`)
+        .map((s: any) => `### Skill: ${s.name} (${s.category})\n${s.content}`)
         .join("\n\n");
       config.system_prompt = config.system_prompt + "\n\n## Available Skills\n" + skillBlock;
     }

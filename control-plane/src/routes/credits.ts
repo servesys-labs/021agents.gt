@@ -294,7 +294,6 @@ creditRoutes.openapi(addCreditsRoute, async (c): Promise<any> => {
 
   return c.json({
     ok: true,
-    balance_after_cents: result.balance_after_cents,
-    balance_after_usd: (result.balance_after_cents / 100).toFixed(2),
+    balance_after_usd: result.balance_after_usd,
   });
 });
