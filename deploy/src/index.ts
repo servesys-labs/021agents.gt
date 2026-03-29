@@ -2144,17 +2144,35 @@ export default {
           const userText = (msg.voicePrompt || "").trim();
           if (!userText) return;
 
-          // Use ctx.waitUntil to keep the worker alive for the async agent call
+          // Immediately send a filler phrase so there's no dead silence
+          const fillers = ["Let me check that for you.", "One moment.", "Sure, let me look into that.", "Got it, checking now."];
+          const filler = fillers[Math.floor(Math.random() * fillers.length)];
+          try { server.send(JSON.stringify({ type: "text", token: filler, last: false })); } catch {}
+
           ctx.waitUntil((async () => {
             try {
               const result = await runViaAgent(env, agentName, userText, {
                 org_id: orgId, channel: "voice", channel_user_id: `twilio-${callSid}`,
               });
               let response = result.output || "I didn't catch that.";
+
+              // Strip markdown
               response = response.replace(/#{1,6}\s*/g, "").replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
                 .replace(/`{1,3}[^`]*`{1,3}/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
                 .replace(/^[-*•]\s*/gm, "").replace(/\n/g, " ").trim();
-              server.send(JSON.stringify({ type: "text", token: response, last: true }));
+
+              // Stream sentence by sentence — Twilio speaks each as it arrives
+              const sentences = response.match(/[^.!?]+[.!?]+\s*/g) || [response];
+              for (let i = 0; i < sentences.length; i++) {
+                const sentence = sentences[i].trim();
+                if (!sentence) continue;
+                const isLast = i === sentences.length - 1;
+                try { server.send(JSON.stringify({ type: "text", token: sentence, last: isLast })); } catch { break; }
+              }
+              // If no sentences matched, send the whole thing
+              if (sentences.length === 0 || (sentences.length === 1 && sentences[0] === response)) {
+                try { server.send(JSON.stringify({ type: "text", token: response, last: true })); } catch {}
+              }
             } catch (err) {
               console.error("[VoiceRelay] Error:", err);
               try { server.send(JSON.stringify({ type: "text", token: "Sorry, something went wrong.", last: true })); } catch {}
