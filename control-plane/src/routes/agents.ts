@@ -234,6 +234,7 @@ async function snapshotVersion(
 function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
   const config = parseConfig(row.config_json);
   return {
+    agent_id: row.agent_id ?? "",
     name: row.name ?? config.name ?? "",
     description: row.description ?? config.description ?? "",
     model: config.model ?? "",
@@ -241,6 +242,29 @@ function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
     tags: Array.isArray(config.tags) ? config.tags : [],
     version: config.version ?? "0.1.0",
   };
+}
+
+/**
+ * Resolve an agent identifier (either agent_id or name) to the agent's name.
+ * This allows frontend URLs to use agent_id while backend routes still key on name.
+ */
+async function resolveAgentName(
+  sql: Awaited<ReturnType<typeof getDbForOrg>>,
+  identifier: string,
+  orgId: string,
+): Promise<string | null> {
+  // First try as agent_id (short hex string, no spaces/special chars)
+  if (/^[a-f0-9]{8,32}$/i.test(identifier)) {
+    const rows = await sql`
+      SELECT name FROM agents WHERE agent_id = ${identifier} AND org_id = ${orgId} AND is_active = 1 LIMIT 1
+    `;
+    if (rows.length > 0) return String(rows[0].name);
+  }
+  // Fall back to treating it as a name (backwards compatible)
+  const rows = await sql`
+    SELECT name FROM agents WHERE name = ${identifier} AND org_id = ${orgId} LIMIT 1
+  `;
+  return rows.length > 0 ? String(rows[0].name) : null;
 }
 
 function parseConfig(raw: unknown): Record<string, unknown> {
@@ -277,7 +301,7 @@ agentRoutes.openapi(listAgentsRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT name, description, config_json, is_active, created_at, updated_at
+    SELECT agent_id, name, description, config_json, is_active, created_at, updated_at
     FROM agents
     WHERE org_id = ${user.org_id} AND is_active = 1
     ORDER BY created_at DESC
@@ -299,19 +323,24 @@ const getAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(getAgentRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
+  const agentName = await resolveAgentName(sql, identifier, user.org_id);
+  if (!agentName) {
+    return c.json({ error: `Agent '${identifier}' not found` }, 404);
+  }
+
   const rows = await sql`
-    SELECT name, description, config_json, is_active, created_at, updated_at
+    SELECT agent_id, name, description, config_json, is_active, created_at, updated_at
     FROM agents
-    WHERE name = ${name} AND org_id = ${user.org_id}
+    WHERE name = ${agentName} AND org_id = ${user.org_id}
     LIMIT 1
   `;
 
   if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
+    return c.json({ error: `Agent '${identifier}' not found` }, 404);
   }
 
   return c.json(agentResponse(rows[0] as Record<string, unknown>) as any);
@@ -413,10 +442,11 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     }
 
     // Insert into DB
+    const newAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     await sql`
       INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
-        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
+        ${newAgentId},
         ${req.name},
         ${user.org_id},
         ${user.project_id || ""},
@@ -445,6 +475,7 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     }
 
     const response: Record<string, unknown> = {
+      agent_id: newAgentId,
       name: req.name,
       description: req.description,
       model: configJson.model,
@@ -474,10 +505,15 @@ const updateAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
-    const { name } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const req = c.req.valid("json");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const name = await resolveAgentName(sql, identifier, user.org_id);
+    if (!name) {
+      return c.json({ error: `Agent '${identifier}' not found` }, 404);
+    }
 
     // Fetch existing
     const rows = await sql`
@@ -485,9 +521,6 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
       WHERE name = ${name} AND org_id = ${user.org_id}
       LIMIT 1
     `;
-    if (rows.length === 0) {
-      return c.json({ error: `Agent '${name}' not found` }, 404);
-    }
 
     const existingConfig = parseConfig((rows[0] as Record<string, unknown>).config_json);
 
@@ -604,17 +637,14 @@ const deleteAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
-    const { name } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const hardDelete = c.req.query("hard_delete") === "true";
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-    // Check existence
-    const rows = await sql`
-      SELECT name FROM agents WHERE name = ${name} AND org_id = ${user.org_id} LIMIT 1
-    `;
-    if (rows.length === 0) {
-      return c.json({ error: `Agent '${name}' not found` }, 404);
+    const name = await resolveAgentName(sql, identifier, user.org_id);
+    if (!name) {
+      return c.json({ error: `Agent '${identifier}' not found` }, 404);
     }
 
     const counts: Record<string, number> = {};
@@ -716,9 +746,11 @@ const listVersionsRoute = createRoute({
   },
 });
 agentRoutes.openapi(listVersionsRoute, async (c): Promise<any> => {
-    const { name: agentName } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
       SELECT id, agent_name, version, config_json, created_by, created_at
@@ -754,18 +786,18 @@ const listToolsRoute = createRoute({
   },
 });
 agentRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
     SELECT config_json FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
-  if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
-  }
 
   const config = parseConfig((rows[0] as Record<string, unknown>).config_json);
   return c.json({ tools: Array.isArray(config.tools) ? config.tools : [] });
@@ -784,18 +816,18 @@ const getConfigRoute = createRoute({
   },
 });
 agentRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
     SELECT config_json FROM agents
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
-  if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
-  }
 
   return c.json(parseConfig((rows[0] as Record<string, unknown>).config_json) as any);
 });
@@ -818,11 +850,14 @@ const cloneAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const { new_name: newNameValue } = c.req.valid("json");
 
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   // Fetch source agent
   const rows = await sql`
@@ -830,9 +865,6 @@ agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
     WHERE name = ${name} AND org_id = ${user.org_id}
     LIMIT 1
   `;
-  if (rows.length === 0) {
-    return c.json({ error: `Agent '${name}' not found` }, 404);
-  }
 
   // Check target name doesn't exist
   const existCheck = await sql`
@@ -980,9 +1012,12 @@ const exportAgentRoute = createRoute({
   },
 });
 agentRoutes.openapi(exportAgentRoute, async (c): Promise<any> => {
-  const { name } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const name = await resolveAgentName(sql, identifier, user.org_id);
+  if (!name) return c.json({ error: `Agent '${identifier}' not found` }, 404);
 
   const rows = await sql`
     SELECT config_json FROM agents
@@ -1398,10 +1433,11 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     }
 
     // Save agent
+    const generatedAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
     await sql`
       INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
       VALUES (
-        ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
+        ${generatedAgentId},
         ${String(config.name)},
         ${user.org_id},
         ${user.project_id || ""},
@@ -1414,6 +1450,13 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       ON CONFLICT (name, org_id) DO UPDATE
       SET config_json = ${JSON.stringify(cfgRecord)}, updated_at = now()
     `;
+
+    // Retrieve the actual agent_id (may differ on conflict/update)
+    let agentId = generatedAgentId;
+    try {
+      const idRows = await sql`SELECT agent_id FROM agents WHERE name = ${String(config.name)} AND org_id = ${user.org_id} LIMIT 1`;
+      if (idRows.length > 0) agentId = String(idRows[0].agent_id);
+    } catch {}
 
     await snapshotVersion(sql, String(config.name), String(config.version), cfgRecord, user.user_id);
 
@@ -1481,6 +1524,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
 
     const payload: Record<string, unknown> = {
       created: true,
+      agent_id: agentId,
       name: config.name,
       description: config.description,
       model: config.model,
@@ -1540,9 +1584,12 @@ const evolveRoute = createRoute({
 
 agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const { name: agentName } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const req = c.req.valid("json");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const agentName = await resolveAgentName(sql, identifier, user.org_id);
+  if (!agentName) return c.json({ error: "Agent not found" }, 404);
 
   // Load agent config
   const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1`;
@@ -1679,17 +1726,15 @@ const metaChatRoute = createRoute({
   },
 });
 agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
-  const { name: agentName } = c.req.valid("param");
+  const { name: identifier } = c.req.valid("param");
   const { messages } = c.req.valid("json");
   const user = c.get("user");
 
-  // Verify agent exists
+  // Resolve agent identifier (supports both agent_id and name)
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`
-    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
-  `;
-  if (rows.length === 0) {
-    return c.json({ error: `Agent '${agentName}' not found` }, 404);
+  const agentName = await resolveAgentName(sql, identifier, user.org_id);
+  if (!agentName) {
+    return c.json({ error: `Agent '${identifier}' not found` }, 404);
   }
 
   if (!c.env.OPENROUTER_API_KEY) {
@@ -1765,8 +1810,10 @@ const restoreVersionRoute = createRoute({
 });
 agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const { name: agentName, commitId } = c.req.valid("param");
+    const { name: identifier, commitId } = c.req.valid("param");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
       SELECT config_json, version FROM agent_versions
@@ -1830,8 +1877,10 @@ const listTrashRoute = createRoute({
 });
 agentRoutes.openapi(listTrashRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const { name: agentName } = c.req.valid("param");
+    const { name: identifier } = c.req.valid("param");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+    const agentName = await resolveAgentName(sql, identifier, user.org_id) || identifier;
 
     const rows = await sql`
       SELECT agent_id, name, config_json, updated_at, created_by
@@ -1865,7 +1914,9 @@ const restoreTrashRoute = createRoute({
 });
 agentRoutes.openapi(restoreTrashRoute, async (c): Promise<any> => {
     const user = c.get("user");
-    const { name: agentName, trashId } = c.req.valid("param");
+    const { name: identifier, trashId } = c.req.valid("param");
+    const sql2 = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+    const agentName = await resolveAgentName(sql2, identifier, user.org_id) || identifier;
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     await sql`
