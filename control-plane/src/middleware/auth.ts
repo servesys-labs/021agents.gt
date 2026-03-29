@@ -119,6 +119,7 @@ const PUBLIC_PATHS = new Set([
 function isPublicVoiceWebhook(path: string, method: string): boolean {
   if (method !== "POST") return false;
   if (path === "/api/v1/voice/vapi/webhook") return true;
+  if (path === "/api/v1/voice/twilio/incoming") return true;
   const m = path.match(/^\/api\/v1\/voice\/([a-z0-9_-]+)\/webhook$/);
   if (!m) return false;
   return m[1] === "tavus";

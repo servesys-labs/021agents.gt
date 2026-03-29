@@ -1506,3 +1506,362 @@ voiceRoutes.openapi(platformCallEventsRoute, async (c): Promise<any> => {
   `;
   return c.json({ events: rows, platform });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// Twilio Direct Voice Pipeline — STT/TTS via Workers AI
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── POST /twilio/provision — Buy a Twilio phone number and link to agent ──
+
+const twilioProvisionRoute = createRoute({
+  method: "post",
+  path: "/twilio/provision",
+  tags: ["Voice", "Twilio"],
+  summary: "Buy a Twilio phone number and link it to an agent",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1),
+            area_code: z.string().optional(),
+            country: z.string().default("US"),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Provisioned number",
+      content: {
+        "application/json": {
+          schema: z.object({
+            phone_number: z.string(),
+            agent_name: z.string(),
+            provider_sid: z.string(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400, 500),
+  },
+});
+voiceRoutes.openapi(twilioProvisionRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name: agentName, area_code: areaCode, country } = c.req.valid("json");
+
+  const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!accountSid || !authToken) {
+    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+  }
+
+  // Verify agent exists
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const agentRows = await sql`
+    SELECT name FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+  `;
+  if (agentRows.length === 0) {
+    return c.json({ error: `Agent '${agentName}' not found` }, 400);
+  }
+
+  // Search for available numbers
+  const searchParams = new URLSearchParams({
+    VoiceEnabled: "true",
+    SmsEnabled: "false",
+    Limit: "1",
+  });
+  if (areaCode) searchParams.set("AreaCode", areaCode);
+
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+  const searchResp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/AvailablePhoneNumbers/${country || "US"}/Local.json?${searchParams}`,
+    { headers: { Authorization: `Basic ${basicAuth}` } },
+  );
+  if (!searchResp.ok) {
+    const errText = await searchResp.text().catch(() => "");
+    return c.json({ error: `Twilio search failed (${searchResp.status})`, detail: errText.slice(0, 300) }, 400);
+  }
+
+  const searchData = (await searchResp.json()) as { available_phone_numbers?: Array<{ phone_number: string }> };
+  const available = searchData.available_phone_numbers ?? [];
+  if (available.length === 0) {
+    return c.json({ error: "No available phone numbers found for the given criteria" }, 400);
+  }
+
+  const numberToBuy = available[0].phone_number;
+
+  // The webhook URL Twilio will POST to when a call comes in
+  const voiceWebhookUrl = "https://api.oneshots.co/api/v1/voice/twilio/incoming";
+
+  // Buy the number
+  const buyBody = new URLSearchParams({
+    PhoneNumber: numberToBuy,
+    VoiceUrl: voiceWebhookUrl,
+    VoiceMethod: "POST",
+  });
+  const buyResp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${basicAuth}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: buyBody.toString(),
+    },
+  );
+  if (!buyResp.ok) {
+    const errText = await buyResp.text().catch(() => "");
+    return c.json({ error: `Twilio purchase failed (${buyResp.status})`, detail: errText.slice(0, 300) }, 400);
+  }
+
+  const buyData = (await buyResp.json()) as { sid: string; phone_number: string };
+
+  // Store in DB
+  await sql`
+    INSERT INTO voice_numbers (org_id, agent_name, phone_number, provider, provider_sid, status, config)
+    VALUES (
+      ${user.org_id},
+      ${agentName},
+      ${buyData.phone_number},
+      'twilio',
+      ${buyData.sid},
+      'active',
+      ${JSON.stringify({})}
+    )
+    ON CONFLICT (phone_number) DO UPDATE SET
+      agent_name = EXCLUDED.agent_name,
+      provider_sid = EXCLUDED.provider_sid,
+      status = 'active',
+      config = EXCLUDED.config
+  `;
+
+  return c.json({
+    phone_number: buyData.phone_number,
+    agent_name: agentName,
+    provider_sid: buyData.sid,
+  });
+});
+
+// ── POST /twilio/incoming — TwiML webhook for incoming calls (PUBLIC) ──
+
+const twilioIncomingRoute = createRoute({
+  method: "post",
+  path: "/twilio/incoming",
+  tags: ["Voice", "Twilio"],
+  summary: "Twilio voice webhook — returns TwiML to start a media stream",
+  responses: {
+    200: {
+      description: "TwiML response",
+      content: { "text/xml": { schema: z.string() } },
+    },
+    ...errorResponses(404),
+  },
+});
+voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
+  // Twilio sends form-encoded body with To, From, CallSid, etc.
+  let calledNumber = "";
+  try {
+    const formData = await c.req.parseBody();
+    calledNumber = String(formData["To"] ?? formData["Called"] ?? "");
+  } catch {
+    // Fallback: try URL params
+    calledNumber = c.req.query("To") ?? c.req.query("Called") ?? "";
+  }
+
+  if (!calledNumber) {
+    return c.text(
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, I could not determine which agent to connect you to.</Say><Hangup/></Response>`,
+      200,
+      { "Content-Type": "text/xml" },
+    );
+  }
+
+  // Look up which agent owns this number
+  const sql = await getDb(c.env.HYPERDRIVE);
+  const rows = await sql`
+    SELECT org_id, agent_name FROM voice_numbers
+    WHERE phone_number = ${calledNumber} AND provider = 'twilio' AND status = 'active'
+    LIMIT 1
+  `;
+
+  if (rows.length === 0) {
+    return c.text(
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, this number is not linked to any agent.</Say><Hangup/></Response>`,
+      200,
+      { "Content-Type": "text/xml" },
+    );
+  }
+
+  const { org_id: orgId, agent_name: agentName } = rows[0] as { org_id: string; agent_name: string };
+
+  // Return TwiML that opens a bidirectional media stream to the runtime DO
+  const runtimeWsUrl = String(c.env.RUNTIME_WORKER_URL || "https://runtime.oneshots.co")
+    .replace(/^http/, "ws"); // https -> wss, http -> ws
+  const streamUrl = `${runtimeWsUrl}/voice/stream?agent=${encodeURIComponent(agentName)}&org_id=${encodeURIComponent(orgId)}`;
+
+  const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="${streamUrl}">
+      <Parameter name="agent_name" value="${agentName}" />
+      <Parameter name="org_id" value="${orgId}" />
+    </Stream>
+  </Connect>
+</Response>`;
+
+  return c.text(twiml, 200, { "Content-Type": "text/xml" });
+});
+
+// ── GET /twilio/numbers — List provisioned Twilio numbers ──
+
+const twilioNumbersRoute = createRoute({
+  method: "get",
+  path: "/twilio/numbers",
+  tags: ["Voice", "Twilio"],
+  summary: "List provisioned Twilio phone numbers for the org",
+  middleware: [requireScope("integrations:read")],
+  request: {
+    query: z.object({
+      agent_name: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "List of voice numbers",
+      content: {
+        "application/json": {
+          schema: z.object({
+            numbers: z.array(z.object({
+              id: z.string(),
+              phone_number: z.string(),
+              agent_name: z.string(),
+              provider: z.string(),
+              provider_sid: z.string(),
+              status: z.string(),
+              created_at: z.string(),
+            })),
+          }),
+        },
+      },
+    },
+  },
+});
+voiceRoutes.openapi(twilioNumbersRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name: agentName } = c.req.valid("query");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  let rows;
+  if (agentName) {
+    rows = await sql`
+      SELECT id, phone_number, agent_name, provider, provider_sid, status, created_at
+      FROM voice_numbers
+      WHERE org_id = ${user.org_id} AND provider = 'twilio' AND agent_name = ${agentName}
+      ORDER BY created_at DESC
+    `;
+  } else {
+    rows = await sql`
+      SELECT id, phone_number, agent_name, provider, provider_sid, status, created_at
+      FROM voice_numbers
+      WHERE org_id = ${user.org_id} AND provider = 'twilio'
+      ORDER BY created_at DESC
+    `;
+  }
+
+  return c.json({ numbers: rows });
+});
+
+// ── DELETE /twilio/numbers/:number_sid — Release a Twilio number ──
+
+const twilioDeleteNumberRoute = createRoute({
+  method: "delete",
+  path: "/twilio/numbers/{number_sid}",
+  tags: ["Voice", "Twilio"],
+  summary: "Release a Twilio phone number",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    params: z.object({ number_sid: z.string().min(1) }),
+  },
+  responses: {
+    200: {
+      description: "Number released",
+      content: { "application/json": { schema: z.object({ ok: z.boolean(), released: z.string() }) } },
+    },
+    ...errorResponses(400, 404, 500),
+  },
+});
+voiceRoutes.openapi(twilioDeleteNumberRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { number_sid: numberSid } = c.req.valid("param");
+
+  const accountSid = String(c.env.TWILIO_ACCOUNT_SID ?? "").trim();
+  const authToken = String(c.env.TWILIO_AUTH_TOKEN ?? "").trim();
+  if (!accountSid || !authToken) {
+    return c.json({ error: "TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN not configured" }, 500);
+  }
+
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify ownership
+  const rows = await sql`
+    SELECT phone_number FROM voice_numbers
+    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
+    LIMIT 1
+  `;
+  if (rows.length === 0) {
+    return c.json({ error: "Number not found or not owned by this org" }, 404);
+  }
+
+  // Release from Twilio
+  const basicAuth = btoa(`${accountSid}:${authToken}`);
+  const releaseResp = await fetch(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers/${numberSid}.json`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Basic ${basicAuth}` },
+    },
+  );
+
+  if (!releaseResp.ok && releaseResp.status !== 404) {
+    const errText = await releaseResp.text().catch(() => "");
+    return c.json({ error: `Twilio release failed (${releaseResp.status})`, detail: errText.slice(0, 300) }, 400);
+  }
+
+  // Remove from DB
+  await sql`
+    DELETE FROM voice_numbers
+    WHERE provider_sid = ${numberSid} AND org_id = ${user.org_id} AND provider = 'twilio'
+  `;
+
+  return c.json({ ok: true, released: numberSid });
+});
+
+// ── GET /twilio/integration-status — Check Twilio config ──
+
+const twilioIntegrationStatusRoute = createRoute({
+  method: "get",
+  path: "/twilio/integration-status",
+  tags: ["Voice", "Twilio"],
+  summary: "Whether Twilio credentials are configured",
+  middleware: [requireScope("integrations:read")],
+  responses: {
+    200: {
+      description: "Status",
+      content: {
+        "application/json": {
+          schema: z.object({ configured: z.boolean() }),
+        },
+      },
+    },
+  },
+});
+voiceRoutes.openapi(twilioIntegrationStatusRoute, async (c): Promise<any> => {
+  const configured =
+    Boolean(String(c.env.TWILIO_ACCOUNT_SID ?? "").trim()) &&
+    Boolean(String(c.env.TWILIO_AUTH_TOKEN ?? "").trim());
+  return c.json({ configured });
+});
