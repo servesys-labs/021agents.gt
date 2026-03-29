@@ -35,6 +35,80 @@ function parseAgentConfigJson(raw: unknown): Record<string, unknown> {
   return {};
 }
 
+// ── Plan-based model routing (mirrors deploy/src/runtime/db.ts + router.ts) ──
+
+const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string; max_tokens: number }>>> = {
+  basic: {
+    general: { simple: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 2048 }, moderate: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 4096 }, complex: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 }, tool_call: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai", max_tokens: 2048 } },
+    creative: { write: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai", max_tokens: 8192 } },
+  },
+  standard: {
+    general: { simple: { model: "google-ai-studio/gemini-2.5-flash", provider: "google", max_tokens: 4096 }, moderate: { model: "openai/gpt-5-mini", provider: "openai", max_tokens: 8192 }, complex: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 }, tool_call: { model: "google-ai-studio/gemini-2.5-flash", provider: "google", max_tokens: 4096 } },
+    creative: { write: { model: "anthropic/claude-sonnet-4-6", provider: "anthropic", max_tokens: 8192 } },
+  },
+  premium: {
+    general: { simple: { model: "openai/gpt-5-nano", provider: "openai", max_tokens: 8192 }, moderate: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 }, complex: { model: "anthropic/claude-opus-4-6", provider: "anthropic", max_tokens: 16384 }, tool_call: { model: "openai/gpt-5.4", provider: "openai", max_tokens: 16384 } },
+    creative: { write: { model: "anthropic/claude-opus-4-6", provider: "anthropic", max_tokens: 16384 } },
+  },
+};
+
+/**
+ * Resolve agent plan to routing table. Agent-level overrides win.
+ */
+function resolvePlanRouting(
+  plan: string,
+  agentRouting: Record<string, any> | undefined,
+): Record<string, any> | undefined {
+  if (agentRouting && Object.keys(agentRouting).length > 0) return agentRouting;
+  const normalized = (plan || "standard").toLowerCase().trim();
+  return PLAN_ROUTING[normalized] || PLAN_ROUTING["standard"];
+}
+
+/**
+ * Select the best model for a voice call from the agent's plan routing.
+ * Voice calls are conversational → use general.moderate by default.
+ * Falls back to config.model or a sensible default.
+ */
+function resolveVoiceModel(config: Record<string, unknown>): { model: string; provider: string; max_tokens: number } {
+  const plan = String(config.plan || "standard");
+  const agentRouting = (config.routing && typeof config.routing === "object" && !Array.isArray(config.routing))
+    ? (config.routing as Record<string, any>)
+    : undefined;
+
+  const routing = resolvePlanRouting(plan, agentRouting);
+  if (routing) {
+    // Voice is conversational — general.moderate is the best default
+    const generalRoutes = routing["general"];
+    if (generalRoutes) {
+      const route = generalRoutes["moderate"] || generalRoutes["simple"];
+      if (route && route.model) {
+        return {
+          model: String(route.model),
+          provider: String(route.provider || "openai"),
+          max_tokens: Number(route.max_tokens) || 4096,
+        };
+      }
+    }
+    // Try creative.write as fallback (also conversational)
+    const creativeRoutes = routing["creative"];
+    if (creativeRoutes?.write?.model) {
+      return {
+        model: String(creativeRoutes.write.model),
+        provider: String(creativeRoutes.write.provider || "openai"),
+        max_tokens: Number(creativeRoutes.write.max_tokens) || 4096,
+      };
+    }
+  }
+
+  // Fallback to config.model
+  const fallbackModel = String(config.model || "anthropic/claude-sonnet-4-6");
+  return {
+    model: fallbackModel,
+    provider: fallbackModel.includes("claude") ? "anthropic" : fallbackModel.includes("gpt") ? "openai" : "openai",
+    max_tokens: 4096,
+  };
+}
+
 function mapVoiceCallRow(r: Record<string, unknown>): Record<string, unknown> {
   const statusRaw = String(r.status ?? "").toLowerCase();
   let status: "completed" | "missed" | "voicemail" = "completed";
@@ -498,9 +572,9 @@ voiceRoutes.openapi(vapiServerUrlRoute, async (c): Promise<any> => {
     const language = String(voiceConfig.language || "en");
     const maxDuration = Number(voiceConfig.max_duration) || 600;
 
-    // Map agent model to Vapi-compatible provider/model
-    const agentModel = String(config.model || "anthropic/claude-sonnet-4-6");
-    const { provider: vapiProvider, model: vapiModel } = mapModelToVapi(agentModel);
+    // Resolve model from agent's LLM plan routing (basic/standard/premium)
+    const resolved = resolveVoiceModel(config);
+    const { provider: vapiProvider, model: vapiModel } = mapModelToVapi(resolved.model);
 
     // Build tool definitions for Vapi (subset safe for voice)
     const agentTools = Array.isArray(config.tools) ? config.tools as string[] : [];

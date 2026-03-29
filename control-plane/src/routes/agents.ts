@@ -126,6 +126,7 @@ const CreateFromDescriptionSchema = z.object({
   description: z.string().min(1).max(5000),
   name: z.string().max(128).default(""),
   tools: z.string().default("auto"),
+  plan: z.enum(["basic", "standard", "premium"]).default("standard"),
   draft_only: z.boolean().default(false),
   strict_graph_lint: z.boolean().default(true),
   auto_graph: z.boolean().default(true),
@@ -238,6 +239,7 @@ function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
     name: row.name ?? config.name ?? "",
     description: row.description ?? config.description ?? "",
     model: config.model ?? "",
+    plan: config.plan ?? "standard",
     tools: Array.isArray(config.tools) ? config.tools : [],
     tags: Array.isArray(config.tags) ? config.tags : [],
     version: config.version ?? "0.1.0",
@@ -382,6 +384,7 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       system_prompt: req.system_prompt,
       personality: req.personality,
       model: req.model || "anthropic/claude-sonnet-4-6",
+      plan: req.plan || "standard",
       max_tokens: req.max_tokens,
       temperature: req.temperature,
       tools: req.tools,
@@ -1195,6 +1198,9 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     });
 
     if (req.name) config.name = req.name;
+
+    // Apply LLM plan
+    config.plan = req.plan;
 
     // Tool selection
     if (req.tools === "auto") {
