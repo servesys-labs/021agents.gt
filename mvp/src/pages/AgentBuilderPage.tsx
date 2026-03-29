@@ -93,6 +93,7 @@ export default function AgentBuilderPage() {
   // Quick mode state
   const [agentName, setAgentName] = useState("");
   const [description, setDescription] = useState("");
+  const [plan, setPlan] = useState<"basic" | "standard" | "premium">("standard");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [creationPhase, setCreationPhase] = useState("");
@@ -207,6 +208,7 @@ export default function AgentBuilderPage() {
         description: buildMetaDescription(),
         name: name || undefined,
         tools: "auto",
+        plan,
         draft_only: false,
         auto_graph: true,
       });
@@ -275,6 +277,7 @@ export default function AgentBuilderPage() {
           description: buildMetaDescription(),
           name,
           tools: selectedTools.length > 0 ? selectedTools.join(",") : "auto",
+          plan,
           draft_only: false,
         });
         const advPath = agentPathSegment(res.agent_id || res.name || name);
@@ -337,6 +340,31 @@ export default function AgentBuilderPage() {
             onChange={(e) => setDescription(e.target.value)}
             rows={4}
           />
+
+          {/* Plan selection */}
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text">LLM Plan</label>
+            <div className="grid grid-cols-3 gap-2">
+              {([
+                { key: "basic" as const, label: "Basic", desc: "Free-tier models" },
+                { key: "standard" as const, label: "Standard", desc: "GPT + Claude + Gemini" },
+                { key: "premium" as const, label: "Premium", desc: "Top-tier models" },
+              ]).map((p) => (
+                <button
+                  key={p.key}
+                  onClick={() => setPlan(p.key)}
+                  className={`p-2.5 rounded-lg border text-left transition-colors ${
+                    plan === p.key
+                      ? "border-primary bg-primary-light ring-1 ring-primary"
+                      : "border-border hover:border-gray-300"
+                  }`}
+                >
+                  <p className="text-sm font-semibold text-text">{p.label}</p>
+                  <p className="text-[11px] text-text-secondary mt-0.5">{p.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
 
           {/* Example prompts */}
           {!description.trim() && (

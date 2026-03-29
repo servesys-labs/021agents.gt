@@ -64,7 +64,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "update_agent_config",
       description:
-        "Update specific fields of the agent's configuration. Only include fields you want to change. Supports: system_prompt, description, personality, model, temperature, max_tokens, tools (array of tool names), tags, max_turns, timeout_seconds, governance (object with budget_limit_usd etc).",
+        "Update specific fields of the agent's configuration. Only include fields you want to change. Supports: system_prompt, description, personality, model, plan (basic/standard/premium), routing (custom routing overrides), temperature, max_tokens, tools (array of tool names), tags, max_turns, timeout_seconds, governance (object with budget_limit_usd etc).",
       parameters: {
         type: "object",
         properties: {
@@ -72,6 +72,8 @@ const META_TOOLS: ToolDef[] = [
           description: { type: "string", description: "Agent description" },
           personality: { type: "string", description: "Personality/tone" },
           model: { type: "string", description: "Model identifier" },
+          plan: { type: "string", enum: ["basic", "standard", "premium"], description: "LLM plan tier — controls which models are used for different task types" },
+          routing: { type: "object", description: "Custom model routing overrides by category and role (e.g. { general: { moderate: { model: '...', provider: '...' } } })" },
           temperature: { type: "number", description: "Sampling temperature" },
           max_tokens: { type: "number", description: "Max output tokens" },
           tools: {
@@ -239,6 +241,8 @@ async function executeTool(
         system_prompt: config.system_prompt,
         personality: config.personality,
         model: config.model,
+        plan: config.plan || "standard",
+        routing: config.routing || null,
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         tools: config.tools,
@@ -277,6 +281,8 @@ async function executeTool(
         "description",
         "personality",
         "model",
+        "plan",
+        "routing",
         "temperature",
         "max_tokens",
         "tools",
@@ -672,8 +678,8 @@ function buildSystemPrompt(agentName: string): string {
 
 ## Your Capabilities
 You have tools to:
-- **Read the agent's full configuration** (system prompt, tools, model, governance, etc.)
-- **Update any configuration field** (system prompt, tools, temperature, model, etc.)
+- **Read the agent's full configuration** (system prompt, tools, model, plan, routing, governance, etc.)
+- **Update any configuration field** (system prompt, tools, temperature, model, plan, routing, etc.)
 - **Read user sessions** to understand how people are using the agent
 - **Read specific conversations** to diagnose issues or understand patterns
 - **Check observability data** (errors, latency, costs, active sessions)
@@ -695,6 +701,7 @@ You have tools to:
 - "My agent gives wrong answers about X" → read_agent_config (check prompt), then update_agent_config to add instructions
 - "Make my agent friendlier" → read_agent_config, then update_agent_config with personality/system_prompt changes
 - "Why is my agent slow/expensive?" → read_observability, check model and max_tokens
+- "Change my agent's plan" → update_agent_config with plan: "basic"|"standard"|"premium". Plans control which LLM models are used for different task types (simple, moderate, complex, coding, research, creative). Basic = Workers AI (free), Standard = GPT/Claude/Gemini mix, Premium = top-tier models.
 - "Improve my agent" → analyze_and_suggest to get data-driven recommendations`;
 }
 

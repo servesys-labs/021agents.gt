@@ -54,6 +54,7 @@ export default function AgentSettingsPage() {
   const [persona, setPersona] = useState("");
   const [tone, setTone] = useState("friendly");
   const [responseLength, setResponseLength] = useState("medium");
+  const [plan, setPlan] = useState<"basic" | "standard" | "premium">("standard");
   const [tools, setTools] = useState<string[]>([]);
   const [isLive, setIsLive] = useState(false);
 
@@ -80,6 +81,7 @@ export default function AgentSettingsPage() {
       setPersona(cfg.system_prompt || cfg.persona || "");
       setTone(cfg.tone || "friendly");
       setResponseLength(cfg.response_length || "medium");
+      setPlan(cfg.plan || "standard");
       setTools(cfg.tools || []);
       setIsLive(data.is_active ?? false);
       // Handoff
@@ -118,6 +120,7 @@ export default function AgentSettingsPage() {
         config_json: {
           ...(agent.config_json || {}),
           system_prompt: persona,
+          plan,
           tone,
           response_length: responseLength,
           tools,
@@ -193,6 +196,37 @@ export default function AgentSettingsPage() {
         <div className="space-y-4 max-w-lg">
           <Input label="Agent name" value={agent.name} disabled />
           <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
+
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text">LLM Plan</label>
+            <p className="text-xs text-text-secondary mb-2">
+              Controls which AI models power your agent. Higher tiers use more capable models.
+            </p>
+            <div className="grid grid-cols-3 gap-3">
+              {([
+                { key: "basic" as const, label: "Basic", desc: "Free-tier models (Workers AI)", price: "Free" },
+                { key: "standard" as const, label: "Standard", desc: "GPT, Claude & Gemini mix", price: "Usage-based" },
+                { key: "premium" as const, label: "Premium", desc: "Top-tier models (Opus, GPT-5)", price: "Usage-based" },
+              ]).map((p) => (
+                <button
+                  key={p.key}
+                  onClick={() => setPlan(p.key)}
+                  className={`p-3 rounded-lg border text-left transition-colors ${
+                    plan === p.key
+                      ? "border-primary bg-primary-light ring-1 ring-primary"
+                      : "border-border hover:border-gray-300"
+                  }`}
+                >
+                  <p className="text-sm font-semibold text-text">{p.label}</p>
+                  <p className="text-xs text-text-secondary mt-0.5 leading-relaxed">{p.desc}</p>
+                  <Badge variant={plan === p.key ? "success" : "default"} className="mt-2 text-[10px]">
+                    {p.price}
+                  </Badge>
+                </button>
+              ))}
+            </div>
+          </div>
+
           <Card className="border-red-200 bg-red-50/40">
             <p className="text-sm font-medium text-text">Remove assistant</p>
             <p className="text-xs text-text-secondary mt-1 leading-relaxed">
