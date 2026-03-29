@@ -1707,7 +1707,18 @@ voiceRoutes.openapi(twilioIncomingRoute, async (c): Promise<any> => {
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Connect>
-    <ConversationRelay url="${relayUrl}" welcomeGreeting="Hello! How can I help you today?" voice="Google.en-US-Journey-F" />
+    <ConversationRelay
+      url="${relayUrl}"
+      welcomeGreeting="Hello! How can I help you today?"
+      voice="Google.en-US-Journey-F"
+      transcriptionProvider="Deepgram"
+      ttsProvider="ElevenLabs"
+      elevenlabsTextNormalization="on"
+      interruptible="speech"
+      interruptSensitivity="medium"
+      dtmfDetection="true"
+      welcomeGreetingInterruptible="speech"
+    />
   </Connect>
 </Response>`;
 

@@ -2144,35 +2144,88 @@ export default {
           const userText = (msg.voicePrompt || "").trim();
           if (!userText) return;
 
-          // Immediately send a filler phrase so there's no dead silence
-          const fillers = ["Let me check that for you.", "One moment.", "Sure, let me look into that.", "Got it, checking now."];
-          const filler = fillers[Math.floor(Math.random() * fillers.length)];
-          try { server.send(JSON.stringify({ type: "text", token: filler, last: false })); } catch {}
-
           ctx.waitUntil((async () => {
             try {
-              const result = await runViaAgent(env, agentName, userText, {
-                org_id: orgId, channel: "voice", channel_user_id: `twilio-${callSid}`,
-              });
-              let response = result.output || "I didn't catch that.";
+              // Load agent config for system prompt
+              const { loadAgentConfig } = await import("./runtime/db");
+              const config = await loadAgentConfig(env.HYPERDRIVE, agentName, orgId);
+              let systemPrompt = config?.system_prompt || "You are a helpful assistant.";
 
-              // Strip markdown
-              response = response.replace(/#{1,6}\s*/g, "").replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
-                .replace(/`{1,3}[^`]*`{1,3}/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-                .replace(/^[-*•]\s*/gm, "").replace(/\n/g, " ").trim();
+              // Voice mode instructions
+              systemPrompt += `\n\n[VOICE MODE — You are on a phone call. Rules:
+1. Keep responses to 1-2 sentences MAX. Be concise.
+2. Speak naturally with contractions. Say "I'll" not "I will".
+3. NEVER use markdown, asterisks, hashes, bullets, code blocks, or formatting.
+4. NEVER read URLs, file paths, or technical syntax.
+5. Summarize verbally. Ask one question at a time.]`;
 
-              // Stream sentence by sentence — Twilio speaks each as it arrives
-              const sentences = response.match(/[^.!?]+[.!?]+\s*/g) || [response];
-              for (let i = 0; i < sentences.length; i++) {
-                const sentence = sentences[i].trim();
-                if (!sentence) continue;
-                const isLast = i === sentences.length - 1;
-                try { server.send(JSON.stringify({ type: "text", token: sentence, last: isLast })); } catch { break; }
+              // Stream LLM tokens directly to Twilio — per-token, no buffering
+              const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
+              const gatewayId = env.AI_GATEWAY_ID || "";
+              const model = config?.model || env.DEFAULT_MODEL || "@cf/moonshotai/kimi-k2.5";
+              const isWorkersAI = model.startsWith("@cf/");
+              const providerPath = isWorkersAI ? "compat" : "openrouter";
+              const gatewayModel = isWorkersAI ? `workers-ai/${model}` : model;
+
+              const headers: Record<string, string> = { "Content-Type": "application/json" };
+              const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
+              if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+
+              const llmResp = await fetch(
+                `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`,
+                {
+                  method: "POST",
+                  headers,
+                  body: JSON.stringify({
+                    model: gatewayModel,
+                    messages: [
+                      { role: "system", content: systemPrompt },
+                      { role: "user", content: userText },
+                    ],
+                    stream: true,
+                  }),
+                },
+              );
+
+              if (!llmResp.ok || !llmResp.body) {
+                server.send(JSON.stringify({ type: "text", token: "Sorry, I couldn't process that.", last: true }));
+                return;
               }
-              // If no sentences matched, send the whole thing
-              if (sentences.length === 0 || (sentences.length === 1 && sentences[0] === response)) {
-                try { server.send(JSON.stringify({ type: "text", token: response, last: true })); } catch {}
+
+              // Stream each token directly to Twilio as it arrives
+              const reader = llmResp.body.getReader();
+              const decoder = new TextDecoder();
+              let buffer = "";
+
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split("\n");
+                buffer = lines.pop() || "";
+
+                for (const line of lines) {
+                  if (!line.startsWith("data:")) continue;
+                  const data = line.slice(5).trim();
+                  if (data === "[DONE]") continue;
+
+                  try {
+                    const chunk = JSON.parse(data);
+                    let token = chunk.choices?.[0]?.delta?.content || "";
+                    if (!token) continue;
+
+                    // Strip markdown inline
+                    token = token.replace(/[*#`]/g, "");
+
+                    // Send each token immediately — Twilio buffers and speaks smoothly
+                    server.send(JSON.stringify({ type: "text", token, last: false }));
+                  } catch {}
+                }
               }
+
+              // Signal completion
+              server.send(JSON.stringify({ type: "text", token: "", last: true }));
             } catch (err) {
               console.error("[VoiceRelay] Error:", err);
               try { server.send(JSON.stringify({ type: "text", token: "Sorry, something went wrong.", last: true })); } catch {}
