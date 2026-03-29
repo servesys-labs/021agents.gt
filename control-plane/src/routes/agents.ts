@@ -12,7 +12,7 @@ import { getDb, getDbForOrg } from "../db/client";
 import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from "../logic/graph-lint";
 import { lintAndAutofixGraph } from "../logic/graph-autofix";
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
-import { defaultNoCodeGraph, buildFromDescription, recommendTools } from "../logic/meta-agent";
+import { defaultNoCodeGraph, buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
@@ -1429,6 +1429,55 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     // Notify runtime of new agent (fire-and-forget)
     notifyRuntimeOfConfigChange(c.env, String(config.name), String(config.version)).catch(() => {});
 
+    // ── Auto-Eval: expand eval_config into executable test cases ──────
+    // This runs after agent creation so the agent exists before we test it.
+    let autoEvalTasks: EvalTestCase[] = [];
+    let autoEvalRubric: EvalRubric | null = null;
+    const evalCfg = (pkg?.eval_config ?? (config as Record<string, unknown>).eval_config) as Record<string, unknown> | null;
+
+    if (evalCfg) {
+      try {
+        const expanded = await expandEvalConfig(
+          evalCfg,
+          String(config.description || req.description),
+          String(config.name),
+          { openrouterApiKey: c.env.OPENROUTER_API_KEY },
+        );
+        autoEvalTasks = expanded.tasks;
+        autoEvalRubric = expanded.rubric;
+
+        // Persist auto-generated eval tasks for later re-runs
+        if (autoEvalTasks.length > 0) {
+          const evalConfigWithTasks = {
+            ...evalCfg,
+            test_cases: autoEvalTasks,
+            rubric: autoEvalRubric,
+            auto_generated: true,
+            generated_at: new Date().toISOString(),
+          };
+          // Update agent config with expanded eval_config
+          await sql`
+            UPDATE agents SET config_json = jsonb_set(
+              config_json::jsonb,
+              '{eval_config}',
+              ${JSON.stringify(evalConfigWithTasks)}::jsonb
+            )
+            WHERE name = ${String(config.name)} AND org_id = ${user.org_id}
+          `.catch(() => {
+            // Fallback: re-write the whole config if jsonb_set isn't available
+            const updatedConfig = { ...cfgRecord, eval_config: evalConfigWithTasks };
+            return sql`
+              UPDATE agents SET config_json = ${JSON.stringify(updatedConfig)}
+              WHERE name = ${String(config.name)} AND org_id = ${user.org_id}
+            `;
+          });
+        }
+      } catch (err) {
+        console.error("[auto-eval] Failed to expand eval config:", err);
+        // Non-fatal — agent is already created
+      }
+    }
+
     const payload: Record<string, unknown> = {
       created: true,
       name: config.name,
@@ -1445,6 +1494,13 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       payload.guardrails_created = (Array.isArray(pkg.guardrails) ? pkg.guardrails : []).length;
       payload.mcp_connectors = pkg.mcp_connectors;
     }
+    if (autoEvalTasks.length > 0) {
+      payload.auto_eval = {
+        test_cases_generated: autoEvalTasks.length,
+        rubric: autoEvalRubric,
+        tasks: autoEvalTasks,
+      };
+    }
     if (packageErrors.length > 0) payload.package_errors = packageErrors;
     if (req.include_autofix) payload.graph_autofix = graphAutofix;
     if (req.include_gate_pack) payload.gate_pack = gatePack;
@@ -1452,6 +1508,131 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     payload.hold_override_applied = holdOverrideApplied;
 
     return c.json(payload as any, 201);
+});
+
+// ── Evolution: analyze eval results and suggest improvements ──────────
+
+const evolveRoute = createRoute({
+  method: "post",
+  path: "/{name}/evolve",
+  tags: ["Agents"],
+  summary: "Analyze eval results and suggest agent improvements",
+  middleware: [requireScope("agents:write")],
+  request: {
+    params: z.object({ name: z.string() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            eval_run_id: z.string().optional().openapi({ description: "Specific eval run to analyze (defaults to latest)" }),
+            auto_apply: z.boolean().default(false).openapi({ description: "Auto-apply low-risk suggestions" }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Evolution suggestions", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404, 500),
+  },
+});
+
+agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { name: agentName } = c.req.valid("param");
+  const req = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Load agent config
+  const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1`;
+  if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
+  const agentConfig = JSON.parse(String(agentRows[0].config_json || "{}"));
+
+  // Load eval results (latest run or specific run)
+  let evalRows: any[];
+  if (req.eval_run_id) {
+    evalRows = await sql`SELECT * FROM eval_runs WHERE id = ${req.eval_run_id} AND org_id = ${user.org_id} LIMIT 1`;
+  } else {
+    evalRows = await sql`SELECT * FROM eval_runs WHERE agent_name = ${agentName} AND org_id = ${user.org_id} ORDER BY created_at DESC LIMIT 1`;
+  }
+
+  if (evalRows.length === 0) {
+    return c.json({
+      suggestions: [{
+        area: "test_cases",
+        severity: "high",
+        suggestion: "No eval runs found. Run the auto-generated tests first to get improvement suggestions.",
+        auto_applicable: false,
+      }],
+      eval_run: null,
+    });
+  }
+
+  const evalRun = evalRows[0];
+  // Load trial failures
+  let failures: any[] = [];
+  try {
+    const trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${evalRun.id} AND pass = false ORDER BY trial_number`;
+    failures = trials.map((t: any) => ({
+      input: String(t.input || ""),
+      expected: String(t.expected || ""),
+      actual: String(t.actual || ""),
+      reasoning: String(t.reasoning || ""),
+    }));
+  } catch {}
+
+  const suggestions = await generateEvolutionSuggestions(
+    agentName,
+    agentConfig,
+    {
+      pass_rate: Number(evalRun.pass_rate) || 0,
+      failures,
+      avg_latency_ms: Number(evalRun.avg_latency_ms) || undefined,
+      total_cost_usd: Number(evalRun.total_cost_usd) || undefined,
+    },
+    { openrouterApiKey: c.env.OPENROUTER_API_KEY },
+  );
+
+  // Auto-apply safe suggestions if requested
+  let appliedCount = 0;
+  if (req.auto_apply) {
+    for (const sug of suggestions) {
+      if (!sug.auto_applicable || !sug.patch) continue;
+      try {
+        if (sug.area === "prompt" && sug.patch.system_prompt_append) {
+          const currentPrompt = String(agentConfig.system_prompt || "");
+          const appendText = String(sug.patch.system_prompt_append);
+          agentConfig.system_prompt = currentPrompt + "\n\n" + appendText;
+          appliedCount++;
+        }
+        if (sug.area === "tools" && Array.isArray(sug.patch.add_tools)) {
+          const currentTools = new Set(Array.isArray(agentConfig.tools) ? agentConfig.tools : []);
+          for (const t of sug.patch.add_tools) currentTools.add(String(t));
+          agentConfig.tools = [...currentTools];
+          appliedCount++;
+        }
+      } catch {}
+    }
+
+    if (appliedCount > 0) {
+      await sql`
+        UPDATE agents SET config_json = ${JSON.stringify(agentConfig)}, updated_at = now()
+        WHERE name = ${agentName} AND org_id = ${user.org_id}
+      `;
+      notifyRuntimeOfConfigChange(c.env, agentName, String(agentConfig.version || "")).catch(() => {});
+    }
+  }
+
+  return c.json({
+    suggestions,
+    auto_applied: appliedCount,
+    eval_run: {
+      id: evalRun.id,
+      pass_rate: evalRun.pass_rate,
+      total_tasks: evalRun.total_tasks,
+      failures_analyzed: failures.length,
+    },
+  });
 });
 
 // ── Runtime endpoints — moved to edge ────────────────────────────────
