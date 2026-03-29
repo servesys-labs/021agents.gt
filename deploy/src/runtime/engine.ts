@@ -100,8 +100,10 @@ export async function edgeRun(
 
   // Voice channel optimization — fast model + conversational rules
   if (request.channel === "voice") {
-    // Override model to fastest available — voice needs <2s response, not quality
-    config.model = "openai/gpt-5.4-nano";
+    // Override model for voice — needs to be fast AND reliable at tool calling
+    // gpt-5.4-nano is too small (says it'll use tools but doesn't actually call them)
+    // gpt-5.4-mini: fast (~1.5s), good at tool calls, $0.75/1M input
+    config.model = "openai/gpt-5.4-mini";
     config.provider = "openrouter";
 
     config.system_prompt = (config.system_prompt || "") + `\n\n[VOICE MODE — The user is on a phone call. You MUST follow these rules:
