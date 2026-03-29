@@ -1,0 +1,18 @@
+$kind: http-request
+name: Run Agent
+method: POST
+url: '{{base_url}}/api/v1/agents/{{agent_name}}/run'
+order: 18000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "input": "What is the weather today?",
+      "session_id": "{{session_id}}"
+    }

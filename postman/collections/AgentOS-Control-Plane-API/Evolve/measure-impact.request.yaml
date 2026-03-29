@@ -1,0 +1,24 @@
+$kind: http-request
+name: Measure Impact
+method: POST
+url: '{{base_url}}/api/v1/evolve/{{agent_name}}/proposals/{{proposal_id}}/measure-impact'
+order: 13000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: proposal_id
+    value: '{{proposal_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "window_hours": 24
+    }

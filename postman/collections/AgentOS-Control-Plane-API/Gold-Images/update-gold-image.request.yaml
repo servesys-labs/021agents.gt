@@ -1,0 +1,24 @@
+$kind: http-request
+name: Update Gold Image
+method: PUT
+url: '{{base_url}}/api/v1/gold-images/{{image_id}}'
+order: 12000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: image_id
+    value: '{{image_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "name": "updated-gold-image",
+      "description": "Updated description",
+      "tags": ["production", "v2"]
+    }

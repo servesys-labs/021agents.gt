@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Plan
+method: GET
+url: '{{base_url}}/api/v1/plans/{{plan_name}}'
+order: 2000
+pathVariables:
+  - key: plan_name
+    value: pro

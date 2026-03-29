@@ -1,0 +1,20 @@
+$kind: http-request
+name: Stream Run
+method: POST
+url: '{{base_url}}/api/v1/runtime-proxy/runnable/stream'
+order: 4000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "input": "Explain quantum computing"
+    }

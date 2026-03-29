@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Dashboard Stats
+method: GET
+url: '{{base_url}}/api/v1/dashboard/stats'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

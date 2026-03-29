@@ -1,0 +1,3 @@
+$kind: collection
+name: Batch-API
+description: Batch job submission and management for bulk agent operations

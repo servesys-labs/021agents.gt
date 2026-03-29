@@ -1,0 +1,15 @@
+$kind: http-request
+name: Replay Webhook Delivery
+method: POST
+url: '{{base_url}}/api/v1/webhooks/{{webhook_id}}/deliveries/{{delivery_id}}/replay'
+order: 7000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: webhook_id
+    value: '{{webhook_id}}'
+  - key: delivery_id
+    value: '{{delivery_id}}'

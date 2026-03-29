@@ -1,0 +1,15 @@
+$kind: http-request
+name: Calculate AIVSS Score
+method: POST
+url: '{{base_url}}/api/v1/security/aivss/calculate'
+order: 9000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agentId}}",
+      "findings": ["prompt_injection_high", "data_exfiltration_medium"]
+    }

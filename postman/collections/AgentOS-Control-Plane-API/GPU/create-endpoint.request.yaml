@@ -1,0 +1,17 @@
+$kind: http-request
+name: Create GPU Endpoint
+method: POST
+url: '{{base_url}}/api/v1/gpu/endpoints'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "my-gpu-endpoint",
+      "model": "llama-3-70b",
+      "gpu_type": "A100",
+      "replicas": 1
+    }

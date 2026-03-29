@@ -1,0 +1,10 @@
+$kind: http-request
+name: Cancel Agent Run
+method: POST
+url: '{{base_url}}/api/v1/agents/{{agent_name}}/run/{{session_id}}/cancel'
+order: 22000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: session_id
+    value: '{{session_id}}'

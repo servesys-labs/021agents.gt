@@ -1,0 +1,13 @@
+$kind: http-request
+name: Retry Job
+method: POST
+url: '{{base_url}}/api/v1/jobs/{{job_id}}/retry'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: job_id
+    value: '{{job_id}}'

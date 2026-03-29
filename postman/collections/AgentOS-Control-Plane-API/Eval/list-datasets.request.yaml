@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Eval Datasets
+method: GET
+url: '{{base_url}}/api/v1/eval/datasets'
+order: 8000

@@ -1,0 +1,23 @@
+$kind: http-request
+name: Generate Meta Proposals
+method: POST
+url: '{{base_url}}/api/v1/observability/agents/{{agent_name}}/meta-proposals/generate'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "lookback_hours": 24,
+      "min_evidence_count": 3
+    }

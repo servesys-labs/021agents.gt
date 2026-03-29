@@ -1,0 +1,18 @@
+$kind: http-request
+name: Run Agent (Public)
+method: POST
+url: '{{base_url}}/v1/agents/{{agent_name}}/run'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "input": "What is the capital of France?",
+      "stream": false
+    }

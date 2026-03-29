@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Component
+method: DELETE
+url: '{{base_url}}/api/v1/components/{{component_id}}'
+order: 5000
+pathVariables:
+  - key: component_id
+    value: '{{component_id}}'

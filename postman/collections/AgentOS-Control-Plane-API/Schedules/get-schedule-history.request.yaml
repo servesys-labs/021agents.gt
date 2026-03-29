@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Schedule History
+method: GET
+url: '{{base_url}}/api/v1/schedules/{{schedule_id}}/history'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: schedule_id
+    value: '{{schedule_id}}'

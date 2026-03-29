@@ -1,0 +1,3 @@
+$kind: collection
+name: Plans
+description: Subscription plan management and feature flag configuration

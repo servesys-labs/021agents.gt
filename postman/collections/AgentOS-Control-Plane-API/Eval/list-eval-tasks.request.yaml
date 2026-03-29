@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Eval Tasks
+method: GET
+url: '{{base_url}}/api/v1/eval/tasks'
+order: 7000

@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Quota
+method: GET
+url: '{{base_url}}/api/v1/billing/quota'
+order: 6000

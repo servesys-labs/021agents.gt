@@ -1,0 +1,11 @@
+$kind: http-request
+name: Get Working Memory
+method: GET
+url: '{{base_url}}/api/v1/memory/{{agentId}}/working'
+order: 8000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+queryParams:
+  - key: session_id
+    value: '{{session_id}}'

@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Conversation (Public)
+method: GET
+url: '{{base_url}}/v1/agents/{{agent_name}}/conversations/{{session_id}}'
+order: 7000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: session_id
+    value: '{{session_id}}'

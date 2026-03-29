@@ -1,0 +1,36 @@
+$kind: http-request
+name: Stream Execute Graph
+method: POST
+url: '{{base_url}}/api/v1/graphs/stream'
+order: 11000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+  - key: Accept
+    value: text/event-stream
+body:
+  type: json
+  content: |-
+    {
+      "graph": {
+        "nodes": [
+          {"id": "start", "type": "input"},
+          {"id": "llm", "type": "llm", "config": {"model": "gpt-4o"}},
+          {"id": "end", "type": "output"}
+        ],
+        "edges": [
+          {"from": "start", "to": "llm"},
+          {"from": "llm", "to": "end"}
+        ]
+      },
+      "input": "Tell me a story",
+      "agent_context": {
+        "agent_name": "{{agent_name}}",
+        "org_id": "{{org_id}}"
+      }
+    }

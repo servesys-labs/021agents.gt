@@ -1,0 +1,8 @@
+$kind: http-request
+name: List Evolution Proposals
+method: GET
+url: '{{base_url}}/api/v1/evolve/{{agent_name}}/proposals'
+order: 3000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

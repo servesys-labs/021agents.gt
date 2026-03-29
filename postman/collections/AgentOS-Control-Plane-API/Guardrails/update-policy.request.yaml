@@ -1,0 +1,24 @@
+$kind: http-request
+name: Update Guardrail Policy
+method: PUT
+url: '{{base_url}}/api/v1/guardrails/policies/{{policy_id}}'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: policy_id
+    value: '{{policy_id}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "rules": [
+        { "type": "block_pii", "severity": "critical" }
+      ]
+    }

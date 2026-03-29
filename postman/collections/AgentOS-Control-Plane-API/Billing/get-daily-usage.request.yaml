@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Daily Usage
+method: GET
+url: '{{base_url}}/api/v1/billing/usage/daily'
+order: 2000
+queryParams:
+  - key: days
+    value: '30'

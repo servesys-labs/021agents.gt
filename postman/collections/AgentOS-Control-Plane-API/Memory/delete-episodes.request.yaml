@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Agent Episodes
+method: DELETE
+url: '{{base_url}}/api/v1/memory/{{agentId}}/episodes'
+order: 3000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'

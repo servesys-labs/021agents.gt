@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Usage
+method: GET
+url: '{{base_url}}/api/v1/billing/usage'
+order: 1000
+queryParams:
+  - key: start_date
+    value: '2025-01-01'
+  - key: end_date
+    value: '2025-12-31'

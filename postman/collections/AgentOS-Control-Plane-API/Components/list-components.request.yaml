@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Components
+method: GET
+url: '{{base_url}}/api/v1/components'
+order: 1000

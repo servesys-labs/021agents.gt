@@ -1,0 +1,13 @@
+$kind: http-request
+name: Rotate API Key
+method: POST
+url: '{{base_url}}/api/v1/api-keys/{{key_id}}/rotate'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: key_id
+    value: '{{key_id}}'

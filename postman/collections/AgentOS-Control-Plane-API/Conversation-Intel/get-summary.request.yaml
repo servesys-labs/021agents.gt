@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Conversation Summary
+method: GET
+url: '{{base_url}}/api/v1/intelligence/summary'
+order: 1000
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'

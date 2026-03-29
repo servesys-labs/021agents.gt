@@ -1,0 +1,3 @@
+$kind: collection
+name: A2A
+description: Agent-to-Agent (A2A) protocol endpoints for task delegation between agents

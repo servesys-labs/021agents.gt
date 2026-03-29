@@ -1,0 +1,8 @@
+$kind: http-request
+name: Trigger Autonomous Maintenance
+method: POST
+url: '{{base_url}}/api/v1/observability/agents/{{agent_name}}/autonomous-maintenance-run'
+order: 16000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

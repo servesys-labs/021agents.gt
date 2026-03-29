@@ -1,0 +1,23 @@
+$kind: http-request
+name: Forward Tool Call
+method: POST
+url: '{{base_url}}/api/v1/runtime/tool/call'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "tool_name": "web_search",
+      "params": {
+        "query": "latest AI news"
+      },
+      "session_id": "{{session_id}}"
+    }

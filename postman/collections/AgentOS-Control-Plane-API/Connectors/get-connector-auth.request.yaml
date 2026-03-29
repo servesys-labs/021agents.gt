@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Connector Auth Status
+method: GET
+url: '{{base_url}}/api/v1/connectors/auth/{{app}}'
+order: 7000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: app
+    value: github

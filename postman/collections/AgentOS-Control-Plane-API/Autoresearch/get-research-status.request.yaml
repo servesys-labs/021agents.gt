@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Research Status
+method: GET
+url: '{{base_url}}/api/v1/autoresearch/status'
+order: 3000

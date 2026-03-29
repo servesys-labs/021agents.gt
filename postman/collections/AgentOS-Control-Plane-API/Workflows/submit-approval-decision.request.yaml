@@ -1,0 +1,18 @@
+$kind: http-request
+name: Submit Approval Decision
+method: POST
+url: '{{base_url}}/api/v1/workflows/approval/{{approval_id}}/decision'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: approval_id
+    value: '{{approval_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "decision": "approved",
+      "comment": "Looks good, approved for production."
+    }

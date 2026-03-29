@@ -1,0 +1,22 @@
+$kind: http-request
+name: Run Compliance Check
+method: POST
+url: '{{base_url}}/api/v1/gold-images/compliance/check/{{agent_name}}'
+order: 11000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "strict": false
+    }

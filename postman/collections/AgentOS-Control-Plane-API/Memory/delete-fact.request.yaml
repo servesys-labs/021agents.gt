@@ -1,0 +1,10 @@
+$kind: http-request
+name: Delete Fact by Key
+method: DELETE
+url: '{{base_url}}/api/v1/memory/{{agentId}}/facts/{{factKey}}'
+order: 6000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+  - key: factKey
+    value: user_preference_language

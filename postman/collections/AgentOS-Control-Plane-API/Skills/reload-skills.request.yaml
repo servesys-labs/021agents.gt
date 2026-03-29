@@ -1,0 +1,10 @@
+$kind: http-request
+name: Reload Skills
+method: POST
+url: '{{base_url}}/api/v1/skills/reload'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

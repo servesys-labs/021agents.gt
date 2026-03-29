@@ -1,0 +1,27 @@
+$kind: http-request
+name: Update Project Environment
+method: PUT
+url: '{{base_url}}/api/v1/projects/{{project_id}}/envs/{{env_name}}'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: project_id
+    value: '{{project_id}}'
+  - key: env_name
+    value: production
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "variables": {
+        "API_KEY": "secret-value",
+        "BASE_URL": "https://api.example.com"
+      }
+    }

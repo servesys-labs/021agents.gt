@@ -1,0 +1,5 @@
+$kind: http-request
+name: Delete Telegram Webhook
+method: DELETE
+url: '{{base_url}}/api/v1/chat/telegram/webhook'
+order: 5000

@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Trace Replay
+method: GET
+url: '{{base_url}}/api/v1/observability/trace/{{trace_id}}/replay'
+order: 10000
+pathVariables:
+  - key: trace_id
+    value: '{{trace_id}}'

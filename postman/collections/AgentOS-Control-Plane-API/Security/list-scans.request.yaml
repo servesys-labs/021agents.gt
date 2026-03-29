@@ -1,0 +1,8 @@
+$kind: http-request
+name: List Security Scans
+method: GET
+url: '{{base_url}}/api/v1/security/scans'
+order: 2000
+queryParams:
+  - key: agent_name
+    value: '{{agentId}}'

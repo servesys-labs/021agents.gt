@@ -1,0 +1,17 @@
+$kind: http-request
+name: Compare Agents
+method: POST
+url: '{{base_url}}/api/v1/compare'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_a": "{{agent_name}}",
+      "agent_b": "my-agent-v2",
+      "prompt": "Summarize the latest AI news",
+      "iterations": 5
+    }

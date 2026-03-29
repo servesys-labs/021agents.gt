@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Agent Health
+method: GET
+url: '{{base_url}}/api/v1/ops/agents/{{agent_name}}/health'
+order: 1000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

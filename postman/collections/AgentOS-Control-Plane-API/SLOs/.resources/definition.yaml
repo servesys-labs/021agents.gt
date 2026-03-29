@@ -1,0 +1,3 @@
+$kind: collection
+name: SLOs
+description: 'Service Level Objective management: define, monitor, and alert on SLO compliance'

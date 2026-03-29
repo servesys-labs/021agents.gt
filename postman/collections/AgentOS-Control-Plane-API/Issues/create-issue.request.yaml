@@ -1,0 +1,17 @@
+$kind: http-request
+name: Create Issue
+method: POST
+url: '{{base_url}}/api/v1/issues'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "title": "Agent returning incorrect responses",
+      "severity": "high",
+      "description": "The agent is hallucinating on factual queries"
+    }

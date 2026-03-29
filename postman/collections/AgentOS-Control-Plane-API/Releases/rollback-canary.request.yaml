@@ -1,0 +1,13 @@
+$kind: http-request
+name: Rollback Canary Split
+method: POST
+url: '{{base_url}}/api/v1/releases/{{agent_name}}/canary/rollback'
+order: 7000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

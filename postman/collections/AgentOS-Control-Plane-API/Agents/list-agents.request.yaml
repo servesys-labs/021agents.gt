@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Agents
+method: GET
+url: '{{base_url}}/api/v1/agents'
+order: 1000
+queryParams:
+  - key: limit
+    value: '20'
+  - key: offset
+    value: '0'

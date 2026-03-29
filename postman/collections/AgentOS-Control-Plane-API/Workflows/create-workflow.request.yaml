@@ -1,0 +1,26 @@
+$kind: http-request
+name: Create Workflow
+method: POST
+url: '{{base_url}}/api/v1/workflows'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "deploy-pipeline",
+      "description": "Automated deployment pipeline with approval gate",
+      "dag": {
+        "nodes": [
+          {"id": "lint", "type": "eval"},
+          {"id": "approve", "type": "approval"},
+          {"id": "deploy", "type": "action"}
+        ],
+        "edges": [
+          {"from": "lint", "to": "approve"},
+          {"from": "approve", "to": "deploy"}
+        ]
+      }
+    }

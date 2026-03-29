@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Agent Research History
+method: GET
+url: '{{base_url}}/api/v1/autoresearch/agent/{{agent_name}}/history'
+order: 8000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

@@ -1,0 +1,20 @@
+$kind: http-request
+name: Set Graph Breakpoints
+method: POST
+url: '{{base_url}}/api/v1/graphs/breakpoints'
+order: 6000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "node_ids": ["llm", "tool_call"]
+    }

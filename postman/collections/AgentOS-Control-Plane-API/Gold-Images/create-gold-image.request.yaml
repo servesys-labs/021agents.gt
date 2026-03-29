@@ -1,0 +1,16 @@
+$kind: http-request
+name: Create Gold Image
+method: POST
+url: '{{base_url}}/api/v1/gold-images'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "production-baseline",
+      "agent_name": "{{agent_name}}",
+      "description": "Baseline gold image for production"
+    }

@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Meta Report
+method: GET
+url: '{{base_url}}/api/v1/observability/agents/{{agent_name}}/meta-report'
+order: 15000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

@@ -1,0 +1,13 @@
+$kind: http-request
+name: Delete Organization
+method: DELETE
+url: '{{base_url}}/api/v1/orgs/{{org_id}}'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: org_id
+    value: '{{org_id}}'

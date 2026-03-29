@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Approval Status
+method: GET
+url: '{{base_url}}/api/v1/workflows/approval/{{approval_id}}'
+order: 2000
+pathVariables:
+  - key: approval_id
+    value: '{{approval_id}}'

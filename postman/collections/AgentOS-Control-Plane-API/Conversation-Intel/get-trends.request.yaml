@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Intelligence Trends
+method: GET
+url: '{{base_url}}/api/v1/intelligence/trends'
+order: 5000
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: period
+    value: '7d'

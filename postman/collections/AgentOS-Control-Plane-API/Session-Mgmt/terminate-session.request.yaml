@@ -1,0 +1,8 @@
+$kind: http-request
+name: Terminate Session
+method: DELETE
+url: '{{base_url}}/api/v1/session-management/{{session_id}}'
+order: 2000
+pathVariables:
+  - key: session_id
+    value: '{{session_id}}'

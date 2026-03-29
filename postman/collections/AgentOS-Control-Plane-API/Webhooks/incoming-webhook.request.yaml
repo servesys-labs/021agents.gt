@@ -1,0 +1,20 @@
+$kind: http-request
+name: Process Incoming Webhook
+method: POST
+url: '{{base_url}}/api/v1/webhooks/{{webhook_id}}/incoming'
+order: 9000
+headers:
+  - key: X-AgentOS-Secret
+    value: '{{webhook_secret}}'
+pathVariables:
+  - key: webhook_id
+    value: '{{webhook_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "event": "custom.event",
+      "data": {
+        "message": "Incoming webhook payload"
+      }
+    }

@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Agent Cards
+method: GET
+url: '{{base_url}}/.well-known/agents.json'
+order: 6000

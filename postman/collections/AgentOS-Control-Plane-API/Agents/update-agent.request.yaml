@@ -1,0 +1,20 @@
+$kind: http-request
+name: Update Agent
+method: PUT
+url: '{{base_url}}/api/v1/agents/{{agentId}}'
+order: 4000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+body:
+  type: json
+  content: |-
+    {
+      "description": "Updated description",
+      "model": "gpt-4o",
+      "system_prompt": "You are an updated helpful assistant.",
+      "tools": ["web_search"]
+    }

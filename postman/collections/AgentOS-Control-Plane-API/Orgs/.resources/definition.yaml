@@ -1,0 +1,3 @@
+$kind: collection
+name: Orgs
+description: 'Organization management: CRUD, member management, and org-level settings'

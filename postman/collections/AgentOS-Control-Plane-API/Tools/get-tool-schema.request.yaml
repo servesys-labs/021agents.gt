@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Tool Schema
+method: GET
+url: '{{base_url}}/api/v1/tools/{{tool_name}}/schema'
+order: 7000
+pathVariables:
+  - key: tool_name
+    value: web-search

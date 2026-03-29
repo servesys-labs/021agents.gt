@@ -1,0 +1,3 @@
+$kind: collection
+name: Chat-Platforms
+description: Chat platform integrations (Telegram, Slack, etc.) for agent deployment

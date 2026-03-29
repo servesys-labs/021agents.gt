@@ -1,0 +1,8 @@
+$kind: http-request
+name: Revoke End-User Token
+method: DELETE
+url: '{{base_url}}/api/v1/end-user-tokens/{{token_id}}'
+order: 3000
+pathVariables:
+  - key: token_id
+    value: '{{token_id}}'

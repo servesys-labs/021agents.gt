@@ -1,0 +1,19 @@
+$kind: http-request
+name: Set Evolution Schedule
+method: POST
+url: '{{base_url}}/api/v1/evolve/{{agent_name}}/schedule'
+order: 10000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "cron": "0 2 * * 0",
+      "auto_apply": false,
+      "enabled": true
+    }

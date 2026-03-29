@@ -1,0 +1,17 @@
+$kind: http-request
+name: Run Runtime Security Scan
+method: POST
+url: '{{base_url}}/api/v1/security/scan/{{agentId}}/runtime'
+order: 7000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+body:
+  type: json
+  content: |-
+    {
+      "session_id": "{{session_id}}"
+    }

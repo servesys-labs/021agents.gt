@@ -1,0 +1,20 @@
+$kind: http-request
+name: Create Sandbox
+method: POST
+url: '{{base_url}}/api/v1/sandbox/create'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "template": "base",
+      "timeout_sec": 300
+    }

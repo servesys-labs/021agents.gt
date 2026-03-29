@@ -1,0 +1,13 @@
+$kind: http-request
+name: Cancel Workflow Run
+method: POST
+url: '{{base_url}}/api/v1/workflows/{{workflow_id}}/runs/{{run_id}}/cancel'
+order: 9000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: workflow_id
+    value: '{{workflow_id}}'
+  - key: run_id
+    value: '{{run_id}}'

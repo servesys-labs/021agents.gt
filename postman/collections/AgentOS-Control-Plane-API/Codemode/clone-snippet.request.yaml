@@ -1,0 +1,13 @@
+$kind: http-request
+name: Clone Code Snippet
+method: POST
+url: '{{base_url}}/api/v1/codemode/snippets/{{snippet_id}}/clone'
+order: 8000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: snippet_id
+    value: '{{snippet_id}}'

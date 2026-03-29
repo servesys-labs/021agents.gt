@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Job
+method: GET
+url: '{{base_url}}/api/v1/jobs/{{job_id}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: job_id
+    value: '{{job_id}}'

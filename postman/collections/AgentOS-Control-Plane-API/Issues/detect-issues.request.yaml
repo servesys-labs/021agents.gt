@@ -1,0 +1,8 @@
+$kind: http-request
+name: Detect Issues in Session
+method: POST
+url: '{{base_url}}/api/v1/issues/detect/{{session_id}}'
+order: 4000
+pathVariables:
+  - key: session_id
+    value: '{{session_id}}'

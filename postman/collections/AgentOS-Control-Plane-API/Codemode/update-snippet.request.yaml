@@ -1,0 +1,19 @@
+$kind: http-request
+name: Update Snippet
+method: PUT
+url: '{{base_url}}/api/v1/codemode/snippets/{{snippet_id}}'
+order: 9000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: snippet_id
+    value: '{{snippet_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "name": "updated-snippet",
+      "code": "export default function handler(input) { return input; }",
+      "scope": "agent"
+    }

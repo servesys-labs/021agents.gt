@@ -1,0 +1,21 @@
+$kind: http-request
+name: Update Org Settings (alias)
+method: POST
+url: '{{base_url}}/api/v1/org/settings'
+order: 12000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "onboarding_complete": true,
+      "default_model": "gpt-4o",
+      "timezone": "UTC"
+    }

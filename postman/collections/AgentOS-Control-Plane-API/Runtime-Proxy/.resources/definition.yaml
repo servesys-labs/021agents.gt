@@ -1,0 +1,3 @@
+$kind: collection
+name: Runtime-Proxy
+description: Runtime proxy endpoints for forwarding requests to edge agent instances

@@ -1,0 +1,3 @@
+$kind: collection
+name: Connectors
+description: 'Third-party connector integrations: OAuth tokens, tool calls, and provider management'

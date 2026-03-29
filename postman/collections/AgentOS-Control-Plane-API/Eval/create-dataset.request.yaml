@@ -1,0 +1,16 @@
+$kind: http-request
+name: Create Eval Dataset
+method: POST
+url: '{{base_url}}/api/v1/eval/datasets'
+order: 9000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "qa-benchmark-v1",
+      "description": "Q&A benchmark dataset",
+      "tasks": []
+    }

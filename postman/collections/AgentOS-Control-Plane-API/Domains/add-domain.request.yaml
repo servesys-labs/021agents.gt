@@ -1,0 +1,15 @@
+$kind: http-request
+name: Add Custom Domain
+method: POST
+url: '{{base_url}}/api/v1/domains'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "domain": "api.mycompany.com",
+      "agent_name": "{{agent_name}}"
+    }

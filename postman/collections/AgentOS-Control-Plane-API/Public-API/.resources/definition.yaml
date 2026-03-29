@@ -1,0 +1,3 @@
+$kind: collection
+name: Public-API
+description: Public-facing API endpoints for external consumers

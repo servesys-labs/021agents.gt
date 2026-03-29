@@ -1,0 +1,3 @@
+$kind: collection
+name: Red-Team
+description: 'Red team security testing: automated adversarial probes and OWASP vulnerability scanning'

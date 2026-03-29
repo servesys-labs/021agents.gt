@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Pipeline
+method: DELETE
+url: '{{base_url}}/api/v1/pipelines/{{pipeline_id}}'
+order: 6000
+pathVariables:
+  - key: pipeline_id
+    value: '{{pipeline_id}}'

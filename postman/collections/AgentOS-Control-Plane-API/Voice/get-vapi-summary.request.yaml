@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Vapi Calls Summary
+method: GET
+url: '{{base_url}}/api/v1/voice/vapi/calls/summary'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

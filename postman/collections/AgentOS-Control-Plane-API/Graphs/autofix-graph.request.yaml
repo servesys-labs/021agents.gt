@@ -1,0 +1,31 @@
+$kind: http-request
+name: Auto-Fix Graph
+method: POST
+url: '{{base_url}}/api/v1/graphs/autofix'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "graph": {
+        "nodes": [
+          {"id": "start", "type": "input"},
+          {"id": "llm", "type": "llm"},
+          {"id": "end", "type": "output"}
+        ],
+        "edges": [
+          {"from": "start", "to": "llm"},
+          {"from": "llm", "to": "end"}
+        ]
+      },
+      "strict": false,
+      "apply": true
+    }

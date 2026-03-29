@@ -1,0 +1,16 @@
+$kind: http-request
+name: Add Trace Annotation
+method: POST
+url: '{{base_url}}/api/v1/observability/annotations'
+order: 8000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "trace_id": "{{trace_id}}",
+      "note": "Suspicious tool call detected",
+      "severity": "warning"
+    }

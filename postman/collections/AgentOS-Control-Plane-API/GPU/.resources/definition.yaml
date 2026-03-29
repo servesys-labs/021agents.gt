@@ -1,0 +1,3 @@
+$kind: collection
+name: GPU
+description: GPU endpoint provisioning and management for compute-intensive workloads

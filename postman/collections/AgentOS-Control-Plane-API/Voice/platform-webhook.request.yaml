@@ -1,0 +1,18 @@
+$kind: http-request
+name: Platform Voice Webhook
+method: POST
+url: '{{base_url}}/api/v1/voice/{{platform}}/webhook'
+order: 8000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: platform
+    value: '{{platform}}'
+body:
+  type: json
+  content: |-
+    {
+      "event": "call.completed",
+      "call_id": "{{call_id}}"
+    }

@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Platform Calls Summary
+method: GET
+url: '{{base_url}}/api/v1/voice/{{platform}}/calls/summary'
+order: 9000
+pathVariables:
+  - key: platform
+    value: '{{platform}}'

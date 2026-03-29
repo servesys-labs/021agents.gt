@@ -1,0 +1,17 @@
+$kind: http-request
+name: Create Organization
+method: POST
+url: '{{base_url}}/api/v1/orgs'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "name": "My Organization",
+      "slug": "my-org"
+    }

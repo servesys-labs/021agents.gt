@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Red Team Findings
+method: GET
+url: '{{base_url}}/api/v1/redteam/findings'
+order: 4000
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: severity
+    value: high
