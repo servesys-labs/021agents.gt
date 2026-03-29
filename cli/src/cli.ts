@@ -62,6 +62,13 @@ import { jobsCommand } from "./commands/jobs.js";
 import { researchCommand } from "./commands/research.js";
 import { connectorsCommand } from "./commands/connectors.js";
 import { billingCommand } from "./commands/billing.js";
+import { tokensCommand } from "./commands/tokens.js";
+import { batchCommand } from "./commands/batch.js";
+import { domainsCommand } from "./commands/domains.js";
+import { opsCommand } from "./commands/ops.js";
+import { secretsCommand } from "./commands/secrets.js";
+import { complianceCommand } from "./commands/compliance.js";
+import { apiKeysCommand } from "./commands/api-keys.js";
 
 import { getVersion } from "./lib/version.js";
 
@@ -662,6 +669,123 @@ program
   .command("whoami")
   .description("Show current authenticated user")
   .action(whoamiCommand);
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Consumption & Enterprise Commands
+// ═════════════════════════════════════════════════════════════════════════════
+
+// End-user tokens (SaaS multi-tenant)
+const tokensCmd = program
+  .command("tokens")
+  .description("Manage end-user tokens (SaaS multi-tenant)");
+
+tokensCmd.command("list").description("List end-user tokens").action(tokensCommand.list);
+tokensCmd.command("create")
+  .description("Mint a new end-user token")
+  .requiredOption("-u, --user-id <id>", "End-user ID")
+  .option("-a, --agents <names>", "Allowed agents (comma-separated)")
+  .option("--rpm <n>", "Rate limit requests/minute", "20")
+  .option("--rpd <n>", "Rate limit requests/day", "1000")
+  .option("-e, --expiry <seconds>", "Token expiry in seconds", "3600")
+  .action((opts) => tokensCommand.create(opts));
+tokensCmd.command("revoke <tokenId>").description("Revoke a token").action(tokensCommand.revoke);
+tokensCmd.command("usage <userId>").description("View end-user usage").action(tokensCommand.usage);
+
+// Batch processing
+const batchCmd = program
+  .command("batch")
+  .description("Batch agent processing");
+
+batchCmd.command("submit <agent>")
+  .description("Submit a batch job")
+  .option("-f, --file <path>", "JSON file with tasks array")
+  .option("-i, --input <text>", "Single input task")
+  .option("--callback <url>", "Webhook URL for completion")
+  .action((agent, opts) => batchCommand.submit(agent, opts));
+batchCmd.command("status <agent> <batchId>").description("Get batch status").action((a, b) => batchCommand.status(a, b));
+batchCmd.command("list <agent>").description("List batch jobs").option("-l, --limit <n>", "Limit", "20").action((a, opts) => batchCommand.list(a, opts));
+batchCmd.command("cancel <agent> <batchId>").description("Cancel a batch").action((a, b) => batchCommand.cancel(a, b));
+
+// Custom domains
+const domainsCmd = program
+  .command("domains")
+  .description("Manage custom domains");
+
+domainsCmd.command("list").description("List domains").action(domainsCommand.list);
+domainsCmd.command("add")
+  .description("Add a domain")
+  .option("-t, --type <type>", "Domain type: subdomain or custom", "subdomain")
+  .option("-h, --hostname <host>", "Custom hostname (for type=custom)")
+  .action((opts) => domainsCommand.add(opts));
+domainsCmd.command("verify <domainId>").description("Verify DNS").action(domainsCommand.verify);
+domainsCmd.command("remove <domainId>").description("Remove domain").action(domainsCommand.remove);
+
+// API keys
+const apiKeysCmd = program
+  .command("api-keys")
+  .description("Manage API keys");
+
+apiKeysCmd.command("list").description("List API keys").action(apiKeysCommand.list);
+apiKeysCmd.command("create")
+  .description("Create API key")
+  .option("-n, --name <name>", "Key name", "default")
+  .option("-s, --scopes <scopes>", "Scopes (comma-separated)", "*")
+  .option("--rpm <n>", "Rate limit requests/minute", "60")
+  .option("--rpd <n>", "Rate limit requests/day", "10000")
+  .option("--agents <names>", "Allowed agents (comma-separated)")
+  .option("--ips <cidrs>", "IP allowlist (comma-separated)")
+  .option("--expiry <days>", "Expiry in days")
+  .action((opts) => apiKeysCommand.create(opts));
+apiKeysCmd.command("revoke <keyId>").description("Revoke key").action(apiKeysCommand.revoke);
+apiKeysCmd.command("rotate <keyId>").description("Rotate key").action(apiKeysCommand.rotate);
+
+// Secrets
+const secretsCmd = program
+  .command("secrets")
+  .description("Manage encrypted secrets");
+
+secretsCmd.command("list").description("List secrets").action(secretsCommand.list);
+secretsCmd.command("create <name>")
+  .description("Create secret")
+  .option("-v, --value <value>", "Secret value (prompted if omitted)")
+  .action((name, opts) => secretsCommand.create(name, opts));
+secretsCmd.command("delete <name>").description("Delete secret").action(secretsCommand.delete);
+secretsCmd.command("rotate").description("Rotate encryption key").action(secretsCommand.rotate);
+secretsCmd.command("rotations").description("View rotation history").action(secretsCommand.rotations);
+
+// Ops monitoring
+const opsCmd = program
+  .command("ops")
+  .description("Operations monitoring & alerts");
+
+opsCmd.command("health <agent>").description("Agent health check").action(opsCommand.health);
+opsCmd.command("latency")
+  .description("Latency percentiles")
+  .option("-a, --agent <name>", "Filter by agent")
+  .option("--hours <n>", "Time window", "24")
+  .action((opts) => opsCommand.latency(opts));
+opsCmd.command("errors")
+  .description("Error breakdown")
+  .option("-a, --agent <name>", "Filter by agent")
+  .option("--hours <n>", "Time window", "24")
+  .action((opts) => opsCommand.errors(opts));
+opsCmd.command("budget").description("Cost vs budget").action(opsCommand.budget);
+opsCmd.command("concurrent").description("Active sessions").action(opsCommand.concurrent);
+opsCmd.command("alerts").description("List alert configs & history").action(() => opsCommand.alerts({}));
+
+// Compliance (GDPR)
+const complianceCmd = program
+  .command("compliance")
+  .description("GDPR compliance & data management");
+
+complianceCmd.command("export").description("Request data export").action(complianceCommand.exportData);
+complianceCmd.command("export-status <exportId>").description("Check export status").action(complianceCommand.exportStatus);
+complianceCmd.command("exports").description("List export requests").action(complianceCommand.exports);
+complianceCmd.command("delete-account <userId>")
+  .description("Delete user account (GDPR Art. 17)")
+  .option("-r, --reason <reason>", "Reason for deletion")
+  .action((userId, opts) => complianceCommand.deleteAccount(userId, opts));
+complianceCmd.command("deletions").description("List deletion requests").action(complianceCommand.deletions);
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Utility Commands

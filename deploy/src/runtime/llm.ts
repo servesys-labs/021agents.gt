@@ -16,6 +16,7 @@
  */
 
 import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv } from "./types";
+import { estimateTokenCost } from "./pricing";
 
 /**
  * Call an LLM through CF AI Gateway /compat/ endpoint.
@@ -110,17 +111,37 @@ export async function callLLM(
   const msg = choice.message || {};
   const latencyMs = Date.now() - started;
 
+  let inputTokens = data.usage?.prompt_tokens || data.usage?.input_tokens || 0;
+  let outputTokens = data.usage?.completion_tokens || data.usage?.output_tokens || 0;
+  let providerCost = Number(data.usage?.total_cost) || 0;
+
+  // If provider didn't return tokens, query AI Gateway Logs API for exact data
+  if ((inputTokens === 0 || outputTokens === 0) && gatewayLogId && accountId && gatewayId) {
+    try {
+      const logResp = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${gatewayId}/logs?id=${gatewayLogId}`,
+        { headers: { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN || ""}` } },
+      );
+      if (logResp.ok) {
+        const logData = await logResp.json() as { result?: Array<{ tokens_in?: number; tokens_out?: number; cost?: number }> };
+        const entry = logData.result?.[0];
+        if (entry) {
+          if (entry.tokens_in && entry.tokens_in > 0) inputTokens = entry.tokens_in;
+          if (entry.tokens_out && entry.tokens_out > 0) outputTokens = entry.tokens_out;
+          if (entry.cost && entry.cost > 0) providerCost = entry.cost;
+        }
+      }
+    } catch {}
+  }
+
+  const costUsd = providerCost > 0 ? providerCost : estimateTokenCost(data.model || model, inputTokens, outputTokens);
+
   return {
     content: msg.content || "",
     model: data.model || model,
     tool_calls: parseToolCalls(msg.tool_calls || []),
-    usage: {
-      input_tokens: data.usage?.prompt_tokens || data.usage?.input_tokens || 0,
-      output_tokens: data.usage?.completion_tokens || data.usage?.output_tokens || 0,
-    },
-    // LLM cost: 0 at runtime. Exact cost reconciled from AI Gateway logs API
-    // using gateway_log_id. The gateway tracks per-model pricing automatically.
-    cost_usd: Number(data.usage?.total_cost) || 0,
+    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    cost_usd: costUsd,
     latency_ms: latencyMs,
     gateway_log_id: gatewayLogId,
     gateway_event_id: gatewayEventId,

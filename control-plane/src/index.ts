@@ -26,6 +26,7 @@ import { issueRoutes } from "./routes/issues";
 import { conversationIntelRoutes } from "./routes/conversation-intel";
 import { billingRoutes } from "./routes/billing";
 import { stripeRoutes } from "./routes/stripe";
+import { creditRoutes } from "./routes/credits";
 import { sessionRoutes } from "./routes/sessions";
 import { observabilityRoutes } from "./routes/observability";
 import { opsObservabilityRoutes } from "./routes/ops-observability";
@@ -158,6 +159,7 @@ app.route("/api/v1/slos", sloRoutes);
 // Billing
 app.route("/api/v1/billing", billingRoutes);
 app.route("/api/v1/stripe", stripeRoutes);
+app.route("/api/v1/credits", creditRoutes);
 
 // Sessions + observability
 app.route("/api/v1/sessions", sessionRoutes);
@@ -454,7 +456,8 @@ export default {
 
   // Queue consumer — async job processing
   async queue(batch: MessageBatch, env: Env): Promise<void> {
-    const { getDb } = await import("./db/client");
+    const { getDb, getDbForOrg } = await import("./db/client");
+    const { hasCredits: hasCreditsCheck, deductCredits: deductCreditsForOrg } = await import("./logic/credits");
 
     for (const msg of batch.messages) {
       const job = msg.body as { type: string; payload: Record<string, unknown> };
@@ -513,6 +516,24 @@ export default {
           let failedCount = 0;
 
           for (const task of tasks) {
+            // Credit gate: check before each task
+            try {
+              const creditSql = await getDbForOrg(env.HYPERDRIVE, orgId);
+              const hasEnough = await hasCreditsCheck(creditSql, orgId, 1);
+              if (!hasEnough) {
+                // Mark this and all remaining tasks as failed
+                await sql`
+                  UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits'
+                  WHERE batch_id = ${batchId} AND status = 'pending'
+                `.catch(() => {});
+                await sql`UPDATE batch_tasks SET status = 'failed', error = 'insufficient_credits' WHERE task_id = ${task.task_id}`.catch(() => {});
+                failedCount += tasks.length - completedCount - failedCount;
+                break;
+              }
+            } catch {
+              // If credit check fails, allow the run
+            }
+
             try {
               await sql`UPDATE batch_tasks SET status = 'running' WHERE task_id = ${task.task_id}`;
               const runtimeBody: Record<string, unknown> = {
@@ -539,6 +560,13 @@ export default {
                 WHERE task_id = ${task.task_id}
               `;
               completedCount++;
+
+              // Fire-and-forget credit deduction based on actual cost
+              try {
+                const costUsd = Number(result.cost_usd || 0);
+                const deductSql = await getDbForOrg(env.HYPERDRIVE, orgId);
+                deductCreditsForOrg(deductSql, orgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || "")).catch(() => {});
+              } catch {}
             } catch (taskErr) {
               await sql`UPDATE batch_tasks SET status = 'failed', error = ${String(taskErr)} WHERE task_id = ${task.task_id}`.catch(() => {});
               failedCount++;

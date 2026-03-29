@@ -190,6 +190,10 @@ export interface RuntimeEnv {
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
   OPENROUTER_API_KEY?: string;
+  /** DO SQLite tagged template — passed from DO context for hibernation-safe file persistence. */
+  DO_SQL?: any;
+  /** DO instance name (session affinity key) — used as session_id for workspace persistence. */
+  DO_SESSION_ID?: string;
 }
 
 // ── Runnable API parity envelopes ───────────────────────────────
