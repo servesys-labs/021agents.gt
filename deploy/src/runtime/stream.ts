@@ -328,6 +328,13 @@ export async function streamRun(
 
     // Build messages
     const isVoiceChannel = opts?.channel === "voice";
+
+    // Voice: override model for speed + reliable tool calling
+    if (isVoiceChannel) {
+      config.model = "openai/gpt-5.4-mini";
+      config.provider = "openrouter";
+    }
+
     const messages: LLMMessage[] = [];
     if (config.system_prompt) {
       let sysPrompt = config.system_prompt;
