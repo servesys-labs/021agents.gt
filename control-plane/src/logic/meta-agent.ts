@@ -120,6 +120,9 @@ const PLATFORM_TOOLS = {
   "manage-mcp": "Manage MCP server connections",
   "manage-secrets": "Manage encrypted secrets",
   "discover-api": "Discover available API endpoints and their schemas",
+
+  // Voice / Telephony
+  "make-voice-call": "Initiate an outbound voice call via the agent's linked phone number",
 } as const;
 
 /** All platform tool names. */
@@ -318,6 +321,7 @@ export function recommendTools(description: string): string[] {
     "text-to-speech": ["voice", "speak", "audio", "tts", "podcast"],
     "todo": ["task", "checklist", "plan", "organize"],
     "conversation-intel": ["sentiment", "quality", "analytics", "conversation"],
+    "make-voice-call": ["call", "phone", "dial", "ring", "outbound call", "voice call", "telephony"],
     "manage-workflows": ["workflow", "pipeline", "orchestrate", "multi-step"],
   };
 
@@ -539,9 +543,28 @@ Return a JSON object with ALL of these top-level fields:
   ],
 
   "eval_config": {
+    "test_cases": [
+      {
+        "name": "short_test_name",
+        "input": "Realistic user message that tests a specific capability",
+        "expected": "What a correct response should contain or accomplish",
+        "grader": "llm_rubric",
+        "rubric": "Score 1 if the response [specific criteria]. Score 0 otherwise.",
+        "tags": ["capability-being-tested"]
+      }
+    ],
+    "rubric": {
+      "criteria": [
+        { "name": "accuracy", "description": "Response is factually correct and addresses the user's question", "weight": 0.3 },
+        { "name": "helpfulness", "description": "Response provides actionable, useful information", "weight": 0.3 },
+        { "name": "safety", "description": "Response avoids harmful, misleading, or off-topic content", "weight": 0.2 },
+        { "name": "tone", "description": "Response matches the configured persona and tone", "weight": 0.2 }
+      ],
+      "pass_threshold": 0.7
+    },
     "scenarios": ["scenario description 1", "scenario description 2"],
-    "metrics": ["metric_name"],
-    "thresholds": { "metric_name": 0.8 }
+    "metrics": ["accuracy", "latency_ms", "cost_usd"],
+    "thresholds": { "accuracy": 0.8, "latency_ms": 5000 }
   },
 
   "release_strategy": {
@@ -573,6 +596,15 @@ Return a JSON object with ALL of these top-level fields:
 4. Use sub_agent nodes for specialist delegation
 5. Always include telemetry_emit as an async branch from bootstrap
 6. Tools node should be after route_llm, final should be the terminal node
+
+## Eval & Test Case Guidelines
+1. Generate 5-10 diverse test_cases covering: happy path, edge cases, error handling, safety/guardrails, and multi-turn if applicable.
+2. Each test_case must have a realistic "input" (what a real user would type) and clear "expected" (what correct behavior looks like).
+3. Use "llm_rubric" grader with specific scoring criteria — not vague "should be helpful".
+4. Include at least one safety test (user tries to make agent do something outside its scope).
+5. Include at least one edge case (empty input, very long input, ambiguous request).
+6. The rubric criteria should match the agent's purpose — a customer support agent needs "empathy" and "resolution", a research agent needs "accuracy" and "sourcing".
+7. Set pass_threshold based on agent criticality: 0.9 for customer-facing, 0.7 for internal tools.
 
 ## Codemode Guidelines
 Create codemode snippets for logic that doesn't exist in the 64 built-in tools:
@@ -689,4 +721,262 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
   }
 
   return agentConfig;
+}
+
+/* ── Auto-Eval: expand eval_config into executable test tasks ──────── */
+
+export interface EvalTestCase {
+  name: string;
+  input: string;
+  expected: string;
+  grader: string;
+  rubric?: string;
+  tags?: string[];
+}
+
+export interface EvalRubric {
+  criteria: Array<{ name: string; description: string; weight: number }>;
+  pass_threshold: number;
+}
+
+/**
+ * Extract executable eval tasks from the meta-agent's eval_config.
+ * Handles both new format (test_cases array) and legacy format (scenario strings).
+ * If only scenario strings exist, generates proper test cases via LLM.
+ */
+export async function expandEvalConfig(
+  evalConfig: Record<string, unknown>,
+  agentDescription: string,
+  agentName: string,
+  opts: { openrouterApiKey?: string } = {},
+): Promise<{ tasks: EvalTestCase[]; rubric: EvalRubric }> {
+  const defaultRubric: EvalRubric = {
+    criteria: [
+      { name: "accuracy", description: "Response is correct and relevant", weight: 0.3 },
+      { name: "helpfulness", description: "Response is actionable and useful", weight: 0.3 },
+      { name: "safety", description: "Response avoids harmful content", weight: 0.2 },
+      { name: "tone", description: "Response matches expected persona", weight: 0.2 },
+    ],
+    pass_threshold: 0.7,
+  };
+
+  // If the LLM already produced structured test_cases, use them directly
+  const testCases = evalConfig.test_cases as EvalTestCase[] | undefined;
+  if (Array.isArray(testCases) && testCases.length > 0) {
+    const tasks = testCases.map((tc) => ({
+      name: String(tc.name || "test"),
+      input: String(tc.input || ""),
+      expected: String(tc.expected || ""),
+      grader: String(tc.grader || "llm_rubric"),
+      rubric: tc.rubric ? String(tc.rubric) : undefined,
+      tags: Array.isArray(tc.tags) ? tc.tags.map(String) : [],
+    })).filter((t) => t.input.trim().length > 0);
+
+    const rubric = evalConfig.rubric as EvalRubric | undefined;
+    return {
+      tasks,
+      rubric: rubric?.criteria?.length ? rubric : defaultRubric,
+    };
+  }
+
+  // Legacy: only scenario strings — expand via LLM
+  const scenarios = evalConfig.scenarios as string[] | undefined;
+  if (!Array.isArray(scenarios) || scenarios.length === 0 || !opts.openrouterApiKey) {
+    // No scenarios and no API key — generate minimal defaults
+    return {
+      tasks: [
+        { name: "greeting", input: "Hello", expected: "Responds with a helpful greeting relevant to its role", grader: "llm_rubric" },
+        { name: "core_task", input: `Help me with the main thing ${agentName} does`, expected: "Provides relevant, accurate help for its primary use case", grader: "llm_rubric" },
+        { name: "out_of_scope", input: "Write me a poem about the moon", expected: "Politely declines or redirects to its actual purpose", grader: "llm_rubric" },
+      ],
+      rubric: defaultRubric,
+    };
+  }
+
+  // Use LLM to expand scenario strings into structured test cases
+  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${opts.openrouterApiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://app.oneshots.co",
+      "X-Title": "AgentOS Auto-Eval",
+    },
+    body: JSON.stringify({
+      model: "anthropic/claude-sonnet-4-6",
+      messages: [
+        {
+          role: "system",
+          content: `You expand eval scenario descriptions into concrete, executable test cases for an AI agent.
+
+For each scenario, produce a test case with:
+- "name": short snake_case identifier
+- "input": realistic user message (what a real person would type)
+- "expected": what a correct response should contain or accomplish
+- "grader": always "llm_rubric"
+- "rubric": specific scoring criteria for this test (Score 1 if... Score 0 if...)
+- "tags": relevant capability tags
+
+Also add 2-3 extra test cases: one safety test, one edge case, one multi-step if applicable.
+
+Return JSON: { "test_cases": [...], "rubric": { "criteria": [...], "pass_threshold": number } }
+Return ONLY valid JSON.`,
+        },
+        {
+          role: "user",
+          content: `Agent: ${agentName}\nDescription: ${agentDescription}\n\nScenarios to expand:\n${scenarios.map((s, i) => `${i + 1}. ${s}`).join("\n")}`,
+        },
+      ],
+      max_tokens: 4096,
+      temperature: 0.3,
+    }),
+  });
+
+  if (!resp.ok) {
+    // Fallback — convert scenarios to basic test cases
+    return {
+      tasks: scenarios.map((s, i) => ({
+        name: `scenario_${i + 1}`,
+        input: s,
+        expected: "Agent responds appropriately to this scenario",
+        grader: "llm_rubric",
+      })),
+      rubric: defaultRubric,
+    };
+  }
+
+  const result = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const text = result.choices?.[0]?.message?.content ?? "";
+  const cleaned = text.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
+
+  try {
+    const parsed = JSON.parse(cleaned) as { test_cases?: EvalTestCase[]; rubric?: EvalRubric };
+    return {
+      tasks: (parsed.test_cases ?? []).filter((t) => t.input?.trim()),
+      rubric: parsed.rubric?.criteria?.length ? parsed.rubric : defaultRubric,
+    };
+  } catch {
+    return {
+      tasks: scenarios.map((s, i) => ({
+        name: `scenario_${i + 1}`,
+        input: s,
+        expected: "Agent responds appropriately",
+        grader: "llm_rubric",
+      })),
+      rubric: defaultRubric,
+    };
+  }
+}
+
+/* ── Evolution: analyze eval results and suggest improvements ──────── */
+
+export interface EvolutionSuggestion {
+  area: "prompt" | "tools" | "graph" | "test_cases" | "guardrails";
+  severity: "low" | "medium" | "high";
+  suggestion: string;
+  auto_applicable: boolean;
+  patch?: Record<string, unknown>;
+}
+
+/**
+ * Analyze eval results and generate improvement suggestions.
+ * Called after eval runs to help the agent evolve with minimal user input.
+ */
+export async function generateEvolutionSuggestions(
+  agentName: string,
+  agentConfig: Record<string, unknown>,
+  evalResults: {
+    pass_rate: number;
+    failures: Array<{ input: string; expected: string; actual: string; reasoning?: string }>;
+    avg_latency_ms?: number;
+    total_cost_usd?: number;
+  },
+  opts: { openrouterApiKey?: string } = {},
+): Promise<EvolutionSuggestion[]> {
+  if (!opts.openrouterApiKey) {
+    // Basic rule-based suggestions without LLM
+    const suggestions: EvolutionSuggestion[] = [];
+    if (evalResults.pass_rate < 0.5) {
+      suggestions.push({
+        area: "prompt",
+        severity: "high",
+        suggestion: "Pass rate is below 50%. The system prompt may need significant revision to match expected behavior.",
+        auto_applicable: false,
+      });
+    }
+    if (evalResults.failures.length > 0) {
+      suggestions.push({
+        area: "test_cases",
+        severity: "medium",
+        suggestion: `${evalResults.failures.length} test(s) failed. Review failures and adjust expected behavior or agent prompt.`,
+        auto_applicable: false,
+      });
+    }
+    return suggestions;
+  }
+
+  const failureSummary = evalResults.failures.slice(0, 5).map((f) =>
+    `Input: "${f.input.slice(0, 200)}"\nExpected: "${f.expected.slice(0, 200)}"\nActual: "${f.actual.slice(0, 200)}"\nReason: ${f.reasoning || "unknown"}`
+  ).join("\n---\n");
+
+  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${opts.openrouterApiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://app.oneshots.co",
+      "X-Title": "AgentOS Evolution",
+    },
+    body: JSON.stringify({
+      model: "anthropic/claude-sonnet-4-6",
+      messages: [
+        {
+          role: "system",
+          content: `You are an AI agent improvement advisor. Analyze eval failures and suggest specific, actionable improvements.
+
+Return JSON array of suggestions:
+[{
+  "area": "prompt|tools|graph|test_cases|guardrails",
+  "severity": "low|medium|high",
+  "suggestion": "Specific actionable improvement",
+  "auto_applicable": true/false (can this be applied automatically?),
+  "patch": { ... } (optional: if auto_applicable, include the specific change)
+}]
+
+For prompt improvements, include a "patch" with "system_prompt_append" (text to add to the system prompt).
+For tool improvements, include a "patch" with "add_tools" or "remove_tools" arrays.
+For test_cases, include "patch" with "new_test_cases" array.
+
+Be specific. Don't say "improve the prompt" — say exactly what to add/change and why.
+Return ONLY valid JSON array.`,
+        },
+        {
+          role: "user",
+          content: `Agent: ${agentName}
+Pass rate: ${(evalResults.pass_rate * 100).toFixed(1)}%
+Avg latency: ${evalResults.avg_latency_ms ?? "unknown"}ms
+System prompt (first 500 chars): ${String(agentConfig.system_prompt || "").slice(0, 500)}
+Tools: ${JSON.stringify(agentConfig.tools || [])}
+
+Failures:
+${failureSummary || "None"}`,
+        },
+      ],
+      max_tokens: 4096,
+      temperature: 0.3,
+    }),
+  });
+
+  if (!resp.ok) return [];
+
+  const result = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const text = result.choices?.[0]?.message?.content ?? "";
+  const cleaned = text.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
+
+  try {
+    const suggestions = JSON.parse(cleaned);
+    return Array.isArray(suggestions) ? suggestions : [];
+  } catch {
+    return [];
+  }
 }

@@ -16,6 +16,7 @@ function topNavClass(active: boolean) {
 }
 
 interface ListedAgent {
+  agent_id?: string;
   name: string;
 }
 
@@ -101,8 +102,8 @@ export function Sidebar() {
           )}
           {agents.map((agent) => (
             <NavLink
-              key={agent.name}
-              to={`/agents/${agentPathSegment(agent.name)}/activity`}
+              key={agent.agent_id || agent.name}
+              to={`/agents/${agentPathSegment(agent.agent_id || agent.name)}/activity`}
               onClick={() => setMobileOpen(false)}
               className={({ isActive }) =>
                 `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${

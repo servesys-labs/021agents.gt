@@ -2339,6 +2339,88 @@ async function dispatch(
       }
     }
 
+    case "make-voice-call": {
+      const hyperdrive = (env as any).HYPERDRIVE;
+      if (!hyperdrive) return "make-voice-call requires database access";
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const orgId = args.org_id || "";
+      const customerPhone = String(args.phone_number || "").trim();
+      const agentName = String(args.agent_name || sessionMeta?.agent_name || "").trim();
+      const firstMessage = String(args.first_message || "").trim() || undefined;
+
+      if (!customerPhone) return "phone_number is required (E.164 format, e.g. +15551234567)";
+
+      try {
+        // Look up the agent's voice config for Vapi IDs
+        const agentRows = await sql`
+          SELECT config_json FROM agents
+          WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1
+        `.catch(() => []);
+        if (agentRows.length === 0) return `Agent '${agentName}' not found or no voice config`;
+
+        const config = typeof agentRows[0].config_json === "string"
+          ? JSON.parse(agentRows[0].config_json)
+          : agentRows[0].config_json ?? {};
+        const voiceCfg = config.voice || {};
+        const assistantId = String(voiceCfg.vapi_assistant_id || "");
+        const phoneNumberId = String(voiceCfg.vapi_phone_number_id || "");
+
+        if (!assistantId || !phoneNumberId) {
+          return "Agent does not have a Vapi assistant and phone number linked. Set up voice first.";
+        }
+
+        // Call control-plane's outbound call endpoint via Hyperdrive
+        // We construct the Vapi API call directly since we're in the runtime
+        const vapiKey = (env as any).VAPI_API_KEY || "";
+        if (!vapiKey) return "VAPI_API_KEY not configured on runtime";
+
+        const vapiBody: Record<string, unknown> = {
+          assistantId,
+          phoneNumberId,
+          customer: { number: customerPhone },
+        };
+        if (firstMessage) {
+          vapiBody.assistantOverrides = { firstMessage };
+        }
+
+        const resp = await fetch("https://api.vapi.ai/call", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${vapiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(vapiBody),
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => "");
+          return `Vapi API error (${resp.status}): ${errText.slice(0, 200)}`;
+        }
+
+        const data = await resp.json() as Record<string, unknown>;
+        const callId = String(data.id ?? "");
+
+        // Record the call
+        if (callId) {
+          await sql`
+            INSERT INTO voice_calls (call_id, platform, org_id, agent_name, phone_number, direction, status, platform_agent_id, started_at)
+            VALUES (${callId}, 'vapi', ${orgId}, ${agentName}, ${customerPhone}, 'outbound', 'pending', ${assistantId}, now())
+            ON CONFLICT (call_id) DO UPDATE SET status = 'pending', phone_number = ${customerPhone}
+          `.catch(() => {});
+        }
+
+        return JSON.stringify({
+          success: true,
+          call_id: callId,
+          phone_number: customerPhone,
+          message: `Outbound call initiated to ${customerPhone}`,
+        });
+      } catch (err: any) {
+        return `make-voice-call failed: ${err.message || err}`;
+      }
+    }
+
     case "manage-gpu": {
       const hyperdrive = (env as any).HYPERDRIVE;
       if (!hyperdrive) return "manage-gpu requires database access";
@@ -4577,6 +4659,33 @@ const TOOL_CATALOG: ToolDefinition[] = [
           },
         },
         required: ["strategy", "reason"],
+      },
+    },
+  },
+
+  // ── Voice / Telephony ─────────────────────────────────────────────
+
+  {
+    type: "function",
+    function: {
+      name: "make-voice-call",
+      description:
+        "Initiate an outbound voice call via the agent's linked phone number. " +
+        "The call connects to the agent's voice assistant so the recipient speaks with the AI agent. " +
+        "Requires the agent to have a Vapi phone number and assistant linked.",
+      parameters: {
+        type: "object",
+        properties: {
+          phone_number: {
+            type: "string",
+            description: "Destination phone number in E.164 format (e.g. +15551234567)",
+          },
+          first_message: {
+            type: "string",
+            description: "Optional custom greeting for this call (overrides default)",
+          },
+        },
+        required: ["phone_number"],
       },
     },
   },
