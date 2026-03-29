@@ -1,5 +1,5 @@
 {
-  "name": "@agentos/widget",
+  "name": "@oneshots/widget",
   "version": "0.1.0",
   "description": "Embeddable chat widget for AgentOS agents",
   "main": "dist/widget.js",

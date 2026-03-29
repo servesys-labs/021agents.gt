@@ -92,6 +92,13 @@ export const AgentCreateBody = z.object({
   release_strategy: z.record(z.unknown()).optional(),
   mcp_connectors: z.array(z.record(z.unknown())).optional(),
   deploy_policy: z.record(z.unknown()).optional(),
+  /** MVP flow editor canvas only; does not replace runtime `declarative_graph`. */
+  mvp_flow_canvas: z
+    .object({
+      nodes: z.array(z.record(z.unknown())),
+      edges: z.array(z.record(z.unknown())),
+    })
+    .optional(),
 }).openapi("AgentCreateBody");
 
 export const AgentSummary = z.object({

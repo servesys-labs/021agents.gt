@@ -566,6 +566,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             org_id: data.org_id || config.orgId || "",
             project_id: data.project_id || config.projectId || "",
             channel: data.channel || "websocket",
+            channel_user_id: data.channel_user_id,
+            api_key_id: data.api_key_id,
             history_messages: history,
             delegation: data.delegation,
           },
@@ -725,6 +727,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           org_id: data.org_id || config.orgId || "",
           project_id: data.project_id || config.projectId || "",
           channel: data.channel || "async_rest",
+          channel_user_id: data.channel_user_id,
+          api_key_id: data.api_key_id,
           history_messages: history,
           delegation: data.delegation,
         },
@@ -802,6 +806,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               org_id: data.org_id || config.orgId || "",
               project_id: data.project_id || config.projectId || "",
               channel: data.channel || "sse",
+              channel_user_id: data.channel_user_id,
+              api_key_id: data.api_key_id,
               history_messages: history,
               delegation: data.delegation,
             },
@@ -1366,6 +1372,7 @@ async function runViaAgent(
     project_id?: string;
     channel?: string;
     channel_user_id?: string;
+    api_key_id?: string;
     delegation?: Record<string, unknown>;
   },
 ): Promise<{ output: string; success: boolean; error?: string; turns: number; tool_calls: number; cost_usd: number; latency_ms: number; session_id: string; trace_id: string; stop_reason: string; [key: string]: unknown }> {
@@ -1393,6 +1400,7 @@ async function runViaAgent(
       project_id: opts?.project_id || "",
       channel: opts?.channel || "api",
       channel_user_id: opts?.channel_user_id || "",
+      api_key_id: opts?.api_key_id || "",
       delegation: opts?.delegation,
     }),
   }));
@@ -1577,6 +1585,7 @@ export default {
           project_id?: string;
           channel?: string;
           channel_user_id?: string;
+          api_key_id?: string;
           delegation?: Record<string, unknown>;
         };
         const result = await runViaAgent(env, body.agent_name || "agentos", body.input || "", {
@@ -1584,6 +1593,7 @@ export default {
           project_id: body.project_id,
           channel: body.channel || "api",
           channel_user_id: body.channel_user_id,
+          api_key_id: body.api_key_id,
           delegation: body.delegation,
         });
         return Response.json(result);
@@ -1789,6 +1799,7 @@ export default {
         project_id?: string;
         channel?: string;
         channel_user_id?: string;
+        api_key_id?: string;
       };
       let body: EvalRunBody = {};
       const rawBody = await request.text();
@@ -1848,6 +1859,7 @@ export default {
               const runResult = await runViaAgent(env, agentName, input, {
                 org_id: body.org_id, project_id: body.project_id,
                 channel: body.channel, channel_user_id: body.channel_user_id,
+                api_key_id: body.api_key_id,
               });
               const grade = gradeEvalOutput(runResult.output, expected, grader);
               if (grade.passed) passCount++;
@@ -1988,6 +2000,7 @@ export default {
       const body = await request.json() as {
         agent_name?: string; task?: string; input?: unknown;
         org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        api_key_id?: string;
       };
 
       const agentName = body.agent_name || "agentos";
@@ -2001,6 +2014,7 @@ export default {
           project_id: body.project_id,
           channel: body.channel,
           channel_user_id: userId,
+          api_key_id: body.api_key_id,
         }).catch(() => {}),
       );
 
@@ -2028,6 +2042,7 @@ export default {
       const body = await request.json() as {
         agent_name?: string; task?: string; input?: unknown;
         org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        api_key_id?: string;
         session_id?: string; trace_id?: string; limit?: number; cursor?: string; watermark_cursor?: string;
         event_type?: string; tool_name?: string; status?: string; from_ts_ms?: number; to_ts_ms?: number;
         config?: Record<string, unknown>;
@@ -2078,6 +2093,7 @@ export default {
               project_id: body.project_id,
               channel: body.channel,
               channel_user_id: userId,
+              api_key_id: body.api_key_id,
             }).catch(() => {}),
           );
           return Response.json({
@@ -2133,6 +2149,7 @@ export default {
         const body = await request.json() as {
           agent_name?: string; task?: string; input?: unknown;
           org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+          api_key_id?: string;
         };
 
         const agentName = body.agent_name || "agentos";
@@ -2156,6 +2173,7 @@ export default {
             project_id: body.project_id || "",
             channel: body.channel || "sse",
             channel_user_id: userId,
+            api_key_id: body.api_key_id || "",
           }),
         }));
 
@@ -2850,6 +2868,7 @@ export default {
       const body = await request.json() as {
         agent_name?: string; task?: string;
         org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        api_key_id?: string;
       };
 
       const agentName = body.agent_name || "agentos";
@@ -2862,6 +2881,7 @@ export default {
           project_id: body.project_id,
           channel: body.channel,
           channel_user_id: userId,
+          api_key_id: body.api_key_id,
         }).catch(() => {}),
       );
 
@@ -2886,6 +2906,7 @@ export default {
       const body = await request.json() as { inputs: Array<{
         agent_name?: string; task?: string; input?: unknown;
         org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        api_key_id?: string;
         config?: Record<string, unknown>;
       }> };
 
@@ -2919,6 +2940,7 @@ export default {
             project_id: inp.project_id,
             channel: inp.channel,
             channel_user_id: inp.channel_user_id,
+            api_key_id: inp.api_key_id,
           })),
         };
         const result = await edgeBatch(runtimeEnv, env.HYPERDRIVE, batchReq, env.TELEMETRY_QUEUE);
@@ -2970,6 +2992,7 @@ export default {
         session_id?: string;
         agent_name?: string; task?: string; input?: unknown;
         org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
+        api_key_id?: string;
       };
 
       // If session_id provided, compute breakdown from existing events
@@ -2996,6 +3019,7 @@ export default {
           project_id: body.project_id,
           channel: body.channel,
           channel_user_id: userId,
+          api_key_id: body.api_key_id,
         }).catch(() => {}),
       );
 

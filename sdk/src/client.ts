@@ -4,7 +4,7 @@ import { AgentOSError } from "./errors";
 import { HttpClient } from "./http";
 import type { AgentOSConfig, HealthCheckResult } from "./types";
 
-const DEFAULT_BASE_URL = "https://api.agentos.dev";
+const DEFAULT_BASE_URL = "https://api.oneshots.co";
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
@@ -14,7 +14,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
  *
  * @example
  * ```ts
- * import { AgentOS } from "@agentos/sdk";
+ * import { AgentOS } from "@oneshots/sdk";
  *
  * const client = new AgentOS({ apiKey: "ak_live_..." });
  *

@@ -91,8 +91,10 @@ const app = createApp();
 app.use("*", securityHeadersMiddleware);
 app.use("*", cors({
   origin: (origin) => {
-    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://agentos-portal.servesys.workers.dev,https://agentos-mvp.servesys.workers.dev").split(",");
+    const allowed = (process.env.ALLOWED_ORIGINS || "http://localhost:3000,http://localhost:5173,https://app.oneshots.co").split(",");
     if (!origin || allowed.includes(origin) || allowed.includes("*")) return origin;
+    // Allow any *.oneshots.co subdomain
+    if (origin && /^https:\/\/[a-z0-9-]+\.oneshots\.co$/.test(origin)) return origin;
     // Allow any *.agentos.dev subdomain (custom org domains)
     if (origin && /^https:\/\/[a-z0-9-]+\.agentos\.dev$/.test(origin)) return origin;
     // Allow any *.servesys.workers.dev subdomain (internal services)
@@ -278,7 +280,7 @@ app.doc("/api/v1/_openapi-raw.json", {
     contact: { name: "AgentOS", url: "https://agentos.dev" },
   },
   servers: [
-    { url: "https://agentos-control-plane.servesys.workers.dev", description: "Production" },
+    { url: "https://api.oneshots.co", description: "Production" },
   ],
   security: [{ bearerAuth: [] }],
   tags: [

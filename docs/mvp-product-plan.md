@@ -156,7 +156,14 @@ Emit structured events from the MVP client (or edge middleware where appropriate
 
 ---
 
-## 11. Code map
+## 11. Deploy notes (Cloudflare Workers — static assets)
+
+- Build: `cd mvp && npm run build`
+- **`mvp/wrangler.jsonc` must set** `assets.not_found_handling`: `"single-page-application"`. Otherwise `/agents/:name/settings` and other client routes **404 on refresh or direct URL**, the browser shows `chrome-error://chromewebdata/`, and DevTools may report misleading “unsafe attempt to load URL … from frame” messages.
+- Redeploy after changing wrangler: `npx wrangler deploy` (from `mvp/`).
+- API CORS: control plane already allows `https://agentos-mvp.servesys.workers.dev` and `*.servesys.workers.dev` in `index.ts` — if you use another host, add it to `ALLOWED_ORIGINS`.
+
+## 12. Code map
 
 - **MVP UI:** `mvp/src/` (pages, `lib/api.ts`, `lib/product.ts`)
 - **Control plane:** `control-plane/src/routes/`, `middleware/auth.ts`, `auth/types.ts` (scopes)
@@ -164,7 +171,7 @@ Emit structured events from the MVP client (or edge middleware where appropriate
 
 ---
 
-## 12. Review cadence
+## 13. Review cadence
 
 - Revisit this doc when **adding a new MVP screen** or **new API dependency**.
 - After each release: compare telemetry to §8; adjust §3 or §9 only with explicit product sign-off.

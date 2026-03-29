@@ -520,6 +520,16 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
       harness.declarative_graph = req.graph;
     }
 
+    // MVP dashboard flow UI (visual only; runtime graph stays in declarative_graph)
+    if (req.mvp_flow_canvas && typeof req.mvp_flow_canvas === "object") {
+      let harness = existingConfig.harness as Record<string, unknown> | undefined;
+      if (typeof harness !== "object" || harness === null) {
+        harness = {};
+        existingConfig.harness = harness;
+      }
+      harness.mvp_flow_canvas = req.mvp_flow_canvas;
+    }
+
     let graph = ensureDeclarativeGraph(existingConfig, req.auto_graph);
 
     try {

@@ -1,5 +1,5 @@
 {
-  "name": "@agentos/sdk",
+  "name": "@oneshots/sdk",
   "version": "0.1.0",
   "description": "Official TypeScript SDK for AgentOS — build, deploy, and consume AI agents",
   "main": "dist/index.js",

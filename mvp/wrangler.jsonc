@@ -1,7 +1,9 @@
+// SPA: without not_found_handling, deep links and refresh 404 (Chrome error page → console frame warnings).
 {
   "name": "agentos-mvp",
   "compatibility_date": "2026-03-01",
   "assets": {
-    "directory": "./dist"
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
   }
 }

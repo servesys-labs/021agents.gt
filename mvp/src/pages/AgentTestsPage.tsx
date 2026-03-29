@@ -12,6 +12,7 @@ import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/Toast";
 import { api } from "../lib/api";
 import { agentPathSegment } from "../lib/agent-path";
+import { ensureArray } from "../lib/ensure-array";
 
 interface AgentDetail {
   name: string;
@@ -79,7 +80,7 @@ export default function AgentTestsPage() {
         api.get<EvalRun[]>(`/eval/runs?agent_name=${q}`),
       ]);
       setAgent(agentData);
-      setRuns(evalRuns || []);
+      setRuns(ensureArray<EvalRun>(evalRuns));
     } catch (err: any) {
       if (err.status === 404) {
         setAgent(null);
@@ -133,8 +134,8 @@ export default function AgentTestsPage() {
         trials: 1,
       });
       // Refresh runs list
-      const updatedRuns = await api.get<EvalRun[]>(`/eval/runs?agent_name=${encodeURIComponent(id!.trim())}`);
-      setRuns(updatedRuns || []);
+      const updatedRuns = await api.get<unknown>(`/eval/runs?agent_name=${encodeURIComponent(id!.trim())}`);
+      setRuns(ensureArray<EvalRun>(updatedRuns));
       const passCount = result.pass_count ?? 0;
       const totalCount = result.total_count ?? scenarios.length;
       toast(`Eval complete: ${passCount}/${totalCount} passed`);

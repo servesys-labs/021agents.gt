@@ -1,11 +1,12 @@
 /**
  * CLI Configuration management
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
-const CONFIG_DIR = join(homedir(), ".agentos");
+const LEGACY_CONFIG_DIR = join(homedir(), ".agentos");
+const CONFIG_DIR = join(homedir(), ".oneshots");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 const AUTH_FILE = join(CONFIG_DIR, "auth.json");
 
@@ -20,17 +21,23 @@ export interface AuthConfig {
   refreshToken?: string;
   userId?: string;
   email?: string;
+  orgId?: string;
   expiresAt?: number;
 }
 
 const DEFAULT_CONFIG: Config = {
-  apiUrl: process.env.AGENTOS_API_URL || "https://api.agentos.dev",
+  apiUrl: process.env.ONESHOTS_API_URL || process.env.AGENTOS_API_URL || "https://api.oneshots.co",
   defaultModel: "claude-sonnet-4-20250514",
 };
 
 function ensureConfigDir(): void {
   if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    // Migrate from legacy ~/.agentos if it exists
+    if (existsSync(LEGACY_CONFIG_DIR)) {
+      cpSync(LEGACY_CONFIG_DIR, CONFIG_DIR, { recursive: true });
+    } else {
+      mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    }
   }
 }
 
@@ -86,10 +93,10 @@ export function isAuthenticated(): boolean {
 export function requireAuth(): AuthConfig {
   const auth = getAuth();
   if (!auth?.token) {
-    throw new Error("Not authenticated. Run 'agentos login' first.");
+    throw new Error("Not authenticated. Run 'oneshots login' first.");
   }
-  if (auth.expiresAt && auth.expiresAt < Date.now()) {
-    throw new Error("Session expired. Run 'agentos login' to re-authenticate.");
+  if (auth.expiresAt && Date.now() >= auth.expiresAt) {
+    throw new Error("Session expired. Run 'oneshots login' to re-authenticate.");
   }
   return auth;
 }

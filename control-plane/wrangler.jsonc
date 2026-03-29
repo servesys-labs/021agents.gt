@@ -71,6 +71,6 @@
 
   // Environment variables (secrets via `wrangler secret put`)
   "vars": {
-    "RUNTIME_WORKER_URL": "https://agentos.servesys.workers.dev"
+    "RUNTIME_WORKER_URL": "https://runtime.oneshots.co"
   }
 }

@@ -27,9 +27,9 @@ export function DeployPage() {
   const [copied, setCopied] = useState<string | null>(null);
 
   /* URLs */
-  const prodWorkerBase = "https://agentos.servesys.workers.dev";
+  const prodWorkerBase = "https://runtime.oneshots.co";
   const restUrl = `${prodWorkerBase}/api/v1/agents/${agentName}/run`;
-  const wsUrl = `wss://agentos.servesys.workers.dev/agents/agentos-agent/${agentName}`;
+  const wsUrl = `wss://runtime.oneshots.co/agents/agentos-agent/${agentName}`;
   const embedScript = `<script src="${prodWorkerBase}/embed.js" data-agent="${agentName}"></script>`;
 
   /* ── Copy to clipboard ─────────────────────────────────────────── */

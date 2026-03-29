@@ -49,7 +49,7 @@ deployRoutes.openapi(deployAgentRoute, async (c): Promise<any> => {
     deployed: true,
     agent: agentName,
     url: `/agents/agentos-agent/${agentName}`,
-    websocket: `wss://agentos.servesys.workers.dev/agents/agentos-agent/${agentName}`,
+    websocket: `wss://runtime.oneshots.co/agents/agentos-agent/${agentName}`,
     org_id: user.org_id,
   });
 });
@@ -115,7 +115,7 @@ deployRoutes.openapi(deployStatusRoute, async (c): Promise<any> => {
         deployed: true,
         agent: agentName,
         url: `/agents/agentos-agent/${agentName}`,
-        websocket: `wss://agentos.servesys.workers.dev/agents/agentos-agent/${agentName}`,
+        websocket: `wss://runtime.oneshots.co/agents/agentos-agent/${agentName}`,
       });
     }
   } catch {}

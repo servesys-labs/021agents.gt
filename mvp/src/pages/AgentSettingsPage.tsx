@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Check, RefreshCw, Loader2 } from "lucide-react";
+import { Check, RefreshCw, Loader2, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
@@ -64,6 +64,7 @@ export default function AgentSettingsPage() {
   const [handoffSlack, setHandoffSlack] = useState("");
   const [handoffTriggers, setHandoffTriggers] = useState<string[]>([]);
   const [handoffMessage, setHandoffMessage] = useState("I'm going to connect you with our team who can help you directly. One moment please!");
+  const [deleting, setDeleting] = useState(false);
 
   const fetchAgent = async () => {
     if (!id) return;
@@ -138,6 +139,21 @@ export default function AgentSettingsPage() {
     }
   };
 
+  const handleDelete = async () => {
+    if (!agent || !id) return;
+    if (!window.confirm(`Remove “${agent.name}” from your workspace? It will no longer appear in your list.`)) return;
+    setDeleting(true);
+    try {
+      await api.del(`/agents/${agentPathSegment(id)}`);
+      toast("Assistant removed");
+      navigate("/");
+    } catch (err: any) {
+      toast(err.message || "Could not remove assistant");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -177,6 +193,30 @@ export default function AgentSettingsPage() {
         <div className="space-y-4 max-w-lg">
           <Input label="Agent name" value={agent.name} disabled />
           <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
+          <Card className="border-red-200 bg-red-50/40">
+            <p className="text-sm font-medium text-text">Remove assistant</p>
+            <p className="text-xs text-text-secondary mt-1 leading-relaxed">
+              This deactivates the agent for your organization. Data may be retained per your plan; contact support for a full data purge if needed.
+            </p>
+            <Button
+              type="button"
+              variant="danger"
+              size="sm"
+              className="mt-3"
+              disabled={deleting}
+              onClick={handleDelete}
+            >
+              {deleting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> Removing…
+                </>
+              ) : (
+                <>
+                  <Trash2 size={14} /> Remove assistant
+                </>
+              )}
+            </Button>
+          </Card>
         </div>
       )}
 

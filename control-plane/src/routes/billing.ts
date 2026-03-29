@@ -44,6 +44,7 @@ billingRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
       COALESCE(SUM(CASE WHEN cost_type = 'inference' THEN total_cost_usd ELSE 0 END), 0) as inference_cost_usd,
       COALESCE(SUM(CASE WHEN cost_type = 'gpu_compute' THEN total_cost_usd ELSE 0 END), 0) as gpu_compute_cost_usd,
       COALESCE(SUM(CASE WHEN cost_type = 'connector' THEN total_cost_usd ELSE 0 END), 0) as connector_cost_usd,
+      COALESCE(SUM(CASE WHEN cost_type = 'telephony' THEN total_cost_usd ELSE 0 END), 0) as telephony_cost_usd,
       COALESCE(SUM(input_tokens), 0) as total_input_tokens,
       COALESCE(SUM(output_tokens), 0) as total_output_tokens,
       COUNT(*) as total_billing_records,
@@ -82,11 +83,40 @@ billingRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
   const byAgent: Record<string, number> = {};
   for (const r of agentRows) byAgent[r.agent_name] = Number(r.cost);
 
+  let by_billing_subject: Array<{
+    billing_user_id: string;
+    api_key_id: string;
+    cost_usd: number;
+    record_count: number;
+  }> = [];
+  try {
+    const subjectRows = await sql`
+      SELECT billing_user_id, api_key_id,
+             SUM(total_cost_usd) as cost,
+             COUNT(*)::int as record_count
+      FROM billing_records
+      WHERE org_id = ${user.org_id} AND created_at >= ${since}
+        AND (COALESCE(TRIM(billing_user_id), '') != '' OR COALESCE(TRIM(api_key_id), '') != '')
+      GROUP BY billing_user_id, api_key_id
+      ORDER BY cost DESC
+      LIMIT 100
+    `;
+    by_billing_subject = subjectRows.map((r: Record<string, unknown>) => ({
+      billing_user_id: String(r.billing_user_id ?? ""),
+      api_key_id: String(r.api_key_id ?? ""),
+      cost_usd: Number(r.cost) || 0,
+      record_count: Number(r.record_count) || 0,
+    }));
+  } catch {
+    /* Older DBs without billing_user_id / api_key_id columns */
+  }
+
   return c.json({
     total_cost_usd: Number(summary.total_cost_usd),
     inference_cost_usd: Number(summary.inference_cost_usd),
     gpu_compute_cost_usd: Number(summary.gpu_compute_cost_usd),
     connector_cost_usd: Number(summary.connector_cost_usd),
+    telephony_cost_usd: Number(summary.telephony_cost_usd),
     total_input_tokens: Number(summary.total_input_tokens),
     total_output_tokens: Number(summary.total_output_tokens),
     total_billing_records: Number(summary.total_billing_records),
@@ -94,6 +124,7 @@ billingRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
     by_cost_type: byCostType,
     by_model: byModel,
     by_agent: byAgent,
+    by_billing_subject,
   });
 });
 

@@ -87,11 +87,11 @@ const METHOD_COLORS: Record<string, string> = {
 const SDKS = [
   {
     name: "TypeScript SDK",
-    pkg: "@agentos/sdk",
+    pkg: "@oneshots/sdk",
     icon: Package,
     status: "available" as const,
     badge: "npm",
-    link: "https://www.npmjs.com/package/@agentos/sdk",
+    link: "https://www.npmjs.com/package/@oneshots/sdk",
   },
   {
     name: "Python SDK",
@@ -119,7 +119,7 @@ const SDKS = [
   },
   {
     name: "Chat Widget",
-    pkg: "@agentos/chat-widget",
+    pkg: "@oneshots/widget",
     icon: MessageSquare,
     status: "available" as const,
     badge: "npm",
@@ -129,9 +129,9 @@ const SDKS = [
 
 /* ── Code snippets ──────────────────────────────────────────────── */
 
-const INSTALL_SNIPPET = `npm install @agentos/sdk`;
+const INSTALL_SNIPPET = `npm install @oneshots/sdk`;
 
-const RUN_SNIPPET = `import { AgentOS } from "@agentos/sdk";
+const RUN_SNIPPET = `import { AgentOS } from "@oneshots/sdk";
 
 const client = new AgentOS({
   apiKey: process.env.AGENTOS_API_KEY,

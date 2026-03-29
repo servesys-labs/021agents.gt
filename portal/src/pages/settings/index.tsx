@@ -87,6 +87,7 @@ type BillingUsageRaw = {
   inference_cost_usd: number;
   gpu_compute_cost_usd: number;
   connector_cost_usd: number;
+  telephony_cost_usd?: number;
   by_agent: Record<string, number>;
   by_model: Record<string, number>;
 };
@@ -960,6 +961,7 @@ export const SettingsPage = () => {
   const inferenceCost = billingRaw?.inference_cost_usd ?? 0;
   const gpuCost = billingRaw?.gpu_compute_cost_usd ?? 0;
   const connectorCost = billingRaw?.connector_cost_usd ?? 0;
+  const telephonyCost = billingRaw?.telephony_cost_usd ?? 0;
 
   const dailyPoints = useMemo(() => {
     const raw = dailyQuery.data?.days ?? [];
@@ -1020,6 +1022,7 @@ export const SettingsPage = () => {
             <SignalCard label="Inference" value={formatCurrency(inferenceCost)} />
             <SignalCard label="GPU Compute" value={formatCurrency(gpuCost)} />
             <SignalCard label="Connectors" value={formatCurrency(connectorCost)} />
+            <SignalCard label="Voice / Telephony" value={formatCurrency(telephonyCost)} />
           </div>
 
           {/* Daily cost chart */}

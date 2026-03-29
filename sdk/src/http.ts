@@ -107,7 +107,7 @@ export class HttpClient {
     const url = this._buildUrl(path);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${this._apiKey}`,
-      "User-Agent": "@agentos/sdk 0.1.0",
+      "User-Agent": "@oneshots/sdk 0.1.0",
       // Note: Content-Type is intentionally omitted — the browser/runtime
       // sets it automatically with the correct multipart boundary.
     };
@@ -239,7 +239,7 @@ export class HttpClient {
   private _headers(hasBody: boolean): Record<string, string> {
     const h: Record<string, string> = {
       Authorization: `Bearer ${this._apiKey}`,
-      "User-Agent": "@agentos/sdk 0.1.0",
+      "User-Agent": "@oneshots/sdk 0.1.0",
     };
     if (hasBody) {
       h["Content-Type"] = "application/json";

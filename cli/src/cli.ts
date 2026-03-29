@@ -1,36 +1,36 @@
 #!/usr/bin/env node
 /**
- * AgentOS CLI - TypeScript implementation
- * 
+ * OneShots CLI - TypeScript implementation
+ *
  * Commands:
- *   agentos init [dir]          Scaffold a new agent project
- *   agentos create              Create an agent (conversational)
- *   agentos create -1 DESC      Create from one-line description
- *   agentos run <agent> "task"  Run an agent locally
- *   agentos list                List all agents
- *   agentos deploy <agent>      Deploy to Cloudflare Workers
- *   agentos chat <agent>        Interactive chat session
- *   agentos sandbox <cmd>       Manage sandboxes
- *   agentos login/logout        Authentication
- * 
+ *   oneshots init [dir]          Scaffold a new agent project
+ *   oneshots create              Create an agent (conversational)
+ *   oneshots create -1 DESC      Create from one-line description
+ *   oneshots run <agent> "task"  Run an agent locally
+ *   oneshots list                List all agents
+ *   oneshots deploy <agent>      Deploy to Cloudflare Workers
+ *   oneshots chat <agent>        Interactive chat session
+ *   oneshots sandbox <cmd>       Manage sandboxes
+ *   oneshots login/logout        Authentication
+ *
  * Extended commands:
- *   agentos eval <cmd>          Run/view evaluations
- *   agentos evolve <cmd>        Analyze/improve agents
- *   agentos issues <cmd>        Manage issues
- *   agentos security <cmd>      Security scanning
- *   agentos sessions            View sessions
- *   agentos traces <id>         View session traces
- *   agentos skills              Manage skills
- *   agentos tools               List tools
- *   agentos graph <cmd>         View agent graphs
- *   agentos memory <cmd>        View agent memory
- *   agentos releases <agent>    Manage releases
- *   agentos workflow <cmd>      Manage workflows
- *   agentos schedule <cmd>      Manage schedules
- *   agentos jobs                View background jobs
- *   agentos research <cmd>      Autonomous research
- *   agentos connectors          Manage connectors
- *   agentos billing             View usage/costs
+ *   oneshots eval <cmd>          Run/view evaluations
+ *   oneshots evolve <cmd>        Analyze/improve agents
+ *   oneshots issues <cmd>        Manage issues
+ *   oneshots security <cmd>      Security scanning
+ *   oneshots sessions            View sessions
+ *   oneshots traces <id>         View session traces
+ *   oneshots skills              Manage skills
+ *   oneshots tools               List tools
+ *   oneshots graph <cmd>         View agent graphs
+ *   oneshots memory <cmd>        View agent memory
+ *   oneshots releases <agent>    Manage releases
+ *   oneshots workflow <cmd>      Manage workflows
+ *   oneshots schedule <cmd>      Manage schedules
+ *   oneshots jobs                View background jobs
+ *   oneshots research <cmd>      Autonomous research
+ *   oneshots connectors          Manage connectors
+ *   oneshots billing             View usage/costs
  */
 
 import { Command } from "commander";
@@ -68,8 +68,8 @@ import { getVersion } from "./lib/version.js";
 const program = new Command();
 
 program
-  .name("agentos")
-  .description("AgentOS — Build, run, and deploy autonomous agents")
+  .name("oneshots")
+  .description("OneShots — Build, run, and deploy AI agents")
   .version(getVersion(), "-v, --version", "Display version number");
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -100,7 +100,7 @@ program
 program
   .command("run <agent> <task>")
   .description("Run an agent on a task")
-  .option("-s, --stream", "Stream output", true)
+  .option("-s, --stream", "Stream output (default: false)", false)
   .option("-v, --verbose", "Verbose output")
   .action(runCommand);
 
@@ -649,7 +649,8 @@ sandbox
 
 program
   .command("login")
-  .description("Authenticate with AgentOS")
+  .description("Authenticate with OneShots")
+  .option("-m, --manual", "Use email/password instead of browser login")
   .action(loginCommand);
 
 program

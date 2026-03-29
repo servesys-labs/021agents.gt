@@ -297,6 +297,8 @@ CREATE TABLE IF NOT EXISTS billing_records (
   org_id text NOT NULL DEFAULT '',
   customer_id text NOT NULL DEFAULT '',
   agent_name text NOT NULL DEFAULT '',
+  billing_user_id text NOT NULL DEFAULT '',
+  api_key_id text NOT NULL DEFAULT '',
   -- What
   cost_type text NOT NULL DEFAULT 'inference',  -- inference / gpu_compute / tool / eval
   description text NOT NULL DEFAULT '',
@@ -332,6 +334,12 @@ CREATE INDEX IF NOT EXISTS idx_billing_records_created ON billing_records(create
 CREATE INDEX IF NOT EXISTS idx_billing_records_type ON billing_records(cost_type);
 CREATE INDEX IF NOT EXISTS idx_billing_records_agent ON billing_records(agent_name);
 CREATE INDEX IF NOT EXISTS idx_billing_records_session ON billing_records(session_id);
+CREATE INDEX IF NOT EXISTS idx_billing_records_org_billing_user
+  ON billing_records(org_id, billing_user_id)
+  WHERE billing_user_id != '';
+CREATE INDEX IF NOT EXISTS idx_billing_records_org_api_key
+  ON billing_records(org_id, api_key_id)
+  WHERE api_key_id != '';
 
 -- ═══════════════════════════════════════════════════════════════════════════
 -- PRICING CATALOG — pricing configuration for billing

@@ -19,8 +19,10 @@ export async function runCommand(
     console.log(chalk.gray(`Task: ${task}\n`));
 
     if (options.stream) {
-      // Stream the response
-      const stream = apiStream(`/api/v1/agents/${agentName}/run`, {
+      // Stream the response via runtime proxy
+      const stream = apiStream(`/api/v1/runtime-proxy/agent/run`, {
+        agent_name: agentName,
+        task,
         input: task,
         stream: true,
       });
@@ -30,11 +32,11 @@ export async function runCommand(
       }
       console.log(); // newline after stream
     } else {
-      // Non-streaming response
+      // Non-streaming response via runtime proxy
       const { apiPost } = await import("../lib/api.js");
       const result = await apiPost<{ output?: string; error?: string }>(
-        `/api/v1/agents/${agentName}/run`,
-        { input: task }
+        `/api/v1/runtime-proxy/agent/run`,
+        { agent_name: agentName, task, input: task }
       );
 
       if (result.error) {

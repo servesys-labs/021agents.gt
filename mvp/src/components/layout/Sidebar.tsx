@@ -5,6 +5,7 @@ import { useAuth } from "../../lib/auth";
 import { PRODUCT } from "../../lib/product";
 import { api } from "../../lib/api";
 import { agentPathSegment } from "../../lib/agent-path";
+import { ensureArray } from "../../lib/ensure-array";
 
 function topNavClass(active: boolean) {
   return `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -29,8 +30,8 @@ export function Sidebar() {
   const loadAgents = useCallback(async () => {
     setAgentsLoading(true);
     try {
-      const rows = await api.get<ListedAgent[]>("/agents");
-      setAgents(Array.isArray(rows) ? rows : []);
+      const rows = await api.get<unknown>("/agents");
+      setAgents(ensureArray<ListedAgent>(rows));
     } catch {
       setAgents([]);
     } finally {

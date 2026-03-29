@@ -25,9 +25,9 @@ export const billingCommand = {
       }>(`/api/v1/billing/usage?days=${days}`);
 
       console.log(chalk.blue(`\nUsage (Last ${days} days)\n`));
-      console.log(`Total Cost: ${chalk.yellow(`$${usage.total_cost.toFixed(4)}`)}`);
-      console.log(`Requests: ${usage.requests.toLocaleString()}`);
-      console.log(`Tokens: ${usage.tokens.input.toLocaleString()} in / ${usage.tokens.output.toLocaleString()} out`);
+      console.log(`Total Cost: ${chalk.yellow(`$${(usage.total_cost ?? 0).toFixed(4)}`)}`);
+      console.log(`Requests: ${(usage.requests ?? 0).toLocaleString()}`);
+      console.log(`Tokens: ${(usage.tokens?.input ?? 0).toLocaleString()} in / ${(usage.tokens?.output ?? 0).toLocaleString()} out`);
 
       if (Object.keys(usage.by_agent).length > 0) {
         console.log(chalk.gray("\nBy Agent:"));

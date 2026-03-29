@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { Plus, Trash2, Zap, Brain, Wrench, GitBranch, MessageSquare, Loader2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
@@ -43,13 +43,42 @@ const CANVAS_H = 500;
 const OFFSET_X = CANVAS_W / 2;
 const OFFSET_Y = 20;
 
+function coerceMvpCanvas(raw: unknown): { nodes: FlowNode[]; edges: FlowEdge[] } {
+  if (!raw || typeof raw !== "object") return { nodes: [], edges: [] };
+  const o = raw as { nodes?: unknown; edges?: unknown };
+  const nodes: FlowNode[] = Array.isArray(o.nodes)
+    ? (o.nodes as unknown[]).filter(
+        (n): n is FlowNode =>
+          !!n &&
+          typeof n === "object" &&
+          typeof (n as FlowNode).id === "string" &&
+          typeof (n as FlowNode).type === "string" &&
+          typeof (n as FlowNode).label === "string",
+      )
+    : [];
+  for (const n of nodes) {
+    if (typeof n.x !== "number") n.x = 0;
+    if (typeof n.y !== "number") n.y = 0;
+  }
+  const edges: FlowEdge[] = Array.isArray(o.edges)
+    ? (o.edges as unknown[]).filter(
+        (e): e is FlowEdge =>
+          !!e &&
+          typeof e === "object" &&
+          typeof (e as FlowEdge).id === "string" &&
+          typeof (e as FlowEdge).from === "string" &&
+          typeof (e as FlowEdge).to === "string",
+      )
+    : [];
+  return { nodes, edges };
+}
+
 export default function AgentFlowPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const { toast } = useToast();
 
   const [agentName, setAgentName] = useState<string | null>(null);
-  const [graphId, setGraphId] = useState<string | null>(null);
+  const [fullConfig, setFullConfig] = useState<Record<string, unknown> | null>(null);
   const [nodes, setNodes] = useState<FlowNode[]>([]);
   const [edges, setEdges] = useState<FlowEdge[]>([]);
   const [loading, setLoading] = useState(true);
@@ -71,22 +100,23 @@ export default function AgentFlowPage() {
         setLoading(true);
         setError(null);
 
-        const agent = await api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`);
+        const config = await api.get<Record<string, unknown>>(`/agents/${agentPathSegment(id)}/config`);
         if (cancelled) return;
-        setAgentName(agent.name ?? id);
+        setFullConfig(config);
+        setAgentName(String(config.name ?? id).trim() || id);
 
-        const graphs = await api.get<any[]>(`/graphs?agent_name=${encodeURIComponent(id.trim())}`);
-        if (cancelled) return;
-
-        if (graphs && graphs.length > 0) {
-          const graph = graphs[0];
-          setGraphId(graph.id);
-          const json = typeof graph.graph_json === "string" ? JSON.parse(graph.graph_json) : graph.graph_json;
-          setNodes(json?.nodes || []);
-          setEdges(json?.edges || []);
-        }
+        const harness =
+          config.harness && typeof config.harness === "object" && !Array.isArray(config.harness)
+            ? (config.harness as Record<string, unknown>)
+            : null;
+        const { nodes: n, edges: e } = coerceMvpCanvas(harness?.mvp_flow_canvas);
+        setNodes(n);
+        setEdges(e);
       } catch (err: any) {
-        if (!cancelled) setError(err.message || "Failed to load flow");
+        if (!cancelled) {
+          if (err.status === 404) setError("__not_found__");
+          else setError(err.message || "Failed to load flow");
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -129,16 +159,34 @@ export default function AgentFlowPage() {
   }, []);
 
   const handleSave = async () => {
-    if (!id) return;
+    if (!id || !fullConfig) return;
+    const seg = agentPathSegment(id);
+    const name = String(fullConfig.name ?? agentName ?? id).trim() || id;
+    const governance =
+      fullConfig.governance && typeof fullConfig.governance === "object" && !Array.isArray(fullConfig.governance)
+        ? (fullConfig.governance as Record<string, unknown>)
+        : {};
     setSaving(true);
     try {
-      const graphJson = { nodes, edges };
-      if (graphId) {
-        await api.put(`/graphs/${graphId}`, { graph_json: graphJson });
-      } else {
-        const created = await api.post<{ id: string }>(`/graphs`, { agent_name: id, graph_json: graphJson });
-        setGraphId(created.id);
-      }
+      await api.put(`/agents/${seg}`, {
+        name,
+        description: String(fullConfig.description ?? ""),
+        system_prompt: String(fullConfig.system_prompt ?? "You are a helpful AI assistant."),
+        personality: String(fullConfig.personality ?? ""),
+        model: String(fullConfig.model ?? ""),
+        max_tokens: typeof fullConfig.max_tokens === "number" ? fullConfig.max_tokens : undefined,
+        temperature: typeof fullConfig.temperature === "number" ? fullConfig.temperature : undefined,
+        tools: Array.isArray(fullConfig.tools) ? (fullConfig.tools as string[]) : [],
+        max_turns: typeof fullConfig.max_turns === "number" ? fullConfig.max_turns : 50,
+        timeout_seconds: typeof fullConfig.timeout_seconds === "number" ? fullConfig.timeout_seconds : undefined,
+        budget_limit_usd: typeof governance.budget_limit_usd === "number" ? governance.budget_limit_usd : 10,
+        tags: Array.isArray(fullConfig.tags) ? (fullConfig.tags as string[]) : [],
+        mvp_flow_canvas: { nodes, edges },
+        strict_graph_lint: true,
+        auto_graph: false,
+      });
+      const next = await api.get<Record<string, unknown>>(`/agents/${seg}/config`);
+      setFullConfig(next);
       toast("Flow saved");
     } catch (err: any) {
       toast(err.message || "Failed to save flow");
@@ -157,6 +205,7 @@ export default function AgentFlowPage() {
   }
 
   if (error) {
+    if (error === "__not_found__") return <AgentNotFound />;
     return (
       <div className="text-center py-24">
         <p className="text-sm text-danger mb-2">{error}</p>
@@ -318,6 +367,9 @@ export default function AgentFlowPage() {
                 Each step in the flow defines how your agent processes a message.
                 Click a node to select it, then click "Connect" to link it to another step.
                 The flow starts at the trigger and follows the connections you define.
+              </p>
+              <p className="text-xs text-text-muted leading-relaxed mt-2">
+                This canvas is saved with your agent for planning. The live runtime graph is the declarative graph managed by AgentOS (create/update flows in the full builder when you need execution changes).
               </p>
             </Card>
           </div>

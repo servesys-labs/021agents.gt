@@ -1,10 +1,10 @@
 {
-  "name": "@agentos/cli",
+  "name": "@oneshots/cli",
   "version": "0.2.0",
   "description": "AgentOS CLI - Build, run, and deploy autonomous agents (Bun-optimized)",
   "type": "module",
   "bin": {
-    "agentos": "./dist/cli.js"
+    "oneshots": "./dist/cli.js"
   },
   "files": [
     "dist/",

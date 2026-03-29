@@ -307,23 +307,66 @@ export async function writeBillingRecord(
     output_tokens: number;
     cost_usd: number;
     plan: string;
+    trace_id?: string;
+    /** Portal user, end-user id, or channel user id (from RunRequest.channel_user_id). */
+    billing_user_id?: string;
+    /** API keys table key_id when the run used API key auth. */
+    api_key_id?: string;
   },
 ): Promise<void> {
   const sql = await getDb(hyperdrive);
-  // Best-effort — billing table may not exist yet in all deployments
+  const sessionId = String(record.session_id ?? "").trim();
+  const orgId = String(record.org_id ?? "").trim();
+  if (!orgId) return;
+
+  const traceId = String(record.trace_id ?? sessionId).trim() || sessionId;
+  const billingUserId = String(record.billing_user_id ?? "").trim();
+  const apiKeyId = String(record.api_key_id ?? "").trim();
+
+  try {
+    if (sessionId) {
+      const dup = await sql`
+        SELECT 1 FROM billing_records
+        WHERE org_id = ${orgId} AND session_id = ${sessionId} AND cost_type = 'inference'
+        LIMIT 1
+      `;
+      if (dup.length > 0) return;
+    }
+
+    await sql`
+      INSERT INTO billing_records (
+        org_id, customer_id, agent_name, billing_user_id, api_key_id, cost_type, description,
+        model, provider, input_tokens, output_tokens,
+        inference_cost_usd, total_cost_usd,
+        session_id, trace_id, pricing_source, pricing_key, unit, quantity, unit_price_usd
+      ) VALUES (
+        ${orgId}, '', ${record.agent_name}, ${billingUserId}, ${apiKeyId}, 'inference',
+        ${sessionId ? `Edge session ${sessionId}` : "Edge session"},
+        ${record.model}, '',
+        ${record.input_tokens}, ${record.output_tokens},
+        ${record.cost_usd}, ${record.cost_usd},
+        ${sessionId}, ${traceId},
+        'fallback_env', ${`edge:${record.plan || "standard"}`}, 'session', 1, ${record.cost_usd}
+      )
+    `;
+  } catch (err) {
+    console.error("[writeBillingRecord] billing_records insert failed", err);
+  }
+
+  // Legacy metering table (optional schema) — non-fatal
   try {
     await sql`
       INSERT INTO billing_events (
         session_id, org_id, agent_name, model,
         input_tokens, output_tokens, cost_usd, plan, created_at
       ) VALUES (
-        ${record.session_id}, ${record.org_id}, ${record.agent_name},
+        ${sessionId}, ${orgId}, ${record.agent_name},
         ${record.model}, ${record.input_tokens}, ${record.output_tokens},
         ${record.cost_usd}, ${record.plan}, ${new Date().toISOString()}
       )
     `;
   } catch {
-    // Billing table may not exist — non-fatal
+    /* billing_events may be missing or different shape */
   }
 }
 
@@ -1641,7 +1684,7 @@ export async function queryUsage(
     period_end: toTs,
   };
 
-  // Token totals from billing_events (if available)
+  // Token totals from billing_events (if available), else billing_records inference rows
   try {
     let tokenRows: any[];
     if (agentName) {
@@ -1663,6 +1706,30 @@ export async function queryUsage(
     summary.total_output_tokens = Number(tokenRows[0]?.total_out) || 0;
   } catch {
     // billing_events table may not exist
+  }
+  if (summary.total_input_tokens === 0 && summary.total_output_tokens === 0) {
+    try {
+      let br: any[];
+      if (agentName) {
+        br = await sql`
+          SELECT COALESCE(SUM(input_tokens), 0) as total_in, COALESCE(SUM(output_tokens), 0) as total_out
+          FROM billing_records
+          WHERE org_id = ${orgId} AND agent_name = ${agentName} AND cost_type = 'inference'
+            AND created_at >= ${fromTs} AND created_at <= ${toTs}
+        `;
+      } else {
+        br = await sql`
+          SELECT COALESCE(SUM(input_tokens), 0) as total_in, COALESCE(SUM(output_tokens), 0) as total_out
+          FROM billing_records
+          WHERE org_id = ${orgId} AND cost_type = 'inference'
+            AND created_at >= ${fromTs} AND created_at <= ${toTs}
+        `;
+      }
+      summary.total_input_tokens = Number(br[0]?.total_in) || 0;
+      summary.total_output_tokens = Number(br[0]?.total_out) || 0;
+    } catch {
+      /* billing_records may be missing */
+    }
   }
 
   // Paginated session list

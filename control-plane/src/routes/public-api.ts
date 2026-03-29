@@ -3,7 +3,7 @@
  *
  * Mounted at /v1 on the control-plane. Accessed via:
  *   - Custom org domains: POST https://acme.agentos.dev/v1/agents/my-bot/run
- *   - Direct with API key: POST https://agentos-control-plane.servesys.workers.dev/v1/agents/my-bot/run
+ *   - Direct with API key: POST https://api.oneshots.co/v1/agents/my-bot/run
  *
  * All routes require API key auth (ak_...). The org is resolved from:
  *   1. Custom domain hostname (via hostnameMiddleware)

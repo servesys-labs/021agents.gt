@@ -222,7 +222,11 @@ describe("voice routes", () => {
     const res = await app.request("/vapi/calls", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone_number: "+1" }),
+      body: JSON.stringify({
+        phone_number_id: "pn_1",
+        customer_phone: "+15551234567",
+        assistant_id: "asst_1",
+      }),
     }, mockEnv({ VAPI_API_KEY: undefined }));
     expect(res.status).toBe(400);
   });
@@ -249,7 +253,8 @@ describe("voice routes", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          phone_number: "pn_1",
+          phone_number_id: "pn_1",
+          customer_phone: "+15551234567",
           assistant_id: "asst_1",
           agent_name: "agent-a",
         }),
@@ -259,6 +264,8 @@ describe("voice routes", () => {
       expect(body.call_id).toBe("vapi-new-1");
       expect(body.status).toBe("initiated");
       expect(globalThis.fetch).toHaveBeenCalled();
+      const fetchUrl = (globalThis.fetch as any).mock.calls[0][0] as string;
+      expect(String(fetchUrl)).toContain("api.vapi.ai/call");
     });
 
     it("DELETE /vapi/calls/:id proxies end call", async () => {

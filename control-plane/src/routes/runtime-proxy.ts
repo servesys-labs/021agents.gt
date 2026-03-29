@@ -208,13 +208,14 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
           project_id: user.project_id || "",
           channel: "portal",
           channel_user_id: user.user_id,
+          api_key_id: user.apiKeyId ?? "",
           history: body.history,
         }),
       }),
     );
 
-    const result = await resp.json() as Record<string, unknown>;
-    return c.json(result);
+    const result = (await resp.json().catch(() => ({ error: "Invalid response from runtime" }))) as Record<string, unknown>;
+    return c.json(result, resp.status as 200 | 400 | 401 | 403 | 404 | 500 | 502 | 503);
   } catch (err: any) {
     return c.json({ error: `Runtime execution failed: ${err.message || err}` }, 502);
   }
@@ -295,6 +296,10 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
                   agent_name: agentName,
                   task: input,
                   org_id: user.org_id,
+                  project_id: user.project_id || "",
+                  channel: "portal",
+                  channel_user_id: user.user_id,
+                  api_key_id: user.apiKeyId ?? "",
                 }),
               }),
             );

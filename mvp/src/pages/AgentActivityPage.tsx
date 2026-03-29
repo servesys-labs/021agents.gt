@@ -12,6 +12,7 @@ import { AgentNotFound } from "../components/AgentNotFound";
 import { Button } from "../components/ui/Button";
 import { api } from "../lib/api";
 import { agentPathSegment } from "../lib/agent-path";
+import { ensureArray } from "../lib/ensure-array";
 
 interface AgentDetail {
   name: string;
@@ -26,7 +27,7 @@ interface Session {
   status: string;
   cost_total_usd: number;
   wall_clock_seconds: number;
-  created_at: string;
+  created_at: string | number;
 }
 
 const statusVariant: Record<string, "success" | "info" | "danger" | "warning"> = {
@@ -60,7 +61,7 @@ export default function AgentActivityPage() {
         api.get<Session[]>(`/sessions?agent_name=${q}&limit=20`),
       ]);
       setAgent(agentData);
-      setSessions(sessionData);
+      setSessions(ensureArray<Session>(sessionData));
     } catch (err: any) {
       if (err.status === 404) {
         setAgent(null);
@@ -112,7 +113,13 @@ export default function AgentActivityPage() {
   // Build daily chart data from sessions grouped by date
   const dailyMap = new Map<string, { count: number; successCount: number }>();
   sessions.forEach((s) => {
-    const day = s.created_at?.slice(0, 10) || "unknown";
+    const created = s.created_at;
+    const day =
+      typeof created === "string"
+        ? created.slice(0, 10)
+        : typeof created === "number"
+          ? new Date(created).toISOString().slice(0, 10)
+          : "unknown";
     const entry = dailyMap.get(day) || { count: 0, successCount: 0 };
     entry.count++;
     if (s.status === "completed") entry.successCount++;

@@ -10,12 +10,42 @@ import { Modal } from "../components/ui/Modal";
 import { useToast } from "../components/ui/Toast";
 import { api } from "../lib/api";
 import { agentPathSegment } from "../lib/agent-path";
+import { ensureArray } from "../lib/ensure-array";
 
 interface ConnectorProvider {
   app: string;
   name: string;
   connected: boolean;
   tool_count: number;
+}
+
+/** Control plane returns `{ providers: [...], active }`, not a bare array. */
+function normalizeConnectorProviders(body: unknown): ConnectorProvider[] {
+  if (Array.isArray(body)) {
+    return ensureArray<ConnectorProvider>(body);
+  }
+  if (body && typeof body === "object" && "providers" in body) {
+    const raw = ensureArray<{ name?: string; apps?: string; status?: string }>(
+      (body as { providers?: unknown }).providers,
+    );
+    const active = String((body as { active?: string }).active || "");
+    return raw.map((p) => {
+      const app = String(p.name || "unknown");
+      const appsLabel = String(p.apps || "");
+      const toolGuess = (() => {
+        const m = appsLabel.match(/[\d,]+/);
+        if (!m) return 0;
+        return parseInt(m[0].replace(/,/g, ""), 10) || 0;
+      })();
+      return {
+        app,
+        name: app.charAt(0).toUpperCase() + app.slice(1),
+        connected: p.status === "connected" || (!!active && active === app),
+        tool_count: toolGuess,
+      };
+    });
+  }
+  return [];
 }
 
 export default function AgentIntegrationsPage() {
@@ -40,14 +70,14 @@ export default function AgentIntegrationsPage() {
         setLoading(true);
         setError(null);
 
-        const [agent, providerList] = await Promise.all([
+        const [agent, providerBody] = await Promise.all([
           api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`),
-          api.get<ConnectorProvider[]>(`/connectors/providers`),
+          api.get<unknown>(`/connectors/providers`),
         ]);
         if (cancelled) return;
 
         setAgentName(agent.name ?? id);
-        setProviders(providerList || []);
+        setProviders(normalizeConnectorProviders(providerBody));
       } catch (err: any) {
         if (!cancelled) setError(err.message || "Failed to load integrations");
       } finally {
@@ -73,8 +103,8 @@ export default function AgentIntegrationsPage() {
       // Refresh providers after a delay to pick up new connection
       setTimeout(async () => {
         try {
-          const updated = await api.get<ConnectorProvider[]>(`/connectors/providers`);
-          setProviders(updated || []);
+          const updated = await api.get<unknown>(`/connectors/providers`);
+          setProviders(normalizeConnectorProviders(updated));
         } catch { /* ignore refresh errors */ }
       }, 3000);
     } catch (err: any) {

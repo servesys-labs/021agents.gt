@@ -47,7 +47,7 @@ function cachePut(hostname: string, org_id: string, allowed_origins: string[] | 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const MAIN_DOMAIN = "agentos-control-plane.servesys.workers.dev";
+const MAIN_DOMAIN = "api.oneshots.co";
 const PLATFORM_SUFFIX = ".agentos.dev";
 
 // ---------------------------------------------------------------------------

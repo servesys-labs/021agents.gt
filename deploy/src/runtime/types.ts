@@ -225,6 +225,8 @@ export interface RunRequest {
   task: string;
   org_id?: string;
   project_id?: string;
+  /** When set, stored on billing_records.api_key_id for usage attribution. */
+  api_key_id?: string;
   delegation?: {
     parent_session_id?: string;
     parent_trace_id?: string;

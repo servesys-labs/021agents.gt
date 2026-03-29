@@ -56,6 +56,64 @@ function randomId(): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/** Resolved tenant for Vapi webhooks (from agent voice config). */
+export type VapiWebhookTenantContext = {
+  org_id: string;
+  agent_name: string;
+};
+
+async function recordTelephonyBilling(
+  sql: Sql,
+  opts: {
+    org_id: string;
+    agent_name: string;
+    call_id: string;
+    cost_usd: number;
+    duration_seconds: number;
+  },
+): Promise<void> {
+  if (!opts.org_id.trim() || !opts.call_id.trim()) return;
+  const traceId = `vapi:${opts.call_id}`;
+  try {
+    const existing = await sql`
+      SELECT 1 FROM billing_records
+      WHERE org_id = ${opts.org_id}
+        AND trace_id = ${traceId}
+        AND cost_type = 'telephony'
+      LIMIT 1
+    `;
+    if (existing.length > 0) return;
+
+    const qty = opts.duration_seconds > 0 ? opts.duration_seconds : 1;
+    const unit = opts.duration_seconds > 0 ? "second" : "call";
+    const unitPrice = opts.cost_usd > 0 ? opts.cost_usd / qty : 0;
+
+    await sql`
+      INSERT INTO billing_records (
+        org_id, agent_name, cost_type, description,
+        model, provider, total_cost_usd, inference_cost_usd,
+        session_id, trace_id,
+        unit, quantity, unit_price_usd, pricing_source
+      ) VALUES (
+        ${opts.org_id},
+        ${opts.agent_name || ""},
+        'telephony',
+        ${`Vapi call ${opts.call_id}`},
+        'vapi', 'vapi',
+        ${opts.cost_usd}, 0,
+        ${traceId},
+        ${traceId},
+        ${unit},
+        ${qty},
+        ${unitPrice},
+        'fallback_env'
+      )
+    `;
+  } catch {
+    /* best-effort */
+  }
+}
+
 function parseVapiEvent(payload: Record<string, unknown>): {
   event_type: string;
   call_id: string;
@@ -72,8 +130,10 @@ function parseVapiEvent(payload: Record<string, unknown>): {
 export async function processVapiWebhook(
   payload: Record<string, unknown>,
   sql: Sql,
-  orgId: string,
+  tenant: VapiWebhookTenantContext,
 ): Promise<Record<string, unknown>> {
+  const orgId = String(tenant.org_id ?? "");
+  const agentName = String(tenant.agent_name ?? "");
   const { event_type, call_id } = parseVapiEvent(payload);
   const result: Record<string, unknown> = {
     event_type,
@@ -97,7 +157,7 @@ export async function processVapiWebhook(
           call_id, platform, org_id, agent_name, phone_number, direction, status,
           platform_agent_id, started_at
         ) VALUES (
-          ${id}, 'vapi', ${orgId}, '', ${phone}, ${direction}, 'connected',
+          ${id}, 'vapi', ${orgId}, ${agentName}, ${phone}, ${direction}, 'connected',
           ${assistantId}, ${nowSec()}
         )
         ON CONFLICT (call_id) DO UPDATE SET
@@ -105,7 +165,9 @@ export async function processVapiWebhook(
           phone_number = EXCLUDED.phone_number,
           direction = EXCLUDED.direction,
           platform_agent_id = EXCLUDED.platform_agent_id,
-          started_at = EXCLUDED.started_at
+          started_at = EXCLUDED.started_at,
+          org_id = COALESCE(NULLIF(TRIM(voice_calls.org_id), ''), EXCLUDED.org_id),
+          agent_name = COALESCE(NULLIF(TRIM(voice_calls.agent_name), ''), EXCLUDED.agent_name)
       `;
     } catch {
       /* best-effort */
@@ -131,11 +193,45 @@ export async function processVapiWebhook(
             duration_seconds = ${duration},
             cost_usd = ${cost},
             transcript = ${transcript.slice(0, 5000)},
-            ended_at = ${nowSec()}
+            ended_at = ${nowSec()},
+            org_id = CASE
+              WHEN ${orgId} = '' THEN org_id
+              WHEN org_id IS NULL OR TRIM(org_id) = '' THEN ${orgId}
+              ELSE org_id
+            END,
+            agent_name = CASE
+              WHEN ${agentName} = '' THEN agent_name
+              WHEN agent_name IS NULL OR TRIM(agent_name) = '' THEN ${agentName}
+              ELSE agent_name
+            END
           WHERE call_id = ${call_id} AND platform = 'vapi'
         `;
       } catch {
         /* best-effort */
+      }
+      let billOrg = orgId;
+      let billAgent = agentName;
+      if (!billOrg.trim() || !billAgent.trim()) {
+        try {
+          const rows = (await sql`
+            SELECT org_id, agent_name FROM voice_calls
+            WHERE call_id = ${call_id} AND platform = 'vapi' LIMIT 1
+          `) as { org_id?: string; agent_name?: string }[];
+          const r = rows[0];
+          if (!billOrg.trim() && r?.org_id) billOrg = String(r.org_id);
+          if (!billAgent.trim() && r?.agent_name) billAgent = String(r.agent_name);
+        } catch {
+          /* best-effort */
+        }
+      }
+      if (billOrg.trim() && (cost > 0 || duration > 0)) {
+        await recordTelephonyBilling(sql, {
+          org_id: billOrg,
+          agent_name: billAgent,
+          call_id,
+          cost_usd: cost,
+          duration_seconds: duration,
+        });
       }
     }
     result.duration_seconds = duration;
@@ -184,6 +280,8 @@ export async function processVapiWebhook(
     }
   }
 
+  result.tenant_org_id = orgId;
+  result.tenant_agent_name = agentName;
   return result;
 }
 

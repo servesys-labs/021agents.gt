@@ -28,6 +28,13 @@ export function summarizeCoverage(paths: string[]): {
 
 /* ── Usage & Billing ─────────────────────────────────────────── */
 
+export type BillingSubjectRow = {
+  billing_user_id: string;
+  api_key_id: string;
+  cost_usd: number;
+  record_count: number;
+};
+
 export type UsageResponse = {
   total_cost_usd?: number;
   total_input_tokens?: number;
@@ -35,9 +42,11 @@ export type UsageResponse = {
   by_model?: Record<string, number>;
   by_cost_type?: Record<string, number>;
   by_agent?: Record<string, number>;
+  by_billing_subject?: BillingSubjectRow[];
   inference_cost_usd?: number;
   connector_cost_usd?: number;
   gpu_compute_cost_usd?: number;
+  telephony_cost_usd?: number;
 };
 
 export type DailyUsageResponse = {

@@ -244,6 +244,8 @@ export async function streamRun(
     org_id?: string;
     project_id?: string;
     channel?: string;
+    channel_user_id?: string;
+    api_key_id?: string;
     history_messages?: Array<{ role: "user" | "assistant"; content: string }>;
     delegation?: DelegationContextInput;
   },
@@ -538,6 +540,9 @@ export async function streamRun(
       session_id: sessionId, org_id: config.org_id, agent_name: config.agent_name,
       model: lastModel, input_tokens: totalInputTokens, output_tokens: totalOutputTokens,
       cost_usd: cumulativeCost, plan: config.plan,
+      trace_id: traceId,
+      billing_user_id: opts?.channel_user_id,
+      api_key_id: opts?.api_key_id,
     }).catch(() => {});
 
     const doneEvent: DoneEvent = {

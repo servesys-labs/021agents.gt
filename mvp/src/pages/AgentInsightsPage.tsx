@@ -11,6 +11,7 @@ import { Badge } from "../components/ui/Badge";
 import { SimpleChart } from "../components/SimpleChart";
 import { api } from "../lib/api";
 import { agentPathSegment } from "../lib/agent-path";
+import { ensureArray } from "../lib/ensure-array";
 
 interface TopicInsight {
   topic: string;
@@ -25,13 +26,6 @@ interface KnowledgeGap {
   count: number;
   category: string;
   suggestion: string;
-}
-
-interface IntelligenceData {
-  topics?: TopicInsight[];
-  gaps?: KnowledgeGap[];
-  sentiment_data?: { label: string; value: number }[];
-  resolution_data?: { label: string; value: number }[];
 }
 
 const sentimentIcon = {
@@ -59,6 +53,12 @@ export default function AgentInsightsPage() {
   const [gaps, setGaps] = useState<KnowledgeGap[]>([]);
   const [sentimentData, setSentimentData] = useState<{ label: string; value: number }[]>([]);
   const [resolutionData, setResolutionData] = useState<{ label: string; value: number }[]>([]);
+  /** When set, sentiment tab uses DB distribution instead of per-topic sentiment. */
+  const [sentimentCounts, setSentimentCounts] = useState<{
+    positive: number;
+    neutral: number;
+    negative: number;
+  } | null>(null);
 
   useEffect(() => {
     if (!id) return;
@@ -69,17 +69,60 @@ export default function AgentInsightsPage() {
         setLoading(true);
         setError(null);
 
-        const [agent, intelligence] = await Promise.all([
-          api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`),
-          api.get<IntelligenceData>(`/intelligence?agent_name=${encodeURIComponent(id.trim())}`),
-        ]);
+        const agent = await api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`);
+        if (cancelled) return;
+        setAgentName(agent.name ?? id);
+
+        const trends = await api
+          .get<Record<string, unknown>>(
+            `/intelligence/trends?agent_name=${encodeURIComponent(id.trim())}&since_days=30`,
+          )
+          .catch(() => ({} as Record<string, unknown>));
         if (cancelled) return;
 
-        setAgentName(agent.name ?? id);
-        setTopics(intelligence.topics || []);
-        setGaps(intelligence.gaps || []);
-        setSentimentData(intelligence.sentiment_data || []);
-        setResolutionData(intelligence.resolution_data || []);
+        const topicDist = trends.topic_distribution;
+        if (topicDist && typeof topicDist === "object" && !Array.isArray(topicDist)) {
+          const topicList: TopicInsight[] = Object.entries(topicDist as Record<string, unknown>)
+            .map(([topic, count]) => ({
+              topic,
+              count: Number(count) || 0,
+              trend: "flat" as const,
+              sentiment: "neutral" as const,
+              sample_question: "",
+            }))
+            .filter((t) => t.count > 0)
+            .sort((a, b) => b.count - a.count);
+          setTopics(topicList);
+        } else {
+          setTopics([]);
+        }
+
+        const sentDist = trends.sentiment_distribution;
+        if (sentDist && typeof sentDist === "object" && !Array.isArray(sentDist)) {
+          const o = sentDist as Record<string, unknown>;
+          const n = (k: string) => Number(o[k] ?? 0) || 0;
+          setSentimentData(
+            Object.entries(o).map(([label, value]) => ({ label, value: Number(value) || 0 })),
+          );
+          setSentimentCounts({
+            positive: n("positive") + n("Positive"),
+            neutral: n("neutral") + n("Neutral"),
+            negative: n("negative") + n("Negative"),
+          });
+        } else {
+          setSentimentData([]);
+          setSentimentCounts(null);
+        }
+
+        const daily = ensureArray<{ day?: string; avg_quality?: number }>(trends.daily);
+        setResolutionData(
+          daily.map((d) => ({
+            label: String(d.day || "").slice(5) || "—",
+            value: Math.min(100, Math.round((Number(d.avg_quality) || 0) * 100)),
+          })),
+        );
+
+        setGaps([]);
       } catch (err: any) {
         if (!cancelled) setError(err.message || "Failed to load insights");
       } finally {
@@ -112,7 +155,18 @@ export default function AgentInsightsPage() {
 
   const totalQuestions = topics.reduce((s, t) => s + t.count, 0);
   const avgSentiment = sentimentData.length > 0 ? Math.round(sentimentData.reduce((s, d) => s + d.value, 0) / sentimentData.length) : 0;
-  const isEmpty = topics.length === 0 && gaps.length === 0 && sentimentData.length === 0;
+  const isEmpty = topics.length === 0 && gaps.length === 0 && sentimentData.length === 0 && resolutionData.length === 0;
+
+  const posSent = sentimentCounts
+    ? sentimentCounts.positive
+    : topics.filter((t) => t.sentiment === "positive").reduce((s, t) => s + t.count, 0);
+  const neuSent = sentimentCounts
+    ? sentimentCounts.neutral
+    : topics.filter((t) => t.sentiment === "neutral").reduce((s, t) => s + t.count, 0);
+  const negSent = sentimentCounts
+    ? sentimentCounts.negative
+    : topics.filter((t) => t.sentiment === "negative").reduce((s, t) => s + t.count, 0);
+  const sentDistTotal = posSent + neuSent + negSent;
 
   if (isEmpty) {
     return (
@@ -266,13 +320,9 @@ export default function AgentInsightsPage() {
                     <ThumbsUp size={16} className="text-success" />
                     <span className="text-sm font-medium text-text">Positive</span>
                   </div>
-                  <p className="text-2xl font-semibold text-success">
-                    {topics.filter((t) => t.sentiment === "positive").reduce((s, t) => s + t.count, 0)}
-                  </p>
+                  <p className="text-2xl font-semibold text-success">{posSent}</p>
                   <p className="text-xs text-text-muted mt-1">
-                    {totalQuestions > 0 ? Math.round(
-                      (topics.filter((t) => t.sentiment === "positive").reduce((s, t) => s + t.count, 0) / totalQuestions) * 100,
-                    ) : 0}% of conversations
+                    {sentDistTotal > 0 ? Math.round((posSent / sentDistTotal) * 100) : 0}% of scored turns
                   </p>
                 </Card>
                 <Card>
@@ -280,13 +330,9 @@ export default function AgentInsightsPage() {
                     <Minus size={16} className="text-text-muted" />
                     <span className="text-sm font-medium text-text">Neutral</span>
                   </div>
-                  <p className="text-2xl font-semibold text-text">
-                    {topics.filter((t) => t.sentiment === "neutral").reduce((s, t) => s + t.count, 0)}
-                  </p>
+                  <p className="text-2xl font-semibold text-text">{neuSent}</p>
                   <p className="text-xs text-text-muted mt-1">
-                    {totalQuestions > 0 ? Math.round(
-                      (topics.filter((t) => t.sentiment === "neutral").reduce((s, t) => s + t.count, 0) / totalQuestions) * 100,
-                    ) : 0}% of conversations
+                    {sentDistTotal > 0 ? Math.round((neuSent / sentDistTotal) * 100) : 0}% of scored turns
                   </p>
                 </Card>
                 <Card>
@@ -294,13 +340,9 @@ export default function AgentInsightsPage() {
                     <ThumbsDown size={16} className="text-danger" />
                     <span className="text-sm font-medium text-text">Negative</span>
                   </div>
-                  <p className="text-2xl font-semibold text-danger">
-                    {topics.filter((t) => t.sentiment === "negative").reduce((s, t) => s + t.count, 0)}
-                  </p>
+                  <p className="text-2xl font-semibold text-danger">{negSent}</p>
                   <p className="text-xs text-text-muted mt-1">
-                    {totalQuestions > 0 ? Math.round(
-                      (topics.filter((t) => t.sentiment === "negative").reduce((s, t) => s + t.count, 0) / totalQuestions) * 100,
-                    ) : 0}% of conversations
+                    {sentDistTotal > 0 ? Math.round((negSent / sentDistTotal) * 100) : 0}% of scored turns
                   </p>
                 </Card>
               </div>

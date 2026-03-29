@@ -241,6 +241,9 @@ export async function edgeRun(
     output_tokens: ctx.totalOutputTokens,
     cost_usd: ctx.cumulativeCost,
     plan: config.plan,
+    trace_id: traceId,
+    billing_user_id: request.channel_user_id,
+    api_key_id: request.api_key_id,
   }));
 
   if (telemetryQueue) {
@@ -834,6 +837,7 @@ export async function edgeResume(
     output_tokens: ctx.totalOutputTokens,
     cost_usd: ctx.cumulativeCost,
     plan: config.plan,
+    trace_id: checkpoint.trace_id,
   });
 
   return {

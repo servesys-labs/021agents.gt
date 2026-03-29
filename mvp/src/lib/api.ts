@@ -1,4 +1,4 @@
-const BASE = (globalThis as any).__VITE_API_URL ?? "https://agentos-control-plane.servesys.workers.dev/api/v1";
+const BASE = (globalThis as any).__VITE_API_URL ?? "https://api.oneshots.co/api/v1";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {

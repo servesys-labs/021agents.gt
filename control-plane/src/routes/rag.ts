@@ -84,34 +84,62 @@ ragRoutes.openapi(ingestRoute, async (c): Promise<any> => {
     return c.json({ error: "No valid documents to ingest" }, 400);
   }
 
-  // Store documents in R2
-  let totalChunks = 0;
+  type DocEntry = { length: number; metadata: { source: string; filename: string; agent: string } };
+  const newNames = new Set(metadatas.map((m) => m.filename));
+  let keptDocs: DocEntry[] = [];
+  const indexKey = `rag/${agentName}/index.json`;
+  const prevIndexObj = await c.env.STORAGE.get(indexKey);
+  if (prevIndexObj) {
+    try {
+      const old = (await prevIndexObj.json()) as { documents?: DocEntry[] };
+      const prev = Array.isArray(old.documents) ? old.documents : [];
+      keptDocs = prev.filter((d) => !newNames.has(String(d?.metadata?.filename || "")));
+    } catch {
+      keptDocs = [];
+    }
+  }
+
+  const newEntries: DocEntry[] = documents.map((d, i) => ({
+    length: d.length,
+    metadata: metadatas[i],
+  }));
+  const mergedEntries = [...keptDocs, ...newEntries];
+
+  // Store documents in R2 + build chunks for this batch only (vectorize)
+  let batchChunks = 0;
   const allChunks: { text: string; metadata: any }[] = [];
 
   for (let i = 0; i < documents.length; i++) {
     const chunks = chunkText(documents[i], chunkSize);
-    totalChunks += chunks.length;
+    batchChunks += chunks.length;
     for (const chunk of chunks) {
       allChunks.push({ text: chunk, metadata: metadatas[i] });
     }
 
-    // Store raw document in R2
     const key = `rag/${agentName}/documents/${metadatas[i].filename}`;
     await c.env.STORAGE.put(key, documents[i], {
       httpMetadata: { contentType: "text/plain" },
     });
   }
 
+  let totalChunks = 0;
+  for (const e of mergedEntries) {
+    const len = typeof e.length === "number" ? e.length : 0;
+    totalChunks += Math.max(1, Math.ceil(len / chunkSize));
+  }
+
+  const sourceFiles = mergedEntries.map((e) => String(e.metadata?.filename || e.metadata?.source || "")).filter(Boolean);
+
   // Store index metadata in R2
   const indexData = {
     agent: agentName,
     chunk_size: chunkSize,
-    documents: documents.map((d, i) => ({ length: d.length, metadata: metadatas[i] })),
+    documents: mergedEntries,
     total_chunks: totalChunks,
-    source_files: metadatas.map((m) => m.source),
+    source_files: sourceFiles,
     updated_at: Date.now() / 1000,
   };
-  await c.env.STORAGE.put(`rag/${agentName}/index.json`, JSON.stringify(indexData, null, 2), {
+  await c.env.STORAGE.put(indexKey, JSON.stringify(indexData, null, 2), {
     httpMetadata: { contentType: "application/json" },
   });
 
@@ -157,7 +185,9 @@ ragRoutes.openapi(ingestRoute, async (c): Promise<any> => {
 
   return c.json({
     documents: documents.length,
-    chunks: totalChunks,
+    chunks: batchChunks,
+    total_documents: mergedEntries.length,
+    total_chunks: totalChunks,
     sources: metadatas.map((m) => m.filename),
   });
 });
@@ -196,6 +226,7 @@ ragRoutes.openapi(statusRoute, async (c): Promise<any> => {
       chunks: data.total_chunks || 0,
       chunk_size: data.chunk_size || 512,
       sources: data.source_files || [],
+      updated_at: typeof data.updated_at === "number" ? data.updated_at : undefined,
     });
   } catch {
     return c.json({ indexed: false, documents: 0, chunks: 0 });
@@ -231,4 +262,75 @@ ragRoutes.openapi(listDocumentsRoute, async (c): Promise<any> => {
   } catch {
     return c.json({ documents: [] });
   }
+});
+
+// ── DELETE /:agent_name/documents/:filename — remove one indexed file ─
+
+const deleteDocumentRoute = createRoute({
+  method: "delete",
+  path: "/{agent_name}/documents/{filename}",
+  tags: ["RAG"],
+  summary: "Delete one RAG source file and update the agent index",
+  middleware: [requireScope("rag:write")],
+  request: {
+    params: z.object({
+      agent_name: z.string(),
+      filename: z.string(),
+    }),
+  },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(404),
+  },
+});
+ragRoutes.openapi(deleteDocumentRoute, async (c): Promise<any> => {
+  const { agent_name: agentName, filename: filenameParam } = c.req.valid("param");
+  const filename = decodeURIComponent(filenameParam);
+
+  const indexKey = `rag/${agentName}/index.json`;
+  const indexObj = await c.env.STORAGE.get(indexKey);
+  if (!indexObj) {
+    return c.json({ error: "No index for this agent" }, 404);
+  }
+
+  let data: Record<string, unknown>;
+  try {
+    data = (await indexObj.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ error: "Invalid index" }, 404);
+  }
+
+  const docs = Array.isArray(data.documents)
+    ? (data.documents as { length?: number; metadata?: { filename?: string; source?: string } }[])
+    : [];
+  const nextDocs = docs.filter((d) => String(d?.metadata?.filename || d?.metadata?.source || "") !== filename);
+  if (nextDocs.length === docs.length) {
+    return c.json({ error: `Document '${filename}' not found` }, 404);
+  }
+
+  const docKey = `rag/${agentName}/documents/${filename}`;
+  await c.env.STORAGE.delete(docKey).catch(() => {});
+
+  const chunkSize = Number(data.chunk_size) || 512;
+  let totalChunks = 0;
+  for (const d of nextDocs) {
+    const len = typeof d.length === "number" ? d.length : 0;
+    totalChunks += Math.max(1, Math.ceil(len / chunkSize));
+  }
+
+  const sourceFiles = nextDocs.map((d) => String(d?.metadata?.filename || d?.metadata?.source || "")).filter(Boolean);
+
+  const nextIndex = {
+    ...data,
+    documents: nextDocs,
+    total_chunks: totalChunks,
+    source_files: sourceFiles,
+    updated_at: Date.now() / 1000,
+  };
+
+  await c.env.STORAGE.put(indexKey, JSON.stringify(nextIndex, null, 2), {
+    httpMetadata: { contentType: "application/json" },
+  });
+
+  return c.json({ deleted: filename, documents_remaining: nextDocs.length });
 });

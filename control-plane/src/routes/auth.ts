@@ -983,3 +983,172 @@ authRoutes.post("/resend-verification", async (c) => {
 
   return c.json({ message: "Verification email sent" });
 });
+
+// ── GET /cli — CLI login redirect page ────────────────────────────────────
+
+const cliLoginRoute = createRoute({
+  method: "get",
+  path: "/cli",
+  tags: ["Auth"],
+  summary: "CLI login — show login form or redirect if already authenticated",
+  security: [],
+  request: {
+    query: z.object({
+      port: z.string().min(1),
+      state: z.string().min(1),
+    }),
+  },
+  responses: {
+    200: { description: "Login form HTML" },
+    302: { description: "Redirect to CLI callback (already authenticated)" },
+    ...errorResponses(400),
+  },
+});
+
+authRoutes.openapi(cliLoginRoute, async (c): Promise<any> => {
+  const { port, state } = c.req.valid("query");
+
+  // Check if user already has a valid session (Authorization header or cookie)
+  const existingUser = await resolveUser(c);
+  if (existingUser && existingUser.user_id) {
+    // Issue a fresh JWT and redirect straight to CLI callback
+    const token = await createToken(c.env.AUTH_JWT_SECRET, existingUser.user_id, {
+      email: existingUser.email,
+      name: existingUser.name,
+      org_id: existingUser.org_id,
+      provider: existingUser.auth_method,
+      expiry_seconds: 24 * 60 * 60,
+    });
+    return c.redirect(
+      `http://localhost:${encodeURIComponent(port)}/callback?token=${encodeURIComponent(token)}&state=${encodeURIComponent(state)}`,
+    );
+  }
+
+  // Render login form
+  const html = `<!DOCTYPE html>
+<html>
+<head><title>OneShots CLI Login</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 400px; margin: 80px auto; padding: 20px;">
+  <h2>Sign in to OneShots CLI</h2>
+  <form method="POST" action="/api/v1/auth/cli/callback">
+    <input type="hidden" name="port" value="${port.replace(/"/g, "&quot;")}">
+    <input type="hidden" name="state" value="${state.replace(/"/g, "&quot;")}">
+    <label>Email<br><input type="email" name="email" required style="width:100%;padding:8px;margin:4px 0 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;"></label>
+    <label>Password<br><input type="password" name="password" required style="width:100%;padding:8px;margin:4px 0 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;"></label>
+    <button type="submit" style="width:100%;padding:10px;background:#6366f1;color:white;border:none;border-radius:6px;cursor:pointer;font-size:14px;">Sign in</button>
+  </form>
+</body>
+</html>`;
+
+  return c.html(html);
+});
+
+// ── POST /cli/callback — Process login form and redirect to CLI ──────────
+
+const cliCallbackRoute = createRoute({
+  method: "post",
+  path: "/cli/callback",
+  tags: ["Auth"],
+  summary: "CLI login callback — validate credentials and redirect to local CLI server",
+  security: [],
+  request: {
+    body: {
+      content: {
+        "application/x-www-form-urlencoded": {
+          schema: z.object({
+            email: z.string().min(1),
+            password: z.string().min(1),
+            port: z.string().min(1),
+            state: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    302: { description: "Redirect to CLI callback on success" },
+    200: { description: "Re-rendered login form with error" },
+    ...errorResponses(400, 429),
+  },
+});
+
+authRoutes.openapi(cliCallbackRoute, async (c): Promise<any> => {
+  const { email, password, port, state } = c.req.valid("form");
+
+  const loginLimit = checkRateLimit(c, `cli-login:${getClientIp(c)}`, 10, 60 * 60 * 1000);
+  if (loginLimit) return loginLimit as any;
+
+  const sql = await getDb(c.env.HYPERDRIVE);
+
+  // Validate credentials (same logic as POST /login)
+  const rows = await sql`
+    SELECT user_id, email, name, password_hash FROM users WHERE email = ${email}
+  `;
+
+  let errorMsg = "";
+
+  if (rows.length === 0) {
+    errorMsg = "Invalid email or password.";
+  } else {
+    const user = rows[0];
+    if (!user.password_hash) {
+      errorMsg = "Invalid email or password.";
+    } else {
+      const valid = await verifyPassword(password, user.password_hash);
+      if (!valid) {
+        errorMsg = "Invalid email or password.";
+      }
+    }
+  }
+
+  if (errorMsg) {
+    // Re-render form with error
+    const html = `<!DOCTYPE html>
+<html>
+<head><title>OneShots CLI Login</title></head>
+<body style="font-family: system-ui, sans-serif; max-width: 400px; margin: 80px auto; padding: 20px;">
+  <h2>Sign in to OneShots CLI</h2>
+  <div style="background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; border-radius: 6px; padding: 10px; margin-bottom: 16px; font-size: 14px;">${errorMsg}</div>
+  <form method="POST" action="/api/v1/auth/cli/callback">
+    <input type="hidden" name="port" value="${port.replace(/"/g, "&quot;")}">
+    <input type="hidden" name="state" value="${state.replace(/"/g, "&quot;")}">
+    <label>Email<br><input type="email" name="email" required value="${email.replace(/"/g, "&quot;")}" style="width:100%;padding:8px;margin:4px 0 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;"></label>
+    <label>Password<br><input type="password" name="password" required style="width:100%;padding:8px;margin:4px 0 12px;border:1px solid #ddd;border-radius:6px;box-sizing:border-box;"></label>
+    <button type="submit" style="width:100%;padding:10px;background:#6366f1;color:white;border:none;border-radius:6px;cursor:pointer;font-size:14px;">Sign in</button>
+  </form>
+</body>
+</html>`;
+    return c.html(html);
+  }
+
+  // Credentials valid — issue JWT and redirect to CLI
+  const user = rows[0];
+  const orgRows = await sql`
+    SELECT org_id FROM org_members WHERE user_id = ${user.user_id} LIMIT 1
+  `;
+  const orgId = orgRows.length > 0 ? orgRows[0].org_id : "";
+
+  const token = await createToken(c.env.AUTH_JWT_SECRET, user.user_id, {
+    email: user.email,
+    name: user.name || "",
+    org_id: orgId,
+    provider: "local",
+    expiry_seconds: 24 * 60 * 60,
+  });
+
+  auditAuthEvent(sql, "auth.cli_login", user.user_id, String(orgId), { email: user.email, provider: "local" });
+
+  logSecurityEvent(sql, {
+    org_id: String(orgId),
+    event_type: "login.success",
+    actor_id: user.user_id,
+    actor_type: "user",
+    ip_address: getClientIp(c),
+    severity: "info",
+    details: { email: user.email, provider: "local", method: "cli" },
+  });
+
+  return c.redirect(
+    `http://localhost:${encodeURIComponent(port)}/callback?token=${encodeURIComponent(token)}&state=${encodeURIComponent(state)}`,
+  );
+});

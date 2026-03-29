@@ -1,9 +1,9 @@
 /**
- * @agentos/sdk — Official TypeScript SDK for AgentOS
+ * @oneshots/sdk — Official TypeScript SDK for AgentOS
  *
  * @example
  * ```ts
- * import { AgentOS } from "@agentos/sdk";
+ * import { AgentOS } from "@oneshots/sdk";
  *
  * const client = new AgentOS({ apiKey: "ak_live_..." });
  *

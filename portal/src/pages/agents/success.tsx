@@ -18,7 +18,7 @@ export function SuccessPage() {
   const { name: agentName } = useParams<{ name: string }>();
   const navigate = useNavigate();
 
-  const prodWorkerBase = "https://agentos.servesys.workers.dev";
+  const prodWorkerBase = "https://runtime.oneshots.co";
   const restUrl = `${prodWorkerBase}/api/v1/agents/${agentName}/run`;
 
   const nextSteps = [
@@ -101,7 +101,7 @@ export function SuccessPage() {
             <div className="flex-1 min-w-0">
               <p className="text-[var(--text-sm)] text-text-primary">WebSocket</p>
               <p className="text-[var(--text-xs)] text-text-muted font-mono truncate">
-                wss://agentos.servesys.workers.dev/agents/agentos-agent/{agentName}
+                wss://runtime.oneshots.co/agents/agentos-agent/{agentName}
               </p>
             </div>
             <span className="badge-live">LIVE</span>

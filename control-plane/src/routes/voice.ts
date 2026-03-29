@@ -14,12 +14,276 @@ import {
   verifyWebhookHmac,
   VOICE_GENERIC_PLATFORMS,
 } from "../logic/voice-webhook";
+import { extractVapiCallIds, resolveVapiVoiceTenant } from "../logic/voice-tenant";
 
 export const voiceRoutes = createOpenAPIRouter();
 
 function nowSec(): string {
   return new Date().toISOString();
 }
+
+function parseAgentConfigJson(raw: unknown): Record<string, unknown> {
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  return {};
+}
+
+function mapVoiceCallRow(r: Record<string, unknown>): Record<string, unknown> {
+  const statusRaw = String(r.status ?? "").toLowerCase();
+  let status: "completed" | "missed" | "voicemail" = "completed";
+  if (statusRaw === "failed" || statusRaw === "busy" || statusRaw === "no-answer") status = "missed";
+  else if (statusRaw.includes("voice")) status = "voicemail";
+
+  const started = r.started_at ?? r.created_at;
+  let startedAt = new Date().toISOString();
+  try {
+    if (typeof started === "string" || typeof started === "number") {
+      startedAt = new Date(started).toISOString();
+    }
+  } catch {
+    /* keep default */
+  }
+
+  return {
+    id: String(r.call_id ?? ""),
+    caller: String(r.phone_number ?? ""),
+    duration_seconds: Number(r.duration_seconds ?? 0),
+    status,
+    started_at: startedAt,
+    summary: String(r.transcript ?? "").slice(0, 500),
+  };
+}
+
+async function vapiForwardGet(env: { VAPI_API_KEY?: string }, path: string): Promise<Response> {
+  const key = String(env.VAPI_API_KEY ?? "").trim();
+  if (!key) {
+    return new Response(JSON.stringify({ error: "VAPI_API_KEY not configured" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return fetch(`https://api.vapi.ai${path}`, {
+    headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+  });
+}
+
+// ── GET/PUT /config — MVP agent voice prefs + call history (server-side Vapi key) ─
+
+const getVoiceConfigRoute = createRoute({
+  method: "get",
+  path: "/config",
+  tags: ["Voice"],
+  summary: "Voice UI config for an agent (prefs + recent Vapi calls)",
+  middleware: [requireScope("agents:read")],
+  request: {
+    query: z.object({ agent_name: z.string().min(1) }),
+  },
+  responses: {
+    200: { description: "Voice config", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 404),
+  },
+});
+voiceRoutes.openapi(getVoiceConfigRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name: agentName } = c.req.valid("query");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const rows = await sql`
+    SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+  `;
+  if (rows.length === 0) {
+    return c.json({ error: `Agent '${agentName}' not found` }, 404);
+  }
+
+  const cfg = parseAgentConfigJson((rows[0] as Record<string, unknown>).config_json);
+  const voice = (cfg.voice && typeof cfg.voice === "object" && !Array.isArray(cfg.voice)
+    ? (cfg.voice as Record<string, unknown>)
+    : {}) as Record<string, unknown>;
+
+  const vapiAssistantId = String(voice.vapi_assistant_id ?? "");
+  let callRows: Record<string, unknown>[] = [];
+  try {
+    if (vapiAssistantId) {
+      callRows = (await sql`
+        SELECT * FROM voice_calls
+        WHERE org_id = ${user.org_id} AND platform = 'vapi' AND platform_agent_id = ${vapiAssistantId}
+        ORDER BY started_at DESC
+        LIMIT 50
+      `) as Record<string, unknown>[];
+    } else {
+      callRows = (await sql`
+        SELECT * FROM voice_calls
+        WHERE org_id = ${user.org_id} AND platform = 'vapi' AND agent_name = ${agentName}
+        ORDER BY started_at DESC
+        LIMIT 50
+      `) as Record<string, unknown>[];
+    }
+  } catch {
+    callRows = [];
+  }
+
+  const vapiConfigured = Boolean(String(c.env.VAPI_API_KEY ?? "").trim());
+
+  return c.json({
+    voice: String(voice.voice ?? "alloy"),
+    greeting: String(voice.greeting ?? ""),
+    language: String(voice.language ?? "en"),
+    max_duration: Number(voice.max_duration ?? 600),
+    vapi_configured: vapiConfigured,
+    vapi_assistant_id: vapiAssistantId,
+    vapi_phone_number_id: String(voice.vapi_phone_number_id ?? ""),
+    calls: callRows.map((r) => mapVoiceCallRow(r)),
+  });
+});
+
+const putVoiceConfigRoute = createRoute({
+  method: "put",
+  path: "/config",
+  tags: ["Voice"],
+  summary: "Update voice UI prefs and Vapi resource IDs on an agent",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1),
+            voice: z.string().optional(),
+            greeting: z.string().optional(),
+            language: z.string().optional(),
+            max_duration: z.coerce.number().int().min(60).max(7200).optional(),
+            vapi_assistant_id: z.string().optional(),
+            vapi_phone_number_id: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Updated", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 404),
+  },
+});
+voiceRoutes.openapi(putVoiceConfigRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const body = c.req.valid("json");
+  const agentName = body.agent_name;
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const rows = await sql`
+    SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1
+  `;
+  if (rows.length === 0) {
+    return c.json({ error: `Agent '${agentName}' not found` }, 404);
+  }
+
+  const cfg = parseAgentConfigJson((rows[0] as Record<string, unknown>).config_json);
+  const prevVoice =
+    cfg.voice && typeof cfg.voice === "object" && !Array.isArray(cfg.voice)
+      ? (cfg.voice as Record<string, unknown>)
+      : {};
+  const nextVoice: Record<string, unknown> = { ...prevVoice };
+  if (body.voice !== undefined) nextVoice.voice = body.voice;
+  if (body.greeting !== undefined) nextVoice.greeting = body.greeting;
+  if (body.language !== undefined) nextVoice.language = body.language;
+  if (body.max_duration !== undefined) nextVoice.max_duration = body.max_duration;
+  if (body.vapi_assistant_id !== undefined) nextVoice.vapi_assistant_id = body.vapi_assistant_id;
+  if (body.vapi_phone_number_id !== undefined) nextVoice.vapi_phone_number_id = body.vapi_phone_number_id;
+  cfg.voice = nextVoice;
+
+  await sql`
+    UPDATE agents SET config_json = ${JSON.stringify(cfg)}, updated_at = now()
+    WHERE name = ${agentName} AND org_id = ${user.org_id}
+  `;
+
+  return c.json({ ok: true, agent_name: agentName });
+});
+
+// ── Vapi integration status (no secrets) ─────────────────────────────
+
+const vapiIntegrationStatusRoute = createRoute({
+  method: "get",
+  path: "/vapi/integration-status",
+  tags: ["Voice"],
+  summary: "Whether VAPI_API_KEY is configured on the control plane",
+  middleware: [requireScope("integrations:read")],
+  responses: {
+    200: {
+      description: "Status",
+      content: {
+        "application/json": {
+          schema: z.object({ configured: z.boolean() }),
+        },
+      },
+    },
+  },
+});
+voiceRoutes.openapi(vapiIntegrationStatusRoute, async (c): Promise<any> => {
+  const configured = Boolean(String(c.env.VAPI_API_KEY ?? "").trim());
+  return c.json({ configured });
+});
+
+// ── Proxy: Vapi phone numbers & assistants (uses server API key) ─────
+
+const vapiPhoneNumbersProxyRoute = createRoute({
+  method: "get",
+  path: "/vapi/phone-numbers",
+  tags: ["Voice"],
+  summary: "List phone numbers from Vapi (proxied)",
+  middleware: [requireScope("integrations:read")],
+  responses: {
+    200: { description: "Vapi JSON", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(500),
+  },
+});
+voiceRoutes.openapi(vapiPhoneNumbersProxyRoute, async (c): Promise<any> => {
+  const res = await vapiForwardGet(c.env, "/phone-number");
+  const text = await res.text();
+  if (!res.ok) {
+    return c.json(
+      { error: `Vapi error ${res.status}`, detail: text.slice(0, 400) },
+      res.status === 503 ? 500 : 400,
+    );
+  }
+  try {
+    return c.json(JSON.parse(text) as Record<string, unknown>);
+  } catch {
+    return c.json({ error: "Vapi returned non-JSON" }, 400);
+  }
+});
+
+const vapiAssistantsProxyRoute = createRoute({
+  method: "get",
+  path: "/vapi/assistants",
+  tags: ["Voice"],
+  summary: "List assistants from Vapi (proxied)",
+  middleware: [requireScope("integrations:read")],
+  responses: {
+    200: { description: "Vapi JSON", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(500),
+  },
+});
+voiceRoutes.openapi(vapiAssistantsProxyRoute, async (c): Promise<any> => {
+  const res = await vapiForwardGet(c.env, "/assistant");
+  const text = await res.text();
+  if (!res.ok) {
+    return c.json(
+      { error: `Vapi error ${res.status}`, detail: text.slice(0, 400) },
+      res.status === 503 ? 500 : 400,
+    );
+  }
+  try {
+    return c.json(JSON.parse(text) as Record<string, unknown>);
+  } catch {
+    return c.json({ error: "Vapi returned non-JSON" }, 400);
+  }
+});
 
 // ── Cross-platform Summary ─────────────────────────────────────────────
 
@@ -122,7 +386,13 @@ voiceRoutes.openapi(vapiWebhookRoute, async (c): Promise<any> => {
     return c.json({ error: "Invalid JSON" }, 400);
   }
   const sql = await getDb(c.env.HYPERDRIVE);
-  const out = await processVapiWebhook(payload, sql, "");
+  const { assistantId, phoneNumberId } = extractVapiCallIds(payload);
+  const resolved = await resolveVapiVoiceTenant(sql, assistantId, phoneNumberId);
+  const tenant = {
+    org_id: resolved?.org_id ?? "",
+    agent_name: resolved?.agent_name ?? "",
+  };
+  const out = await processVapiWebhook(payload, sql, tenant);
   return c.json(out);
 });
 
@@ -226,17 +496,22 @@ const vapiCallsCreateRoute = createRoute({
   method: "post",
   path: "/vapi/calls",
   tags: ["Voice"],
-  summary: "Initiate outbound Vapi call",
+  summary: "Initiate outbound Vapi call (uses server VAPI_API_KEY)",
   middleware: [requireScope("integrations:write")],
   request: {
     body: {
       content: {
         "application/json": {
           schema: z.object({
-            phone_number: z.string().default(""),
-            assistant_id: z.string().default(""),
+            /** Vapi phone-number resource id */
+            phone_number_id: z.string().optional(),
+            /** Destination E.164, e.g. +15551234567 */
+            customer_phone: z.string().optional(),
+            assistant_id: z.string().optional(),
             agent_name: z.string().default(""),
-            first_message: z.string().default(""),
+            first_message: z.string().optional(),
+            /** @deprecated use phone_number_id; was previously misused as phoneNumberId only */
+            phone_number: z.string().optional(),
           }),
         },
       },
@@ -265,22 +540,35 @@ voiceRoutes.openapi(vapiCallsCreateRoute, async (c): Promise<any> => {
     return c.json({ error: "VAPI_API_KEY not configured" }, 400);
   }
   const body = c.req.valid("json");
-  const phone_number = body.phone_number;
-  const assistant_id = body.assistant_id;
+  const phoneNumberId = String(body.phone_number_id || body.phone_number || "").trim();
+  const customerPhone = String(body.customer_phone || "").trim();
+  const assistant_id = String(body.assistant_id || "").trim();
   const agent_name = body.agent_name;
   const first_message = body.first_message;
 
-  const res = await fetch("https://api.vapi.ai/call/phone", {
+  if (!phoneNumberId || !customerPhone || !assistant_id) {
+    return c.json(
+      { error: "phone_number_id, customer_phone, and assistant_id are required" },
+      400,
+    );
+  }
+
+  const vapiBody: Record<string, unknown> = {
+    assistantId: assistant_id,
+    phoneNumberId,
+    customer: { number: customerPhone },
+  };
+  if (first_message && first_message.trim()) {
+    vapiBody.assistantOverrides = { firstMessage: first_message.trim() };
+  }
+
+  const res = await fetch("https://api.vapi.ai/call", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      phoneNumberId: phone_number,
-      ...(assistant_id ? { assistantId: assistant_id } : {}),
-      ...(first_message ? { firstMessage: first_message } : {}),
-    }),
+    body: JSON.stringify(vapiBody),
   });
   const text = await res.text();
   if (!res.ok) {
@@ -307,7 +595,7 @@ voiceRoutes.openapi(vapiCallsCreateRoute, async (c): Promise<any> => {
         call_id, platform, org_id, agent_name, phone_number, direction, status,
         platform_agent_id, started_at
       ) VALUES (
-        ${call_id}, 'vapi', ${user.org_id}, ${agent_name}, ${phone_number},
+        ${call_id}, 'vapi', ${user.org_id}, ${agent_name}, ${customerPhone},
         'outbound', 'pending', ${assistant_id}, ${nowSec()}
       )
       ON CONFLICT (call_id) DO UPDATE SET

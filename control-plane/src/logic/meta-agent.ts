@@ -592,7 +592,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
     headers: {
       "Authorization": `Bearer ${opts.openrouterApiKey}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://agentos-portal.servesys.workers.dev",
+      "HTTP-Referer": "https://app.oneshots.co",
       "X-Title": "AgentOS Meta-Agent",
     },
     body: JSON.stringify({

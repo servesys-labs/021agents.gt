@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, MessageSquare, TrendingUp, Bot, AlertCircle, RefreshCw, Loader2 } from "lucide-react";
+import { Plus, MessageSquare, TrendingUp, Bot, AlertCircle, RefreshCw, Loader2, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { StatCard } from "../components/ui/StatCard";
 import { api } from "../lib/api";
+import { useToast } from "../components/ui/Toast";
 import { PRODUCT } from "../lib/product";
 import { agentPathSegment } from "../lib/agent-path";
 
@@ -28,12 +29,14 @@ interface ApiAgent {
 
 export default function DashboardPage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
 
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [statsUnavailable, setStatsUnavailable] = useState(false);
   const [agents, setAgents] = useState<ApiAgent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [removingName, setRemovingName] = useState<string | null>(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -60,6 +63,21 @@ export default function DashboardPage() {
   useEffect(() => {
     fetchData();
   }, []);
+
+  const removeAgent = async (e: React.MouseEvent, name: string) => {
+    e.stopPropagation();
+    if (!window.confirm(`Remove “${name}” from your workspace?`)) return;
+    setRemovingName(name);
+    try {
+      await api.del(`/agents/${agentPathSegment(name)}`);
+      toast("Assistant removed");
+      await fetchData();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "Could not remove assistant");
+    } finally {
+      setRemovingName(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -138,7 +156,22 @@ export default function DashboardPage() {
                     <h3 className="text-sm font-semibold text-text truncate">{agent.name}</h3>
                     <p className="text-xs text-text-secondary mt-0.5 line-clamp-2">{agent.description || "—"}</p>
                   </div>
-                  <Badge variant="success">Live</Badge>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      title="Remove assistant"
+                      disabled={removingName === agent.name}
+                      onClick={(e) => removeAgent(e, agent.name)}
+                      className="p-1.5 rounded-lg text-text-muted hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
+                    >
+                      {removingName === agent.name ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <Trash2 size={16} />
+                      )}
+                    </button>
+                    <Badge variant="success">Live</Badge>
+                  </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-muted">
                   <span>v{agent.version}</span>

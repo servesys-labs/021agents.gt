@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { Upload, FileText, File, Trash2, Search, CheckCircle, Clock, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
@@ -22,6 +22,30 @@ interface KBDocument {
 
 const ACCEPTED_TYPES = ".pdf,.doc,.docx,.txt,.md,.csv,.json,.html";
 
+/** RAG index entry shape from control-plane `GET /rag/:agent/documents`. */
+function mapIndexEntryToKB(
+  entry: unknown,
+  chunkSize: number,
+  indexUpdatedAtSec?: number,
+): KBDocument | null {
+  if (!entry || typeof entry !== "object") return null;
+  const e = entry as { length?: number; metadata?: { filename?: string; source?: string } };
+  const filename = String(e.metadata?.filename || e.metadata?.source || "").trim();
+  if (!filename) return null;
+  const len = typeof e.length === "number" ? e.length : 0;
+  const cs = chunkSize > 0 ? chunkSize : 512;
+  return {
+    id: filename,
+    filename,
+    status: "ready",
+    chunks: Math.max(1, Math.ceil(len / cs)),
+    created_at:
+      typeof indexUpdatedAtSec === "number" && indexUpdatedAtSec > 0
+        ? new Date(indexUpdatedAtSec * 1000).toISOString()
+        : new Date().toISOString(),
+  };
+}
+
 function fileIcon(name: string) {
   if (name.endsWith(".pdf")) return <FileText size={20} className="text-red-500" />;
   return <File size={20} className="text-blue-500" />;
@@ -35,7 +59,6 @@ const statusConfig = {
 
 export default function AgentKnowledgePage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -54,10 +77,22 @@ export default function AgentKnowledgePage() {
 
   const fetchDocs = useCallback(async () => {
     if (!id) return;
+    const seg = agentPathSegment(id);
     try {
-      const documents = await api.get<KBDocument[]>(`/rag/documents?agent_name=${encodeURIComponent(id.trim())}`);
-      setDocs(documents || []);
-    } catch { /* silently ignore refresh failures */ }
+      const [statusBody, listBody] = await Promise.all([
+        api.get<{ chunk_size?: number; indexed?: boolean }>(`/rag/${seg}/status`),
+        api.get<{ documents?: unknown[] }>(`/rag/${seg}/documents`),
+      ]);
+      const chunkSize = typeof statusBody.chunk_size === "number" ? statusBody.chunk_size : 512;
+      const updatedAt = (statusBody as { updated_at?: number }).updated_at;
+      const raw = Array.isArray(listBody.documents) ? listBody.documents : [];
+      const mapped = raw
+        .map((row) => mapIndexEntryToKB(row, chunkSize, updatedAt))
+        .filter((d): d is KBDocument => d != null);
+      setDocs(mapped);
+    } catch {
+      /* silently ignore refresh failures */
+    }
   }, [id]);
 
   useEffect(() => {
@@ -69,14 +104,23 @@ export default function AgentKnowledgePage() {
         setLoading(true);
         setError(null);
 
-        const [agent, documents] = await Promise.all([
-          api.get<{ name: string }>(`/agents/${agentPathSegment(id)}`),
-          api.get<KBDocument[]>(`/rag/documents?agent_name=${encodeURIComponent(id.trim())}`),
+        const seg = agentPathSegment(id);
+        const [agent, statusBody, listBody] = await Promise.all([
+          api.get<{ name: string }>(`/agents/${seg}`),
+          api.get<{ chunk_size?: number; updated_at?: number }>(`/rag/${seg}/status`),
+          api.get<{ documents?: unknown[] }>(`/rag/${seg}/documents`),
         ]);
         if (cancelled) return;
 
         setAgentName(agent.name ?? id);
-        setDocs(documents || []);
+        const chunkSize = typeof statusBody.chunk_size === "number" ? statusBody.chunk_size : 512;
+        const updatedAt = statusBody.updated_at;
+        const raw = Array.isArray(listBody.documents) ? listBody.documents : [];
+        setDocs(
+          raw
+            .map((row) => mapIndexEntryToKB(row, chunkSize, updatedAt))
+            .filter((d): d is KBDocument => d != null),
+        );
       } catch (err: any) {
         if (!cancelled) setError(err.message || "Failed to load knowledge base");
       } finally {
@@ -96,18 +140,23 @@ export default function AgentKnowledgePage() {
       if (!files || !id) return;
       setUploading(true);
       try {
+        const seg = agentPathSegment(id);
+        const token = localStorage.getItem("agentos_token");
+        const BASE = (globalThis as any).__VITE_API_URL ?? "https://api.oneshots.co/api/v1";
+        const formData = new FormData();
         for (const file of Array.from(files)) {
-          const formData = new FormData();
           formData.append("file", file);
-          formData.append("agent_name", id);
+        }
+        formData.append("chunk_size", chunkSize);
 
-          const token = localStorage.getItem("agentos_token");
-          const BASE = (globalThis as any).__VITE_API_URL ?? "https://agentos-control-plane.servesys.workers.dev/api/v1";
-          await fetch(`${BASE}/rag/upload`, {
-            method: "POST",
-            headers: token ? { Authorization: `Bearer ${token}` } : {},
-            body: formData,
-          });
+        const res = await fetch(`${BASE}/rag/${seg}/ingest`, {
+          method: "POST",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: formData,
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error((body as { error?: string }).error || `Upload failed (${res.status})`);
         }
         toast(`Uploaded ${files.length} file${files.length > 1 ? "s" : ""}`);
         await fetchDocs();
@@ -117,7 +166,7 @@ export default function AgentKnowledgePage() {
         setUploading(false);
       }
     },
-    [id, toast, fetchDocs],
+    [id, toast, fetchDocs, chunkSize],
   );
 
   const handleDrop = useCallback(
@@ -130,8 +179,9 @@ export default function AgentKnowledgePage() {
   );
 
   const deleteDoc = async (docId: string) => {
+    if (!id) return;
     try {
-      await api.del(`/rag/documents/${docId}`);
+      await api.del(`/rag/${agentPathSegment(id)}/documents/${encodeURIComponent(docId)}`);
       setDocs((prev) => prev.filter((d) => d.id !== docId));
       setSelectedDoc(null);
       toast("Document removed");
