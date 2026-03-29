@@ -45,7 +45,7 @@ export async function loadAgentConfig(
   try {
     const sql = await getDb(hyperdrive);
     rows = await sql`
-      SELECT name, org_id, project_id, config_json, description
+      SELECT name, org_id, project_id, config_json, description, tools, system_prompt, model, plan
       FROM agents
       WHERE name = ${agentName} AND is_active = 1
       LIMIT 1
@@ -89,16 +89,21 @@ export async function loadAgentConfig(
     );
   }
 
-  // config_json contains harness config: system_prompt, provider, model, tools, etc.
+  // Merge top-level agent columns with config_json (top-level takes priority)
+  // API stores tools, system_prompt, model, plan at the row level, not always in config_json
+  const topLevelTools = parseJsonArray(row.tools);
+  const cfgTools = parseJsonArray(cfg.tools);
+  const mergedTools = topLevelTools.length > 0 ? topLevelTools : cfgTools;
+
   return {
     agent_name: row.name || agentName,
-    system_prompt: String(cfg.system_prompt || cfg.systemPrompt || row.description || "You are a helpful AI assistant."),
+    system_prompt: String(row.system_prompt || cfg.system_prompt || cfg.systemPrompt || row.description || "You are a helpful AI assistant."),
     provider: String(cfg.provider || defaults.provider),
-    model: String(cfg.model || defaults.model),
-    plan: String(cfg.plan || defaults.plan),
+    model: String(row.model || cfg.model || defaults.model),
+    plan: String(row.plan || cfg.plan || defaults.plan),
     max_turns: Number(cfg.max_turns || cfg.maxTurns) || 50,
     budget_limit_usd: Number(cfg.budget_limit_usd || cfg.budgetLimitUsd) || 10.0,
-    tools: parseJsonArray(cfg.tools),
+    tools: mergedTools,
     blocked_tools: parseJsonArray(cfg.blocked_tools || cfg.blockedTools || governance.blocked_tools),
     allowed_domains: parseJsonArray(cfg.allowed_domains || cfg.allowedDomains || governance.allowed_domains),
     blocked_domains: parseJsonArray(cfg.blocked_domains || cfg.blockedDomains || governance.blocked_domains),

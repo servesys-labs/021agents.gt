@@ -98,8 +98,12 @@ export async function edgeRun(
     // Best-effort — skill loading should never block execution
   }
 
-  // Voice channel optimization — inject conversational response rules
+  // Voice channel optimization — fast model + conversational rules
   if (request.channel === "voice") {
+    // Override model to fastest available — voice needs <2s response, not quality
+    config.model = "openai/gpt-5.4-nano";
+    config.provider = "openrouter";
+
     config.system_prompt = (config.system_prompt || "") + `\n\n[VOICE MODE — The user is on a phone call. You MUST follow these rules:
 1. Keep every response to 1-2 sentences MAX. Be extremely concise.
 2. Speak naturally — use contractions, casual tone. Say "I'll" not "I will".
