@@ -1,0 +1,26 @@
+$kind: http-request
+name: Create Alert
+method: POST
+url: '{{base_url}}/api/v1/alerts'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "High Error Rate",
+      "type": "error_rate",
+      "threshold": 0.05,
+      "comparison": "gte",
+      "window_minutes": 15,
+      "webhook_url": "https://hooks.example.com/alert",
+      "agent_name": "{{agent_name}}",
+      "cooldown_minutes": 30
+    }

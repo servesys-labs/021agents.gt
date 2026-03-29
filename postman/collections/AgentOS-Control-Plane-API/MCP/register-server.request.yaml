@@ -1,0 +1,25 @@
+$kind: http-request
+name: Register MCP Server
+method: POST
+url: '{{base_url}}/api/v1/mcp/servers'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "my-mcp-server",
+      "url": "https://mcp.example.com",
+      "description": "Custom MCP server for tool access",
+      "auth": {
+        "type": "bearer",
+        "token": "mcp-token"
+      }
+    }

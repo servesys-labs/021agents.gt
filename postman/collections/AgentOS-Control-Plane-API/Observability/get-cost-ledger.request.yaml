@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Cost Ledger
+method: GET
+url: '{{base_url}}/api/v1/observability/cost-ledger'
+order: 5000
+queryParams:
+  - key: agent_name
+    value: '{{agentId}}'

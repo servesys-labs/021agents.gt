@@ -1,0 +1,23 @@
+$kind: http-request
+name: Create Tool
+method: POST
+url: '{{base_url}}/api/v1/tools'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "web-search",
+      "description": "Search the web for information",
+      "type": "function",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Search query" }
+        },
+        "required": ["query"]
+      }
+    }

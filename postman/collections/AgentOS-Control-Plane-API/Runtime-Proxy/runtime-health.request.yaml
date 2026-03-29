@@ -1,0 +1,10 @@
+$kind: http-request
+name: Runtime Health
+method: GET
+url: '{{base_url}}/api/v1/runtime-proxy/health'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

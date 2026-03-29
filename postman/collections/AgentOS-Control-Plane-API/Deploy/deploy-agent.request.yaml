@@ -1,0 +1,22 @@
+$kind: http-request
+name: Deploy Agent
+method: POST
+url: '{{base_url}}/api/v1/deploy/{{agent_name}}'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "config": {}
+    }

@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Deletion Requests
+method: GET
+url: '{{base_url}}/api/v1/compliance/deletion-requests'
+order: 5000

@@ -1,0 +1,11 @@
+$kind: http-request
+name: Get Agent Episodes
+method: GET
+url: '{{base_url}}/api/v1/memory/{{agentId}}/episodes'
+order: 1000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+queryParams:
+  - key: limit
+    value: '20'

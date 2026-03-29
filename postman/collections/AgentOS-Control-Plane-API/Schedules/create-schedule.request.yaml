@@ -1,0 +1,19 @@
+$kind: http-request
+name: Create Schedule
+method: POST
+url: '{{base_url}}/api/v1/schedules'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "cron": "0 9 * * 1-5",
+      "task": "Run daily morning report",
+      "is_enabled": true
+    }

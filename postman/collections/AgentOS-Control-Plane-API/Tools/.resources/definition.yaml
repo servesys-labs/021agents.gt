@@ -1,0 +1,3 @@
+$kind: collection
+name: Tools
+description: 'Tool registry: register, update, test, and manage tools available to agents'

@@ -1,0 +1,17 @@
+$kind: http-request
+name: Stream Agent Run
+method: POST
+url: '{{base_url}}/api/v1/agents/{{agent_name}}/run/stream'
+order: 19000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "input": "Explain the theory of relativity"
+    }

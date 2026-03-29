@@ -1,0 +1,15 @@
+$kind: http-request
+name: Setup Telegram Bot
+method: POST
+url: '{{base_url}}/api/v1/chat/telegram/setup'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "webhook_url": "https://example.com/webhook"
+    }

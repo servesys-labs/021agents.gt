@@ -1,0 +1,25 @@
+$kind: http-request
+name: Create Guardrail Policy
+method: POST
+url: '{{base_url}}/api/v1/guardrails/policies'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "No PII Policy",
+      "description": "Block PII in agent outputs",
+      "rules": [
+        { "type": "block_pii", "severity": "high" },
+        { "type": "block_profanity", "severity": "medium" }
+      ],
+      "agent_name": "{{agent_name}}"
+    }

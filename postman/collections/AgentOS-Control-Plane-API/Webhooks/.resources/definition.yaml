@@ -1,0 +1,3 @@
+$kind: collection
+name: Webhooks
+description: 'Webhook management: register endpoints, view delivery history, and replay events'

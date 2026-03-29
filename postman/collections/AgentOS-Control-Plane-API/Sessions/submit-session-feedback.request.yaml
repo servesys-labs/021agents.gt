@@ -1,0 +1,19 @@
+$kind: http-request
+name: Submit Session Feedback
+method: POST
+url: '{{base_url}}/api/v1/sessions/{{session_id}}/feedback'
+order: 8000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: session_id
+    value: '{{session_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "rating": 5,
+      "comment": "Very helpful session",
+      "turn_id": "turn_abc123"
+    }

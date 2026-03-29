@@ -1,0 +1,19 @@
+$kind: http-request
+name: List Jobs
+method: GET
+url: '{{base_url}}/api/v1/jobs'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: status
+    value: ''
+    disabled: true
+  - key: type
+    value: ''
+    disabled: true
+  - key: limit
+    value: '20'

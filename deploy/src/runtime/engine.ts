@@ -330,11 +330,14 @@ export async function edgeRun(
     r.tool_results?.some((tr) => snapshotTools.has(tr.tool)),
   );
   if (hadSnapshotWrites && env.STORAGE && env.SANDBOX) {
-    persistenceTasks.push(
-      autoSnapshotWorkspace(env, sessionId, config.agent_name, config.org_id).catch((err) => {
-        console.error("[runtime] auto-snapshot failed:", err instanceof Error ? err.message : err);
-      }),
-    );
+    // Workspace snapshot MUST complete before releasing (hibernation safety).
+    // Awaited directly instead of pushed to persistenceTasks to guarantee
+    // all files are synced to R2 before the response scope ends.
+    try {
+      await autoSnapshotWorkspace(env, sessionId, config.agent_name, config.org_id);
+    } catch (err) {
+      console.error("[runtime] auto-snapshot failed:", err instanceof Error ? err.message : err);
+    }
   }
 
   const firstError = ctx.results.find((r) => r.error)?.error;

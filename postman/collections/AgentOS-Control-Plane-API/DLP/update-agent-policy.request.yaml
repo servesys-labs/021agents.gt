@@ -1,0 +1,19 @@
+$kind: http-request
+name: Update Agent DLP Policy
+method: PUT
+url: '{{base_url}}/api/v1/dlp/agents/{{agent_name}}/policy'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "enabled": true,
+      "classifications": ["PII", "FINANCIAL"],
+      "action": "block"
+    }

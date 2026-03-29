@@ -1,0 +1,21 @@
+$kind: http-request
+name: Create Project
+method: POST
+url: '{{base_url}}/api/v1/projects'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "My Project",
+      "description": "A new project",
+      "org_id": "{{org_id}}"
+    }

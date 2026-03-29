@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Snippet
+method: DELETE
+url: '{{base_url}}/api/v1/codemode/snippets/{{snippet_id}}'
+order: 10000
+pathVariables:
+  - key: snippet_id
+    value: '{{snippet_id}}'

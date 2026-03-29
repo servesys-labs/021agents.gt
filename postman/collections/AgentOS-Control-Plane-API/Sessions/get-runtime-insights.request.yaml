@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Runtime Insights
+method: GET
+url: '{{base_url}}/api/v1/sessions/runtime/insights'
+order: 1000

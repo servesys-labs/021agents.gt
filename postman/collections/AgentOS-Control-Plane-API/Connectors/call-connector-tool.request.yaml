@@ -1,0 +1,24 @@
+$kind: http-request
+name: Call Connector Tool
+method: POST
+url: '{{base_url}}/api/v1/connectors/tools/call'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "tool": "github.create_issue",
+      "params": {
+        "repo": "owner/repo",
+        "title": "Bug report",
+        "body": "Description of the issue"
+      }
+    }

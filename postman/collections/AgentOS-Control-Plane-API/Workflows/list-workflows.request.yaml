@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Workflows
+method: GET
+url: '{{base_url}}/api/v1/workflows'
+order: 4000

@@ -1,0 +1,17 @@
+$kind: http-request
+name: Create Webhook
+method: POST
+url: '{{base_url}}/api/v1/webhooks'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "url": "https://example.com/webhook",
+      "events": ["session.completed", "agent.deployed", "eval.run.finished"]
+    }

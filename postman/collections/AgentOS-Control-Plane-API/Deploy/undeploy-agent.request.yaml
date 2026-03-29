@@ -1,0 +1,13 @@
+$kind: http-request
+name: Undeploy Agent
+method: DELETE
+url: '{{base_url}}/api/v1/deploy/{{agent_name}}'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

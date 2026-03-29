@@ -1,0 +1,3 @@
+$kind: collection
+name: Domains
+description: Custom domain management for agent endpoints

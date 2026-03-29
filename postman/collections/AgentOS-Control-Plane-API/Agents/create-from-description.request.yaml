@@ -1,0 +1,15 @@
+$kind: http-request
+name: Create Agent from Description
+method: POST
+url: '{{base_url}}/api/v1/agents/create-from-description'
+order: 12000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "description": "An agent that helps users search the web and summarize results",
+      "name": "web-search-agent"
+    }

@@ -1,0 +1,13 @@
+$kind: http-request
+name: List Audit
+method: GET
+url: '{{base_url}}/api/v1/gold-images/audit'
+order: 9000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: limit
+    value: '50'

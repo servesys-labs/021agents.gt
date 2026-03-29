@@ -1,0 +1,13 @@
+$kind: http-request
+name: List Release Channels
+method: GET
+url: '{{base_url}}/api/v1/releases/{{agent_name}}/channels'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

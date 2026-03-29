@@ -1,0 +1,8 @@
+$kind: http-request
+name: Verify Domain
+method: POST
+url: '{{base_url}}/api/v1/domains/{{domain_id}}/verify'
+order: 5000
+pathVariables:
+  - key: domain_id
+    value: '{{domain_id}}'

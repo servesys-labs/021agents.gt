@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Voice Summary (All Platforms)
+method: GET
+url: '{{base_url}}/api/v1/voice/all/summary'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

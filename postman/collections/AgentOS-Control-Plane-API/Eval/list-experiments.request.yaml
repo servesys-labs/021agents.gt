@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Experiments
+method: GET
+url: '{{base_url}}/api/v1/eval/experiments'
+order: 12000

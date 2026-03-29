@@ -7,6 +7,8 @@
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
+import { hasCredits, deductCredits } from "../logic/credits";
+import { getDbForOrg } from "../db/client";
 
 export const runtimeProxyRoutes = createOpenAPIRouter();
 
@@ -193,6 +195,22 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     return c.json({ error: "agent_name and input are required" }, 400);
   }
 
+  // Credit gate: verify org has credits before running
+  const orgId = user.org_id;
+  try {
+    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+    const hasEnough = await hasCredits(creditSql, orgId, 1);
+    if (!hasEnough) {
+      return c.json({
+        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        code: "insufficient_credits",
+        balance_cents: 0,
+      }, 402);
+    }
+  } catch {
+    // If credit check fails (e.g. table not yet migrated), allow the run
+  }
+
   try {
     const resp = await c.env.RUNTIME.fetch(
       new Request("https://runtime/run", {
@@ -204,7 +222,7 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
         body: JSON.stringify({
           input,
           agent_name: agentName,
-          org_id: user.org_id,
+          org_id: orgId,
           project_id: user.project_id || "",
           channel: "portal",
           channel_user_id: user.user_id,
@@ -215,6 +233,16 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     );
 
     const result = (await resp.json().catch(() => ({ error: "Invalid response from runtime" }))) as Record<string, unknown>;
+
+    // Deduct credits after successful response (awaited — fast atomic UPDATE)
+    if (resp.status < 400) {
+      try {
+        const costUsd = Number(result.cost_usd || 0);
+        const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+        await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+      } catch {}
+    }
+
     return c.json(result, resp.status as 200 | 400 | 401 | 403 | 404 | 500 | 502 | 503);
   } catch (err: any) {
     return c.json({ error: `Runtime execution failed: ${err.message || err}` }, 502);
@@ -259,6 +287,22 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
 
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
   if (inputs.length === 0) return c.json({ error: "inputs array is required" }, 400);
+
+  // Credit gate: verify org has credits before batch run
+  const batchOrgId = user.org_id;
+  try {
+    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, batchOrgId);
+    const hasEnough = await hasCredits(creditSql, batchOrgId, 1);
+    if (!hasEnough) {
+      return c.json({
+        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        code: "insufficient_credits",
+        balance_cents: 0,
+      }, 402);
+    }
+  } catch {
+    // If credit check fails, allow the run
+  }
 
   // Check runtime health before processing
   const health = await checkRuntimeHealth(c.env.RUNTIME);
@@ -330,7 +374,15 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
       if (settled.status === "fulfilled") {
         const result = settled.value as Record<string, unknown>;
         results.push(result);
-        totalCostUsd += Number(result.cost_usd || result.cumulative_cost_usd || 0);
+        const itemCostUsd = Number(result.cost_usd || result.cumulative_cost_usd || 0);
+        totalCostUsd += itemCostUsd;
+
+        // Fire-and-forget per-item credit deduction
+        try {
+          const costUsd = Number(itemCostUsd || 0);
+          const deductSql = await getDbForOrg(c.env.HYPERDRIVE, batchOrgId);
+          deductCredits(deductSql, batchOrgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || "")).catch(() => {});
+        } catch {}
       } else {
         results.push({
           error: String(settled.reason),
@@ -449,6 +501,22 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
 
   if (!agentName) {
     return c.json({ error: "agent_name is required" }, 400);
+  }
+
+  // Credit gate: verify org has credits before streaming
+  const streamOrgId = user.org_id;
+  try {
+    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, streamOrgId);
+    const hasEnough = await hasCredits(creditSql, streamOrgId, 1);
+    if (!hasEnough) {
+      return c.json({
+        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        code: "insufficient_credits",
+        balance_cents: 0,
+      }, 402);
+    }
+  } catch {
+    // If credit check fails, allow the run
   }
 
   // Check runtime health first

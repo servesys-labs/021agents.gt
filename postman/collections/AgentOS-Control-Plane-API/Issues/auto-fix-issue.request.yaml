@@ -1,0 +1,8 @@
+$kind: http-request
+name: Auto-Fix Issue
+method: POST
+url: '{{base_url}}/api/v1/issues/{{issue_id}}/auto-fix'
+order: 8000
+pathVariables:
+  - key: issue_id
+    value: '{{issue_id}}'

@@ -1,0 +1,3 @@
+$kind: collection
+name: Alerts
+description: Alert configuration and history for monitoring agent and system events

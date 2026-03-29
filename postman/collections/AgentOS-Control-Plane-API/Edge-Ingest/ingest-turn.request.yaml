@@ -1,0 +1,17 @@
+$kind: http-request
+name: Ingest Turn (Edge)
+method: POST
+url: '{{base_url}}/api/v1/edge-ingest/turns'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "session_id": "{{session_id}}",
+      "role": "user",
+      "content": "Hello, agent!",
+      "timestamp": 1700000000000
+    }

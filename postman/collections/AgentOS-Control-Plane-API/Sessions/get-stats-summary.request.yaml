@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Sessions Stats Summary
+method: GET
+url: '{{base_url}}/api/v1/sessions/stats/summary'
+order: 2000
+queryParams:
+  - key: agent_name
+    value: '{{agentId}}'

@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Dead Letter Queue
+method: GET
+url: '{{base_url}}/api/v1/jobs/dlq'
+order: 6000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

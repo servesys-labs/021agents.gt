@@ -1,0 +1,5 @@
+$kind: http-request
+name: List A2A Remotes
+method: GET
+url: '{{base_url}}/api/v1/config/a2a/remotes'
+order: 3000

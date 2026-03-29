@@ -1,0 +1,20 @@
+$kind: http-request
+name: Create Plan
+method: POST
+url: '{{base_url}}/api/v1/plans'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "enterprise",
+      "display_name": "Enterprise",
+      "price_monthly": 999,
+      "limits": {
+        "agents": 100,
+        "sessions_per_month": 100000
+      }
+    }

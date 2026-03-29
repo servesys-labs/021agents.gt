@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Daily Cost
+method: GET
+url: '{{base_url}}/api/v1/observability/daily-cost'
+order: 4000
+queryParams:
+  - key: days
+    value: '30'

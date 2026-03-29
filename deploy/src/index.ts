@@ -195,6 +195,77 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         }
       } catch {}
     }
+
+    // ── Workspace Hibernation Recovery ──────────────────────────────
+    // Restore workspace files and working memory from DO SQLite checkpoint.
+    // SQLite survives hibernation; R2 is the fallback if DO was fully evicted.
+    try {
+      const { loadCheckpointFromSQLite, loadFilesFromSQLite, ensureWorkspaceTables } = await import("./runtime/workspace-persistence");
+      ensureWorkspaceTables(this.sql);
+
+      // Restore workspace files from SQLite
+      const files = loadFilesFromSQLite(this.sql, this.name);
+      if (files.length > 0) {
+        console.log(`[workspace] Restored ${files.length} files from SQLite checkpoint`);
+      }
+
+      // Restore working memory, cost accumulator, and turn count from checkpoint
+      const checkpoint = loadCheckpointFromSQLite(this.sql, this.name);
+      if (checkpoint) {
+        if (checkpoint.working_memory && Object.keys(checkpoint.working_memory).length > 0) {
+          this.setState({
+            ...this.state,
+            working: checkpoint.working_memory,
+            totalCostUsd: checkpoint.cumulative_cost_usd,
+            turnCount: checkpoint.turn_count,
+          });
+        }
+        console.log(`[workspace] Restored checkpoint: ${checkpoint.turn_count} turns, $${checkpoint.cumulative_cost_usd.toFixed(6)} cost`);
+      }
+    } catch {}
+  }
+
+  // ── Hibernation Checkpoint (periodic save) ───────────────────────
+
+  /**
+   * Scheduled callback: save workspace + state to DO SQLite every 30 seconds.
+   * If the DO hibernates between checkpoints, SQLite retains the last one.
+   * Called via `this.schedule(Date.now() + 30_000, "checkpointWorkspace")`.
+   */
+  async checkpointWorkspace() {
+    try {
+      const { saveCheckpointToSQLite, saveCheckpointToR2 } = await import("./runtime/workspace-persistence");
+      const config = this.state.config;
+      const checkpoint = {
+        session_id: this.name,
+        org_id: config.orgId || "",
+        agent_name: config.agentName || "",
+        files: [],  // Files already persisted individually via saveFileToSQLite
+        working_memory: this.state.working,
+        cumulative_cost_usd: this.state.totalCostUsd,
+        turn_count: this.state.turnCount,
+        last_model: config.model || "",
+        conversation_context: this._loadConversationHistory(24),
+        created_at: new Date().toISOString(),
+      };
+      saveCheckpointToSQLite(this.sql, checkpoint);
+
+      // R2 backup (async, non-blocking)
+      if (this.env.STORAGE) {
+        saveCheckpointToR2(
+          this.env.STORAGE,
+          config.orgId || "",
+          config.agentName || "",
+          this.name,
+          checkpoint,
+        ).catch(() => {});
+      }
+    } catch {}
+
+    // Re-schedule for next checkpoint (30 seconds)
+    try {
+      await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+    } catch {}
   }
 
   // ── Callable Methods (RPC from client) ──────────────────────────
@@ -250,6 +321,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
       DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
       DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "deepseek/deepseek-chat-v3-0324",
+      DO_SQL: this.sql.bind(this),
+      DO_SESSION_ID: this.name,
     };
 
     const request: RunRequest = {
@@ -266,6 +339,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       request,
       this.env.TELEMETRY_QUEUE,
     );
+
+    // Start periodic checkpoint alarm for hibernation safety
+    try {
+      this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+    } catch {}
 
     const elapsed = Date.now() - started;
 
@@ -555,6 +633,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
         DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+        DO_SQL: this.sql.bind(this),
+        DO_SESSION_ID: this.name,
       };
 
       const inputText = String(data.input || "");
@@ -642,6 +722,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         this._appendConversationMessage("assistant", "[Error: response failed]", channel);
         return;
       }
+
+      // Start periodic checkpoint alarm for hibernation safety
+      try {
+        this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+      } catch {}
 
       // Only persist both messages atomically — skip if assistant produced nothing
       const channel = data.channel || "websocket";
@@ -770,6 +855,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
         DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+        DO_SQL: this.sql.bind(this),
+        DO_SESSION_ID: this.name,
       };
 
       // Run in DO context (no Worker timeout) — result written to Supabase
@@ -821,6 +908,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         return Response.json({ status: "error", success: false, error: String(err) }, { status: 500 });
       }
 
+      // Start periodic checkpoint alarm for hibernation safety
+      try {
+        this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+      } catch {}
+
       const restChannel = data.channel || "async_rest";
       if (finalOutput.trim()) {
         this._appendConversationMessage("user", inputText, restChannel);
@@ -869,6 +961,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
         DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+        DO_SQL: this.sql.bind(this),
+        DO_SESSION_ID: this.name,
       };
 
       const encoder = new TextEncoder();

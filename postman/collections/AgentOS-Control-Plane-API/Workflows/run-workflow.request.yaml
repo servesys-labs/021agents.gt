@@ -1,0 +1,20 @@
+$kind: http-request
+name: Run Workflow
+method: POST
+url: '{{base_url}}/api/v1/workflows/{{workflow_id}}/run'
+order: 6000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: workflow_id
+    value: '{{workflow_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "inputs": {
+        "agent_name": "{{agentId}}",
+        "target_channel": "production"
+      }
+    }

@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Rotation History
+method: GET
+url: '{{base_url}}/api/v1/secrets-rotation/rotations'
+order: 2000

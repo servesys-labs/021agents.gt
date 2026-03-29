@@ -1,0 +1,16 @@
+$kind: http-request
+name: Ingest Session (Edge)
+method: POST
+url: '{{base_url}}/api/v1/edge-ingest/sessions'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "session_id": "{{session_id}}",
+      "metadata": {}
+    }

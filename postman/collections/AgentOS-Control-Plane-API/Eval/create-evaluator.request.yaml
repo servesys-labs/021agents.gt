@@ -1,0 +1,17 @@
+$kind: http-request
+name: Create Evaluator
+method: POST
+url: '{{base_url}}/api/v1/eval/evaluators'
+order: 11000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "accuracy-evaluator",
+      "type": "llm_judge",
+      "prompt": "Rate the accuracy of the response from 0 to 1.",
+      "model": "gpt-4o"
+    }

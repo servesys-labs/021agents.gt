@@ -1,0 +1,3 @@
+$kind: collection
+name: RAG
+description: 'Retrieval-Augmented Generation: pipeline management, document ingestion, and semantic search'

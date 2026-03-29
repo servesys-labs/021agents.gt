@@ -1,0 +1,28 @@
+$kind: http-request
+name: JSON-RPC
+method: POST
+url: '{{base_url}}/a2a'
+order: 7000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "jsonrpc": "2.0",
+      "method": "tasks/send",
+      "id": "req-1",
+      "params": {
+        "agent_name": "{{agent_name}}",
+        "message": {
+          "role": "user",
+          "parts": [{"text": "Hello"}]
+        }
+      }
+    }

@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Issues
+method: GET
+url: '{{base_url}}/api/v1/issues'
+order: 2000
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: status
+    value: open

@@ -1,0 +1,3 @@
+$kind: collection
+name: Misc
+description: Miscellaneous endpoints — health checks, config, deploy, jobs, schedules, plans, orgs, projects, audit, compliance, and more.

@@ -1,0 +1,26 @@
+$kind: http-request
+name: Submit Batch (v1 path)
+method: POST
+url: '{{base_url}}/v1/agents/{{agent_name}}/run/batch'
+order: 8000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "inputs": [
+        {"id": "item-1", "message": "Process this"},
+        {"id": "item-2", "message": "Summarize this"}
+      ],
+      "concurrency": 5
+    }

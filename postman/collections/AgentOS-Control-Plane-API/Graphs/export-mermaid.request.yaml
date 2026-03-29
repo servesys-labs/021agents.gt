@@ -1,0 +1,29 @@
+$kind: http-request
+name: Export Graph to Mermaid
+method: POST
+url: '{{base_url}}/api/v1/graphs/export/mermaid'
+order: 12000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "graph": {
+        "nodes": [
+          {"id": "start", "type": "input"},
+          {"id": "llm", "type": "llm", "config": {"model": "gpt-4o"}},
+          {"id": "end", "type": "output"}
+        ],
+        "edges": [
+          {"from": "start", "to": "llm"},
+          {"from": "llm", "to": "end"}
+        ]
+      }
+    }

@@ -1,0 +1,8 @@
+$kind: http-request
+name: List Agent Trash
+method: GET
+url: '{{base_url}}/api/v1/agents/{{agentId}}/trash'
+order: 14000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'

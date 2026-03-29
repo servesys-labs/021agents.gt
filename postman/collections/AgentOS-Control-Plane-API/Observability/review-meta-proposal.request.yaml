@@ -1,0 +1,25 @@
+$kind: http-request
+name: Review Meta Proposal
+method: POST
+url: '{{base_url}}/api/v1/observability/agents/{{agent_name}}/meta-proposals/{{proposal_id}}/review'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: proposal_id
+    value: '{{proposal_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "status": "approved",
+      "note": "Looks good, applying this change"
+    }

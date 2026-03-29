@@ -1,0 +1,25 @@
+$kind: http-request
+name: Create Job
+method: POST
+url: '{{base_url}}/api/v1/jobs'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "type": "agent_run",
+      "payload": {
+        "agent_name": "{{agent_name}}",
+        "message": "Process this task in the background"
+      },
+      "priority": 5,
+      "max_retries": 3
+    }

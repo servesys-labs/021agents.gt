@@ -1,0 +1,15 @@
+$kind: http-request
+name: Test Ops Alert
+method: POST
+url: '{{base_url}}/api/v1/ops/alerts/test'
+order: 9000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "alert_type": "latency_spike",
+      "threshold": 2000
+    }

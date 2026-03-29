@@ -1,0 +1,13 @@
+$kind: http-request
+name: Restore Agent from Trash
+method: POST
+url: '{{base_url}}/api/v1/agents/{{agentId}}/trash/{{trashId}}/restore'
+order: 15000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+  - key: trashId
+    value: trash_abc123

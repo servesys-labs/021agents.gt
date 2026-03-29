@@ -1,0 +1,21 @@
+$kind: http-request
+name: Update Member Role
+method: PUT
+url: '{{base_url}}/api/v1/orgs/{{org_id}}/members/{{member_user_id}}'
+order: 7000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: org_id
+    value: '{{org_id}}'
+  - key: member_user_id
+    value: '{{member_user_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "role": "admin"
+    }

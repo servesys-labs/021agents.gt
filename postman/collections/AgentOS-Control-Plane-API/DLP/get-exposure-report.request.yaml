@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get DLP Exposure Report
+method: GET
+url: '{{base_url}}/api/v1/dlp/exposure-report'
+order: 6000

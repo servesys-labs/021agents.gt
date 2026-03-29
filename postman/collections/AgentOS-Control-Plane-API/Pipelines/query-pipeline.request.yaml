@@ -1,0 +1,17 @@
+$kind: http-request
+name: Query Pipeline
+method: POST
+url: '{{base_url}}/api/v1/pipelines/{{pipeline_id}}/query'
+order: 14000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: pipeline_id
+    value: '{{pipeline_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "sql": "SELECT * FROM events WHERE agent_name = '{{agent_name}}' LIMIT 100"
+    }

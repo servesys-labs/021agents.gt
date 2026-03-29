@@ -1,0 +1,17 @@
+$kind: http-request
+name: Create Sink
+method: POST
+url: '{{base_url}}/api/v1/pipelines/sinks'
+order: 11000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "r2-parquet-sink",
+      "sink_type": "r2_parquet",
+      "path": "knowledge/",
+      "compression": "zstd"
+    }

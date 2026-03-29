@@ -1,0 +1,16 @@
+$kind: http-request
+name: List Agent Batches
+method: GET
+url: '{{base_url}}/v1/agents/{{agent_name}}/batches'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+queryParams:
+  - key: limit
+    value: '20'

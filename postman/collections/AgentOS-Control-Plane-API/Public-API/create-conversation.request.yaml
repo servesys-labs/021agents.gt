@@ -1,0 +1,18 @@
+$kind: http-request
+name: Create Conversation (Public)
+method: POST
+url: '{{base_url}}/v1/agents/{{agent_name}}/conversations'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "system_prompt": "You are a helpful assistant.",
+      "metadata": {}
+    }

@@ -1,0 +1,3 @@
+$kind: collection
+name: Workflows
+description: 'Workflow DAG management: create, validate, execute, and manage approval gates'

@@ -1,0 +1,13 @@
+$kind: http-request
+name: Delete Alert
+method: DELETE
+url: '{{base_url}}/api/v1/alerts/{{alert_id}}'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: alert_id
+    value: '{{alert_id}}'

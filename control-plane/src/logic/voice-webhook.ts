@@ -3,6 +3,7 @@
  * Ported from agentos/integrations/voice_platforms/{vapi,tavus}.py
  */
 import type { Sql } from "../db/client";
+import { deductCredits } from "./credits";
 
 export const VOICE_GENERIC_PLATFORMS = {
   tavus: {
@@ -109,6 +110,12 @@ async function recordTelephonyBilling(
         'fallback_env'
       )
     `;
+
+    // Fire-and-forget credit deduction for telephony cost
+    if (opts.cost_usd > 0) {
+      const costCents = Math.max(1, Math.round(opts.cost_usd * 100));
+      deductCredits(sql, opts.org_id, costCents, `Voice call: ${opts.call_id}`, opts.agent_name || "voice", traceId).catch(() => {});
+    }
   } catch {
     /* best-effort */
   }

@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get SLO History
+method: GET
+url: '{{base_url}}/api/v1/slos/history'
+order: 6000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: limit
+    value: '50'

@@ -1,0 +1,20 @@
+$kind: http-request
+name: Resume from Checkpoint
+method: POST
+url: '{{base_url}}/api/v1/agents/{{agent_name}}/run/checkpoints/{{checkpoint_id}}/resume'
+order: 21000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: checkpoint_id
+    value: '{{checkpoint_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "decision": "approved",
+      "input": "Continue with the plan"
+    }

@@ -1,0 +1,16 @@
+$kind: http-request
+name: Run Sandbox
+method: POST
+url: '{{base_url}}/api/v1/sandbox/run'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "input": "Test input for sandbox",
+      "config_overrides": {}
+    }

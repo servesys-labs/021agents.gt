@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Session Feedback
+method: GET
+url: '{{base_url}}/api/v1/sessions/{{session_id}}/feedback'
+order: 9000
+pathVariables:
+  - key: session_id
+    value: '{{session_id}}'

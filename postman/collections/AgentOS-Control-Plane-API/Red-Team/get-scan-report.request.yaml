@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Red Team Scan Report
+method: GET
+url: '{{base_url}}/api/v1/redteam/scan/{{scan_id}}/report'
+order: 3000
+pathVariables:
+  - key: scan_id
+    value: '{{scan_id}}'

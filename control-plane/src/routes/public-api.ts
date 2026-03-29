@@ -26,6 +26,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { dispatchRunCompletedWebhooks, type AgentRunEvent } from "../logic/webhook-delivery";
 import { redactPii } from "../logic/pii-redactor";
+import { hasCredits, deductCredits } from "../logic/credits";
 
 type R = { Bindings: Env; Variables: { user: CurrentUser; custom_domain?: string } };
 export const publicAgentRoutes = new OpenAPIHono<R>();
@@ -158,6 +159,21 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
+  // Credit gate: verify org has credits before running
+  try {
+    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+    const hasEnough = await hasCredits(creditSql, orgId, 1);
+    if (!hasEnough) {
+      return c.json({
+        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        code: "insufficient_credits",
+        balance_cents: 0,
+      }, 402);
+    }
+  } catch {
+    // If credit check fails (e.g. table not yet migrated), allow the run
+  }
+
   const body = c.req.valid("json");
 
   if (!body.input || typeof body.input !== "string") {
@@ -252,6 +268,13 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
       model: String(result.model || ""),
       conversation_id: body.conversation_id || null,
     };
+
+    // Deduct credits based on actual cost
+    try {
+      const costUsd = Number(result.cost_usd || 0);
+      const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+      await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+    } catch {}
 
     // Store idempotency cache if key was provided
     if (body.idempotency_key) {
@@ -350,6 +373,21 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
 
+  // Credit gate: verify org has credits before streaming
+  try {
+    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+    const hasEnough = await hasCredits(creditSql, orgId, 1);
+    if (!hasEnough) {
+      return c.json({
+        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        code: "insufficient_credits",
+        balance_cents: 0,
+      }, 402);
+    }
+  } catch {
+    // If credit check fails, allow the run
+  }
+
   const body = c.req.valid("json");
 
   if (!body.input || typeof body.input !== "string") {
@@ -437,6 +475,13 @@ publicAgentRoutes.openapi(agentRunStreamRoute, async (c): Promise<any> => {
         conversation_id: body.conversation_id || null,
       });
 
+      // Fire-and-forget credit deduction
+      try {
+        const costUsd = Number(result.cost_usd || 0);
+        const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+        await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+      } catch {}
+
       // Fire-and-forget end-user usage tracking
       try {
         const user = c.get("user");
@@ -498,6 +543,21 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
 
   const accessErr = await checkAgentAccess(c, agentName, orgId);
   if (accessErr) return accessErr;
+
+  // Credit gate: verify org has credits before upload+run
+  try {
+    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+    const hasEnough = await hasCredits(creditSql, orgId, 1);
+    if (!hasEnough) {
+      return c.json({
+        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        code: "insufficient_credits",
+        balance_cents: 0,
+      }, 402);
+    }
+  } catch {
+    // If credit check fails, allow the run
+  }
 
   // Parse multipart form data
   const formData = await c.req.parseBody({ all: true });
@@ -660,6 +720,13 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
       conversation_id: conversationId || null,
       file_ids: fileIds,
     };
+
+    // Deduct credits based on actual cost
+    try {
+      const costUsd = Number(result.cost_usd || 0);
+      const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+      await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+    } catch {}
 
     // Store idempotency cache if key was provided
     if (idempotencyKey) {

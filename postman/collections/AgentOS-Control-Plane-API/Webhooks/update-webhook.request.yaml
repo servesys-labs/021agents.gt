@@ -1,0 +1,21 @@
+$kind: http-request
+name: Update Webhook
+method: PUT
+url: '{{base_url}}/api/v1/webhooks/{{webhook_id}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: webhook_id
+    value: '{{webhook_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "url": "https://example.com/webhook-updated",
+      "events": ["session.completed", "agent.deployed"],
+      "is_active": true
+    }

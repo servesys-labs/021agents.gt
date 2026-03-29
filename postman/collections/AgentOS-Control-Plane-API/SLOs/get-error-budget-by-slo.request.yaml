@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Error Budget by SLO
+method: GET
+url: '{{base_url}}/api/v1/slos/error-budgets/{{slo_id}}'
+order: 8000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: slo_id
+    value: '{{slo_id}}'

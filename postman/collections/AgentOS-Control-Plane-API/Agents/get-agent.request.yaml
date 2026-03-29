@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Agent
+method: GET
+url: '{{base_url}}/api/v1/agents/{{agentId}}'
+order: 3000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'

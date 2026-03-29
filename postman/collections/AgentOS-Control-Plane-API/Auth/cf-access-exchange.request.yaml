@@ -1,0 +1,16 @@
+$kind: http-request
+name: CF Access Exchange
+method: POST
+url: '{{base_url}}/api/v1/auth/cf-access/exchange'
+order: 12000
+auth:
+  type: noauth
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "cf_access_token": "cf-access-jwt-token"
+    }

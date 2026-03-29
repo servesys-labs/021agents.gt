@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete GPU Endpoint
+method: DELETE
+url: '{{base_url}}/api/v1/gpu/endpoints/{{endpoint_id}}'
+order: 3000
+pathVariables:
+  - key: endpoint_id
+    value: '{{endpoint_id}}'

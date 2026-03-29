@@ -1,0 +1,8 @@
+$kind: http-request
+name: List Workflow Runs
+method: GET
+url: '{{base_url}}/api/v1/workflows/{{workflow_id}}/runs'
+order: 7000
+pathVariables:
+  - key: workflow_id
+    value: '{{workflow_id}}'

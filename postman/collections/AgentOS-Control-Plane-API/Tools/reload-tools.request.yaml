@@ -1,0 +1,5 @@
+$kind: http-request
+name: Reload Tools
+method: POST
+url: '{{base_url}}/api/v1/tools/reload'
+order: 4000

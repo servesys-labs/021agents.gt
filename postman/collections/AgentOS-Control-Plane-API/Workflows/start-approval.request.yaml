@@ -1,0 +1,19 @@
+$kind: http-request
+name: Start Approval Workflow
+method: POST
+url: '{{base_url}}/api/v1/workflows/approval/start'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "workflow_id": "{{workflow_id}}",
+      "context": {
+        "agent_name": "{{agentId}}",
+        "action": "promote_to_production"
+      },
+      "approvers": ["user@example.com"]
+    }

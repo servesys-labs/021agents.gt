@@ -1,0 +1,19 @@
+$kind: http-request
+name: Kill Sandbox
+method: POST
+url: '{{base_url}}/api/v1/sandbox/kill'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "sandbox_id": "{{sandbox_id}}"
+    }

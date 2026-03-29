@@ -1,0 +1,3 @@
+$kind: collection
+name: Graphs
+description: 'Agent graph operations: lint, validate, autofix, and cycle detection'

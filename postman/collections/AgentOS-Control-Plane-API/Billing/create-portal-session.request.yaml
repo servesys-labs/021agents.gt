@@ -1,0 +1,14 @@
+$kind: http-request
+name: Create Stripe Portal Session
+method: POST
+url: '{{base_url}}/api/v1/stripe/portal'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "return_url": "https://app.example.com/billing"
+    }

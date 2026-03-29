@@ -1,0 +1,19 @@
+$kind: http-request
+name: Add Episode
+method: POST
+url: '{{base_url}}/api/v1/memory/{{agentId}}/episodes'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+body:
+  type: json
+  content: |-
+    {
+      "content": "User asked about weather in Paris. Agent responded with current conditions.",
+      "session_id": "{{session_id}}",
+      "importance": 0.8
+    }

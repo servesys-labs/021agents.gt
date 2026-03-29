@@ -1,0 +1,23 @@
+$kind: http-request
+name: Create Vapi Call
+method: POST
+url: '{{base_url}}/api/v1/voice/vapi/calls'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "phone_number": "+15551234567",
+      "assistant_id": "asst_xxxx",
+      "metadata": {
+        "agent_name": "{{agent_name}}"
+      }
+    }

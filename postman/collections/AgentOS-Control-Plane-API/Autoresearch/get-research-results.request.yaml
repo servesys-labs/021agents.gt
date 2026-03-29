@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Research Results
+method: GET
+url: '{{base_url}}/api/v1/autoresearch/results'
+order: 4000

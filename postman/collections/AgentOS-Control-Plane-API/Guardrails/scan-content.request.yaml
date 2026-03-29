@@ -1,0 +1,21 @@
+$kind: http-request
+name: Scan Content
+method: POST
+url: '{{base_url}}/api/v1/guardrails/scan'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "text": "Sample text to scan for policy violations",
+      "agent_name": "{{agent_name}}",
+      "context": "user_input"
+    }

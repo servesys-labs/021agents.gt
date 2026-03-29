@@ -1,0 +1,5 @@
+$kind: http-request
+name: List DLP Classifications
+method: GET
+url: '{{base_url}}/api/v1/dlp/classifications'
+order: 1000

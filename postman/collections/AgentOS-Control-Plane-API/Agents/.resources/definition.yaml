@@ -1,0 +1,3 @@
+$kind: collection
+name: Agents
+description: 'Agent lifecycle management: CRUD, versioning, deployment, run, stream, and checkpoint operations'

@@ -1,0 +1,18 @@
+$kind: http-request
+name: Update Pipeline
+method: PUT
+url: '{{base_url}}/api/v1/pipelines/{{pipeline_id}}'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: pipeline_id
+    value: '{{pipeline_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "name": "updated-pipeline",
+      "description": "Updated pipeline description"
+    }

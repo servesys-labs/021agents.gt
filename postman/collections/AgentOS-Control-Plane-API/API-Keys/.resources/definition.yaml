@@ -1,0 +1,3 @@
+$kind: collection
+name: API-Keys
+description: 'API key management: create, list, rotate, and revoke API keys'

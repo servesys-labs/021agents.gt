@@ -1,0 +1,13 @@
+$kind: http-request
+name: List Project Environments
+method: GET
+url: '{{base_url}}/api/v1/projects/{{project_id}}/envs'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: project_id
+    value: '{{project_id}}'
