@@ -19,6 +19,7 @@ interface DashboardStats {
 }
 
 interface ApiAgent {
+  agent_id: string;
   name: string;
   description: string;
   model?: string;
@@ -64,16 +65,16 @@ export default function DashboardPage() {
     fetchData();
   }, []);
 
-  const removeAgent = async (e: React.MouseEvent, name: string) => {
+  const removeAgent = async (e: React.MouseEvent, agent: ApiAgent) => {
     e.stopPropagation();
-    if (!window.confirm(`Remove “${name}” from your workspace?`)) return;
-    setRemovingName(name);
+    if (!window.confirm(`Remove “${agent.name}” from your workspace?`)) return;
+    setRemovingName(agent.name);
     try {
-      await api.del(`/agents/${agentPathSegment(name)}`);
-      toast("Assistant removed");
+      await api.del(`/agents/${agentPathSegment(agent.agent_id || agent.name)}`);
+      toast(“Assistant removed”);
       await fetchData();
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "Could not remove assistant");
+      toast(err instanceof Error ? err.message : “Could not remove assistant”);
     } finally {
       setRemovingName(null);
     }
@@ -148,9 +149,9 @@ export default function DashboardPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {agents.map((agent) => {
-            const path = agentPathSegment(agent.name);
+            const path = agentPathSegment(agent.agent_id || agent.name);
             return (
-              <Card key={agent.name} hover onClick={() => navigate(`/agents/${path}/activity`)}>
+              <Card key={agent.agent_id || agent.name} hover onClick={() => navigate(`/agents/${path}/activity`)}>
                 <div className="flex items-start justify-between gap-3 mb-3">
                   <div className="min-w-0">
                     <h3 className="text-sm font-semibold text-text truncate">{agent.name}</h3>
@@ -161,7 +162,7 @@ export default function DashboardPage() {
                       type="button"
                       title="Remove assistant"
                       disabled={removingName === agent.name}
-                      onClick={(e) => removeAgent(e, agent.name)}
+                      onClick={(e) => removeAgent(e, agent)}
                       className="p-1.5 rounded-lg text-text-muted hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
                     >
                       {removingName === agent.name ? (

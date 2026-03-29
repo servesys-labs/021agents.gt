@@ -67,6 +67,7 @@ interface PersonalBuilderState {
 }
 
 interface CreateResult {
+  agent_id?: string;
   name?: string;
   auto_eval?: {
     test_cases_generated: number;
@@ -211,7 +212,7 @@ export default function AgentBuilderPage() {
       });
 
       setCreateResult(res);
-      const createdName = String(res.name || name);
+      const agentPath = agentPathSegment(res.agent_id || res.name || name);
 
       // Show success with auto-eval info
       const testCount = res.auto_eval?.test_cases_generated || 0;
@@ -223,11 +224,11 @@ export default function AgentBuilderPage() {
 
       // Navigate: personal flow → channels, business → tests (so they see auto-eval)
       if (personalFlow) {
-        navigate(`/agents/${agentPathSegment(createdName)}/channels`);
+        navigate(`/agents/${agentPath}/channels`);
       } else if (testCount > 0) {
-        navigate(`/agents/${agentPathSegment(createdName)}/tests`);
+        navigate(`/agents/${agentPath}/tests`);
       } else {
-        navigate(`/agents/${agentPathSegment(createdName)}/play`);
+        navigate(`/agents/${agentPath}/play`);
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -246,6 +247,7 @@ export default function AgentBuilderPage() {
             tags: personalFlow ? ["workspace:personal"] : [],
           });
           toast("Created assistant from your description.");
+          // Fallback: no agent_id available, use name
           navigate(`/agents/${agentPathSegment(name)}/play`);
           return;
         } catch (fallbackErr) {
@@ -275,10 +277,10 @@ export default function AgentBuilderPage() {
           tools: selectedTools.length > 0 ? selectedTools.join(",") : "auto",
           draft_only: false,
         });
-        const createdName = String(res.name || name);
+        const advPath = agentPathSegment(res.agent_id || res.name || name);
         const testCount = res.auto_eval?.test_cases_generated || 0;
         toast(`Assistant created with AI${testCount > 0 ? ` + ${testCount} test cases` : ""}.`);
-        navigate(`/agents/${agentPathSegment(createdName)}/${testCount > 0 ? "tests" : "activity"}`);
+        navigate(`/agents/${advPath}/${testCount > 0 ? "tests" : "activity"}`);
         return;
       } catch (err) {
         if (err instanceof ApiError && err.status === 409) {
@@ -295,6 +297,7 @@ export default function AgentBuilderPage() {
         tools: selectedTools,
         tags: useCase ? [useCase, ...(personalFlow ? ["workspace:personal"] : [])] : [],
       });
+      // Fallback: no agent_id available, use name
       navigate(`/agents/${agentPathSegment(name)}/activity`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Failed to create assistant");
