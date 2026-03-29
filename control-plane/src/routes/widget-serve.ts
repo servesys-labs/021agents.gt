@@ -20,7 +20,7 @@ export const widgetServeRoutes = new OpenAPIHono<WidgetEnv>();
 let cachedWidget: { script: string; etag: string; ts: number } | null = null;
 const CACHE_TTL = 300_000; // 5 min
 
-const STUB_SCRIPT = `(function(){console.error("[AgentOS Widget] Widget bundle not deployed yet. Run: npx wrangler r2 object put agentos-storage/widget/widget.js --file widget/dist/widget.js")})();`;
+const STUB_SCRIPT = `(function(){console.error("[OneShots Widget] Widget bundle not deployed yet. Run: npx wrangler r2 object put agentos-storage/widget/widget.js --file widget/dist/widget.js")})();`;
 
 function widgetHeaders(etag: string, maxAge = 3600): Record<string, string> {
   return {

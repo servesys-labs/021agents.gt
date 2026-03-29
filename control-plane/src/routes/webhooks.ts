@@ -237,7 +237,7 @@ webhookRoutes.openapi(testWebhookRoute, async (c): Promise<any> => {
   const payload = {
     event: "test",
     timestamp: Date.now() / 1000,
-    data: { message: "This is a test webhook delivery from AgentOS" },
+    data: { message: "This is a test webhook delivery from OneShots" },
   };
 
   try {

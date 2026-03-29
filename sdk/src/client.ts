@@ -8,7 +8,7 @@ const DEFAULT_BASE_URL = "https://api.oneshots.co";
 const DEFAULT_TIMEOUT_MS = 120_000;
 
 /**
- * Main entry point for the AgentOS SDK.
+ * Main entry point for the OneShots SDK.
  *
  * Create a single instance and reuse it across your application.
  *
@@ -66,7 +66,7 @@ export class AgentOS {
   }
 
   /**
-   * Check the health of the AgentOS API.
+   * Check the health of the OneShots API.
    *
    * @returns The current API health status.
    *

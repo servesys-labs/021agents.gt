@@ -142,19 +142,19 @@ export async function initCommand(
     // Create README
     const readme = `# ${projectName}
 
-AgentOS project scaffolded with the \`${options.template}\` template.
+OneShots project scaffolded with the \`${options.template}\` template.
 
 ## Quick Start
 
 \`\`\`bash
 # Run the agent
-agentos run ${projectName} "Your task here"
+oneshots run ${projectName} "Your task here"
 
 # Interactive chat
-agentos chat ${projectName}
+oneshots chat ${projectName}
 
 # Deploy to production
-agentos deploy ${projectName}
+oneshots deploy ${projectName}
 \`\`\`
 
 ## Project Structure
@@ -165,8 +165,8 @@ agentos deploy ${projectName}
 
 ## Documentation
 
-- [AgentOS Docs](https://docs.agentos.dev)
-- [Templates](https://docs.agentos.dev/templates)
+- [OneShots Docs](https://docs.oneshots.co)
+- [Templates](https://docs.oneshots.co/templates)
 `;
 
     const readmePath = join(targetDir, "README.md");
@@ -177,7 +177,7 @@ agentos deploy ${projectName}
     }
 
     // Create .gitignore
-    const gitignore = `# AgentOS
+    const gitignore = `# OneShots
 .env
 .env.local
 .DS_Store
@@ -230,8 +230,8 @@ build/
     if (directory !== ".") {
       console.log(chalk.gray(`  cd ${directory}`));
     }
-    console.log(chalk.gray(`  agentos run ${projectName} "Hello world"`));
-    console.log(chalk.gray(`  agentos chat ${projectName}`));
+    console.log(chalk.gray(`  oneshots run ${projectName} "Hello world"`));
+    console.log(chalk.gray(`  oneshots chat ${projectName}`));
     console.log();
 
   } catch (error) {

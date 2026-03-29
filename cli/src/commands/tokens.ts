@@ -34,7 +34,7 @@ export const tokensCommand = {
 
       if (tokens.length === 0) {
         console.log(chalk.yellow("No end-user tokens found."));
-        console.log(chalk.gray("Create one with: agentos tokens create --user-id <id>"));
+        console.log(chalk.gray("Create one with: oneshots tokens create --user-id <id>"));
         return;
       }
 

@@ -369,7 +369,7 @@ export default function AgentFlowPage() {
                 The flow starts at the trigger and follows the connections you define.
               </p>
               <p className="text-xs text-text-muted leading-relaxed mt-2">
-                This canvas is saved with your agent for planning. The live runtime graph is the declarative graph managed by AgentOS (create/update flows in the full builder when you need execution changes).
+                This canvas is saved with your agent for planning. The live runtime graph is the declarative graph managed by OneShots (create/update flows in the full builder when you need execution changes).
               </p>
             </Card>
           </div>

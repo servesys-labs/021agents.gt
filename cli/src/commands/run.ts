@@ -50,7 +50,7 @@ export async function runCommand(
     if (error instanceof APIError) {
       if (error.status === 404) {
         console.error(chalk.red(`Agent not found: ${agentName}`));
-        console.log(chalk.gray("Run 'agentos list' to see available agents."));
+        console.log(chalk.gray("Run 'oneshots list' to see available agents."));
       } else {
         console.error(chalk.red(`API Error (${error.status}):`), error.message);
       }

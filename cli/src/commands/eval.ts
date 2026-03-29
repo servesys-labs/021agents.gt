@@ -29,7 +29,7 @@ export const evalCommand = {
 
       if (runs.length === 0) {
         console.log(chalk.yellow("No eval runs found."));
-        console.log(chalk.gray("Run 'agentos eval run <agent>' to start an evaluation."));
+        console.log(chalk.gray("Run 'oneshots eval run <agent>' to start an evaluation."));
         return;
       }
 
@@ -87,7 +87,7 @@ export const evalCommand = {
       if (result.status === "queued") {
         spinner.succeed("Eval queued!");
         console.log(chalk.blue(`Run ID: ${result.run_id}`));
-        console.log(chalk.gray("Check status with: agentos eval status " + result.run_id));
+        console.log(chalk.gray("Check status with: oneshots eval status " + result.run_id));
       } else {
         spinner.succeed("Eval completed!");
         console.log(chalk.green(`✓ Run ID: ${result.run_id}`));

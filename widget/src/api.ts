@@ -1,5 +1,5 @@
 /**
- * Thin API client for the AgentOS widget.
+ * Thin API client for the OneShots widget.
  * Handles conversation creation and SSE-based message streaming.
  */
 

@@ -30,7 +30,7 @@ export const evolveCommand = {
       spinner.succeed("Analysis complete!");
       console.log(chalk.green(`\n✓ Generated ${result.proposals_generated} proposals`));
       console.log(chalk.gray(result.summary));
-      console.log(chalk.gray(`\nView proposals: agentos evolve proposals ${agentName}`));
+      console.log(chalk.gray(`\nView proposals: oneshots evolve proposals ${agentName}`));
     } catch (error) {
       spinner.fail("Analysis failed");
       console.error(chalk.red(error));
@@ -46,7 +46,7 @@ export const evolveCommand = {
 
       if (data.proposals.length === 0) {
         console.log(chalk.yellow("No proposals found."));
-        console.log(chalk.gray(`Run 'agentos evolve analyze ${agentName}' to generate proposals.`));
+        console.log(chalk.gray(`Run 'oneshots evolve analyze ${agentName}' to generate proposals.`));
         return;
       }
 
@@ -64,9 +64,9 @@ export const evolveCommand = {
       }
 
       console.log(chalk.gray("Actions:"));
-      console.log(chalk.gray(`  agentos evolve approve ${agentName} <id>`));
-      console.log(chalk.gray(`  agentos evolve reject ${agentName} <id>`));
-      console.log(chalk.gray(`  agentos evolve apply ${agentName} <id>`));
+      console.log(chalk.gray(`  oneshots evolve approve ${agentName} <id>`));
+      console.log(chalk.gray(`  oneshots evolve reject ${agentName} <id>`));
+      console.log(chalk.gray(`  oneshots evolve apply ${agentName} <id>`));
     } catch (error) {
       console.error(chalk.red("Failed to get proposals:"), error);
       process.exit(1);

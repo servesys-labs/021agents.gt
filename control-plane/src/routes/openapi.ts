@@ -44,7 +44,7 @@ openapiRoutes.openapi(docsRoute, (c): any => {
   const html = `<!DOCTYPE html>
 <html>
 <head>
-  <title>AgentOS API Reference</title>
+  <title>OneShots API Reference</title>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
 </head>

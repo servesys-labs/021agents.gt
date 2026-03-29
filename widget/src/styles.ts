@@ -1,5 +1,5 @@
 /**
- * All CSS for the AgentOS chat widget.
+ * All CSS for the OneShots chat widget.
  * Injected into Shadow DOM to isolate from host page styles.
  *
  * Uses CSS custom properties for theming -- the light/dark token sets

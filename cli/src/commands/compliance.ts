@@ -50,7 +50,7 @@ export const complianceCommand = {
       spinner.succeed("Data export requested!");
       console.log(`Export ID: ${chalk.bold(result.export_id)}`);
       console.log(`Status:    ${chalk.yellow(result.status)}`);
-      console.log(chalk.gray(`\nCheck status: agentos compliance export-status ${result.export_id}`));
+      console.log(chalk.gray(`\nCheck status: oneshots compliance export-status ${result.export_id}`));
       console.log();
     } catch (error) {
       spinner.fail("Failed to request data export");

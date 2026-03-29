@@ -1,5 +1,5 @@
 /**
- * @oneshots/sdk — Official TypeScript SDK for AgentOS
+ * @oneshots/sdk — Official TypeScript SDK for OneShots
  *
  * @example
  * ```ts

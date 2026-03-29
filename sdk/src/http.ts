@@ -359,10 +359,10 @@ export class HttpClient {
 
     if (direction === "request") {
       // eslint-disable-next-line no-console
-      console.debug(`[AgentOS] -> ${method} ${url}`, statusOrBody ?? "");
+      console.debug(`[OneShots] -> ${method} ${url}`, statusOrBody ?? "");
     } else {
       // eslint-disable-next-line no-console
-      console.debug(`[AgentOS] <- ${method} ${url} ${statusOrBody}`, responseBody ?? "");
+      console.debug(`[OneShots] <- ${method} ${url} ${statusOrBody}`, responseBody ?? "");
     }
   }
 }

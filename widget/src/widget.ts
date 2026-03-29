@@ -1,5 +1,5 @@
 /**
- * AgentOS Embeddable Chat Widget
+ * OneShots Embeddable Chat Widget
  *
  * Self-initializing IIFE that reads configuration from the hosting
  * <script> tag's data-* attributes and injects a Shadow DOM chat
@@ -21,7 +21,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "Thinking...",
     error: "Something went wrong. Please try again.",
     rateLimit: "Too many messages. Please wait a moment.",
-    powered: "Powered by AgentOS",
+    powered: "Powered by OneShots",
     upload: "Attach file",
     newChat: "New conversation",
   },
@@ -31,7 +31,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "Pensando...",
     error: "Algo sali\u00f3 mal. Int\u00e9ntalo de nuevo.",
     rateLimit: "Demasiados mensajes. Espera un momento.",
-    powered: "Impulsado por AgentOS",
+    powered: "Impulsado por OneShots",
     upload: "Adjuntar archivo",
     newChat: "Nueva conversaci\u00f3n",
   },
@@ -41,7 +41,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "R\u00e9flexion...",
     error: "Une erreur est survenue. R\u00e9essayez.",
     rateLimit: "Trop de messages. Patientez.",
-    powered: "Propuls\u00e9 par AgentOS",
+    powered: "Propuls\u00e9 par OneShots",
     upload: "Joindre un fichier",
     newChat: "Nouvelle conversation",
   },
@@ -51,7 +51,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "Denke nach...",
     error: "Etwas ist schiefgelaufen. Bitte versuchen Sie es erneut.",
     rateLimit: "Zu viele Nachrichten. Bitte warten Sie einen Moment.",
-    powered: "Betrieben von AgentOS",
+    powered: "Betrieben von OneShots",
     upload: "Datei anh\u00e4ngen",
     newChat: "Neues Gespr\u00e4ch",
   },
@@ -61,7 +61,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "\u8003\u3048\u4e2d...",
     error: "\u554f\u984c\u304c\u767a\u751f\u3057\u307e\u3057\u305f\u3002\u3082\u3046\u4e00\u5ea6\u304a\u8a66\u3057\u304f\u3060\u3055\u3044\u3002",
     rateLimit: "\u30e1\u30c3\u30bb\u30fc\u30b8\u304c\u591a\u3059\u304e\u307e\u3059\u3002\u5c11\u3005\u304a\u5f85\u3061\u304f\u3060\u3055\u3044\u3002",
-    powered: "AgentOS\u63d0\u4f9b",
+    powered: "OneShots\u63d0\u4f9b",
     upload: "\u30d5\u30a1\u30a4\u30eb\u3092\u6dfb\u4ed8",
     newChat: "\u65b0\u3057\u3044\u4f1a\u8a71",
   },
@@ -71,7 +71,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "\u601d\u8003\u4e2d...",
     error: "\u51fa\u4e86\u70b9\u95ee\u9898\u3002\u8bf7\u91cd\u8bd5\u3002",
     rateLimit: "\u6d88\u606f\u592a\u591a\u3002\u8bf7\u7a0d\u7b49\u3002",
-    powered: "\u7531 AgentOS \u63d0\u4f9b\u652f\u6301",
+    powered: "\u7531 OneShots \u63d0\u4f9b\u652f\u6301",
     upload: "\u9644\u52a0\u6587\u4ef6",
     newChat: "\u65b0\u5bf9\u8bdd",
   },
@@ -81,7 +81,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "Pensando...",
     error: "Algo deu errado. Tente novamente.",
     rateLimit: "Muitas mensagens. Aguarde um momento.",
-    powered: "Desenvolvido por AgentOS",
+    powered: "Desenvolvido por OneShots",
     upload: "Anexar arquivo",
     newChat: "Nova conversa",
   },
@@ -91,7 +91,7 @@ const STRINGS: Record<string, Record<string, string>> = {
     typing: "\u062c\u0627\u0631\u064d \u0627\u0644\u062a\u0641\u0643\u064a\u0631...",
     error: "\u062d\u062f\u062b \u062e\u0637\u0623. \u064a\u0631\u062c\u0649 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629 \u0645\u0631\u0629 \u0623\u062e\u0631\u0649.",
     rateLimit: "\u0631\u0633\u0627\u0626\u0644 \u0643\u062b\u064a\u0631\u0629 \u062c\u062f\u064b\u0627. \u064a\u0631\u062c\u0649 \u0627\u0644\u0627\u0646\u062a\u0638\u0627\u0631.",
-    powered: "\u0645\u062f\u0639\u0648\u0645 \u0628\u0648\u0627\u0633\u0637\u0629 AgentOS",
+    powered: "\u0645\u062f\u0639\u0648\u0645 \u0628\u0648\u0627\u0633\u0637\u0629 OneShots",
     upload: "\u0625\u0631\u0641\u0627\u0642 \u0645\u0644\u0641",
     newChat: "\u0645\u062d\u0627\u062f\u062b\u0629 \u062c\u062f\u064a\u062f\u0629",
   },
@@ -130,7 +130,7 @@ function readConfig(): WidgetConfig {
     document.querySelector<HTMLScriptElement>("script[data-agent][data-api-key]");
 
   if (!script) {
-    throw new Error("[AgentOS Widget] Could not locate the widget <script> tag.");
+    throw new Error("[OneShots Widget] Could not locate the widget <script> tag.");
   }
 
   const agent = script.getAttribute("data-agent");
@@ -138,7 +138,7 @@ function readConfig(): WidgetConfig {
 
   if (!agent || !apiKey) {
     throw new Error(
-      "[AgentOS Widget] data-agent and data-api-key are required attributes."
+      "[OneShots Widget] data-agent and data-api-key are required attributes."
     );
   }
 
@@ -164,7 +164,7 @@ function readConfig(): WidgetConfig {
     try {
       suggestedReplies = JSON.parse(suggestedRaw);
     } catch {
-      console.warn("[AgentOS Widget] Invalid data-suggested-replies JSON.");
+      console.warn("[OneShots Widget] Invalid data-suggested-replies JSON.");
     }
   }
 
@@ -236,7 +236,7 @@ class AgentOSWidget {
 
     // Create host element
     this.host = document.createElement("div");
-    this.host.id = "agentos-widget";
+    this.host.id = "oneshots-widget";
     this.host.setAttribute("data-theme", config.theme);
 
     // Set RTL direction for Arabic
@@ -390,8 +390,8 @@ class AgentOSWidget {
     }
     const poweredLabel = this.strings.powered;
     powered.innerHTML = `${poweredLabel.replace(
-      "AgentOS",
-      '<a href="https://agentos.dev" target="_blank" rel="noopener noreferrer">AgentOS</a>'
+      "OneShots",
+      '<a href="https://oneshots.co" target="_blank" rel="noopener noreferrer">OneShots</a>'
     )}`;
 
     // Assemble window
@@ -483,7 +483,7 @@ class AgentOSWidget {
     this.fab.setAttribute("aria-label", "Close chat");
     // Focus the input after animation
     setTimeout(() => this.inputEl.focus(), 300);
-    window.dispatchEvent(new CustomEvent("agentos:open"));
+    window.dispatchEvent(new CustomEvent("oneshots:open"));
   }
 
   private close(): void {
@@ -491,7 +491,7 @@ class AgentOSWidget {
     this.window.setAttribute("data-open", "false");
     this.fab.setAttribute("aria-expanded", "false");
     this.fab.setAttribute("aria-label", "Open chat");
-    window.dispatchEvent(new CustomEvent("agentos:close"));
+    window.dispatchEvent(new CustomEvent("oneshots:close"));
   }
 
   /* ---------------------------------------------------------------- */
@@ -679,7 +679,7 @@ class AgentOSWidget {
 
   private dispatchWidgetEvent(name: string, detail?: Record<string, unknown>): void {
     window.dispatchEvent(
-      new CustomEvent(`agentos:${name}`, detail ? { detail } : undefined)
+      new CustomEvent(`oneshots:${name}`, detail ? { detail } : undefined)
     );
   }
 
@@ -793,7 +793,7 @@ class AgentOSWidget {
         err instanceof Error ? err.message : this.strings.error;
       this.addErrorMessage(message);
       this.dispatchWidgetEvent("error", { error: message });
-      console.error("[AgentOS Widget]", err);
+      console.error("[OneShots Widget]", err);
     } finally {
       this.isStreaming = false;
       this.sendBtn.disabled = false;
@@ -812,7 +812,7 @@ function init(): void {
     const config = readConfig();
     new AgentOSWidget(config);
   } catch (err) {
-    console.error("[AgentOS Widget]", err);
+    console.error("[OneShots Widget]", err);
   }
 }
 

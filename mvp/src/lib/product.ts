@@ -3,10 +3,10 @@
  * Edit here to retone the whole shell without hunting strings.
  */
 export const PRODUCT = {
-  name: "AgentOS",
+  name: "OneShots",
   /** Shown next to the logo and in the browser title */
   edition: "Business & personal",
-  documentTitle: "AgentOS — Business & personal",
+  documentTitle: "OneShots — Business & personal",
   /** One line under the logo on auth screens */
   editionTagline: "Assistants for your business—and a private one in your pocket.",
   /** Dashboard hero */
@@ -25,7 +25,7 @@ export const PRODUCT = {
   createAgentIntro:
     "Give it a name and job—perfect for reception, bookings, or order questions without hiring another person.",
   /** Onboarding */
-  onboardingHeadline: "How will you use AgentOS?",
+  onboardingHeadline: "How will you use OneShots?",
   onboardingSub: "Pick a path—you can add the other kind of assistant anytime.",
   onboardingBusinessHeadline: "Set up your business workspace",
   onboardingBusinessSub: "We’ll match templates and tools to how your team works.",

@@ -1,5 +1,5 @@
 /**
- * Base error class for all AgentOS SDK errors.
+ * Base error class for all OneShots SDK errors.
  *
  * Thrown when the API returns a non-2xx response or when a client-side
  * validation failure occurs.

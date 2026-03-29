@@ -88,7 +88,7 @@ export const batchCommand = {
         console.log(`Callback:    ${options.callback}`);
       }
       console.log(
-        chalk.gray(`\nCheck status with: agentos batch status ${agentName} ${result.batch_id}`)
+        chalk.gray(`\nCheck status with: oneshots batch status ${agentName} ${result.batch_id}`)
       );
       console.log();
     } catch (error) {

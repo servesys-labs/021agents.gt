@@ -1,5 +1,5 @@
 /**
- * API client for AgentOS control-plane
+ * API client for OneShots control-plane
  */
 import fetch from "node-fetch";
 import { getConfig, requireAuth } from "./config.js";
@@ -18,7 +18,7 @@ export class APIError extends Error {
 function getHeaders(auth = true): Record<string, string> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    "User-Agent": "AgentOS-CLI/0.2.0",
+    "User-Agent": "OneShots-CLI/0.2.0",
   };
 
   if (auth) {

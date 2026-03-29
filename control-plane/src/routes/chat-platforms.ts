@@ -173,7 +173,7 @@ chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
 
   // Handle commands
   if (text.startsWith("/start")) {
-    await sendTelegramMessage(botToken, chatId, "Hi! I'm your AgentOS agent. Send me a message and I'll help.");
+    await sendTelegramMessage(botToken, chatId, "Hi! I'm your OneShots agent. Send me a message and I'll help.");
     return c.json({ ok: true });
   }
   if (text.startsWith("/help")) {

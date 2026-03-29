@@ -2,13 +2,13 @@
 // Client configuration
 // ---------------------------------------------------------------------------
 
-/** Configuration for the AgentOS SDK client. */
+/** Configuration for the OneShots SDK client. */
 export interface AgentOSConfig {
   /** API key — must start with "ak_". */
   apiKey: string;
 
   /**
-   * Base URL of the AgentOS API.
+   * Base URL of the OneShots API.
    * @default "https://api.agentos.dev"
    */
   baseUrl?: string;

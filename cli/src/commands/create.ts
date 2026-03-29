@@ -122,9 +122,9 @@ export async function createCommand(options: CreateOptions): Promise<void> {
     }
 
     console.log(chalk.gray(`\nNext steps:`));
-    console.log(chalk.gray(`  agentos run ${agentName} "Hello world"`));
-    console.log(chalk.gray(`  agentos chat ${agentName}`));
-    console.log(chalk.gray(`  agentos deploy ${agentName}`));
+    console.log(chalk.gray(`  oneshots run ${agentName} "Hello world"`));
+    console.log(chalk.gray(`  oneshots chat ${agentName}`));
+    console.log(chalk.gray(`  oneshots deploy ${agentName}`));
 
   } catch (error) {
     console.error(chalk.red("Failed to create agent:"), error);

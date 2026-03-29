@@ -532,7 +532,7 @@ opsObservabilityRoutes.openapi(alertsTestRoute, async (c): Promise<any> => {
   const payload = {
     alert_type: alertType,
     severity: "test",
-    message: `Test ${alertType} alert from AgentOS`,
+    message: `Test ${alertType} alert from OneShots`,
     timestamp: new Date().toISOString(),
     org_id: c.get("user").org_id,
     test: true,

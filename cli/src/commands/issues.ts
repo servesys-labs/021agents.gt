@@ -130,8 +130,8 @@ export const issuesCommand = {
       }
 
       console.log(chalk.gray("\nActions:"));
-      console.log(chalk.gray(`  agentos issues fix ${issueId}`));
-      console.log(chalk.gray(`  agentos issues triage ${issueId} <severity>`));
+      console.log(chalk.gray(`  oneshots issues fix ${issueId}`));
+      console.log(chalk.gray(`  oneshots issues triage ${issueId} <severity>`));
       console.log();
     } catch (error) {
       console.error(chalk.red("Failed to get issue:"), error);

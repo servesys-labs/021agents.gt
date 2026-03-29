@@ -41,7 +41,7 @@ export const domainsCommand = {
 
       if (domains.length === 0) {
         console.log(chalk.yellow("No custom domains configured."));
-        console.log(chalk.gray("Add one with: agentos domains add --hostname <host>"));
+        console.log(chalk.gray("Add one with: oneshots domains add --hostname <host>"));
         return;
       }
 
@@ -131,7 +131,7 @@ export const domainsCommand = {
         }
 
         console.log(
-          chalk.gray(`\nAfter adding DNS records, verify with: agentos domains verify ${result.id}`)
+          chalk.gray(`\nAfter adding DNS records, verify with: oneshots domains verify ${result.id}`)
         );
       }
       console.log();

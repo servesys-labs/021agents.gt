@@ -344,16 +344,16 @@ export default function AgentChannelsPage() {
   const telegramDeepLink = telegramInfo?.deep_link ?? "";
   const waDigits = waPhone.replace(/\D/g, "");
   const whatsappDeepLink = waDigits
-    ? `https://wa.me/${waDigits}?text=${encodeURIComponent("Hi — I'd like to use my AgentOS assistant.")}`
+    ? `https://wa.me/${waDigits}?text=${encodeURIComponent("Hi — I'd like to use my OneShots assistant.")}`
     : "";
 
-  const widgetSnippet = `<script src="https://agentos.dev/widget/${id}.js"
+  const widgetSnippet = `<script src="https://oneshots.co/widget/${id}.js"
   data-position="${widgetPosition}"
   data-color="${widgetColor}"
   data-greeting="${widgetGreeting}">
 </script>`;
 
-  const apiEndpoint = `POST https://api.agentos.dev/v1/agents/${id}/chat
+  const apiEndpoint = `POST https://api.oneshots.co/v1/agents/${id}/chat
 Authorization: Bearer YOUR_API_KEY
 Content-Type: application/json
 
@@ -470,7 +470,7 @@ Content-Type: application/json
         <div className="space-y-4">
           <p className="text-sm text-text-secondary leading-relaxed">
             In <strong>@BotFather</strong>, create a bot and copy the <strong>HTTP API token</strong>.
-            AgentOS saves it securely, calls Telegram <code className="text-xs bg-surface-alt px-1 rounded">setWebhook</code>, then you can open the bot from the link or QR.
+            OneShots saves it securely, calls Telegram <code className="text-xs bg-surface-alt px-1 rounded">setWebhook</code>, then you can open the bot from the link or QR.
           </p>
           <Input label="Bot token (from BotFather)" type="password" autoComplete="off" placeholder="Paste token here"
             value={telegramBotToken} onChange={(e) => setTelegramBotToken(e.target.value)} />

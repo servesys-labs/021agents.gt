@@ -546,7 +546,7 @@ const cfAccessExchangeRoute = createRoute({
   path: "/cf-access/exchange",
   tags: ["Auth"],
   summary: "Exchange CF Access token for JWT",
-  description: "Exchange a Cloudflare Access token for an AgentOS JWT. Auto-provisions users on first login.",
+  description: "Exchange a Cloudflare Access token for a OneShots JWT. Auto-provisions users on first login.",
   security: [],
   request: {
     body: { content: { "application/json": { schema: CfAccessExchangeRequest } } },

@@ -498,7 +498,7 @@ const vapiServerUrlRoute = createRoute({
   method: "post",
   path: "/vapi/server-url",
   tags: ["Voice"],
-  summary: "Vapi Server URL endpoint — connects voice calls to AgentOS agents",
+  summary: "Vapi Server URL endpoint — connects voice calls to OneShots agents",
   responses: {
     200: {
       description: "Server URL response",

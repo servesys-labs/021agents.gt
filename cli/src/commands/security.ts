@@ -94,7 +94,7 @@ export const securityCommand = {
 
       spinner.succeed("Scan initiated!");
       console.log(chalk.blue(`Scan ID: ${result.scan_id}`));
-      console.log(chalk.gray(`Check results: agentos security findings --scan ${result.scan_id}`));
+      console.log(chalk.gray(`Check results: oneshots security findings --scan ${result.scan_id}`));
     } catch (error) {
       spinner.fail("Scan failed");
       console.error(chalk.red(error));

@@ -402,7 +402,7 @@ export default function AgentSettingsPage() {
           <Card>
             <p className="text-sm font-medium text-text mb-2">Widget embed code</p>
             <code className="block bg-surface-alt rounded-lg p-3 text-xs text-text-secondary break-all">
-              {`<script src="https://agentos.dev/widget/${id}.js"></script>`}
+              {`<script src="https://oneshots.co/widget/${id}.js"></script>`}
             </code>
           </Card>
           <Card>

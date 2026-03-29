@@ -19,7 +19,7 @@ export async function listCommand(options: { all?: boolean }): Promise<void> {
 
     if (agents.length === 0) {
       console.log(chalk.yellow("No agents found."));
-      console.log(chalk.gray("Create your first agent with: agentos create"));
+      console.log(chalk.gray("Create your first agent with: oneshots create"));
       return;
     }
 
