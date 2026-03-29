@@ -1,0 +1,3 @@
+$kind: collection
+name: Compliance
+description: 'GDPR/compliance endpoints: data export requests and account deletion'

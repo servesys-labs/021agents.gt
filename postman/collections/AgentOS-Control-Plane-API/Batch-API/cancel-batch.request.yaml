@@ -1,0 +1,15 @@
+$kind: http-request
+name: Cancel Batch Job
+method: DELETE
+url: '{{base_url}}/api/v1/agents/{{agent_name}}/batches/{{batch_id}}'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: batch_id
+    value: '{{batch_id}}'

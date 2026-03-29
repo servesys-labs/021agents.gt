@@ -1,0 +1,13 @@
+$kind: http-request
+name: Enable Schedule
+method: POST
+url: '{{base_url}}/api/v1/schedules/{{schedule_id}}/enable'
+order: 6000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: schedule_id
+    value: '{{schedule_id}}'

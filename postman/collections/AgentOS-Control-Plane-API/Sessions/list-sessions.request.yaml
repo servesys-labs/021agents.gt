@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Sessions
+method: GET
+url: '{{base_url}}/api/v1/sessions'
+order: 3000
+queryParams:
+  - key: agent_name
+    value: '{{agentId}}'
+  - key: limit
+    value: '20'

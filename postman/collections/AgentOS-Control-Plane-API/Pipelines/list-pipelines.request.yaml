@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Pipelines
+method: GET
+url: '{{base_url}}/api/v1/pipelines'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

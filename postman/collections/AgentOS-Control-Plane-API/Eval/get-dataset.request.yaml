@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Dataset
+method: GET
+url: '{{base_url}}/api/v1/eval/datasets/{{dataset_name}}'
+order: 14000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: dataset_name
+    value: '{{dataset_name}}'

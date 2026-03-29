@@ -1,0 +1,18 @@
+$kind: http-request
+name: Create Platform Call
+method: POST
+url: '{{base_url}}/api/v1/voice/{{platform}}/calls'
+order: 11000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: platform
+    value: '{{platform}}'
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "phone_number": "+15551234567"
+    }

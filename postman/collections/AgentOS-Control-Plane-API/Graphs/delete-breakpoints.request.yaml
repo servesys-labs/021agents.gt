@@ -1,0 +1,19 @@
+$kind: http-request
+name: Delete Graph Breakpoints
+method: DELETE
+url: '{{base_url}}/api/v1/graphs/breakpoints'
+order: 7000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}"
+    }

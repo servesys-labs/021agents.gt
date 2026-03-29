@@ -1,0 +1,3 @@
+$kind: collection
+name: End-User-Tokens
+description: End-user token issuance and management for multi-tenant agent access

@@ -1,0 +1,22 @@
+$kind: http-request
+name: Execute Code
+method: POST
+url: '{{base_url}}/api/v1/codemode/execute'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "scope": "agent",
+      "code": "return { result: input.value * 2 };",
+      "input": { "value": 21 },
+      "timeout_ms": 5000
+    }

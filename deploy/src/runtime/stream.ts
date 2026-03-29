@@ -26,10 +26,13 @@ import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop } from "./middleware";
 import { serializeForWebSocket } from "./protocol";
 import { createBackpressureController } from "./backpressure";
+import { estimateTokenCost } from "./pricing";
 import { attachDelegationLineage, type DelegationContextInput } from "./delegation";
 import { attachToolPolicyEnvelope } from "./policy-envelope";
 
 type WsSend = (data: string) => void;
+
+// Model pricing imported from shared module (pricing.ts)
 
 /**
  * Helper for progress reporting on long-running tools.
@@ -120,6 +123,9 @@ async function streamLLM(
     throw new Error(`LLM ${resp.status}: ${errBody.slice(0, 300)}`);
   }
 
+  // Capture gateway log ID for post-hoc exact token lookup
+  const gatewayLogId = resp.headers.get("cf-aig-log-id") || "";
+
   // Parse SSE stream and forward tokens
   let content = "";
   let toolCalls: ToolCall[] = [];
@@ -207,6 +213,24 @@ async function streamLLM(
     }
   }
 
+  // If streaming didn't include usage, query AI Gateway Logs API for exact tokens + cost
+  if ((inputTokens === 0 || outputTokens === 0) && gatewayLogId && accountId && gatewayId) {
+    try {
+      const logResp = await fetch(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${gatewayId}/logs?id=${gatewayLogId}`,
+        { headers: { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN || ""}` } },
+      );
+      if (logResp.ok) {
+        const logData = await logResp.json() as { result?: Array<{ tokens_in?: number; tokens_out?: number; cost?: number }> };
+        const entry = logData.result?.[0];
+        if (entry) {
+          if (entry.tokens_in && entry.tokens_in > 0) inputTokens = entry.tokens_in;
+          if (entry.tokens_out && entry.tokens_out > 0) outputTokens = entry.tokens_out;
+        }
+      }
+    } catch {}
+  }
+
   // Clean up reader
   try { reader.cancel(); } catch {}
 
@@ -225,7 +249,7 @@ async function streamLLM(
     model: resolvedModel,
     tool_calls: toolCalls,
     usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-    cost_usd: 0, // Trust AI Gateway analytics for billing
+    cost_usd: estimateTokenCost(resolvedModel, inputTokens, outputTokens),
     latency_ms: latencyMs,
   };
 }

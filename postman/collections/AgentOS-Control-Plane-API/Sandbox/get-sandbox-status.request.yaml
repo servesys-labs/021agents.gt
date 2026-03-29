@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Sandbox Status
+method: GET
+url: '{{base_url}}/api/v1/sandbox/status'
+order: 2000

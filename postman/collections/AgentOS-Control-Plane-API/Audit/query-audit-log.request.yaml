@@ -1,0 +1,22 @@
+$kind: http-request
+name: Query Audit Log
+method: GET
+url: '{{base_url}}/api/v1/audit/log'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: limit
+    value: '50'
+  - key: action
+    value: ''
+    disabled: true
+  - key: user_id
+    value: ''
+    disabled: true
+  - key: resource_type
+    value: ''
+    disabled: true

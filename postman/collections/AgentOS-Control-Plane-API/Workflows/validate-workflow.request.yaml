@@ -1,0 +1,20 @@
+$kind: http-request
+name: Validate Workflow
+method: POST
+url: '{{base_url}}/api/v1/workflows/validate'
+order: 10000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "dag": {
+        "nodes": [
+          {"id": "step1", "type": "eval"},
+          {"id": "step2", "type": "action"}
+        ],
+        "edges": [{"from": "step1", "to": "step2"}]
+      }
+    }

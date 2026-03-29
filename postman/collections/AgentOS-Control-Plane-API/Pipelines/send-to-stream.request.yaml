@@ -1,0 +1,18 @@
+$kind: http-request
+name: Send to Stream
+method: POST
+url: '{{base_url}}/api/v1/pipelines/streams/{{stream_id}}/send'
+order: 10000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: stream_id
+    value: '{{stream_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "event": "agent.session.completed",
+      "data": { "session_id": "{{session_id}}" }
+    }

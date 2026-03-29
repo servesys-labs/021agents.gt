@@ -1,0 +1,16 @@
+$kind: http-request
+name: Export Audit Log
+method: GET
+url: '{{base_url}}/api/v1/audit/export'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: format
+    value: json
+  - key: since
+    value: ''
+    disabled: true

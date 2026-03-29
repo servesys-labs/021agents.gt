@@ -1,0 +1,26 @@
+$kind: http-request
+name: Update Skill
+method: PUT
+url: '{{base_url}}/api/v1/skills/{{skill_name}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: skill_name
+    value: web_search
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "description": "Updated skill description",
+      "parameters": {
+        "max_results": 10
+      },
+      "enabled": true
+    }

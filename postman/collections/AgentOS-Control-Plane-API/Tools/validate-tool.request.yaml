@@ -1,0 +1,19 @@
+$kind: http-request
+name: Validate Tool
+method: POST
+url: '{{base_url}}/api/v1/tools/validate'
+order: 11000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "my-tool",
+      "type": "function",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }

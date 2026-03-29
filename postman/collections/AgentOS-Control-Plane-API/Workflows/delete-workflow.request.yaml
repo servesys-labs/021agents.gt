@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Workflow
+method: DELETE
+url: '{{base_url}}/api/v1/workflows/{{workflow_id}}'
+order: 11000
+pathVariables:
+  - key: workflow_id
+    value: '{{workflow_id}}'

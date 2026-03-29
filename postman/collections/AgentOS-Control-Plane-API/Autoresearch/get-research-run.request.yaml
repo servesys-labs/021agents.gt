@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Research Run
+method: GET
+url: '{{base_url}}/api/v1/autoresearch/runs/{{run_id}}'
+order: 7000
+pathVariables:
+  - key: run_id
+    value: '{{run_id}}'

@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Evaluator
+method: GET
+url: '{{base_url}}/api/v1/eval/evaluators/{{evaluator_name}}'
+order: 15000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: evaluator_name
+    value: '{{evaluator_name}}'

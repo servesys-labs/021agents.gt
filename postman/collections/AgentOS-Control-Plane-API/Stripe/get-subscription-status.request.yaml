@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Subscription Status
+method: GET
+url: '{{base_url}}/api/v1/stripe/status'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

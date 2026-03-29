@@ -1,0 +1,24 @@
+$kind: http-request
+name: Update Org Settings
+method: POST
+url: '{{base_url}}/api/v1/orgs/settings'
+order: 10000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "onboarding_complete": true,
+      "org_name": "My Company",
+      "industry": "Technology",
+      "team_size": "11-50",
+      "use_cases": ["customer-support", "data-analysis"],
+      "data_sensitivity": "medium",
+      "deploy_style": "balanced",
+      "plan": "pro",
+      "default_connectors": ["slack", "github"]
+    }

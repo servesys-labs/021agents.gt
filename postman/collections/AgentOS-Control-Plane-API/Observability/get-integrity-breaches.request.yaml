@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Integrity Breaches
+method: GET
+url: '{{base_url}}/api/v1/observability/integrity/breaches'
+order: 2000
+queryParams:
+  - key: agent_name
+    value: '{{agentId}}'
+  - key: limit
+    value: '20'

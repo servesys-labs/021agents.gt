@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Gold Images
+method: GET
+url: '{{base_url}}/api/v1/gold-images'
+order: 1000

@@ -1,0 +1,17 @@
+$kind: http-request
+name: Create Component
+method: POST
+url: '{{base_url}}/api/v1/components'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "my-component",
+      "type": "tool",
+      "description": "A reusable tool component",
+      "config": {}
+    }

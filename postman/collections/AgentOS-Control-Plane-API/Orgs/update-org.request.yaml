@@ -1,0 +1,20 @@
+$kind: http-request
+name: Update Organization
+method: PUT
+url: '{{base_url}}/api/v1/orgs/{{org_id}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: org_id
+    value: '{{org_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "name": "Updated Org Name",
+      "plan": "pro"
+    }

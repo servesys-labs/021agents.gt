@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Gold Image
+method: GET
+url: '{{base_url}}/api/v1/gold-images/{{image_id}}'
+order: 4000
+pathVariables:
+  - key: image_id
+    value: '{{image_id}}'

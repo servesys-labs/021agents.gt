@@ -1,0 +1,21 @@
+$kind: http-request
+name: Run Agent
+method: POST
+url: '{{base_url}}/api/v1/runtime-proxy/agent/run'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "input": "Hello, what can you do?",
+      "session_id": "{{session_id}}"
+    }

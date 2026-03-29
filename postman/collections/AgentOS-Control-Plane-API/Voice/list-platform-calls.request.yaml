@@ -1,0 +1,8 @@
+$kind: http-request
+name: List Platform Calls
+method: GET
+url: '{{base_url}}/api/v1/voice/{{platform}}/calls'
+order: 10000
+pathVariables:
+  - key: platform
+    value: '{{platform}}'

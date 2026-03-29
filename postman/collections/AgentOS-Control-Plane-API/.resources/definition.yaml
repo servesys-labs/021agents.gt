@@ -1,0 +1,162 @@
+$kind: collection
+name: AgentOS Control Plane API
+description: |-
+  Complete API collection for the AgentOS Control Plane.
+  Covers all 65 route families including Auth, Agents, Sessions, Billing,
+  Security, Observability, Workflows, Eval, Memory, Tools, RAG, Releases,
+  Graphs, Secrets, Webhooks, and more.
+
+  Use {{base_url}} for the API host and {{api_token}} for Bearer auth.
+variables:
+  - key: base_url
+    value: 'http://localhost:8787'
+    description: Control plane base URL
+  - key: api_token
+    value: ''
+    description: Bearer token for authentication
+  - key: agent_name
+    value: my-agent
+    description: Agent name (slug)
+  - key: agentId
+    value: ''
+    description: Agent UUID
+  - key: session_id
+    value: ''
+    description: Session UUID
+  - key: org_id
+    value: ''
+    description: Organization ID
+  - key: project_id
+    value: ''
+    description: Project ID
+  - key: workflow_id
+    value: ''
+    description: Workflow ID
+  - key: run_id
+    value: ''
+    description: Eval run ID
+  - key: trace_id
+    value: ''
+    description: Trace ID
+  - key: webhook_id
+    value: ''
+    description: Webhook ID
+  - key: delivery_id
+    value: ''
+    description: Webhook delivery ID
+  - key: webhook_secret
+    value: ''
+    description: Webhook signing secret
+  - key: secret_name
+    value: MY_SECRET
+    description: Secret name in vault
+  - key: key_id
+    value: ''
+    description: API key ID
+  - key: schedule_id
+    value: ''
+    description: Schedule ID
+  - key: member_user_id
+    value: ''
+    description: Member user ID for org operations
+  - key: scan_id
+    value: ''
+    description: Security scan ID
+  - key: finding_id
+    value: ''
+    description: Security finding ID
+  - key: task_id
+    value: ''
+    description: A2A task ID
+  - key: call_id
+    value: ''
+    description: Voice call ID
+  - key: server_id
+    value: ''
+    description: MCP server ID
+  - key: policy_id
+    value: ''
+    description: Guardrail policy ID
+  - key: alert_id
+    value: ''
+    description: Alert ID
+  - key: batch_id
+    value: ''
+    description: Batch job ID
+  - key: snippet_id
+    value: ''
+    description: Codemode snippet ID
+  - key: job_id
+    value: ''
+    description: Background job ID
+  - key: pipeline_id
+    value: ''
+    description: Pipeline ID
+  - key: stream_id
+    value: ''
+    description: Pipeline stream ID
+  - key: sink_id
+    value: ''
+    description: Pipeline sink ID
+  - key: approval_id
+    value: ''
+    description: Workflow approval ID
+  - key: proposal_id
+    value: ''
+    description: Evolve proposal ID
+  - key: image_id
+    value: ''
+    description: Gold image ID
+  - key: issue_id
+    value: ''
+    description: Issue ID
+  - key: component_id
+    value: ''
+    description: Component ID
+  - key: domain_id
+    value: ''
+    description: Custom domain ID
+  - key: endpoint_id
+    value: ''
+    description: GPU endpoint ID
+  - key: token_id
+    value: ''
+    description: End-user token ID
+  - key: export_id
+    value: ''
+    description: Compliance data export ID
+  - key: entry_id
+    value: ''
+    description: Audit log entry ID
+  - key: platform
+    value: twilio
+    description: Voice platform (twilio, vapi, etc.)
+  - key: run_id
+    value: ''
+    description: Workflow / autoresearch run ID
+  - key: checkpoint_id
+    value: ''
+    description: Agent checkpoint ID
+  - key: connector
+    value: github
+    description: Connector provider name
+  - key: app
+    value: github
+    description: Connector app name
+  - key: end_user_id
+    value: ''
+    description: End-user ID
+  - key: dataset_name
+    value: ''
+    description: Eval dataset name
+  - key: evaluator_name
+    value: ''
+    description: Eval evaluator name
+  - key: agent_name
+    value: my-agent
+    description: Agent name (slug)
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

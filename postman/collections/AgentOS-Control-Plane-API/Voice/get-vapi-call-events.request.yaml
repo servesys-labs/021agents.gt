@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Vapi Call Events
+method: GET
+url: '{{base_url}}/api/v1/voice/vapi/calls/{{call_id}}/events'
+order: 6000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: call_id
+    value: '{{call_id}}'

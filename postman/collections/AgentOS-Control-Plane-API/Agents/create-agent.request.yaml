@@ -1,0 +1,23 @@
+$kind: http-request
+name: Create Agent
+method: POST
+url: '{{base_url}}/api/v1/agents'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "My Agent",
+      "description": "A helpful AI agent",
+      "model": "gpt-4o",
+      "system_prompt": "You are a helpful assistant.",
+      "tools": [],
+      "memory_config": {
+        "working_memory_limit": 10,
+        "episodic_enabled": true,
+        "semantic_enabled": true
+      }
+    }

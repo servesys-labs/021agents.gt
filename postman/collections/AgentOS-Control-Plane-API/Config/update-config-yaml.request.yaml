@@ -1,0 +1,14 @@
+$kind: http-request
+name: Update Config YAML
+method: PUT
+url: '{{base_url}}/api/v1/config/yaml'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "yaml": "# AgentOS config\ndefault_model: gpt-4o\nmax_tokens: 4096\n"
+    }

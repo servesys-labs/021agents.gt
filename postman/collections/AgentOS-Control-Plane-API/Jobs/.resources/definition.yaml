@@ -1,0 +1,3 @@
+$kind: collection
+name: Jobs
+description: 'Background job management: status, cancellation, and history'

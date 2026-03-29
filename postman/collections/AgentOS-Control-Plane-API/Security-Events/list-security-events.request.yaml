@@ -1,0 +1,19 @@
+$kind: http-request
+name: List Security Events
+method: GET
+url: '{{base_url}}/api/v1/security-events'
+order: 1000
+queryParams:
+  - key: event_type
+    value: ''
+    disabled: true
+  - key: severity
+    value: ''
+    disabled: true
+  - key: actor_id
+    value: ''
+    disabled: true
+  - key: since_hours
+    value: '24'
+  - key: limit
+    value: '50'

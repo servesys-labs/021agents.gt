@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Feedback Item
+method: DELETE
+url: '{{base_url}}/api/v1/feedback/{{component_id}}'
+order: 4000
+pathVariables:
+  - key: component_id
+    value: '{{component_id}}'

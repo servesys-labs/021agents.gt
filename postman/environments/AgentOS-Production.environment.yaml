@@ -1,0 +1,56 @@
+$kind: environment
+name: AgentOS Production
+variables:
+  - key: base_url
+    value: 'https://agentos-control-plane.servesys.workers.dev'
+    enabled: true
+  - key: api_token
+    value: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI2NmRjNjEzMDA3NTk0ZDE0IiwiZW1haWwiOiJpc2h3YXJAdGVzdC1hZ2VudG9zLmRldiIsIm5hbWUiOiJJc2h3YXIiLCJwcm92aWRlciI6ImxvY2FsIiwib3JnX2lkIjoiZDViOTljZTFjNDQzNDVjZCIsImlhdCI6MTc3NDczMzc2OSwiZXhwIjoxNzc1MzM4NTY5fQ.TCcL0QTcSInUU-XMJXnAFvl_rN-56gDWmpLUv4fYrcQ'
+    enabled: true
+    secret: true
+  - key: agent_name
+    value: my-agent
+    enabled: true
+  - key: session_id
+    value: ''
+    enabled: true
+  - key: org_id
+    value: ''
+    enabled: true
+  - key: project_id
+    value: ''
+    enabled: true
+  - key: sandbox_id
+    value: ''
+    enabled: true
+  - key: proposal_id
+    value: ''
+    enabled: true
+  - key: image_id
+    value: ''
+    enabled: true
+  - key: issue_id
+    value: ''
+    enabled: true
+  - key: batch_id
+    value: ''
+    enabled: true
+  - key: slo_id
+    value: ''
+    enabled: true
+  - key: scan_id
+    value: ''
+    enabled: true
+  - key: dataset_name
+    value: ''
+    enabled: true
+  - key: evaluator_name
+    value: ''
+    enabled: true
+  - key: policy_id
+    value: ''
+    enabled: true
+  - key: service_token
+    value: ''
+    enabled: true
+    secret: true

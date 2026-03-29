@@ -1,0 +1,8 @@
+$kind: http-request
+name: Score Session
+method: POST
+url: '{{base_url}}/api/v1/intelligence/score/{{session_id}}'
+order: 4000
+pathVariables:
+  - key: session_id
+    value: '{{session_id}}'

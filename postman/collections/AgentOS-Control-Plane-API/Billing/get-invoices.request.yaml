@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Invoices
+method: GET
+url: '{{base_url}}/api/v1/billing/invoices'
+order: 4000

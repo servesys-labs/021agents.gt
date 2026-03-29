@@ -1,0 +1,13 @@
+$kind: http-request
+name: Delete Webhook
+method: DELETE
+url: '{{base_url}}/api/v1/webhooks/{{webhook_id}}'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: webhook_id
+    value: '{{webhook_id}}'

@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Agent Procedures
+method: GET
+url: '{{base_url}}/api/v1/memory/{{agentId}}/procedures'
+order: 7000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'

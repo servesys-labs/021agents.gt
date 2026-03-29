@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Config YAML
+method: GET
+url: '{{base_url}}/api/v1/config/yaml'
+order: 1000

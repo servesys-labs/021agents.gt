@@ -1,0 +1,17 @@
+$kind: http-request
+name: Run Agent with File Upload (Public)
+method: POST
+url: '{{base_url}}/v1/agents/{{agent_name}}/run/upload'
+order: 4000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: formdata
+  content:
+    - key: input
+      type: text
+      value: Analyze this document
+    - key: file
+      type: file
+      src: /path/to/document.pdf

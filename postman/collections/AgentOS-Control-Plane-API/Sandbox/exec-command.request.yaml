@@ -1,0 +1,21 @@
+$kind: http-request
+name: Exec Command
+method: POST
+url: '{{base_url}}/api/v1/sandbox/exec'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "command": "python3 -c \"print('hello world')\"",
+      "sandbox_id": "{{sandbox_id}}",
+      "timeout_ms": 30000
+    }

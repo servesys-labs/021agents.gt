@@ -1,0 +1,28 @@
+$kind: http-request
+name: Send A2A Task
+method: POST
+url: '{{base_url}}/api/v1/a2a/tasks/send'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "jsonrpc": "2.0",
+      "id": "req-1",
+      "method": "tasks/send",
+      "params": {
+        "agent_name": "{{agent_name}}",
+        "message": {
+          "role": "user",
+          "parts": [{ "text": "Summarize the latest news about AI" }]
+        }
+      }
+    }

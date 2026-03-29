@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Stream
+method: DELETE
+url: '{{base_url}}/api/v1/pipelines/streams/{{stream_id}}'
+order: 9000
+pathVariables:
+  - key: stream_id
+    value: '{{stream_id}}'

@@ -1,0 +1,23 @@
+$kind: http-request
+name: Update Alert
+method: PUT
+url: '{{base_url}}/api/v1/alerts/{{alert_id}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: alert_id
+    value: '{{alert_id}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "threshold": 0.1,
+      "cooldown_minutes": 60
+    }

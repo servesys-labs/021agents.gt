@@ -1,0 +1,3 @@
+$kind: collection
+name: Billing
+description: 'Billing, usage, invoices, pricing, and Stripe integration'

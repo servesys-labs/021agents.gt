@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Code Snippet
+method: GET
+url: '{{base_url}}/api/v1/codemode/snippets/{{snippet_id}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: snippet_id
+    value: '{{snippet_id}}'

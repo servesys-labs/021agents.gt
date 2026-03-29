@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Risk Profiles
+method: GET
+url: '{{base_url}}/api/v1/security/risk-profiles'
+order: 4000

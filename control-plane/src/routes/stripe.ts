@@ -11,6 +11,7 @@ import type { Env } from "../env";
 import { getDb } from "../db/client";
 import Stripe from "stripe";
 import { requireScope } from "../middleware/auth";
+import { addCredits } from "../logic/credits";
 
 export const stripeRoutes = createOpenAPIRouter();
 
@@ -192,15 +193,48 @@ stripeRoutes.openapi(webhookRoute, async (c): Promise<any> => {
   }
 
   const eventType = event.type || "";
+  const eventId = event.id || "";
   const data = event.data?.object || {};
   const sql = await getDb(c.env.HYPERDRIVE);
   const now = new Date().toISOString();
 
+  // ── Idempotency: skip already-processed events ────────────────
+  if (eventId) {
+    const existing = await sql`
+      SELECT 1 FROM stripe_events_processed WHERE event_id = ${eventId} LIMIT 1
+    `.catch(() => []);
+    if (existing.length > 0) {
+      return c.json({ received: true, deduplicated: true });
+    }
+  }
+
   if (eventType === "checkout.session.completed") {
     const orgId = data.metadata?.org_id || "";
-    const plan = data.metadata?.plan || "standard";
-    const subscriptionId = data.subscription || "";
-    if (orgId) {
+    const packageId = data.metadata?.package_id || "";
+    const isCreditPurchase = data.metadata?.type === "credit_purchase";
+
+    if (orgId && isCreditPurchase && packageId) {
+      // ── Credit purchase fulfillment ───────────────────────
+      const pkgs = await sql`
+        SELECT credits_cents, name FROM credit_packages WHERE id = ${packageId} LIMIT 1
+      `;
+      if (pkgs.length > 0) {
+        const pkg = pkgs[0] as any;
+        const creditsCents = Number(pkg.credits_cents);
+        await addCredits(
+          sql,
+          orgId,
+          creditsCents,
+          `Credit purchase: ${pkg.name}`,
+          data.id || eventId,
+          "stripe_checkout",
+        );
+        console.log(`[stripe] Credited ${creditsCents} cents to org ${orgId} (package: ${packageId})`);
+      }
+    } else if (orgId) {
+      // ── Subscription checkout (existing flow) ─────────────
+      const plan = data.metadata?.plan || "standard";
+      const subscriptionId = data.subscription || "";
       await sql`
         UPDATE orgs SET plan = ${plan}, stripe_subscription_id = ${subscriptionId}, updated_at = ${now}
         WHERE org_id = ${orgId}
@@ -224,7 +258,30 @@ stripeRoutes.openapi(webhookRoute, async (c): Promise<any> => {
         INSERT INTO billing_records (org_id, cost_type, total_cost_usd, description, created_at)
         VALUES (${orgs[0].org_id}, 'subscription', ${amount}, ${`Stripe invoice: ${data.id || ""}`}, ${now})
       `;
+
+      // If invoice has credit metadata, allocate credits for subscription renewals
+      const invoiceMeta = data.subscription_details?.metadata || data.lines?.data?.[0]?.metadata || {};
+      const invoiceCredits = Number(invoiceMeta.credits_cents || 0);
+      if (invoiceCredits > 0 && orgs[0].org_id) {
+        await addCredits(
+          sql,
+          orgs[0].org_id,
+          invoiceCredits,
+          `Subscription credit allocation: invoice ${data.id || ""}`,
+          data.id || "",
+          "stripe_invoice",
+        );
+      }
     }
+  }
+
+  // ── Mark event as processed ───────────────────────────────────
+  if (eventId) {
+    await sql`
+      INSERT INTO stripe_events_processed (event_id, event_type, processed_at)
+      VALUES (${eventId}, ${eventType}, ${now})
+      ON CONFLICT (event_id) DO NOTHING
+    `.catch(() => {});
   }
 
   return c.json({ received: true });

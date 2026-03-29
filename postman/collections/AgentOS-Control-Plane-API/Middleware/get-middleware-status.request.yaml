@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Middleware Status
+method: GET
+url: '{{base_url}}/api/v1/middleware/status'
+order: 1000

@@ -1,0 +1,21 @@
+$kind: http-request
+name: Create Checkout
+method: POST
+url: '{{base_url}}/api/v1/stripe/checkout'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "plan_id": "pro",
+      "success_url": "https://app.example.com/billing/success",
+      "cancel_url": "https://app.example.com/billing/cancel"
+    }

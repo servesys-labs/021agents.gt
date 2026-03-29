@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Agent Templates
+method: GET
+url: '{{base_url}}/api/v1/agents/templates'
+order: 500

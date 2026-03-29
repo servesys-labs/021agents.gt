@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Agent Risk Profile
+method: GET
+url: '{{base_url}}/api/v1/security/risk-profiles/{{agentId}}'
+order: 5000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'

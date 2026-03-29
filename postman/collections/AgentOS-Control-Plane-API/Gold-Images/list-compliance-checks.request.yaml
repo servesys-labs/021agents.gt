@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Compliance Checks
+method: GET
+url: '{{base_url}}/api/v1/gold-images/compliance/checks'
+order: 10000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

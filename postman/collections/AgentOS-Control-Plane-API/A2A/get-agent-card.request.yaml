@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Agent Card
+method: GET
+url: '{{base_url}}/.well-known/agent.json'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'

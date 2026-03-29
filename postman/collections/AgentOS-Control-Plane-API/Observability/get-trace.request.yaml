@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Trace
+method: GET
+url: '{{base_url}}/api/v1/observability/trace/{{trace_id}}'
+order: 6000
+pathVariables:
+  - key: trace_id
+    value: '{{trace_id}}'

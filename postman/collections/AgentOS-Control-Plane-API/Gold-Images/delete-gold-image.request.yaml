@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Gold Image
+method: DELETE
+url: '{{base_url}}/api/v1/gold-images/{{image_id}}'
+order: 6000
+pathVariables:
+  - key: image_id
+    value: '{{image_id}}'

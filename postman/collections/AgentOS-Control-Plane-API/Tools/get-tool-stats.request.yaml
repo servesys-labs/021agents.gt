@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Tool Stats
+method: GET
+url: '{{base_url}}/api/v1/tools/stats'
+order: 3000

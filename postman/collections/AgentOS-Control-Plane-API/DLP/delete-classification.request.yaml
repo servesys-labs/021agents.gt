@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete DLP Classification
+method: DELETE
+url: '{{base_url}}/api/v1/dlp/classifications/{{component_id}}'
+order: 3000
+pathVariables:
+  - key: component_id
+    value: '{{component_id}}'

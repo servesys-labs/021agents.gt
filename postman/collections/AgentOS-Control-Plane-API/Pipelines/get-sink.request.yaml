@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Sink
+method: GET
+url: '{{base_url}}/api/v1/pipelines/sinks/{{sink_id}}'
+order: 12000
+pathVariables:
+  - key: sink_id
+    value: '{{sink_id}}'

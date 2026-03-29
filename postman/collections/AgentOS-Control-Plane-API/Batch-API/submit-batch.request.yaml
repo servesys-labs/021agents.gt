@@ -1,0 +1,27 @@
+$kind: http-request
+name: Submit Batch Job
+method: POST
+url: '{{base_url}}/api/v1/agents/{{agent_name}}/run/batch'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "inputs": [
+        { "id": "item-1", "message": "Process this document" },
+        { "id": "item-2", "message": "Summarize this text" }
+      ],
+      "concurrency": 5,
+      "callback_url": "https://hooks.example.com/batch-done"
+    }

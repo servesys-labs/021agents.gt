@@ -1,0 +1,30 @@
+$kind: http-request
+name: Visualize Graph
+method: POST
+url: '{{base_url}}/api/v1/graphs/visualize'
+order: 13000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "graph": {
+        "nodes": [
+          {"id": "start", "type": "input"},
+          {"id": "llm", "type": "llm", "config": {"model": "gpt-4o"}},
+          {"id": "end", "type": "output"}
+        ],
+        "edges": [
+          {"from": "start", "to": "llm"},
+          {"from": "llm", "to": "end"}
+        ]
+      },
+      "format": "mermaid"
+    }

@@ -1,0 +1,3 @@
+$kind: collection
+name: Schedules
+description: 'Scheduled task management: cron-based agent execution scheduling'

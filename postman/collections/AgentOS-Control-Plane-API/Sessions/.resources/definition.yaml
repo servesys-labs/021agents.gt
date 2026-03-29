@@ -1,0 +1,3 @@
+$kind: collection
+name: Sessions
+description: 'Session lifecycle: list, get details, traces, turn history, feedback, and stats'

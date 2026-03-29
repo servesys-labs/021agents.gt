@@ -1,0 +1,16 @@
+$kind: http-request
+name: Start Auto-Research
+method: POST
+url: '{{base_url}}/api/v1/autoresearch/start'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "topic": "AI agent architectures",
+      "depth": 3
+    }

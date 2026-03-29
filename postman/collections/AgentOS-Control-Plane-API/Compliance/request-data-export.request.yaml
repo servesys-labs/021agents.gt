@@ -1,0 +1,15 @@
+$kind: http-request
+name: Request Data Export
+method: POST
+url: '{{base_url}}/api/v1/compliance/data-export'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "format": "json",
+      "include": ["sessions", "agents", "billing"]
+    }

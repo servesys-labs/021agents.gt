@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get MCP Server Status
+method: GET
+url: '{{base_url}}/api/v1/mcp/servers/{{server_id}}/status'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: server_id
+    value: '{{server_id}}'

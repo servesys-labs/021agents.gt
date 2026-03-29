@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Component Catalog
+method: GET
+url: '{{base_url}}/api/v1/components/catalog/list'
+order: 7000

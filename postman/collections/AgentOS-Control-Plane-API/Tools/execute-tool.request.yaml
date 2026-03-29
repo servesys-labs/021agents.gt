@@ -1,0 +1,19 @@
+$kind: http-request
+name: Execute Tool
+method: POST
+url: '{{base_url}}/api/v1/tools/{{tool_name}}/execute'
+order: 8000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: tool_name
+    value: web-search
+body:
+  type: json
+  content: |-
+    {
+      "parameters": {
+        "query": "latest AI news"
+      }
+    }

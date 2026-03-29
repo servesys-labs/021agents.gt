@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Active Sessions
+method: GET
+url: '{{base_url}}/api/v1/session-management/active'
+order: 1000

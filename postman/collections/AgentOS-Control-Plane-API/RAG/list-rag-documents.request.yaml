@@ -1,0 +1,13 @@
+$kind: http-request
+name: List RAG Documents
+method: GET
+url: '{{base_url}}/api/v1/rag/{{agent_name}}/documents'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

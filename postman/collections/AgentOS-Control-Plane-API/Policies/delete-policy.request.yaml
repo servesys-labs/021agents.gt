@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Policy
+method: DELETE
+url: '{{base_url}}/api/v1/policies/{{policy_id}}'
+order: 4000
+pathVariables:
+  - key: policy_id
+    value: '{{policy_id}}'

@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Policies
+method: GET
+url: '{{base_url}}/api/v1/policies'
+order: 1000

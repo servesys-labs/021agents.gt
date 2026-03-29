@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Platform Call Events
+method: GET
+url: '{{base_url}}/api/v1/voice/{{platform}}/calls/{{call_id}}/events'
+order: 13000
+pathVariables:
+  - key: platform
+    value: '{{platform}}'
+  - key: call_id
+    value: '{{call_id}}'

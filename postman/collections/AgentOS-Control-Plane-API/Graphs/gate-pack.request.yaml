@@ -1,0 +1,26 @@
+$kind: http-request
+name: Run Gate-Pack Checks
+method: POST
+url: '{{base_url}}/api/v1/graphs/gate-pack'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "graph": null,
+      "strict_graph_lint": true,
+      "eval_file": null,
+      "trials": 3,
+      "min_eval_pass_rate": 0.85,
+      "min_eval_trials": 3,
+      "target_channel": "staging"
+    }

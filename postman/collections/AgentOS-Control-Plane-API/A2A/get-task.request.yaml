@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get A2A Task Status
+method: GET
+url: '{{base_url}}/api/v1/a2a/tasks/{{task_id}}'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: task_id
+    value: '{{task_id}}'

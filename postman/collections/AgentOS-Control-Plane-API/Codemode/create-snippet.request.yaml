@@ -1,0 +1,22 @@
+$kind: http-request
+name: Create Code Snippet
+method: POST
+url: '{{base_url}}/api/v1/codemode/snippets'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "data-transformer",
+      "scope": "transform",
+      "code": "export default function transform(input) {\n  return { ...input, processed: true };\n}",
+      "description": "Transforms input data by adding a processed flag"
+    }

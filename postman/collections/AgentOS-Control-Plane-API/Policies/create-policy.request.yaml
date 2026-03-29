@@ -1,0 +1,16 @@
+$kind: http-request
+name: Create Policy
+method: POST
+url: '{{base_url}}/api/v1/policies'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "no-pii-policy",
+      "type": "content_filter",
+      "rules": [{ "type": "block_pii", "enabled": true }]
+    }

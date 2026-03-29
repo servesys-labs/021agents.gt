@@ -1,0 +1,19 @@
+$kind: http-request
+name: Stripe Webhook
+method: POST
+url: '{{base_url}}/api/v1/stripe/webhook'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+  - key: Stripe-Signature
+    value: '{{stripe_signature}}'
+auth:
+  type: noauth
+body:
+  type: json
+  content: |-
+    {
+      "type": "customer.subscription.updated",
+      "data": { "object": {} }
+    }

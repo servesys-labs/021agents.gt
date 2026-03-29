@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Session
+method: GET
+url: '{{base_url}}/api/v1/sessions/{{session_id}}'
+order: 4000
+pathVariables:
+  - key: session_id
+    value: '{{session_id}}'

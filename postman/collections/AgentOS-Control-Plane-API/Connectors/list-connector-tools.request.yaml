@@ -1,0 +1,14 @@
+$kind: http-request
+name: List Connector Tools
+method: GET
+url: '{{base_url}}/api/v1/connectors/tools'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: provider
+    value: ''
+    disabled: true

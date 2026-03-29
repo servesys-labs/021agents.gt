@@ -1,0 +1,18 @@
+$kind: http-request
+name: Run Evolution
+method: POST
+url: '{{base_url}}/api/v1/evolve/{{agent_name}}/run'
+order: 7000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "auto_apply": false,
+      "max_proposals": 5
+    }

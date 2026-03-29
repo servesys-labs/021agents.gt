@@ -752,6 +752,23 @@ async function dispatch(
         ).catch(() => {});
       }
 
+      // Persist to DO SQLite for hibernation safety
+      if (filePath.startsWith("/workspace/") && env.DO_SQL) {
+        try {
+          const { saveFileToSQLite, hashContent } = await import("./workspace-persistence");
+          const fileContent = args.content || "";
+          const hash = await hashContent(fileContent);
+          saveFileToSQLite(env.DO_SQL, env.DO_SESSION_ID || sessionId, {
+            path: filePath,
+            content: fileContent,
+            encoding: "utf-8",
+            size: fileContent.length,
+            hash,
+            modified_at: new Date().toISOString(),
+          });
+        } catch {}
+      }
+
       return `Written ${(args.content || "").length} bytes to ${filePath}`;
     }
 
@@ -798,6 +815,22 @@ async function dispatch(
         import("./workspace").then(({ syncFileToR2 }) =>
           syncFileToR2(env.STORAGE, args.org_id || "default", args.agent_name || "agent", editPath, newContent, sessionId),
         ).catch(() => {});
+      }
+
+      // Persist to DO SQLite for hibernation safety
+      if (editPath.startsWith("/workspace/") && env.DO_SQL) {
+        try {
+          const { saveFileToSQLite, hashContent } = await import("./workspace-persistence");
+          const hash = await hashContent(newContent);
+          saveFileToSQLite(env.DO_SQL, env.DO_SESSION_ID || sessionId, {
+            path: editPath,
+            content: newContent,
+            encoding: "utf-8",
+            size: newContent.length,
+            hash,
+            modified_at: new Date().toISOString(),
+          });
+        } catch {}
       }
 
       // Return unified diff so agent sees exactly what changed (SWE-agent ACI pattern)

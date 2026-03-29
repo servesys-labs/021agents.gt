@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Tool
+method: GET
+url: '{{base_url}}/api/v1/tools/{{tool_name}}'
+order: 6000
+pathVariables:
+  - key: tool_name
+    value: web-search

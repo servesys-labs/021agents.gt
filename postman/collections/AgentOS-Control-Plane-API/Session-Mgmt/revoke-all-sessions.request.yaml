@@ -1,0 +1,14 @@
+$kind: http-request
+name: Revoke All Sessions
+method: POST
+url: '{{base_url}}/api/v1/session-management/revoke-all'
+order: 3000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "reason": "Security incident response"
+    }

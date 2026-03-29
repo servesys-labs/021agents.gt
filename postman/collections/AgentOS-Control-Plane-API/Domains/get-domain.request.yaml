@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Domain
+method: GET
+url: '{{base_url}}/api/v1/domains/{{domain_id}}'
+order: 3000
+pathVariables:
+  - key: domain_id
+    value: '{{domain_id}}'

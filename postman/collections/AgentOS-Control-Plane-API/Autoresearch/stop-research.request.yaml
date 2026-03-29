@@ -1,0 +1,14 @@
+$kind: http-request
+name: Stop Auto-Research
+method: POST
+url: '{{base_url}}/api/v1/autoresearch/stop'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}"
+    }

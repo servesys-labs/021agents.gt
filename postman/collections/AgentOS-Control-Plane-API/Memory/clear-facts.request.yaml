@@ -1,0 +1,13 @@
+$kind: http-request
+name: Clear Facts
+method: DELETE
+url: '{{base_url}}/api/v1/memory/{{agent_name}}/facts'
+order: 10000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

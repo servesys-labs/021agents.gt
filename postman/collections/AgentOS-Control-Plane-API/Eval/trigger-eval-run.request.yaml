@@ -1,0 +1,17 @@
+$kind: http-request
+name: Trigger Eval Run
+method: POST
+url: '{{base_url}}/api/v1/eval/run'
+order: 4000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agentId}}",
+      "dataset": "my-dataset",
+      "evaluators": ["accuracy", "latency"],
+      "n_trials": 5
+    }

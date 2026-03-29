@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Current User (Me)
+method: GET
+url: '{{base_url}}/api/v1/auth/me'
+order: 4000

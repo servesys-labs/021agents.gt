@@ -1,0 +1,23 @@
+$kind: http-request
+name: Stream Agent Run
+method: POST
+url: '{{base_url}}/api/v1/runtime/runnable/stream'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+  - key: Accept
+    value: text/event-stream
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "message": "Stream this response",
+      "session_id": "{{session_id}}"
+    }

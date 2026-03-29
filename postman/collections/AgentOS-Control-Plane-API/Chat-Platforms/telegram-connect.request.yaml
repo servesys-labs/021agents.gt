@@ -1,0 +1,15 @@
+$kind: http-request
+name: Connect Telegram Bot
+method: POST
+url: '{{base_url}}/api/v1/chat/telegram/connect'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "bot_token": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+    }

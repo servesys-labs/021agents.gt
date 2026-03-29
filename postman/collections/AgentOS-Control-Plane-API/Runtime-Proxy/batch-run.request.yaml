@@ -1,0 +1,21 @@
+$kind: http-request
+name: Batch Run
+method: POST
+url: '{{base_url}}/api/v1/runtime-proxy/batch'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "inputs": ["Task one", "Task two", "Task three"],
+      "max_concurrency": 5
+    }

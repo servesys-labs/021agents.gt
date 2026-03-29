@@ -1,0 +1,7 @@
+$kind: http-request
+name: Public Health Check
+method: GET
+url: '{{base_url}}/v1/health'
+order: 1000
+auth:
+  type: noauth

@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Sink
+method: DELETE
+url: '{{base_url}}/api/v1/pipelines/sinks/{{sink_id}}'
+order: 13000
+pathVariables:
+  - key: sink_id
+    value: '{{sink_id}}'

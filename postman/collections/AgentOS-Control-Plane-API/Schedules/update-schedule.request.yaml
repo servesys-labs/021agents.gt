@@ -1,0 +1,21 @@
+$kind: http-request
+name: Update Schedule
+method: PUT
+url: '{{base_url}}/api/v1/schedules/{{schedule_id}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: schedule_id
+    value: '{{schedule_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "cron": "0 10 * * 1-5",
+      "task": "Updated morning report task",
+      "is_enabled": true
+    }

@@ -1,0 +1,16 @@
+$kind: http-request
+name: Update Data Retention Policy
+method: PUT
+url: '{{base_url}}/api/v1/retention/policy'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "session_retention_days": 90,
+      "audit_log_retention_days": 365,
+      "auto_purge": true
+    }

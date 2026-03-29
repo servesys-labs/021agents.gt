@@ -1,0 +1,24 @@
+$kind: http-request
+name: Create API Key
+method: POST
+url: '{{base_url}}/api/v1/api-keys'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+body:
+  type: json
+  content: |-
+    {
+      "name": "CI/CD Key",
+      "scopes": ["agents:read", "sessions:read", "eval:read"],
+      "project_id": "",
+      "env": "production",
+      "expires_in_days": 90,
+      "ip_allowlist": [],
+      "allowed_agents": [],
+      "rate_limit_rpm": 60,
+      "rate_limit_rpd": 10000
+    }

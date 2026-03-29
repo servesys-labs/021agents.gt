@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Error Breakdown
+method: GET
+url: '{{base_url}}/api/v1/ops/error-breakdown'
+order: 3000
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'

@@ -1,0 +1,3 @@
+$kind: collection
+name: Security-Events
+description: 'Security event querying: list events, aggregated summaries, and hourly timelines'

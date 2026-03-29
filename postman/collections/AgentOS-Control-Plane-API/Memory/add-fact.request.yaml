@@ -1,0 +1,19 @@
+$kind: http-request
+name: Add Fact
+method: POST
+url: '{{base_url}}/api/v1/memory/{{agentId}}/facts'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+body:
+  type: json
+  content: |-
+    {
+      "key": "user_preference_language",
+      "value": "English",
+      "confidence": 0.95
+    }

@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Guardrail Stats
+method: GET
+url: '{{base_url}}/api/v1/guardrails/stats'
+order: 8000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

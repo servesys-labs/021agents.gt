@@ -1,0 +1,3 @@
+$kind: collection
+name: Security
+description: 'Security scanning: OWASP probes, PII detection, and vulnerability assessments'

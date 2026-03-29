@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Session Settings
+method: GET
+url: '{{base_url}}/api/v1/session-management/settings'
+order: 4000

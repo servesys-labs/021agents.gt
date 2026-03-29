@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get SLO
+method: GET
+url: '{{base_url}}/api/v1/slos/{{component_id}}'
+order: 3000
+pathVariables:
+  - key: component_id
+    value: '{{component_id}}'

@@ -1,0 +1,3 @@
+$kind: collection
+name: Deploy
+description: 'Agent deployment management: deploy, undeploy, and deployment status'

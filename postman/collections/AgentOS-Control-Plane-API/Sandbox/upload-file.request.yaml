@@ -1,0 +1,23 @@
+$kind: http-request
+name: Upload File
+method: POST
+url: '{{base_url}}/api/v1/sandbox/{{sandbox_id}}/files/upload'
+order: 4000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: sandbox_id
+    value: '{{sandbox_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "dest_path": "/app/main.py",
+      "content": "print('hello from uploaded file')"
+    }

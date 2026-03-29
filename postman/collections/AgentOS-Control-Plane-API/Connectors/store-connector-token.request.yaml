@@ -1,0 +1,22 @@
+$kind: http-request
+name: Store Connector Token
+method: POST
+url: '{{base_url}}/api/v1/connectors/tokens'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "connector": "github",
+      "access_token": "gho_xxxxxxxxxxxx",
+      "refresh_token": "",
+      "expires_at": null
+    }

@@ -1,0 +1,16 @@
+$kind: http-request
+name: Create Research Run
+method: POST
+url: '{{base_url}}/api/v1/autoresearch/runs'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "agent_name": "{{agent_name}}",
+      "topic": "LLM evaluation methods",
+      "config": {}
+    }

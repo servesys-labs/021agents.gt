@@ -1,0 +1,13 @@
+$kind: http-request
+name: Deploy Pipeline
+method: POST
+url: '{{base_url}}/api/v1/pipelines/{{pipeline_id}}/deploy'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: pipeline_id
+    value: '{{pipeline_id}}'

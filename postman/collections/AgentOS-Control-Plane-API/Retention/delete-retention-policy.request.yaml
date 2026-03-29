@@ -1,0 +1,13 @@
+$kind: http-request
+name: Delete Retention Policy
+method: DELETE
+url: '{{base_url}}/api/v1/retention/{{policy_id}}'
+order: 5000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: policy_id
+    value: '{{policy_id}}'

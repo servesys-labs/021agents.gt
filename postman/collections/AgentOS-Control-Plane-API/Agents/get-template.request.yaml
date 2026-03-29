@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Agent Template
+method: GET
+url: '{{base_url}}/api/v1/agents/templates/{{templateId}}'
+order: 600
+pathVariables:
+  - key: templateId
+    value: default-assistant

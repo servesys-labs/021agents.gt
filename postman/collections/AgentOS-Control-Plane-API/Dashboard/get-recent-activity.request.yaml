@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Recent Activity
+method: GET
+url: '{{base_url}}/api/v1/dashboard/activity'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: limit
+    value: '10'

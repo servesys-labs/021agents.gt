@@ -1,0 +1,16 @@
+$kind: http-request
+name: Get Logs
+method: GET
+url: '{{base_url}}/api/v1/sandbox/{{sandbox_id}}/logs'
+order: 6000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: sandbox_id
+    value: '{{sandbox_id}}'
+queryParams:
+  - key: lines
+    value: '100'

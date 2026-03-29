@@ -1,0 +1,8 @@
+$kind: http-request
+name: Approve Gold Image
+method: POST
+url: '{{base_url}}/api/v1/gold-images/{{image_id}}/approve'
+order: 5000
+pathVariables:
+  - key: image_id
+    value: '{{image_id}}'

@@ -1,0 +1,10 @@
+$kind: http-request
+name: Check Agent Drift
+method: POST
+url: '{{base_url}}/api/v1/gold-images/drift/{{agent_name}}/{{image_id}}'
+order: 7000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: image_id
+    value: '{{image_id}}'

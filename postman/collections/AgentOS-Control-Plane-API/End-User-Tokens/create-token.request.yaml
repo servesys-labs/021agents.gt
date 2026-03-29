@@ -1,0 +1,16 @@
+$kind: http-request
+name: Create End-User Token
+method: POST
+url: '{{base_url}}/api/v1/end-user-tokens'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "end_user_id": "user-123",
+      "agent_name": "{{agent_name}}",
+      "ttl_seconds": 3600
+    }

@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Security Findings
+method: GET
+url: '{{base_url}}/api/v1/security/findings'
+order: 3000
+queryParams:
+  - key: severity
+    value: high
+  - key: agent_name
+    value: '{{agentId}}'

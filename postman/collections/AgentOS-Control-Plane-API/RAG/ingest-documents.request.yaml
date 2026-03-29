@@ -1,0 +1,23 @@
+$kind: http-request
+name: Ingest Documents
+method: POST
+url: '{{base_url}}/api/v1/rag/{{agent_name}}/ingest'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: formdata
+  content:
+    - key: chunk_size
+      type: text
+      value: '512'
+    - key: file
+      type: file
+      src: document.txt
+      description: Document file to ingest

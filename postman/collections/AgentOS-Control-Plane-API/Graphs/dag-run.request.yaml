@@ -1,0 +1,36 @@
+$kind: http-request
+name: DAG Graph Run
+method: POST
+url: '{{base_url}}/api/v1/graphs/dag-run'
+order: 9000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "graph": {
+        "nodes": [
+          {"id": "start", "type": "input"},
+          {"id": "llm", "type": "llm", "config": {"model": "gpt-4o"}},
+          {"id": "end", "type": "output"}
+        ],
+        "edges": [
+          {"from": "start", "to": "llm"},
+          {"from": "llm", "to": "end"}
+        ]
+      },
+      "task": "Process the input data",
+      "agent_context": {
+        "agent_name": "{{agent_name}}",
+        "org_id": "{{org_id}}",
+        "channel": "production"
+      },
+      "initial_state": {}
+    }

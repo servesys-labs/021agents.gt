@@ -1,0 +1,14 @@
+$kind: http-request
+name: List Code Snippets
+method: GET
+url: '{{base_url}}/api/v1/codemode/snippets'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+queryParams:
+  - key: scope
+    value: ''
+    disabled: true

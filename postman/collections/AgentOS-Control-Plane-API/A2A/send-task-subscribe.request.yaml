@@ -1,0 +1,30 @@
+$kind: http-request
+name: Send A2A Task (Streaming)
+method: POST
+url: '{{base_url}}/api/v1/a2a/tasks/sendSubscribe'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+headers:
+  - key: Content-Type
+    value: application/json
+  - key: Accept
+    value: text/event-stream
+body:
+  type: json
+  content: |-
+    {
+      "jsonrpc": "2.0",
+      "id": "req-2",
+      "method": "tasks/sendSubscribe",
+      "params": {
+        "agent_name": "{{agent_name}}",
+        "message": {
+          "role": "user",
+          "parts": [{ "text": "Stream a long analysis" }]
+        }
+      }
+    }

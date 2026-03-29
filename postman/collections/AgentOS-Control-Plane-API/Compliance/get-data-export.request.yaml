@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Data Export Status
+method: GET
+url: '{{base_url}}/api/v1/compliance/data-export/{{export_id}}'
+order: 3000
+pathVariables:
+  - key: export_id
+    value: '{{export_id}}'

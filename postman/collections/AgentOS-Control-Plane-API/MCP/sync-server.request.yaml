@@ -1,0 +1,13 @@
+$kind: http-request
+name: Sync MCP Server
+method: POST
+url: '{{base_url}}/api/v1/mcp/servers/{{server_id}}/sync'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: server_id
+    value: '{{server_id}}'

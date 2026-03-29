@@ -1,0 +1,3 @@
+$kind: collection
+name: Edge-Ingest
+description: Edge data ingestion endpoints for streaming events into the platform

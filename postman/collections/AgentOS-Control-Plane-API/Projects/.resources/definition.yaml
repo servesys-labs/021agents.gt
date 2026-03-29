@@ -1,0 +1,3 @@
+$kind: collection
+name: Projects
+description: 'Project management within organizations: CRUD and project settings'

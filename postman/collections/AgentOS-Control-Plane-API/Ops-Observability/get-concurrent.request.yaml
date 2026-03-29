@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Concurrent Sessions
+method: GET
+url: '{{base_url}}/api/v1/ops/concurrent'
+order: 6000

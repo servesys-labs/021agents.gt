@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Eval Run Trials
+method: GET
+url: '{{base_url}}/api/v1/eval/runs/{{run_id}}/trials'
+order: 3000
+pathVariables:
+  - key: run_id
+    value: '{{run_id}}'

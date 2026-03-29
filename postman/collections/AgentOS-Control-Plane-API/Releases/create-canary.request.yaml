@@ -1,0 +1,21 @@
+$kind: http-request
+name: Create Canary Split
+method: POST
+url: '{{base_url}}/api/v1/releases/{{agent_name}}/canary'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+body:
+  type: json
+  content: |-
+    {
+      "primary_version": "1.0.0",
+      "canary_version": "1.1.0",
+      "canary_weight": 0.1
+    }

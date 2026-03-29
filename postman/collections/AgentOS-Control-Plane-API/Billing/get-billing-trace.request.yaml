@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Billing Trace
+method: GET
+url: '{{base_url}}/api/v1/billing/trace/{{trace_id}}'
+order: 3000
+pathVariables:
+  - key: trace_id
+    value: '{{trace_id}}'

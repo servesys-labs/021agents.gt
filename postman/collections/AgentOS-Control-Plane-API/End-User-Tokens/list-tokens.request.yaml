@@ -1,0 +1,5 @@
+$kind: http-request
+name: List End-User Tokens
+method: GET
+url: '{{base_url}}/api/v1/end-user-tokens'
+order: 2000

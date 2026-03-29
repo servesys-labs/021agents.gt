@@ -1,0 +1,16 @@
+$kind: http-request
+name: Update Session Settings
+method: PUT
+url: '{{base_url}}/api/v1/session-management/settings'
+order: 5000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "max_concurrent_sessions": 10,
+      "session_timeout_minutes": 60,
+      "require_mfa": false
+    }

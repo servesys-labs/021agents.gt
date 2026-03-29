@@ -1,0 +1,13 @@
+$kind: http-request
+name: Revoke Connector Token
+method: DELETE
+url: '{{base_url}}/api/v1/connectors/tokens/{{connector}}'
+order: 6000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: connector
+    value: github

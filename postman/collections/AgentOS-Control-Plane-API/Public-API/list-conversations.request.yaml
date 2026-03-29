@@ -1,0 +1,8 @@
+$kind: http-request
+name: List Conversations (Public)
+method: GET
+url: '{{base_url}}/v1/agents/{{agent_name}}/conversations'
+order: 6000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'

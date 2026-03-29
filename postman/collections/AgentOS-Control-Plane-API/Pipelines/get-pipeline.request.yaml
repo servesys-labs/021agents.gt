@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Pipeline
+method: GET
+url: '{{base_url}}/api/v1/pipelines/{{pipeline_id}}'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: pipeline_id
+    value: '{{pipeline_id}}'

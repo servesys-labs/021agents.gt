@@ -1,0 +1,18 @@
+$kind: http-request
+name: Run Security Scan
+method: POST
+url: '{{base_url}}/api/v1/security/scan/{{agentId}}'
+order: 6000
+headers:
+  - key: Content-Type
+    value: application/json
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+body:
+  type: json
+  content: |-
+    {
+      "probes": ["prompt_injection", "data_exfiltration", "privilege_escalation"],
+      "depth": "full"
+    }

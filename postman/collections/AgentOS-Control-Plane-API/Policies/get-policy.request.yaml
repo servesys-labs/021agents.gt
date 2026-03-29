@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Policy
+method: GET
+url: '{{base_url}}/api/v1/policies/{{policy_id}}'
+order: 3000
+pathVariables:
+  - key: policy_id
+    value: '{{policy_id}}'

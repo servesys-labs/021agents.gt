@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete All Sessions
+method: DELETE
+url: '{{base_url}}/api/v1/sessions'
+order: 10000
+queryParams:
+  - key: agent_name
+    value: '{{agentId}}'

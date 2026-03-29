@@ -1,0 +1,20 @@
+$kind: http-request
+name: Create Experiment
+method: POST
+url: '{{base_url}}/api/v1/eval/experiments'
+order: 13000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "gpt4o-vs-claude",
+      "description": "Compare GPT-4o vs Claude on QA tasks",
+      "variants": [
+        {"agent_name": "agent-gpt4o"},
+        {"agent_name": "agent-claude"}
+      ],
+      "dataset": "qa-benchmark-v1"
+    }

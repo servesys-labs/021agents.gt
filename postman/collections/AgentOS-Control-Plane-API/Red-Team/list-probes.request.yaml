@@ -1,0 +1,8 @@
+$kind: http-request
+name: List Red Team Probes
+method: GET
+url: '{{base_url}}/api/v1/redteam/probes'
+order: 1000
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'

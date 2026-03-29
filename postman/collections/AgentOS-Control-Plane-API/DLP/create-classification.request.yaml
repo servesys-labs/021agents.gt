@@ -1,0 +1,16 @@
+$kind: http-request
+name: Create DLP Classification
+method: POST
+url: '{{base_url}}/api/v1/dlp/classifications'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "name": "PII",
+      "patterns": ["\\b\\d{3}-\\d{2}-\\d{4}\\b"],
+      "action": "redact"
+    }

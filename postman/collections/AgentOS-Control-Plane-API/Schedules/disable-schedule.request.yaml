@@ -1,0 +1,13 @@
+$kind: http-request
+name: Disable Schedule
+method: POST
+url: '{{base_url}}/api/v1/schedules/{{schedule_id}}/disable'
+order: 7000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: schedule_id
+    value: '{{schedule_id}}'

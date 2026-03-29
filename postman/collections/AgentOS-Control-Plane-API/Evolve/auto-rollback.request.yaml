@@ -1,0 +1,24 @@
+$kind: http-request
+name: Auto Rollback
+method: POST
+url: '{{base_url}}/api/v1/evolve/{{agent_name}}/proposals/{{proposal_id}}/auto-rollback'
+order: 12000
+headers:
+  - key: Content-Type
+    value: application/json
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: proposal_id
+    value: '{{proposal_id}}'
+body:
+  type: json
+  content: |-
+    {
+      "reason": "Metric regression detected: success_rate dropped below threshold"
+    }

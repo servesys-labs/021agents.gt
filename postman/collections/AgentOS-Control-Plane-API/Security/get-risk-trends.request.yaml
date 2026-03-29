@@ -1,0 +1,11 @@
+$kind: http-request
+name: Get Risk Trends
+method: GET
+url: '{{base_url}}/api/v1/security/risk-trends/{{agentId}}'
+order: 10000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'
+queryParams:
+  - key: days
+    value: '30'

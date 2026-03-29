@@ -1,0 +1,10 @@
+$kind: http-request
+name: Get Intelligence Analytics
+method: GET
+url: '{{base_url}}/api/v1/intelligence/analytics'
+order: 3000
+queryParams:
+  - key: agent_name
+    value: '{{agent_name}}'
+  - key: days
+    value: '30'

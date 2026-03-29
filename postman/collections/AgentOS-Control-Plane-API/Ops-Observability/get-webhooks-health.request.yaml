@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Webhooks Health
+method: GET
+url: '{{base_url}}/api/v1/ops/webhooks/health'
+order: 4000

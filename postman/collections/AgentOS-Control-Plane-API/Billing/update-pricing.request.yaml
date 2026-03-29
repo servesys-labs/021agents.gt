@@ -1,0 +1,16 @@
+$kind: http-request
+name: Update Pricing
+method: POST
+url: '{{base_url}}/api/v1/billing/pricing'
+order: 8000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "model": "gpt-4o",
+      "input_cost_per_1k": 0.005,
+      "output_cost_per_1k": 0.015
+    }

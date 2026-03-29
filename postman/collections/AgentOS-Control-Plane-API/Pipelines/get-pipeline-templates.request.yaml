@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Pipeline Templates
+method: GET
+url: '{{base_url}}/api/v1/pipelines/templates'
+order: 15000

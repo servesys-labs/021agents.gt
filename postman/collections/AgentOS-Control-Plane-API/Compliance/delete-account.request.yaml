@@ -1,0 +1,15 @@
+$kind: http-request
+name: Delete Account (Compliance)
+method: DELETE
+url: '{{base_url}}/api/v1/compliance/account'
+order: 1000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "confirmation": "DELETE_MY_ACCOUNT",
+      "reason": "User requested account deletion"
+    }

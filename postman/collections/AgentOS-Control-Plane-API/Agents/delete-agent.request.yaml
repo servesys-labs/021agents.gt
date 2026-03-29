@@ -1,0 +1,8 @@
+$kind: http-request
+name: Delete Agent
+method: DELETE
+url: '{{base_url}}/api/v1/agents/{{agentId}}'
+order: 5000
+pathVariables:
+  - key: agentId
+    value: '{{agentId}}'

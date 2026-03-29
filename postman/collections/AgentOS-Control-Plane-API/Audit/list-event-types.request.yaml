@@ -1,0 +1,10 @@
+$kind: http-request
+name: List Audit Event Types
+method: GET
+url: '{{base_url}}/api/v1/audit/events'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'

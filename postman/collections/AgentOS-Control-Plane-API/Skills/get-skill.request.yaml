@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Skill
+method: GET
+url: '{{base_url}}/api/v1/skills/{{skill_name}}'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: skill_name
+    value: web_search

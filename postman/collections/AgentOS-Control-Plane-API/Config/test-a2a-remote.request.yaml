@@ -1,0 +1,15 @@
+$kind: http-request
+name: Test A2A Remote
+method: POST
+url: '{{base_url}}/api/v1/config/a2a/test'
+order: 4000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "remote_url": "https://remote-agent.example.com",
+      "agent_name": "{{agent_name}}"
+    }

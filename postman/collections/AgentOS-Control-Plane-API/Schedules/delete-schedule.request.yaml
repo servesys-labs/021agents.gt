@@ -1,0 +1,13 @@
+$kind: http-request
+name: Delete Schedule
+method: DELETE
+url: '{{base_url}}/api/v1/schedules/{{schedule_id}}'
+order: 4000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: schedule_id
+    value: '{{schedule_id}}'

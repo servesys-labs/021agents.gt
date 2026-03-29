@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get API Docs
+method: GET
+url: '{{base_url}}/api/v1/docs'
+order: 2000

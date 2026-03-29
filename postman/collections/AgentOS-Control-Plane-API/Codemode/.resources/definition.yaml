@@ -1,0 +1,3 @@
+$kind: collection
+name: Codemode
+description: Code execution and snippet management in V8 isolates with 10 execution scopes

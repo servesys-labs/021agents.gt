@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Research Runs
+method: GET
+url: '{{base_url}}/api/v1/autoresearch/runs'
+order: 6000

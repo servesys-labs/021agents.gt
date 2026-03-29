@@ -1,0 +1,13 @@
+$kind: http-request
+name: Pause Job
+method: POST
+url: '{{base_url}}/api/v1/jobs/{{job_id}}/pause'
+order: 7000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{api_token}}'
+pathVariables:
+  - key: job_id
+    value: '{{job_id}}'

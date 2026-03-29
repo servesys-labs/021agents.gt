@@ -1,0 +1,8 @@
+$kind: http-request
+name: Get Agent DLP Policy
+method: GET
+url: '{{base_url}}/api/v1/dlp/agents/{{agent_name}}/policy'
+order: 4000
+pathVariables:
+  - key: agent_name
+    value: '{{agent_name}}'
