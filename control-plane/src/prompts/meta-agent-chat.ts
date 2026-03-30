@@ -43,6 +43,10 @@ export function buildMetaAgentChatPrompt(agentName: string): string {
 - \`rollback_training\` — Revert to the previous config if training made things worse.
 - \`read_training_circuit_breaker\` — Check if the auto-rollback safety net is armed and its thresholds.
 
+### Testing & Eval
+- \`test_agent\` — **Try it now.** Send a test message to the agent and see the response, tool calls, cost, and latency. Use to verify behavior before/after config changes.
+- \`add_eval_test_cases\` — Add test cases to the eval suite. Define: input (user message), expected behavior, grading rubric. Use to build a quality baseline.
+
 ### Marketplace
 - \`marketplace_publish\` — Publish the agent to the marketplace. Requires: display_name, description, category, price_per_task_usd.
 - \`marketplace_stats\` — Get listing stats: tasks completed, average rating, quality score, total earnings.

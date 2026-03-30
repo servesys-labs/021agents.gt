@@ -352,6 +352,50 @@ const META_TOOLS: ToolDef[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "add_eval_test_cases",
+      description:
+        "Add test cases to the agent's eval suite. Each test case has an input (what a user would say), expected behavior, and grading criteria. The agent can then be evaluated against these cases.",
+      parameters: {
+        type: "object",
+        properties: {
+          test_cases: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string", description: "Short snake_case test name" },
+                input: { type: "string", description: "Realistic user message to test" },
+                expected: { type: "string", description: "What a correct response should contain" },
+                rubric: { type: "string", description: "Grading criteria: Score 1 if... Score 0 if..." },
+                tags: { type: "array", items: { type: "string" }, description: "Capability tags" },
+              },
+              required: ["name", "input", "expected"],
+            },
+            description: "Array of test cases to add",
+          },
+        },
+        required: ["test_cases"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "test_agent",
+      description:
+        "Send a test message to the agent and get back the response. Use this to try out the agent's behavior before and after making config changes. Returns the agent's response, tool calls used, latency, and cost.",
+      parameters: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "The test message to send to the agent" },
+        },
+        required: ["message"],
+      },
+    },
+  },
 ];
 
 /* ── Tool execution ─────────────────────────────────────────────── */
@@ -1160,6 +1204,85 @@ async function executeTool(
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Stats failed: ${err.message || err}` });
+      }
+    }
+
+    case "add_eval_test_cases": {
+      const testCases = args.test_cases || [];
+      if (!Array.isArray(testCases) || testCases.length === 0) {
+        return JSON.stringify({ error: "test_cases array is required" });
+      }
+      try {
+        // Read current eval config from agent
+        const [agent] = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+        const config = typeof agent.config_json === "string" ? JSON.parse(agent.config_json) : agent.config_json || {};
+        const evalConfig = config.eval_config || { test_cases: [], rubric: { criteria: [], pass_threshold: 0.7 }, scenarios: [] };
+
+        // Add new test cases
+        const existing = evalConfig.test_cases || [];
+        for (const tc of testCases) {
+          existing.push({
+            name: tc.name,
+            input: tc.input,
+            expected: tc.expected,
+            grader: "llm_rubric",
+            rubric: tc.rubric || `Score 1 if the response addresses "${tc.expected}". Score 0 otherwise.`,
+            tags: tc.tags || [],
+          });
+        }
+        evalConfig.test_cases = existing;
+        config.eval_config = evalConfig;
+
+        await sql`UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now() WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+
+        return JSON.stringify({
+          added: testCases.length,
+          total_test_cases: existing.length,
+          test_names: testCases.map((tc: any) => tc.name),
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to add test cases: ${err.message || err}` });
+      }
+    }
+
+    case "test_agent": {
+      const message = args.message || "";
+      if (!message) return JSON.stringify({ error: "message is required" });
+      try {
+        // Call the runtime to execute a test message
+        if (!ctx.env.RUNTIME) return JSON.stringify({ error: "Runtime not available for testing" });
+
+        const resp = await ctx.env.RUNTIME.fetch("https://runtime/run", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(ctx.env.SERVICE_TOKEN ? { Authorization: `Bearer ${ctx.env.SERVICE_TOKEN}` } : {}),
+          },
+          body: JSON.stringify({
+            agent_name: ctx.agentName,
+            input: message,
+            org_id: ctx.orgId,
+            channel: "meta-agent-test",
+          }),
+        });
+
+        if (!resp.ok) {
+          const errText = await resp.text().catch(() => "Runtime error");
+          return JSON.stringify({ error: `Test run failed: ${errText}` });
+        }
+
+        const result = (await resp.json()) as any;
+        return JSON.stringify({
+          output: (result.output || "").slice(0, 3000),
+          turns: result.turns || 0,
+          tool_calls: result.tool_calls || 0,
+          cost_usd: result.cost_usd || 0,
+          model: result.model || "",
+          session_id: result.session_id || "",
+          success: result.success !== false,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Test failed: ${err.message || err}` });
       }
     }
 
