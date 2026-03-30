@@ -799,12 +799,13 @@ async function dispatch(
       if (dir) await sandbox.exec(`mkdir -p "${dir}"`, { timeout: 5 }).catch(() => {});
       await sandbox.writeFile(filePath, args.content || "");
 
-      // Per-file sync to R2 for durability (non-blocking)
+      // Per-file sync to R2 for durability (non-blocking, user-scoped)
       if (filePath.startsWith("/workspace/") && env.STORAGE) {
         const r2Org = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
         const r2Agent = (env as any).__agentConfig?.name || "agent";
+        const r2UserId = (env as any).__channelUserId || "";
         import("./workspace").then(({ syncFileToR2 }) =>
-          syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, args.content || "", sessionId),
+          syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, args.content || "", sessionId, r2UserId),
         ).catch(() => {});
       }
 
@@ -866,12 +867,13 @@ async function dispatch(
 
       await sandbox.writeFile(editPath, newContent);
 
-      // Sync edited file to R2 (non-blocking)
+      // Sync edited file to R2 (non-blocking, user-scoped)
       if (editPath.startsWith("/workspace/") && env.STORAGE) {
         const r2Org = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
         const r2Agent = (env as any).__agentConfig?.name || "agent";
+        const r2UserId = (env as any).__channelUserId || "";
         import("./workspace").then(({ syncFileToR2 }) =>
-          syncFileToR2(env.STORAGE, r2Org, r2Agent, editPath, newContent, sessionId),
+          syncFileToR2(env.STORAGE, r2Org, r2Agent, editPath, newContent, sessionId, r2UserId),
         ).catch(() => {});
       }
 
@@ -1258,6 +1260,30 @@ async function dispatch(
 
     case "list-project-versions":
       return listProjectVersions(env, args);
+
+    case "load-folder": {
+      // Load files from an R2 folder prefix into the agent's context
+      if (!env.STORAGE) return "R2 storage not configured";
+      const { loadFolderToContext } = await import("./workspace");
+      const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
+      const agentName = (env as any).__agentConfig?.name || "agent";
+      const userId = (env as any).__channelUserId || "";
+
+      let prefix = args.path || args.prefix || "";
+      // Shortcuts: "workspace" loads the user's workspace, "project:name" loads a named project
+      if (prefix === "workspace" || !prefix) {
+        prefix = `workspaces/${orgId}/${agentName}/u/${userId || "shared"}/files/`;
+      } else if (prefix.startsWith("project:")) {
+        const projectName = prefix.slice(8);
+        prefix = `workspaces/${orgId}/${agentName}/projects/${projectName}/files/`;
+      }
+
+      const content = await loadFolderToContext(env.STORAGE, prefix, {
+        maxFiles: args.max_files || 20,
+        maxSizePerFile: args.max_size_per_file || 50_000,
+      });
+      return content;
+    }
 
     case "todo":
       return todoTool(env, args, sessionId);
@@ -4081,54 +4107,55 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promis
 
 async function saveProject(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const workspace = args.workspace || "/workspace";
-  // Default org_id and agent_name from session context — agent shouldn't need to specify these
-  const orgId = args.org_id || "default";
-  const agentName = args.agent_name || sessionId.split("-")[0] || "agent";
+  const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
+  const agentName = (env as any).__agentConfig?.name || "agent";
+  const projectName = args.project_name || args.project_id || args.name || "default";
   const sandbox = getSafeSandbox(env, `session-${sessionId}`);
   const tarResult = await sandbox.exec(`cd ${workspace} 2>/dev/null && tar czf /tmp/workspace.tar.gz . 2>/dev/null || echo "__EMPTY__"`, { timeout: 30 });
   if (tarResult.stdout?.includes("__EMPTY__")) return `No files found in ${workspace}`;
   const b64Result = await sandbox.exec(`base64 /tmp/workspace.tar.gz`, { timeout: 30 });
   const b64Data = b64Result.stdout?.trim() || "";
   if (!b64Data) return "Failed to read workspace archive";
-  const projectId = args.project_id || "default";
-  const r2Key = `workspaces/${orgId}/${projectId}/${agentName}/latest.tar.gz`;
-  const versionKey = `workspaces/${orgId}/${projectId}/${agentName}/v${Date.now()}.tar.gz`;
+  const r2Key = `workspaces/${orgId}/${agentName}/projects/${projectName}/latest.tar.gz`;
+  const versionKey = `workspaces/${orgId}/${agentName}/projects/${projectName}/v${Date.now()}.tar.gz`;
   const bytes = Uint8Array.from(atob(b64Data), (c) => c.charCodeAt(0));
-  await env.STORAGE.put(r2Key, bytes, { customMetadata: { org_id: orgId, agent_name: agentName, saved_at: new Date().toISOString() } });
-  await env.STORAGE.put(versionKey, bytes, { customMetadata: { org_id: orgId, agent_name: agentName, saved_at: new Date().toISOString() } });
+  const meta = { org_id: orgId, agent_name: agentName, project_name: projectName, saved_at: new Date().toISOString() };
+  await env.STORAGE.put(r2Key, bytes, { customMetadata: meta });
+  await env.STORAGE.put(versionKey, bytes, { customMetadata: meta });
   const countResult = await sandbox.exec(`find ${workspace} -type f | wc -l`, { timeout: 5 });
-  return JSON.stringify({ saved: true, r2_key: r2Key, version_key: versionKey, files: parseInt(countResult.stdout?.trim() || "0"), size_bytes: bytes.byteLength });
+  return JSON.stringify({ saved: true, project: projectName, r2_key: r2Key, version_key: versionKey, files: parseInt(countResult.stdout?.trim() || "0"), size_bytes: bytes.byteLength });
 }
 
 async function loadProject(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const workspace = args.workspace || "/workspace";
-  const orgId = args.org_id || "default";
-  const agentName = args.agent_name || sessionId.split("-")[0] || "agent";
+  const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
+  const agentName = (env as any).__agentConfig?.name || "agent";
+  const projectName = args.project_name || args.project_id || args.name || "default";
   const version = args.version || "latest";
-  const projectId = args.project_id || "default";
   const r2Key = version === "latest"
-    ? `workspaces/${orgId}/${projectId}/${agentName}/latest.tar.gz`
-    : `workspaces/${orgId}/${projectId}/${agentName}/${version}.tar.gz`;
+    ? `workspaces/${orgId}/${agentName}/projects/${projectName}/latest.tar.gz`
+    : `workspaces/${orgId}/${agentName}/projects/${projectName}/${version}.tar.gz`;
   const sandbox = getSafeSandbox(env, `session-${sessionId}`);
   const obj = await env.STORAGE.get(r2Key);
-  if (!obj) return JSON.stringify({ loaded: false, reason: "No saved workspace found." });
+  if (!obj) return JSON.stringify({ loaded: false, reason: `No project "${projectName}" found. Use save-project to create one.` });
   const buf = await obj.arrayBuffer();
   const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
   await sandbox.writeFile("/tmp/workspace.tar.gz.b64", b64);
   await sandbox.exec(`mkdir -p ${workspace}`, { timeout: 5 });
   await sandbox.exec(`base64 -d /tmp/workspace.tar.gz.b64 > /tmp/workspace.tar.gz && cd ${workspace} && tar xzf /tmp/workspace.tar.gz`, { timeout: 30 });
   const countResult = await sandbox.exec(`find ${workspace} -type f | wc -l`, { timeout: 5 });
-  return JSON.stringify({ loaded: true, r2_key: r2Key, files: parseInt(countResult.stdout?.trim() || "0"), size_bytes: buf.byteLength });
+  return JSON.stringify({ loaded: true, project: projectName, r2_key: r2Key, files: parseInt(countResult.stdout?.trim() || "0"), size_bytes: buf.byteLength });
 }
 
 async function listProjectVersions(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
-  const orgId = args.org_id || "";
-  const agentName = args.agent_name || "";
-  if (!orgId || !agentName) return "list-project-versions requires org_id and agent_name";
-  const prefix = `workspaces/${orgId}/${args.project_id || "default"}/${agentName}/`;
+  const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "";
+  const agentName = (env as any).__agentConfig?.name || "";
+  if (!orgId || !agentName) return "Could not determine org/agent context";
+  const projectName = args.project_name || args.project_id || args.name || "default";
+  const prefix = `workspaces/${orgId}/${agentName}/projects/${projectName}/`;
   const listed = await env.STORAGE.list({ prefix, limit: 50 });
   const versions = listed.objects.map((o: any) => ({ key: o.key.replace(prefix, ""), size: o.size, uploaded: o.uploaded }));
-  return JSON.stringify({ versions, count: versions.length });
+  return JSON.stringify({ project: projectName, versions, count: versions.length });
 }
 
 // ── Todo (session-scoped) ────────────────────────────────────
@@ -4616,16 +4643,16 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "save-project",
-      description: "Save the current workspace to persistent storage",
+      description:
+        "Save the current workspace as a named project. Creates a versioned snapshot in persistent storage. " +
+        "Use project names like 'my-web-app' or 'data-analysis'. Each save creates a new version.",
       parameters: {
         type: "object",
         properties: {
+          project_name: { type: "string", description: "Name for the project (e.g. 'my-web-app'). Default: 'default'" },
           workspace: { type: "string", description: "Workspace path (default /workspace)" },
-          org_id: { type: "string", description: "Organization ID" },
-          agent_name: { type: "string", description: "Agent name" },
-          project_id: { type: "string", description: "Project ID" },
         },
-        required: ["org_id", "agent_name"],
+        required: [],
       },
     },
   },
@@ -4633,17 +4660,39 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "load-project",
-      description: "Load a saved workspace from persistent storage",
+      description:
+        "Load a previously saved project into the workspace. Restores all files from the project snapshot. " +
+        "Use this to resume work on a project from a previous session.",
       parameters: {
         type: "object",
         properties: {
+          project_name: { type: "string", description: "Name of the project to load. Default: 'default'" },
+          version: { type: "string", description: "Version to load (default: 'latest')" },
           workspace: { type: "string", description: "Workspace path (default /workspace)" },
-          org_id: { type: "string", description: "Organization ID" },
-          agent_name: { type: "string", description: "Agent name" },
-          project_id: { type: "string", description: "Project ID" },
-          version: { type: "string", description: "Version to load (default latest)" },
         },
-        required: ["org_id", "agent_name"],
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "load-folder",
+      description:
+        "Load files from R2 storage into the conversation context. Use this to review project files, " +
+        "workspace contents, or any stored folder without needing a sandbox. " +
+        "Shortcuts: 'workspace' loads your current workspace files, 'project:name' loads a named project's files.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "What to load: 'workspace' (your files), 'project:my-app' (a named project), or a raw R2 prefix",
+          },
+          max_files: { type: "number", description: "Max files to include (default 20)" },
+          max_size_per_file: { type: "number", description: "Max bytes per file (default 50000)" },
+        },
+        required: [],
       },
     },
   },

@@ -4,8 +4,12 @@
  * Per-file sync with manifest — not tar snapshots.
  *
  * Storage layout in R2:
- *   workspaces/{org}/{agent}/manifest.json       — file list, hashes, timestamps
- *   workspaces/{org}/{agent}/files/{path}        — individual files
+ *   workspaces/{org}/{agent}/u/{userId}/manifest.json   — per-user file list
+ *   workspaces/{org}/{agent}/u/{userId}/files/{path}    — per-user files
+ *   workspaces/{org}/{agent}/projects/{name}/files/{..}  — named projects (shared)
+ *
+ * Each user gets their own workspace scope within the same agent.
+ * When no userId is provided, falls back to "shared" (agent-level scope).
  *
  * Write flow:
  *   write-file → sandbox + R2 file + update manifest (non-blocking)
@@ -32,24 +36,31 @@ export interface FileEntry {
 export interface WorkspaceManifest {
   org_id: string;
   agent_name: string;
+  user_id: string;
   files: FileEntry[];
   last_sync: string;
   session_id: string;
 }
 
-function manifestKey(org: string, agent: string): string {
-  return `workspaces/${org}/${agent}/manifest.json`;
+function scopePrefix(org: string, agent: string, userId?: string): string {
+  const userScope = userId || "shared";
+  return `workspaces/${org}/${agent}/u/${userScope}`;
 }
 
-function fileKey(org: string, agent: string, filePath: string): string {
+function manifestKey(org: string, agent: string, userId?: string): string {
+  return `${scopePrefix(org, agent, userId)}/manifest.json`;
+}
+
+function fileKey(org: string, agent: string, filePath: string, userId?: string): string {
   // Normalize: strip leading /workspace/ to get relative path
   const relative = filePath.replace(/^\/workspace\//, "").replace(/^\/+/, "");
-  return `workspaces/${org}/${agent}/files/${relative}`;
+  return `${scopePrefix(org, agent, userId)}/files/${relative}`;
 }
 
 /**
  * Sync a single file to R2 and update the manifest.
  * Called after every write-file/edit-file in the tool layer.
+ * Files are scoped per-user within the agent (userId from channel_user_id).
  */
 export async function syncFileToR2(
   storage: R2Bucket,
@@ -58,8 +69,9 @@ export async function syncFileToR2(
   filePath: string,
   content: string,
   sessionId: string,
+  userId?: string,
 ): Promise<void> {
-  const key = fileKey(org, agent, filePath);
+  const key = fileKey(org, agent, filePath, userId);
   const hash = await quickHash(content);
   const now = new Date().toISOString();
 
@@ -74,10 +86,10 @@ export async function syncFileToR2(
   });
 
   // Update manifest (read-modify-write)
-  const mKey = manifestKey(org, agent);
-  let manifest = await loadManifest(storage, org, agent);
+  const mKey = manifestKey(org, agent, userId);
+  let manifest = await loadManifest(storage, org, agent, userId);
   if (!manifest) {
-    manifest = { org_id: org, agent_name: agent, files: [], last_sync: now, session_id: sessionId };
+    manifest = { org_id: org, agent_name: agent, user_id: userId || "shared", files: [], last_sync: now, session_id: sessionId };
   }
 
   // Upsert file entry
@@ -104,8 +116,9 @@ export async function loadManifest(
   storage: R2Bucket,
   org: string,
   agent: string,
+  userId?: string,
 ): Promise<WorkspaceManifest | null> {
-  const obj = await storage.get(manifestKey(org, agent));
+  const obj = await storage.get(manifestKey(org, agent, userId));
   if (!obj) return null;
   try {
     return JSON.parse(await obj.text()) as WorkspaceManifest;
@@ -127,8 +140,9 @@ export async function hydrateWorkspace(
   },
   org: string,
   agent: string,
+  userId?: string,
 ): Promise<{ restored: number; skipped: number }> {
-  const manifest = await loadManifest(storage, org, agent);
+  const manifest = await loadManifest(storage, org, agent, userId);
   if (!manifest || manifest.files.length === 0) return { restored: 0, skipped: 0 };
 
   await sandbox.exec("mkdir -p /workspace", { timeout: 5 }).catch(() => {});
@@ -149,7 +163,7 @@ export async function hydrateWorkspace(
     }
 
     // Download from R2 and write to sandbox
-    const key = fileKey(org, agent, localPath);
+    const key = fileKey(org, agent, localPath, userId);
     const obj = await storage.get(key);
     if (!obj) continue;
 
@@ -170,8 +184,9 @@ export async function listWorkspaceFiles(
   storage: R2Bucket,
   org: string,
   agent: string,
+  userId?: string,
 ): Promise<FileEntry[]> {
-  const manifest = await loadManifest(storage, org, agent);
+  const manifest = await loadManifest(storage, org, agent, userId);
   return manifest?.files || [];
 }
 
@@ -183,11 +198,50 @@ export async function readFileFromR2(
   org: string,
   agent: string,
   filePath: string,
+  userId?: string,
 ): Promise<string | null> {
-  const key = fileKey(org, agent, filePath);
+  const key = fileKey(org, agent, filePath, userId);
   const obj = await storage.get(key);
   if (!obj) return null;
   return obj.text();
+}
+
+/**
+ * Load an R2 folder (project or user workspace) into a text summary for agent context.
+ * Returns file contents formatted for injection into the conversation.
+ */
+export async function loadFolderToContext(
+  storage: R2Bucket,
+  prefix: string,
+  opts?: { maxFiles?: number; maxSizePerFile?: number },
+): Promise<string> {
+  const maxFiles = opts?.maxFiles || 20;
+  const maxSize = opts?.maxSizePerFile || 50_000; // 50KB per file
+  const listed = await storage.list({ prefix, limit: maxFiles + 5 });
+  if (listed.objects.length === 0) return "No files found at this path.";
+
+  const parts: string[] = [];
+  let loaded = 0;
+
+  for (const obj of listed.objects) {
+    if (loaded >= maxFiles) break;
+    // Skip manifest files and directories
+    if (obj.key.endsWith("manifest.json") || obj.key.endsWith("/")) continue;
+    if (obj.size > maxSize) {
+      const relPath = obj.key.replace(prefix, "");
+      parts.push(`--- ${relPath} (${obj.size} bytes, too large to include) ---`);
+      loaded++;
+      continue;
+    }
+    const file = await storage.get(obj.key);
+    if (!file) continue;
+    const content = await file.text();
+    const relPath = obj.key.replace(prefix, "").replace(/^\//, "");
+    parts.push(`--- ${relPath} ---\n${content}`);
+    loaded++;
+  }
+
+  return parts.join("\n\n");
 }
 
 // ── Helpers ───────────────────────────────────────────────────
