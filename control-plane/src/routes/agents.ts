@@ -195,10 +195,11 @@ async function resolveAgentName(
   identifier: string,
   orgId: string,
 ): Promise<string | null> {
-  // First try as agent_id (short hex string, no spaces/special chars)
-  if (/^[a-f0-9]{8,32}$/i.test(identifier)) {
+  // First try as agent_id (hex string with optional agt_ prefix)
+  const cleanId = identifier.replace(/^agt_/, "");
+  if (/^[a-f0-9]{8,32}$/i.test(cleanId) || identifier.startsWith("agt_")) {
     const rows = await sql`
-      SELECT name FROM agents WHERE agent_id = ${identifier} AND org_id = ${orgId} AND is_active = 1 LIMIT 1
+      SELECT name FROM agents WHERE (agent_id = ${identifier} OR agent_id = ${cleanId}) AND org_id = ${orgId} AND is_active = 1 LIMIT 1
     `;
     if (rows.length > 0) return String(rows[0].name);
   }
