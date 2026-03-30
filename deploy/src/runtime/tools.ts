@@ -1419,14 +1419,14 @@ async function dispatch(
       const agentName = args.agent_name || args.self_agent_name || "";
       const cronExpr = args.cron || args.schedule || "";
       const taskDesc = args.task || args.description || "";
-      const orgId = args.org_id || "";
+      const orgId = args.org_id || (env as any).__agentConfig?.org_id || "";
       if (!agentName || !cronExpr || !taskDesc) {
         return "create-schedule requires agent_name, cron (e.g. '0 9 * * *'), and task description";
       }
       try {
         await sql`
           INSERT INTO schedules (schedule_id, agent_name, org_id, task, cron, is_enabled, run_count, created_at)
-          VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${new Date().toISOString()})
+          VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, 1, 0, ${new Date().toISOString()})
         `;
         return JSON.stringify({ created: true, schedule_id: scheduleId, agent_name: agentName, cron: cronExpr, task: taskDesc });
       } catch (err: any) {

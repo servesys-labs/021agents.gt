@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import { Info, RefreshCw, Trash2, Sparkles } from "lucide-react";
+import { Info, RefreshCw, Trash2, Sparkles, Plus, History } from "lucide-react";
 import { MetaAgentPanel } from "../components/MetaAgentPanel";
 import { ChatInterface } from "../components/ChatInterface";
 import { InfoBox } from "../components/ui/InfoBox";
@@ -8,7 +8,7 @@ import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
 import { Button } from "../components/ui/Button";
 import { api } from "../lib/api";
-import { useAgentStream } from "../lib/use-agent-stream";
+import { useAgentStream, loadSessionList, type StoredSession } from "../lib/use-agent-stream";
 import { agentPathSegment } from "../lib/agent-path";
 
 interface AgentDetail {
@@ -27,6 +27,20 @@ export default function AgentPlaygroundPage() {
 
   const { messages, streaming, sessionMeta, send, stop, clear, loadHistory } = useAgentStream();
   const [metaOpen, setMetaOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessions, setSessions] = useState<StoredSession[]>([]);
+
+  const handleNewSession = useCallback(async () => {
+    // 1. Clear frontend
+    clear();
+    // 2. Tell the DO to reset server-side conversation
+    if (agent) {
+      try {
+        await api.post(`/runtime-proxy/runnable/reset`, { agent_name: agent.name }).catch(() => {});
+      } catch {}
+      setSessions(loadSessionList(agent.name));
+    }
+  }, [agent, clear]);
 
   const fetchAgent = async () => {
     setPageLoading(true);
@@ -100,14 +114,38 @@ export default function AgentPlaygroundPage() {
           <span className="text-text-secondary">{toolCount} tools</span>
         </InfoBox>
         <div className="flex items-center gap-1 ml-2">
-          <Button variant="ghost" size="sm" onClick={() => setMetaOpen(true)} title="Improve this agent">
-            <Sparkles size={14} /> Improve
+          <Button variant="ghost" size="sm" onClick={handleNewSession} title="New conversation">
+            <Plus size={14} /> New
           </Button>
-          {messages.length > 0 && (
-            <Button variant="ghost" size="sm" onClick={clear} title="Clear conversation">
-              <Trash2 size={14} />
+          <div className="relative">
+            <Button
+              variant="ghost" size="sm"
+              onClick={() => { if (agent) setSessions(loadSessionList(agent.name)); setSessionsOpen(!sessionsOpen); }}
+              title="Session history"
+            >
+              <History size={14} />
             </Button>
-          )}
+            {sessionsOpen && sessions.length > 0 && (
+              <div className="absolute right-0 top-full mt-1 w-72 max-h-80 overflow-y-auto bg-surface border border-border rounded-xl shadow-lg z-50">
+                <div className="px-3 py-2 border-b border-border">
+                  <p className="text-xs font-medium text-text-secondary">Recent conversations</p>
+                </div>
+                {sessions.map(s => (
+                  <button
+                    key={s.id}
+                    onClick={() => { if (agent) loadHistory(agent.name, s.id); setSessionsOpen(false); }}
+                    className="w-full px-3 py-2 text-left hover:bg-surface-alt transition-colors border-b border-border/30 last:border-0"
+                  >
+                    <p className="text-xs font-medium text-text truncate">{s.title}</p>
+                    <p className="text-[10px] text-text-muted mt-0.5">{s.messageCount} messages · {new Date(s.updatedAt).toLocaleDateString()}</p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <Button variant="ghost" size="sm" onClick={() => setMetaOpen(true)} title="Improve this agent">
+            <Sparkles size={14} />
+          </Button>
         </div>
       </div>
 

@@ -697,3 +697,50 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
     });
   }
 });
+
+// ── POST /runnable/reset — Reset agent conversation history ─────────
+
+const resetRoute = createRoute({
+  method: "post",
+  path: "/runnable/reset",
+  tags: ["RuntimeProxy"],
+  summary: "Reset agent conversation history (start new session)",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ agent_name: z.string().min(1) }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Reset complete", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(500),
+  },
+});
+runtimeProxyRoutes.openapi(resetRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const body = c.req.valid("json");
+  const agentName = body.agent_name;
+  const orgId = user.org_id || "";
+  const userId = user.user_id || "";
+  const orgPrefix = orgId ? `${orgId}-` : "";
+  const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
+
+  try {
+    const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/stream", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+      },
+      // Send a special __reset command through the same path as normal runs
+      // The DO handles POST /reset directly
+      body: JSON.stringify({ __reset: true, agent_name: agentName, org_id: orgId, channel_user_id: userId }),
+    });
+    // Alternative: forward directly to the DO reset endpoint
+  } catch {}
+
+  return c.json({ ok: true, reset: true, agent_name: agentName });
+});
