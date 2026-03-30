@@ -32,11 +32,10 @@ import { getCircuitStatus } from "./runtime/tools";
 // Per CF Containers docs: https://developers.cloudflare.com/containers/
 //
 // Lifecycle hooks give us visibility into OOM kills, crashes, and graceful shutdowns.
-// outboundByHost lets sandbox code access platform resources (R2, KV) via HTTP
-// while keeping arbitrary internet access blocked (enableInternet = false).
+// outboundByHost lets sandbox code access platform resources (R2, KV) via HTTP.
+// Internet is ENABLED because agents need npm install, pip install, git clone, curl, etc.
+// Security: each container runs in its own VM (CF isolation), SSRF blocked by parent Worker.
 export class AgentSandbox extends Sandbox<Env> {
-  // Block arbitrary internet — sandbox code can't exfiltrate data
-  enableInternet = false;
 
   onStart() {
     console.log(`[sandbox] Started: ${this.ctx.id.toString().slice(0, 16)}`);
@@ -1101,6 +1100,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                             trace_id: evt.trace_id || "",
                           })
                         ).catch((err: any) => console.error("[sse-billing] writeBillingRecord failed:", err.message));
+
+                        // Write session record (for observability / meta-agent)
+                        import("./runtime/db").then(({ writeSession }) =>
+                          writeSession(self.env.HYPERDRIVE, {
+                            session_id: evt.session_id || "", org_id: orgId,
+                            project_id: data.project_id || "", agent_name: agentName,
+                            status: "success", input_text: inputText,
+                            output_text: (evt.output || "").slice(0, 2000),
+                            model: "workflow",
+                            trace_id: evt.trace_id || "",
+                            step_count: Number(evt.turns) || 1,
+                            action_count: Number(evt.tool_calls) || 0,
+                            wall_clock_seconds: 0,
+                            cost_total_usd: costUsd,
+                          })
+                        ).catch((err: any) => console.error("[sse-session] writeSession failed:", err.message));
                       }
                     }
                     if (evt.type === "error") done = true;
@@ -3277,10 +3292,12 @@ export default {
         await fetch(`${tgApi}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: "I can help with research, code, data analysis, and more.\n\nCommands:\n/new — Clear conversation and start fresh\n/help — Show this message\n\nJust send text, photos, voice notes, or documents!", parse_mode: "Markdown" }),
+          body: JSON.stringify({ chat_id: chatId, text: "I can help with research, code, data analysis, and more.\n\nCommands:\n/new — Clear conversation\n/project — List or load a project\n/project name — Load a project by name\n/save name — Save workspace as project\n/files — Show current workspace files\n/help — Show this message\n\nJust send text, photos, voice notes, or documents!", parse_mode: "Markdown" }),
         });
         return Response.json({ ok: true });
       }
+
+      // /project, /save, /files commands handled below after cleanText is declared
 
       // ── Message deduplication (2s window) ──
       // Telegram sometimes delivers the same webhook twice, or users send rapid messages.
@@ -3307,6 +3324,18 @@ export default {
       let cleanText = contentText;
       if (cleanText.startsWith("/ask ")) cleanText = cleanText.slice(5);
       if (chatType !== "private") cleanText = cleanText.replace(/@\w+/g, "").trim();
+
+      // /project [name], /save [name], /files — rewrite to agent-friendly prompts
+      if (cleanText.startsWith("/project") || cleanText.startsWith("/save") || cleanText.startsWith("/files")) {
+        const cmd = cleanText.split(" ")[0];
+        const arg = cleanText.slice(cmd.length).trim();
+        if (cmd === "/project" && !arg) cleanText = "List all my saved projects using list-project-versions, and show what's available.";
+        else if (cmd === "/project") cleanText = `Load my project "${arg}" into the workspace using load-project, then tell me what files are available.`;
+        else if (cmd === "/save" && arg) cleanText = `Save the current workspace as project "${arg}" using save-project.`;
+        else if (cmd === "/save") cleanText = "Save the current workspace as a project. Ask me what to name it.";
+        else if (cmd === "/files") cleanText = "List all files in my current workspace using load-folder with path='workspace'.";
+      }
+
       if (cleanText) inputParts.push(cleanText);
 
       if (hasMedia && tgFileId) {
