@@ -44,6 +44,7 @@ interface MetaChatContext {
   cloudflareAccountId?: string;
   aiGatewayId?: string;
   cloudflareApiToken?: string;
+  aiGatewayToken?: string;
   env: {
     RUNTIME?: { fetch: (input: RequestInfo, init?: RequestInit) => Promise<Response> };
     SERVICE_TOKEN?: string;
@@ -1356,6 +1357,7 @@ export async function runMetaChat(
         cloudflareAccountId: ctx.cloudflareAccountId,
         aiGatewayId: ctx.aiGatewayId,
         cloudflareApiToken: ctx.cloudflareApiToken,
+        aiGatewayToken: ctx.aiGatewayToken,
         openrouterApiKey: ctx.openrouterApiKey,
       },
       {

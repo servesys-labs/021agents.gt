@@ -1544,6 +1544,7 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
       aiGatewayId: c.env.AI_GATEWAY_ID,
       cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
+      aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
       env: {
         RUNTIME: c.env.RUNTIME,
         SERVICE_TOKEN: c.env.SERVICE_TOKEN,
