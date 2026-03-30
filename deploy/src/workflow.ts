@@ -223,8 +223,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 
       totalCost += llm.cost_usd;
 
-      // ── Thinking trace ──
-      if (llm.content) {
+      // ── Thinking trace (only when LLM is reasoning before tool calls) ──
+      if (llm.content && llm.tool_calls.length > 0) {
         await this.emit(p.progress_key, { type: "thinking", content: llm.content, turn });
       }
 

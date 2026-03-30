@@ -213,7 +213,7 @@ const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string
   standard: {
     general:    { simple: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" }, moderate: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, complex: { model: "openai/gpt-5.4", provider: "openrouter" }, tool_call: { model: "openai/gpt-5.4-mini", provider: "openrouter" } },
     coding:     { planner: { model: "openai/gpt-5.4", provider: "openrouter" }, implementer: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, reviewer: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" }, debugger: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" } },
-    research:   { search: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" }, analyze: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, synthesize: { model: "openai/gpt-5.4", provider: "openrouter" } },
+    research:   { search: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, analyze: { model: "openai/gpt-5.4", provider: "openrouter" }, synthesize: { model: "openai/gpt-5.4", provider: "openrouter" } },
     creative:   { write: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" } },
     multimodal: { vision: { model: "openai/gpt-5.4", provider: "openrouter" } },
   },

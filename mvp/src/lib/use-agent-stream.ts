@@ -389,12 +389,22 @@ export function useAgentStream() {
           historyRef.current.push({ role: "assistant", content: finalOutput });
         }
 
-        // If we have output but no streamed tokens (non-streaming model), add it
-        if (finalOutput && !assistantIdRef.current) {
-          setMessages(prev => [...prev, {
-            id: makeId(), role: "assistant", content: finalOutput,
-            timestamp: new Date().toISOString(),
-          }]);
+        // If we have output but no streamed tokens, add a new assistant message
+        // If tokens were streamed, update the existing message with the final complete output
+        if (finalOutput) {
+          if (assistantIdRef.current) {
+            // Update existing streamed message with final output (ensures completeness)
+            const msgId = assistantIdRef.current;
+            setMessages(prev => prev.map(m =>
+              m.id === msgId ? { ...m, content: finalOutput } : m
+            ));
+          } else {
+            // No streaming happened — create the message
+            setMessages(prev => [...prev, {
+              id: makeId(), role: "assistant", content: finalOutput,
+              timestamp: new Date().toISOString(),
+            }]);
+          }
         }
 
         // Persist conversation to localStorage
