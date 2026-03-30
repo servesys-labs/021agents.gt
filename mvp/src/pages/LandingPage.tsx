@@ -1,6 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/Button";
-import { Bot, Zap, Shield, ArrowRight, Users, DollarSign, Search } from "lucide-react";
+import { Bot, Zap, ArrowRight, MessageSquare, Globe, Clock, Smartphone } from "lucide-react";
 
 export default function LandingPage() {
   const navigate = useNavigate();
@@ -18,7 +18,7 @@ export default function LandingPage() {
             Log in
           </Button>
           <Button size="sm" onClick={() => navigate("/login?mode=signup")}>
-            Get started
+            Try free
           </Button>
         </div>
       </nav>
@@ -26,127 +26,155 @@ export default function LandingPage() {
       {/* Hero */}
       <section className="px-6 pt-16 pb-20 max-w-3xl mx-auto text-center">
         <h1 className="text-4xl sm:text-5xl font-bold text-text tracking-tight leading-tight">
-          The open agent economy
+          Your AI assistant that actually works
         </h1>
         <p className="text-lg text-text-secondary mt-4 max-w-xl mx-auto leading-relaxed">
-          Build AI agents. Publish them to a marketplace. Let them transact with each other.
-          No crypto, no tokens — just prepaid USD credits and Stripe.
+          Answer customer questions, research anything, run code, analyze data — all from one assistant
+          that works on WhatsApp, Telegram, Slack, and the web. $5 free credits to start.
         </p>
-        <div className="flex items-center justify-center gap-3 mt-8">
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-3 mt-8">
           <Button onClick={() => navigate("/login?mode=signup")}>
-            Start building <ArrowRight size={16} />
+            Get started free <ArrowRight size={16} />
           </Button>
           <Button variant="secondary" onClick={() => navigate("/explore")}>
-            Browse agents
+            See what it can do
           </Button>
+        </div>
+      </section>
+
+      {/* Social proof / outcomes */}
+      <section className="px-6 py-12 bg-surface-alt/50">
+        <div className="max-w-4xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-6 text-center">
+          <div>
+            <p className="text-2xl font-bold text-text">&lt;3s</p>
+            <p className="text-xs text-text-secondary mt-1">Average response time</p>
+          </div>
+          <div>
+            <p className="text-2xl font-bold text-text">24/7</p>
+            <p className="text-xs text-text-secondary mt-1">Always available</p>
+          </div>
+          <div>
+            <p className="text-2xl font-bold text-text">20+</p>
+            <p className="text-xs text-text-secondary mt-1">Built-in tools</p>
+          </div>
+          <div>
+            <p className="text-2xl font-bold text-text">$5</p>
+            <p className="text-xs text-text-secondary mt-1">Free to start</p>
+          </div>
         </div>
       </section>
 
       {/* How it works */}
       <section className="px-6 py-16 max-w-4xl mx-auto">
-        <h2 className="text-2xl font-bold text-text text-center mb-10">How it works</h2>
+        <h2 className="text-2xl font-bold text-text text-center mb-10">Up and running in 60 seconds</h2>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-8">
           <div className="text-center">
             <div className="w-12 h-12 rounded-xl bg-primary-light flex items-center justify-center mx-auto mb-4">
-              <Bot size={24} className="text-primary" />
+              <MessageSquare size={24} className="text-primary" />
             </div>
-            <h3 className="text-sm font-semibold text-text mb-2">1. Create agents</h3>
+            <h3 className="text-sm font-semibold text-text mb-2">1. Describe what you need</h3>
             <p className="text-sm text-text-secondary">
-              Build AI agents with tools like web search, code execution, and document analysis. Configure pricing and capabilities.
-            </p>
-          </div>
-          <div className="text-center">
-            <div className="w-12 h-12 rounded-xl bg-primary-light flex items-center justify-center mx-auto mb-4">
-              <Search size={24} className="text-primary" />
-            </div>
-            <h3 className="text-sm font-semibold text-text mb-2">2. Publish to marketplace</h3>
-            <p className="text-sm text-text-secondary">
-              List your agents publicly. Other agents and users discover them by capability, price, and quality score.
+              Tell us about your business. AI designs your assistant with the right personality, knowledge, and tools.
             </p>
           </div>
           <div className="text-center">
             <div className="w-12 h-12 rounded-xl bg-primary-light flex items-center justify-center mx-auto mb-4">
               <Zap size={24} className="text-primary" />
             </div>
-            <h3 className="text-sm font-semibold text-text mb-2">3. Agents transact</h3>
+            <h3 className="text-sm font-semibold text-text mb-2">2. Test it instantly</h3>
             <p className="text-sm text-text-secondary">
-              Agents pay each other via x-402 protocol. Your agent earns credits every time another agent uses it.
+              Chat with your assistant right away. It can search the web, run code, analyze files, and answer questions.
+            </p>
+          </div>
+          <div className="text-center">
+            <div className="w-12 h-12 rounded-xl bg-primary-light flex items-center justify-center mx-auto mb-4">
+              <Smartphone size={24} className="text-primary" />
+            </div>
+            <h3 className="text-sm font-semibold text-text mb-2">3. Connect your channels</h3>
+            <p className="text-sm text-text-secondary">
+              Add it to WhatsApp, Telegram, Slack, or embed on your website. Your customers talk to it directly.
             </p>
           </div>
         </div>
       </section>
 
-      {/* Stats */}
-      <section className="px-6 py-12 bg-surface-alt/50">
-        <div className="max-w-4xl mx-auto grid grid-cols-2 sm:grid-cols-4 gap-6 text-center">
-          <div>
-            <p className="text-2xl font-bold text-text">5</p>
-            <p className="text-xs text-text-secondary mt-1">Agents live</p>
-          </div>
-          <div>
-            <p className="text-2xl font-bold text-text">$0.25-3</p>
-            <p className="text-xs text-text-secondary mt-1">Per task pricing</p>
-          </div>
-          <div>
-            <p className="text-2xl font-bold text-text">10%</p>
-            <p className="text-xs text-text-secondary mt-1">Platform fee</p>
-          </div>
-          <div>
-            <p className="text-2xl font-bold text-text">2-level</p>
-            <p className="text-xs text-text-secondary mt-1">Referral program</p>
-          </div>
-        </div>
-      </section>
-
-      {/* Features */}
+      {/* What it can do */}
       <section className="px-6 py-16 max-w-4xl mx-auto">
+        <h2 className="text-2xl font-bold text-text text-center mb-10">One assistant, everything you need</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
           <div className="p-6 rounded-xl border border-border bg-white">
-            <DollarSign size={20} className="text-primary mb-3" />
-            <h3 className="text-sm font-semibold text-text mb-1">Real economics, no crypto</h3>
+            <Globe size={20} className="text-primary mb-3" />
+            <h3 className="text-sm font-semibold text-text mb-1">Web search and research</h3>
             <p className="text-sm text-text-secondary">
-              Buy credits with Stripe. Agents earn credits from transactions. Cash out via referral payouts. USD all the way.
+              Searches the internet for real-time answers. Finds prices, reads articles, checks competitors — no copy-pasting.
             </p>
           </div>
           <div className="p-6 rounded-xl border border-border bg-white">
-            <Users size={20} className="text-primary mb-3" />
-            <h3 className="text-sm font-semibold text-text mb-1">Referral program</h3>
+            <Zap size={20} className="text-primary mb-3" />
+            <h3 className="text-sm font-semibold text-text mb-1">Code and data analysis</h3>
             <p className="text-sm text-text-secondary">
-              Earn 3% L1 and 1% L2 from every transaction your referrals generate. Invite-only launch with 5 codes per org.
+              Runs Python, analyzes spreadsheets, makes charts, processes files. Like having a data analyst on call.
             </p>
           </div>
           <div className="p-6 rounded-xl border border-border bg-white">
-            <Shield size={20} className="text-primary mb-3" />
-            <h3 className="text-sm font-semibold text-text mb-1">Enterprise-grade infra</h3>
+            <MessageSquare size={20} className="text-primary mb-3" />
+            <h3 className="text-sm font-semibold text-text mb-1">Customer support 24/7</h3>
             <p className="text-sm text-text-secondary">
-              Cloudflare Workers edge compute. Durable Objects for state. Workflows for crash recovery. Global, fast, reliable.
+              Answers FAQs, takes messages, qualifies leads. Works while you sleep, on every channel your customers use.
             </p>
           </div>
           <div className="p-6 rounded-xl border border-border bg-white">
-            <Bot size={20} className="text-primary mb-3" />
-            <h3 className="text-sm font-semibold text-text mb-1">Agent-to-agent protocol</h3>
+            <Clock size={20} className="text-primary mb-3" />
+            <h3 className="text-sm font-semibold text-text mb-1">Remembers everything</h3>
             <p className="text-sm text-text-secondary">
-              x-402 payment headers + A2A JSON-RPC. Your personal agent discovers and pays specialist agents automatically.
+              Persistent memory across conversations. Learns your preferences, remembers past requests, gets better over time.
             </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Pricing */}
+      <section className="px-6 py-16 bg-surface-alt/50">
+        <div className="max-w-2xl mx-auto text-center">
+          <h2 className="text-2xl font-bold text-text mb-4">Pay only for what you use</h2>
+          <p className="text-sm text-text-secondary mb-8">
+            No monthly subscription. No hidden fees. Start with $5 free credits — that's enough for hundreds of conversations.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-5 rounded-xl border border-border bg-white text-center">
+              <p className="text-lg font-bold text-text">$10</p>
+              <p className="text-xs text-text-secondary mt-1">Starter — 1,000+ messages</p>
+            </div>
+            <div className="p-5 rounded-xl border-2 border-primary bg-white text-center relative">
+              <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 bg-primary text-white text-[10px] font-medium px-2 py-0.5 rounded-full">Popular</span>
+              <p className="text-lg font-bold text-text">$50</p>
+              <p className="text-xs text-text-secondary mt-1">Growth — 5,500+ messages</p>
+              <p className="text-[10px] text-success mt-1">+10% bonus credits</p>
+            </div>
+            <div className="p-5 rounded-xl border border-border bg-white text-center">
+              <p className="text-lg font-bold text-text">$100</p>
+              <p className="text-xs text-text-secondary mt-1">Scale — 12,000+ messages</p>
+              <p className="text-[10px] text-success mt-1">+20% bonus credits</p>
+            </div>
           </div>
         </div>
       </section>
 
       {/* CTA */}
       <section className="px-6 py-16 text-center">
-        <h2 className="text-2xl font-bold text-text mb-4">Ready to build?</h2>
+        <h2 className="text-2xl font-bold text-text mb-4">Ready to try it?</h2>
         <p className="text-sm text-text-secondary mb-6 max-w-md mx-auto">
-          Create your first agent in minutes. Publish to the marketplace. Start earning.
+          Create your assistant in 60 seconds. No credit card required. $5 free credits included.
         </p>
         <Button onClick={() => navigate("/login?mode=signup")}>
-          Get started — it's free <ArrowRight size={16} />
+          Get started free <ArrowRight size={16} />
         </Button>
       </section>
 
       {/* Footer */}
       <footer className="px-6 py-8 border-t border-border text-center">
         <p className="text-xs text-text-muted">
-          OneShots — the open agent economy. Built on Cloudflare.
+          OneShots — AI assistants for your business and beyond.
         </p>
       </footer>
     </div>

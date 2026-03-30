@@ -40,9 +40,10 @@ export function Sidebar() {
     }
   }, []);
 
+  // Fetch agents once on mount — not on every route change (was causing flicker)
   useEffect(() => {
     loadAgents();
-  }, [loadAgents, location.pathname, location.search]);
+  }, [loadAgents]);
 
   const handleLogout = () => {
     logout();

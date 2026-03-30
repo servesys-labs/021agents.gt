@@ -26,7 +26,7 @@ import MyAssistantPage from "./pages/MyAssistantPage";
 function LandingOrDashboard() {
   const { user, loading } = useAuth();
   if (loading) return <div className="flex items-center justify-center h-screen"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>;
-  if (user) return <Navigate to="/my-assistant" replace />;
+  if (user) return <Navigate to="/dashboard" replace />;
   return <LandingPage />;
 }
 

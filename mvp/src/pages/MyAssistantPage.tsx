@@ -112,6 +112,12 @@ export default function MyAssistantPage() {
           streaming={streaming}
           sessionMeta={sessionMeta}
           placeholder="Ask anything — search the web, run code, analyze data, hire specialists..."
+          suggestedPrompts={[
+            "Search the web for today's top AI news",
+            "Write a Python script to analyze my CSV data",
+            "Find the best deals on a laptop under $1000",
+            "Draft a professional email to a client",
+          ]}
         />
       </div>
     </div>
