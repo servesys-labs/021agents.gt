@@ -1077,6 +1077,9 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       hyperdrive: c.env.HYPERDRIVE,
       orgId: user.org_id,
       openrouterApiKey: c.env.OPENROUTER_API_KEY,
+      cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
+      aiGatewayId: c.env.AI_GATEWAY_ID,
+      cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
       pipedream: c.env.PIPEDREAM_CLIENT_ID ? {
         clientId: c.env.PIPEDREAM_CLIENT_ID,
         clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
@@ -1538,6 +1541,9 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       userId: user.user_id,
       hyperdrive: c.env.HYPERDRIVE,
       openrouterApiKey: c.env.OPENROUTER_API_KEY,
+      cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
+      aiGatewayId: c.env.AI_GATEWAY_ID,
+      cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
       env: {
         RUNTIME: c.env.RUNTIME,
         SERVICE_TOKEN: c.env.SERVICE_TOKEN,

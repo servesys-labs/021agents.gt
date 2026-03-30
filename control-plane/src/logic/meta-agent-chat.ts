@@ -41,6 +41,9 @@ interface MetaChatContext {
   userId: string;
   hyperdrive: Hyperdrive;
   openrouterApiKey: string;
+  cloudflareAccountId?: string;
+  aiGatewayId?: string;
+  cloudflareApiToken?: string;
   env: {
     RUNTIME?: { fetch: (input: RequestInfo, init?: RequestInit) => Promise<Response> };
     SERVICE_TOKEN?: string;
@@ -1348,44 +1351,30 @@ export async function runMetaChat(
   while (round < MAX_TOOL_ROUNDS) {
     round++;
 
-    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${ctx.openrouterApiKey}`,
-        "HTTP-Referer": "https://app.oneshots.co",
-        "X-Title": "AgentOS Meta-Agent",
+    const { callLLMGateway } = await import("../lib/llm-gateway");
+    const llmResult = await callLLMGateway(
+      {
+        cloudflareAccountId: ctx.cloudflareAccountId,
+        aiGatewayId: ctx.aiGatewayId,
+        cloudflareApiToken: ctx.cloudflareApiToken,
+        openrouterApiKey: ctx.openrouterApiKey,
       },
-      body: JSON.stringify({
+      {
         model: "anthropic/claude-sonnet-4-6",
-        messages: llmMessages,
+        messages: llmMessages as any,
         tools: META_TOOLS,
         tool_choice: "auto",
         max_tokens: 4096,
         temperature: 0.3,
-      }),
-    });
+        metadata: { agent: "meta-agent", org_id: ctx.orgId },
+      },
+    );
 
-    if (!resp.ok) {
-      const errText = await resp.text().catch(() => "Unknown error");
-      throw new Error(`OpenRouter API error (${resp.status}): ${errText}`);
-    }
-
-    const data = (await resp.json()) as {
-      choices: Array<{
-        message: {
-          role: string;
-          content: string | null;
-          tool_calls?: ToolCall[];
-        };
-        finish_reason: string;
-      }>;
+    const msg = {
+      role: "assistant" as const,
+      content: llmResult.content,
+      tool_calls: llmResult.tool_calls as ToolCall[] | undefined,
     };
-
-    const choice = data.choices?.[0];
-    if (!choice) throw new Error("No response from LLM");
-
-    const msg = choice.message;
     const toolCalls = msg.tool_calls;
 
     if (!toolCalls || toolCalls.length === 0) {

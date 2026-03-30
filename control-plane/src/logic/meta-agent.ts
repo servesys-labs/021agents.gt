@@ -355,6 +355,9 @@ export async function buildFromDescription(
     hyperdrive?: Hyperdrive;
     orgId?: string;
     openrouterApiKey?: string;
+    cloudflareAccountId?: string;
+    aiGatewayId?: string;
+    cloudflareApiToken?: string;
     pipedream?: { clientId: string; clientSecret: string; projectId: string };
     orgProfile?: {
       org_name?: string;
@@ -367,8 +370,8 @@ export async function buildFromDescription(
     };
   } = {},
 ): Promise<Record<string, unknown>> {
-  if (!opts.openrouterApiKey) {
-    throw new Error("OPENROUTER_API_KEY is required for agent generation. Check worker secrets.");
+  if (!opts.openrouterApiKey && !(opts.cloudflareAccountId && opts.aiGatewayId)) {
+    throw new Error("AI Gateway or OPENROUTER_API_KEY is required for agent generation. Check worker secrets.");
   }
 
   // Resolve the model the generated agent should use
@@ -561,41 +564,28 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
 
   const userPrompt = `Design a complete agent package for: ${description}`;
 
-  // Call Claude Sonnet 4.6 via OpenRouter
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${opts.openrouterApiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://app.oneshots.co",
-      "X-Title": "AgentOS Meta-Agent",
+  // Call Claude Sonnet 4.6 via AI Gateway
+  const { callLLMGateway } = await import("../lib/llm-gateway");
+  const llmResult = await callLLMGateway(
+    {
+      cloudflareAccountId: (opts as any).cloudflareAccountId,
+      aiGatewayId: (opts as any).aiGatewayId,
+      cloudflareApiToken: (opts as any).cloudflareApiToken,
+      openrouterApiKey: opts.openrouterApiKey,
     },
-    body: JSON.stringify({
+    {
       model: "anthropic/claude-sonnet-4-6",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      max_tokens: 16384, // Large output for full package
+      max_tokens: 16384,
       temperature: 0.3,
-    }),
-  });
+      metadata: { agent: "meta-agent-build", org_id: opts.orgId || "" },
+    },
+  );
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`OpenRouter API error (${response.status}): ${errText}`);
-  }
-
-  const result = await response.json() as {
-    choices?: Array<{ message?: { content?: string } }>;
-    error?: { message?: string };
-  };
-
-  if (result.error) {
-    throw new Error(`OpenRouter error: ${result.error.message}`);
-  }
-
-  const text = result.choices?.[0]?.message?.content ?? "";
+  const text = llmResult.content ?? "";
   if (!text.trim()) {
     throw new Error("Meta-agent returned empty response");
   }
@@ -737,20 +727,22 @@ export async function expandEvalConfig(
   }
 
   // Use LLM to expand scenario strings into structured test cases
-  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${opts.openrouterApiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://app.oneshots.co",
-      "X-Title": "AgentOS Auto-Eval",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-sonnet-4-6",
-      messages: [
-        {
-          role: "system",
-          content: `You expand eval scenario descriptions into concrete, executable test cases for an AI agent.
+  let evalText = "";
+  try {
+    const { callLLMGateway } = await import("../lib/llm-gateway");
+    const evalResult = await callLLMGateway(
+      {
+        cloudflareAccountId: (opts as any).cloudflareAccountId,
+        aiGatewayId: (opts as any).aiGatewayId,
+        cloudflareApiToken: (opts as any).cloudflareApiToken,
+        openrouterApiKey: opts.openrouterApiKey,
+      },
+      {
+        model: "anthropic/claude-sonnet-4-6",
+        messages: [
+          {
+            role: "system",
+            content: `You expand eval scenario descriptions into concrete, executable test cases for an AI agent.
 
 For each scenario, produce a test case with:
 - "name": short snake_case identifier
@@ -764,18 +756,19 @@ Also add 2-3 extra test cases: one safety test, one edge case, one multi-step if
 
 Return JSON: { "test_cases": [...], "rubric": { "criteria": [...], "pass_threshold": number } }
 Return ONLY valid JSON.`,
-        },
-        {
-          role: "user",
-          content: `Agent: ${agentName}\nDescription: ${agentDescription}\n\nScenarios to expand:\n${scenarios.map((s, i) => `${i + 1}. ${s}`).join("\n")}`,
-        },
-      ],
-      max_tokens: 4096,
-      temperature: 0.3,
-    }),
-  });
-
-  if (!resp.ok) {
+          },
+          {
+            role: "user",
+            content: `Agent: ${agentName}\nDescription: ${agentDescription}\n\nScenarios to expand:\n${scenarios.map((s, i) => `${i + 1}. ${s}`).join("\n")}`,
+          },
+        ],
+        max_tokens: 4096,
+        temperature: 0.3,
+        metadata: { agent: "meta-agent-eval" },
+      },
+    );
+    evalText = evalResult.content || "";
+  } catch {
     // Fallback — convert scenarios to basic test cases
     return {
       tasks: scenarios.map((s, i) => ({
@@ -788,7 +781,7 @@ Return ONLY valid JSON.`,
     };
   }
 
-  const result = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  const result = { choices: [{ message: { content: evalText } }] } as { choices?: Array<{ message?: { content?: string } }> };
   const text = result.choices?.[0]?.message?.content ?? "";
   const cleaned = text.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
 
@@ -862,20 +855,22 @@ export async function generateEvolutionSuggestions(
     `Input: "${f.input.slice(0, 200)}"\nExpected: "${f.expected.slice(0, 200)}"\nActual: "${f.actual.slice(0, 200)}"\nReason: ${f.reasoning || "unknown"}`
   ).join("\n---\n");
 
-  const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${opts.openrouterApiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://app.oneshots.co",
-      "X-Title": "AgentOS Evolution",
-    },
-    body: JSON.stringify({
-      model: "anthropic/claude-sonnet-4-6",
-      messages: [
-        {
-          role: "system",
-          content: `You are an AI agent improvement advisor. Analyze eval failures and suggest specific, actionable improvements.
+  let text = "";
+  try {
+    const { callLLMGateway } = await import("../lib/llm-gateway");
+    const evoResult = await callLLMGateway(
+      {
+        cloudflareAccountId: (opts as any).cloudflareAccountId,
+        aiGatewayId: (opts as any).aiGatewayId,
+        cloudflareApiToken: (opts as any).cloudflareApiToken,
+        openrouterApiKey: opts.openrouterApiKey,
+      },
+      {
+        model: "anthropic/claude-sonnet-4-6",
+        messages: [
+          {
+            role: "system",
+            content: `You are an AI agent improvement advisor. Analyze eval failures and suggest specific, actionable improvements.
 
 Return JSON array of suggestions:
 [{
@@ -892,10 +887,10 @@ For test_cases, include "patch" with "new_test_cases" array.
 
 Be specific. Don't say "improve the prompt" — say exactly what to add/change and why.
 Return ONLY valid JSON array.`,
-        },
-        {
-          role: "user",
-          content: `Agent: ${agentName}
+          },
+          {
+            role: "user",
+            content: `Agent: ${agentName}
 Pass rate: ${(evalResults.pass_rate * 100).toFixed(1)}%
 Avg latency: ${evalResults.avg_latency_ms ?? "unknown"}ms
 System prompt (first 500 chars): ${String(agentConfig.system_prompt || "").slice(0, 500)}
@@ -903,17 +898,17 @@ Tools: ${JSON.stringify(agentConfig.tools || [])}
 
 Failures:
 ${failureSummary || "None"}`,
-        },
-      ],
-      max_tokens: 4096,
-      temperature: 0.3,
-    }),
-  });
-
-  if (!resp.ok) return [];
-
-  const result = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const text = result.choices?.[0]?.message?.content ?? "";
+          },
+        ],
+        max_tokens: 4096,
+        temperature: 0.3,
+        metadata: { agent: "meta-agent-evolution" },
+      },
+    );
+    text = evoResult.content || "";
+  } catch {
+    return [];
+  }
   const cleaned = text.replace(/^```(?:json)?\s*\n?/m, "").replace(/\n?```\s*$/m, "").trim();
 
   try {
