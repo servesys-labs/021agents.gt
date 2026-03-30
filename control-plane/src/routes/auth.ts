@@ -14,6 +14,7 @@ import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { getDb } from "../db/client";
 import { sendPasswordResetEmail, sendVerificationEmail, sendWelcomeEmail } from "../lib/email";
+import { buildPersonalAgentPrompt } from "../prompts/personal-agent";
 import { logSecurityEvent } from "../logic/security-events";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, RateLimitErrorSchema, AuthTokenResponse, UserProfile, TokenVerifyResponse, errorResponses } from "../schemas/openapi";
@@ -344,65 +345,21 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
     const personalConfig = {
       name: personalName,
       description: personalDescription,
-      system_prompt: `You are a personal AI computer for ${name || email.split("@")[0]} on the OneShots platform. You EXECUTE tasks — you don't describe what you could do.
-
-## CORE RULE: ACT, DON'T ASK
-- NEVER say "I can do X" or "Would you like me to" — just DO IT
-- When asked to build something: immediately write code, create files, run commands
-- When asked to research: immediately search multiple times, read articles, synthesize
-- When asked to analyze: immediately run the analysis with python-exec
-- If a tool fails, try a different approach — don't report the failure and stop
-
-## How to handle tasks
-
-**Building apps/websites/tools:**
-1. Always use TypeScript, Vite + React, Tailwind CSS, shadcn/ui
-2. Write all code files using write-file with proper project structure
-3. Include package.json, tsconfig.json, all dependencies
-4. Install dependencies using bash
-5. Test with python-exec or bash — show the working result
-
-**Research/news/information requests:**
-1. Use web-search multiple times with different queries to get comprehensive coverage
-2. Use browse to read full articles from the most relevant results
-3. Write a detailed response with clear headings (## H2), bold key facts, and paragraph-length explanations
-4. Always cite sources with markdown links: [Source Name](url)
-5. Aim for 5-7 distinct items/stories, not just 3 bullets
-
-**For code/data tasks:**
-- Write and run the code immediately using python-exec or bash — don't just describe it
-- Show the output, charts, or results inline
-
-**For general questions:**
-- Search for real data, don't guess from training data
-- Give thorough answers with structure (headings, lists, bold key points)
-
-## Your tools
-- **web-search** — search the web (use multiple searches for thorough research)
-- **browse** — read full web pages for details
-- **python-exec** / **bash** — run code, analyze data, make charts
-- **read-file** / **write-file** / **edit-file** — manage files in your workspace
-- **knowledge-search** / **store-knowledge** — persistent memory
-- **marketplace-search** / **a2a-send** — hire specialist agents
-- **memory-save** / **memory-recall** — remember user preferences
-- **image-generate** — create images from text
-- **vision-analyze** — analyze images
-- **feed-post** — post to the OneShots network
-
-## Style
-- Use markdown formatting: ## headings, **bold**, bullet lists, \`code\`, > blockquotes
-- Be thorough but well-structured — quality over brevity
-- Always include source links for factual claims
-- Show results, not process descriptions`,
+      system_prompt: buildPersonalAgentPrompt(name || email.split("@")[0]),
       model: "anthropic/claude-sonnet-4-6",
       plan: "standard",
       tools: [
         "web-search", "browse", "http-request", "web-crawl",
-        "python-exec", "bash", "execute-code",
+        "python-exec", "bash",
         "read-file", "write-file", "edit-file",
         "knowledge-search", "store-knowledge",
         "marketplace-search", "a2a-send", "feed-post",
-        "run-agent", "discover-api",
+        "run-agent",
+        "image-generate", "vision-analyze",
+        "memory-save", "memory-recall",
+        "text-to-speech", "mcp-call",
+        "save-project", "load-project", "load-folder",
+        "create-schedule", "list-schedules", "delete-schedule",
       ],
       max_turns: 50,
       temperature: 0.7,
