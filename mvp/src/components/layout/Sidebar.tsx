@@ -1,5 +1,5 @@
 import { NavLink, Link, useNavigate, useLocation } from "react-router-dom";
-import { Home, Bot, Settings, LogOut, Menu, X, Plus, Loader2, User } from "lucide-react";
+import { Home, Bot, Settings, LogOut, Menu, X, Plus, Loader2, User, Store } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../../lib/auth";
 import { PRODUCT } from "../../lib/product";
@@ -121,6 +121,14 @@ export function Sidebar() {
         </div>
 
         <div className="pt-3 mt-3 border-t border-border">
+          <NavLink
+            to="/marketplace"
+            onClick={() => setMobileOpen(false)}
+            className={({ isActive }) => topNavClass(isActive)}
+          >
+            <Store size={18} />
+            Marketplace
+          </NavLink>
           <NavLink
             to="/settings"
             onClick={() => setMobileOpen(false)}

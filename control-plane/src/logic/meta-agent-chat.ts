@@ -310,6 +310,44 @@ const META_TOOLS: ToolDef[] = [
       },
     },
   },
+
+  // ── Marketplace Tools ──────────────────────────────────────
+  {
+    type: "function",
+    function: {
+      name: "marketplace_publish",
+      description:
+        "Publish this agent to the marketplace so other agents and users can discover and use it. Requires a display name, short description, category, and price per task.",
+      parameters: {
+        type: "object",
+        properties: {
+          display_name: { type: "string", description: "Human-readable name shown in marketplace" },
+          short_description: { type: "string", description: "One-line description of what the agent does (max 200 chars)" },
+          category: {
+            type: "string",
+            enum: ["shopping", "research", "legal", "finance", "travel", "coding", "creative", "support", "data", "health", "education", "marketing", "hr", "operations", "other"],
+            description: "Marketplace category",
+          },
+          tags: { type: "array", items: { type: "string" }, description: "Searchable tags (e.g. ['summarizer', 'pdf'])" },
+          price_per_task_usd: { type: "number", description: "Price in USD per task (0 = free). Recommended: 0.01-1.00" },
+        },
+        required: ["display_name", "short_description", "category", "price_per_task_usd"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "marketplace_stats",
+      description:
+        "Get this agent's marketplace listing stats: total tasks completed, average rating, quality score, earnings, and whether it's currently published.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
 ];
 
 /* ── Tool execution ─────────────────────────────────────────────── */
@@ -1002,6 +1040,104 @@ async function executeTool(
       }
     }
 
+    // ── Marketplace Tool Execution ───────────────────────────────
+    case "marketplace_publish": {
+      const displayName = String(args.display_name || ctx.agentName);
+      const shortDesc = String(args.short_description || "").slice(0, 200);
+      const category = String(args.category || "other");
+      const tags = Array.isArray(args.tags) ? args.tags.map(String) : [];
+      const pricePerTask = Number(args.price_per_task_usd ?? 0);
+
+      try {
+        const listingId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        const baseUrl = "https://api.oneshots.co";
+        await sql`
+          INSERT INTO marketplace_listings (
+            id, agent_name, org_id, display_name, short_description, category, tags,
+            price_per_task_usd, quality_score, total_tasks_completed, avg_rating, total_ratings,
+            is_verified, is_featured, is_published, a2a_endpoint_url, agent_card_url, created_at, updated_at
+          ) VALUES (
+            ${listingId}, ${ctx.agentName}, ${ctx.orgId}, ${displayName}, ${shortDesc}, ${category}, ${tags},
+            ${pricePerTask}, 0.5, 0, 0, 0,
+            false, false, true, ${baseUrl + "/a2a"}, ${baseUrl + "/.well-known/agent.json"}, now(), now()
+          )
+          ON CONFLICT (agent_name, org_id) DO UPDATE SET
+            display_name = ${displayName}, short_description = ${shortDesc}, category = ${category},
+            tags = ${tags}, price_per_task_usd = ${pricePerTask}, is_published = true, updated_at = now()
+        `;
+
+        // Also set pricing in agent config so x-402 works
+        if (pricePerTask > 0) {
+          await sql`
+            UPDATE agents SET config_json = jsonb_set(
+              COALESCE(config_json::jsonb, '{}'::jsonb),
+              '{pricing}',
+              ${JSON.stringify({ price_per_task_usd: pricePerTask, requires_payment: true })}::jsonb
+            ), updated_at = now()
+            WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+          `.catch(() => {});
+        }
+
+        return JSON.stringify({
+          published: true,
+          listing_id: listingId,
+          display_name: displayName,
+          category,
+          price_per_task_usd: pricePerTask,
+          message: "Agent is now live on the marketplace. Other agents can discover it via search.",
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Publish failed: ${err.message || err}` });
+      }
+    }
+
+    case "marketplace_stats": {
+      try {
+        const rows = await sql`
+          SELECT id, display_name, category, price_per_task_usd, quality_score,
+                 total_tasks_completed, total_tasks_failed, avg_rating, total_ratings,
+                 is_verified, is_featured, is_published, created_at
+          FROM marketplace_listings
+          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+          LIMIT 1
+        `;
+        if (rows.length === 0) {
+          return JSON.stringify({ published: false, message: "This agent is not published on the marketplace. Use marketplace_publish to list it." });
+        }
+        const listing = rows[0] as any;
+
+        // Get earnings from credit_transactions
+        let totalEarnings = 0;
+        try {
+          const [earn] = await sql`
+            SELECT COALESCE(SUM(amount_usd), 0) as total
+            FROM credit_transactions
+            WHERE org_id = ${ctx.orgId} AND type = 'transfer_in' AND reference_type = 'a2a_payment'
+          `;
+          totalEarnings = Number(earn?.total || 0);
+        } catch {}
+
+        return JSON.stringify({
+          published: listing.is_published,
+          listing_id: listing.id,
+          display_name: listing.display_name,
+          category: listing.category,
+          price_per_task_usd: Number(listing.price_per_task_usd),
+          quality_score: Number(listing.quality_score),
+          total_tasks_completed: Number(listing.total_tasks_completed),
+          total_tasks_failed: Number(listing.total_tasks_failed || 0),
+          avg_rating: Number(listing.avg_rating),
+          total_ratings: Number(listing.total_ratings),
+          is_verified: listing.is_verified,
+          is_featured: listing.is_featured,
+          total_earnings_usd: Math.round(totalEarnings * 10000) / 10000,
+          created_at: listing.created_at,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Stats failed: ${err.message || err}` });
+      }
+    }
+
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
@@ -1027,6 +1163,8 @@ You have tools to:
 - **Activate trained configs** to apply optimized configurations with safety gates
 - **Rollback training** to revert to the previous config if training made things worse
 - **Check circuit breaker** to see if the auto-rollback safety net is active
+- **Publish to the marketplace** so other agents and users can discover and pay to use this agent
+- **Check marketplace stats** to see ratings, task counts, quality score, and earnings
 
 ## Reasoning Strategies
 
@@ -1088,6 +1226,36 @@ When the agent receives calls via phone (Twilio ConversationRelay):
 - "Apply the trained config" → read_training_status to get the best resource_id, then activate_trained_config
 - "Training made it worse" → rollback_training to revert immediately, then read_training_circuit_breaker to verify
 - "Is it safe after training?" → read_training_circuit_breaker to check error rate in the monitoring window
+- "Publish my agent" → marketplace_publish with display name, description, category, and price
+- "How is my agent doing on the marketplace?" → marketplace_stats to see ratings, tasks, and earnings
+- "Make my agent free/paid" → marketplace_publish with price_per_task_usd = 0 (free) or > 0 (paid)
+
+## Marketplace
+
+The agent marketplace lets agents earn money by serving other agents via A2A (Agent-to-Agent) protocol:
+
+### How to Publish
+Use the \`marketplace_publish\` tool with a display name, short description, category, and price per task. The agent becomes discoverable by other agents and users. Setting price to 0 makes it free.
+
+### How Pricing Works
+- When another agent calls this agent via A2A, the x-402 payment protocol automatically charges the caller
+- The platform takes a 10% fee on each transaction
+- The remaining 90% is credited to this agent's org balance
+- Pricing is set per-task (each A2A call = one task)
+- Recommended pricing: $0.01-$0.10 for simple tasks, $0.10-$1.00 for complex ones
+
+### How Referral Earnings Work
+- When someone signs up using a referral code linked to this org, the org earns a percentage of the platform fee on their transactions
+- This is automatic — no action needed from the agent owner
+- Referral earnings are separate from task revenue
+
+### Quality Score
+The marketplace ranks agents by a quality score (0-1) based on:
+- Task completion rate (40%) — how often tasks succeed vs fail
+- Average rating (30%) — 1-5 star ratings from callers
+- Response time (20%) — faster = higher score
+- Verification status (10%) — verified agents get a boost
+Higher quality score = more visibility in search results.
 
 ## How Training Works
 
