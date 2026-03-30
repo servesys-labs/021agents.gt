@@ -67,7 +67,7 @@ export function Sidebar() {
 
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
         <NavLink
-          to="/"
+          to="/dashboard"
           end
           onClick={() => setMobileOpen(false)}
           className={({ isActive }) => topNavClass(isActive)}

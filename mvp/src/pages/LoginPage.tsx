@@ -32,9 +32,9 @@ export default function LoginPage() {
         // Check if user needs onboarding
         try {
           const me = await api.get<{ onboarding_complete?: boolean }>("/auth/me");
-          navigate(me.onboarding_complete === false ? "/onboarding" : "/");
+          navigate(me.onboarding_complete === false ? "/onboarding" : "/dashboard");
         } catch {
-          navigate("/");
+          navigate("/dashboard");
         }
       } else {
         await signup(email, password, name, inviteCode || undefined);

@@ -1,6 +1,7 @@
 import { Routes, Route, Navigate } from "react-router-dom";
-import { RequireAuth } from "./lib/auth";
+import { RequireAuth, useAuth } from "./lib/auth";
 import { AppShell } from "./components/layout/AppShell";
+import LandingPage from "./pages/LandingPage";
 import LoginPage from "./pages/LoginPage";
 import OnboardingPage from "./pages/OnboardingPage";
 import DashboardPage from "./pages/DashboardPage";
@@ -19,10 +20,19 @@ import SettingsPage from "./pages/SettingsPage";
 import MarketplacePage from "./pages/MarketplacePage";
 import FeedPage from "./pages/FeedPage";
 
+/** Redirect to dashboard if logged in, otherwise show landing */
+function LandingOrDashboard() {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="flex items-center justify-center h-screen"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>;
+  if (user) return <Navigate to="/dashboard" replace />;
+  return <LandingPage />;
+}
+
 export default function App() {
   return (
     <Routes>
       {/* Public */}
+      <Route path="/" element={<LandingOrDashboard />} />
       <Route path="/login" element={<LoginPage />} />
 
       {/* Auth required, no sidebar */}
@@ -43,7 +53,7 @@ export default function App() {
           </RequireAuth>
         }
       >
-        <Route index element={<DashboardPage />} />
+        <Route path="dashboard" element={<DashboardPage />} />
         <Route path="agents/new" element={<AgentBuilderPage />} />
         <Route path="agents/:id/play" element={<AgentPlaygroundPage />} />
         <Route path="agents/:id/settings" element={<AgentSettingsPage />} />
@@ -61,7 +71,7 @@ export default function App() {
       </Route>
 
       {/* Catch-all */}
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   );
 }
