@@ -42,6 +42,8 @@ export interface AgentRunParams {
   /** If set, this is a delegated sub-agent run */
   parent_session_id?: string;
   parent_depth?: number;
+  /** Override the system prompt for this run (used by training eval) */
+  system_prompt_override?: string;
 }
 
 export interface RunOutput {
@@ -130,8 +132,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // ═══════════════════════════════════════════════════════════
 
     let messages: Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [];
-    if (config.system_prompt) {
-      messages.push({ role: "system", content: config.system_prompt });
+    // Use system_prompt_override if provided (training eval), otherwise use agent config
+    const effectiveSystemPrompt = p.system_prompt_override || config.system_prompt;
+    if (effectiveSystemPrompt) {
+      messages.push({ role: "system", content: effectiveSystemPrompt });
     }
     if (bootstrap.reasoning_prompt) {
       messages.push({ role: "system", content: bootstrap.reasoning_prompt });

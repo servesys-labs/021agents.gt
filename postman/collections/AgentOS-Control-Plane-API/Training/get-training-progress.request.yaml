@@ -1,0 +1,9 @@
+$kind: http-request
+name: Get Training Progress (Real-time)
+method: GET
+url: '{{base_url}}/api/v1/training/jobs/{{training_job_id}}/progress'
+order: 1750
+description: |-
+  Returns real-time Workflow progress events from KV for the current training iteration.
+  Events include: turn_start, thinking, tool_calls, tool_result, turn_end, done, error.
+  Requires AGENT_PROGRESS_KV binding configured on the control-plane worker.

@@ -825,26 +825,21 @@ async function executeTool(
         const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         const now = new Date().toISOString();
         await sql`
-          INSERT INTO training_jobs (id, agent_name, org_id, algorithm, max_iterations, auto_activate, status, current_iteration, best_score, created_at, updated_at)
-          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'running', 0, 0, ${now}, ${now})
+          INSERT INTO training_jobs (job_id, agent_name, org_id, algorithm, max_iterations, auto_activate, status, current_iteration, best_score, created_at)
+          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'created', 0, NULL, ${now})
         `;
 
-        // Enqueue the first training step so the queue consumer auto-chains iterations
-        try {
-          await sql`
-            INSERT INTO queue_jobs (id, job_type, payload, status, created_at)
-            VALUES (${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}, 'training_step', ${JSON.stringify({ job_id: jobId })}, 'pending', ${now})
-          `;
-        } catch {} // queue table may not exist yet — job still created
+        // NOTE: To start the first training step, the caller should use
+        // POST /training/jobs/{id}/auto-step or the JOB_QUEUE binding.
+        // The meta-agent cannot directly access the Queue binding from logic code.
 
         return JSON.stringify({
           job_id: jobId,
-          status: "running",
+          status: "created",
           algorithm,
           max_iterations: maxIterations,
           auto_activate: autoActivate,
-          auto_started: true,
-          message: "Training started. Iterations will run automatically. Use read_training_status to monitor progress.",
+          message: "Training job created. Call POST /training/jobs/{id}/auto-step to begin iterations, then use read_training_status to monitor progress.",
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Training not available: ${err.message || err}` });
@@ -857,7 +852,7 @@ async function executeTool(
         if (args.job_id) {
           jobRows = await sql`
             SELECT * FROM training_jobs
-            WHERE id = ${String(args.job_id)} AND org_id = ${ctx.orgId} LIMIT 1
+            WHERE job_id = ${String(args.job_id)} AND org_id = ${ctx.orgId} LIMIT 1
           `;
         } else {
           jobRows = await sql`
@@ -871,7 +866,7 @@ async function executeTool(
         }
         const job = jobRows[0] as any;
         const result: any = {
-          job_id: job.id,
+          job_id: job.job_id,
           status: job.status,
           algorithm: job.algorithm,
           current_iteration: job.current_iteration,
@@ -879,22 +874,23 @@ async function executeTool(
           best_score: job.best_score,
           auto_activate: job.auto_activate,
           created_at: job.created_at,
-          updated_at: job.updated_at,
+          completed_at: job.completed_at,
         };
 
         if (args.include_iterations) {
           const iterations = await sql`
-            SELECT iteration_number, eval_pass_rate, reward_score, changes_json, created_at
+            SELECT iteration_number, pass_rate, reward_score, algorithm_output_json, started_at, completed_at
             FROM training_iterations
-            WHERE job_id = ${job.id}
+            WHERE job_id = ${job.job_id}
             ORDER BY iteration_number
           `;
           result.iterations = iterations.map((it: any) => ({
             iteration: it.iteration_number,
-            eval_pass_rate: it.eval_pass_rate,
+            pass_rate: it.pass_rate,
             reward_score: it.reward_score,
-            changes: (() => { try { return JSON.parse(it.changes_json || "{}"); } catch { return {}; } })(),
-            created_at: it.created_at,
+            algorithm_output: (() => { try { return JSON.parse(it.algorithm_output_json || "{}"); } catch { return {}; } })(),
+            started_at: it.started_at,
+            completed_at: it.completed_at,
           }));
         }
         return JSON.stringify(result);
@@ -910,11 +906,13 @@ async function executeTool(
         // Read the trained resource
         const resRows = await sql`
           SELECT * FROM training_resources
-          WHERE id = ${resourceId} AND agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
+          WHERE resource_id = ${resourceId} AND agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
         `;
         if (resRows.length === 0) return JSON.stringify({ error: "Training resource not found" });
         const resource = resRows[0] as any;
-        const trainedConfig = typeof resource.config_json === "string" ? JSON.parse(resource.config_json) : resource.config_json;
+        // content_text holds prompt content; content_json holds structured configs
+        const rawContent = resource.content_text || resource.content_json;
+        const trainedConfig = typeof rawContent === "string" ? (() => { try { return JSON.parse(rawContent); } catch { return { system_prompt: rawContent }; } })() : (rawContent || {});
 
         // Read current config for rollback storage
         const currentRows = await sql`
@@ -939,14 +937,14 @@ async function executeTool(
 
         // Mark resource as active
         await sql`
-          UPDATE training_resources SET is_active = 1, activated_at = now()
-          WHERE id = ${resourceId}
+          UPDATE training_resources SET is_active = true
+          WHERE resource_id = ${resourceId}
         `;
 
         // Store rollback point
         await sql`
-          INSERT INTO training_resources (id, agent_name, org_id, resource_type, config_json, source_job_id, is_active, created_at)
-          VALUES (${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}, ${ctx.agentName}, ${ctx.orgId}, 'rollback_snapshot', ${JSON.stringify(currentConfig)}, ${resource.source_job_id || ''}, 0, now())
+          INSERT INTO training_resources (resource_id, agent_name, org_id, resource_type, resource_key, version, content_text, job_id, source, is_active, created_at)
+          VALUES (${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}, ${ctx.agentName}, ${ctx.orgId}, 'rollback_snapshot', 'main', 0, ${JSON.stringify(currentConfig)}, ${resource.job_id || ''}, 'rollback', false, now())
         `.catch(() => {});
 
         return JSON.stringify({
@@ -963,17 +961,38 @@ async function executeTool(
 
     case "rollback_training": {
       try {
-        const rollbackRows = await sql`
-          SELECT config_json FROM training_resources
-          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND resource_type = 'rollback_snapshot'
+        // Find the currently active resource, then find the previous version
+        const activeRows = await sql`
+          SELECT resource_id, agent_name, org_id, resource_type, resource_key, version
+          FROM training_resources
+          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND is_active = true
           ORDER BY created_at DESC LIMIT 1
         `;
+        let rollbackRows: any[];
+        if (activeRows.length > 0) {
+          const active = activeRows[0] as any;
+          rollbackRows = await sql`
+            SELECT content_text, content_json, version FROM training_resources
+            WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+              AND resource_type = ${active.resource_type} AND resource_key = ${active.resource_key}
+              AND version < ${active.version}
+            ORDER BY version DESC LIMIT 1
+          `;
+        } else {
+          // Fallback: look for rollback_snapshot resources
+          rollbackRows = await sql`
+            SELECT content_text, content_json FROM training_resources
+            WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND resource_type = 'rollback_snapshot'
+            ORDER BY created_at DESC LIMIT 1
+          `;
+        }
         if (rollbackRows.length === 0) {
           return JSON.stringify({ error: "No rollback snapshot found. No training activation has been done for this agent." });
         }
-        const previousConfig = typeof rollbackRows[0].config_json === "string"
-          ? JSON.parse(rollbackRows[0].config_json as string)
-          : rollbackRows[0].config_json;
+        const rawContent = rollbackRows[0].content_text || rollbackRows[0].content_json;
+        const previousConfig = typeof rawContent === "string"
+          ? (() => { try { return JSON.parse(rawContent); } catch { return { system_prompt: rawContent }; } })()
+          : (rawContent || {});
 
         await sql`
           UPDATE agents SET config_json = ${JSON.stringify(previousConfig)}, updated_at = now()
@@ -994,16 +1013,16 @@ async function executeTool(
       try {
         // Check for recent activations and error rates
         const recentActivation = await sql`
-          SELECT activated_at FROM training_resources
-          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND is_active = 1
-          ORDER BY activated_at DESC LIMIT 1
+          SELECT created_at FROM training_resources
+          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND is_active = true
+          ORDER BY created_at DESC LIMIT 1
         `;
 
         if (recentActivation.length === 0) {
           return JSON.stringify({ armed: false, message: "No active training resource. Circuit breaker not armed." });
         }
 
-        const activatedAt = recentActivation[0].activated_at;
+        const activatedAt = recentActivation[0].created_at;
         const msSinceActivation = Date.now() - new Date(String(activatedAt)).getTime();
         const inWindow = msSinceActivation < 15 * 60 * 1000; // 15 min window
 
