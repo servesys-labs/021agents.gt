@@ -126,7 +126,7 @@ const getPackagesRoute = createRoute({
 creditRoutes.openapi(getPackagesRoute, async (c): Promise<any> => {
   const sql = await getDb(c.env.HYPERDRIVE);
   const packages = await sql`
-    SELECT id, name, credits_cents, price_cents, bonus_pct, sort_order
+    SELECT id, name, credits_usd, price_usd, bonus_pct, sort_order
     FROM credit_packages
     WHERE is_active = true
     ORDER BY sort_order ASC
@@ -134,8 +134,8 @@ creditRoutes.openapi(getPackagesRoute, async (c): Promise<any> => {
   return c.json({
     packages: packages.map((p: any) => ({
       ...p,
-      credits_usd: (Number(p.credits_cents) / 100).toFixed(2),
-      price_usd: (Number(p.price_cents) / 100).toFixed(2),
+      credits_usd: Number(p.credits_usd).toFixed(2),
+      price_usd: Number(p.price_usd).toFixed(2),
     })),
   });
 });
@@ -220,9 +220,9 @@ creditRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
         currency: "usd",
         product_data: {
           name: `${pkg.name} Credit Package`,
-          description: `${(Number(pkg.credits_cents) / 100).toFixed(2)} credits${Number(pkg.bonus_pct) > 0 ? ` (includes ${pkg.bonus_pct}% bonus)` : ""}`,
+          description: `$${Number(pkg.credits_usd).toFixed(2)} credits${Number(pkg.bonus_pct) > 0 ? ` (includes ${pkg.bonus_pct}% bonus)` : ""}`,
         },
-        unit_amount: Number(pkg.price_cents),
+        unit_amount: Math.round(Number(pkg.price_usd) * 100),
       },
       quantity: 1,
     });
@@ -238,7 +238,7 @@ creditRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
     metadata: {
       org_id: user.org_id,
       package_id: body.package_id,
-      credits_cents: String(pkg.credits_cents),
+      credits_usd: String(pkg.credits_usd),
       type: "credit_purchase",
     },
   });
