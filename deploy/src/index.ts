@@ -2379,11 +2379,17 @@ export default {
         const agentName = body.agent_name || "agentos";
         const task = runnableInputToTask(body.input, body.task);
         const userId = body.channel_user_id || "";
-        const doName = userId ? `${agentName}-u-${userId}` : agentName;
+        const orgId = body.org_id || "";
+        const orgPrefix = orgId ? `${orgId}-` : "";
+        const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
         const agentId = env.AGENTOS_AGENT.idFromName(doName);
         const agent = env.AGENTOS_AGENT.get(agentId);
 
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+          "x-partykit-namespace": "agentos",
+          "x-partykit-room": doName,
+        };
         if (env.SERVICE_TOKEN) headers.Authorization = `Bearer ${env.SERVICE_TOKEN}`;
 
         // Forward to DO /run/stream — returns SSE
