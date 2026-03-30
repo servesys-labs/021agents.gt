@@ -26,7 +26,7 @@ import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop, maybeSummarize } from "./middleware";
 import { serializeForWebSocket } from "./protocol";
 import { createBackpressureController } from "./backpressure";
-import { estimateTokenCost } from "./pricing";
+import { estimateTokenCost, estimateTokensFromText } from "./pricing";
 import { attachDelegationLineage, type DelegationContextInput } from "./delegation";
 import { attachToolPolicyEnvelope } from "./policy-envelope";
 import { selectReasoningStrategy, autoSelectStrategy } from "./reasoning-strategies";
@@ -254,14 +254,15 @@ async function streamLLM(
       arguments: tc.arguments || "{}",
     }));
 
-  // Fallback token estimation from content length when API doesn't report usage
-  // ~4 chars per token is a rough but usable approximation
+  // Fallback token estimation when API doesn't report usage.
+  // Uses word-based estimation (more accurate than chars/4 across languages):
+  // English: ~1.3 tokens/word. Code/JSON: ~2 tokens/word. CJK: ~1 token/char.
   if (inputTokens === 0 && messages.length > 0) {
-    const totalInputChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
-    inputTokens = Math.ceil(totalInputChars / 4);
+    const totalInputText = messages.map(m => m.content || "").join(" ");
+    inputTokens = estimateTokensFromText(totalInputText);
   }
   if (outputTokens === 0 && content.length > 0) {
-    outputTokens = Math.ceil(content.length / 4);
+    outputTokens = estimateTokensFromText(content);
   }
 
   const latencyMs = Date.now() - started;
@@ -521,6 +522,7 @@ export async function streamRun(
 
       // Route model
       const route = await selectModel(task, planRouting as PlanRouting | undefined, config.model, config.provider, env);
+      cumulativeCost += route.routing_cost_usd || 0;
 
       send(serializeForWebSocket({ type: "turn_start", turn, model: route.model }));
 

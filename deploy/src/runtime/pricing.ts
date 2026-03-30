@@ -40,6 +40,27 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
 const DEFAULT_PRICING = { input: 1.00, output: 3.00 };
 
 /**
+ * Estimate token count from text when the API doesn't report usage.
+ * More accurate than simple chars/4:
+ * - Splits on whitespace + punctuation boundaries
+ * - Code/JSON tokens tend to be shorter (more tokens per word)
+ * - Adds 10% safety margin to avoid undercharging
+ */
+export function estimateTokensFromText(text: string): number {
+  if (!text) return 0;
+  // Count words (split on whitespace)
+  const words = text.split(/\s+/).filter(Boolean).length;
+  // Count code-like characters (braces, brackets, operators) — these often tokenize individually
+  const codeChars = (text.match(/[{}[\]();:,<>=!&|+\-*/%]/g) || []).length;
+  // CJK characters typically tokenize to ~1 token each
+  const cjkChars = (text.match(/[\u3000-\u9fff\uac00-\ud7af]/g) || []).length;
+  // Base: ~1.3 tokens per English word + code chars + CJK chars
+  const estimate = Math.ceil(words * 1.3) + codeChars + cjkChars;
+  // Add 10% safety margin to avoid undercharging
+  return Math.ceil(estimate * 1.1);
+}
+
+/**
  * Estimate LLM token cost from model name and token counts.
  * Returns cost in USD with full precision.
  */
@@ -48,7 +69,12 @@ export function estimateTokenCost(model: string, inputTokens: number, outputToke
   if (!pricing) {
     // Prefix match for versioned model names
     const key = Object.keys(MODEL_PRICING).find((k) => model.startsWith(k) || k.startsWith(model));
-    pricing = key ? MODEL_PRICING[key] : DEFAULT_PRICING;
+    pricing = key ? MODEL_PRICING[key] : undefined;
+    if (!pricing) {
+      // Unknown model — use default but log for operator awareness
+      console.warn(`[pricing] Unknown model '${model}' — using default pricing ($${DEFAULT_PRICING.input}/$${DEFAULT_PRICING.output} per 1M tokens). Add to MODEL_PRICING to prevent over/undercharging.`);
+      pricing = DEFAULT_PRICING;
+    }
   }
   return (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
 }
