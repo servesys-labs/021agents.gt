@@ -581,7 +581,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         const scanResult = evaluateOutput(output, DEFAULT_GUARDRAIL_POLICY);
         // Write to guardrail_events so reward aggregator can read it
         await sql`
-          INSERT INTO guardrail_events (org_id, agent_name, event_type, action, text_preview, matches, created_at)
+          INSERT INTO guardrail_events (org_id, agent_name, event_type, action, text_preview, matches_json, created_at)
           VALUES (${user.org_id}, ${job.agent_name}, 'output', ${scanResult.action},
                   ${output.slice(0, 200)}, ${JSON.stringify(scanResult.reasons)}, now())
         `.catch(() => {}); // Non-critical — don't fail training if table doesn't exist
@@ -662,25 +662,29 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   let optimizationResult = await algorithm.optimize(ctx);
 
   // If APO needs LLM calls, execute them here (where we have env.AI)
-  if (optimizationResult.metadata.requires_llm_calls && c.env.AI) {
+  if (optimizationResult.metadata.requires_llm_calls) {
     try {
+      const { callLLMGateway, gatewayConfigFromEnv } = await import("../lib/llm-gateway");
+      const gwConfig = gatewayConfigFromEnv(c.env);
       const gradientPrompt = optimizationResult.metadata.gradient_prompt as string;
       const editTemplate = optimizationResult.metadata.edit_prompt_template as string;
 
-      // Step 5a: Generate gradient (critique)
-      const gradientResp = await c.env.AI.run(
-        "@cf/meta/llama-3.1-70b-instruct" as keyof AiModels,
-        { messages: [{ role: "user", content: gradientPrompt }], max_tokens: 500 } as any,
-      ) as { response?: string };
-      const gradient = gradientResp.response ?? "";
+      // Step 5a: Generate gradient (critique) via AI Gateway
+      const gradientResult = await callLLMGateway(gwConfig, {
+        model: "anthropic/claude-sonnet-4-6",
+        messages: [{ role: "user", content: gradientPrompt }],
+        metadata: { agent: "training-apo-gradient" },
+      });
+      const gradient = gradientResult.content ?? "";
 
       // Step 5b: Apply gradient to produce new prompt
       const editPrompt = editTemplate.replace("{{GRADIENT}}", gradient);
-      const editResp = await c.env.AI.run(
-        "@cf/meta/llama-3.1-70b-instruct" as keyof AiModels,
-        { messages: [{ role: "user", content: editPrompt }], max_tokens: 2000 } as any,
-      ) as { response?: string };
-      const newPrompt = editResp.response ?? "";
+      const editResult = await callLLMGateway(gwConfig, {
+        model: "anthropic/claude-sonnet-4-6",
+        messages: [{ role: "user", content: editPrompt }],
+        metadata: { agent: "training-apo-edit" },
+      });
+      const newPrompt = editResult.content ?? "";
 
       if (newPrompt.trim()) {
         optimizationResult = {
@@ -875,9 +879,9 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       if (agentRows.length > 0) {
         const versionTag = 'training-' + job_id;
         await sql`
-          INSERT INTO agent_versions (agent_name, version_number, config_json, created_by, created_at)
-          VALUES (${job.agent_name}, ${versionTag}, ${String(agentRows[0].config_json)}, ${user.user_id}, now())
-          ON CONFLICT (agent_name, version_number) DO UPDATE
+          INSERT INTO agent_versions (agent_name, org_id, version, config_json, created_by, created_at)
+          VALUES (${job.agent_name}, ${user.org_id}, ${versionTag}, ${String(agentRows[0].config_json)}, ${user.user_id}, now())
+          ON CONFLICT (agent_name, org_id, version) DO UPDATE
           SET config_json = ${String(agentRows[0].config_json)}, created_by = ${user.user_id}
         `;
       }
