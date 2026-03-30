@@ -19,30 +19,9 @@ export const componentRoutes = createOpenAPIRouter();
  * Notify the runtime worker that component caches should be invalidated.
  * Fire-and-forget: failures are logged but don't block the response.
  */
-async function notifyRuntimeOfCacheInvalidation(
-  env: Env,
-  type: "graph" | "subgraph" | "all",
-  id?: string,
-): Promise<void> {
-  try {
-    await env.RUNTIME.fetch("https://runtime/api/v1/internal/cache-invalidate", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
-      },
-      body: JSON.stringify({
-        type,
-        graph_id: type === "graph" ? id : undefined,
-        subgraph_id: type === "subgraph" ? id : undefined,
-        timestamp: Date.now()
-      }),
-    });
-  } catch (e) {
-    // Non-critical: cache will be stale until TTL expires
-    console.warn(`[components] Failed to notify runtime of cache invalidation:`, e);
-  }
-}
+// Graph cache invalidation removed — runtime no longer has graph execution.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function notifyRuntimeOfCacheInvalidation(_env: any, _type: string, _id?: string): Promise<void> {}
 
 // ── Schemas ──────────────────────────────────────────────────────────
 
