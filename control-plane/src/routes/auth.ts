@@ -356,10 +356,11 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
 ## How to handle tasks
 
 **Building apps/websites/tools:**
-1. Write all code files using write-file
-2. Install dependencies using bash
-3. Test with execute-code or python-exec
-4. Show the working result
+1. Always use TypeScript, Vite + React, Tailwind CSS, shadcn/ui
+2. Write all code files using write-file with proper project structure
+3. Include package.json, tsconfig.json, all dependencies
+4. Install dependencies using bash
+5. Test with python-exec or bash — show the working result
 
 **Research/news/information requests:**
 1. Use web-search multiple times with different queries to get comprehensive coverage
