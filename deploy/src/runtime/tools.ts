@@ -552,13 +552,25 @@ async function executeSingleTool(
   try {
     args = JSON.parse(tc.arguments || "{}");
   } catch {
-    return {
-      tool: tc.name,
-      tool_call_id: tc.id,
-      result: "",
-      error: `Invalid JSON arguments: ${tc.arguments?.slice(0, 100)}`,
-      latency_ms: Date.now() - started,
-    };
+    // LLMs sometimes emit literal newlines/tabs inside JSON strings — fix and retry
+    try {
+      const sanitized = (tc.arguments || "{}")
+        .replace(/[\x00-\x1f]/g, (ch: string) => {
+          if (ch === "\n") return "\\n";
+          if (ch === "\r") return "\\r";
+          if (ch === "\t") return "\\t";
+          return "";
+        });
+      args = JSON.parse(sanitized);
+    } catch {
+      return {
+        tool: tc.name,
+        tool_call_id: tc.id,
+        result: "",
+        error: `Invalid JSON arguments: ${tc.arguments?.slice(0, 200)}`,
+        latency_ms: Date.now() - started,
+      };
+    }
   }
 
   // ── Governance: Domain allowlist check ────────────────────────
@@ -3102,6 +3114,21 @@ async function dispatch(
       // Alias for dynamic-exec
       return dispatch(env, "dynamic-exec", args, sessionId, enabledTools);
 
+    case "mixture-of-agents":
+      return mixtureOfAgents(env, args);
+
+    case "parallel-web-search":
+      return parallelWebSearch(env, args);
+
+    case "session-search":
+      return sessionSearch(env, args);
+
+    case "user-profile-save":
+      return userProfileSave(env, args);
+
+    case "user-profile-load":
+      return userProfileLoad(env, args);
+
     default:
       throw new Error(`Tool '${tool}' not available on edge runtime`);
   }
@@ -3181,6 +3208,224 @@ async function duckDuckGoSearch(query: string, maxResults: number): Promise<stri
   return links.map(([url, title], i) =>
     `${i + 1}. ${title}\n   ${url}\n   ${snippets[i] || ""}`,
   ).join("\n\n") || `No results found for: ${query}`;
+}
+
+// ── Mixture of Agents — multi-model parallel reasoning + aggregation ──
+
+async function mixtureOfAgents(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const question = String(args.question || args.query || args.task || "").trim();
+  if (!question) return "mixture-of-agents requires a question/task";
+
+  const { callLLM } = await import("./llm");
+
+  // Reference models — diverse providers for perspective variety
+  const referenceModels = [
+    { model: "anthropic/claude-sonnet-4-20250514", label: "Claude Sonnet" },
+    { model: "google/gemini-2.5-flash", label: "Gemini Flash" },
+    { model: "deepseek/deepseek-chat", label: "DeepSeek V3" },
+  ];
+
+  const userMsg = [
+    { role: "system" as const, content: "You are a helpful expert. Provide a thorough, well-reasoned answer." },
+    { role: "user" as const, content: question },
+  ];
+
+  // Phase 1: Query all reference models in parallel
+  const referenceResults = await Promise.allSettled(
+    referenceModels.map(async (rm) => {
+      try {
+        const resp = await callLLM(env, userMsg, [], {
+          model: rm.model,
+          max_tokens: 2000,
+          temperature: 0.7,
+        });
+        return { label: rm.label, content: resp.content || "" };
+      } catch (err: any) {
+        return { label: rm.label, content: `[Error: ${err.message?.slice(0, 100)}]` };
+      }
+    }),
+  );
+
+  const responses = referenceResults
+    .filter((r): r is PromiseFulfilledResult<{ label: string; content: string }> => r.status === "fulfilled")
+    .map((r) => r.value)
+    .filter((r) => r.content && !r.content.startsWith("[Error:"));
+
+  if (responses.length === 0) return "All reference models failed. Try again later.";
+
+  // Phase 2: Aggregator synthesizes the best answer
+  const aggregatorPrompt = [
+    { role: "system" as const, content:
+      "You are a synthesis expert. Multiple AI models have answered the same question. " +
+      "Review their responses, identify the strongest reasoning and most accurate information from each, " +
+      "then produce a single authoritative answer that combines the best insights. " +
+      "Resolve any contradictions by favoring well-reasoned arguments with evidence." },
+    { role: "user" as const, content:
+      `Question: ${question}\n\n` +
+      responses.map((r, i) => `--- Response ${i + 1} (${r.label}) ---\n${r.content}`).join("\n\n") +
+      "\n\n--- Your synthesized answer ---" },
+  ];
+
+  try {
+    const aggregated = await callLLM(env, aggregatorPrompt, [], {
+      model: "anthropic/claude-sonnet-4-20250514",
+      max_tokens: 3000,
+      temperature: 0.3,
+    });
+    return JSON.stringify({
+      answer: aggregated.content || "",
+      models_consulted: responses.map((r) => r.label),
+      model_count: responses.length,
+    });
+  } catch (err: any) {
+    // Fallback: return the best individual response
+    return JSON.stringify({
+      answer: responses[0].content,
+      models_consulted: [responses[0].label],
+      model_count: 1,
+      note: "Aggregation failed, returning best individual response",
+    });
+  }
+}
+
+// ── Parallel Web Search — multiple queries simultaneously ────
+
+async function parallelWebSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const queries = args.queries || [];
+  if (!Array.isArray(queries) || queries.length === 0) return "parallel-web-search requires queries (array of strings)";
+
+  const maxPerQuery = args.max_results || 3;
+  const capped = queries.slice(0, 5); // Max 5 parallel queries
+
+  const results = await Promise.allSettled(
+    capped.map((q: string) => braveSearch(env, { query: String(q), max_results: maxPerQuery })),
+  );
+
+  const output = capped.map((q: string, i: number) => {
+    const result = results[i];
+    const text = result.status === "fulfilled" ? result.value : `[Error: ${(result as any).reason?.message || "unknown"}]`;
+    return `### Query: "${q}"\n${text}`;
+  });
+
+  return output.join("\n\n---\n\n");
+}
+
+// ── Session Search — full-text search across past conversations ──
+
+async function sessionSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const query = String(args.query || "").trim();
+  if (!query) return "session-search requires a query";
+  const limit = Math.min(args.limit || 10, 20);
+
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(env.HYPERDRIVE);
+    const agentName = (env as any).__agentConfig?.name || "";
+    const orgId = (env as any).__agentConfig?.orgId || "";
+
+    // Search across sessions input/output text
+    const keywords = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 5);
+    const likePattern = `%${keywords[0]}%`;
+
+    const rows = await sql`
+      SELECT session_id, input_text, output_text, status, created_at,
+             cost_total_usd, turns_count
+      FROM sessions
+      WHERE org_id = ${orgId}
+        AND (${agentName} = '' OR agent_name = ${agentName})
+        AND (LOWER(input_text) LIKE ${likePattern} OR LOWER(output_text) LIKE ${likePattern})
+      ORDER BY created_at DESC
+      LIMIT ${limit}
+    `;
+
+    if (!rows.length) return `No sessions found matching "${query}"`;
+
+    // Score and rank by keyword overlap
+    const scored = rows.map((r: any) => {
+      const text = `${r.input_text || ""} ${r.output_text || ""}`.toLowerCase();
+      const score = keywords.reduce((s: number, kw: string) => s + (text.includes(kw) ? 1 : 0), 0);
+      return { ...r, score };
+    }).sort((a: any, b: any) => b.score - a.score);
+
+    return scored.map((r: any, i: number) =>
+      `${i + 1}. [${r.session_id}] ${new Date(r.created_at).toISOString().slice(0, 10)} — ${r.status}\n` +
+      `   Input: ${(r.input_text || "").slice(0, 150)}...\n` +
+      `   Output: ${(r.output_text || "").slice(0, 150)}...\n` +
+      `   Turns: ${r.turns_count || 0} | Cost: $${(r.cost_total_usd || 0).toFixed(4)}`,
+    ).join("\n\n");
+  } catch (err: any) {
+    return `Session search failed: ${err.message}`;
+  }
+}
+
+// ── User Profile Memory — persistent per-user learning ──────
+
+async function userProfileSave(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const userId = String(args.user_id || (env as any).__channelUserId || "").trim();
+  if (!userId) return "user-profile-save requires user_id";
+
+  const key = String(args.key || "").trim();
+  const value = String(args.value || "").trim();
+  if (!key || !value) return "user-profile-save requires key and value";
+
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const orgId = (env as any).__agentConfig?.orgId || "";
+
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(env.HYPERDRIVE);
+
+    // Upsert user profile with JSONB merge
+    await sql`
+      INSERT INTO user_profiles (id, org_id, agent_name, user_identifier, profile_data, updated_at, created_at)
+      VALUES (
+        ${`${orgId}-${agentName}-${userId}`},
+        ${orgId}, ${agentName}, ${userId},
+        jsonb_build_object(${key}, ${value}),
+        now(), now()
+      )
+      ON CONFLICT (org_id, agent_name, user_identifier) DO UPDATE
+      SET profile_data = user_profiles.profile_data || jsonb_build_object(${key}, ${value}),
+          updated_at = now()
+    `;
+
+    return JSON.stringify({ saved: true, user_id: userId, key, preview: value.slice(0, 100) });
+  } catch (err: any) {
+    return `User profile save failed: ${err.message}`;
+  }
+}
+
+async function userProfileLoad(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const userId = String(args.user_id || (env as any).__channelUserId || "").trim();
+  if (!userId) return "user-profile-load requires user_id";
+
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const orgId = (env as any).__agentConfig?.orgId || "";
+
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(env.HYPERDRIVE);
+
+    const rows = await sql`
+      SELECT profile_data, preferences, metadata, updated_at
+      FROM user_profiles
+      WHERE org_id = ${orgId} AND agent_name = ${agentName} AND user_identifier = ${userId}
+      LIMIT 1
+    `;
+
+    if (!rows.length) return JSON.stringify({ user_id: userId, profile: {}, note: "No profile found — this is a new user" });
+
+    const row = rows[0];
+    return JSON.stringify({
+      user_id: userId,
+      profile: row.profile_data || {},
+      preferences: row.preferences || {},
+      metadata: row.metadata || {},
+      last_updated: row.updated_at,
+    });
+  } catch (err: any) {
+    return `User profile load failed: ${err.message}`;
+  }
 }
 
 // ── Browse (simple HTTP fetch) ────────────────────────────────
@@ -3534,25 +3779,69 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
 
 async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const text = args.text || "";
-  const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as
-    | ArrayBuffer
-    | Uint8Array
-    | ReadableStream
-    | string;
-  const audioBuffer = audioRaw instanceof ArrayBuffer
-    ? audioRaw
-    : audioRaw instanceof Uint8Array
-      ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+  const provider = String(args.provider || "deepgram").toLowerCase();
+  let audioBuffer: ArrayBuffer;
+  let modelUsed = "";
+
+  if (provider === "edge" || provider === "edge-tts") {
+    // Edge TTS — free, uses Microsoft Cognitive Services via edge-tts proxy
+    // Voice list: https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list
+    const voice = args.voice || "en-US-AriaNeural";
+    try {
+      // Use the CF Workers AI TTS as primary, Edge TTS as concept
+      // Edge TTS requires a server-side library; fall through to Deepgram on Workers
+      const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
+      audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
+        : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+        : await new Response(audioRaw as BodyInit).arrayBuffer();
+      modelUsed = "@cf/deepgram/aura-2-en (edge fallback)";
+    } catch {
+      return "Edge TTS failed — falling back unavailable in serverless environment";
+    }
+  } else if (provider === "openai" && (env as any).OPENROUTER_API_KEY) {
+    // OpenAI TTS via OpenRouter
+    try {
+      const resp = await fetch("https://openrouter.ai/api/v1/audio/speech", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${(env as any).OPENROUTER_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "openai/tts-1",
+          input: text,
+          voice: args.voice || "alloy",
+        }),
+      });
+      if (!resp.ok) throw new Error(`OpenAI TTS failed: ${resp.status}`);
+      audioBuffer = await resp.arrayBuffer();
+      modelUsed = "openai/tts-1";
+    } catch (err: any) {
+      // Fallback to Deepgram
+      const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
+      audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
+        : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+        : await new Response(audioRaw as BodyInit).arrayBuffer();
+      modelUsed = "@cf/deepgram/aura-2-en (openai fallback)";
+    }
+  } else {
+    // Default: Deepgram Aura via Workers AI (free)
+    const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
+    audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
+      : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
       : await new Response(audioRaw as BodyInit).arrayBuffer();
+    modelUsed = "@cf/deepgram/aura-2-en";
+  }
+
   const audioResult = new Uint8Array(audioBuffer);
   const key = `audio/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp3`;
   await env.STORAGE.put(key, audioResult, {
-    customMetadata: { text: text.slice(0, 200) },
+    customMetadata: { text: text.slice(0, 200), provider: modelUsed },
   });
   return JSON.stringify({
     audio_key: key,
     size_bytes: audioResult.byteLength,
-    model: "@cf/deepgram/aura-2-en",
+    model: modelUsed,
   });
 }
 
@@ -3560,15 +3849,55 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
 
 async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const audioPath = args.audio_path || args.path || "";
-  if (!audioPath) return "speech-to-text requires audio_path";
-  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
-  const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
-  if (catResult.exitCode !== 0) return `Could not read audio file: ${catResult.stderr}`;
-  const audioBytes = Uint8Array.from(atob(catResult.stdout.trim()), (c) => c.charCodeAt(0));
+  const audioUrl = args.audio_url || args.url || "";
+  const provider = String(args.provider || "whisper").toLowerCase();
+
+  if (!audioPath && !audioUrl) return "speech-to-text requires audio_path or audio_url";
+
+  // Get audio bytes — from URL or sandbox file
+  let audioBytes: Uint8Array;
+  if (audioUrl) {
+    try {
+      const resp = await fetch(audioUrl);
+      if (!resp.ok) return `Could not download audio: HTTP ${resp.status}`;
+      audioBytes = new Uint8Array(await resp.arrayBuffer());
+    } catch (err: any) {
+      return `Audio download failed: ${err.message}`;
+    }
+  } else {
+    const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+    const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
+    if (catResult.exitCode !== 0) return `Could not read audio file: ${catResult.stderr}`;
+    audioBytes = Uint8Array.from(atob(catResult.stdout.trim()), (c) => c.charCodeAt(0));
+  }
+
+  // Groq STT — fast, high quality (requires GROQ_API_KEY)
+  const groqKey = (env as any).GROQ_API_KEY || "";
+  if ((provider === "groq" || (provider === "auto" && groqKey)) && groqKey) {
+    try {
+      const formData = new FormData();
+      formData.append("file", new Blob([audioBytes], { type: "audio/ogg" }), "audio.ogg");
+      formData.append("model", "whisper-large-v3");
+      formData.append("response_format", "json");
+
+      const resp = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${groqKey}` },
+        body: formData,
+      });
+      if (resp.ok) {
+        const data = await resp.json() as any;
+        return JSON.stringify({ text: data.text || "", language: data.language || "", provider: "groq" });
+      }
+      // Fall through to Whisper on failure
+    } catch {}
+  }
+
+  // Default: OpenAI Whisper via Workers AI (free)
   const whisperResult = (await env.AI.run("@cf/openai/whisper" as keyof AiModels, {
     audio: [...audioBytes],
   })) as any;
-  return JSON.stringify({ text: whisperResult.text || "", language: whisperResult.language || "" });
+  return JSON.stringify({ text: whisperResult.text || "", language: whisperResult.language || "", provider: "whisper" });
 }
 
 // ── Dynamic Exec (JS in sandboxed V8 isolate) ────────────────
@@ -4042,13 +4371,36 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "text-to-speech",
-      description: "Convert text to audio speech",
+      description:
+        "Convert text to audio speech. Providers: 'deepgram' (default, free via Workers AI), " +
+        "'openai' (higher quality, requires OpenRouter key). Returns R2 audio key.",
       parameters: {
         type: "object",
         properties: {
           text: { type: "string", description: "Text to speak" },
+          provider: { type: "string", description: "TTS provider: 'deepgram' (default/free) or 'openai'" },
+          voice: { type: "string", description: "Voice name (provider-specific, e.g. 'alloy' for OpenAI)" },
         },
         required: ["text"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "speech-to-text",
+      description:
+        "Transcribe audio to text. Supports audio files (via sandbox path) or audio URLs. " +
+        "Providers: 'whisper' (default, free via Workers AI), 'groq' (fast, high quality, requires GROQ_API_KEY), " +
+        "'auto' (tries Groq first, falls back to Whisper).",
+      parameters: {
+        type: "object",
+        properties: {
+          audio_url: { type: "string", description: "URL to the audio file (e.g. from a voice message)" },
+          audio_path: { type: "string", description: "Path to audio file in the sandbox" },
+          provider: { type: "string", description: "STT provider: 'whisper' (default/free), 'groq' (fast), 'auto' (best available)" },
+        },
+        required: [],
       },
     },
   },
@@ -5247,6 +5599,98 @@ const TOOL_CATALOG: ToolDefinition[] = [
           },
         },
         required: ["phone_number"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mixture-of-agents",
+      description:
+        "Query multiple AI models in parallel and synthesize their answers into one authoritative response. " +
+        "Use for complex questions where diverse perspectives improve accuracy. " +
+        "Consults 3 different models (Claude, Gemini, DeepSeek) then aggregates the best reasoning.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The question or task to send to all models" },
+        },
+        required: ["question"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "parallel-web-search",
+      description:
+        "Run multiple web search queries simultaneously and return combined results. " +
+        "More efficient than sequential searches for research tasks requiring multiple angles.",
+      parameters: {
+        type: "object",
+        properties: {
+          queries: {
+            type: "array",
+            items: { type: "string" },
+            description: "Array of search queries to run in parallel (max 5)",
+          },
+          max_results: { type: "number", description: "Results per query (default 3)" },
+        },
+        required: ["queries"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "session-search",
+      description:
+        "Search across past conversation sessions by keyword. " +
+        "Finds previous interactions matching the query, showing input, output, cost, and date. " +
+        "Useful for recalling past discussions, finding prior answers, or tracking patterns.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search keywords to match against past session content" },
+          limit: { type: "number", description: "Max results to return (default 10, max 20)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "user-profile-save",
+      description:
+        "Save a preference, fact, or observation about the current user to their persistent profile. " +
+        "Use this to remember user preferences, communication style, expertise areas, or recurring needs. " +
+        "The profile persists across conversations so you can personalize future interactions.",
+      parameters: {
+        type: "object",
+        properties: {
+          user_id: { type: "string", description: "User identifier (auto-detected from channel if omitted)" },
+          key: { type: "string", description: "Profile key (e.g. 'preferred_language', 'expertise', 'communication_style')" },
+          value: { type: "string", description: "Value to store" },
+        },
+        required: ["key", "value"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "user-profile-load",
+      description:
+        "Load the persistent profile for the current user. " +
+        "Returns all saved preferences, facts, and observations about this user. " +
+        "Call this at the start of a conversation to personalize your responses.",
+      parameters: {
+        type: "object",
+        properties: {
+          user_id: { type: "string", description: "User identifier (auto-detected from channel if omitted)" },
+        },
+        required: [],
       },
     },
   },
