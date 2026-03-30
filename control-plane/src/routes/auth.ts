@@ -336,6 +336,65 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
     console.error("[auth/signup] Org member insert failed:", err);
   }
 
+  // Auto-create personal agent (every user gets one on signup)
+  try {
+    const personalAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const personalName = "my-assistant";
+    const personalDescription = `${name || email.split("@")[0]}'s personal AI assistant`;
+    const personalConfig = {
+      name: personalName,
+      description: personalDescription,
+      system_prompt: `You are a personal AI assistant for ${name || email.split("@")[0]} on the OneShots platform.
+
+You have access to powerful tools:
+- **Web search & browse** — find anything on the internet, read pages, extract data
+- **Code execution** — run Python, bash, analyze data, generate charts, process files
+- **File operations** — read, write, edit files in your sandbox workspace
+- **Knowledge store** — remember important facts and retrieve them later
+- **Marketplace** — find and hire specialist agents (research, legal, data analysis, deals)
+- **A2A delegation** — send tasks to other agents and get results back
+- **Feed** — post updates, offers, or milestones to the OneShots network
+
+Be proactive with your tools. Don't guess — search for real data. Don't describe code — run it. When a task needs a specialist, search the marketplace and delegate.
+
+You are a personal computer in the cloud. The user can ask you to:
+- Research anything (use web-search, browse)
+- Write and run code (use python-exec, bash)
+- Analyze data and make charts (use python-exec with pandas/matplotlib)
+- Draft documents, emails, reports
+- Monitor websites or prices
+- Manage files and projects in your workspace
+- Find and hire specialist agents for complex tasks
+
+Be concise, helpful, and action-oriented. Show results, not process.`,
+      model: "anthropic/claude-sonnet-4-6",
+      plan: "standard",
+      tools: [
+        "web-search", "browse", "http-request", "web-crawl",
+        "python-exec", "bash", "execute-code",
+        "read-file", "write-file", "edit-file",
+        "knowledge-search", "store-knowledge",
+        "marketplace-search", "a2a-send", "feed-post",
+        "run-agent", "discover-api",
+      ],
+      max_turns: 50,
+      temperature: 0.7,
+      tags: ["personal", "assistant"],
+      version: "1.0.0",
+      governance: { budget_limit_usd: 10 },
+      reasoning_strategy: "chain-of-thought",
+      is_personal: true,
+    };
+
+    await sql`
+      INSERT INTO agents (agent_id, name, org_id, description, config_json, version, is_active, created_by, created_at, updated_at)
+      VALUES (${personalAgentId}, ${personalName}, ${orgId}, ${personalDescription}, ${JSON.stringify(personalConfig)}, '1.0.0', 1, ${userId}, now(), now())
+    `;
+    console.log(`[auth/signup] Personal agent created for ${email}`);
+  } catch (err) {
+    console.warn("[auth/signup] Personal agent creation failed:", err);
+  }
+
   // Create default org_settings
   try {
     await sql`
