@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, History, ChevronDown } from "lucide-react";
+import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, Sparkles } from "lucide-react";
+import { MetaAgentPanel } from "../components/MetaAgentPanel";
 import { ChatInterface } from "../components/ChatInterface";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -20,6 +21,7 @@ export default function MyAssistantPage() {
   const [agent, setAgent] = useState<AgentInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const { messages, streaming, sessionMeta, send, stop, clear, loadHistory } = useAgentStream();
+  const [metaOpen, setMetaOpen] = useState(false);
 
   useEffect(() => {
     api.get<AgentInfo>(`/agents/${AGENT_NAME}`)
@@ -99,6 +101,14 @@ export default function MyAssistantPage() {
           <Button
             variant="ghost"
             size="sm"
+            onClick={() => setMetaOpen(true)}
+            title="Improve this assistant"
+          >
+            <Sparkles size={14} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => navigate(`/agents/${AGENT_NAME}/settings`)}
             title="Agent settings"
           >
@@ -124,6 +134,9 @@ export default function MyAssistantPage() {
           ]}
         />
       </div>
+
+      {/* Meta-agent panel */}
+      <MetaAgentPanel agentName={AGENT_NAME} open={metaOpen} onClose={() => setMetaOpen(false)} context="test" />
     </div>
   );
 }

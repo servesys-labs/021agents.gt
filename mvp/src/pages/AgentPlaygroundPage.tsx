@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import { Info, RefreshCw, Trash2 } from "lucide-react";
+import { Info, RefreshCw, Trash2, Sparkles } from "lucide-react";
+import { MetaAgentPanel } from "../components/MetaAgentPanel";
 import { ChatInterface } from "../components/ChatInterface";
 import { InfoBox } from "../components/ui/InfoBox";
 import { AgentNav } from "../components/AgentNav";
@@ -76,6 +77,8 @@ export default function AgentPlaygroundPage() {
     );
   }
 
+  const [metaOpen, setMetaOpen] = useState(false);
+
   if (!agent) return <AgentNotFound />;
 
   const model = agent.config_json?.model || "default";
@@ -97,12 +100,20 @@ export default function AgentPlaygroundPage() {
           <span className="mx-2 text-text-muted">|</span>
           <span className="text-text-secondary">{toolCount} tools</span>
         </InfoBox>
-        {messages.length > 0 && (
-          <Button variant="ghost" size="sm" onClick={clear} className="ml-2" title="Clear conversation">
-            <Trash2 size={14} />
+        <div className="flex items-center gap-1 ml-2">
+          <Button variant="ghost" size="sm" onClick={() => setMetaOpen(true)} title="Improve this agent">
+            <Sparkles size={14} /> Improve
           </Button>
-        )}
+          {messages.length > 0 && (
+            <Button variant="ghost" size="sm" onClick={clear} title="Clear conversation">
+              <Trash2 size={14} />
+            </Button>
+          )}
+        </div>
       </div>
+
+      {/* Meta-agent panel */}
+      <MetaAgentPanel agentName={agent.name} open={metaOpen} onClose={() => setMetaOpen(false)} context="test" />
 
       {/* Chat */}
       <div className="flex-1 min-h-0 mt-2">
