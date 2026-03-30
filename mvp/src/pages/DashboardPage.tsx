@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { Plus, MessageSquare, TrendingUp, Bot, AlertCircle, RefreshCw, Loader2, Trash2 } from "lucide-react";
+import { Plus, MessageSquare, TrendingUp, Bot, AlertCircle, RefreshCw, Loader2, Trash2, DollarSign, CreditCard } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -40,6 +40,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [removingName, setRemovingName] = useState<string | null>(null);
+  const [creditBalance, setCreditBalance] = useState<number | null>(null);
 
   const fetchData = async () => {
     setLoading(true);
@@ -56,6 +57,11 @@ export default function DashboardPage() {
         setStats(null);
         setStatsUnavailable(true);
       }
+
+      try {
+        const credits = await api.get<{ balance_usd: number }>("/credits/balance");
+        setCreditBalance(Number(credits.balance_usd) || 0);
+      } catch {}
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load dashboard data");
     } finally {
@@ -131,10 +137,12 @@ export default function DashboardPage() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-10">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-10">
         <StatCard icon={<Bot size={16} className="text-primary" />} label={PRODUCT.statAssistants} value={assistantCount} />
         <StatCard icon={<MessageSquare size={16} className="text-success" />} label={PRODUCT.statSessions} value={sessionCount} />
         <StatCard icon={<TrendingUp size={16} className="text-warning" />} label={PRODUCT.statLatency} value={latency} />
+        <StatCard icon={<DollarSign size={16} className="text-danger" />} label="Total spent" value={stats?.total_cost_usd ? `$${stats.total_cost_usd.toFixed(2)}` : "$0.00"} />
+        <StatCard icon={<CreditCard size={16} className="text-info" />} label="Credits" value={creditBalance !== null ? `$${creditBalance.toFixed(2)}` : "—"} />
       </div>
 
       <h2 className="text-lg font-semibold text-text mb-4 pb-3 border-b border-border">{PRODUCT.agentsSectionTitle}</h2>
