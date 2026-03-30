@@ -39,6 +39,9 @@ import { getCircuitStatus } from "./runtime/tools";
 // Re-export Sandbox so Cloudflare can discover the Durable Object class
 export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
 
+// Re-export Workflow so Cloudflare can discover it
+export { AgentRunWorkflow } from "./workflow";
+
 // ---------------------------------------------------------------------------
 // Environment bindings
 // ---------------------------------------------------------------------------
@@ -56,6 +59,8 @@ export interface Env extends Cloudflare.Env {
   TELEGRAM_AGENT_NAME?: string;
   ENABLE_LANGCHAIN_TOOLS?: string;
   VAPI_API_KEY?: string;         // Vapi API key (for make-voice-call tool)
+  AGENT_RUN_WORKFLOW?: any;      // Cloudflare Workflow for durable agent runs
+  AGENT_PROGRESS_KV?: KVNamespace; // KV for workflow progress events
 }
 
 // ---------------------------------------------------------------------------
@@ -932,6 +937,77 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         return this._handleVoiceRelay(request);
       }
       return Response.json({ error: "WebSocket upgrade required" }, { status: 426 });
+    }
+
+    // POST /run/workflow — Durable agent run via Cloudflare Workflow (crash-safe, no state corruption)
+    // The DO triggers the Workflow, then polls KV for progress and returns the final result.
+    // For SSE streaming, use /run/workflow/stream which polls and emits events.
+    if (url.pathname === "/run/workflow" && request.method === "POST") {
+      if (!(await this._isAuthorized(request))) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+      const data = await request.json() as any;
+      const agentName = data.agent_name || this.state.config.agentName || "agentos";
+      const input = String(data.input || "");
+      const history = this._loadConversationHistory(24);
+      const progressKey = `run:${this.name}:${Date.now()}`;
+
+      if (!this.env.AGENT_RUN_WORKFLOW) {
+        return Response.json({ error: "Workflows not configured" }, { status: 501 });
+      }
+
+      try {
+        const instance = await this.env.AGENT_RUN_WORKFLOW.create({
+          params: {
+            agent_name: agentName,
+            input,
+            org_id: data.org_id || this.state.config.orgId || "",
+            project_id: data.project_id || this.state.config.projectId || "",
+            channel: data.channel || "workflow",
+            channel_user_id: data.channel_user_id || "",
+            history: history.map((m: any) => ({ role: m.role, content: m.content })),
+            progress_key: progressKey,
+          },
+        });
+
+        // Poll for completion (max 5 minutes)
+        const maxWait = 300_000;
+        const start = Date.now();
+        let status: any = { status: "running" };
+
+        while (Date.now() - start < maxWait) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            status = await instance.status();
+          } catch { continue; }
+
+          if (status.status === "complete" || status.status === "errored" || status.status === "terminated") {
+            break;
+          }
+        }
+
+        if (status.status === "complete" && status.output) {
+          const result = status.output as { output: string; turns: number; tool_calls: number; cost_usd: number; session_id: string };
+          this._appendConversationMessage("user", input, data.channel || "workflow");
+          this._appendConversationMessage("assistant", result.output, data.channel || "workflow");
+          return Response.json({ status: "completed", success: true, ...result });
+        }
+
+        if (status.status === "errored") {
+          return Response.json({ status: "error", success: false, error: status.error?.message || "Workflow failed" }, { status: 500 });
+        }
+
+        // Still running after max wait — return instance ID for polling
+        return Response.json({
+          status: "running",
+          success: true,
+          instance_id: instance.id,
+          progress_key: progressKey,
+          message: "Run is still in progress. Poll /run/workflow/status for updates.",
+        }, { status: 202 });
+      } catch (err: any) {
+        return Response.json({ error: `Workflow failed: ${err.message}` }, { status: 500 });
+      }
     }
 
     // GET /run/checkpoint — read the latest checkpoint for a session (crash recovery)
