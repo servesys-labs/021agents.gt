@@ -1168,6 +1168,13 @@ async function executeTool(
 /* ── System prompt ──────────────────────────────────────────────── */
 
 function buildSystemPrompt(agentName: string): string {
+  // Import the reusable prompt builder
+  const { buildMetaAgentChatPrompt } = require("../prompts/meta-agent-chat");
+  return buildMetaAgentChatPrompt(agentName);
+}
+
+// Legacy prompt kept for reference — replaced by prompts/meta-agent-chat.ts
+function _legacyBuildSystemPrompt(agentName: string): string {
   return `You are the Agent Manager for "${agentName}" on the AgentOS platform. You help the agent's owner understand, configure, monitor, and improve their agent through natural conversation.
 
 ## Your Capabilities
