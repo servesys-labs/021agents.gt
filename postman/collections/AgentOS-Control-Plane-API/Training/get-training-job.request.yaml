@@ -1,0 +1,5 @@
+$kind: http-request
+name: Get Training Job Detail
+method: GET
+url: '{{base_url}}/api/v1/training/jobs/{{training_job_id}}'
+order: 1200

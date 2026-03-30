@@ -1,0 +1,16 @@
+$kind: http-request
+name: Check Circuit Breaker
+method: GET
+url: '{{base_url}}/api/v1/training/resources/{{agent_name}}/circuit-breaker'
+order: 2100
+params:
+  - key: window_minutes
+    value: '15'
+    disabled: true
+  - key: error_threshold
+    value: '0.3'
+    disabled: true
+description: |-
+  Checks if error rate spiked after the most recent resource activation.
+  Returns tripped=true if error rate exceeds threshold within the window.
+  Read-only — use POST /rollback to revert if tripped.

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import {
   Plus, Play, CheckCircle, XCircle, Clock, Trash2, RefreshCw, Loader2,
@@ -59,6 +59,7 @@ export default function AgentTestsPage() {
   // History
   const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerStatus | null>(null);
   const [rollingBack, setRollingBack] = useState(false);
+  const autoEvalFired = useRef(false); // prevent auto-eval from firing on every page load
 
   // ── Data Loading ─────────────────────────────────────────
 
@@ -91,10 +92,11 @@ export default function AgentTestsPage() {
         });
       }
 
-      // Auto-run first eval if agent has auto-generated tests but no eval runs
+      // Auto-run first eval if agent has auto-generated tests but no eval runs (once per mount)
       const hasAutoTests = evalConfig?.test_cases?.length > 0 && evalConfig?.auto_generated;
       const noRuns = ensureArray<EvalRun>(evalRuns).length === 0;
-      if (hasAutoTests && noRuns) {
+      if (hasAutoTests && noRuns && !autoEvalFired.current) {
+        autoEvalFired.current = true;
         // Fire-and-forget first eval — will show results on next load
         const autoTasks = evalConfig.test_cases
           .filter((tc: any) => String(tc.input || "").trim())
@@ -174,22 +176,36 @@ export default function AgentTestsPage() {
     if (!id || scenarios.length === 0) return;
     setImproving(true);
     setTab("improve");
+
+    // Step 1: Run eval to get baseline
+    toast("Step 1/3: Running eval baseline...");
     try {
-      // Step 1: Run eval to get baseline
-      toast("Step 1/3: Running eval baseline...");
-      await api.post<EvalRun>("/eval/run", {
+      const evalResult = await api.post<EvalRun>("/eval/run", {
         agent_name: id,
         tasks: scenarios.map((s) => ({ input: s.input, expected: s.expected, grader: s.grader })),
         trials: 1,
       });
+      const updatedRuns = await api.get<unknown>(`/eval/runs?agent_name=${encodeURIComponent(id)}`).catch(() => []);
+      setRuns(ensureArray<EvalRun>(updatedRuns));
+      toast(`Baseline: ${evalResult.pass_count}/${evalResult.total_count} passed`);
+    } catch (err: any) {
+      toast(`Eval failed: ${err.message || "Unknown error"}. Fix test scenarios and try again.`);
+      setImproving(false);
+      return;
+    }
 
-      // Step 2: Get suggestions
-      toast("Step 2/3: Analyzing results...");
+    // Step 2: Get suggestions (non-blocking — continue even if this fails)
+    toast("Step 2/3: Analyzing results...");
+    try {
       const sugRes = await api.post<{ suggestions: EvolutionSuggestion[] }>(`/agents/${agentPathSegment(id)}/evolve`, { auto_apply: false });
       setSuggestions(sugRes.suggestions || []);
+    } catch {
+      // Analysis is optional — training can proceed without suggestions
+    }
 
-      // Step 3: Start training with auto-activate
-      toast("Step 3/3: Starting AI training...");
+    // Step 3: Start training with auto-activate
+    toast("Step 3/3: Starting AI training...");
+    try {
       const job = await api.post<TrainingJob>("/training/jobs", {
         agent_name: id,
         algorithm: "apo",
@@ -202,8 +218,10 @@ export default function AgentTestsPage() {
       setTrainingJob({ ...job, status: "running" });
       toast("Training started. Your agent will improve automatically.");
     } catch (err: any) {
-      toast(err.message || "Improvement failed");
-    } finally { setImproving(false); }
+      toast(`Training unavailable: ${err.message || "Unknown error"}. Eval results and suggestions are still available.`);
+    }
+
+    setImproving(false);
   };
 
   const rollback = async () => {

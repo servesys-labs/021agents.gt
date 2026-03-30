@@ -1609,7 +1609,15 @@ async function dispatch(
       if (!/^[a-zA-Z0-9_-]+$/.test(name)) return "Agent name must contain only letters, numbers, hyphens, dashes";
 
       const desc = String(args.description || "").slice(0, 2000);
-      const systemPrompt = String(args.system_prompt || `You are ${name}. ${desc}`).slice(0, 50000);
+      // Generate a useful system prompt that tells the agent about its tools
+      const defaultPrompt = (() => {
+        const toolList = (Array.isArray(args.tools) ? args.tools : []).filter((t: string) => getValidToolNames().has(t));
+        const toolDesc = toolList.length > 0
+          ? `\n\nYou have access to these tools and MUST use them when relevant:\n${toolList.map((t: string) => `- ${t}`).join("\n")}\n\nAlways use your tools to get real data. Never guess or make up information when you can search or compute.`
+          : "\n\nYou have access to tools including web search, code execution, and file operations. Use them proactively to help the user.";
+        return `You are ${name}${desc ? ` — ${desc}` : ""}. You are a helpful AI assistant.${toolDesc}`;
+      })();
+      const systemPrompt = String(args.system_prompt || defaultPrompt).slice(0, 50000);
       // Don't set a default model — let plan-based routing select the right model at runtime.
       // Only set model if the user explicitly provides one.
       const model = args.model ? String(args.model) : "";
@@ -4113,8 +4121,10 @@ const TOOL_CATALOG: ToolDefinition[] = [
     function: {
       name: "create-agent",
       description:
-        "Create a new agent config in the database. Validates tools against the catalog and enforces org limits. " +
-        "Invalid tool names are dropped with a warning. The system_prompt should describe the agent's role and capabilities.",
+        "Create a new agent. Only 'name' is required — all other fields have sensible defaults. " +
+        "Call this immediately with just the name and description; do NOT ask the user for optional fields. " +
+        "Tools are validated against the catalog (invalid names dropped with warning). " +
+        "If no system_prompt is provided, one is auto-generated that tells the agent about its tools.",
       parameters: {
         type: "object",
         properties: {

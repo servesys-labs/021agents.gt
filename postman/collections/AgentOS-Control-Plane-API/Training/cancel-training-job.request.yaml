@@ -1,0 +1,5 @@
+$kind: http-request
+name: Cancel Training Job
+method: POST
+url: '{{base_url}}/api/v1/training/jobs/{{training_job_id}}/cancel'
+order: 1500

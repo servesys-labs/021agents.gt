@@ -1,0 +1,17 @@
+$kind: http-request
+name: Step Training Job (One Iteration)
+method: POST
+url: '{{base_url}}/api/v1/training/jobs/{{training_job_id}}/step'
+order: 1300
+description: |-
+  Advances the training job by one iteration:
+  1. Pre-flight check (tools, config)
+  2. Eval run via RUNTIME
+  3. Guardrail scan on outputs
+  4. Compute composite reward
+  5. Run optimization algorithm (APO/baseline/multi)
+  6. Safety gate on new prompt
+  7. Config validation
+  8. Store versioned resource
+
+  Call repeatedly to run the full training loop, or use /auto-step for unattended.

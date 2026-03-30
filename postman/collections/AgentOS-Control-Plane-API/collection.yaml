@@ -2,9 +2,9 @@ $kind: collection
 name: AgentOS Control Plane API
 description: |-
   Complete API collection for the AgentOS Control Plane.
-  Covers all 65 route families including Auth, Agents, Sessions, Billing,
-  Security, Observability, Workflows, Eval, Memory, Tools, RAG, Releases,
-  Graphs, Secrets, Webhooks, and more.
+  Covers all 66 route families including Auth, Agents, Sessions, Billing,
+  Security, Observability, Workflows, Eval, Training, Memory, Tools, RAG,
+  Releases, Graphs, Secrets, Webhooks, and more.
 
   Use {{base_url}} for the API host and {{api_token}} for Bearer auth.
 auth:
@@ -199,3 +199,6 @@ variables:
   - key: version_id
     value: ''
     description: Agent version ID
+  - key: training_job_id
+    value: ''
+    description: Training job ID

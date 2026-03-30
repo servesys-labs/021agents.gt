@@ -1,0 +1,12 @@
+$kind: http-request
+name: List Resource Versions
+method: GET
+url: '{{base_url}}/api/v1/training/resources/{{agent_name}}'
+order: 1800
+params:
+  - key: resource_type
+    value: system_prompt
+    disabled: true
+  - key: limit
+    value: '50'
+    disabled: true

@@ -1,0 +1,5 @@
+$kind: http-request
+name: List Training Iterations
+method: GET
+url: '{{base_url}}/api/v1/training/jobs/{{training_job_id}}/iterations'
+order: 1700

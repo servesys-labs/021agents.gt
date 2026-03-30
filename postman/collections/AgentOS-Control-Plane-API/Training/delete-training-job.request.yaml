@@ -1,0 +1,6 @@
+$kind: http-request
+name: Delete Training Job
+method: DELETE
+url: '{{base_url}}/api/v1/training/jobs/{{training_job_id}}'
+order: 1600
+description: 'Cannot delete a running job — cancel it first.'

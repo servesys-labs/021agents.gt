@@ -1,0 +1,16 @@
+$kind: http-request
+name: Rollback Resource
+method: POST
+url: '{{base_url}}/api/v1/training/resources/{{agent_name}}/rollback'
+order: 2000
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "resource_type": "system_prompt",
+      "resource_key": "main"
+    }
+description: 'Reverts to the previous active resource version. Use when a trained prompt performs worse in production.'

@@ -1,0 +1,9 @@
+$kind: http-request
+name: Auto-Step Training Job (Unattended)
+method: POST
+url: '{{base_url}}/api/v1/training/jobs/{{training_job_id}}/auto-step'
+order: 1400
+description: |-
+  Enqueues the first training step on the job queue.
+  Subsequent steps are automatically enqueued until the job completes,
+  reaches max_iterations, or is cancelled.

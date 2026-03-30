@@ -1,0 +1,15 @@
+$kind: http-request
+name: Activate Resource Version
+method: POST
+url: '{{base_url}}/api/v1/training/resources/{{agent_name}}/system_prompt/main/activate'
+order: 1900
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "version": 3
+    }
+description: 'Activates a specific resource version and applies it to the agent config.'

@@ -1,0 +1,15 @@
+$kind: http-request
+name: List Training Jobs
+method: GET
+url: '{{base_url}}/api/v1/training/jobs'
+order: 1100
+params:
+  - key: agent_name
+    value: '{{agent_name}}'
+    disabled: true
+  - key: status
+    value: running
+    disabled: true
+  - key: limit
+    value: '20'
+    disabled: true

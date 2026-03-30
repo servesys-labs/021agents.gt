@@ -782,78 +782,34 @@ async function executeTool(
       const algorithm = String(args.algorithm || "apo");
       const maxIterations = Number(args.max_iterations) || 10;
       const autoActivate = args.auto_activate === true;
+      // Create training job directly via SQL (training routes are on the control-plane, same process)
       try {
-        const resp = await fetch(
-          `https://${ctx.env.RUNTIME ? "runtime" : "api.oneshots.co/api/v1"}/training/jobs`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(ctx.env.SERVICE_TOKEN ? { Authorization: `Bearer ${ctx.env.SERVICE_TOKEN}` } : {}),
-            },
-            body: JSON.stringify({
-              agent_name: ctx.agentName,
-              org_id: ctx.orgId,
-              algorithm,
-              max_iterations: maxIterations,
-              auto_activate: autoActivate,
-            }),
-          },
-        );
-        if (!resp.ok) {
-          const err = await resp.text();
-          return JSON.stringify({ error: `Failed to start training: ${err.slice(0, 300)}` });
-        }
-        const result = (await resp.json()) as { id?: string; job_id?: string };
-        const createdJobId = result.id || result.job_id;
+        const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        const now = new Date().toISOString();
+        await sql`
+          INSERT INTO training_jobs (id, agent_name, org_id, algorithm, max_iterations, auto_activate, status, current_iteration, best_score, created_at, updated_at)
+          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'running', 0, 0, ${now}, ${now})
+        `;
 
-        // Auto-start the training loop via /auto-step
-        if (createdJobId) {
-          try {
-            await fetch(
-              `https://${ctx.env.RUNTIME ? "runtime" : "api.oneshots.co/api/v1"}/training/jobs/${createdJobId}/auto-step`,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  ...(ctx.env.SERVICE_TOKEN ? { Authorization: `Bearer ${ctx.env.SERVICE_TOKEN}` } : {}),
-                },
-              },
-            );
-          } catch {} // non-blocking — job exists even if auto-step fails
-        }
-
-        return JSON.stringify({ ...result, auto_started: true, message: "Training started. The system will automatically run each iteration. Use read_training_status to monitor progress." });
-      } catch (err: any) {
-        // Fallback: try via SQL + queue directly
+        // Enqueue the first training step so the queue consumer auto-chains iterations
         try {
-          const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-          const now = new Date().toISOString();
           await sql`
-            INSERT INTO training_jobs (id, agent_name, org_id, algorithm, max_iterations, auto_activate, status, current_iteration, best_score, created_at, updated_at)
-            VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'running', 0, 0, ${now}, ${now})
+            INSERT INTO queue_jobs (id, job_type, payload, status, created_at)
+            VALUES (${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}, 'training_step', ${JSON.stringify({ job_id: jobId })}, 'pending', ${now})
           `;
+        } catch {} // queue table may not exist yet — job still created
 
-          // Try to enqueue the first step via the queue
-          try {
-            await sql`
-              INSERT INTO queue_jobs (id, job_type, payload, status, created_at)
-              VALUES (${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}, 'training_step', ${JSON.stringify({ job_id: jobId })}, 'pending', ${now})
-            `;
-          } catch {} // queue table may not exist yet
-
-          return JSON.stringify({
-            job_id: jobId,
-            status: "running",
-            algorithm,
-            max_iterations: maxIterations,
-            auto_activate: autoActivate,
-            auto_started: true,
-            message: "Training job created and queued. Iterations will run automatically.",
-          });
-        } catch (dbErr: any) {
-          return JSON.stringify({ error: `Training not available: ${dbErr.message || dbErr}` });
-        }
+        return JSON.stringify({
+          job_id: jobId,
+          status: "running",
+          algorithm,
+          max_iterations: maxIterations,
+          auto_activate: autoActivate,
+          auto_started: true,
+          message: "Training started. Iterations will run automatically. Use read_training_status to monitor progress.",
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Training not available: ${err.message || err}` });
       }
     }
 

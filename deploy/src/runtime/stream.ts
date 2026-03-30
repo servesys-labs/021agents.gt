@@ -254,6 +254,16 @@ async function streamLLM(
       arguments: tc.arguments || "{}",
     }));
 
+  // Fallback token estimation from content length when API doesn't report usage
+  // ~4 chars per token is a rough but usable approximation
+  if (inputTokens === 0 && messages.length > 0) {
+    const totalInputChars = messages.reduce((sum, m) => sum + (m.content?.length || 0), 0);
+    inputTokens = Math.ceil(totalInputChars / 4);
+  }
+  if (outputTokens === 0 && content.length > 0) {
+    outputTokens = Math.ceil(content.length / 4);
+  }
+
   const latencyMs = Date.now() - started;
   return {
     content,

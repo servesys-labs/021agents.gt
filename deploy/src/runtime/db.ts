@@ -94,7 +94,7 @@ export async function loadAgentConfig(
     // Agent genuinely not in DB — return full defaults for development/onboarding
     return {
       agent_name: agentName,
-      system_prompt: "You are a helpful AI assistant.",
+      system_prompt: "You are a helpful AI assistant. You have access to tools including web search, Python code execution, file operations, and more. Use your tools proactively to help the user — always search for real data instead of guessing.",
       provider: defaults.provider,
       model: defaults.model,
       plan: defaults.plan,
