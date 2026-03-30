@@ -294,30 +294,18 @@ export async function selectModel(
   env?: RuntimeEnv,
   sessionCache?: Map<string, RouteClassification>,
 ): Promise<RouteDecision> {
-  // Use LLM classifier if env is available, otherwise regex fallback
+  // Skip LLM classification — simplified plans use one model per plan.
+  // Use fast regex classification only (no extra LLM call = lower latency + cost).
   let complexity: ComplexityTier;
   let category: TaskCategory;
   let role: TaskRole;
-  // Classifier cost: ~250 input tokens + ~50 output tokens @ glm-4.7-flash ($0.05/$0.20 per 1M)
   let routingCostUsd = 0;
 
-  if (env) {
-    const classification = await classifyTurn(input, env, sessionCache);
-    routingCostUsd = (250 / 1_000_000) * 0.05 + (50 / 1_000_000) * 0.20; // ~$0.0000225
+  {
+    const classification = classifyTurnRegex(input);
     complexity = classification.complexity as ComplexityTier;
     category = classification.category as TaskCategory;
     role = classification.role as TaskRole;
-
-    // Still check for multimodal-specific tiers via regex (image_gen, vision, tts, stt)
-    // since the LLM classifier returns simple/moderate/complex
-    const regexComplexity = classifyComplexity(input);
-    if (["image_gen", "vision", "tts", "stt", "tool_call"].includes(regexComplexity)) {
-      complexity = regexComplexity;
-    }
-  } else {
-    complexity = classifyComplexity(input);
-    category = classifyCategory(input);
-    role = classifyRole(input, category);
   }
 
   if (!planRouting || Object.keys(planRouting).length === 0) {

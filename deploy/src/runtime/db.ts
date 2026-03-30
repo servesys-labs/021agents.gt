@@ -202,29 +202,39 @@ export async function loadAgentConfig(
 // Workers AI models (@cf/) route through AI Gateway directly (CF account token).
 // No max_tokens — let models decide their output length.
 
+// Simplified plan routing — one primary model per plan, no per-task classification.
+// The model handles all task types (coding, research, creative, etc.)
+// Agent can override with config_json.model for specific use cases.
 const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
-  // ── Basic: Workers AI on-edge (lowest cost, lowest latency) ────────────
+  // ── Basic: Free Workers AI models (edge, no cost) ──
   basic: {
-    general:    { simple: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, moderate: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, complex: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, tool_call: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" } },
-    coding:     { planner: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, implementer: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, reviewer: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, debugger: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
-    research:   { search: { model: "@cf/zai-org/glm-4.7-flash", provider: "workers-ai" }, analyze: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" }, synthesize: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
-    creative:   { write: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
+    general: {
+      simple: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
+      moderate: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
+      complex: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
+      tool_call: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
+    },
+    multimodal: { vision: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
   },
-  // ── Standard: GPT-5.4 + Gemini 3.1 + Claude Sonnet 4.6 (via OpenRouter) ──
+  // ── Standard: Claude Sonnet 4.6 for everything ──
   standard: {
-    general:    { simple: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" }, moderate: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, complex: { model: "openai/gpt-5.4", provider: "openrouter" }, tool_call: { model: "openai/gpt-5.4-mini", provider: "openrouter" } },
-    coding:     { planner: { model: "openai/gpt-5.4", provider: "openrouter" }, implementer: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, reviewer: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" }, debugger: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" } },
-    research:   { search: { model: "openai/gpt-5.4-mini", provider: "openrouter" }, analyze: { model: "openai/gpt-5.4", provider: "openrouter" }, synthesize: { model: "openai/gpt-5.4", provider: "openrouter" } },
-    creative:   { write: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" } },
-    multimodal: { vision: { model: "openai/gpt-5.4", provider: "openrouter" } },
+    general: {
+      simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+      moderate: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+      complex: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+      tool_call: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+    },
+    multimodal: { vision: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" } },
   },
-  // ── Premium: GPT-5.4 Pro + Claude Opus 4.6 + Gemini 3.1 Pro (via OpenRouter) ──
+  // ── Premium: Claude Opus 4.6 for everything ──
   premium: {
-    general:    { simple: { model: "openai/gpt-5.4-nano", provider: "openrouter" }, moderate: { model: "openai/gpt-5.4", provider: "openrouter" }, complex: { model: "anthropic/claude-opus-4.6", provider: "openrouter" }, tool_call: { model: "openai/gpt-5.4", provider: "openrouter" } },
-    coding:     { planner: { model: "openai/gpt-5.4-pro", provider: "openrouter" }, implementer: { model: "anthropic/claude-sonnet-4.6", provider: "openrouter" }, reviewer: { model: "anthropic/claude-opus-4.6", provider: "openrouter" }, debugger: { model: "anthropic/claude-opus-4.6", provider: "openrouter" } },
-    research:   { search: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" }, analyze: { model: "openai/gpt-5.4", provider: "openrouter" }, synthesize: { model: "anthropic/claude-opus-4.6", provider: "openrouter" } },
-    creative:   { write: { model: "anthropic/claude-opus-4.6", provider: "openrouter" } },
-    multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
+    general: {
+      simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+      moderate: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
+      complex: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
+      tool_call: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+    },
+    multimodal: { vision: { model: "anthropic/claude-opus-4-6", provider: "openrouter" } },
   },
 };
 
