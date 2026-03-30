@@ -513,20 +513,20 @@ async function executeTool(
     case "read_sessions": {
       const limit = Number(args.limit) || 20;
       const rows = await sql`
-        SELECT session_id, channel, message_count, created_at, updated_at
+        SELECT session_id, model, step_count, created_at, ended_at
         FROM sessions
         WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
-        ORDER BY updated_at DESC
+        ORDER BY ended_at DESC
         LIMIT ${limit}
       `;
       return JSON.stringify({
         total: rows.length,
         sessions: rows.map((r: any) => ({
           session_id: r.session_id,
-          channel: r.channel,
-          message_count: r.message_count,
+          model: r.model,
+          step_count: r.step_count,
           created_at: r.created_at,
-          updated_at: r.updated_at,
+          ended_at: r.ended_at,
         })),
       });
     }
@@ -536,19 +536,20 @@ async function executeTool(
       if (!sessionId) return JSON.stringify({ error: "session_id required" });
       const limit = Number(args.limit) || 50;
       const rows = await sql`
-        SELECT role, content, created_at
-        FROM turns
-        WHERE session_id = ${sessionId} AND org_id = ${ctx.orgId}
-        ORDER BY created_at ASC
+        SELECT t.turn_number, t.llm_content, t.started_at
+        FROM turns t
+        JOIN sessions s ON t.session_id = s.session_id
+        WHERE t.session_id = ${sessionId} AND s.org_id = ${ctx.orgId}
+        ORDER BY t.started_at ASC
         LIMIT ${limit}
       `;
       return JSON.stringify({
         session_id: sessionId,
         message_count: rows.length,
         messages: rows.map((r: any) => ({
-          role: r.role,
-          content: String(r.content || "").slice(0, 500),
-          created_at: r.created_at,
+          turn_number: r.turn_number,
+          content: String(r.llm_content || "").slice(0, 500),
+          started_at: r.started_at,
         })),
       });
     }
@@ -569,12 +570,13 @@ async function executeTool(
         const turnStats = await sql`
           SELECT
             COUNT(*) as total_turns,
-            COUNT(DISTINCT session_id) as active_sessions,
-            AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) as avg_turn_duration_s
-          FROM turns
-          WHERE agent_name = ${ctx.agentName}
-            AND org_id = ${ctx.orgId}
-            AND created_at > now() - ${interval}::interval
+            COUNT(DISTINCT t.session_id) as active_sessions,
+            AVG(EXTRACT(EPOCH FROM (t.ended_at - t.started_at))) as avg_turn_duration_s
+          FROM turns t
+          JOIN sessions s ON t.session_id = s.session_id
+          WHERE s.agent_name = ${ctx.agentName}
+            AND s.org_id = ${ctx.orgId}
+            AND t.started_at > now() - ${interval}::interval
         `;
         stats = turnStats[0] || {};
       } catch {}
@@ -583,11 +585,12 @@ async function executeTool(
       let errorCount = 0;
       try {
         const errRows = await sql`
-          SELECT COUNT(*) as cnt FROM turns
-          WHERE agent_name = ${ctx.agentName}
-            AND org_id = ${ctx.orgId}
-            AND created_at > now() - ${interval}::interval
-            AND (content LIKE '%[error]%' OR content LIKE '%Error:%')
+          SELECT COUNT(*) as cnt FROM turns t
+          JOIN sessions s ON t.session_id = s.session_id
+          WHERE s.agent_name = ${ctx.agentName}
+            AND s.org_id = ${ctx.orgId}
+            AND t.started_at > now() - ${interval}::interval
+            AND t.errors_json IS NOT NULL AND t.errors_json != '[]'
         `;
         errorCount = Number(errRows[0]?.cnt) || 0;
       } catch {}
@@ -639,12 +642,12 @@ async function executeTool(
       let failures: any[] = [];
       try {
         const trials = await sql`
-          SELECT input, expected, actual, reasoning, pass
-          FROM eval_trials WHERE run_id = ${run.id}
-          ORDER BY trial_number LIMIT 50
+          SELECT input, expected, actual, reasoning, passed
+          FROM eval_trials WHERE eval_run_id = ${run.id}
+          ORDER BY created_at LIMIT 50
         `;
         failures = trials
-          .filter((t: any) => !t.pass)
+          .filter((t: any) => !t.passed)
           .map((t: any) => ({
             input: String(t.input || "").slice(0, 200),
             expected: String(t.expected || "").slice(0, 200),
@@ -700,8 +703,8 @@ async function executeTool(
       try {
         const trials = await sql`
           SELECT input, expected, actual, reasoning FROM eval_trials
-          WHERE run_id = ${evalRun.id} AND pass = false
-          ORDER BY trial_number
+          WHERE eval_run_id = ${evalRun.id} AND passed = false
+          ORDER BY created_at
         `;
         failures = trials.map((t: any) => ({
           input: String(t.input || ""),
@@ -785,7 +788,7 @@ async function executeTool(
       let avgMessages = 0;
       try {
         const rows = await sql`
-          SELECT COUNT(*) as cnt, AVG(message_count) as avg_msg
+          SELECT COUNT(*) as cnt, AVG(step_count) as avg_msg
           FROM sessions
           WHERE agent_name = ${ctx.agentName}
             AND org_id = ${ctx.orgId}
@@ -803,7 +806,7 @@ async function executeTool(
           JOIN sessions s ON t.session_id = s.session_id
           WHERE s.agent_name = ${ctx.agentName}
             AND s.org_id = ${ctx.orgId}
-          ORDER BY t.created_at DESC LIMIT 50
+          ORDER BY t.started_at DESC LIMIT 50
         `;
         recentTopics = turnRows
           .map((r: any) => String(r.content || "").slice(0, 100))
