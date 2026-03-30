@@ -129,5 +129,6 @@ export function agentCardToJSON(card: AgentCard): Record<string, unknown> {
     securitySchemes: card.securitySchemes,
     interfaces: card.interfaces,
     url: card.url,
+    ...((card as any).pricing ? { pricing: (card as any).pricing } : {}),
   };
 }

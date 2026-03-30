@@ -94,6 +94,11 @@ export async function transferCredits(
   if (amountUsd <= 0) return { success: false, error: "Amount must be positive" };
   if (fromOrg === toOrg) return { success: false, error: "Cannot transfer to self" };
 
+  // Platform fee: 10% of transfer amount
+  const PLATFORM_FEE_RATE = 0.10;
+  const platformFee = Math.round(amountUsd * PLATFORM_FEE_RATE * 1_000_000) / 1_000_000;
+  const receiverAmount = amountUsd - platformFee;
+
   const transferId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
   const now = new Date().toISOString();
 
@@ -111,15 +116,23 @@ export async function transferCredits(
       return { success: false, error: "Insufficient credits" };
     }
 
-    // Credit to receiver (upsert)
+    // Credit to receiver (minus platform fee)
     await sql`
       INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, lifetime_consumed_usd, updated_at)
-      VALUES (${toOrg}, ${amountUsd}, ${amountUsd}, 0, ${now})
+      VALUES (${toOrg}, ${receiverAmount}, ${receiverAmount}, 0, ${now})
       ON CONFLICT (org_id) DO UPDATE
-      SET balance_usd = org_credit_balance.balance_usd + ${amountUsd},
-          lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${amountUsd},
+      SET balance_usd = org_credit_balance.balance_usd + ${receiverAmount},
+          lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${receiverAmount},
           updated_at = ${now}
     `;
+
+    // Platform fee audit (if > 0)
+    if (platformFee > 0) {
+      await sql`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+        VALUES ('platform', 'transfer_in', ${platformFee}, 0, ${'Platform fee: ' + description}, ${transferId}, 'marketplace_fee', ${now})
+      `.catch(() => {}); // non-blocking
+    }
 
     // Read updated balances
     const [fromBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
