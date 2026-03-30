@@ -49,7 +49,7 @@ export default function LoginPage() {
         navigate("/dashboard");
       } else if (mode === "signup") {
         await signup(email, password, name, inviteCode || undefined);
-        navigate("/dashboard");
+        navigate("/onboarding");
       } else if (mode === "reset") {
         await api.post("/auth/forgot-password", { email });
         setSuccess("If that email exists, a reset link has been sent. Check your inbox.");
@@ -91,7 +91,7 @@ export default function LoginPage() {
           </p>
         </div>
 
-        <div className="bg-white rounded-xl border border-border p-6 shadow-lg overflow-hidden relative">
+        <div className="bg-surface rounded-xl border border-border p-6 shadow-lg overflow-hidden relative">
           <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-primary to-blue-400" />
 
           {/* Tabs (only for login/signup) */}
@@ -100,7 +100,7 @@ export default function LoginPage() {
               <button
                 onClick={() => { setMode("login"); setError(""); setSuccess(""); }}
                 className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
-                  mode === "login" ? "bg-white text-text shadow-sm" : "text-text-secondary"
+                  mode === "login" ? "bg-surface text-text shadow-sm" : "text-text-secondary"
                 }`}
               >
                 Sign in
@@ -108,7 +108,7 @@ export default function LoginPage() {
               <button
                 onClick={() => { setMode("signup"); setError(""); setSuccess(""); }}
                 className={`flex-1 py-2 text-sm font-medium rounded-md transition-colors ${
-                  mode === "signup" ? "bg-white text-text shadow-sm" : "text-text-secondary"
+                  mode === "signup" ? "bg-surface text-text shadow-sm" : "text-text-secondary"
                 }`}
               >
                 Create account

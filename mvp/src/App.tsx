@@ -3,7 +3,7 @@ import { RequireAuth, useAuth } from "./lib/auth";
 import { AppShell } from "./components/layout/AppShell";
 import LandingPage from "./pages/LandingPage";
 import LoginPage from "./pages/LoginPage";
-// OnboardingPage removed — signup goes straight to /my-assistant
+import OnboardingWizard from "./pages/OnboardingWizard";
 import DashboardPage from "./pages/DashboardPage";
 import AgentBuilderPage from "./pages/AgentBuilderPage";
 import AgentPlaygroundPage from "./pages/AgentPlaygroundPage";
@@ -40,8 +40,8 @@ export default function App() {
       <Route path="/explore/:name" element={<AgentDetailPage />} />
       <Route path="/feed" element={<FeedPage />} />
 
-      {/* Onboarding redirects to assistant (personal agent auto-created on signup) */}
-      <Route path="/onboarding" element={<Navigate to="/my-assistant" replace />} />
+      {/* Onboarding wizard — 60-second business setup */}
+      <Route path="/onboarding" element={<RequireAuth><OnboardingWizard /></RequireAuth>} />
 
       {/* Auth required, with sidebar */}
       <Route
