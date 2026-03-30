@@ -48,6 +48,7 @@ export async function loadAgentConfig(
     "read-file", "write-file", "edit-file",
     "knowledge-search", "store-knowledge",
     "create-agent", "list-agents", "run-agent",
+    "marketplace-search", "a2a-send",
     "discover-api",
   ];
 

@@ -987,6 +987,24 @@ async function dispatch(
     case "browser-render":
       return browserRender(env, args);
 
+    case "marketplace-search": {
+      // Search the agent marketplace for agents that can help with a task
+      const query = String(args.query || "");
+      if (!query) return "marketplace-search requires a query";
+      const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
+      try {
+        const params = new URLSearchParams({ q: query, limit: String(args.limit || 5) });
+        if (args.category) params.set("category", String(args.category));
+        if (args.max_price) params.set("max_price", String(args.max_price));
+        const resp = await fetch(`${apiBase}/marketplace/search?${params}`, {
+          headers: { "Content-Type": "application/json" },
+        });
+        return await resp.text();
+      } catch (err: any) {
+        return `Marketplace search failed: ${err.message}`;
+      }
+    }
+
     case "a2a-send": {
       const targetUrl = args.url || "";
       const urlCheck = validateUrl(targetUrl);
@@ -3775,8 +3793,25 @@ const TOOL_CATALOG: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "marketplace-search",
+      description: "Search the OneShots agent marketplace to find agents that can help with a task. Returns ranked results with pricing, quality scores, and A2A endpoints. Use this before a2a-send to find the right agent.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "What you're looking for (e.g., 'flight booking agent', 'legal document review')" },
+          category: { type: "string", description: "Category filter: shopping, research, legal, finance, travel, coding, creative, support, data, health, education, marketing" },
+          max_price: { type: "number", description: "Max price per task in USD" },
+          limit: { type: "number", description: "Max results (default 5)" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "a2a-send",
-      description: "Send a task to another agent via A2A protocol",
+      description: "Send a task to another agent via A2A protocol. Handles x-402 payments automatically if the agent charges. Use marketplace-search first to find the right agent.",
       parameters: {
         type: "object",
         properties: {
