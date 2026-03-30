@@ -62,6 +62,7 @@ import { compareRoutes } from "./routes/compare";
 import { sandboxRoutes } from "./routes/sandbox";
 import { plansRoutes } from "./routes/plans";
 import { marketplaceRoutes } from "./routes/marketplace";
+import { referralRoutes } from "./routes/referrals";
 import { guardrailRoutes } from "./routes/guardrails";
 import { dlpRoutes } from "./routes/dlp";
 import { pipelineRoutes } from "./routes/pipelines";
@@ -225,6 +226,9 @@ app.route("/api/v1/plans", plansRoutes);
 
 // Agent Marketplace (publish, discover, rate, feature)
 app.route("/api/v1/marketplace", marketplaceRoutes);
+
+// Referral Program (codes, stats, earnings)
+app.route("/api/v1/referrals", referralRoutes);
 
 // Components (reusable graphs, prompts, tool sets)
 // app.route("/api/v1/components", componentRoutes); // removed
