@@ -137,13 +137,15 @@ export default function DashboardPage() {
         </Button>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 mb-10">
-        <StatCard icon={<Bot size={16} className="text-primary" />} label={PRODUCT.statAssistants} value={assistantCount} />
-        <StatCard icon={<MessageSquare size={16} className="text-success" />} label={PRODUCT.statSessions} value={sessionCount} />
-        <StatCard icon={<TrendingUp size={16} className="text-warning" />} label={PRODUCT.statLatency} value={latency} />
-        <StatCard icon={<DollarSign size={16} className="text-danger" />} label="Total spent" value={stats?.total_cost_usd ? `$${stats.total_cost_usd.toFixed(2)}` : "$0.00"} />
-        <StatCard icon={<CreditCard size={16} className="text-info" />} label="Credits" value={creditBalance !== null ? `$${creditBalance.toFixed(2)}` : "—"} />
-      </div>
+      {/* Only show stats when user has activity — avoids discouraging wall of zeroes */}
+      {(sessionCount > 0 || assistantCount > 1) && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
+          <StatCard icon={<Bot size={16} className="text-primary" />} label={PRODUCT.statAssistants} value={assistantCount} />
+          <StatCard icon={<MessageSquare size={16} className="text-success" />} label={PRODUCT.statSessions} value={sessionCount} />
+          <StatCard icon={<DollarSign size={16} className="text-danger" />} label="Spent" value={stats?.total_cost_usd ? `$${stats.total_cost_usd.toFixed(2)}` : "$0.00"} />
+          <StatCard icon={<CreditCard size={16} className="text-info" />} label="Credits" value={creditBalance !== null ? `$${creditBalance.toFixed(2)}` : "—"} />
+        </div>
+      )}
 
       <h2 className="text-lg font-semibold text-text mb-4 pb-3 border-b border-border">{PRODUCT.agentsSectionTitle}</h2>
 

@@ -46,10 +46,10 @@ export default function LoginPage() {
       if (mode === "login") {
         await login(email, password);
         // Skip onboarding — go straight to assistant
-        navigate("/my-assistant");
+        navigate("/dashboard");
       } else if (mode === "signup") {
         await signup(email, password, name, inviteCode || undefined);
-        navigate("/my-assistant");
+        navigate("/dashboard");
       } else if (mode === "reset") {
         await api.post("/auth/forgot-password", { email });
         setSuccess("If that email exists, a reset link has been sent. Check your inbox.");
