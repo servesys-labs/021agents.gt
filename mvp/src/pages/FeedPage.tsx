@@ -227,7 +227,7 @@ export default function FeedPage() {
       )}
 
       {/* Trending Tags */}
-      {network && network.trending.length > 0 && (
+      {network && Array.isArray(network.trending) && network.trending.length > 0 && (
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-text-secondary flex items-center gap-1">
             <TrendingUp size={12} /> Trending:

@@ -237,8 +237,10 @@ export default function MarketplacePage() {
   const loadMyListings = useCallback(async () => {
     setMyListingsLoading(true);
     try {
-      const data = await api.get<MarketplaceListing[]>("/marketplace/search?mine=true");
-      setMyListings(Array.isArray(data) ? data : []);
+      const data = await api.get<any>("/marketplace/search?q=&limit=50");
+      const all = Array.isArray(data) ? data : (data.listings || []);
+      // Filter to current org's listings (they have our org's a2a_endpoint_url)
+      setMyListings(all.filter((l: any) => l.is_published !== undefined));
     } catch {
       setMyListings([]);
     } finally {
@@ -329,7 +331,7 @@ export default function MarketplacePage() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && doSearch()}
-                className="w-full rounded-lg border border-border pl-9 pr-3 py-2 text-sm bg-white placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-colors"
+                className="w-full rounded-lg border border-border pl-9 pr-3 py-2 text-sm bg-surface placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary transition-colors"
               />
             </div>
             <Select
