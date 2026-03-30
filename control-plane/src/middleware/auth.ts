@@ -177,17 +177,17 @@ export const authMiddleware = createMiddleware<{
     isPublicVoiceWebhook(c.req.path, c.req.method) ||
     isPublicExternalWebhook(c.req.path, c.req.method)
   ) {
-    // Set a default empty user for public routes
+    // Set default user — service token gets full access, public routes get viewer
     c.set("user", {
-      user_id: "",
+      user_id: isServiceAuth ? "service" : "",
       email: "",
-      name: "",
+      name: isServiceAuth ? "Service Token" : "",
       org_id: "",
       project_id: "",
       env: "",
-      role: "viewer",
-      scopes: [],
-      auth_method: "jwt",
+      role: isServiceAuth ? "owner" : "viewer",
+      scopes: isServiceAuth ? ["*"] : [],
+      auth_method: "jwt" as const,
     });
     return next();
   }
