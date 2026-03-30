@@ -348,6 +348,21 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
     WHERE name = ${agentName} AND org_id = ${orgId}
   `;
 
+  // Notify runtime DO to invalidate config cache — ensures the evolution
+  // change takes effect immediately without waiting for DO cold start.
+  try {
+    await c.env.RUNTIME.fetch("https://runtime/api/v1/internal/config-invalidate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({ agent_name: agentName, version: "evolve-" + proposalId, timestamp: Date.now() }),
+    });
+  } catch {
+    // Non-critical — DO will reload on next request
+  }
+
   // R2 VCS: commit the config change for full version history
   try {
     const { commitAgentConfig } = await import("../logic/r2-vcs");
@@ -592,6 +607,18 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
     UPDATE agents SET config_json = ${JSON.stringify(previousConfig)}
     WHERE name = ${agentName} AND org_id = ${orgId}
   `;
+
+  // Notify runtime DO to invalidate config cache
+  try {
+    await c.env.RUNTIME.fetch("https://runtime/api/v1/internal/config-invalidate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({ agent_name: agentName, version: "rollback-" + proposalId, timestamp: Date.now() }),
+    });
+  } catch {}
 
   // Commit rollback to R2 VCS (store config snapshot in STORAGE bucket)
   try {

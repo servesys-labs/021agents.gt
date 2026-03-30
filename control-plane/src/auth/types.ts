@@ -46,6 +46,7 @@ export const ALL_SCOPES = new Set([
   "autoresearch:read", "autoresearch:write",
   "compare:read",
   "codemode:read", "codemode:write",
+  "training:read", "training:write",
   "admin",
 ]);
 

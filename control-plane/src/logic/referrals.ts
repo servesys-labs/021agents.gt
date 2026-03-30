@@ -5,10 +5,12 @@
  * No buy-in. No recruiting incentive. Revenue from real transactions only.
  *
  * Fee split: platform takes 10% of every A2A transfer.
- *   L1 referrer (referred the earning org): 5% of transfer
- *   L2 referrer (referred the L1 referrer): 2% of transfer
- *   Platform retains: remaining 3%
+ *   L1 referrer: 3% of transfer (2% after 50 active referrals)
+ *   L2 referrer: 1% of transfer
+ *   Platform retains: 6-7% (60-70% of fee)
  *
+ * Declining rate: L1 drops from 3% to 2% after 50 active referrals.
+ * Max 40% of platform fee goes to referrals (vs SaaS standard of 20-30%).
  * Capped at 2 levels — no infinite chain.
  */
 
@@ -17,10 +19,12 @@ type Sql = ReturnType<typeof postgres>;
 
 // ── Constants ────────────────────────────────────────────────
 
-export const L1_RATE = 0.05;  // 5% of total transfer to direct referrer
-export const L2_RATE = 0.02;  // 2% of total transfer to second-level referrer
+export const L1_RATE = 0.03;           // 3% of total transfer to direct referrer
+export const L1_RATE_AFTER_CAP = 0.02; // 2% after 50 active referrals (declining)
+export const L1_CAP_THRESHOLD = 50;    // active referrals before rate drops
+export const L2_RATE = 0.01;           // 1% of total transfer to L2 referrer
 export const PLATFORM_BASE_RATE = 0.10; // 10% total platform fee
-// Platform keeps: PLATFORM_BASE_RATE - L1_RATE - L2_RATE = 3% (when both levels exist)
+// Platform keeps: 6% min (L1 3% + L2 1%) to 10% (no referrals)
 
 // ── Referral Code Management ─────────────────────────────────
 
@@ -115,7 +119,15 @@ export async function distributeReferralEarnings(
 
   if (l1Ref) {
     const l1OrgId = String(l1Ref.referrer_org_id);
-    l1Payout = Math.round(transferAmount * L1_RATE * 1_000_000) / 1_000_000;
+
+    // Declining rate: check how many active referrals this referrer has
+    const [refCount] = await sql`
+      SELECT COUNT(*)::int as cnt FROM referrals WHERE referrer_org_id = ${l1OrgId} AND status = 'active'
+    `.catch(() => [{ cnt: 0 }]);
+    const activeReferrals = Number(refCount.cnt || 0);
+    const effectiveL1Rate = activeReferrals > L1_CAP_THRESHOLD ? L1_RATE_AFTER_CAP : L1_RATE;
+
+    l1Payout = Math.round(transferAmount * effectiveL1Rate * 1_000_000) / 1_000_000;
 
     if (l1Payout > 0) {
       // Credit L1 referrer
@@ -128,7 +140,7 @@ export async function distributeReferralEarnings(
       // Audit
       await sql`
         INSERT INTO referral_earnings (earner_org_id, source_org_id, transfer_id, level, platform_fee_usd, earning_usd, earning_rate)
-        VALUES (${l1OrgId}, ${receiverOrgId}, ${transferId}, 1, ${transferAmount * PLATFORM_BASE_RATE}, ${l1Payout}, ${L1_RATE})
+        VALUES (${l1OrgId}, ${receiverOrgId}, ${transferId}, 1, ${transferAmount * PLATFORM_BASE_RATE}, ${l1Payout}, ${effectiveL1Rate})
       `;
 
       await sql`

@@ -119,3 +119,65 @@ referralRoutes.openapi(earningsRoute, async (c): Promise<any> => {
     })),
   });
 });
+
+// ── POST /payout — Request credit-to-cash payout via Stripe Connect ──
+
+const payoutRoute = createRoute({
+  method: "post", path: "/payout", tags: ["Referrals"],
+  summary: "Request payout of referral earnings to bank account via Stripe",
+  middleware: [requireScope("billing:write")],
+  request: {
+    body: { content: { "application/json": { schema: z.object({
+      amount_usd: z.number().min(10).max(10000), // minimum $10 payout
+    }) } } },
+  },
+  responses: { 200: { description: "Payout initiated", content: { "application/json": { schema: z.record(z.unknown()) } } }, ...errorResponses(400, 500) },
+});
+
+referralRoutes.openapi(payoutRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { amount_usd } = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Check balance
+  const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${user.org_id}`.catch(() => [{ balance_usd: 0 }]);
+  const balance = Number(bal.balance_usd || 0);
+  if (balance < amount_usd) {
+    return c.json({ error: `Insufficient balance. You have $${balance.toFixed(2)}, requested $${amount_usd.toFixed(2)}.` }, 400);
+  }
+
+  // Check minimum referral earnings (only allow payout of earned credits, not purchased)
+  const [earnings] = await sql`
+    SELECT COALESCE(SUM(earning_usd), 0) as total FROM referral_earnings WHERE earner_org_id = ${user.org_id}
+  `.catch(() => [{ total: 0 }]);
+  const totalEarned = Number(earnings.total || 0);
+  if (totalEarned < amount_usd) {
+    return c.json({ error: `Payout limited to referral earnings. You've earned $${totalEarned.toFixed(2)}.` }, 400);
+  }
+
+  // Deduct from balance
+  const deducted = await sql`
+    UPDATE org_credit_balance SET balance_usd = balance_usd - ${amount_usd}, updated_at = now()
+    WHERE org_id = ${user.org_id} AND balance_usd >= ${amount_usd}
+  `;
+  if (deducted.count === 0) return c.json({ error: "Balance changed, please retry." }, 400);
+
+  const payoutId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  const now = new Date().toISOString();
+
+  // Record payout request
+  await sql`
+    INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, amount_cents, balance_after_cents, created_at)
+    VALUES (${user.org_id}, 'burn', ${-amount_usd}, 0, ${'Payout request: $' + amount_usd.toFixed(2)}, ${payoutId}, 'payout', 0, 0, ${now})
+  `.catch(() => {});
+
+  // TODO: Initiate Stripe Connect transfer when Stripe Connect is set up
+  // For now, record the payout request for manual processing
+  return c.json({
+    payout_id: payoutId,
+    amount_usd,
+    status: "pending",
+    message: "Payout request submitted. Funds will be transferred to your bank account within 3-5 business days.",
+    note: "Minimum payout: $10. Only referral earnings (not purchased credits) are eligible for payout.",
+  });
+});

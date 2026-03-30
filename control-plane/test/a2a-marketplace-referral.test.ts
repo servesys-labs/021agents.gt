@@ -312,24 +312,30 @@ describe("Referral Program", () => {
   });
 
   describe("referral earnings distribution", () => {
-    it("pays L1 referrer 5% of transfer", async () => {
+    it("pays L1 referrer 3% of transfer (before cap)", async () => {
       const { L1_RATE } = await import("../src/logic/referrals");
-      expect(L1_RATE).toBe(0.05);
+      expect(L1_RATE).toBe(0.03);
       const payout = Math.round(10.0 * L1_RATE * 1_000_000) / 1_000_000;
-      expect(payout).toBe(0.5); // $10 transfer → $0.50 to L1
+      expect(payout).toBe(0.3); // $10 transfer → $0.30 to L1
     });
 
-    it("pays L2 referrer 2% of transfer", async () => {
+    it("pays L2 referrer 1% of transfer", async () => {
       const { L2_RATE } = await import("../src/logic/referrals");
-      expect(L2_RATE).toBe(0.02);
+      expect(L2_RATE).toBe(0.01);
       const payout = Math.round(10.0 * L2_RATE * 1_000_000) / 1_000_000;
-      expect(payout).toBe(0.2); // $10 transfer → $0.20 to L2
+      expect(payout).toBe(0.1); // $10 transfer → $0.10 to L2
     });
 
-    it("platform retains 3% when both L1 and L2 exist", async () => {
+    it("platform retains 6% when both L1 and L2 exist", async () => {
       const { L1_RATE, L2_RATE, PLATFORM_BASE_RATE } = await import("../src/logic/referrals");
       const platformRetained = PLATFORM_BASE_RATE - L1_RATE - L2_RATE;
-      expect(platformRetained).toBeCloseTo(0.03, 6);
+      expect(platformRetained).toBeCloseTo(0.06, 6);
+    });
+
+    it("L1 rate drops to 2% after 50 active referrals", async () => {
+      const { L1_RATE_AFTER_CAP, L1_CAP_THRESHOLD } = await import("../src/logic/referrals");
+      expect(L1_RATE_AFTER_CAP).toBe(0.02);
+      expect(L1_CAP_THRESHOLD).toBe(50);
     });
 
     it("distributes nothing when no referrer exists", async () => {
@@ -343,13 +349,21 @@ describe("Referral Program", () => {
     });
 
     it("distributes L1 only when no L2 exists", async () => {
-      // First call finds L1 referrer, second call (for L2) finds nothing
-      let callCount = 0;
+      let referralQueryCount = 0;
       const sql: any = (strings: TemplateStringsArray, ...values: unknown[]) => {
         const q = strings.join("?");
-        if (q.includes("SELECT") && q.includes("referrals")) {
-          callCount++;
-          if (callCount === 1) return Promise.resolve([{ referrer_org_id: "org-referrer-l1" }]);
+        // Idempotency check — no existing earnings
+        if (q.includes("SELECT") && q.includes("referral_earnings") && q.includes("transfer_id")) {
+          return Promise.resolve([]);
+        }
+        // Count active referrals for declining rate
+        if (q.includes("SELECT") && q.includes("COUNT") && q.includes("referrals")) {
+          return Promise.resolve([{ cnt: 5 }]); // 5 referrals = below cap
+        }
+        // Find referrer
+        if (q.includes("SELECT") && q.includes("referrals") && q.includes("referred_org_id")) {
+          referralQueryCount++;
+          if (referralQueryCount === 1) return Promise.resolve([{ referrer_org_id: "org-referrer-l1" }]);
           return Promise.resolve([]); // no L2
         }
         if (q.includes("INSERT") || q.includes("UPDATE")) return Object.assign(Promise.resolve([]), { count: 1 });
@@ -358,9 +372,9 @@ describe("Referral Program", () => {
 
       const { distributeReferralEarnings } = await import("../src/logic/referrals");
       const result = await distributeReferralEarnings(sql, "org-receiver", 10.0, "transfer-1");
-      expect(result.l1_payout).toBe(0.5); // 5% of $10
+      expect(result.l1_payout).toBe(0.3); // 3% of $10
       expect(result.l2_payout).toBe(0);
-      expect(result.total_payout).toBe(0.5);
+      expect(result.total_payout).toBe(0.3);
     });
   });
 });
@@ -462,11 +476,11 @@ describe("Marketplace", () => {
 });
 
 describe("End-to-End Fee Split", () => {
-  it("correctly splits a $10 transfer: 90% receiver, 5% L1, 2% L2, 3% platform", () => {
+  it("correctly splits a $10 transfer: 90% receiver, 3% L1, 1% L2, 6% platform", () => {
     const transferAmount = 10.0;
     const platformFeeRate = 0.10;
-    const l1Rate = 0.05;
-    const l2Rate = 0.02;
+    const l1Rate = 0.03;
+    const l2Rate = 0.01;
 
     const platformFee = Math.round(transferAmount * platformFeeRate * 1_000_000) / 1_000_000;
     const receiverAmount = transferAmount - platformFee;
@@ -476,9 +490,9 @@ describe("End-to-End Fee Split", () => {
 
     expect(platformFee).toBe(1.0);
     expect(receiverAmount).toBe(9.0);
-    expect(l1Payout).toBe(0.5);
-    expect(l2Payout).toBe(0.2);
-    expect(platformRetained).toBeCloseTo(0.3, 6);
+    expect(l1Payout).toBe(0.3);
+    expect(l2Payout).toBe(0.1);
+    expect(platformRetained).toBeCloseTo(0.6, 6);
 
     // Total should equal original amount
     const total = receiverAmount + l1Payout + l2Payout + platformRetained;
@@ -488,14 +502,14 @@ describe("End-to-End Fee Split", () => {
   it("handles micro-transactions without floating point drift", () => {
     const transferAmount = 0.01; // 1 cent
     const platformFee = Math.round(transferAmount * 0.10 * 1_000_000) / 1_000_000;
-    const l1 = Math.round(transferAmount * 0.05 * 1_000_000) / 1_000_000;
-    const l2 = Math.round(transferAmount * 0.02 * 1_000_000) / 1_000_000;
+    const l1 = Math.round(transferAmount * 0.03 * 1_000_000) / 1_000_000;
+    const l2 = Math.round(transferAmount * 0.01 * 1_000_000) / 1_000_000;
     const retained = platformFee - l1 - l2;
 
     expect(platformFee).toBe(0.001);
-    expect(l1).toBe(0.0005);
-    expect(l2).toBe(0.0002);
-    expect(retained).toBeCloseTo(0.0003, 6);
+    expect(l1).toBe(0.0003);
+    expect(l2).toBe(0.0001);
+    expect(retained).toBeCloseTo(0.0006, 6);
   });
 
   it("platform keeps full 10% when no referrers exist", () => {
@@ -504,8 +518,8 @@ describe("End-to-End Fee Split", () => {
     const referralPayout = 0; // no referrers
     const platformRetained = platformFee - referralPayout;
 
-    expect(platformRetained).toBe(0.5);
-    expect(platformRetained).toBe(platformFee); // keeps everything
+    expect(platformRetained).toBeCloseTo(0.5, 6);
+    expect(platformRetained).toBeCloseTo(platformFee, 6); // keeps everything
   });
 });
 
