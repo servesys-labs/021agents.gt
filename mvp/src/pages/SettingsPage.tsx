@@ -8,7 +8,7 @@ import { useToast } from "../components/ui/Toast";
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
 import { PRODUCT } from "../lib/product";
-import { Loader2 } from "lucide-react";
+import { Loader2, CreditCard, Sparkles, ExternalLink } from "lucide-react";
 
 type Tab = "account" | "organization" | "billing";
 
@@ -17,6 +17,14 @@ interface BillingInfo {
   total_spent_usd?: number;
   total_sessions?: number;
   plan?: string;
+}
+
+interface CreditPackage {
+  id: string;
+  name: string;
+  credits_usd: string;
+  price_usd: string;
+  bonus_pct: number;
 }
 
 export default function SettingsPage() {
@@ -34,6 +42,8 @@ export default function SettingsPage() {
 
   const [billing, setBilling] = useState<BillingInfo | null>(null);
   const [billingLoading, setBillingLoading] = useState(false);
+  const [packages, setPackages] = useState<CreditPackage[]>([]);
+  const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
 
   useEffect(() => {
     if (user?.name) setName(user.name);
@@ -57,16 +67,53 @@ export default function SettingsPage() {
       Promise.all([
         api.get<any>("/credits/balance").catch(() => ({})),
         api.get<any>("/billing/usage").catch(() => ({})),
-      ]).then(([credits, usage]) => {
+        api.get<any>("/credits/packages").catch(() => ({ packages: [] })),
+      ]).then(([credits, usage, pkgs]) => {
         setBilling({
           credits_remaining_usd: credits.balance_usd ?? credits.credits_remaining_usd ?? 0,
           total_spent_usd: usage.total_cost_usd ?? usage.total_spent_usd ?? 0,
           total_sessions: usage.total_sessions ?? 0,
           plan: credits.plan || "free",
         });
+        setPackages(pkgs.packages || []);
       }).finally(() => setBillingLoading(false));
     }
   }, [tab]);
+
+  const handleBuyCredits = async (packageId: string) => {
+    setCheckoutLoading(packageId);
+    try {
+      const { checkout_url } = await api.post<{ checkout_url: string; session_id: string }>("/credits/checkout", {
+        package_id: packageId,
+        success_url: `${window.location.origin}/settings?tab=billing&credit_purchase=success`,
+        cancel_url: `${window.location.origin}/settings?tab=billing&credit_purchase=canceled`,
+      });
+      if (checkout_url) {
+        window.location.href = checkout_url;
+      } else {
+        toast("Failed to create checkout session", "error");
+      }
+    } catch (err: any) {
+      toast(err.message || "Checkout failed", "error");
+    } finally {
+      setCheckoutLoading(null);
+    }
+  };
+
+  // Handle return from Stripe checkout
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("credit_purchase") === "success") {
+      toast("Credits purchased successfully!");
+      setTab("billing");
+      setBilling(null); // Force refresh
+      window.history.replaceState({}, "", "/settings?tab=billing");
+    } else if (params.get("credit_purchase") === "canceled") {
+      toast("Credit purchase canceled", "error");
+      window.history.replaceState({}, "", "/settings?tab=billing");
+    }
+    if (params.get("tab") === "billing") setTab("billing");
+  }, []);
 
   const saveAccount = async () => {
     setSaving(true);
@@ -177,6 +224,44 @@ export default function SettingsPage() {
                   <Badge variant="info" className="capitalize">{billing.plan}</Badge>
                 </div>
               </Card>
+
+              {/* Credit Packages */}
+              {packages.length > 0 && (
+                <div>
+                  <p className="text-sm font-medium text-text mb-3 flex items-center gap-2">
+                    <CreditCard size={16} /> Buy Credits
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {packages.map((pkg) => (
+                      <Card key={pkg.id} className="p-5 relative">
+                        {pkg.bonus_pct > 0 && (
+                          <Badge variant="success" className="absolute top-3 right-3">
+                            <Sparkles size={10} className="mr-1" /> +{pkg.bonus_pct}% bonus
+                          </Badge>
+                        )}
+                        <p className="text-sm font-semibold text-text">{pkg.name}</p>
+                        <p className="text-2xl font-bold text-text mt-2">${pkg.credits_usd}</p>
+                        <p className="text-xs text-text-secondary">in credits</p>
+                        <p className="text-sm text-text-secondary mt-3">
+                          Pay <span className="font-medium text-text">${pkg.price_usd}</span>
+                        </p>
+                        <Button
+                          className="w-full mt-4"
+                          size="sm"
+                          onClick={() => handleBuyCredits(pkg.id)}
+                          disabled={checkoutLoading !== null}
+                        >
+                          {checkoutLoading === pkg.id ? (
+                            <><Loader2 size={14} className="animate-spin" /> Redirecting...</>
+                          ) : (
+                            <><ExternalLink size={14} /> Buy now</>
+                          )}
+                        </Button>
+                      </Card>
+                    ))}
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <Card className="p-5">

@@ -216,20 +216,20 @@ stripeRoutes.openapi(webhookRoute, async (c): Promise<any> => {
     if (orgId && isCreditPurchase && packageId) {
       // ── Credit purchase fulfillment ───────────────────────
       const pkgs = await sql`
-        SELECT credits_cents, name FROM credit_packages WHERE id = ${packageId} LIMIT 1
+        SELECT credits_usd, name FROM credit_packages WHERE id = ${packageId} LIMIT 1
       `;
       if (pkgs.length > 0) {
         const pkg = pkgs[0] as any;
-        const creditsCents = Number(pkg.credits_cents);
+        const creditsUsd = Number(pkg.credits_usd);
         await addCredits(
           sql,
           orgId,
-          creditsCents,
+          creditsUsd,
           `Credit purchase: ${pkg.name}`,
           data.id || eventId,
           "stripe_checkout",
         );
-        console.log(`[stripe] Credited ${creditsCents} cents to org ${orgId} (package: ${packageId})`);
+        console.log(`[stripe] Credited $${creditsUsd} to org ${orgId} (package: ${packageId})`);
       }
     } else if (orgId) {
       // ── Subscription checkout (existing flow) ─────────────
@@ -261,7 +261,7 @@ stripeRoutes.openapi(webhookRoute, async (c): Promise<any> => {
 
       // If invoice has credit metadata, allocate credits for subscription renewals
       const invoiceMeta = data.subscription_details?.metadata || data.lines?.data?.[0]?.metadata || {};
-      const invoiceCredits = Number(invoiceMeta.credits_cents || 0);
+      const invoiceCredits = Number(invoiceMeta.credits_usd || invoiceMeta.credits_cents ? Number(invoiceMeta.credits_cents) / 100 : 0);
       if (invoiceCredits > 0 && orgs[0].org_id) {
         await addCredits(
           sql,
