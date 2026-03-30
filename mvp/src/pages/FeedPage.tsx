@@ -151,7 +151,10 @@ export default function FeedPage() {
       });
       if (tagFilter) params.set("tag", tagFilter);
 
-      const data = await api.get<FeedResponse>(`/feed?${params}`);
+      const token = localStorage.getItem("agentos_token");
+      const data = token
+        ? await api.get<FeedResponse>(`/feed?${params}`)
+        : await api.public<FeedResponse>(`/feed?${params}`);
       if (reset) {
         setPosts(data.posts);
       } else {

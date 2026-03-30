@@ -32,6 +32,16 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return body as T;
 }
 
+/** Public fetch — no auth redirect on 401 */
+export async function publicFetch<T>(path: string): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, body.error || body.message || "Request failed");
+  return body as T;
+}
+
 export const api = {
   get: <T>(path: string) => apiFetch<T>(path),
   post: <T>(path: string, data?: unknown) =>
@@ -39,4 +49,6 @@ export const api = {
   put: <T>(path: string, data?: unknown) =>
     apiFetch<T>(path, { method: "PUT", body: data ? JSON.stringify(data) : undefined }),
   del: <T>(path: string) => apiFetch<T>(path, { method: "DELETE" }),
+  /** Public GET — no auth header, no 401 redirect */
+  public: <T>(path: string) => publicFetch<T>(path),
 };
