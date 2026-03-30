@@ -426,7 +426,29 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
         // Persist to DB for audit (use actual target org, not caller's)
         const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
+        const transferId = paymentReceipt?.transfer_id || "";
+        const transferAmount = transferId
+          ? await (async () => {
+              try {
+                const [t] = await sql`SELECT amount_usd FROM a2a_tasks WHERE transfer_id = ${transferId} LIMIT 1`;
+                return Number(t?.amount_usd) || 0;
+              } catch { return 0; }
+            })()
+          : 0;
         persistA2ATask(c.env, task, user.org_id, targetOrgId, paymentReceipt?.transfer_id);
+
+        // Write billing record for A2A transaction (caller pays)
+        if (transferAmount > 0) {
+          try {
+            await sql`
+              INSERT INTO billing_records (org_id, agent_name, cost_type, model, total_cost_usd, inference_cost_usd, session_id, trace_id, description, created_at)
+              VALUES (${user.org_id}, ${targetAgentName}, 'a2a_task', 'a2a', ${transferAmount}, ${transferAmount}, ${taskId}, ${taskId}, ${'A2A task to ' + targetAgentName}, now())
+              ON CONFLICT DO NOTHING
+            `;
+          } catch (err) {
+            console.error("[a2a] Billing record write failed:", err);
+          }
+        }
 
         // Item 5: Auto-rate completed task (default 4/5 = good)
         // Item 8: Increment task counter on marketplace listing

@@ -795,6 +795,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const inputText = String(data.input || "");
       const agentName = data.agent_name || this.state.config.agentName || "agentos";
 
+      // Pre-run credit check — reject early if org has no credits
+      const runOrgId = data.org_id || this.state.config.orgId || "";
+      if (runOrgId && this.env.HYPERDRIVE) {
+        try {
+          const { getDb } = await import("./runtime/db");
+          const sql = await getDb(this.env.HYPERDRIVE);
+          const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${runOrgId}`;
+          if (!bal || Number(bal.balance_usd) <= 0) {
+            return Response.json({
+              error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+              code: "insufficient_credits",
+            }, { status: 402 });
+          }
+        } catch {} // Don't block on credit check failure
+      }
+
       // ── Workflow path (durable, crash-safe) ──
       if (this.env.AGENT_RUN_WORKFLOW && this.env.AGENT_PROGRESS_KV) {
         const history = this._loadConversationHistory(24);
@@ -867,6 +883,40 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 step_count: result.turns || 1, action_count: result.tool_calls || 0,
                 wall_clock_seconds: 0, cost_total_usd: result.cost_usd || 0,
               }).catch(() => {});
+
+              // Deduct credits (critical: sync /run path must bill)
+              const costUsd = Number(result.cost_usd) || 0;
+              const orgId = data.org_id || "";
+              const sessionId = result.session_id || "";
+              if (costUsd > 0 && orgId) {
+                const { getDb } = await import("./runtime/db");
+                const sql = await getDb(this.env.HYPERDRIVE);
+                try {
+                  const dup = await sql`SELECT 1 FROM credit_transactions WHERE session_id = ${sessionId} AND type = 'burn' LIMIT 1`;
+                  if (dup.length === 0) {
+                    const now = new Date().toISOString();
+                    const updated = await sql`
+                      UPDATE org_credit_balance
+                      SET balance_usd = balance_usd - ${costUsd},
+                          lifetime_consumed_usd = lifetime_consumed_usd + ${costUsd},
+                          last_deduction_at = ${now}, updated_at = ${now}
+                      WHERE org_id = ${orgId} AND balance_usd >= ${costUsd}
+                    `;
+                    if (updated.count > 0) {
+                      const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`;
+                      await sql`
+                        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, agent_name, session_id, created_at)
+                        VALUES (${orgId}, 'burn', ${-costUsd}, ${Number(bal.balance_usd)}, ${'Agent run: ' + agentName}, ${agentName}, ${sessionId}, ${now})
+                      `;
+                      console.log(`[run-billing] Deducted $${costUsd} from org ${orgId}`);
+                    } else {
+                      console.error(`[run-billing] Insufficient credits for org ${orgId}, cost $${costUsd}`);
+                    }
+                  }
+                } catch (err: any) {
+                  console.error("[run-billing] Credit deduction failed:", err.message);
+                }
+              }
             }
 
             return Response.json({ status: "completed", success: true, ...result });
@@ -949,6 +999,55 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                       // Save conversation
                       self._appendConversationMessage("user", inputText, data.channel || "sse");
                       self._appendConversationMessage("assistant", evt.output || "", data.channel || "sse");
+
+                      // Write billing record + deduct credits (critical: SSE path must bill)
+                      const costUsd = Number(evt.cost_usd) || 0;
+                      const orgId = data.org_id || self.state.config?.orgId || "";
+                      if (costUsd > 0 && orgId && self.env.HYPERDRIVE) {
+                        (async () => {
+                          try {
+                            const { writeBillingRecord, getDb } = await import("./runtime/db");
+                            // 1. Write billing record
+                            await writeBillingRecord(self.env.HYPERDRIVE, {
+                              session_id: evt.session_id || "",
+                              org_id: orgId,
+                              agent_name: agentName,
+                              model: "workflow",
+                              input_tokens: 0,
+                              output_tokens: 0,
+                              cost_usd: costUsd,
+                              plan: "standard",
+                              trace_id: evt.trace_id || "",
+                            });
+                            // 2. Deduct credits (atomic SQL)
+                            const sql = await getDb(self.env.HYPERDRIVE);
+                            const sessionId = evt.session_id || "";
+                            // Idempotency: check if already deducted for this session
+                            const dup = await sql`SELECT 1 FROM credit_transactions WHERE session_id = ${sessionId} AND type = 'burn' LIMIT 1`;
+                            if (dup.length > 0) return; // Already billed
+                            const now = new Date().toISOString();
+                            const updated = await sql`
+                              UPDATE org_credit_balance
+                              SET balance_usd = balance_usd - ${costUsd},
+                                  lifetime_consumed_usd = lifetime_consumed_usd + ${costUsd},
+                                  last_deduction_at = ${now}, updated_at = ${now}
+                              WHERE org_id = ${orgId} AND balance_usd >= ${costUsd}
+                            `;
+                            if (updated.count === 0) {
+                              console.error(`[sse-billing] Insufficient credits for org ${orgId}, cost $${costUsd}`);
+                              return;
+                            }
+                            const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`;
+                            await sql`
+                              INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, agent_name, session_id, created_at)
+                              VALUES (${orgId}, 'burn', ${-costUsd}, ${Number(bal.balance_usd)}, ${'Agent run: ' + agentName}, ${agentName}, ${sessionId}, ${now})
+                            `;
+                            console.log(`[sse-billing] Deducted $${costUsd} from org ${orgId} (session: ${sessionId})`);
+                          } catch (err: any) {
+                            console.error("[sse-billing] Billing failed:", err.message);
+                          }
+                        })();
+                      }
                     }
                     if (evt.type === "error") done = true;
                   }

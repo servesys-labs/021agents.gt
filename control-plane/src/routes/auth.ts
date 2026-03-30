@@ -414,6 +414,23 @@ Be concise, helpful, and action-oriented. Show results, not process.`,
     console.warn("[auth/signup] org_settings insert failed:", err);
   }
 
+  // Seed free tier credits ($1.00 — enough for ~10-50 agent runs)
+  try {
+    const FREE_TIER_USD = 1.00;
+    await sql`
+      INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
+      VALUES (${orgId}, ${FREE_TIER_USD}, ${FREE_TIER_USD}, now())
+      ON CONFLICT (org_id) DO NOTHING
+    `;
+    await sql`
+      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+      VALUES (${orgId}, 'bonus', ${FREE_TIER_USD}, ${FREE_TIER_USD}, 'Welcome bonus — free tier credits', 'signup', 'signup_bonus', now())
+    `;
+    console.log(`[auth/signup] Seeded $${FREE_TIER_USD} free credits for org ${orgId}`);
+  } catch (err) {
+    console.warn("[auth/signup] Free credit seed failed:", err);
+  }
+
   // Create referral relationship (code already validated + consumed above)
   if (validatedReferrerOrgId && validatedReferrerOrgId !== orgId) {
     try {

@@ -239,8 +239,13 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
       try {
         const costUsd = Number(result.cost_usd || 0);
         const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-        await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
-      } catch {}
+        const deductResult = await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+        if (!deductResult.success) {
+          console.error(`[billing] FAILED to deduct $${costUsd} from org ${orgId} — insufficient credits (balance: $${deductResult.balance_after_usd})`);
+        }
+      } catch (err: any) {
+        console.error(`[billing] Credit deduction error for org ${orgId}: ${err.message}`);
+      }
     }
 
     return c.json(result, resp.status as 200 | 400 | 401 | 403 | 404 | 500 | 502 | 503);
@@ -381,8 +386,12 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
         try {
           const costUsd = Number(itemCostUsd || 0);
           const deductSql = await getDbForOrg(c.env.HYPERDRIVE, batchOrgId);
-          deductCredits(deductSql, batchOrgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || "")).catch(() => {});
-        } catch {}
+          deductCredits(deductSql, batchOrgId, costUsd, `Batch run: ${agentName}`, agentName, String(result.session_id || ""))
+            .then(r => { if (!r.success) console.error(`[billing] Batch deduction failed for org ${batchOrgId}: insufficient credits`); })
+            .catch(err => console.error(`[billing] Batch deduction error: ${err.message}`));
+        } catch (err: any) {
+          console.error(`[billing] Batch billing setup error: ${err.message}`);
+        }
       } else {
         results.push({
           error: String(settled.reason),
@@ -630,11 +639,16 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
               const costUsd = Number(doneEvent.cost_usd || 0);
               if (costUsd > 0) {
                 const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgIdForBilling);
-                await deductCredits(deductSql, orgIdForBilling, costUsd,
+                const deductResult = await deductCredits(deductSql, orgIdForBilling, costUsd,
                   `Agent run: ${agentNameForBilling}`, agentNameForBilling,
                   String(doneEvent.session_id || ""));
+                if (!deductResult.success) {
+                  console.error(`[sse-billing] FAILED deduction $${costUsd} from org ${orgIdForBilling} — insufficient credits`);
+                }
               }
-            } catch {} // non-blocking — don't break the stream
+            } catch (err: any) {
+              console.error(`[sse-billing] Credit deduction error: ${err.message}`);
+            }
             buffer = ""; // stop scanning after done
           }
         }
