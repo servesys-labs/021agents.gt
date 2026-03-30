@@ -11,6 +11,7 @@ export interface GatewayConfig {
   cloudflareAccountId?: string;
   aiGatewayId?: string;
   cloudflareApiToken?: string;
+  aiGatewayToken?: string;
   openrouterApiKey?: string;
 }
 
@@ -40,19 +41,22 @@ export async function callLLMGateway(
   options: LLMCallOptions,
 ): Promise<LLMCallResult> {
   const model = options.model || "anthropic/claude-sonnet-4-6";
-  const { cloudflareAccountId, aiGatewayId, cloudflareApiToken, openrouterApiKey } = config;
+  const { cloudflareAccountId, aiGatewayId, cloudflareApiToken, aiGatewayToken, openrouterApiKey } = config;
 
   // Determine endpoint and auth
   const useGateway = !!(cloudflareAccountId && aiGatewayId);
+  const isWorkersAI = model.startsWith("@cf/") || model.startsWith("workers-ai/");
+  const providerPath = isWorkersAI ? "compat" : "openrouter";
   const endpoint = useGateway
-    ? `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/openai/chat/completions`
+    ? `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/${providerPath}/chat/completions`
     : "https://openrouter.ai/api/v1/chat/completions";
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
 
   if (useGateway) {
-    if (cloudflareApiToken) {
-      headers["cf-aig-authorization"] = `Bearer ${cloudflareApiToken}`;
+    const cfToken = aiGatewayToken || cloudflareApiToken || "";
+    if (cfToken) {
+      headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
     }
     if (options.metadata) {
       headers["cf-aig-metadata"] = JSON.stringify(options.metadata);
@@ -105,6 +109,7 @@ export function gatewayConfigFromEnv(env: any): GatewayConfig {
     cloudflareAccountId: env.CLOUDFLARE_ACCOUNT_ID || "",
     aiGatewayId: env.AI_GATEWAY_ID || "",
     cloudflareApiToken: env.CLOUDFLARE_API_TOKEN || "",
+    aiGatewayToken: env.AI_GATEWAY_TOKEN || "",
     openrouterApiKey: env.OPENROUTER_API_KEY || "",
   };
 }
