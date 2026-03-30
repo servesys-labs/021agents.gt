@@ -26,6 +26,7 @@ export default function AgentPlaygroundPage() {
   const [pageError, setPageError] = useState<string | null>(null);
 
   const { messages, streaming, sessionMeta, send, stop, clear, loadHistory } = useAgentStream();
+  const [metaOpen, setMetaOpen] = useState(false);
 
   const fetchAgent = async () => {
     setPageLoading(true);
@@ -76,8 +77,6 @@ export default function AgentPlaygroundPage() {
       </div>
     );
   }
-
-  const [metaOpen, setMetaOpen] = useState(false);
 
   if (!agent) return <AgentNotFound />;
 
