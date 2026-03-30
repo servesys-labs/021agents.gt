@@ -125,13 +125,31 @@ function clampSandboxTimeout(timeoutSeconds?: number): number {
 function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // getSandbox returns immediately — container only starts on first operation.
   // Same sandboxId = same container = warm after first call.
+  // Per CF Containers docs: https://developers.cloudflare.com/containers/
   const raw = getSandbox(env.SANDBOX, sandboxId, {
-    sleepAfter: "10m",  // keep container warm for 10 min of inactivity
-  });
+    sleepAfter: "10m",
+    // Security: disable outbound internet for LLM-generated code.
+    // Agent tools that need HTTP (web-search, browse) run in the parent Worker.
+    enableInternet: false,
+  } as any);
 
   return {
-    exec: (cmd: string, opts?: any) => raw.exec(cmd, opts),
-    writeFile: (path: string, content: string) => raw.writeFile(path, content),
+    exec: async (cmd: string, opts?: any) => {
+      try {
+        return await raw.exec(cmd, opts);
+      } catch (err: any) {
+        console.error(`[sandbox] exec failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
+        throw err;
+      }
+    },
+    writeFile: async (path: string, content: string) => {
+      try {
+        return await raw.writeFile(path, content);
+      } catch (err: any) {
+        console.error(`[sandbox] writeFile failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
+        throw err;
+      }
+    },
     readFile: (path: string) =>
       (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || ""),
   };
@@ -1177,21 +1195,21 @@ async function dispatch(
 
                 // Audit trail — sender
                 await sql`
-                  INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, amount_cents, balance_after_cents, created_at)
-                  VALUES (${fromOrg}, 'transfer_out', ${-amountUsd}, 0, ${'A2A payment: ' + (args.agent_name || targetUrl)}, ${transferId}, 'a2a_payment', 0, 0, ${now})
+                  INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+                  VALUES (${fromOrg}, 'transfer_out', ${-amountUsd}, 0, ${'A2A payment: ' + (args.agent_name || targetUrl)}, ${transferId}, 'a2a_payment', ${now})
                 `.catch(() => {});
 
                 // Audit trail — receiver
                 await sql`
-                  INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, amount_cents, balance_after_cents, created_at)
-                  VALUES (${paymentAddress}, 'transfer_in', ${receiverAmount}, 0, ${'A2A earning: ' + (args.agent_name || '')}, ${transferId}, 'a2a_payment', 0, 0, ${now})
+                  INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+                  VALUES (${paymentAddress}, 'transfer_in', ${receiverAmount}, 0, ${'A2A earning: ' + (args.agent_name || '')}, ${transferId}, 'a2a_payment', ${now})
                 `.catch(() => {});
 
                 // Platform fee
                 if (platformFee > 0) {
                   await sql`
-                    INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, amount_cents, balance_after_cents, created_at)
-                    VALUES ('platform', 'transfer_in', ${platformFee}, 0, ${'Platform fee: A2A'}, ${transferId}, 'marketplace_fee', 0, 0, ${now})
+                    INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+                    VALUES ('platform', 'transfer_in', ${platformFee}, 0, ${'Platform fee: A2A'}, ${transferId}, 'marketplace_fee', ${now})
                   `.catch(() => {});
                 }
 
@@ -1861,7 +1879,7 @@ async function dispatch(
         try {
           const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${orgId} AND is_active = 1`;
           const current = countRows[0]?.cnt || 0;
-          const limitRows = await sql`SELECT max_agents FROM org_settings WHERE org_id = ${orgId} LIMIT 1`.catch(() => []);
+          const limitRows = await sql`SELECT (limits_json->>'max_agents')::int as max_agents FROM org_settings WHERE org_id = ${orgId} LIMIT 1`.catch(() => []);
           const maxAgents = limitRows[0]?.max_agents || 50;
           if (current >= maxAgents) {
             return JSON.stringify({ error: `Org has reached agent limit (${maxAgents}). Delete unused agents or upgrade plan.` });
@@ -2046,8 +2064,8 @@ async function dispatch(
       const trials = Number(args.trials) || 1;
       try {
         await sql`
-          INSERT INTO eval_runs (id, agent_name, org_id, status, trials, created_at)
-          VALUES (${runId}, ${agentName}, ${orgId}, 'pending', ${trials}, ${new Date().toISOString()})
+          INSERT INTO eval_runs (id, agent_name, org_id, total_trials, created_at)
+          VALUES (${runId}, ${agentName}, ${orgId}, ${trials}, ${new Date().toISOString()})
         `;
         return JSON.stringify({ eval_run_id: runId, agent_name: agentName, status: "pending", trials });
       } catch (err: any) {
@@ -2131,8 +2149,8 @@ async function dispatch(
       const timeBudget = Number(args.time_budget) || 300;
       try {
         await sql`
-          INSERT INTO eval_runs (id, agent_name, org_id, status, trials, created_at)
-          VALUES (${runId}, ${agentName}, ${orgId}, 'autoresearch_pending', ${maxIter}, ${new Date().toISOString()})
+          INSERT INTO eval_runs (id, agent_name, org_id, total_trials, created_at)
+          VALUES (${runId}, ${agentName}, ${orgId}, ${maxIter}, ${new Date().toISOString()})
         `;
         return JSON.stringify({ run_id: runId, agent_name: agentName, max_iterations: maxIter, time_budget_seconds: timeBudget, status: "pending" });
       } catch (err: any) {
@@ -2235,8 +2253,8 @@ async function dispatch(
         if (action === "list") {
           const agentName = args.agent_name ? String(args.agent_name) : null;
           const rows = agentName
-            ? await sql`SELECT id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT 50`
-            : await sql`SELECT id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+            ? await sql`SELECT issue_id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} AND agent_name = ${agentName} ORDER BY created_at DESC LIMIT 50`
+            : await sql`SELECT issue_id, agent_name, title, severity, status, created_at FROM issues WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -2245,7 +2263,7 @@ async function dispatch(
           const desc = String(args.description || "");
           const agentName = String(args.agent_name || "");
           await sql`
-            INSERT INTO issues (id, org_id, agent_name, title, description, severity, status, created_at)
+            INSERT INTO issues (issue_id, org_id, agent_name, title, description, severity, status, created_at)
             VALUES (${issueId}, ${orgId}, ${agentName}, ${title}, ${desc}, 'medium', 'open', ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, issue_id: issueId });
@@ -2253,7 +2271,7 @@ async function dispatch(
         if (action === "auto-fix") {
           const issueId = String(args.issue_id || "");
           if (!issueId) return "auto-fix requires issue_id";
-          await sql`UPDATE issues SET status = 'resolved', resolved_at = ${new Date().toISOString()} WHERE id = ${issueId} AND org_id = ${orgId}`;
+          await sql`UPDATE issues SET status = 'resolved', resolved_at = ${new Date().toISOString()} WHERE issue_id = ${issueId} AND org_id = ${orgId}`;
           return JSON.stringify({ resolved: true, issue_id: issueId });
         }
         return `Unknown action: ${action}. Use list, create, or auto-fix.`;
@@ -2382,7 +2400,7 @@ async function dispatch(
       const action = String(args.action || "list");
       try {
         if (action === "list") {
-          const rows = await sql`SELECT id, agent_name, metric, threshold, created_at FROM slo_definitions WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT slo_id, agent_name, metric, threshold, created_at FROM slo_definitions WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -2391,14 +2409,14 @@ async function dispatch(
           const threshold = Number(args.threshold) || 0.95;
           const sloId = crypto.randomUUID().slice(0, 12);
           await sql`
-            INSERT INTO slo_definitions (id, org_id, agent_name, metric, threshold, created_at)
+            INSERT INTO slo_definitions (slo_id, org_id, agent_name, metric, threshold, created_at)
             VALUES (${sloId}, ${orgId}, ${agentName}, ${metric}, ${threshold}, ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, slo_id: sloId, metric, threshold });
         }
         if (action === "check") {
           const agentName = String(args.agent_name || "");
-          const slos = await sql`SELECT id, metric, threshold FROM slo_definitions WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
+          const slos = await sql`SELECT slo_id, metric, threshold FROM slo_definitions WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
           return JSON.stringify({ agent_name: agentName, slos, message: "Compare thresholds against session stats from view-traces or db-query" });
         }
         return `Unknown action: ${action}. Use list, create, or check.`;
@@ -2444,9 +2462,9 @@ async function dispatch(
           const value = String(args.value || "");
           if (!name || !value) return "create requires name and value";
           await sql`
-            INSERT INTO secrets (name, org_id, encrypted_value, created_at)
+            INSERT INTO secrets (name, org_id, value_encrypted, created_at)
             VALUES (${name}, ${orgId}, ${value}, ${new Date().toISOString()})
-            ON CONFLICT (name, org_id) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value
+            ON CONFLICT (name, org_id) DO UPDATE SET value_encrypted = EXCLUDED.value_encrypted
           `;
           return JSON.stringify({ stored: true, name });
         }
@@ -2454,7 +2472,7 @@ async function dispatch(
           const name = String(args.name || "");
           const value = String(args.value || "");
           if (!name || !value) return "rotate requires name and new value";
-          await sql`UPDATE secrets SET encrypted_value = ${value} WHERE name = ${name} AND org_id = ${orgId}`;
+          await sql`UPDATE secrets SET value_encrypted = ${value} WHERE name = ${name} AND org_id = ${orgId}`;
           return JSON.stringify({ rotated: true, name });
         }
         if (action === "delete") {
@@ -2512,17 +2530,18 @@ async function dispatch(
       const action = String(args.action || "list");
       try {
         if (action === "list") {
-          const rows = await sql`SELECT id, name, budget_limit_usd, blocked_tools_json, created_at FROM policy_templates WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT policy_id, name, policy_json, created_at FROM policy_templates WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
           const name = String(args.name || "default");
           const budgetLimit = Number(args.budget_limit_usd) || 10.0;
-          const blockedTools = Array.isArray(args.blocked_tools) ? JSON.stringify(args.blocked_tools) : "[]";
+          const blockedTools = Array.isArray(args.blocked_tools) ? args.blocked_tools : [];
+          const policyJson = JSON.stringify({ budget_limit_usd: budgetLimit, blocked_tools: blockedTools });
           const policyId = crypto.randomUUID().slice(0, 12);
           await sql`
-            INSERT INTO policy_templates (id, org_id, name, budget_limit_usd, blocked_tools_json, created_at)
-            VALUES (${policyId}, ${orgId}, ${name}, ${budgetLimit}, ${blockedTools}, ${new Date().toISOString()})
+            INSERT INTO policy_templates (policy_id, org_id, name, policy_json, created_at)
+            VALUES (${policyId}, ${orgId}, ${name}, ${policyJson}, ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, policy_id: policyId, name, budget_limit_usd: budgetLimit });
         }
@@ -2541,7 +2560,7 @@ async function dispatch(
       const action = String(args.action || "list");
       try {
         if (action === "list") {
-          const rows = await sql`SELECT id, table_name, retention_days, created_at FROM retention_policies WHERE org_id = ${orgId} ORDER BY table_name`;
+          const rows = await sql`SELECT policy_id, resource_type, retention_days, created_at FROM retention_policies WHERE org_id = ${orgId} ORDER BY resource_type`;
           return JSON.stringify(rows);
         }
         if (action === "apply") {
@@ -2562,7 +2581,7 @@ async function dispatch(
       const action = String(args.action || "list");
       try {
         if (action === "list") {
-          const rows = await sql`SELECT id, name, status, steps_json, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT workflow_id, name, status, steps_json, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -2571,7 +2590,7 @@ async function dispatch(
           const steps = Array.isArray(args.steps) ? JSON.stringify(args.steps) : "[]";
           const wfId = crypto.randomUUID().slice(0, 12);
           await sql`
-            INSERT INTO workflows (id, org_id, name, steps_json, status, created_at)
+            INSERT INTO workflows (workflow_id, org_id, name, steps_json, status, created_at)
             VALUES (${wfId}, ${orgId}, ${name}, ${steps}, 'draft', ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, workflow_id: wfId, name });
@@ -2610,7 +2629,7 @@ async function dispatch(
       const action = String(args.action || "list");
       try {
         if (action === "list") {
-          const rows = await sql`SELECT id, name, url, status, created_at FROM mcp_servers WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT server_id, name, url, status, created_at FROM mcp_servers WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "register") {
@@ -2619,7 +2638,7 @@ async function dispatch(
           if (!name || !url) return "register requires name and url";
           const mcpId = crypto.randomUUID().slice(0, 12);
           await sql`
-            INSERT INTO mcp_servers (id, org_id, name, url, status, created_at)
+            INSERT INTO mcp_servers (server_id, org_id, name, url, status, created_at)
             VALUES (${mcpId}, ${orgId}, ${name}, ${url}, 'active', ${new Date().toISOString()})
           `;
           return JSON.stringify({ registered: true, mcp_id: mcpId, name, url });
@@ -2891,7 +2910,7 @@ async function dispatch(
         // Helper: query SLO breach status
         const querySlos = async () => {
           const slos = await sql`
-            SELECT id, metric, threshold FROM slo_definitions
+            SELECT slo_id, metric, threshold FROM slo_definitions
             WHERE org_id = ${orgId} AND agent_name = ${agentName}
           `;
           if (slos.length === 0) return { slos: [], breaches: [] };

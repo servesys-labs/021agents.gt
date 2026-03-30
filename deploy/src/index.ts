@@ -26,7 +26,10 @@ import {
 // streamRun removed — all execution goes through Cloudflare Workflows
 import { getCircuitStatus } from "./runtime/tools";
 
-// Re-export Sandbox so Cloudflare can discover the Durable Object class
+// Re-export Sandbox so Cloudflare can discover the Durable Object class.
+// Lifecycle hooks (onStart/onStop/onError) and internet control are configured
+// via getSafeSandbox() in runtime/tools.ts where we control the container behavior.
+// Per CF Containers docs: https://developers.cloudflare.com/containers/
 export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
 
 // Re-export Workflow so Cloudflare can discover it
@@ -4088,7 +4091,7 @@ export default {
               const agentName = String(body.params?.agent_name || "");
               const limit = Math.min(Number(body.params?.limit) || 20, 100);
               return await tx`
-                SELECT version_number, created_by, created_at FROM agent_versions
+                SELECT version, created_by, created_at FROM agent_versions
                 WHERE agent_name = ${agentName}
                 ORDER BY created_at DESC LIMIT ${limit}
               `;

@@ -472,9 +472,9 @@ async function executeTool(
       // Snapshot version
       try {
         await sql`
-          INSERT INTO agent_versions (agent_name, version_number, config_json, created_by, created_at)
+          INSERT INTO agent_versions (agent_name, version, config_json, created_by, created_at)
           VALUES (${ctx.agentName}, ${newVersion}, ${JSON.stringify(config)}, ${"meta-agent"}, now())
-          ON CONFLICT (agent_name, version_number) DO UPDATE
+          ON CONFLICT (agent_name, version) DO UPDATE
           SET config_json = ${JSON.stringify(config)}, created_by = ${"meta-agent"}
         `;
       } catch {}
@@ -595,7 +595,7 @@ async function executeTool(
       let totalCost = 0;
       try {
         const costRows = await sql`
-          SELECT COALESCE(SUM(cost_usd), 0) as total_cost FROM billing_records
+          SELECT COALESCE(SUM(total_cost_usd), 0) as total_cost FROM billing_records
           WHERE agent_name = ${ctx.agentName}
             AND org_id = ${ctx.orgId}
             AND created_at > now() - ${interval}::interval
@@ -798,12 +798,11 @@ async function executeTool(
       let recentTopics: string[] = [];
       try {
         const turnRows = await sql`
-          SELECT content FROM turns
-          WHERE agent_name = ${ctx.agentName}
-            AND org_id = ${ctx.orgId}
-            AND role = 'user'
-            AND created_at > now() - ${interval}::interval
-          ORDER BY created_at DESC LIMIT 20
+          SELECT t.llm_content as content FROM turns t
+          JOIN sessions s ON t.session_id = s.session_id
+          WHERE s.agent_name = ${ctx.agentName}
+            AND s.org_id = ${ctx.orgId}
+          ORDER BY t.created_at DESC LIMIT 50
         `;
         recentTopics = turnRows
           .map((r: any) => String(r.content || "").slice(0, 100))

@@ -40,12 +40,17 @@
   "worker_loaders": [{ "binding": "LOADER" }],
 
   // Sandbox SDK (Containers) — Python/Bash execution environment
+  // "basic" = 1/4 vCPU, 1 GiB RAM, 4 GB disk — sufficient for numpy/pandas/matplotlib workloads
+  // "lite" (256 MiB) was OOMing on heavy data analysis; basic provides 4x headroom
   "containers": [
     {
       "class_name": "AgentSandbox",
       "image": "./sandbox.Dockerfile",
-      "instance_type": "lite",
-      "max_instances": 10
+      "instance_type": "basic",
+      "max_instances": 50,
+      // Rolling deploy: 10% first, wait 5 min, then 100% — prevents killing active sandboxes
+      "rollout_step_percentage": [10, 100],
+      "rollout_active_grace_period": 300
     }
   ],
 

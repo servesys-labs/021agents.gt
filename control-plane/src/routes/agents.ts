@@ -162,9 +162,9 @@ async function snapshotVersion(
 ): Promise<void> {
   try {
     await sql`
-      INSERT INTO agent_versions (agent_name, version_number, config_json, created_by, created_at)
+      INSERT INTO agent_versions (agent_name, version, config_json, created_by, created_at)
       VALUES (${agentName}, ${version}, ${JSON.stringify(configJson)}, ${createdBy}, now())
-      ON CONFLICT (agent_name, version_number) DO UPDATE
+      ON CONFLICT (agent_name, version) DO UPDATE
       SET config_json = ${JSON.stringify(configJson)}, created_by = ${createdBy}
     `;
   } catch {
@@ -322,7 +322,7 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     try {
       const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${user.org_id} AND is_active = true`;
       const current = countRows[0]?.cnt || 0;
-      const limitRows = await sql`SELECT max_agents FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1`;
+      const limitRows = await sql`SELECT (limits_json->>'max_agents')::int as max_agents FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1`;
       const maxAgents = limitRows[0]?.max_agents || 3;
       if (current >= maxAgents) {
         return c.json({
