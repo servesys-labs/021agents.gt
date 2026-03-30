@@ -597,7 +597,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
           OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
           DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
           DO_SQL: this.sql.bind(this), DO_SESSION_ID: this.name,
         };
 
@@ -688,7 +688,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
         DO_SQL: this.sql.bind(this),
         DO_SESSION_ID: this.name,
       };
@@ -901,7 +901,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         const { loadAgentConfig } = await import("./runtime/db");
         const dbConfig = await loadAgentConfig(this.env.HYPERDRIVE, data.agent_name || config.agentName || "agentos", {
           provider: config.provider || "openrouter",
-          model: config.model || "@cf/moonshotai/kimi-k2.5",
+          model: config.model || "openai/gpt-5.4-mini",
           plan: config.plan || "standard",
         });
         // Merge DB config into DO state — DB takes priority for tools, system_prompt
@@ -937,7 +937,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
         DO_SQL: this.sql.bind(this),
         DO_SESSION_ID: this.name,
       };
@@ -1039,7 +1039,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
         DO_SQL: this.sql.bind(this),
         DO_SESSION_ID: this.name,
       };
@@ -1231,7 +1231,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
           OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
           DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "@cf/moonshotai/kimi-k2.5",
+          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
           DO_SQL: this.sql.bind(this),
           DO_SESSION_ID: this.name,
         };

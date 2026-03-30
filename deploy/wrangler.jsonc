@@ -103,6 +103,6 @@
   "vars": {
     "DEFAULT_PLAN": "standard",
     "DEFAULT_PROVIDER": "openrouter",
-    "DEFAULT_MODEL": "@cf/moonshotai/kimi-k2.5"
+    "DEFAULT_MODEL": "openai/gpt-5.4-mini"
   }
 }
