@@ -15,14 +15,11 @@ import {
   Connection,
   callable,
   routeAgentRequest,
-  getAgentByName,
-  type StreamingResponse,
 } from "agents";
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import {
   loadRuntimeEventsPage, replayOtelEventsAtCursor, buildRuntimeRunTree,
   writeEvalRun, writeEvalTrial, listEvalRuns, getEvalRun, listEvalTrialsByRun,
-  autoRegisterTools,
   createWebSocketSendWithBackpressure,
   type RuntimeEnv,
 } from "./runtime";
@@ -84,45 +81,6 @@ interface AgentConfig {
   agentDescription: string;
 }
 
-interface TurnResult {
-  turn: number;
-  content: string;
-  toolResults: any[];
-  done: boolean;
-  error?: string;
-  costUsd: number;
-  model: string;
-}
-
-interface ObservabilityEvent {
-  id: number;
-  session_id: string;
-  turn: number;
-  event_type: string;
-  action: string;
-  plan: string;
-  tier: string;
-  provider: string;
-  model: string;
-  tool_name: string;
-  status: string;
-  latency_ms: number;
-  input_tokens: number;
-  output_tokens: number;
-  cost_usd: number;
-  details_json: string;
-  created_at: string;
-}
-
-type ComplexityTier = "simple" | "moderate" | "complex" | "tool_call";
-
-type PlanRoute = {
-  provider: string;
-  model: string;
-  maxTokens: number;
-};
-
-type PlanRouting = Record<ComplexityTier, PlanRoute>;
 
 function normalizePlan(value?: string): string {
   const raw = (value || "").trim().toLowerCase();
@@ -213,17 +171,6 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       created_at REAL NOT NULL DEFAULT (unixepoch('now'))
     )`;
 
-    // Run checkpoints: per-turn state for crash recovery
-    this.sql`CREATE TABLE IF NOT EXISTS run_checkpoints (
-      session_id TEXT NOT NULL,
-      turn INTEGER NOT NULL,
-      messages_json TEXT NOT NULL DEFAULT '[]',
-      output TEXT NOT NULL DEFAULT '',
-      cost_usd REAL NOT NULL DEFAULT 0,
-      tool_calls INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL,
-      PRIMARY KEY (session_id, turn)
-    )`;
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
     // Load 100 to match the local retention cap — not just 24 (the per-request window)
@@ -443,24 +390,6 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     this.setState({ ...this.state, working });
   }
 
-  @callable()
-  getSessions(limit: number = 20): any[] {
-    return this.sql`SELECT * FROM sessions ORDER BY created_at DESC LIMIT ${limit}`;
-  }
-
-  @callable()
-  getStats(): any {
-    const sessions = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM sessions`;
-    const totalCost = this.sql<{ total: number }>`SELECT COALESCE(SUM(cost_usd), 0) as total FROM sessions`;
-    return {
-      totalSessions: sessions[0]?.cnt ?? 0,
-      totalCostUsd: totalCost[0]?.total ?? 0,
-      turnCount: this.state.turnCount,
-      sessionActive: this.state.sessionActive,
-      config: this.state.config,
-    };
-  }
-
   private _getConversationCount(): number {
     try {
       const rows = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
@@ -666,9 +595,6 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
 
     // Auto-register tools on first run if configured
-    // Note: autoRegisterTools requires a register function
-    // if (data.type === "run" && this.env.ENABLE_TOOL_AUTO_REGISTER === "true") {
-    //   await autoRegisterTools((tool) => { /* register tool */ });
     // }
 
     if (data.type === "feedback") {
@@ -834,31 +760,6 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // /run/workflow removed — /run now uses Workflow as primary path
 
-    // GET /run/checkpoint — legacy checkpoint for crash recovery (Workflow handles this now)
-    if (url.pathname === "/run/checkpoint" && request.method === "GET") {
-      const sessionId = url.searchParams.get("session_id");
-      if (!sessionId) return Response.json({ error: "session_id required" }, { status: 400 });
-      try {
-        const rows = this.sql<{ session_id: string; turn: number; messages_json: string; output: string; cost_usd: number; tool_calls: number; created_at: string }>`
-          SELECT * FROM run_checkpoints WHERE session_id = ${sessionId} ORDER BY turn DESC LIMIT 1
-        `;
-        if (rows.length === 0) return Response.json({ checkpoint: null });
-        const cp = rows[0];
-        return Response.json({
-          checkpoint: {
-            session_id: cp.session_id,
-            turn: cp.turn,
-            output: cp.output,
-            cost_usd: cp.cost_usd,
-            tool_calls: cp.tool_calls,
-            created_at: cp.created_at,
-            messages: (() => { try { return JSON.parse(cp.messages_json); } catch { return []; } })(),
-          },
-        });
-      } catch {
-        return Response.json({ checkpoint: null });
-      }
-    }
 
     if (url.pathname === "/run" && request.method === "POST") {
       if (!(await this._isAuthorized(request))) {
@@ -1287,60 +1188,6 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // and queued to TELEMETRY_QUEUE → Supabase for durable storage.
   // No backend HTTP calls — Supabase is the single source of truth.
 
-  private _recordEvent(input: {
-    sessionId: string;
-    turn?: number;
-    eventType: string;
-    action?: string;
-    plan?: string;
-    tier?: string;
-    provider?: string;
-    model?: string;
-    toolName?: string;
-    status?: string;
-    latencyMs?: number;
-    inputTokens?: number;
-    outputTokens?: number;
-    costUsd?: number;
-    details?: Record<string, unknown>;
-  }): void {
-    const turn = input.turn ?? 0;
-    const action = input.action || "";
-    const plan = input.plan || "";
-    const tier = input.tier || "";
-    const provider = input.provider || "";
-    const model = input.model || "";
-    const toolName = input.toolName || "";
-    const status = input.status || "";
-    const latencyMs = input.latencyMs || 0;
-    const inputTokens = input.inputTokens || 0;
-    const outputTokens = input.outputTokens || 0;
-    const costUsd = input.costUsd || 0;
-    const detailsJson = JSON.stringify(input.details || {});
-
-    // 1. DO-local SQLite (instant, queryable via RPC)
-    this.sql`INSERT INTO otel_events (
-      session_id, turn, event_type, action, plan, tier, provider, model, tool_name, status, latency_ms,
-      input_tokens, output_tokens, cost_usd, details_json
-    ) VALUES (
-      ${input.sessionId}, ${turn}, ${input.eventType}, ${action}, ${plan}, ${tier}, ${provider}, ${model}, ${toolName}, ${status}, ${latencyMs},
-      ${inputTokens}, ${outputTokens}, ${costUsd}, ${detailsJson}
-    )`;
-
-    // 2. Queue → Supabase (durable, async, non-blocking)
-    if (this.env.TELEMETRY_QUEUE) {
-      this.env.TELEMETRY_QUEUE.send({
-        type: "event",
-        payload: {
-          session_id: input.sessionId, turn, event_type: input.eventType,
-          action, plan, tier, provider, model, tool_name: toolName,
-          status, latency_ms: latencyMs, input_tokens: inputTokens,
-          output_tokens: outputTokens, cost_usd: costUsd,
-          details_json: detailsJson, created_at: new Date().toISOString(),
-        },
-      }).catch(() => {});
-    }
-  }
 
   /** Handle voice relay WebSocket — Twilio ConversationRelay sends text, we run agent and reply with text */
   private _handleVoiceRelay(request: Request): Response {
@@ -1952,187 +1799,6 @@ function runnableInputToTask(input: unknown, task?: string): string {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Voice Pipeline — Audio conversion utilities for Twilio Media Streams
-// ═══════════════════════════════════════════════════════════════════════
-
-/**
- * Decode an array of base64-encoded audio chunks into a single Uint8Array.
- */
-function base64ChunksToUint8Array(chunks: string[]): Uint8Array {
-  const decoded: Uint8Array[] = [];
-  let totalLen = 0;
-  for (const chunk of chunks) {
-    const raw = atob(chunk);
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-    decoded.push(bytes);
-    totalLen += bytes.length;
-  }
-  const result = new Uint8Array(totalLen);
-  let offset = 0;
-  for (const buf of decoded) {
-    result.set(buf, offset);
-    offset += buf.length;
-  }
-  return result;
-}
-
-/**
- * Encode a Uint8Array to base64 string.
- */
-function uint8ArrayToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return btoa(binary);
-}
-
-/**
- * mu-law decoding table (8-bit mu-law to 16-bit linear PCM).
- * ITU-T G.711 standard.
- */
-const MULAW_DECODE_TABLE = new Int16Array(256);
-(() => {
-  for (let i = 0; i < 256; i++) {
-    const mu = ~i & 0xff;
-    const sign = mu & 0x80;
-    let exponent = (mu >> 4) & 0x07;
-    let mantissa = mu & 0x0f;
-    let magnitude = ((mantissa << 1) + 33) << (exponent + 2);
-    magnitude -= 0x84;
-    MULAW_DECODE_TABLE[i] = sign ? -magnitude : magnitude;
-  }
-})();
-
-/**
- * mu-law encoding: 16-bit linear PCM sample to 8-bit mu-law.
- */
-function linearToMulaw(sample: number): number {
-  const MULAW_MAX = 32635;
-  const MULAW_BIAS = 0x84;
-  let sign = 0;
-  if (sample < 0) {
-    sign = 0x80;
-    sample = -sample;
-  }
-  if (sample > MULAW_MAX) sample = MULAW_MAX;
-  sample += MULAW_BIAS;
-
-  let exponent = 0;
-  let mask = 0x4000;
-  for (exponent = 13; exponent >= 0; exponent--) {
-    if (sample & mask) break;
-    mask >>= 1;
-  }
-
-  const mantissa = (sample >> (exponent + 3)) & 0x0f;
-  const mulawByte = ~(sign | (exponent << 4) | mantissa) & 0xff;
-  return mulawByte;
-}
-
-/**
- * Convert mulaw (8-bit, 8kHz) audio to WAV format for Whisper STT.
- * Returns a complete WAV file with PCM16 data.
- */
-function mulawToWav(mulaw: Uint8Array, sampleRate: number): Uint8Array {
-  const numSamples = mulaw.length;
-  const pcmDataLen = numSamples * 2; // 16-bit PCM
-  const wavHeaderLen = 44;
-  const wav = new Uint8Array(wavHeaderLen + pcmDataLen);
-  const view = new DataView(wav.buffer);
-
-  // RIFF header
-  wav.set([0x52, 0x49, 0x46, 0x46], 0); // "RIFF"
-  view.setUint32(4, 36 + pcmDataLen, true);  // File size - 8
-  wav.set([0x57, 0x41, 0x56, 0x45], 8); // "WAVE"
-
-  // fmt chunk
-  wav.set([0x66, 0x6d, 0x74, 0x20], 12); // "fmt "
-  view.setUint32(16, 16, true);            // Chunk size
-  view.setUint16(20, 1, true);             // PCM format
-  view.setUint16(22, 1, true);             // Mono
-  view.setUint32(24, sampleRate, true);    // Sample rate
-  view.setUint32(28, sampleRate * 2, true); // Byte rate (sampleRate * channels * bitsPerSample/8)
-  view.setUint16(32, 2, true);             // Block align
-  view.setUint16(34, 16, true);            // Bits per sample
-
-  // data chunk
-  wav.set([0x64, 0x61, 0x74, 0x61], 36); // "data"
-  view.setUint32(40, pcmDataLen, true);
-
-  // Decode mulaw to PCM16
-  for (let i = 0; i < numSamples; i++) {
-    view.setInt16(wavHeaderLen + i * 2, MULAW_DECODE_TABLE[mulaw[i]], true);
-  }
-
-  return wav;
-}
-
-/**
- * Convert PCM audio (from TTS output, typically WAV) to mulaw 8kHz for Twilio.
- *
- * Handles two cases:
- *   - Raw PCM16 bytes (if TTS returns raw audio)
- *   - WAV file (skips the 44-byte header)
- *
- * If the TTS sample rate differs from 8kHz, a basic nearest-neighbor
- * resample is applied. This is intentionally simple to avoid external
- * dependencies; production deployments may want linear interpolation.
- */
-function pcmToMulaw(audioData: Uint8Array): Uint8Array {
-  let pcmStart = 0;
-  let srcSampleRate = 8000;
-
-  // Detect WAV header
-  if (
-    audioData.length > 44 &&
-    audioData[0] === 0x52 && // R
-    audioData[1] === 0x49 && // I
-    audioData[2] === 0x46 && // F
-    audioData[3] === 0x46    // F
-  ) {
-    const view = new DataView(audioData.buffer, audioData.byteOffset, audioData.byteLength);
-    srcSampleRate = view.getUint32(24, true);
-    const bitsPerSample = view.getUint16(34, true);
-    // Find "data" chunk
-    let offset = 12;
-    while (offset + 8 < audioData.length) {
-      const chunkId = String.fromCharCode(
-        audioData[offset], audioData[offset + 1],
-        audioData[offset + 2], audioData[offset + 3],
-      );
-      const chunkSize = view.getUint32(offset + 4, true);
-      if (chunkId === "data") {
-        pcmStart = offset + 8;
-        break;
-      }
-      offset += 8 + chunkSize;
-    }
-    // If 8-bit, no conversion (unlikely from TTS)
-    if (bitsPerSample !== 16) {
-      // Treat the whole thing as raw
-      pcmStart = 0;
-    }
-  }
-
-  const pcmData = audioData.subarray(pcmStart);
-  const numSamples = Math.floor(pcmData.length / 2);
-  const srcView = new DataView(pcmData.buffer, pcmData.byteOffset, pcmData.byteLength);
-
-  // Resample to 8kHz if needed
-  const ratio = srcSampleRate / 8000;
-  const outSamples = Math.floor(numSamples / ratio);
-  const mulaw = new Uint8Array(outSamples);
-
-  for (let i = 0; i < outSamples; i++) {
-    const srcIdx = Math.min(Math.floor(i * ratio), numSamples - 1);
-    const sample = srcView.getInt16(srcIdx * 2, true);
-    mulaw[i] = linearToMulaw(sample);
-  }
-
-  return mulaw;
-}
 
 function extractRunnableConfig(config?: Record<string, unknown>): {
   run_name: string;
@@ -2404,36 +2070,6 @@ export default {
           agent_name: agentName,
           version: body.version,
           note: "Config will be reloaded on next request",
-        });
-      } catch (e: any) {
-        return Response.json({ error: e.message }, { status: 400 });
-      }
-    }
-    
-    // Graph cache invalidation endpoint (called by control-plane on component updates)
-    if (url.pathname === "/api/v1/internal/cache-invalidate" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
-      }
-      
-      try {
-        const body = await request.json() as { 
-          type?: "graph" | "subgraph" | "all"; 
-          graph_id?: string;
-          subgraph_id?: string;
-        };
-        
-        // Graph cache invalidation removed — graph execution system deleted.
-        // Workflows don't use graph caching. Accepting the call as a no-op.
-        return Response.json({
-          invalidated: true,
-          type: body.type || "all",
-          note: "Graph caching removed — Workflows handle execution directly.",
         });
       } catch (e: any) {
         return Response.json({ error: e.message }, { status: 400 });
@@ -3084,11 +2720,6 @@ export default {
       }
     }
 
-    // Graph execution endpoints removed — Workflows replace graph execution.
-    if (url.pathname.startsWith("/api/v1/graphs/") && request.method === "POST") {
-      return Response.json({ error: "Use POST /run instead. Graph endpoints removed." }, { status: 410 });
-    }
-
 
     // --- Codemode Runtime API ---
 
@@ -3396,50 +3027,6 @@ export default {
       }, { status: 202 });
     }
 
-    // ── Checkpoint resume ─────────────────────────────────────
-    const checkpointResumeMatch = url.pathname.match(
-      /^\/api\/v1\/runtime-proxy\/agent\/run\/checkpoints\/([a-zA-Z0-9]+)\/resume$/,
-    );
-    if (checkpointResumeMatch && request.method === "POST") {
-      const checkpointId = checkpointResumeMatch[1];
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
-      }
-
-      const runtimeEnv: RuntimeEnv = {
-        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
-        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
-        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
-        AI_GATEWAY_ID: env.AI_GATEWAY_ID,
-        AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
-        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
-        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
-        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
-      };
-
-      try {
-        // Resume via Workflow is not applicable — Workflows auto-resume on crash.
-        // For legacy checkpoints, fall back to edgeResume.
-        if (env.AGENT_RUN_WORKFLOW) {
-          return Response.json({
-            error: "Resume not needed — Cloudflare Workflows automatically resume from the last completed step on crash/deploy. Check the Workflow instance status instead.",
-            suggestion: "Use GET /api/v1/runs/{run_id} to check the status of a running Workflow instance.",
-          }, { status: 410 });
-        }
-        return Response.json({
-          error: "Resume requires Workflow binding. Cloudflare Workflows auto-resume on crash.",
-          suggestion: "Use GET /api/v1/runs/{run_id} to check the status.",
-        }, { status: 501 });
-      } catch (err: any) {
-        return Response.json({ error: err.message }, { status: 500 });
-      }
-    }
 
     // ── Run status/result query (non-blocking polling) ──────
     // GET /api/v1/runs/{run_id} — check status and get result for an async run
