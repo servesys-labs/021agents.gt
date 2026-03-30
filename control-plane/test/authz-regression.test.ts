@@ -75,41 +75,7 @@ describe("Finding 1: Meta-proposals IDOR", () => {
   });
 });
 
-describe("Finding 3: gate-pack org scoping", () => {
-  it("rejects cross-org gate-pack even with inline graph", async () => {
-    const mockSql2 = (async (strings: TemplateStringsArray) => {
-      const query = strings.join("?");
-      if (query.includes("SELECT 1 FROM agents")) return [];
-      return [];
-    }) as any;
-    vi.mocked(getDb).mockResolvedValue(mockSql2);
-    vi.mocked(getDbForOrg).mockResolvedValue(mockSql2);
-
-    const { graphRoutes } = await import("../src/routes/graphs");
-
-    const app = new Hono<AppType>();
-    app.use("*", async (c, next) => {
-      c.set("user", makeUser("org-b"));
-      return next();
-    });
-    app.route("/", graphRoutes);
-
-    const res = await app.request(
-      "/gate-pack",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent_name: "org-a-agent",
-          graph: { nodes: [{ id: "a" }], edges: [] },
-        }),
-      },
-      mockEnv(),
-    );
-
-    expect(res.status).toBe(404);
-  });
-});
+// Finding 3: gate-pack test removed — graphRoutes deleted with graph system
 
 describe("Finding 4: Hold override requires reason", () => {
   it("validates override_reason is not empty in Zod schema", async () => {

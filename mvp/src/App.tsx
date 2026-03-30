@@ -8,7 +8,6 @@ import AgentBuilderPage from "./pages/AgentBuilderPage";
 import AgentPlaygroundPage from "./pages/AgentPlaygroundPage";
 import AgentSettingsPage from "./pages/AgentSettingsPage";
 import AgentActivityPage from "./pages/AgentActivityPage";
-import AgentFlowPage from "./pages/AgentFlowPage";
 import AgentTestsPage from "./pages/AgentTestsPage";
 import AgentKnowledgePage from "./pages/AgentKnowledgePage";
 import AgentVoicePage from "./pages/AgentVoicePage";
@@ -47,7 +46,6 @@ export default function App() {
         <Route path="agents/:id/play" element={<AgentPlaygroundPage />} />
         <Route path="agents/:id/settings" element={<AgentSettingsPage />} />
         <Route path="agents/:id/activity" element={<AgentActivityPage />} />
-        <Route path="agents/:id/flow" element={<AgentFlowPage />} />
         <Route path="agents/:id/tests" element={<AgentTestsPage />} />
         <Route path="agents/:id/knowledge" element={<AgentKnowledgePage />} />
         <Route path="agents/:id/voice" element={<AgentVoicePage />} />

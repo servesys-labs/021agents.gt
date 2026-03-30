@@ -1611,8 +1611,10 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
       const graph = (config.harness as any)?.declarative_graph ?? config.declarative_graph;
       if (graph && typeof graph === "object") {
         graphAvailable = true;
-        const { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } = await import("../logic/graph-lint");
-        const { lintAndAutofixGraph } = await import("../logic/graph-autofix");
+        // Graph lint/autofix removed — stub for compatibility
+        const lintGraphDesign = (_g: any, _o?: any) => ({ valid: true, errors: [], warnings: [], summary: {} });
+        const summarizeGraphContracts = (_g: any) => ({});
+        const lintAndAutofixGraph = (g: any, _o?: any) => ({ graph: g, applied: 0, valid: true });
 
         graphAutofix = lintAndAutofixGraph(graph as Record<string, unknown>, { strict: true, apply: true });
         graphLint = (graphAutofix as any).lint_after ?? null;

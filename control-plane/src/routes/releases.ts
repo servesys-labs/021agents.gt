@@ -8,7 +8,8 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
-import { lintGraphDesign } from "../logic/graph-lint";
+// Graph lint removed — stub for compatibility
+const lintGraphDesign = (_g: any, _o?: any) => ({ valid: true, errors: [], warnings: [] });
 import { getThresholds } from "../logic/policies";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 

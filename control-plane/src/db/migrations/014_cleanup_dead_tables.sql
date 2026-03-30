@@ -12,6 +12,11 @@ DROP TABLE IF EXISTS a2a_agents;
 DROP TABLE IF EXISTS auth_audit_log;
 DROP TABLE IF EXISTS prompt_versions;
 
+-- Graph component tables (routes/components.ts deleted)
+DROP TABLE IF EXISTS component_usage;
+DROP TABLE IF EXISTS components;
+DROP TABLE IF EXISTS subgraph_definitions;
+
 -- Unused columns on org_settings (added in migration 008 but never read/written)
 -- Using IF EXISTS to be safe on different Postgres versions
 DO $$ BEGIN

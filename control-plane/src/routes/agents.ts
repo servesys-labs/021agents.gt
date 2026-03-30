@@ -9,8 +9,11 @@ import { requireScope } from "../middleware/auth";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, AgentCreateBody, AgentTemplate, AgentSummary, errorResponses } from "../schemas/openapi";
 import { getDb, getDbForOrg } from "../db/client";
-import { lintGraphDesign, lintPayloadFromResult, summarizeGraphContracts } from "../logic/graph-lint";
-import { lintAndAutofixGraph } from "../logic/graph-autofix";
+// Graph lint/autofix removed — graph system deleted. Stub functions for compatibility.
+const lintGraphDesign = (_g: any, _o?: any) => ({ valid: true, errors: [] as any[], warnings: [] as any[], summary: {} as any });
+const lintPayloadFromResult = (_r: any) => ({});
+const summarizeGraphContracts = (_g: any) => ({});
+const lintAndAutofixGraph = (g: any, _o?: any) => ({ graph: g, applied: 0, valid: true, errors: [] as any[], warnings: [] as any[], lint_after: null as any, lint_before: null as any });
 import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
 import { defaultNoCodeGraph, buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
 import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";

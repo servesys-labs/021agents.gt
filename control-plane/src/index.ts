@@ -16,7 +16,7 @@ import { createApp } from "./lib/openapi";
 import { authRoutes } from "./routes/auth";
 import { apiKeyRoutes } from "./routes/api-keys";
 import { agentRoutes } from "./routes/agents";
-import { graphRoutes } from "./routes/graphs";
+// graphRoutes removed — graph system deleted, Workflows replace execution
 import { evalRoutes } from "./routes/eval";
 import { evolveRoutes } from "./routes/evolve";
 import { workflowRoutes } from "./routes/workflows";
@@ -61,7 +61,7 @@ import { middlewareStatusRoutes } from "./routes/middleware-status";
 import { compareRoutes } from "./routes/compare";
 import { sandboxRoutes } from "./routes/sandbox";
 import { plansRoutes } from "./routes/plans";
-import { componentRoutes } from "./routes/components";
+// componentRoutes removed — graph components deleted
 import { guardrailRoutes } from "./routes/guardrails";
 import { dlpRoutes } from "./routes/dlp";
 import { pipelineRoutes } from "./routes/pipelines";
@@ -141,7 +141,7 @@ app.route("/api/v1/api-keys", apiKeyRoutes);
 
 // Core agent lifecycle
 app.route("/api/v1/agents", agentRoutes);
-app.route("/api/v1/graphs", graphRoutes);
+// app.route("/api/v1/graphs", graphRoutes); // removed
 
 // Eval, evolve, workflows
 app.route("/api/v1/eval", evalRoutes);
@@ -224,7 +224,7 @@ app.route("/api/v1/sandbox", sandboxRoutes);
 app.route("/api/v1/plans", plansRoutes);
 
 // Components (reusable graphs, prompts, tool sets)
-app.route("/api/v1/components", componentRoutes);
+// app.route("/api/v1/components", componentRoutes); // removed
 
 // Guardrails + DLP
 app.route("/api/v1/guardrails", guardrailRoutes);

@@ -1,11 +1,10 @@
 import { useNavigate, useLocation, useParams } from "react-router-dom";
-import { ArrowLeft, Play, GitBranch, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb, Settings, BarChart3, Bot } from "lucide-react";
+import { ArrowLeft, Play, FlaskConical, BookOpen, Phone, ShoppingBag, Share2, Lightbulb, Settings, BarChart3, Bot } from "lucide-react";
 import { agentPathSegment } from "../lib/agent-path";
 
 const tabs = [
   { path: "activity", icon: BarChart3, label: "Activity" },
   { path: "play", icon: Play, label: "Test" },
-  { path: "flow", icon: GitBranch, label: "Flow" },
   { path: "tests", icon: FlaskConical, label: "Evals" },
   { path: "knowledge", icon: BookOpen, label: "Knowledge" },
   { path: "voice", icon: Phone, label: "Voice" },
