@@ -142,31 +142,44 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // DOs are single-threaded but async yields allow interleaving.
   private _runLock: Promise<void> = Promise.resolve();
 
-  /** Acquire a serial execution lock — only one run at a time per DO. */
-  private _withRunLock<T>(fn: () => Promise<T>, timeoutMs = 30_000): Promise<T> {
-    let release: () => void;
-    const next = new Promise<void>((r) => { release = r; });
-    const prev = this._runLock;
-    this._runLock = next;
-    // Wait for previous run to finish, but don't wait forever
-    return Promise.race([
-      prev.then(fn),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Agent is busy processing another request. Please try again in a moment.")), timeoutMs),
-      ),
-    ]).finally(() => release!());
+  /** True while a run is in progress — prevents concurrent execution that corrupts state. */
+  private _running = false;
+
+  /**
+   * Guard against concurrent execution. Instead of queuing (which caused zombie
+   * tasks and corrupted SQLite state), reject immediately with a clear error.
+   * The client can retry after a short delay.
+   *
+   * Why not queue: if request A is running and request B queues, and A times out,
+   * B starts while A's streamRun continues in the background. Both write to
+   * conversation_messages simultaneously → corrupted history → permanent bad state.
+   * Immediate rejection is safer and gives the user clear feedback.
+   */
+  private async _withRunLock<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this._running) {
+      throw new Error("Agent is busy processing another request. Please wait a moment and try again.");
+    }
+    this._running = true;
+    const abort = new AbortController();
+    // Hard timeout: 5 minutes max per run
+    const timer = setTimeout(() => abort.abort(), 300_000);
+    try {
+      return await fn(abort.signal);
+    } finally {
+      clearTimeout(timer);
+      this._running = false;
+    }
   }
 
   /**
-   * Create a yield callback for streamRun — briefly releases the DO lock between
-   * turns so queued requests (health checks, short queries, status polls) can proceed.
-   * The yield pauses for ~10ms, allowing the DO's event loop to process other requests.
+   * Create a yield callback for streamRun — yields the event loop between turns
+   * so the DO can process incoming request acceptance (prevents HTTP-level timeouts).
+   * The lock stays held; this is a cooperative yield, not a lock release.
    */
-  private _createYieldCallback(): () => Promise<void> {
-    return () => new Promise<void>((resolve) => {
-      // Release the current lock slot momentarily
-      // setTimeout(0) yields to the event loop, letting queued microtasks/fetches proceed
-      setTimeout(resolve, 10);
+  private _createYieldCallback(signal?: AbortSignal): () => Promise<void> {
+    return () => new Promise<void>((resolve, reject) => {
+      if (signal?.aborted) { reject(new Error("Run aborted")); return; }
+      setTimeout(resolve, 1);
     });
   }
 
@@ -701,7 +714,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
 
     if (data.type === "run") {
-      await this._withRunLock(async () => {
+      await this._withRunLock(async (signal) => {
       const config = this.state.config;
       const runtimeEnv: RuntimeEnv = {
         AI: this.env.AI,
@@ -795,7 +808,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               api_key_id: data.api_key_id,
               history_messages: history,
               delegation: data.delegation,
-              yieldBetweenTurns: this._createYieldCallback(),
+              yieldBetweenTurns: this._createYieldCallback(signal),
             },
           );
         }
@@ -951,8 +964,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       if (!(await this._isAuthorized(request))) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
+      // Reject immediately if busy — return clean JSON, not a thrown error
+      if (this._running) {
+        return Response.json({
+          status: "busy",
+          success: false,
+          error: "Agent is processing another request. Please wait a moment and try again.",
+          retry_after_ms: 5000,
+        }, { status: 429 });
+      }
       const data = await request.json() as any;
-      return this._withRunLock(async () => {
+      return this._withRunLock(async (signal) => {
       // Load fresh config from DB — DO state may have stale/empty tools
       let config = { ...this.state.config };
       try {
@@ -1035,7 +1057,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             api_key_id: data.api_key_id,
             history_messages: history,
             delegation: data.delegation,
-            yieldBetweenTurns: this._createYieldCallback(),
+            yieldBetweenTurns: this._createYieldCallback(signal),
           },
         );
       } catch (err) {
@@ -1079,6 +1101,14 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       if (!(await this._isAuthorized(request))) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
+      if (this._running) {
+        return Response.json({
+          status: "busy",
+          success: false,
+          error: "Agent is processing another request. Please wait and try again.",
+          retry_after_ms: 5000,
+        }, { status: 429 });
+      }
       const data = await request.json() as any;
       const config = this.state.config;
       const inputText = String(data.input || "");
@@ -1108,6 +1138,11 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const self = this;
       const agentName = data.agent_name || config.agentName || "agentos";
 
+      // Cancel any running task on this DO before starting SSE stream
+      if (this._runAbort) this._runAbort.abort();
+      const sseAbort = new AbortController();
+      this._runAbort = sseAbort;
+
       const stream = new ReadableStream({
         start(controller) {
           const send = (msg: string) => {
@@ -1136,7 +1171,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               api_key_id: data.api_key_id,
               history_messages: history,
               delegation: data.delegation,
-              yieldBetweenTurns: self._createYieldCallback(),
+              yieldBetweenTurns: self._createYieldCallback(sseAbort.signal),
             },
           ).then(() => {
             self._appendConversationMessage("user", inputText, data.channel || "sse");

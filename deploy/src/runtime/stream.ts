@@ -481,10 +481,16 @@ export async function streamRun(
       // Checkpoint after every completed turn (not the first)
       if (turn > 1) saveCheckpoint(turn - 1);
 
-      // Yield between turns: briefly release the DO lock so queued requests
-      // (health checks, short queries) can proceed. Re-acquires before continuing.
+      // Yield between turns: cooperative yield to the event loop.
+      // If the run was aborted (lock timeout, new request cancelled us), stop cleanly.
       if (turn > 1 && opts?.yieldBetweenTurns) {
-        try { await opts.yieldBetweenTurns(); } catch {}
+        try {
+          await opts.yieldBetweenTurns();
+        } catch {
+          // Abort signal fired — stop the run cleanly
+          send(serializeForWebSocket({ type: "error", message: "Run cancelled", code: "ABORTED" } as any));
+          break;
+        }
       }
 
       // ── CONTEXT COMPRESSION — summarize when messages exceed token budget ──
