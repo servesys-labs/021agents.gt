@@ -160,12 +160,13 @@ export default function MarketplacePage() {
     setSearching(true);
     try {
       const params = new URLSearchParams();
-      if (query) params.set("q", query);
+      params.set("q", query || "");
       if (category) params.set("category", category);
       if (maxPrice) params.set("max_price", maxPrice);
-      const qs = params.toString();
-      const data = await api.get<MarketplaceListing[]>(`/marketplace/search${qs ? `?${qs}` : ""}`);
-      setResults(Array.isArray(data) ? data : []);
+      params.set("limit", "50");
+      const data = await api.get<any>(`/marketplace/search?${params}`);
+      const listings = Array.isArray(data) ? data : (data.listings || []);
+      setResults(listings);
     } catch {
       setResults([]);
       toast("Search failed -- please try again");
