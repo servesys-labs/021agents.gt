@@ -337,8 +337,13 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
         // ── x-402 Payment Gate ──────────────────────────────────
         // Resolve target agent's OWNER org (may be different from caller's org in cross-org A2A)
+        // Resolve agent owner — use ?org= query param for cross-org discovery, or global lookup
+        const targetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
         const agentOwnerRows = await sql`
-          SELECT org_id, config_json FROM agents WHERE name = ${targetAgentName} AND is_active = 1 LIMIT 1
+          SELECT org_id, config_json FROM agents
+          WHERE name = ${targetAgentName} AND is_active = 1
+          ${targetOrgFromUrl ? sql`AND org_id = ${targetOrgFromUrl}` : sql``}
+          LIMIT 1
         `.catch(() => []);
         targetOrgId = agentOwnerRows.length > 0 ? String(agentOwnerRows[0].org_id) : user.org_id;
 
@@ -422,12 +427,20 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         persistA2ATask(c.env, task, user.org_id, targetOrgId);
 
         // Refund payment if task failed after payment
-        const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
-        if (paymentReceipt?.transfer_id) {
+        const failedPaymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
+        if (failedPaymentReceipt?.transfer_id && targetOrgId !== user.org_id) {
           try {
             const { refundTransfer } = await import("../logic/agent-payments");
             const refundSql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-            await refundTransfer(refundSql, paymentReceipt.transfer_id, user.org_id, user.org_id, 0, `A2A task failed: ${errorMsg.slice(0, 200)}`);
+            // Look up original transfer amount from credit_transactions
+            const [txRow] = await refundSql`
+              SELECT ABS(amount_usd) as amount FROM credit_transactions
+              WHERE reference_id = ${failedPaymentReceipt.transfer_id} AND type = 'transfer_out' LIMIT 1
+            `.catch(() => []);
+            const refundAmount = Number(txRow?.amount || 0);
+            if (refundAmount > 0) {
+              await refundTransfer(refundSql, failedPaymentReceipt.transfer_id, user.org_id, targetOrgId, refundAmount, `A2A task failed: ${errorMsg.slice(0, 200)}`);
+            }
           } catch {} // best-effort refund
         }
 

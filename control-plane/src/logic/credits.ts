@@ -42,7 +42,7 @@ export async function hasCredits(
 ): Promise<boolean> {
   const rows = await sql`
     SELECT 1 FROM org_credit_balance
-    WHERE org_id = ${orgId} AND balance_usd > ${requiredUsd}
+    WHERE org_id = ${orgId} AND balance_usd >= ${requiredUsd}
     LIMIT 1
   `;
   return rows.length > 0;

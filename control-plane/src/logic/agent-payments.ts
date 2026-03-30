@@ -219,10 +219,10 @@ export async function refundTransfer(
     `;
     if (existing.length > 0) return { success: true }; // already refunded
 
-    // Deduct from receiver
-    await sql`
+    // Deduct from receiver (with balance check to prevent negative)
+    const refundDeducted = await sql`
       UPDATE org_credit_balance
-      SET balance_usd = balance_usd - ${amountUsd}, updated_at = ${now}
+      SET balance_usd = GREATEST(0, balance_usd - ${amountUsd}), updated_at = ${now}
       WHERE org_id = ${toOrg}
     `;
 
