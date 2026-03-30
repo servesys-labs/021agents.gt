@@ -61,7 +61,7 @@ import { middlewareStatusRoutes } from "./routes/middleware-status";
 import { compareRoutes } from "./routes/compare";
 import { sandboxRoutes } from "./routes/sandbox";
 import { plansRoutes } from "./routes/plans";
-// componentRoutes removed — graph components deleted
+import { marketplaceRoutes } from "./routes/marketplace";
 import { guardrailRoutes } from "./routes/guardrails";
 import { dlpRoutes } from "./routes/dlp";
 import { pipelineRoutes } from "./routes/pipelines";
@@ -222,6 +222,9 @@ app.route("/api/v1/sandbox", sandboxRoutes);
 
 // LLM plans (built-in catalog + org-scoped custom plans)
 app.route("/api/v1/plans", plansRoutes);
+
+// Agent Marketplace (publish, discover, rate, feature)
+app.route("/api/v1/marketplace", marketplaceRoutes);
 
 // Components (reusable graphs, prompts, tool sets)
 // app.route("/api/v1/components", componentRoutes); // removed
