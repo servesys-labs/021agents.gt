@@ -299,6 +299,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
   switch (method) {
     case "SendMessage": {
+      let targetOrgId = user.org_id; // default to caller's org, updated below for cross-org
       const message = (params.message as A2AMessage) || { parts: [], role: "user" };
       const parts = message.parts || [];
       const text = extractText(parts);
@@ -335,30 +336,31 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         }
 
         // ── x-402 Payment Gate ──────────────────────────────────
-        // Check if agent requires payment. If so, verify receipt or return 402.
-        const agentRows = await sql`
-          SELECT config_json FROM agents WHERE name = ${targetAgentName} AND org_id = ${user.org_id} AND is_active = 1 LIMIT 1
+        // Resolve target agent's OWNER org (may be different from caller's org in cross-org A2A)
+        const agentOwnerRows = await sql`
+          SELECT org_id, config_json FROM agents WHERE name = ${targetAgentName} AND is_active = 1 LIMIT 1
         `.catch(() => []);
-        if (agentRows.length > 0) {
+        targetOrgId = agentOwnerRows.length > 0 ? String(agentOwnerRows[0].org_id) : user.org_id;
+
+        if (agentOwnerRows.length > 0) {
           const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
-          const cfg = typeof agentRows[0].config_json === "string" ? JSON.parse(agentRows[0].config_json) : agentRows[0].config_json || {};
+          const cfg = typeof agentOwnerRows[0].config_json === "string" ? JSON.parse(agentOwnerRows[0].config_json) : agentOwnerRows[0].config_json || {};
           const pricing = getAgentPricing(cfg);
 
-          if (pricing?.requires_payment) {
+          if (pricing?.requires_payment && user.org_id !== targetOrgId) {
             const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
 
             if (!paymentReceipt?.transfer_id) {
-              // No payment — return 402 with x-402 headers
               task.status = { state: "FAILED", timestamp: new Date().toISOString() };
-              const headers402 = build402Headers(pricing, targetAgentName, user.org_id);
+              const headers402 = build402Headers(pricing, targetAgentName, targetOrgId);
               return c.json(jsonrpcError(id, -32000, "Payment required"), {
                 status: 402 as any,
                 headers: headers402,
               });
             }
 
-            // Verify payment receipt
-            const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, user.org_id, pricing.price_per_task_usd);
+            // Verify payment was sent to the AGENT OWNER's org (not the caller's)
+            const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, targetOrgId, pricing.price_per_task_usd);
             if (!verification.valid) {
               task.status = { state: "FAILED", timestamp: new Date().toISOString() };
               return c.json(jsonrpcError(id, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
@@ -407,9 +409,9 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         task.messages.push(responseMessage);
         task.artifacts.push({ id: generateId(), name: "response", parts: [{ text: output }] });
 
-        // Persist to DB for audit
+        // Persist to DB for audit (use actual target org, not caller's)
         const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
-        persistA2ATask(c.env, task, user.org_id, user.org_id, paymentReceipt?.transfer_id);
+        persistA2ATask(c.env, task, user.org_id, targetOrgId, paymentReceipt?.transfer_id);
 
         return c.json(jsonrpcResponse(id, { task }));
       } catch (e) {
@@ -417,7 +419,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         task.status = { state: "FAILED", timestamp: new Date().toISOString() };
 
         // Persist failure to DB
-        persistA2ATask(c.env, task, user.org_id, user.org_id);
+        persistA2ATask(c.env, task, user.org_id, targetOrgId);
 
         // Refund payment if task failed after payment
         const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;

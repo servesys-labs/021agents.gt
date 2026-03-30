@@ -137,7 +137,7 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
         ${body.tags}, ${body.price_per_task_usd}, ${body.price_per_1k_tokens_usd},
         ${body.free_tier_tasks}, ${body.sla_response_time_ms || null}, ${body.sla_uptime_pct || null},
         ${baseUrl + '/.well-known/agent.json?agent=' + body.agent_name},
-        ${baseUrl + '/a2a'},
+        ${baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name},
         true
       )
       ON CONFLICT (agent_name, org_id) DO UPDATE SET
@@ -149,13 +149,28 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
       RETURNING id
     `;
 
+    // Sync pricing to agent's config_json (the x-402 gate reads from here)
+    if (body.price_per_task_usd > 0 || body.price_per_1k_tokens_usd > 0) {
+      try {
+        const [agentRow] = await sql`SELECT config_json FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
+        const cfg = typeof agentRow.config_json === "string" ? JSON.parse(agentRow.config_json) : agentRow.config_json || {};
+        cfg.pricing = {
+          price_per_task_usd: body.price_per_task_usd,
+          price_per_1k_tokens_usd: body.price_per_1k_tokens_usd,
+        };
+        await sql`UPDATE agents SET config_json = ${JSON.stringify(cfg)}, updated_at = now() WHERE name = ${body.agent_name} AND org_id = ${user.org_id}`;
+      } catch {} // non-blocking — listing is still created
+    }
+
     return c.json({
       published: true,
       listing_id: listing.id,
       agent_name: body.agent_name,
+      org_id: user.org_id,
       category: body.category,
       price_per_task_usd: body.price_per_task_usd,
       agent_card_url: baseUrl + '/.well-known/agent.json?agent=' + body.agent_name,
+      a2a_endpoint_url: baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name,
     });
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
@@ -195,6 +210,12 @@ marketplaceRoutes.openapi(rateRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Prevent self-rating
+  const [listing] = await sql`SELECT org_id FROM marketplace_listings WHERE id = ${body.listing_id} LIMIT 1`;
+  if (listing && String(listing.org_id) === user.org_id) {
+    return c.json({ error: "Cannot rate your own agent" }, 403);
+  }
 
   await submitRating(sql, body.listing_id, user.org_id, body.rating, {
     task_id: body.task_id,
@@ -295,4 +316,35 @@ marketplaceRoutes.openapi(listingDetailRoute, async (c): Promise<any> => {
       date: r.created_at,
     })),
   });
+});
+
+// ── POST /unpublish — Remove agent from marketplace ──────────
+
+const unpublishRoute = createRoute({
+  method: "post",
+  path: "/unpublish",
+  tags: ["Marketplace"],
+  summary: "Remove an agent from the marketplace",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: { content: { "application/json": { schema: z.object({ agent_name: z.string().min(1) }) } } },
+  },
+  responses: {
+    200: { description: "Unpublished", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 404, 500),
+  },
+});
+
+marketplaceRoutes.openapi(unpublishRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name } = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const updated = await sql`
+    UPDATE marketplace_listings SET is_published = false, is_featured = false, updated_at = now()
+    WHERE agent_name = ${agent_name} AND org_id = ${user.org_id}
+  `;
+
+  if (updated.count === 0) return c.json({ error: "Listing not found" }, 404);
+  return c.json({ unpublished: true, agent_name });
 });

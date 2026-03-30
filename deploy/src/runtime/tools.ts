@@ -3811,12 +3811,14 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "a2a-send",
-      description: "Send a task to another agent via A2A protocol. Handles x-402 payments automatically if the agent charges. Use marketplace-search first to find the right agent.",
+      description: "Send a task to another agent via A2A protocol. Handles x-402 payments automatically if the agent charges. Use marketplace-search first to find the right agent and its a2a_endpoint_url.",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string", description: "Target agent A2A endpoint URL" },
+          url: { type: "string", description: "Target agent A2A endpoint URL (from marketplace search results)" },
           task: { type: "string", description: "Task message to send" },
+          agent_name: { type: "string", description: "Target agent name (from marketplace search results)" },
+          auth_token: { type: "string", description: "Auth token for the target API (optional)" },
         },
         required: ["url", "task"],
       },
