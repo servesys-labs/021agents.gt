@@ -9,13 +9,8 @@ import { requireScope } from "../middleware/auth";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, AgentCreateBody, AgentTemplate, AgentSummary, errorResponses } from "../schemas/openapi";
 import { getDb, getDbForOrg } from "../db/client";
-// Graph lint/autofix removed — graph system deleted. Stub functions for compatibility.
-const lintGraphDesign = (_g: any, _o?: any) => ({ valid: true, errors: [] as any[], warnings: [] as any[], summary: {} as any });
-const lintPayloadFromResult = (_r: any) => ({});
-const summarizeGraphContracts = (_g: any) => ({});
-const lintAndAutofixGraph = (g: any, _o?: any) => ({ graph: g, applied: 0, valid: true, errors: [] as any[], warnings: [] as any[], lint_after: null as any, lint_before: null as any });
-import { latestEvalGate, rolloutRecommendation, lintSuggestionsFromErrors } from "../logic/gate-pack";
-import { defaultNoCodeGraph, buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
+import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
+import { buildFromDescription, recommendTools, expandEvalConfig, generateEvolutionSuggestions, type EvalTestCase, type EvalRubric } from "../logic/meta-agent";
 import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
@@ -131,12 +126,7 @@ const CreateFromDescriptionSchema = z.object({
   tools: z.string().default("auto"),
   plan: z.enum(["basic", "standard", "premium"]).default("standard"),
   draft_only: z.boolean().default(false),
-  strict_graph_lint: z.boolean().default(true),
-  auto_graph: z.boolean().default(true),
-  graph_json: z.string().default(""),
-  include_autofix: z.boolean().default(true),
   include_gate_pack: z.boolean().default(true),
-  include_contracts_validate: z.boolean().default(true),
   min_eval_pass_rate: z.number().min(0).max(1).default(0.85),
   min_eval_trials: z.number().int().min(1).max(1000).default(3),
   target_channel: z.string().min(1).default("staging"),
@@ -156,59 +146,6 @@ function runtimeMovedToEdge(detail_suffix = ""): Response {
     "(`/api/v1/runtime-proxy/runnable/*` or `/api/v1/runtime-proxy/agent/run`).";
   if (detail_suffix) detail = `${detail} ${detail_suffix}`;
   return Response.json({ error: detail }, { status: 410 });
-}
-
-function ensureDeclarativeGraph(
-  configJson: Record<string, unknown>,
-  autoGraph: boolean,
-): Record<string, unknown> | null {
-  let harness = configJson.harness as Record<string, unknown> | undefined;
-  if (typeof harness !== "object" || harness === null) {
-    harness = {};
-    configJson.harness = harness;
-  }
-  for (const key of ["declarative_graph", "graph"]) {
-    const graph = harness[key];
-    if (typeof graph === "object" && graph !== null && !Array.isArray(graph)) {
-      if (key !== "declarative_graph") {
-        harness.declarative_graph = graph;
-      }
-      return graph as Record<string, unknown>;
-    }
-  }
-  if (!autoGraph) return null;
-  const graph = defaultNoCodeGraph();
-  harness.declarative_graph = graph;
-  return graph;
-}
-
-function lintGraphOrThrow(
-  graph: Record<string, unknown> | null,
-  opts: { strict: boolean; source: string },
-): Record<string, unknown> | null {
-  if (graph === null) return null;
-  const result = lintGraphDesign(graph, { strict: opts.strict });
-  if (result.valid) {
-    return {
-      valid: true,
-      errors: [],
-      warnings: result.warnings,
-      summary: result.summary,
-    };
-  }
-  const errors = result.errors;
-  const warnings = result.warnings;
-  throw {
-    status: 422,
-    body: {
-      message: "No-code graph lint failed. Fix graph design before publish.",
-      source: opts.source,
-      strict: opts.strict,
-      errors,
-      warnings,
-      suggestions: lintSuggestionsFromErrors(errors),
-    },
-  };
 }
 
 /**
@@ -428,29 +365,6 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       configJson.deploy_policy = req.deploy_policy;
     }
 
-    // Attach graph if provided
-    if (req.graph && typeof req.graph === "object") {
-      (configJson.harness as Record<string, unknown>).declarative_graph = req.graph;
-    }
-
-    // Ensure / auto-generate graph
-    let graph = ensureDeclarativeGraph(configJson, req.auto_graph);
-
-    // Lint graph — fall back to safe default if it fails
-    try {
-      lintGraphOrThrow(graph, { strict: req.strict_graph_lint, source: "agents.create" });
-    } catch {
-      // LLM-generated or user-provided graph failed lint — fall back to safe default
-      console.warn("[agents/create] Graph lint failed, falling back to default graph");
-      const safeGraph = defaultNoCodeGraph();
-      if (configJson.harness && typeof configJson.harness === "object") {
-        (configJson.harness as Record<string, unknown>).declarative_graph = safeGraph;
-      } else {
-        configJson.harness = { declarative_graph: safeGraph };
-      }
-      graph = safeGraph;
-    }
-
     const deployPolicyApply = applyDeployPolicyToConfigJson(configJson);
     if (!deployPolicyApply.ok) {
       return c.json(
@@ -566,17 +480,7 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     gov.budget_limit_usd = req.budget_limit_usd;
     existingConfig.governance = gov;
 
-    // Graph
-    if (req.graph && typeof req.graph === "object") {
-      let harness = existingConfig.harness as Record<string, unknown> | undefined;
-      if (typeof harness !== "object" || harness === null) {
-        harness = {};
-        existingConfig.harness = harness;
-      }
-      harness.declarative_graph = req.graph;
-    }
-
-    // MVP dashboard flow UI (visual only; runtime graph stays in declarative_graph)
+    // MVP dashboard flow UI (visual only)
     if (req.mvp_flow_canvas && typeof req.mvp_flow_canvas === "object") {
       let harness = existingConfig.harness as Record<string, unknown> | undefined;
       if (typeof harness !== "object" || harness === null) {
@@ -584,20 +488,6 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
         existingConfig.harness = harness;
       }
       harness.mvp_flow_canvas = req.mvp_flow_canvas;
-    }
-
-    let graph = ensureDeclarativeGraph(existingConfig, req.auto_graph);
-
-    try {
-      lintGraphOrThrow(graph, { strict: req.strict_graph_lint, source: "agents.update" });
-    } catch {
-      // Fall back to safe default graph on lint failure
-      console.warn("[agents/update] Graph lint failed, falling back to default graph");
-      const safeGraph = defaultNoCodeGraph();
-      let harness = existingConfig.harness as Record<string, unknown> | undefined;
-      if (typeof harness !== "object" || harness === null) { harness = {}; existingConfig.harness = harness; }
-      harness.declarative_graph = safeGraph;
-      graph = safeGraph;
     }
 
     const deployPolicyUpdate = applyDeployPolicyToConfigJson(existingConfig);
@@ -950,34 +840,13 @@ const importAgentRoute = createRoute({
   responses: {
     200: { description: "Agent imported", content: { "application/json": { schema: AgentSummary } } },
     ...errorResponses(400, 500),
-    422: { description: "Graph lint failed", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    422: { description: "Validation failed", content: { "application/json": { schema: z.record(z.unknown()) } } },
   },
 });
 agentRoutes.openapi(importAgentRoute, async (c): Promise<any> => {
     const { config } = c.req.valid("json");
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-
-    // Extract graph for linting
-    let graph: Record<string, unknown> | null = null;
-    const harness = config.harness;
-    if (typeof harness === "object" && harness !== null && !Array.isArray(harness)) {
-      const h = harness as Record<string, unknown>;
-      const g = h.declarative_graph ?? h.graph;
-      if (typeof g === "object" && g !== null && !Array.isArray(g)) {
-        graph = g as Record<string, unknown>;
-      }
-    }
-    if (typeof config.graph === "object" && config.graph !== null && graph === null) {
-      graph = config.graph as Record<string, unknown>;
-    }
-
-    try {
-      lintGraphOrThrow(graph, { strict: true, source: "agents.import" });
-    } catch (err: unknown) {
-      const e = err as { status: number; body: unknown };
-      return c.json(e.body, 422);
-    }
 
     const agentName = String(config.name || "imported_agent");
 
@@ -1183,7 +1052,6 @@ const createFromDescriptionRoute = createRoute({
     200: { description: "Draft returned", content: { "application/json": { schema: z.record(z.unknown()) } } },
     ...errorResponses(400, 500),
     409: { description: "Gate-pack hold", content: { "application/json": { schema: z.record(z.unknown()) } } },
-    422: { description: "Graph lint or validation failed", content: { "application/json": { schema: z.record(z.unknown()) } } },
   },
 });
 agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
@@ -1246,92 +1114,9 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       config.harness = {};
     }
 
-    // Use LLM-proposed graph instead of hardcoded 5-node template
-    if (pkg?.graph && typeof pkg.graph === "object") {
-      (config.harness as Record<string, unknown>).declarative_graph = pkg.graph;
-    }
-
     // Store eval config in agent config if provided
     if (pkg?.eval_config) {
       (config as Record<string, unknown>).eval_config = pkg.eval_config;
-    }
-
-    // Parse explicit graph_json if provided
-    if (req.graph_json.trim()) {
-      let parsedGraph: unknown;
-      try {
-        parsedGraph = JSON.parse(req.graph_json);
-      } catch (err) {
-        return c.json({ error: `Invalid graph_json: ${err}` }, 400);
-      }
-      if (typeof parsedGraph !== "object" || parsedGraph === null || Array.isArray(parsedGraph)) {
-        return c.json({ error: "graph_json must decode to a JSON object" }, 400);
-      }
-      (config.harness as Record<string, unknown>).declarative_graph = parsedGraph;
-    }
-
-    // Ensure graph
-    let graph = ensureDeclarativeGraph(config, req.auto_graph);
-
-    // Lint + autofix
-    let lintReport: Record<string, unknown> | null = null;
-    let graphAutofix: Record<string, unknown> | null = null;
-
-    if (graph !== null) {
-      graphAutofix = lintAndAutofixGraph(graph, {
-        strict: req.strict_graph_lint,
-        apply: req.include_autofix,
-      });
-
-      if (graphAutofix.autofix_applied) {
-        const fixedGraph = graphAutofix.graph;
-        if (typeof fixedGraph === "object" && fixedGraph !== null) {
-          (config.harness as Record<string, unknown>).declarative_graph = fixedGraph;
-          graph = fixedGraph as Record<string, unknown>;
-        }
-      }
-
-      lintReport = (graphAutofix.lint_after ?? null) as Record<string, unknown> | null;
-      const lintValid = Boolean(lintReport?.valid);
-
-      // If lint fails after autofix, fall back to safe default graph instead of blocking
-      if (!lintValid && !req.draft_only) {
-        console.warn("[agents/create-from-description] LLM graph failed lint after autofix, falling back to default graph");
-        const safeGraph = defaultNoCodeGraph();
-        (config.harness as Record<string, unknown>).declarative_graph = safeGraph;
-        graph = safeGraph;
-        // Re-lint the safe graph (should always pass)
-        const safeLint = lintAndAutofixGraph(safeGraph, { strict: false });
-        lintReport = (safeLint.lint_after ?? safeLint.lint_before ?? null) as Record<string, unknown> | null;
-        graphAutofix = safeLint;
-      }
-
-      // Only block on draft_only=false if even the safe graph fails (should never happen)
-      if (!Boolean(lintReport?.valid) && !req.draft_only) {
-        const errors = (Array.isArray(lintReport?.errors) ? lintReport!.errors : []) as Array<{ code?: string }>;
-        return c.json(
-          {
-            message: "No-code graph lint failed. Fix graph design before publish.",
-            source: "agents.create-from-description",
-            strict: req.strict_graph_lint,
-            errors: lintReport?.errors ?? [],
-            warnings: lintReport?.warnings ?? [],
-            suggestions: lintSuggestionsFromErrors(errors),
-            graph_autofix: graphAutofix,
-          },
-          422,
-        );
-      }
-    } else if (!req.draft_only) {
-      try {
-        lintReport = lintGraphOrThrow(graph, {
-          strict: req.strict_graph_lint,
-          source: "agents.create-from-description",
-        });
-      } catch (err: unknown) {
-        const e = err as { status: number; body: unknown };
-        return c.json(e.body, 422);
-      }
     }
 
     // Eval gate
@@ -1342,29 +1127,13 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
     });
 
     const gatePack = {
-      graph_lint: lintReport,
       eval_gate: evalGate,
       rollout: rolloutRecommendation({
         agentName: String(config.name),
-        graphLint: lintReport,
         evalGate,
         targetChannel: req.target_channel,
       }),
     };
-
-    // Contracts validate
-    let contractsValidate: Record<string, unknown> | null = null;
-    if (graph !== null) {
-      const contractsResult = lintGraphDesign(graph, { strict: req.strict_graph_lint });
-      const contractsSummary: Record<string, unknown> = { ...(contractsResult.summary ?? {}) };
-      contractsSummary.contracts = summarizeGraphContracts(graph);
-      contractsValidate = {
-        valid: contractsResult.valid,
-        errors: contractsResult.errors,
-        warnings: contractsResult.warnings,
-        summary: contractsSummary,
-      };
-    }
 
     const rolloutDecision = String(gatePack.rollout.decision ?? "").trim().toLowerCase();
     let holdOverrideApplied = false;
@@ -1385,7 +1154,6 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
         tags: config.tags,
         version: config.version,
         draft: config,
-        graph_lint: lintReport,
       };
 
       // Include the full agent package from the meta-agent
@@ -1401,9 +1169,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
         payload.mcp_connectors = pkg.mcp_connectors;
       }
 
-      if (req.include_autofix) payload.graph_autofix = graphAutofix;
       if (req.include_gate_pack) payload.gate_pack = gatePack;
-      if (req.include_contracts_validate) payload.contracts_validate = contractsValidate;
       return c.json(payload as any);
     }
 
@@ -1572,9 +1338,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       };
     }
     if (packageErrors.length > 0) payload.package_errors = packageErrors;
-    if (req.include_autofix) payload.graph_autofix = graphAutofix;
     if (req.include_gate_pack) payload.gate_pack = gatePack;
-    if (req.include_contracts_validate) payload.contracts_validate = contractsValidate;
     payload.hold_override_applied = holdOverrideApplied;
 
     return c.json(payload as any, 201);

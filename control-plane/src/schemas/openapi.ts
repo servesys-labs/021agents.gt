@@ -80,9 +80,6 @@ export const AgentCreateBody = z.object({
   timeout_seconds: z.number().int().min(1).max(3600).optional(),
   budget_limit_usd: z.number().min(0).max(10000).default(10),
   tags: z.array(z.string()).default([]),
-  graph: z.record(z.unknown()).nullable().optional().default(null),
-  strict_graph_lint: z.boolean().default(true),
-  auto_graph: z.boolean().default(false),
   reasoning_strategy: z.enum(VALID_REASONING_STRATEGIES).optional(),
   sub_agents: z.array(z.record(z.unknown())).optional(),
   skills: z.array(z.record(z.unknown())).optional(),
@@ -93,7 +90,7 @@ export const AgentCreateBody = z.object({
   release_strategy: z.record(z.unknown()).optional(),
   mcp_connectors: z.array(z.record(z.unknown())).optional(),
   deploy_policy: z.record(z.unknown()).optional(),
-  /** MVP flow editor canvas only; does not replace runtime `declarative_graph`. */
+  /** MVP flow editor canvas (visual layout only). */
   mvp_flow_canvas: z
     .object({
       nodes: z.array(z.record(z.unknown())),
@@ -150,24 +147,6 @@ export const TurnDetail = z.object({
   started_at: z.string().nullable(),
   ended_at: z.string().nullable(),
 }).openapi("TurnDetail");
-
-// ── Graph schemas ───────────────────────────────────────────────────────
-
-export const GraphValidateBody = z.object({
-  graph: z.record(z.unknown()),
-}).openapi("GraphValidateBody");
-
-export const GraphLintBody = z.object({
-  graph: z.record(z.unknown()),
-  strict: z.boolean().default(false),
-}).openapi("GraphLintBody");
-
-export const GraphLintResult = z.object({
-  valid: z.boolean(),
-  errors: z.array(z.record(z.unknown())),
-  warnings: z.array(z.record(z.unknown())),
-  summary: z.record(z.unknown()).optional(),
-}).openapi("GraphLintResult");
 
 // ── Issue schemas ───────────────────────────────────────────────────────
 
@@ -477,7 +456,7 @@ export const ConnectorTokenBody = z.object({
 // ── Component schemas ───────────────────────────────────────────────────
 
 export const ComponentCreateBody = z.object({
-  type: z.enum(["graph", "prompt", "tool_set", "node_template"]),
+  type: z.enum(["prompt", "tool_set", "node_template"]),
   name: z.string().min(1).max(128),
   description: z.string().max(2000).default(""),
   content: z.record(z.unknown()),

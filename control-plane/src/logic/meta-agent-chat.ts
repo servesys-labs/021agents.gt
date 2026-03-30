@@ -55,7 +55,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "read_agent_config",
       description:
-        "Read the full configuration of the agent including system prompt, tools, model, graph, governance, guardrails, and eval config.",
+        "Read the full configuration of the agent including system prompt, tools, model, governance, guardrails, and eval config.",
       parameters: { type: "object", properties: {}, required: [] },
     },
   },
@@ -363,7 +363,7 @@ async function executeTool(
               pass_threshold: config.eval_config.pass_threshold,
             }
           : null,
-        graph_id: config.harness?.declarative_graph?.id ?? null,
+        graph_id: null,
       });
     }
 

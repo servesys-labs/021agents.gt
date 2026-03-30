@@ -8,28 +8,10 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
-// Graph lint removed — stub for compatibility
-const lintGraphDesign = (_g: any, _o?: any) => ({ valid: true, errors: [], warnings: [] });
 import { getThresholds } from "../logic/policies";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
 
 export const releaseRoutes = createOpenAPIRouter();
-
-function extractGraphForLint(config: unknown): Record<string, unknown> | null {
-  if (typeof config !== "object" || config === null || Array.isArray(config)) return null;
-  const cfg = config as Record<string, unknown>;
-  const harness = cfg.harness;
-  if (typeof harness === "object" && harness !== null && !Array.isArray(harness)) {
-    const h = harness as Record<string, unknown>;
-    for (const key of ["declarative_graph", "graph"]) {
-      const g = h[key];
-      if (typeof g === "object" && g !== null && !Array.isArray(g)) {
-        return g as Record<string, unknown>;
-      }
-    }
-  }
-  return null;
-}
 
 // ── GET /releases/:agent_name/channels ──────────────────────────────────
 
@@ -143,15 +125,8 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   }
   configJson = JSON.stringify(parsedPromoteConfig);
 
-  // ── Eval + graph lint enforcement for production promotion ──
+  // ── Eval enforcement for production promotion ──
   if (toChannel === "production") {
-    let graphLintValid = true;
-    const parsedConfig = parsedPromoteConfig;
-    const graph = extractGraphForLint(parsedConfig);
-    if (graph) {
-      graphLintValid = lintGraphDesign(graph, { strict: true }).valid;
-    }
-
     const thresholds = await getThresholds(c.env.HYPERDRIVE, user.org_id, agentName);
     const evalGate = await latestEvalGate(sql, agentName, {
       minEvalPassRate: thresholds.eval_pass_rate,
@@ -160,7 +135,6 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
     });
     const recommendation = rolloutRecommendation({
       agentName,
-      graphLint: { valid: graphLintValid },
       evalGate,
       targetChannel: toChannel,
     });

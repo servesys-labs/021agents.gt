@@ -16,7 +16,6 @@ import { createApp } from "./lib/openapi";
 import { authRoutes } from "./routes/auth";
 import { apiKeyRoutes } from "./routes/api-keys";
 import { agentRoutes } from "./routes/agents";
-// graphRoutes removed — graph system deleted, Workflows replace execution
 import { evalRoutes } from "./routes/eval";
 import { evolveRoutes } from "./routes/evolve";
 import { workflowRoutes } from "./routes/workflows";
@@ -142,8 +141,6 @@ app.route("/api/v1/api-keys", apiKeyRoutes);
 
 // Core agent lifecycle
 app.route("/api/v1/agents", agentRoutes);
-// app.route("/api/v1/graphs", graphRoutes); // removed
-
 // Eval, evolve, workflows
 app.route("/api/v1/eval", evalRoutes);
 app.route("/api/v1/evolve", evolveRoutes);
@@ -230,7 +227,7 @@ app.route("/api/v1/marketplace", marketplaceRoutes);
 // Referral Program (codes, stats, earnings)
 app.route("/api/v1/referrals", referralRoutes);
 
-// Components (reusable graphs, prompts, tool sets)
+// Components (reusable prompts, tool sets)
 // app.route("/api/v1/components", componentRoutes); // removed
 
 // Guardrails + DLP
@@ -301,7 +298,6 @@ app.doc("/api/v1/_openapi-raw.json", {
     { name: "Issues", description: "Issue detection, triage, and auto-fix" },
     { name: "Security", description: "OWASP scanning, risk profiles, AIVSS" },
     { name: "Redteam", description: "Red team probes and security testing" },
-    { name: "Graphs", description: "Graph validation, linting, autofix, gate-pack" },
     { name: "Observability", description: "Traces, spans, annotations, meta-reports" },
     { name: "Ops Observability", description: "Operational monitoring and incidents" },
     { name: "ConversationIntel", description: "Conversation quality and sentiment" },

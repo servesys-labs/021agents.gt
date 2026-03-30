@@ -109,7 +109,6 @@ describe("observability ownership and maintenance contracts", () => {
     expect(typeof payload.signals).toBe("object");
     expect(typeof payload.entrypoints).toBe("object");
     expect(payload.entrypoints && "agent_crud" in payload.entrypoints).toBe(true);
-    expect(payload.entrypoints && "graph_design" in payload.entrypoints).toBe(true);
   });
 
   it("annotations validates required fields", async () => {

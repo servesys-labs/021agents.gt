@@ -6,33 +6,6 @@
 
 import { getDb } from "../db/client";
 
-/** Default no-code starter graph template. */
-export function defaultNoCodeGraph(): Record<string, unknown> {
-  return {
-    id: "no-code-starter",
-    nodes: [
-      { id: "bootstrap", kind: "bootstrap" },
-      { id: "route_llm", kind: "route_llm" },
-      { id: "tools", kind: "tools" },
-      { id: "after_tools", kind: "after_tools" },
-      { id: "final", kind: "final" },
-      {
-        id: "telemetry_emit",
-        kind: "telemetry_emit",
-        async: true,
-        idempotency_key: "session:${session_id}:turn:${turn}:telemetry_emit",
-      },
-    ],
-    edges: [
-      { source: "bootstrap", target: "route_llm" },
-      { source: "route_llm", target: "tools" },
-      { source: "tools", target: "after_tools" },
-      { source: "after_tools", target: "final" },
-      { source: "bootstrap", target: "telemetry_emit" },
-    ],
-  };
-}
-
 /* ── Platform tool inventory ────────────────────────────────────── */
 /*
  * This is the actual tool inventory from deploy/src/runtime/tools.ts.
@@ -417,7 +390,6 @@ You don't just create a config — you design the entire operational package: ag
 ${toolInventory}
 
 ## Platform Capabilities
-- **Graph execution**: Agents run on a declarative DAG. Nodes can be: bootstrap, route_llm, tools, after_tools, final, telemetry_emit, approval_gate, sub_agent, codemode_exec. Edges connect nodes. Nodes can be async (parallel branches). Breakpoints pause for human approval.
 - **Sub-agents**: Agents can spawn specialist sub-agents via route-to-agent and create-agent tools. Each sub-agent gets its own config, tools, and prompt.
 - **Codemode**: Custom JavaScript/TypeScript snippets that run in sandboxed V8 isolates. Use for: data transforms, scoring algorithms, template rendering, API field mapping, custom validation — anything the 64 built-in tools don't cover.
 - **Skills**: Reusable prompt templates (type: "prompt"), tool chains (type: "tool-chain"), or workflows (type: "workflow") stored in the Skills Library and attachable to any agent.
@@ -475,27 +447,6 @@ Return a JSON object with ALL of these top-level fields:
     "max_turns": 50,
     "tags": ["tag1", "tag2"],
     "version": "0.1.0"
-  },
-
-  "graph": {
-    "id": "agent-name-graph",
-    "nodes": [
-      { "id": "bootstrap", "kind": "bootstrap" },
-      { "id": "research", "kind": "tools", "async": true, "tools": ["web-search", "autoresearch"] },
-      { "id": "route_llm", "kind": "route_llm" },
-      { "id": "tools", "kind": "tools" },
-      { "id": "approval", "kind": "approval_gate", "breakpoint": true },
-      { "id": "sub_specialist", "kind": "sub_agent", "agent_name": "specialist-name" },
-      { "id": "telemetry_emit", "kind": "telemetry_emit", "async": true },
-      { "id": "final", "kind": "final" }
-    ],
-    "edges": [
-      { "source": "bootstrap", "target": "research" },
-      { "source": "bootstrap", "target": "route_llm" },
-      { "source": "route_llm", "target": "tools" },
-      { "source": "tools", "target": "approval" },
-      { "source": "approval", "target": "final" }
-    ]
   },
 
   "sub_agents": [
@@ -588,14 +539,6 @@ Return a JSON object with ALL of these top-level fields:
 3. Tool-aware: explicitly mention tool names and when to use each
 4. Include what the agent should NOT do
 5. Domain-specific knowledge and terminology
-
-## Graph Design Guidelines
-1. NEVER use a flat linear pipeline. Design a real DAG with parallel branches.
-2. Use async nodes for independent research/data gathering that can run in parallel
-3. Add approval_gate nodes with breakpoint:true before bulk/destructive actions
-4. Use sub_agent nodes for specialist delegation
-5. Always include telemetry_emit as an async branch from bootstrap
-6. Tools node should be after route_llm, final should be the terminal node
 
 ## Eval & Test Case Guidelines
 1. Generate 5-10 diverse test_cases covering: happy path, edge cases, error handling, safety/guardrails, and multi-turn if applicable.
@@ -871,7 +814,7 @@ Return ONLY valid JSON.`,
 /* ── Evolution: analyze eval results and suggest improvements ──────── */
 
 export interface EvolutionSuggestion {
-  area: "prompt" | "tools" | "graph" | "test_cases" | "guardrails";
+  area: "prompt" | "tools" | "test_cases" | "guardrails";
   severity: "low" | "medium" | "high";
   suggestion: string;
   auto_applicable: boolean;

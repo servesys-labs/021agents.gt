@@ -31,7 +31,6 @@ export const deployPolicyBudgetsSchema = z.object({
 export const deployPolicyEvalReleaseSchema = z.object({
   min_eval_pass_rate: z.number().min(0).max(1).optional(),
   min_eval_trials: z.number().int().min(0).max(1_000_000).optional(),
-  require_graph_lint_for_production: z.boolean().optional(),
   override_requires_approval: z.boolean().optional(),
 });
 
@@ -111,8 +110,6 @@ export function synthesizeLegacyDeployPolicy(configJson: Record<string, unknown>
   const mt = optionalInt(evalCfg.min_trials ?? evalCfg.minEvalTrials);
   if (mr !== undefined) er.min_eval_pass_rate = mr;
   if (mt !== undefined) er.min_eval_trials = mt;
-  const rg = boolish(releaseStrat.require_graph_lint_for_production);
-  if (rg !== undefined) er.require_graph_lint_for_production = rg;
   const oa = boolish(releaseStrat.override_requires_approval);
   if (oa !== undefined) er.override_requires_approval = oa;
 
@@ -197,8 +194,6 @@ function mergeDeployPolicyV1(base: DeployPolicyV1, overlay: Record<string, unkno
     if (mr !== undefined) er.min_eval_pass_rate = mr;
     const mt = optionalInt(oe.min_eval_trials);
     if (mt !== undefined) er.min_eval_trials = mt;
-    const rg = boolish(oe.require_graph_lint_for_production);
-    if (rg !== undefined) er.require_graph_lint_for_production = rg;
     const oa = boolish(oe.override_requires_approval);
     if (oa !== undefined) er.override_requires_approval = oa;
     out.eval_release = Object.keys(er).length ? er : undefined;

@@ -897,11 +897,6 @@ observabilityRoutes.openapi(metaControlPlaneRoute, async (c): Promise<any> => {
       update: `/api/v1/agents/${agentName}`,
       delete: `/api/v1/agents/${agentName}`,
     },
-    graph_design: {
-      validate: "/api/v1/graphs/validate",
-      lint: "/api/v1/graphs/lint",
-      autofix: "/api/v1/graphs/autofix",
-    },
     telemetry: {
       meta_report: `/api/v1/observability/agents/${agentName}/meta-report`,
       meta_control_plane: `/api/v1/observability/agents/${agentName}/meta-control-plane`,
@@ -1136,16 +1131,11 @@ observabilityRoutes.openapi(generateMetaProposalsRoute, async (c): Promise<any> 
       WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
       ORDER BY created_at DESC LIMIT 1
     `.catch(() => []);
-    const checkpointRows = await sql`
-      SELECT COUNT(*) as cnt FROM graph_checkpoints
-      WHERE agent_name = ${agentName} AND status = 'pending_approval'
-    `.catch(() => [{ cnt: 0 }]);
-
     signals = {
       avg_turns: Number(stats.avg_turns),
       node_error_rate: Number(stats.error_rate),
       eval_pass_rate: evalRows.length > 0 ? Number(evalRows[0].pass_rate) : null,
-      checkpoint_pending: Number(checkpointRows[0]?.cnt ?? 0),
+      checkpoint_pending: 0,
     };
   } catch { /* best-effort */ }
 
@@ -1219,14 +1209,9 @@ observabilityRoutes.openapi(metaReportRoute, async (c): Promise<any> => {
     ORDER BY created_at DESC LIMIT 1
   `.catch(() => []);
 
-  const checkpointRows = await sql`
-    SELECT COUNT(*) as cnt FROM graph_checkpoints
-    WHERE agent_name = ${agentName} AND status = 'pending_approval'
-  `.catch(() => [{ cnt: 0 }]);
-
   const signals = {
     node_error_rate: Number(summary.error_rate),
-    checkpoint_pending: Number(checkpointRows[0]?.cnt ?? 0),
+    checkpoint_pending: 0,
     eval_pass_rate: evalRows.length > 0 ? Number(evalRows[0].pass_rate) : null,
     avg_turns: Number(summary.avg_turns),
   };
@@ -1557,11 +1542,6 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
       WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
       ORDER BY created_at DESC LIMIT 1
     `.catch(() => []);
-    const checkpointRows = await sql`
-      SELECT COUNT(*) as cnt FROM graph_checkpoints
-      WHERE agent_name = ${agentName} AND status = 'pending_approval'
-    `.catch(() => [{ cnt: 0 }]);
-
     signals = {
       total_sessions_7d: Number(stats.total),
       avg_turns: Number(stats.avg_turns),
@@ -1569,7 +1549,7 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
       avg_cost_usd: Number(stats.avg_cost),
       node_error_rate: Number(stats.error_rate),
       eval_pass_rate: evalRows.length > 0 ? Number(evalRows[0].pass_rate) : null,
-      checkpoint_pending: Number(checkpointRows[0]?.cnt ?? 0),
+      checkpoint_pending: 0,
     };
   } catch { /* best-effort */ }
 
@@ -1595,44 +1575,7 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
     }
   }
 
-  // 4. Graph checks
-  let graphAvailable = false;
-  let graphLint: Record<string, unknown> | null = null;
-  let graphAutofix: Record<string, unknown> | null = null;
-  let contractsValidate: Record<string, unknown> | null = null;
-
-  try {
-    const agentRows = await sql`
-      SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id}
-    `;
-    if (agentRows.length > 0) {
-      let config: Record<string, unknown> = {};
-      try { config = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
-      const graph = (config.harness as any)?.declarative_graph ?? config.declarative_graph;
-      if (graph && typeof graph === "object") {
-        graphAvailable = true;
-        // Graph lint/autofix removed — stub for compatibility
-        const lintGraphDesign = (_g: any, _o?: any) => ({ valid: true, errors: [], warnings: [], summary: {} });
-        const summarizeGraphContracts = (_g: any) => ({});
-        const lintAndAutofixGraph = (g: any, _o?: any) => ({ graph: g, applied: 0, valid: true });
-
-        graphAutofix = lintAndAutofixGraph(graph as Record<string, unknown>, { strict: true, apply: true });
-        graphLint = (graphAutofix as any).lint_after ?? null;
-
-        const contractsResult = lintGraphDesign(graph as Record<string, unknown>, { strict: true });
-        const contractsSummary: Record<string, unknown> = { ...(contractsResult.summary ?? {}) };
-        contractsSummary.contracts = summarizeGraphContracts(graph as Record<string, unknown>);
-        contractsValidate = {
-          valid: contractsResult.valid,
-          errors: contractsResult.errors,
-          warnings: contractsResult.warnings,
-          summary: contractsSummary,
-        };
-      }
-    }
-  } catch { /* best-effort */ }
-
-  // 5. Eval gate
+  // 4. Eval gate
   const { latestEvalGate, rolloutRecommendation } = await import("../logic/gate-pack");
   const evalGate = await latestEvalGate(sql, agentName, {
     minEvalPassRate,
@@ -1640,11 +1583,9 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
     orgId: user.org_id,
   });
 
-  // 6. Rollout recommendation
-  const lintValid = Boolean((graphLint as any)?.valid);
+  // 5. Rollout recommendation
   const rollout = rolloutRecommendation({
     agentName,
-    graphLint: graphAvailable ? (graphLint as any) : null,
     evalGate,
     targetChannel,
   });
@@ -1654,7 +1595,7 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
     blockingReasons.push(rollout.reason || "Hold decision");
   }
 
-  // 7. Build eval plan from signals + proposals
+  // 6. Build eval plan from signals + proposals
   const focusAreas: string[] = [];
   if (Number(signals.node_error_rate ?? 0) > 0.03) focusAreas.push("node_reliability");
   if (Number(signals.checkpoint_pending ?? 0) > 0) focusAreas.push("approval_resume_flow");
@@ -1681,12 +1622,6 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
     dry_run: dryRun,
     generated_at: Date.now() / 1000,
     meta_report: { signals },
-    graph_checks: {
-      available: graphAvailable,
-      graph_lint: graphLint,
-      contracts_validate: contractsValidate,
-      graph_autofix: graphAutofix,
-    },
     eval_gate: evalGate,
     rollout,
     proposals: {
@@ -1701,12 +1636,11 @@ observabilityRoutes.openapi(autonomousMaintenanceRoute, async (c): Promise<any> 
       review_endpoints: {
         meta_control_plane: `/api/v1/observability/agents/${agentName}/meta-control-plane`,
         meta_proposals: `/api/v1/observability/agents/${agentName}/meta-proposals`,
-        gate_pack: "/api/v1/graphs/gate-pack",
       },
     },
     suggested_eval_plan: suggestedEvalPlan,
     suggested_actions: [
-      "Review generated proposals and graph contract/lint outputs",
+      "Review generated proposals",
       "Approve config changes and run targeted eval regressions",
       "Promote only if rollout decision is promote_candidate",
     ],

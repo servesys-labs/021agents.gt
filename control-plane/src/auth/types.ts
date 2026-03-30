@@ -37,7 +37,6 @@ export const ALL_SCOPES = new Set([
   "orgs:read", "orgs:write",
   "retention:read", "retention:write",
   "observability:read", "observability:write",
-  "graphs:read", "graphs:write",
   "security:read", "security:write",
   "guardrails:read", "guardrails:write",
   "dlp:read", "dlp:write",

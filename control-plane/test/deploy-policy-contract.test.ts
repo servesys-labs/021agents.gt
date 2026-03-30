@@ -16,7 +16,7 @@ describe("deploy-policy-contract", () => {
       max_turns: 20,
       governance: { budget_limit_usd: 5, max_tokens_per_turn: 1024 },
       eval_config: { min_pass_rate: 0.9, min_trials: 5 },
-      release_strategy: { require_graph_lint_for_production: true },
+      release_strategy: {},
     });
     expect(p.schema_version).toBe(DEPLOY_POLICY_SCHEMA_VERSION);
     expect(p.tools.enabled).toEqual(["search", "browser"]);
@@ -27,7 +27,6 @@ describe("deploy-policy-contract", () => {
     expect(p.budgets.max_tokens_per_turn).toBe(1024);
     expect(p.eval_release?.min_eval_pass_rate).toBe(0.9);
     expect(p.eval_release?.min_eval_trials).toBe(5);
-    expect(p.eval_release?.require_graph_lint_for_production).toBe(true);
     expect(validateDeployPolicyConsistency(p)).toEqual([]);
   });
 
