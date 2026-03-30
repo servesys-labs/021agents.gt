@@ -370,8 +370,8 @@ function getExecutor(env: RuntimeEnv, timeoutMs: number): DynamicWorkerExecutor 
       timeout: timeoutMs,
       globalOutbound: null,
       // Inject SANDBOX_HELPERS as an ES module via v0.2.1 `modules` option.
-      // LLM code can: `import { sleep, retry, percentile } from "helpers"`
-      modules: { helpers: SANDBOX_HELPERS_MODULE },
+      // LLM code can: `import { sleep, retry, percentile } from "helpers.js"`
+      modules: { "helpers.js": SANDBOX_HELPERS_MODULE },
     });
     executorPool.set(key, executor);
   }
@@ -380,7 +380,7 @@ function getExecutor(env: RuntimeEnv, timeoutMs: number): DynamicWorkerExecutor 
 
 /**
  * SANDBOX_HELPERS as an ES module (v0.2.1 modules injection).
- * Available via `import { sleep, retry, percentile } from "helpers"` inside sandbox.
+ * Available via `import { sleep, retry, percentile } from "helpers.js"` inside sandbox.
  */
 const SANDBOX_HELPERS_MODULE = `
 export function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
@@ -978,7 +978,7 @@ export async function createHarnessCodeTool(
       description:
         `Write and execute JavaScript code that orchestrates tools. ` +
         `Your code runs in an isolated sandbox with access to all tools via \`codemode.*\` methods. ` +
-        `You can also import harness helpers: \`import { safeEdit, gitCheckpoint, findDefinition, navigateTo } from "harness"\`.\n\n` +
+        `You can also import harness helpers: \`import { safeEdit, gitCheckpoint, findDefinition, navigateTo } from "harness.js"\`.\n\n` +
         `Available tool methods:\n${toolTypes}\n\n` +
         `Harness helpers:\n${HARNESS_TYPE_DEFS}\n\n` +
         `Write an async arrow function: \`async (codemode) => { ... }\``,

@@ -37,7 +37,8 @@ export {
 export type { TraceReplayAtCursor, UsagePage, UsageSummary, UsageSessionEntry, ConversationMessage } from "./db";
 export { callLLM } from "./llm";
 export { executeTools, getToolDefinitions, calculateInfraCost, INFRA_COSTS } from "./tools";
-export { selectModel, classifyComplexity, classifyCategory } from "./router";
+export { selectModel, classifyTurn, classifyComplexity, classifyCategory } from "./router";
+export type { RouteClassification } from "./router";
 export { buildMemoryContext, searchFacts, searchEpisodes, findBestProcedures, queueFactExtraction } from "./memory";
 export { detectLoop, maybeSummarize } from "./middleware";
 export { pipe, mapInputs, branch, parseOutput } from "./runnable";

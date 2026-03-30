@@ -177,7 +177,7 @@ export function buildSandboxModules(
   customModules?: Record<string, string>,
 ): Record<string, string> {
   return {
-    harness: HARNESS_MODULE_SOURCE,
+    "harness.js": HARNESS_MODULE_SOURCE,
     ...customModules,
   };
 }
@@ -187,8 +187,8 @@ export function buildSandboxModules(
  * The LLM sees these types so it knows what helpers are available.
  */
 export const HARNESS_TYPE_DEFS = `
-// Available via: import { ... } from "harness"
-declare module "harness" {
+// Available via: import { ... } from "harness.js"
+declare module "harness.js" {
   /** Initialize git repo and return status. */
   export function gitInit(codemode: any): Promise<string>;
   /** Stage all + commit + return recent log. */

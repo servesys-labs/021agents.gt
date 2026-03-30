@@ -123,33 +123,17 @@ function clampSandboxTimeout(timeoutSeconds?: number): number {
  * the entire DO request.
  */
 function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
-  const raw = getSandbox(env.SANDBOX, sandboxId);
-  const COLD_START_BUDGET_MS = 45_000;
-
-  const wrapWithTimeout = <T>(fn: () => Promise<T>, label: string, timeoutMs?: number): Promise<T> => {
-    const budget = timeoutMs ?? COLD_START_BUDGET_MS;
-    return Promise.race([
-      fn(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Sandbox ${label} timed out after ${budget / 1000}s — container may be cold-starting. Retry in a few seconds.`)), budget),
-      ),
-    ]);
-  };
+  // getSandbox returns immediately — container only starts on first operation.
+  // Same sandboxId = same container = warm after first call.
+  const raw = getSandbox(env.SANDBOX, sandboxId, {
+    sleepAfter: "10m",  // keep container warm for 10 min of inactivity
+  });
 
   return {
-    exec: (cmd: string, opts?: any) => wrapWithTimeout(
-      () => raw.exec(cmd, opts),
-      `exec(${cmd.slice(0, 40)})`,
-      opts?.timeout ? (opts.timeout + 30) * 1000 : undefined,
-    ),
-    writeFile: (path: string, content: string) => wrapWithTimeout(
-      () => raw.writeFile(path, content),
-      `writeFile(${path})`,
-    ),
-    readFile: (path: string) => wrapWithTimeout(
-      () => (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || ""),
-      `readFile(${path})`,
-    ),
+    exec: (cmd: string, opts?: any) => raw.exec(cmd, opts),
+    writeFile: (path: string, content: string) => raw.writeFile(path, content),
+    readFile: (path: string) =>
+      (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || ""),
   };
 }
 
@@ -158,23 +142,14 @@ async function sandboxExecWithLimits(
   sessionId: string,
   command: string,
   timeoutSeconds?: number,
+  stdin?: string,
 ): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> {
   const timeout = clampSandboxTimeout(timeoutSeconds);
   const sandbox = getSafeSandbox(env, `session-${sessionId}`);
-  const options: { timeout: number } & Record<string, number> = {
+  return sandbox.exec(command, {
     timeout,
-    memoryLimitMb: DEFAULT_SANDBOX_MEMORY_LIMIT_MB,
-    cpuLimitMs: timeout * 1000,
-  };
-  // Guard against container cold-start hanging indefinitely.
-  // Total budget: exec timeout + 30s for container startup.
-  const totalTimeoutMs = (timeout + 30) * 1000;
-  return Promise.race([
-    sandbox.exec(command, options),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Sandbox timeout after ${totalTimeoutMs / 1000}s (container may be cold-starting)`)), totalTimeoutMs),
-    ),
-  ]);
+    ...(stdin !== undefined ? { stdin } : {}),
+  } as any);
 }
 
 async function getCachedDynamicWorker(env: RuntimeEnv, workerCode: string): Promise<any> {
@@ -555,7 +530,9 @@ async function executeSingleTool(
   enabledTools?: string[],
 ): Promise<ToolResult> {
   const started = Date.now();
-  
+  // Normalize tool name: LLMs often convert hyphens to underscores
+  tc = { ...tc, name: tc.name.replace(/_/g, "-") };
+
   // Check circuit breaker before executing
   const circuitCheck = canExecute(tc.name);
   if (!circuitCheck.allowed) {
@@ -705,10 +682,12 @@ async function dispatch(
   sessionId: string,
   enabledTools?: string[],
 ): Promise<string> {
+  // Normalize tool name: LLMs often convert hyphens to underscores (web_search → web-search)
+  const normalizedTool = tool.replace(/_/g, "-");
   // Resolve the effective tool list for codemode — uses agent's enabled tools,
   // NOT all tools. This prevents privilege escalation through execute-code.
   const effectiveToolDefs = () => getToolDefinitions(enabledTools || []);
-  switch (tool) {
+  switch (normalizedTool) {
     case "web-search":
       return braveSearch(env, args);
 
@@ -719,66 +698,27 @@ async function dispatch(
       return httpRequest(args);
 
     case "bash": {
-      // Try container sandbox first, fall back to Dynamic Worker
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 15000);
-        const result = await Promise.race([
-          sandboxExec(env, args.command || "", sessionId, args.timeout_seconds),
-          new Promise<string>((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("Container timeout")))),
-        ]);
-        clearTimeout(timeout);
-        return result;
-      } catch {
-        // Container unavailable — execute via Dynamic Worker (JS only)
-        if (env.LOADER) {
-          const jsCode = `console.log("bash not available in Dynamic Worker mode. Command: ${(args.command || "").replace(/"/g, '\\"').slice(0, 200)}")`;
-          const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${jsCode};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:e.message||String(e),exit_code:1})}}}`;
-          try {
-            const w = await env.LOADER.load("bash-fallback", { modules: [{ name: "worker.mjs", content: workerCode, type: "esm" }] });
-            const r = await w.fetch(new Request("http://internal/"));
-            return JSON.stringify(await r.json());
-          } catch {}
-        }
-        return JSON.stringify({ stdout: "", stderr: "Sandbox containers not available. Use execute-code tool for JavaScript, or codemode-run for sandboxed code.", exit_code: 1 });
+        const r = await sandboxExecWithLimits(env, sessionId, args.command || "", args.timeout_seconds);
+        return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
+      } catch (err: any) {
+        return JSON.stringify({ stdout: "", stderr: `Sandbox error: ${err.message || err}`, exit_code: 1 });
       }
     }
 
     case "python-exec": {
       const code = String(args.code || "");
-      // Try container sandbox first with timeout
+      // Write code to temp file then execute — sandbox reuses warm container via session ID
       try {
-        const deps = extractPythonImportCandidates(code);
-        const missing = await checkMissingPythonModules(env, sessionId, deps);
-        if (missing.length > 0) {
-          return JSON.stringify({ stdout: "", stderr: pythonMissingModuleError(missing), exit_code: 1, missing_modules: missing });
-        }
         const sandbox = getSafeSandbox(env, `session-${sessionId}`);
-        const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
-        // Timeout: 15s for container startup + execution
-        const execPromise = (async () => {
-          await sandbox.writeFile(tmpFile, code);
-          const r = await sandboxExecWithLimits(env, sessionId, `python3 ${tmpFile}`, args.timeout_seconds);
-          await sandboxExecWithLimits(env, sessionId, `rm -f ${tmpFile}`, 5).catch(() => {});
-          return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
-        })();
-        const result = await Promise.race([
-          execPromise,
-          new Promise<string>((_, reject) => setTimeout(() => reject(new Error("Container timeout")), 20000)),
-        ]);
-        return result;
-      } catch {
-        // Container unavailable — fall back to Dynamic Worker (transpile Python to JS-like execution)
-        if (env.LOADER) {
-          // Execute Python-like logic as JavaScript in Dynamic Worker
-          const workerCode = `const __o=[],__e=[];console.log=(...a)=>__o.push(a.map(String).join(" "));console.error=(...a)=>__e.push(a.map(String).join(" "));export default{async fetch(){try{${code.replace(/print\s*\(/g, "console.log(").replace(/"/g, '\\"')};return Response.json({stdout:__o.join("\\n"),stderr:__e.join("\\n"),exit_code:0})}catch(e){return Response.json({stdout:__o.join("\\n"),stderr:"Python container unavailable. Error: "+e.message,exit_code:1})}}}`;
-          try {
-            const w = await env.LOADER.load("python-fallback", { modules: [{ name: "worker.mjs", content: workerCode, type: "esm" }] });
-            const r = await w.fetch(new Request("http://internal/"));
-            return JSON.stringify(await r.json());
-          } catch {}
-        }
-        return JSON.stringify({ stdout: "", stderr: "Python sandbox not available. Container startup timed out. The code was not executed. Use execute-code tool for JavaScript instead.", exit_code: 1 });
+        const tmpFile = `/tmp/py_${Date.now()}.py`;
+        await sandbox.writeFile(tmpFile, code);
+        const timeout = clampSandboxTimeout(args.timeout_seconds);
+        const r = await sandbox.exec(`python3 ${tmpFile}`, { timeout });
+        sandbox.exec(`rm -f ${tmpFile}`, { timeout: 5 }).catch(() => {});
+        return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
+      } catch (err: any) {
+        return JSON.stringify({ stdout: "", stderr: `Python sandbox error: ${err.message || err}`, exit_code: 1 });
       }
     }
 
@@ -1658,22 +1598,72 @@ async function dispatch(
       if (!hyperdrive) return "create-agent requires database access";
       const { getDb } = await import("./db");
       const sql = await getDb(hyperdrive);
-      const orgId = args.org_id || "";
+
+      // Enforce org_id from delegation lineage (not raw args) to prevent cross-org creation
+      const lineage = (env as any).__delegationLineage;
+      const orgId = lineage?.org_id || args.org_id || "";
+
       const name = String(args.name || "").trim();
       if (!name) return "create-agent requires name";
-      const desc = String(args.description || "");
-      const systemPrompt = String(args.system_prompt || `You are ${name}. ${desc}`);
-      const model = String(args.model || "anthropic/claude-sonnet-4.6");
-      const tools = Array.isArray(args.tools) ? args.tools : [];
-      const maxTurns = Number(args.max_turns) || 50;
-      const toolsJson = JSON.stringify(tools);
+      if (name.length > 128) return "Agent name must be 128 characters or less";
+      if (!/^[a-zA-Z0-9_-]+$/.test(name)) return "Agent name must contain only letters, numbers, hyphens, dashes";
+
+      const desc = String(args.description || "").slice(0, 2000);
+      const systemPrompt = String(args.system_prompt || `You are ${name}. ${desc}`).slice(0, 50000);
+      // Don't set a default model — let plan-based routing select the right model at runtime.
+      // Only set model if the user explicitly provides one.
+      const model = args.model ? String(args.model) : "";
+      const plan = String(args.plan || "standard");
+      const maxTurns = Math.max(1, Math.min(Number(args.max_turns) || 50, 1000));
+      const budgetLimitUsd = Math.max(0, Math.min(Number(args.budget_limit_usd) ?? 10, 10000));
+
+      // Validate tools against catalog — drop unknown tools and warn
+      const validToolNames = getValidToolNames();
+      const requestedTools = Array.isArray(args.tools) ? args.tools.map(String) : [];
+      const invalidTools = requestedTools.filter((t: string) => !validToolNames.has(t));
+      const validTools = requestedTools.filter((t: string) => validToolNames.has(t));
+
+      // Enforce org agent limit
+      if (orgId) {
+        try {
+          const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${orgId} AND is_active = 1`;
+          const current = countRows[0]?.cnt || 0;
+          const limitRows = await sql`SELECT max_agents FROM org_settings WHERE org_id = ${orgId} LIMIT 1`.catch(() => []);
+          const maxAgents = limitRows[0]?.max_agents || 50;
+          if (current >= maxAgents) {
+            return JSON.stringify({ error: `Org has reached agent limit (${maxAgents}). Delete unused agents or upgrade plan.` });
+          }
+        } catch {} // non-blocking — don't fail creation if limit check fails
+      }
+
+      const agentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      const now = new Date().toISOString();
+      const configJson = JSON.stringify({
+        system_prompt: systemPrompt,
+        ...(model ? { model } : {}),  // omit model to let plan routing decide
+        tools: validTools,
+        max_turns: maxTurns,
+        plan,
+        governance: { budget_limit_usd: budgetLimitUsd },
+        version: "0.1.0",
+      });
       try {
         await sql`
-          INSERT INTO agents (name, org_id, description, system_prompt, model, tools_json, max_turns, is_active, created_at)
-          VALUES (${name}, ${orgId}, ${desc}, ${systemPrompt}, ${model}, ${toolsJson}, ${maxTurns}, true, ${new Date().toISOString()})
+          INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+          VALUES (${agentId}, ${name}, ${orgId}, ${''}, ${configJson}, ${desc}, 1, ${now}, ${now})
         `;
-        return JSON.stringify({ created: true, name, tools_count: tools.length });
+        const warnings: string[] = [];
+        if (invalidTools.length > 0) warnings.push(`Unknown tools dropped: ${invalidTools.join(", ")}`);
+        return JSON.stringify({
+          created: true, name, agent_id: agentId,
+          tools_count: validTools.length,
+          model, plan, max_turns: maxTurns, budget_limit_usd: budgetLimitUsd,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        });
       } catch (err: any) {
+        if (String(err.message || err).includes("unique") || String(err.message || err).includes("duplicate")) {
+          return JSON.stringify({ error: `Agent '${name}' already exists in this org. Use a different name or update the existing agent.` });
+        }
         return `Failed to create agent: ${err.message || err}`;
       }
     }
@@ -1688,7 +1678,7 @@ async function dispatch(
       if (!agentName) return "delete-agent requires agent_name";
       if (!args.confirm) return "delete-agent requires confirm=true as safety check";
       try {
-        await sql`UPDATE agents SET is_active = false WHERE name = ${agentName} AND org_id = ${orgId}`;
+        await sql`UPDATE agents SET is_active = 0 WHERE name = ${agentName} AND org_id = ${orgId}`;
         // Cascade: soft-delete related sessions, schedules
         await sql`UPDATE sessions SET status = 'archived' WHERE agent_name = ${agentName} AND org_id = ${orgId}`;
         await sql`DELETE FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId}`;
@@ -1926,11 +1916,16 @@ async function dispatch(
       const orgId = args.org_id || "";
       try {
         const rows = await sql`
-          SELECT name, description, model, is_active, created_at
-          FROM agents WHERE org_id = ${orgId} AND is_active = true
+          SELECT name, description, config_json, is_active, created_at
+          FROM agents WHERE org_id = ${orgId} AND is_active = 1
           ORDER BY created_at DESC LIMIT 100
         `;
-        return JSON.stringify(rows);
+        // Extract model from config_json for display
+        const enriched = rows.map((r: any) => {
+          const cfg = JSON.parse(r.config_json || "{}");
+          return { name: r.name, description: r.description, model: cfg.model || "default", is_active: r.is_active, created_at: r.created_at };
+        });
+        return JSON.stringify(enriched);
       } catch {
         return "[]";
       }
@@ -1956,13 +1951,13 @@ async function dispatch(
       const agentName = String(args.agent_name || "");
       if (!agentName) return "security-scan requires agent_name";
       try {
-        const agent = await sql`SELECT name, system_prompt, tools_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+        const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const config = agent[0];
-        const tools = JSON.parse(config.tools_json || "[]");
+        const cfg = JSON.parse(agent[0].config_json || "{}");
+        const tools = Array.isArray(cfg.tools) ? cfg.tools : [];
         // Basic OWASP LLM Top 10 probe checks
         const findings: { probe: string; risk: string; detail: string }[] = [];
-        const prompt = String(config.system_prompt || "").toLowerCase();
+        const prompt = String(cfg.system_prompt || cfg.systemPrompt || "").toLowerCase();
         if (prompt.includes("ignore previous") || prompt.includes("ignore all"))
           findings.push({ probe: "prompt_injection_susceptibility", risk: "high", detail: "System prompt may be vulnerable to injection override" });
         if (tools.includes("bash") || tools.includes("python-exec"))
@@ -2044,16 +2039,16 @@ async function dispatch(
       const agentName = String(args.agent_name || "");
       if (!agentName) return "compliance requires agent_name";
       try {
-        const agent = await sql`SELECT name, system_prompt, tools_json, governance_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+        const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const config = agent[0];
-        const governance = JSON.parse(config.governance_json || "{}");
+        const cfg = JSON.parse(agent[0].config_json || "{}");
+        const governance = cfg.governance || {};
         const checks = {
-          has_system_prompt: Boolean(config.system_prompt),
+          has_system_prompt: Boolean(cfg.system_prompt || cfg.systemPrompt),
           has_governance: Boolean(governance.budget_limit_usd),
           has_budget_limit: (governance.budget_limit_usd || 0) > 0,
-          tools_count: JSON.parse(config.tools_json || "[]").length,
-          compliant: Boolean(config.system_prompt) && (governance.budget_limit_usd || 0) > 0,
+          tools_count: (Array.isArray(cfg.tools) ? cfg.tools : []).length,
+          compliant: Boolean(cfg.system_prompt || cfg.systemPrompt) && (governance.budget_limit_usd || 0) > 0,
         };
         return JSON.stringify({ agent_name: agentName, compliance: checks });
       } catch (err: any) {
@@ -2910,18 +2905,13 @@ async function braveSearch(env: RuntimeEnv, args: Record<string, any>): Promise<
     return duckDuckGoSearch(query, maxResults);
   }
 
-  // Route through AI Gateway for logging/caching
-  const baseUrl = accountId && gatewayId
-    ? `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/custom-brave`
-    : "https://api.search.brave.com";
+  // Hit Brave Search API directly (AI Gateway custom endpoints unreliable)
+  const baseUrl = "https://api.search.brave.com";
 
   const headers: Record<string, string> = {
     "X-Subscription-Token": braveKey,
     "Accept": "application/json",
   };
-  if (accountId && gatewayId && env.AI_GATEWAY_TOKEN) {
-    headers["cf-aig-authorization"] = `Bearer ${env.AI_GATEWAY_TOKEN}`;
-  }
 
   try {
     const resp = await fetch(
@@ -3420,6 +3410,11 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
  * discover-api is safe to always expose (read-only type info).
  */
 const ALWAYS_AVAILABLE = new Set(["discover-api"]);
+
+/** Returns the set of all valid tool names from the catalog. */
+export function getValidToolNames(): Set<string> {
+  return new Set(TOOL_CATALOG.map((t) => t.function.name));
+}
 
 export function getToolDefinitions(enabledTools: string[], blockedTools: string[] = []): ToolDefinition[] {
   // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api).
@@ -4116,17 +4111,19 @@ const TOOL_CATALOG: ToolDefinition[] = [
     function: {
       name: "create-agent",
       description:
-        "Create a new agent config in the database. Auto-assigns tools based on the task. " +
-        "The system_prompt you write MUST tell the agent what tools it has.",
+        "Create a new agent config in the database. Validates tools against the catalog and enforces org limits. " +
+        "Invalid tool names are dropped with a warning. The system_prompt should describe the agent's role and capabilities.",
       parameters: {
         type: "object",
         properties: {
-          name: { type: "string", description: "Agent name (unique within org)" },
-          description: { type: "string", description: "What this agent does" },
+          name: { type: "string", description: "Agent name (letters, numbers, hyphens, underscores only, max 128 chars)" },
+          description: { type: "string", description: "What this agent does (max 2000 chars)" },
           system_prompt: { type: "string", description: "Full system prompt for the agent" },
-          model: { type: "string", description: "Model (OpenRouter format, default anthropic/claude-sonnet-4.6)" },
-          tools: { type: "array", items: { type: "string" }, description: "Tool names to enable" },
-          max_turns: { type: "number", description: "Max conversation turns (default 50)" },
+          model: { type: "string", description: "Model in provider/name format (optional — leave empty to use plan-based routing)" },
+          plan: { type: "string", enum: ["basic", "standard", "premium"], description: "Pricing plan tier (default: standard)" },
+          tools: { type: "array", items: { type: "string" }, description: "Tool names to enable (validated against catalog)" },
+          max_turns: { type: "number", description: "Max conversation turns, 1-1000 (default: 50)" },
+          budget_limit_usd: { type: "number", description: "Max cost per session in USD (default: 10)" },
         },
         required: ["name"],
       },
