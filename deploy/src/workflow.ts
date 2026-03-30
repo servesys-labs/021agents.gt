@@ -132,6 +132,31 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     }
 
     // ═══════════════════════════════════════════════════════════
+    // STEP 1b: HYDRATE WORKSPACE — restore files from R2 into sandbox
+    // ═══════════════════════════════════════════════════════════
+    // On cold start, the sandbox container has an empty /workspace.
+    // Files from previous sessions exist in R2 but need to be loaded back.
+    // This must happen BEFORE tools run, or read-file/edit-file will find nothing.
+
+    if (this.env.STORAGE && this.env.SANDBOX) {
+      await step.do("hydrate-workspace", {
+        retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
+        timeout: "60 seconds",
+      }, async () => {
+        const { getSandbox } = await import("@cloudflare/sandbox");
+        const { hydrateWorkspace } = await import("./runtime/workspace");
+        const sandbox = getSandbox(this.env.SANDBOX, `session-${sessionId}`, {
+          sleepAfter: "10m",
+          enableInternet: false,
+        } as any);
+        const { restored, skipped } = await hydrateWorkspace(
+          this.env.STORAGE, sandbox, p.org_id || "default", p.agent_name, p.channel_user_id || "",
+        );
+        return { restored, skipped };
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════
     // STEP 2: BUILD MESSAGES
     // ═══════════════════════════════════════════════════════════
 
@@ -282,6 +307,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
                 OPENROUTER_API_KEY: (this.env as any).OPENROUTER_API_KEY,
                 // Agent config for plan-aware tool routing (vision model, etc.)
                 __agentConfig: config,
+                // User ID for per-user workspace scoping in R2
+                __channelUserId: p.channel_user_id || "",
               } as any,
               [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
               sessionId,
