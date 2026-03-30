@@ -1407,7 +1407,7 @@ async function dispatch(
       }
       try {
         await sql`
-          INSERT INTO schedules (id, agent_name, org_id, task, cron_expression, enabled, run_count, created_at)
+          INSERT INTO schedules (schedule_id, agent_name, org_id, task, cron, is_enabled, run_count, created_at)
           VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${new Date().toISOString()})
         `;
         return JSON.stringify({ created: true, schedule_id: scheduleId, agent_name: agentName, cron: cronExpr, task: taskDesc });
@@ -1425,8 +1425,8 @@ async function dispatch(
       const orgId = args.org_id || "";
       try {
         const rows = agentName
-          ? await sql`SELECT id, agent_name, task, cron_expression, enabled, run_count, last_run_at FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`
-          : await sql`SELECT id, agent_name, task, cron_expression, enabled, run_count, last_run_at FROM schedules WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
+          ? await sql`SELECT schedule_id, agent_name, task, cron, is_enabled, run_count, last_run_at FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`
+          : await sql`SELECT schedule_id, agent_name, task, cron, is_enabled, run_count, last_run_at FROM schedules WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
         return JSON.stringify(rows);
       } catch {
         return "[]";
@@ -1442,7 +1442,7 @@ async function dispatch(
       const orgId = args.org_id || "";
       if (!scheduleId) return "delete-schedule requires schedule_id";
       try {
-        await sql`DELETE FROM schedules WHERE id = ${scheduleId} AND org_id = ${orgId}`;
+        await sql`DELETE FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${orgId}`;
         return JSON.stringify({ deleted: true, schedule_id: scheduleId });
       } catch (err: any) {
         return `Failed to delete schedule: ${err.message || err}`;
@@ -3678,32 +3678,36 @@ async function visionAnalyze(env: RuntimeEnv, args: Record<string, any>): Promis
 
 async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const content = String(args.content || args.value || "").trim();
-  const memoryType = String(args.type || "semantic").trim(); // episodic, semantic
+  const memoryType = String(args.type || "semantic").trim();
   const key = String(args.key || args.name || "").trim();
   if (!content) return "memory-save requires content";
 
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
+  const orgId = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
+  const hyperdrive = (env as any).HYPERDRIVE;
+
+  if (!hyperdrive) return "Memory not available (no database)";
 
   try {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+    const { getDb } = await import("./db");
+    const sql = await getDb(hyperdrive);
+    const now = new Date().toISOString();
+    const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
     if (memoryType === "episodic") {
-      // Save as episodic memory (timestamped events/observations)
-      const resp = await fetch(`${apiBase}/memory/${agentName}/episodes`, {
-        method: "POST", headers,
-        body: JSON.stringify({ content, source: "agent", metadata: key ? { key } : {} }),
-      });
-      return await resp.text();
+      await sql`
+        INSERT INTO episodic_memories (id, agent_name, org_id, content, source, metadata_json, created_at)
+        VALUES (${id}, ${agentName}, ${orgId}, ${content}, 'agent', ${JSON.stringify(key ? { key } : {})}, ${now})
+      `;
+      return JSON.stringify({ saved: true, type: "episodic", id });
     } else {
-      // Save as semantic fact (key-value knowledge)
-      const resp = await fetch(`${apiBase}/memory/${agentName}/facts`, {
-        method: "POST", headers,
-        body: JSON.stringify({ key: key || content.slice(0, 50), value: content, category: args.category || "general" }),
-      });
-      return await resp.text();
+      const factKey = key || content.slice(0, 50);
+      await sql`
+        INSERT INTO semantic_facts (id, agent_name, org_id, key, value, category, created_at)
+        VALUES (${id}, ${agentName}, ${orgId}, ${factKey}, ${content}, ${args.category || 'general'}, ${now})
+        ON CONFLICT (agent_name, org_id, key) DO UPDATE SET value = ${content}, category = ${args.category || 'general'}
+      `;
+      return JSON.stringify({ saved: true, type: "semantic", id, key: factKey });
     }
   } catch (err: any) {
     return `Memory save failed: ${err.message}`;
@@ -3712,40 +3716,29 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
 
 async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const query = String(args.query || args.key || "").trim();
-  const memoryType = String(args.type || "all").trim(); // episodic, semantic, all
-
+  const memoryType = String(args.type || "all").trim();
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+  const orgId = (env as any).__agentConfig?.org_id || "";
+  const hyperdrive = (env as any).HYPERDRIVE;
+  if (!hyperdrive) return "Memory not available";
 
   try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(hyperdrive);
     const results: any[] = [];
 
     if (memoryType === "all" || memoryType === "semantic") {
-      const resp = await fetch(`${apiBase}/memory/${agentName}/facts?limit=20`, { headers });
-      if (resp.ok) {
-        const data = (await resp.json()) as any;
-        const facts = (data.facts || data || []) as any[];
-        const filtered = query
-          ? facts.filter((f: any) => JSON.stringify(f).toLowerCase().includes(query.toLowerCase()))
-          : facts;
-        results.push(...filtered.map((f: any) => ({ type: "semantic", key: f.key, value: f.value, category: f.category })));
-      }
+      const rows = query
+        ? await sql`SELECT key, value, category FROM semantic_facts WHERE agent_name = ${agentName} AND org_id = ${orgId} AND (key ILIKE ${'%' + query + '%'} OR value ILIKE ${'%' + query + '%'}) ORDER BY created_at DESC LIMIT 20`
+        : await sql`SELECT key, value, category FROM semantic_facts WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
+      results.push(...rows.map((r: any) => ({ type: "semantic", key: r.key, value: r.value, category: r.category })));
     }
 
     if (memoryType === "all" || memoryType === "episodic") {
-      const resp = await fetch(`${apiBase}/memory/${agentName}/episodes?limit=20`, { headers });
-      if (resp.ok) {
-        const data = (await resp.json()) as any;
-        const episodes = (data.episodes || data || []) as any[];
-        const filtered = query
-          ? episodes.filter((e: any) => JSON.stringify(e).toLowerCase().includes(query.toLowerCase()))
-          : episodes;
-        results.push(...filtered.map((e: any) => ({ type: "episodic", content: e.content, created: e.created_at })));
-      }
+      const rows = query
+        ? await sql`SELECT content, created_at FROM episodic_memories WHERE agent_name = ${agentName} AND org_id = ${orgId} AND content ILIKE ${'%' + query + '%'} ORDER BY created_at DESC LIMIT 20`
+        : await sql`SELECT content, created_at FROM episodic_memories WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
+      results.push(...rows.map((r: any) => ({ type: "episodic", content: r.content, created: r.created_at })));
     }
 
     if (results.length === 0) return "No memories found" + (query ? ` matching "${query}"` : "");
@@ -3758,18 +3751,22 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
 async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const memoryType = String(args.type || "semantic").trim();
   const agentName = (env as any).__agentConfig?.name || "my-assistant";
-  const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
-  const serviceToken = (env as any).SERVICE_TOKEN || "";
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+  const orgId = (env as any).__agentConfig?.org_id || "";
+  const hyperdrive = (env as any).HYPERDRIVE;
+  if (!hyperdrive) return "Memory not available";
 
   try {
-    if (memoryType === "semantic" && args.fact_id) {
-      await fetch(`${apiBase}/memory/${agentName}/facts/${args.fact_id}`, { method: "DELETE", headers });
-      return JSON.stringify({ deleted: true, type: "semantic", id: args.fact_id });
+    const { getDb } = await import("./db");
+    const sql = await getDb(hyperdrive);
+    if (memoryType === "semantic" && (args.fact_id || args.key)) {
+      if (args.fact_id) {
+        await sql`DELETE FROM semantic_facts WHERE id = ${args.fact_id} AND agent_name = ${agentName} AND org_id = ${orgId}`;
+      } else {
+        await sql`DELETE FROM semantic_facts WHERE key = ${args.key} AND agent_name = ${agentName} AND org_id = ${orgId}`;
+      }
+      return JSON.stringify({ deleted: true, type: "semantic" });
     }
-    return "memory-delete requires type and fact_id (for semantic) or clears episodic via memory-clear";
+    return "memory-delete requires type and fact_id or key";
   } catch (err: any) {
     return `Memory delete failed: ${err.message}`;
   }
