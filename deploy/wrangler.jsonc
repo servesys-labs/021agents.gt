@@ -121,11 +121,16 @@
   // Emails to agent-name@yourdomain.com → agent DO "agent-name"
   "email_routing": true,
 
+  // Custom domain — runtime.oneshots.co
+  "routes": [
+    { "pattern": "runtime.oneshots.co/*", "zone_name": "oneshots.co" }
+  ],
+
   // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
     "DEFAULT_PLAN": "standard",
     "DEFAULT_PROVIDER": "openrouter",
     "DEFAULT_MODEL": "openai/gpt-5.4-mini",
-    "CONTROL_PLANE_URL": "https://agentos-control-plane.servesys.workers.dev/api/v1"
+    "CONTROL_PLANE_URL": "https://api.oneshots.co/api/v1"
   }
 }
