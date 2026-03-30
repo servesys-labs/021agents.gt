@@ -202,11 +202,12 @@ export async function loadAgentConfig(
 // Workers AI models (@cf/) route through AI Gateway directly (CF account token).
 // No max_tokens — let models decide their output length.
 
-// Simplified plan routing — one primary model per plan, no per-task classification.
-// The model handles all task types (coding, research, creative, etc.)
-// Agent can override with config_json.model for specific use cases.
+// Plan routing: 3 tiers, best model per price point.
+// Single agentic loop: LLM → tools → LLM → tools → answer.
+// No per-task classification needed — the model handles everything.
+// Agent can override with config_json.model.
 const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
-  // ── Basic: Free Workers AI models (edge, no cost) ──
+  // ── Basic: Free Workers AI (edge, 0 cost, ~500ms latency) ──
   basic: {
     general: {
       simple: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" },
@@ -216,7 +217,7 @@ const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string
     },
     multimodal: { vision: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
   },
-  // ── Standard: Claude Sonnet 4.6 for everything ──
+  // ── Standard: Claude Sonnet 4.6 (best tool-calling, best instruction-following) ──
   standard: {
     general: {
       simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
@@ -224,9 +225,9 @@ const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string
       complex: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
       tool_call: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
     },
-    multimodal: { vision: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" } },
+    multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
   },
-  // ── Premium: Claude Opus 4.6 for everything ──
+  // ── Premium: Opus for deep reasoning, Sonnet for speed ──
   premium: {
     general: {
       simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
@@ -234,7 +235,7 @@ const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string
       complex: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
       tool_call: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
     },
-    multimodal: { vision: { model: "anthropic/claude-opus-4-6", provider: "openrouter" } },
+    multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
   },
 };
 
