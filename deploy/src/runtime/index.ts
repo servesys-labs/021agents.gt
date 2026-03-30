@@ -1,11 +1,11 @@
 /**
  * Edge Runtime — public API.
+ *
+ * Primary execution: Cloudflare Workflows (workflow.ts)
+ * This module exports supporting utilities used by the Workflow and legacy fallback paths.
  */
 
-export { edgeRun, edgeBatch, edgeResume, computeLatencyBreakdown, writeCheckpoint, loadCheckpoint } from "./engine";
-export type { RunRequest, RunResponse, BatchRequest, BatchResponse, LatencyBreakdown, CheckpointPayload } from "./engine";
-export { GRAPH_HALT, runEdgeGraph, EDGE_RESUME_GRAPH_EMIT_ORDER } from "./edge_graph";
-export type { EdgeGraphNode, FreshGraphCtx, ResumeGraphCtx } from "./edge_graph";
+// Types
 export type {
   AgentConfig,
   LLMMessage,
@@ -16,6 +16,8 @@ export type {
   RuntimeEvent,
   ToolDefinition,
 } from "./types";
+
+// DB
 export {
   loadAgentConfig,
   writeSession,
@@ -35,15 +37,27 @@ export {
   queryUsage,
 } from "./db";
 export type { TraceReplayAtCursor, UsagePage, UsageSummary, UsageSessionEntry, ConversationMessage } from "./db";
+
+// LLM
 export { callLLM } from "./llm";
+
+// Tools
 export { executeTools, getToolDefinitions, calculateInfraCost, INFRA_COSTS } from "./tools";
+
+// Router
 export { selectModel, classifyTurn, classifyComplexity, classifyCategory } from "./router";
 export type { RouteClassification } from "./router";
+
+// Memory
 export { buildMemoryContext, searchFacts, searchEpisodes, findBestProcedures, queueFactExtraction } from "./memory";
+
+// Middleware
 export { detectLoop, maybeSummarize } from "./middleware";
-export { pipe, mapInputs, branch, parseOutput } from "./runnable";
+
+// Connectors
 export { getConnectorToken, executeConnector } from "./connectors";
-// Codemode — full execution system
+
+// Codemode
 export {
   executeCode,
   getToolTypeDefinitions,
@@ -79,76 +93,30 @@ export type {
   GeneratedMcpTool,
   CodemodeTestResult,
 } from "./codemode";
-// Harness code tool (createCodeTool integration)
 export { createHarnessCodeTool, getHarnessToolDefs } from "./codemode";
-// Harness sandbox modules
 export { buildSandboxModules, HARNESS_MODULE_SOURCE, HARNESS_TYPE_DEFS } from "./harness-modules";
 
+// Stream (legacy fallback)
 export { streamRun } from "./stream";
 export type { RuntimeEvent as ProtocolRuntimeEvent, TurnEndEvent, DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent } from "./protocol";
 export { validateEvent, serializeForSSE, serializeForWebSocket } from "./protocol";
+
+// Workspace
 export { syncFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";
 
-// Reasoning strategies (harness pattern: strategy injection)
+// Reasoning strategies
 export { REASONING_STRATEGIES, selectReasoningStrategy, autoSelectStrategy, REASONING_STRATEGY_SNIPPET_CODE } from "./reasoning-strategies";
 export type { ReasoningStrategy } from "./reasoning-strategies";
 
-// Cross-session progress tracking (harness pattern: cognitive anchor)
+// Progress
 export { buildProgressSummary, writeProgress, loadStartupContext } from "./progress";
 export type { ProgressEntry, ProgressSummary, StartupContext } from "./progress";
 
-// Sub-graph support
-export { 
-  subgraphRegistry, 
-  expandSubgraphs, 
-  resolveSubgraphInputs, 
-  mapSubgraphOutputs,
-  validateSubgraphNode,
-} from "./subgraph";
-export type { SubgraphDefinition, SubgraphNodeConfig, SubgraphRegistry } from "./subgraph";
-
-// Schema validation
-export {
-  schemaRegistry,
-  validateDataAgainstSchema,
-  validateGraphSchemas,
-  generateTypeScriptTypes,
-} from "./graph-schema";
-export type { JsonSchema, NodeSchema, SchemaValidationResult } from "./graph-schema";
-
-// Graph caching
-export {
-  graphCache,
-  getCachedValidation,
-  setCachedValidation,
-  getCachedExpansion,
-  setCachedExpansion,
-  getCachedLinearPath,
-  setCachedLinearPath,
-  validateGraphWithCache,
-  expandGraphWithCache,
-  getLinearPathWithCache,
-  invalidateGraphCache,
-  invalidateSubgraphCache,
-  clearGraphCache,
-  getCacheMetrics,
-} from "./graph-cache";
-
-// Node registry
-export {
-  nodeRegistry,
-  registerCustomNode,
-  createExternalServiceNode,
-  listAvailableNodes,
-  validateNodeConfig,
-} from "./node-registry";
-export type { NodeKindDefinition, NodeHandler, NodeHandlerContext } from "./node-registry";
-
-// Intent-based agent routing
+// Intent router
 export { classifyIntent, decomposeIntents } from "./intent-router";
 export type { IntentClassification, AgentCapability } from "./intent-router";
 
-// Backpressure
+// Backpressure (legacy streaming)
 export {
   createBackpressureController,
   createWebSocketSendWithBackpressure,
@@ -165,34 +133,3 @@ export {
   convertSequenceToGraph,
   autoRegisterTools,
 } from "./tool-adapter";
-export {
-  executeLinearDeclarativeRun,
-  executeBoundedDagDeclarativeRun,
-  validateLinearDeclarativeGraph,
-  validateBoundedDagDeclarativeGraph,
-  EDGE_FRESH_GRAPH_KIND_MAP,
-} from "./linear_declarative";
-export type {
-  LinearGraphRunInput,
-  BoundedDagRunInput,
-  GraphSpec,
-  GraphAgentContext,
-  LinearTraceEntry,
-} from "./linear_declarative";
-
-// Unified declarative graph executor
-export {
-  executeDeclarativeGraph,
-  buildDeclarativeGraphContext,
-  prepareDeclarativeGraph,
-  executeDeclarativeNode,
-  subgraphRegistry as declarativeSubgraphRegistry,
-  schemaRegistry as declarativeSchemaRegistry,
-  nodeRegistry as declarativeNodeRegistry,
-} from "./declarative-executor";
-export type {
-  DeclarativeGraphContext,
-  DeclarativeGraphResult,
-  NodeExecutionResult,
-  PreparedGraph,
-} from "./declarative-executor";

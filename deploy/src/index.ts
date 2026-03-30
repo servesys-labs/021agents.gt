@@ -20,18 +20,11 @@ import {
 } from "agents";
 import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
 import {
-  edgeRun, edgeBatch, edgeResume, computeLatencyBreakdown, loadRuntimeEventsPage, replayOtelEventsAtCursor, buildRuntimeRunTree,
+  loadRuntimeEventsPage, replayOtelEventsAtCursor, buildRuntimeRunTree,
   writeEvalRun, writeEvalTrial, listEvalRuns, getEvalRun, listEvalTrialsByRun,
-  executeBoundedDagDeclarativeRun,
-  executeLinearDeclarativeRun,
-  executeDeclarativeGraph,
-  buildDeclarativeGraphContext,
-  prepareDeclarativeGraph,
-  subgraphRegistry,
-  expandSubgraphs,
   autoRegisterTools,
   createWebSocketSendWithBackpressure,
-  type RunRequest, type RuntimeEnv, type BatchRequest, type GraphSpec,
+  type RuntimeEnv,
 } from "./runtime";
 import { streamRun } from "./runtime/stream";
 import { getCircuitStatus } from "./runtime/tools";
@@ -400,80 +393,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       throw new Error("Workflow timed out");
     }
 
-    // ── Legacy path (fallback) ──
-    const runtimeEnv: RuntimeEnv = {
-      AI: this.env.AI,
-      HYPERDRIVE: this.env.HYPERDRIVE,
-      VECTORIZE: this.env.VECTORIZE,
-      STORAGE: this.env.STORAGE,
-      SANDBOX: this.env.SANDBOX,
-      LOADER: this.env.LOADER,
-      TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
-      BROWSER: this.env.BROWSER,
-      AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
-      AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-      BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
-      CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
-      CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
-      OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
-      DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-      DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
-      DO_SQL: this.sql.bind(this),
-      DO_SESSION_ID: this.name,
-    };
-
-    const request: RunRequest = {
-      agent_name: config.agentName || "agentos",
-      task: input,
-      org_id: config.orgId || "",
-      project_id: config.projectId || "",
-      delegation: opts?.delegation,
-    };
-
-    const result = await edgeRun(
-      runtimeEnv,
-      this.env.HYPERDRIVE,
-      request,
-      this.env.TELEMETRY_QUEUE,
-    );
-
-    // Start periodic checkpoint alarm for hibernation safety
-    try {
-      this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-    } catch {}
-
-    const elapsed = Date.now() - started;
-
-    // Record locally for DO observability
-    this._recordEvent({
-      sessionId: result.session_id,
-      turn: 0,
-      eventType: "session.complete",
-      action: "run_edge",
-      plan: normalizePlan(config.plan || this.env.DEFAULT_PLAN),
-      status: result.success ? "ok" : "error",
-      latencyMs: elapsed,
-      costUsd: result.cost_usd,
-      details: {
-        turns: result.turns,
-        tool_calls: result.tool_calls,
-        source: "edge_runtime",
-        stop_reason: result.stop_reason,
-      },
-    });
-
-    // Session data is written to Supabase directly by edgeRun via Hyperdrive.
-    // No backend mirroring — Supabase is the single source of truth.
-
-    return [{
-      turn: result.turns,
-      content: result.output,
-      toolResults: [],
-      done: true,
-      error: result.success ? undefined : "Edge runtime reported failure",
-      costUsd: result.cost_usd,
-      model: runtimeEnv.DEFAULT_MODEL,
-    }];
+    // Workflow unavailable
+    throw new Error("AGENT_RUN_WORKFLOW binding not configured. Deploy with Workflows enabled.");
   }
 
   @callable()

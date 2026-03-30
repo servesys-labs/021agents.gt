@@ -34,7 +34,8 @@ import {
 } from "@cloudflare/codemode";
 import type { RuntimeEnv, ToolDefinition, RuntimeEvent } from "./types";
 import { executeTools } from "./tools";
-import { pushRuntimeEvent } from "./edge_graph";
+// pushRuntimeEvent removed with edge_graph.ts — no-op stub for codemode audit events
+function pushRuntimeEvent(_events: any, _type: string, _turn: number, _data: any) {}
 
 // == Execution Scope ==
 
