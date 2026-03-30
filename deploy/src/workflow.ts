@@ -244,9 +244,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
                 // Workflow + KV bindings for sub-agent delegation
                 AGENT_RUN_WORKFLOW: this.env.AGENT_RUN_WORKFLOW,
                 AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
-                // Auth + API bindings for marketplace/feed tools
+                // Auth + API bindings for marketplace/feed/memory/mcp tools
                 SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
                 CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
+                OPENROUTER_API_KEY: (this.env as any).OPENROUTER_API_KEY,
+                // Agent config for plan-aware tool routing (vision model, etc.)
+                __agentConfig: config,
               } as any,
               [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
               sessionId,

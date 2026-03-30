@@ -966,6 +966,46 @@ async function dispatch(
     case "memory-delete":
       return memoryDelete(env, args);
 
+    case "mcp-call": {
+      // Call a tool on a registered MCP server
+      const serverName = String(args.server || args.server_name || "");
+      const toolName = String(args.tool || args.tool_name || "");
+      if (!serverName || !toolName) return "mcp-call requires server (name) and tool (tool name)";
+
+      const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
+      const serviceToken = (env as any).SERVICE_TOKEN || "";
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+
+      try {
+        // 1. Look up MCP server URL from control-plane
+        const serversResp = await fetch(`${apiBase}/mcp/servers`, { headers });
+        if (!serversResp.ok) return `MCP server lookup failed: ${serversResp.status}`;
+        const { servers } = (await serversResp.json()) as { servers: any[] };
+        const server = servers.find((s: any) => s.name === serverName || s.server_id === serverName);
+        if (!server) return `MCP server "${serverName}" not found. Available: ${servers.map((s: any) => s.name).join(", ")}`;
+
+        // 2. Call the tool on the MCP server (JSON-RPC over HTTP)
+        const mcpHeaders: Record<string, string> = { "Content-Type": "application/json" };
+        if (server.auth_token) mcpHeaders.Authorization = `Bearer ${server.auth_token}`;
+
+        const mcpResp = await fetch(server.url.replace(/\/+$/, "") + "/tools/call", {
+          method: "POST",
+          headers: mcpHeaders,
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            method: "tools/call",
+            id: crypto.randomUUID(),
+            params: { name: toolName, arguments: args.arguments || args.params || {} },
+          }),
+          signal: AbortSignal.timeout(30000),
+        });
+        return await mcpResp.text();
+      } catch (err: any) {
+        return `MCP call failed: ${err.message}`;
+      }
+    }
+
     case "text-to-speech":
       return textToSpeech(env, args);
 
@@ -3360,6 +3400,13 @@ async function visionAnalyze(env: RuntimeEnv, args: Record<string, any>): Promis
 
   try {
     const { callLLM } = await import("./llm");
+    const { resolvePlanRouting } = await import("./db");
+
+    // Resolve vision model from agent's plan (standard → gpt-5.4, premium → gemini-3.1-pro)
+    const agentConfig = (env as any).__agentConfig || {};
+    const routing = resolvePlanRouting(agentConfig.plan || "standard", agentConfig.routing);
+    const visionRoute = routing?.multimodal?.vision || { model: "google/gemini-3.1-pro-preview", provider: "openrouter" };
+
     const response = await callLLM(
       env,
       [
@@ -3371,8 +3418,8 @@ async function visionAnalyze(env: RuntimeEnv, args: Record<string, any>): Promis
           ] as any,
         },
       ],
-      [], // no tools needed for vision
-      { model: "google/gemini-3.1-pro-preview", max_tokens: 2000 },
+      [],
+      { model: visionRoute.model, max_tokens: 2000 },
     );
     return response.content || "Vision analysis returned no result";
   } catch (err: any) {
@@ -3970,6 +4017,22 @@ const TOOL_CATALOG: ToolDefinition[] = [
           type: { type: "string", description: "Memory type: 'semantic' (default)" },
         },
         required: ["fact_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "mcp-call",
+      description: "Call a tool on a registered MCP (Model Context Protocol) server. Use this to interact with external integrations like Pipedream, custom APIs, or any MCP-compatible service. First list available servers, then call specific tools.",
+      parameters: {
+        type: "object",
+        properties: {
+          server: { type: "string", description: "MCP server name or ID (from registered servers)" },
+          tool: { type: "string", description: "Tool name to call on the MCP server" },
+          arguments: { type: "object", description: "Arguments to pass to the MCP tool" },
+        },
+        required: ["server", "tool"],
       },
     },
   },
