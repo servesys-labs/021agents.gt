@@ -51,7 +51,7 @@ export async function loadAgentConfig(
     "marketplace-search", "a2a-send", "feed-post",
     "image-generate", "vision-analyze",
     "memory-save", "memory-recall",
-    "text-to-speech",
+    "text-to-speech", "mcp-call",
     "discover-api",
   ];
 
