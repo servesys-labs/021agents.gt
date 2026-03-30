@@ -106,10 +106,24 @@ export async function runPreflightChecks(
   } else {
     // Check each tool exists in the tool_registry or built-in list
     const BUILTIN_TOOLS = new Set([
-      "web-search", "knowledge-search", "store-knowledge", "create-agent",
-      "eval-agent", "evolve-agent", "list-agents", "list-tools",
-      "dynamic-exec", "web-crawl", "browser-render", "image-generate",
-      "text-to-speech", "speech-to-text",
+      // Web
+      "web-search", "browse", "http-request", "web-crawl", "browser-render",
+      // Code
+      "python-exec", "bash", "execute-code", "dynamic-exec",
+      // Files
+      "read-file", "write-file", "edit-file", "save-project", "load-project", "load-folder",
+      // Memory
+      "memory-save", "memory-recall", "knowledge-search", "store-knowledge",
+      // Scheduling
+      "create-schedule", "list-schedules", "delete-schedule",
+      // Delegation
+      "marketplace-search", "a2a-send", "run-agent", "create-agent", "list-agents",
+      // Media
+      "image-generate", "vision-analyze", "text-to-speech", "speech-to-text",
+      // Integrations
+      "mcp-call", "feed-post",
+      // Legacy / meta
+      "eval-agent", "evolve-agent", "list-tools", "discover-api", "todo",
     ]);
 
     let registeredTools: Set<string>;
