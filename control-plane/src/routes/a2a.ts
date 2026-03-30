@@ -418,6 +418,23 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
         persistA2ATask(c.env, task, user.org_id, targetOrgId, paymentReceipt?.transfer_id);
 
+        // Item 5: Auto-rate completed task (default 4/5 = good)
+        // Item 8: Increment task counter on marketplace listing
+        try {
+          const mktSql = await getDbForOrg(c.env.HYPERDRIVE, targetOrgId);
+          const [listing] = await mktSql`
+            SELECT id FROM marketplace_listings WHERE agent_name = ${targetAgentName} AND is_published = true LIMIT 1
+          `.catch(() => [] as any[]);
+          if (listing) {
+            const { submitRating } = await import("../logic/marketplace");
+            await submitRating(mktSql, listing.id, user.org_id, 4, { task_id: taskId }).catch(() => {});
+            await mktSql`
+              UPDATE marketplace_listings SET total_tasks_completed = total_tasks_completed + 1, updated_at = now()
+              WHERE id = ${listing.id}
+            `.catch(() => {});
+          }
+        } catch {} // non-blocking
+
         return c.json(jsonrpcResponse(id, { task }));
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : String(e);
@@ -425,6 +442,15 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
         // Persist failure to DB
         persistA2ATask(c.env, task, user.org_id, targetOrgId);
+
+        // Item 8: Increment failure counter on marketplace listing
+        try {
+          const mktSql = await getDbForOrg(c.env.HYPERDRIVE, targetOrgId);
+          await mktSql`
+            UPDATE marketplace_listings SET total_tasks_failed = COALESCE(total_tasks_failed, 0) + 1, updated_at = now()
+            WHERE agent_name = ${task.agentName || ''} AND is_published = true
+          `.catch(() => {});
+        } catch {} // non-blocking
 
         // Refund payment if task failed after payment
         const failedPaymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
@@ -479,6 +505,43 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
           return c.json(jsonrpcError(id, -32000, "No agents available"), 400);
         }
         targetAgentName = (rows[0] as { name: string }).name;
+      }
+
+      // ── x-402 Payment Gate (streaming) ──────────────────────────
+      {
+        const streamTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
+        const streamAgentOwnerRows = await sql`
+          SELECT org_id, config_json FROM agents
+          WHERE name = ${targetAgentName} AND is_active = 1
+          ${streamTargetOrgFromUrl ? sql`AND org_id = ${streamTargetOrgFromUrl}` : sql``}
+          LIMIT 1
+        `.catch(() => []);
+        const streamTargetOrgId = streamAgentOwnerRows.length > 0 ? String(streamAgentOwnerRows[0].org_id) : user.org_id;
+
+        if (streamAgentOwnerRows.length > 0) {
+          const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
+          const cfg = typeof streamAgentOwnerRows[0].config_json === "string" ? JSON.parse(streamAgentOwnerRows[0].config_json) : streamAgentOwnerRows[0].config_json || {};
+          const pricing = getAgentPricing(cfg);
+
+          if (pricing?.requires_payment && user.org_id !== streamTargetOrgId) {
+            const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
+
+            if (!paymentReceipt?.transfer_id) {
+              task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+              const headers402 = build402Headers(pricing, targetAgentName, streamTargetOrgId);
+              return c.json(jsonrpcError(id, -32000, "Payment required"), {
+                status: 402 as any,
+                headers: headers402,
+              });
+            }
+
+            const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, streamTargetOrgId, pricing.price_per_task_usd);
+            if (!verification.valid) {
+              task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+              return c.json(jsonrpcError(id, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
+            }
+          }
+        }
       }
 
       const encoder = new TextEncoder();
@@ -669,6 +732,41 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
       targetAgentName = (rows[0] as { name: string }).name;
     }
 
+    // ── x-402 Payment Gate (REST) ──────────────────────────────
+    const restTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
+    const restAgentOwnerRows = await sql`
+      SELECT org_id, config_json FROM agents
+      WHERE name = ${targetAgentName} AND is_active = 1
+      ${restTargetOrgFromUrl ? sql`AND org_id = ${restTargetOrgFromUrl}` : sql``}
+      LIMIT 1
+    `.catch(() => []);
+    const restTargetOrgId = restAgentOwnerRows.length > 0 ? String(restAgentOwnerRows[0].org_id) : user.org_id;
+
+    if (restAgentOwnerRows.length > 0) {
+      const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
+      const cfg = typeof restAgentOwnerRows[0].config_json === "string" ? JSON.parse(restAgentOwnerRows[0].config_json) : restAgentOwnerRows[0].config_json || {};
+      const pricing = getAgentPricing(cfg);
+
+      if (pricing?.requires_payment && user.org_id !== restTargetOrgId) {
+        const paymentReceipt = (body as any).payment_receipt as { transfer_id?: string } | undefined;
+
+        if (!paymentReceipt?.transfer_id) {
+          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+          const headers402 = build402Headers(pricing, targetAgentName, restTargetOrgId);
+          return c.json(jsonrpcError(body.id || null, -32000, "Payment required"), {
+            status: 402 as any,
+            headers: headers402,
+          });
+        }
+
+        const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, restTargetOrgId, pricing.price_per_task_usd);
+        if (!verification.valid) {
+          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+          return c.json(jsonrpcError(body.id || null, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
+        }
+      }
+    }
+
     const resp = await c.env.RUNTIME.fetch(
       new Request("https://runtime/api/v1/run", {
         method: "POST",
@@ -780,6 +878,43 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
       return c.json(jsonrpcError(body.id || null, -32000, "No agents available"), 400);
     }
     targetAgentName = (rows[0] as { name: string }).name;
+  }
+
+  // ── x-402 Payment Gate (REST streaming) ────────────────────
+  {
+    const subTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
+    const subAgentOwnerRows = await sql`
+      SELECT org_id, config_json FROM agents
+      WHERE name = ${targetAgentName} AND is_active = 1
+      ${subTargetOrgFromUrl ? sql`AND org_id = ${subTargetOrgFromUrl}` : sql``}
+      LIMIT 1
+    `.catch(() => []);
+    const subTargetOrgId = subAgentOwnerRows.length > 0 ? String(subAgentOwnerRows[0].org_id) : user.org_id;
+
+    if (subAgentOwnerRows.length > 0) {
+      const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
+      const cfg = typeof subAgentOwnerRows[0].config_json === "string" ? JSON.parse(subAgentOwnerRows[0].config_json) : subAgentOwnerRows[0].config_json || {};
+      const pricing = getAgentPricing(cfg);
+
+      if (pricing?.requires_payment && user.org_id !== subTargetOrgId) {
+        const paymentReceipt = (body as any).payment_receipt as { transfer_id?: string } | undefined;
+
+        if (!paymentReceipt?.transfer_id) {
+          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+          const headers402 = build402Headers(pricing, targetAgentName, subTargetOrgId);
+          return c.json(jsonrpcError(body.id || null, -32000, "Payment required"), {
+            status: 402 as any,
+            headers: headers402,
+          });
+        }
+
+        const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, subTargetOrgId, pricing.price_per_task_usd);
+        if (!verification.valid) {
+          task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+          return c.json(jsonrpcError(body.id || null, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
+        }
+      }
+    }
   }
 
   const encoder = new TextEncoder();

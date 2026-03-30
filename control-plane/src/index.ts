@@ -1039,6 +1039,14 @@ export default {
       console.error("[cron] Quality drop detection failed:", err);
     }
 
+    // 3a. Expire featured marketplace listings
+    try {
+      await sql`UPDATE marketplace_listings SET is_featured = false, updated_at = now() WHERE featured_until < now() AND is_featured = true`;
+      await sql`UPDATE marketplace_featured SET status = 'expired' WHERE ends_at < now() AND status = 'active'`;
+    } catch (err) {
+      console.error("[cron] Featured expiry failed:", err);
+    }
+
     // 3b. Clean up expired idempotency cache and end-user tokens
     try {
       await sql`DELETE FROM idempotency_cache WHERE expires_at < now()`;

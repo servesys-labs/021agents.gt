@@ -103,30 +103,50 @@ export async function transferCredits(
   const now = new Date().toISOString();
 
   try {
-    // Atomic: deduct from sender
-    const deducted = await sql`
-      UPDATE org_credit_balance
-      SET balance_usd = balance_usd - ${amountUsd},
-          lifetime_consumed_usd = lifetime_consumed_usd + ${amountUsd},
-          updated_at = ${now}
-      WHERE org_id = ${fromOrg} AND balance_usd >= ${amountUsd}
-    `;
+    const result = await sql.begin(async (tx: any) => {
+      // Atomic: deduct from sender
+      const deducted = await tx`
+        UPDATE org_credit_balance
+        SET balance_usd = balance_usd - ${amountUsd},
+            lifetime_consumed_usd = lifetime_consumed_usd + ${amountUsd},
+            updated_at = ${now}
+        WHERE org_id = ${fromOrg} AND balance_usd >= ${amountUsd}
+      `;
 
-    if (deducted.count === 0) {
-      return { success: false, error: "Insufficient credits" };
-    }
+      if (deducted.count === 0) {
+        throw new Error("Insufficient credits");
+      }
 
-    // Credit to receiver (minus platform fee)
-    await sql`
-      INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, lifetime_consumed_usd, updated_at)
-      VALUES (${toOrg}, ${receiverAmount}, ${receiverAmount}, 0, ${now})
-      ON CONFLICT (org_id) DO UPDATE
-      SET balance_usd = org_credit_balance.balance_usd + ${receiverAmount},
-          lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${receiverAmount},
-          updated_at = ${now}
-    `;
+      // Credit to receiver (minus platform fee)
+      await tx`
+        INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, lifetime_consumed_usd, updated_at)
+        VALUES (${toOrg}, ${receiverAmount}, ${receiverAmount}, 0, ${now})
+        ON CONFLICT (org_id) DO UPDATE
+        SET balance_usd = org_credit_balance.balance_usd + ${receiverAmount},
+            lifetime_purchased_usd = org_credit_balance.lifetime_purchased_usd + ${receiverAmount},
+            updated_at = ${now}
+      `;
 
-    // Referral earnings — distribute from platform fee to referrers
+      // Read updated balances
+      const [fromBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
+
+      // Audit trail — sender
+      await tx`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+        VALUES (${fromOrg}, 'transfer_out', ${-amountUsd}, ${Number(fromBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
+      `;
+
+      // Audit trail — receiver
+      const [toBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
+      await tx`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+        VALUES (${toOrg}, 'transfer_in', ${amountUsd}, ${Number(toBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
+      `;
+
+      return { from_balance_after: Number(fromBal.balance_usd) };
+    });
+
+    // Referral earnings — distribute from platform fee to referrers (outside transaction, non-blocking)
     let referralPayout = 0;
     if (platformFee > 0) {
       try {
@@ -145,28 +165,15 @@ export async function transferCredits(
       `.catch(() => {});
     }
 
-    // Read updated balances
-    const [fromBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
-
-    // Audit trail — sender
-    await sql`
-      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-      VALUES (${fromOrg}, 'transfer_out', ${-amountUsd}, ${Number(fromBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
-    `;
-
-    // Audit trail — receiver
-    const [toBal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
-    await sql`
-      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-      VALUES (${toOrg}, 'transfer_in', ${amountUsd}, ${Number(toBal.balance_usd)}, ${description}, ${transferId}, 'a2a_payment', ${now})
-    `;
-
     return {
       success: true,
       transfer_id: transferId,
-      from_balance_after: Number(fromBal.balance_usd),
+      from_balance_after: result.from_balance_after,
     };
   } catch (err: any) {
+    if (err.message === "Insufficient credits") {
+      return { success: false, error: "Insufficient credits" };
+    }
     return { success: false, error: `Transfer failed: ${err.message}` };
   }
 }
