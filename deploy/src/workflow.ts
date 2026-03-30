@@ -237,6 +237,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
                 CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
                 AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
                 AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
+                // Workflow + KV bindings for sub-agent delegation
+                AGENT_RUN_WORKFLOW: this.env.AGENT_RUN_WORKFLOW,
+                AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
               } as any,
               [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
               sessionId,
