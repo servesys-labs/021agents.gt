@@ -930,6 +930,64 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     },
     is_best: isBest,
     should_continue: shouldContinue,
+    progress_events: progressEvents.length > 0 ? progressEvents : undefined,
+  });
+});
+
+// ── GET /jobs/{job_id}/progress — poll real-time progress from KV ────
+
+const progressRoute = createRoute({
+  method: "get",
+  path: "/jobs/{job_id}/progress",
+  tags: ["Training"],
+  summary: "Poll real-time training progress from KV",
+  description: "Returns progress events from the runtime Workflow execution. Events include turn_start, thinking, tool_calls, tool_result, turn_end, done, error.",
+  middleware: [requireScope("training:read")],
+  request: { params: z.object({ job_id: z.string() }) },
+  responses: {
+    200: { description: "Progress events", content: { "application/json": { schema: z.object({ events: z.array(z.record(z.unknown())), source: z.string() }) } } },
+    ...errorResponses(404),
+  },
+});
+
+trainingRoutes.openapi(progressRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { job_id } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify job exists and belongs to this org
+  const jobs = await sql`
+    SELECT agent_name FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+  `;
+  if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
+
+  const agentName = String(jobs[0].agent_name);
+  const events: Record<string, unknown>[] = [];
+
+  if (c.env.AGENT_PROGRESS_KV) {
+    try {
+      // List recent progress keys for this agent
+      const listResult = await c.env.AGENT_PROGRESS_KV.list({
+        prefix: `rpc:${agentName}`,
+        limit: 20,
+      });
+      for (const key of listResult.keys) {
+        const raw = await c.env.AGENT_PROGRESS_KV.get(key.name);
+        if (raw) {
+          const parsed = JSON.parse(raw) as Record<string, unknown>[];
+          events.push(...parsed);
+        }
+      }
+      // Sort by timestamp
+      events.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+    } catch {
+      // KV not available
+    }
+  }
+
+  return c.json({
+    events: events.slice(-100), // Last 100 events
+    source: c.env.AGENT_PROGRESS_KV ? "kv" : "unavailable",
   });
 });
 
@@ -1197,6 +1255,20 @@ trainingRoutes.openapi(activateResourceRoute, async (c): Promise<any> => {
         `;
       }
     }
+  }
+
+  // Notify runtime DO to invalidate config cache (so the new prompt takes effect immediately)
+  try {
+    await c.env.RUNTIME.fetch("https://runtime/api/v1/internal/config-invalidate", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({ agent_name, version: String(version), timestamp: Date.now() }),
+    });
+  } catch {
+    // Non-critical — DO will reload on next request anyway
   }
 
   auditTraining(sql, user.org_id, user.user_id, "resource.activated", agent_name, {

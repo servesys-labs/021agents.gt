@@ -53,13 +53,17 @@ interface MarketplaceListing {
 }
 
 interface ReferralStats {
-  referral_code: string;
-  share_url: string;
-  total_referred: number;
-  l1_earnings_usd: number;
-  l2_earnings_usd: number;
-  total_earnings_usd: number;
-  referred_orgs: { org_name: string; joined_at: string; tier: string }[];
+  // Matches backend getReferralStats() response shape
+  referrals: { org_id: string; org_name: string; since: string }[];
+  total_referrals: number;
+  earnings: {
+    total_transactions: number;
+    total_earned_usd: number;
+    l1_earned_usd: number;
+    l2_earned_usd: number;
+    earning_sources: number;
+  };
+  codes: { code: string; label: string; uses: number; max_uses: number | null; active: boolean }[];
 }
 
 const CATEGORIES = [
@@ -277,8 +281,9 @@ export default function MarketplacePage() {
   }, []);
 
   const copyReferralCode = () => {
-    if (referralStats?.share_url) {
-      navigator.clipboard.writeText(referralStats.share_url);
+    const code = referralStats?.codes?.[0]?.code;
+    if (code) {
+      navigator.clipboard.writeText(`https://app.oneshots.co/login?ref=${encodeURIComponent(code)}`);
       setCopiedCode(true);
       toast("Referral link copied");
       setTimeout(() => setCopiedCode(false), 2000);
@@ -537,7 +542,7 @@ export default function MarketplacePage() {
                 <div className="flex flex-col sm:flex-row gap-3">
                   <div className="flex-1 flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-surface-alt text-sm font-mono text-text-secondary truncate">
                     <LinkIcon size={14} className="shrink-0 text-text-muted" />
-                    <span className="truncate">{referralStats.share_url}</span>
+                    <span className="truncate">{referralStats.codes?.[0]?.code ? `https://app.oneshots.co/login?ref=${referralStats.codes[0].code}` : "No referral code"}</span>
                   </div>
                   <Button variant="secondary" size="sm" onClick={copyReferralCode} className="shrink-0">
                     {copiedCode ? <CheckCircle size={14} className="text-success" /> : <Copy size={14} />}
@@ -545,7 +550,8 @@ export default function MarketplacePage() {
                   </Button>
                 </div>
                 <p className="text-xs text-text-muted mt-2">
-                  Code: <span className="font-mono font-medium text-text">{referralStats.referral_code}</span>
+                  Code: <span className="font-mono font-medium text-text">{referralStats.codes?.[0]?.code || "—"}</span>
+                  {referralStats.codes?.[0] && <span className="text-text-muted"> ({referralStats.codes[0].uses}/{referralStats.codes[0].max_uses ?? "∞"} used)</span>}
                 </p>
               </Card>
 
@@ -554,17 +560,17 @@ export default function MarketplacePage() {
                 <StatCard
                   icon={<DollarSign size={16} className="text-success" />}
                   label="Total Earnings"
-                  value={`$${referralStats.total_earnings_usd.toFixed(2)}`}
+                  value={`$${(referralStats.earnings?.total_earned_usd || 0).toFixed(2)}`}
                 />
                 <StatCard
                   icon={<TrendingUp size={16} className="text-primary" />}
                   label="L1 Earnings"
-                  value={`$${referralStats.l1_earnings_usd.toFixed(2)}`}
+                  value={`$${(referralStats.earnings?.l1_earned_usd || 0).toFixed(2)}`}
                 />
                 <StatCard
                   icon={<TrendingUp size={16} className="text-warning" />}
                   label="L2 Earnings"
-                  value={`$${referralStats.l2_earnings_usd.toFixed(2)}`}
+                  value={`$${(referralStats.earnings?.l2_earned_usd || 0).toFixed(2)}`}
                 />
               </div>
 
@@ -572,19 +578,18 @@ export default function MarketplacePage() {
               <Card>
                 <div className="flex items-center justify-between mb-3">
                   <h3 className="text-sm font-semibold text-text">
-                    Referred Organizations ({referralStats.total_referred})
+                    Referred Organizations ({referralStats.total_referrals})
                   </h3>
                 </div>
-                {referralStats.referred_orgs.length === 0 ? (
+                {(referralStats.referrals || []).length === 0 ? (
                   <p className="text-xs text-text-muted">No referrals yet. Share your link to start earning.</p>
                 ) : (
                   <div className="divide-y divide-border">
-                    {referralStats.referred_orgs.map((org) => (
+                    {(referralStats.referrals || []).map((org) => (
                       <div key={org.org_name} className="flex items-center justify-between py-2 text-sm">
                         <span className="text-text font-medium">{org.org_name}</span>
                         <div className="flex items-center gap-3 text-xs text-text-muted">
-                          <Badge variant="default">{org.tier}</Badge>
-                          <span>{new Date(org.joined_at).toLocaleDateString()}</span>
+                          <span className="text-text-muted">{new Date(org.since).toLocaleDateString()}</span>
                         </div>
                       </div>
                     ))}

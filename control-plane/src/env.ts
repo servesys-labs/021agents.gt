@@ -38,6 +38,7 @@ export interface Env {
 
   /** Growth controls */
   OPEN_SIGNUPS?: string;          // "true" = anyone can sign up. Default: invite-only.
+  SEED_ADMIN_CODE?: string;       // Bootstrap: first signup uses this as invite code
   TRAINING_ENABLED?: string;      // "true" = training system active
 
   /** Voice integrations (optional secrets) */

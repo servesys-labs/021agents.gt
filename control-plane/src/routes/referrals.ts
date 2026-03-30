@@ -44,9 +44,25 @@ referralRoutes.openapi(createCodeRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Enforce total invite budget: max 10 codes per org, each with max 5 uses = 50 total invites max
+  const MAX_CODES_PER_ORG = 10;
+  const codeCount = await sql`SELECT COUNT(*)::int as cnt FROM referral_codes WHERE org_id = ${user.org_id}`.catch(() => [{ cnt: 0 }]);
+  if (Number(codeCount[0]?.cnt || 0) >= MAX_CODES_PER_ORG) {
+    return c.json({ error: `Maximum ${MAX_CODES_PER_ORG} referral codes per organization.` }, 400);
+  }
+
+  // Force max_uses on new codes (default 5, max 10) — no unlimited codes
+  const maxUses = Math.min(body.max_uses || 5, 10);
+
   try {
-    const result = await createReferralCode(sql, user.org_id, { code: body.code, label: body.label, userId: user.user_id, maxUses: body.max_uses });
-    return c.json({ created: true, ...result, share_url: `https://app.oneshots.co/signup?ref=${result.code}` });
+    const code = body.code?.replace(/[^a-zA-Z0-9_-]/g, "") || undefined; // URL-safe only
+    const result = await createReferralCode(sql, user.org_id, { code, label: body.label, userId: user.user_id, maxUses });
+    return c.json({
+      created: true, ...result,
+      max_uses: maxUses,
+      share_url: `https://app.oneshots.co/login?ref=${encodeURIComponent(result.code)}`,
+    });
   } catch (err: any) {
     return c.json({ error: err.message?.includes("duplicate") ? "Code already exists" : err.message }, 400);
   }

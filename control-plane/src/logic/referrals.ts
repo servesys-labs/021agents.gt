@@ -99,6 +99,14 @@ export async function distributeReferralEarnings(
   let l2Payout = 0;
   const now = new Date().toISOString();
 
+  // Idempotency: check if earnings already distributed for this transfer
+  const existing = await sql`
+    SELECT 1 FROM referral_earnings WHERE transfer_id = ${transferId} LIMIT 1
+  `.catch(() => []);
+  if (existing.length > 0) {
+    return { l1_payout: 0, l2_payout: 0, total_payout: 0 }; // already paid
+  }
+
   // Find L1 referrer (who referred the earning org)
   const [l1Ref] = await sql`
     SELECT referrer_org_id FROM referrals

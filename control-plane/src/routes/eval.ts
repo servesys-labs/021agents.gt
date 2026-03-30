@@ -626,3 +626,71 @@ evalRoutes.openapi(createExperimentRoute, async (c): Promise<any> => {
   await r2PutJson(c.env.STORAGE, key, list);
   return c.json(item);
 });
+
+// ── GET /runs/{run_id}/progress — real-time progress from KV ────────
+
+const evalProgressRoute = createRoute({
+  method: "get",
+  path: "/runs/{run_id}/progress",
+  tags: ["Eval"],
+  summary: "Poll real-time eval progress from KV",
+  description: "Returns Workflow progress events for an eval run. Events include turn_start, thinking, tool_calls, tool_result, turn_end, done. Requires AGENT_PROGRESS_KV binding.",
+  middleware: [requireScope("eval:read")],
+  request: {
+    params: z.object({ run_id: z.string() }),
+    query: z.object({
+      agent_name: z.string().optional().openapi({ description: "Agent name to filter progress keys" }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Progress events",
+      content: {
+        "application/json": {
+          schema: z.object({
+            events: z.array(z.record(z.unknown())),
+            source: z.string(),
+            keys_scanned: z.number(),
+          }),
+        },
+      },
+    },
+  },
+});
+
+evalRoutes.openapi(evalProgressRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { run_id } = c.req.valid("param");
+  const { agent_name } = c.req.valid("query");
+  const events: Record<string, unknown>[] = [];
+
+  const kv = (c.env as any).AGENT_PROGRESS_KV as KVNamespace | undefined;
+  if (!kv) {
+    return c.json({ events: [], source: "unavailable", keys_scanned: 0 });
+  }
+
+  try {
+    // Eval runs create DO instances named "eval-{agent}-{runId}"
+    // Progress keys are "rpc:eval-{agent}-{runId}:*"
+    const prefix = agent_name ? `rpc:eval-${agent_name}` : `rpc:eval-`;
+    const listResult = await kv.list({ prefix, limit: 50 });
+
+    for (const key of listResult.keys) {
+      const raw = await kv.get(key.name);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Record<string, unknown>[];
+        events.push(...parsed);
+      }
+    }
+
+    events.sort((a, b) => Number(a.ts || 0) - Number(b.ts || 0));
+
+    return c.json({
+      events: events.slice(-200),
+      source: "kv",
+      keys_scanned: listResult.keys.length,
+    });
+  } catch {
+    return c.json({ events: [], source: "error", keys_scanned: 0 });
+  }
+});
