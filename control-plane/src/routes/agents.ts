@@ -377,6 +377,22 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       return c.json({ error: `Agent '${req.name}' already exists` }, 409);
     }
 
+    // Enforce org agent limit
+    try {
+      const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${user.org_id} AND is_active = true`;
+      const current = countRows[0]?.cnt || 0;
+      const limitRows = await sql`SELECT max_agents FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1`;
+      const maxAgents = limitRows[0]?.max_agents || 3;
+      if (current >= maxAgents) {
+        return c.json({
+          error: `Organization has reached agent limit (${maxAgents}). Delete unused agents or upgrade your plan.`,
+        }, 403);
+      }
+    } catch (err) {
+      console.warn(`[agents] Failed to check org limit: ${err}`);
+      // Non-blocking — allow creation if limit check fails
+    }
+
     // Build config JSON
     const configJson: Record<string, unknown> = {
       name: req.name,

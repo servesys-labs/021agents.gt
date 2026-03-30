@@ -547,11 +547,13 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
     });
   }
 
-  // Forward user auth context to runtime
+  // Forward user auth context to runtime — channel_user_id ensures per-user DO isolation
   const forwardBody = {
     ...body,
     org_id: user.org_id,
     project_id: user.project_id,
+    channel_user_id: user.user_id,
+    channel: "portal",
   };
 
   try {
