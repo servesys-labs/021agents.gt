@@ -639,11 +639,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           this._appendConversationMessage("user", userText, "voice");
           this._appendConversationMessage("assistant", response, "voice");
         } else {
-          const result = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, {
-            agent_name: config.agentName || "agentos", task: userText,
-            org_id: config.orgId || "", project_id: config.projectId || "",
-          }, this.env.TELEMETRY_QUEUE);
-          response = result.output || response;
+          response = "Voice processing requires Workflow binding. Please contact support.";
         }
         // Strip markdown for voice
         response = response.replace(/#{1,6}\s*/g, "").replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
@@ -767,24 +763,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         }
       };
 
-      // Check for declarative graph execution
-      const hasDeclarativeGraph = data.graph || (config as any).declarative_graph || (config as any).graph;
-
       try {
-        if (hasDeclarativeGraph && data.use_declarative !== false) {
-          // Use unified declarative executor
-          await this._runDeclarativeGraph(
-            runtimeEnv,
-            inputText,
-            data.graph || (config as any).declarative_graph || (config as any).graph,
-            sendAndCapture,
-            {
-              org_id: data.org_id || config.orgId || "",
-              project_id: data.project_id || config.projectId || "",
-              channel: data.channel || "websocket",
-            }
-          );
-        } else {
+        {
           // Stream the run — tokens flow to client in real-time
           await streamRun(
             runtimeEnv,
@@ -834,80 +814,6 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
       }); // end _withRunLock
     }
-  }
-
-  // Run using unified declarative graph executor
-  private async _runDeclarativeGraph(
-    env: RuntimeEnv,
-    input: string,
-    graph: GraphSpec,
-    send: (msg: string) => Promise<void>,
-    opts: { org_id?: string; project_id?: string; channel?: string }
-  ): Promise<void> {
-    const config = this.state.config;
-    
-    // Build context with event streaming
-    const ctx = await buildDeclarativeGraphContext(
-      env,
-      this.env.HYPERDRIVE,
-      { agent_name: config.agentName, task: input, org_id: opts.org_id, project_id: opts.project_id },
-      {
-        agent_name: config.agentName,
-        system_prompt: config.systemPrompt,
-        provider: config.provider,
-        model: config.model,
-        plan: config.plan || "standard",
-        max_turns: config.maxTurns,
-        budget_limit_usd: config.budgetLimitUsd,
-        tools: config.tools,
-        blocked_tools: config.blockedTools,
-        parallel_tool_calls: true,
-        require_human_approval: false,
-        org_id: opts.org_id || "",
-        project_id: opts.project_id || "",
-      } as any,
-      {
-        telemetryQueue: this.env.TELEMETRY_QUEUE,
-        onEvent: async (event) => {
-          // Stream events to client
-          await send(JSON.stringify({
-            type: event.event_type,
-            ...event.data,
-            timestamp: event.timestamp,
-          }));
-        },
-      }
-    );
-
-    // Prepare graph (validate, expand subgraphs, cache)
-    const prepared = await prepareDeclarativeGraph(ctx, graph, {
-      skipCache: false,
-      skipExpansion: false,
-      skipValidation: false,
-      maxDepth: 3,
-    });
-
-    if (!prepared.validationResult.valid) {
-      await send(JSON.stringify({
-        type: "error",
-        error: `Graph validation failed: ${prepared.validationResult.errors[0]?.message}`,
-      }));
-      return;
-    }
-
-    // Execute graph
-    const result = await executeDeclarativeGraph(ctx, graph);
-
-    // Send final result
-    await send(JSON.stringify({
-      type: "done",
-      output: result.output,
-      cost_usd: result.costUsd,
-      latency_ms: result.latencyMs,
-      turns: result.turnCount,
-      tool_calls: result.toolCallCount,
-      validation_errors: result.validationErrors,
-    }));
   }
 
   // ── Internal HTTP (async run from REST invoke) ──────────────────
@@ -1481,34 +1387,6 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
       try {
         const config = this.state.config;
-        const runtimeEnv: RuntimeEnv = {
-          AI: this.env.AI,
-          HYPERDRIVE: this.env.HYPERDRIVE,
-          VECTORIZE: this.env.VECTORIZE,
-          STORAGE: this.env.STORAGE,
-          SANDBOX: this.env.SANDBOX,
-          LOADER: this.env.LOADER,
-          TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
-          BROWSER: this.env.BROWSER,
-          AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
-          AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-          BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
-          CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
-          CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
-          OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
-          DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
-          DO_SQL: this.sql.bind(this),
-          DO_SESSION_ID: this.name,
-        };
-
-        const request: RunRequest = {
-          agent_name: agentName,
-          task: userText,
-          org_id: orgId,
-          project_id: config.projectId || "",
-        };
-
         let response = "I didn't catch that. Could you say that again?";
         if (this.env.AGENT_RUN_WORKFLOW) {
           const voiceHistory = this._loadConversationHistory(12);
@@ -1529,8 +1407,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           this._appendConversationMessage("user", userText, "voice");
           this._appendConversationMessage("assistant", response, "voice");
         } else {
-          const legacyResult = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, request, this.env.TELEMETRY_QUEUE);
-          response = legacyResult.output || response;
+          response = "Voice processing requires Workflow binding. Please contact support.";
         }
 
         // Strip markdown for voice
@@ -2551,30 +2428,12 @@ export default {
           subgraph_id?: string;
         };
         
-        const { invalidateGraphCache, invalidateSubgraphCache, clearGraphCache } = await import("./runtime/graph-cache");
-        
-        switch (body.type) {
-          case "graph":
-            if (body.graph_id) {
-              // Note: Need full graph spec to invalidate - for now clear all
-              clearGraphCache();
-            }
-            break;
-          case "subgraph":
-            if (body.subgraph_id) {
-              invalidateSubgraphCache(body.subgraph_id);
-            }
-            break;
-          case "all":
-          default:
-            clearGraphCache();
-        }
-        
+        // Graph cache invalidation removed — graph execution system deleted.
+        // Workflows don't use graph caching. Accepting the call as a no-op.
         return Response.json({
           invalidated: true,
           type: body.type || "all",
-          graph_id: body.graph_id,
-          subgraph_id: body.subgraph_id,
+          note: "Graph caching removed — Workflows handle execution directly.",
         });
       } catch (e: any) {
         return Response.json({ error: e.message }, { status: 400 });
@@ -3225,442 +3084,11 @@ export default {
       }
     }
 
-    // POST /api/v1/graphs/linear-run — declarative linear graph (control-plane validated → edge execute)
-    if (url.pathname === "/api/v1/graphs/linear-run" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
-      }
-
-      const body = await request.json() as {
-        graph?: unknown;
-        task?: string;
-        agent_context?: {
-          agent_name?: string;
-          org_id?: string;
-          project_id?: string;
-          channel?: string;
-          channel_user_id?: string;
-        };
-        initial_state?: Record<string, unknown>;
-        validation?: { linear_path?: string[]; graph_id?: string };
-      };
-
-      const task = typeof body.task === "string" ? body.task : "";
-      if (!task.trim()) {
-        return Response.json({ error: "task is required", error_code: "MISSING_TASK" }, { status: 400 });
-      }
-      const ctx = body.agent_context;
-      if (!ctx || typeof ctx.agent_name !== "string" || !ctx.agent_name.trim()) {
-        return Response.json(
-          { error: "agent_context.agent_name is required", error_code: "MISSING_AGENT" },
-          { status: 400 },
-        );
-      }
-      if (!body.graph || typeof body.graph !== "object") {
-        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
-      }
-
-      try {
-        const result = executeLinearDeclarativeRun({
-          graph: body.graph as GraphSpec,
-          task: task.trim(),
-          agent_context: {
-            agent_name: ctx.agent_name.trim(),
-            org_id: ctx.org_id,
-            project_id: ctx.project_id,
-            channel: ctx.channel,
-            channel_user_id: ctx.channel_user_id,
-          },
-          initial_state: body.initial_state,
-          validation: body.validation,
-        });
-        if (!result.success) {
-          const status =
-            result.error_code === "VALIDATION_MISMATCH"
-              ? 409
-              : result.error_code === "MISSING_NODE_KIND"
-                ? 422
-                : 400;
-          return Response.json(
-            {
-              success: false,
-              error: result.error,
-              error_code: result.error_code,
-              linear_path: result.linear_path,
-              linear_trace: result.linear_trace,
-            },
-            { status },
-          );
-        }
-        const traceDigestSha256 = await sha256Hex(JSON.stringify(result.linear_trace));
-        return Response.json({
-          success: true,
-          linear_path: result.linear_path,
-          linear_trace: result.linear_trace,
-          trace_digest_sha256: traceDigestSha256,
-          state: result.state,
-          task: task.trim(),
-          agent_context: {
-            agent_name: ctx.agent_name.trim(),
-            org_id: ctx.org_id ?? "",
-            project_id: ctx.project_id ?? "",
-            channel: ctx.channel ?? "",
-            channel_user_id: ctx.channel_user_id ?? "",
-          },
-        });
-      } catch (err: any) {
-        return Response.json(
-          { success: false, error: err.message || String(err), error_code: "INTERNAL" },
-          { status: 500 },
-        );
-      }
+    // Graph execution endpoints removed — Workflows replace graph execution.
+    if (url.pathname.startsWith("/api/v1/graphs/") && request.method === "POST") {
+      return Response.json({ error: "Use POST /run instead. Graph endpoints removed." }, { status: 410 });
     }
 
-    // POST /api/v1/graphs/dag-run — declarative bounded DAG graph (deterministic topo execution)
-    if (url.pathname === "/api/v1/graphs/dag-run" && request.method === "POST") {
-      const serviceToken = env.SERVICE_TOKEN || "";
-      if (serviceToken) {
-        const authHeader = request.headers.get("Authorization") || "";
-        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
-        if (token !== serviceToken) {
-          return Response.json({ error: "unauthorized" }, { status: 401 });
-        }
-      }
-
-      const body = await request.json() as {
-        graph?: unknown;
-        task?: string;
-        agent_context?: {
-          agent_name?: string;
-          org_id?: string;
-          project_id?: string;
-          channel?: string;
-          channel_user_id?: string;
-        };
-        initial_state?: Record<string, unknown>;
-        max_branching?: number;
-        max_fanin?: number;
-        validation?: { execution_order?: string[]; graph_id?: string };
-      };
-
-      const task = typeof body.task === "string" ? body.task : "";
-      if (!task.trim()) {
-        return Response.json({ error: "task is required", error_code: "MISSING_TASK" }, { status: 400 });
-      }
-      const ctx = body.agent_context;
-      if (!ctx || typeof ctx.agent_name !== "string" || !ctx.agent_name.trim()) {
-        return Response.json(
-          { error: "agent_context.agent_name is required", error_code: "MISSING_AGENT" },
-          { status: 400 },
-        );
-      }
-      if (!body.graph || typeof body.graph !== "object") {
-        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
-      }
-
-      try {
-        const result = executeBoundedDagDeclarativeRun({
-          graph: body.graph as GraphSpec,
-          task: task.trim(),
-          agent_context: {
-            agent_name: ctx.agent_name.trim(),
-            org_id: ctx.org_id,
-            project_id: ctx.project_id,
-            channel: ctx.channel,
-            channel_user_id: ctx.channel_user_id,
-          },
-          initial_state: body.initial_state,
-          max_branching: body.max_branching,
-          max_fanin: body.max_fanin,
-          validation: body.validation,
-        });
-        if (!result.success) {
-          const status =
-            result.error_code === "VALIDATION_MISMATCH"
-              ? 409
-              : result.error_code === "MISSING_NODE_KIND"
-                ? 422
-                : 400;
-          return Response.json(
-            {
-              success: false,
-              error: result.error,
-              error_code: result.error_code,
-              execution_order: result.execution_order,
-              execution_trace: result.execution_trace,
-            },
-            { status },
-          );
-        }
-        const traceDigestSha256 = await sha256Hex(JSON.stringify(result.execution_trace));
-        return Response.json({
-          success: true,
-          execution_order: result.execution_order,
-          execution_trace: result.execution_trace,
-          trace_digest_sha256: traceDigestSha256,
-          state: result.state,
-          task: task.trim(),
-          agent_context: {
-            agent_name: ctx.agent_name.trim(),
-            org_id: ctx.org_id ?? "",
-            project_id: ctx.project_id ?? "",
-            channel: ctx.channel ?? "",
-            channel_user_id: ctx.channel_user_id ?? "",
-          },
-        });
-      } catch (err: any) {
-        return Response.json(
-          { success: false, error: err.message || String(err), error_code: "INTERNAL" },
-          { status: 500 },
-        );
-      }
-    }
-
-    // POST /api/v1/graphs/validate — Validate graph with optional subgraph expansion
-    if (url.pathname === "/api/v1/graphs/validate" && request.method === "POST") {
-      const body = await request.json() as {
-        graph?: unknown;
-        expand_subgraphs?: boolean;
-        max_branching?: number;
-        max_fanin?: number;
-      };
-
-      if (!body.graph || typeof body.graph !== "object") {
-        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
-      }
-
-      try {
-        // Validate graph structure
-        const { validateBoundedDagDeclarativeGraph } = await import("./runtime/linear_declarative");
-        const validationResult = validateBoundedDagDeclarativeGraph(
-          body.graph,
-          body.max_branching || 4,
-          body.max_fanin || 4
-        );
-
-        // If expansion requested, expand subgraphs
-        let expandedGraph: GraphSpec | undefined;
-        if (body.expand_subgraphs !== false) {
-          const runtimeEnv: RuntimeEnv = {
-            AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
-            STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
-            TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
-            AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-            BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
-            CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
-            CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
-            DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
-          };
-          expandedGraph = await expandSubgraphs(body.graph as GraphSpec, runtimeEnv, subgraphRegistry, 0, 3);
-        }
-
-        // Compute execution order
-        const graphSpec = expandedGraph || body.graph as GraphSpec;
-
-        return Response.json({
-          valid: validationResult.valid,
-          errors: validationResult.errors,
-          warnings: [],
-          execution_order: validationResult.execution_order || (graphSpec.nodes || []).map(n => n.id),
-          expanded_graph: expandedGraph,
-          from_cache: false,
-        });
-      } catch (err: any) {
-        return Response.json({
-          valid: false,
-          errors: [{ code: "VALIDATION_ERROR", message: err.message }],
-          warnings: [],
-        }, { status: 400 });
-      }
-    }
-
-    // POST /api/v1/graphs/execute — Execute graph with full runtime
-    if (url.pathname === "/api/v1/graphs/execute" && request.method === "POST") {
-      const body = await request.json() as {
-        graph?: unknown;
-        input?: string;
-        agent_name?: string;
-        org_id?: string;
-        max_turns?: number;
-      };
-
-      if (!body.graph || typeof body.graph !== "object") {
-        return Response.json({ error: "graph is required", error_code: "MISSING_GRAPH" }, { status: 400 });
-      }
-      if (!body.input || typeof body.input !== "string") {
-        return Response.json({ error: "input is required", error_code: "MISSING_INPUT" }, { status: 400 });
-      }
-
-      const runtimeEnv: RuntimeEnv = {
-        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
-        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
-        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
-        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
-        AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
-        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
-        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
-        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
-      };
-
-      try {
-        // Build context
-        const ctx = await buildDeclarativeGraphContext(
-          runtimeEnv,
-          env.HYPERDRIVE,
-          {
-            agent_name: body.agent_name || "agentos",
-            task: body.input,
-            org_id: body.org_id,
-          },
-          {
-            agent_name: body.agent_name || "agentos",
-            system_prompt: "You are a helpful assistant.",
-            provider: env.DEFAULT_PROVIDER || "openrouter",
-            model: env.DEFAULT_MODEL || "deepseek/deepseek-chat-v3-0324",
-            plan: "standard",
-            max_turns: body.max_turns || 50,
-            budget_limit_usd: 10,
-            tools: [],
-            blocked_tools: [],
-            parallel_tool_calls: true,
-            require_human_approval: false,
-            org_id: body.org_id || "",
-            project_id: "",
-          } as any,
-          { telemetryQueue: env.TELEMETRY_QUEUE }
-        );
-
-        // Execute
-        const result = await executeDeclarativeGraph(ctx, body.graph as GraphSpec, {
-          maxTurns: body.max_turns,
-        });
-
-        return Response.json({
-          success: result.success,
-          output: result.output,
-          cost_usd: result.costUsd,
-          latency_ms: result.latencyMs,
-          turns: result.turnCount,
-          tool_calls: result.toolCallCount,
-          validation_errors: result.validationErrors,
-          error: result.error,
-        });
-      } catch (err: any) {
-        return Response.json({
-          success: false,
-          error: err.message || String(err),
-        }, { status: 500 });
-      }
-    }
-
-    // POST /api/v1/graphs/stream — Stream execute graph
-    if (url.pathname === "/api/v1/graphs/stream" && request.method === "POST") {
-      const body = await request.json() as {
-        graph?: unknown;
-        input?: string;
-        agent_name?: string;
-        org_id?: string;
-      };
-
-      if (!body.graph || typeof body.graph !== "object") {
-        return Response.json({ error: "graph is required" }, { status: 400 });
-      }
-      if (!body.input || typeof body.input !== "string") {
-        return Response.json({ error: "input is required" }, { status: 400 });
-      }
-
-      const encoder = new TextEncoder();
-      const runtimeEnv: RuntimeEnv = {
-        AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
-        STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
-        TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
-        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
-        AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
-        CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
-        CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
-        DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
-      };
-
-      const stream = new ReadableStream({
-        async start(controller) {
-          const send = (msg: string) => {
-            try {
-              controller.enqueue(encoder.encode(`data: ${msg}\n\n`));
-            } catch {
-              // Controller closed
-            }
-          };
-
-          try {
-            const ctx = await buildDeclarativeGraphContext(
-              runtimeEnv,
-              env.HYPERDRIVE,
-              {
-                agent_name: body.agent_name || "agentos",
-                task: body.input!,
-                org_id: body.org_id,
-              },
-              {
-                agent_name: body.agent_name || "agentos",
-                system_prompt: "You are a helpful assistant.",
-                provider: env.DEFAULT_PROVIDER || "openrouter",
-                model: env.DEFAULT_MODEL || "deepseek/deepseek-chat-v3-0324",
-                plan: "standard",
-                max_turns: 50,
-                budget_limit_usd: 10,
-                tools: [],
-                blocked_tools: [],
-                parallel_tool_calls: true,
-                require_human_approval: false,
-                org_id: body.org_id || "",
-                project_id: "",
-              } as any,
-              {
-                telemetryQueue: env.TELEMETRY_QUEUE,
-                onEvent: async (event) => {
-                  send(JSON.stringify({
-                    type: event.event_type,
-                    ...event.data,
-                    timestamp: event.timestamp,
-                  }));
-                },
-              }
-            );
-
-            const result = await executeDeclarativeGraph(ctx, body.graph as GraphSpec);
-
-            send(JSON.stringify({
-              type: "done",
-              output: result.output,
-              cost_usd: result.costUsd,
-              latency_ms: result.latencyMs,
-              turns: result.turnCount,
-              tool_calls: result.toolCallCount,
-            }));
-
-            controller.close();
-          } catch (err: any) {
-            send(JSON.stringify({ type: "error", error: err.message }));
-            controller.close();
-          }
-        },
-      });
-
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
-        },
-      });
-    }
 
     // --- Codemode Runtime API ---
 
@@ -3826,7 +3254,7 @@ export default {
       };
 
       try {
-        const batchReq: BatchRequest = {
+        const batchReq: { inputs: any[] } = {
           inputs: (body.inputs || []).map((inp) => ({
             ...(() => {
               const cfg = extractRunnableConfig(inp.config);
@@ -3873,7 +3301,7 @@ export default {
           }));
           result = { results };
         } else {
-          result = await edgeBatch(runtimeEnv, env.HYPERDRIVE, batchReq, env.TELEMETRY_QUEUE);
+          return Response.json({ error: "Batch requires Workflow binding (AGENT_RUN_WORKFLOW)" }, { status: 501 });
         }
         return Response.json({
           outputs: result.results.map((item) => ({
@@ -3932,7 +3360,14 @@ export default {
           const events = await loadRuntimeEventsPage(env.HYPERDRIVE, {
             session_id: body.session_id, limit: 1000,
           });
-          const breakdown = computeLatencyBreakdown(events.events);
+          // Simple latency summary from events (computeLatencyBreakdown removed with engine.ts)
+          const evts = events.events || [];
+          const breakdown = {
+            total_events: evts.length,
+            first_event_at: evts[0]?.timestamp || null,
+            last_event_at: evts[evts.length - 1]?.timestamp || null,
+            wall_clock_ms: evts.length >= 2 ? (evts[evts.length - 1].timestamp - evts[0].timestamp) : 0,
+          };
           return Response.json({ session_id: body.session_id, latency_breakdown: breakdown });
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
@@ -3997,8 +3432,10 @@ export default {
             suggestion: "Use GET /api/v1/runs/{run_id} to check the status of a running Workflow instance.",
           }, { status: 410 });
         }
-        const result = await edgeResume(runtimeEnv, env.HYPERDRIVE, checkpointId, env.TELEMETRY_QUEUE);
-        return Response.json(result);
+        return Response.json({
+          error: "Resume requires Workflow binding. Cloudflare Workflows auto-resume on crash.",
+          suggestion: "Use GET /api/v1/runs/{run_id} to check the status.",
+        }, { status: 501 });
       } catch (err: any) {
         return Response.json({ error: err.message }, { status: 500 });
       }

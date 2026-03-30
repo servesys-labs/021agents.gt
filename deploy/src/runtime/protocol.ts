@@ -12,21 +12,22 @@
 
 // ── Base Event ───────────────────────────────────────────────────────
 
-export type EventType = 
+export type EventType =
   | "connected"
   | "session_start"
   | "turn_start"
   | "token"
   | "tool_call"
   | "tool_result"
+  | "tool_progress"
   | "turn_end"
   | "done"
   | "error"
   | "warning"
   | "system"
-  | "reset"
-  | "node_start"
-  | "node_end";
+  | "thinking"
+  | "reasoning"
+  | "reset";
 
 export interface BaseEvent {
   type: EventType;
