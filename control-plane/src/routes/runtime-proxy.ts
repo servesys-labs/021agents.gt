@@ -602,8 +602,48 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
       });
     }
 
-    // Pass through the SSE stream from runtime with headers
-    return new Response(resp.body, {
+    // Wrap the SSE stream to intercept the "done" event and deduct credits
+    const orgIdForBilling = streamOrgId;
+    const agentNameForBilling = agentName;
+    const sseStream = resp.body;
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+
+    c.executionCtx.waitUntil((async () => {
+      const reader = sseStream!.getReader();
+      let buffer = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          await writer.write(encoder.encode(chunk));
+          buffer += chunk;
+
+          // Check for "done" event in the chunk
+          const doneMatch = buffer.match(/data:\s*(\{[^}]*"type"\s*:\s*"done"[^}]*\})/);
+          if (doneMatch) {
+            try {
+              const doneEvent = JSON.parse(doneMatch[1]);
+              const costUsd = Number(doneEvent.cost_usd || 0);
+              if (costUsd > 0) {
+                const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgIdForBilling);
+                await deductCredits(deductSql, orgIdForBilling, costUsd,
+                  `Agent run: ${agentNameForBilling}`, agentNameForBilling,
+                  String(doneEvent.session_id || ""));
+              }
+            } catch {} // non-blocking — don't break the stream
+            buffer = ""; // stop scanning after done
+          }
+        }
+      } catch {} finally {
+        try { await writer.close(); } catch {}
+      }
+    })());
+
+    return new Response(readable, {
       headers: {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",

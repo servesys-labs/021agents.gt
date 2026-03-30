@@ -113,8 +113,8 @@ async function recordTelephonyBilling(
 
     // Fire-and-forget credit deduction for telephony cost
     if (opts.cost_usd > 0) {
-      const costCents = Math.max(1, Math.round(opts.cost_usd * 100));
-      deductCredits(sql, opts.org_id, costCents, `Voice call: ${opts.call_id}`, opts.agent_name || "voice", traceId).catch(() => {});
+      // deductCredits expects USD, not cents — pass cost_usd directly
+      deductCredits(sql, opts.org_id, opts.cost_usd, `Voice call: ${opts.call_id}`, opts.agent_name || "voice", traceId).catch(() => {});
     }
   } catch {
     /* best-effort */

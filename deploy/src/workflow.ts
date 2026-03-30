@@ -250,12 +250,18 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
               result: typeof r?.result === "string" ? r.result : JSON.stringify(r?.result || ""),
               error: r?.error || undefined,
               latency_ms: r?.latency_ms || 0,
+              cost_usd: r?.cost_usd || 0,
             };
           })
         )
       );
 
       totalToolCalls += llm.tool_calls.length;
+
+      // Accumulate tool costs (was missing — caused silent zero billing for tools)
+      for (const tr of toolResultEntries) {
+        totalCost += tr.cost_usd || 0;
+      }
 
       // Emit tool results
       for (const tr of toolResultEntries) {

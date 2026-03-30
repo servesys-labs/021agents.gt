@@ -1011,6 +1011,30 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           if (result) {
             this._appendConversationMessage("user", inputText, data.channel || "rest");
             this._appendConversationMessage("assistant", result.output || "", data.channel || "rest");
+
+            // Write billing record + session record (critical — without this, runs are free)
+            if (this.env.HYPERDRIVE) {
+              const { writeBillingRecord, writeSession } = await import("./runtime/db");
+              writeBillingRecord(this.env.HYPERDRIVE, {
+                session_id: result.session_id || "", org_id: data.org_id || "",
+                agent_name: agentName, model: "workflow",
+                input_tokens: 0, output_tokens: 0,
+                cost_usd: result.cost_usd || 0, plan: "standard",
+                trace_id: result.trace_id || "",
+                billing_user_id: data.channel_user_id,
+                api_key_id: data.api_key_id,
+              }).catch(() => {});
+              writeSession(this.env.HYPERDRIVE, {
+                session_id: result.session_id || "", org_id: data.org_id || "",
+                project_id: data.project_id || "", agent_name: agentName,
+                status: "success", input_text: inputText,
+                output_text: result.output || "", model: "workflow",
+                trace_id: result.trace_id || "",
+                step_count: result.turns || 1, action_count: result.tool_calls || 0,
+                wall_clock_seconds: 0, cost_total_usd: result.cost_usd || 0,
+              }).catch(() => {});
+            }
+
             return Response.json({ status: "completed", success: true, ...result });
           }
 

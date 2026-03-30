@@ -171,8 +171,8 @@ gpuRoutes.openapi(deleteEndpointRoute, async (c): Promise<any> => {
 
     // Fire-and-forget credit deduction for GPU compute cost
     if (costUsd > 0) {
-      const costCents = Math.max(1, Math.round(costUsd * 100));
-      deductCredits(sql, user.org_id, costCents, `GPU compute: ${endpointId}`, "", "").catch(() => {});
+      // deductCredits expects USD, not cents
+      deductCredits(sql, user.org_id, costUsd, `GPU compute: ${endpointId}`, "", "").catch(() => {});
     }
   } catch {}
 
