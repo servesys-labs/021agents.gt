@@ -992,14 +992,82 @@ async function dispatch(
       const urlCheck = validateUrl(targetUrl);
       if (!urlCheck.valid) return `Error: ${urlCheck.reason}`;
       const task = args.task || args.message || "";
-      const resp = await fetch(`${targetUrl}/tasks/send`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", method: "tasks/send", id: crypto.randomUUID(),
-          params: { message: { role: "user", parts: [{ type: "text", text: task }] } },
-        }),
-      });
+      const authToken = args.auth_token || (env as any).SERVICE_TOKEN || "";
+
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
+
+      const payload = {
+        jsonrpc: "2.0", method: "SendMessage", id: crypto.randomUUID(),
+        params: {
+          message: { role: "user", parts: [{ type: "text", text: task }] },
+          agentName: args.agent_name || "",
+        },
+      };
+
+      // First attempt
+      let resp = await fetch(`${targetUrl}`, { method: "POST", headers, body: JSON.stringify(payload) });
+
+      // x-402 Payment Required — auto-pay via credit transfer and retry
+      if (resp.status === 402) {
+        const price = resp.headers.get("x-402-price");
+        const paymentAddress = resp.headers.get("x-402-payment-address");
+
+        if (price && paymentAddress && (env as any).HYPERDRIVE) {
+          try {
+            const { getDb } = await import("./db");
+            const sql = await getDb((env as any).HYPERDRIVE);
+            const lineage = (env as any).__delegationLineage;
+            const fromOrg = lineage?.org_id || "";
+
+            if (fromOrg) {
+              // Transfer credits
+              const transferId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+              const amountUsd = Number(price);
+              const now = new Date().toISOString();
+
+              // Atomic deduct
+              const deducted = await sql`
+                UPDATE org_credit_balance SET balance_usd = balance_usd - ${amountUsd}, updated_at = ${now}
+                WHERE org_id = ${fromOrg} AND balance_usd >= ${amountUsd}
+              `;
+
+              if (deducted.count > 0) {
+                // Credit receiver
+                await sql`
+                  INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, lifetime_consumed_usd, updated_at)
+                  VALUES (${paymentAddress}, ${amountUsd}, ${amountUsd}, 0, ${now})
+                  ON CONFLICT (org_id) DO UPDATE SET balance_usd = org_credit_balance.balance_usd + ${amountUsd}, updated_at = ${now}
+                `;
+
+                // Audit
+                await sql`
+                  INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+                  VALUES (${fromOrg}, 'transfer_out', ${-amountUsd}, 0, ${'A2A payment: ' + (args.agent_name || targetUrl)}, ${transferId}, 'a2a_payment', ${now})
+                `;
+
+                // Retry with payment receipt
+                const retryPayload = {
+                  ...payload,
+                  params: { ...payload.params, payment_receipt: { transfer_id: transferId } },
+                };
+                resp = await fetch(`${targetUrl}`, { method: "POST", headers, body: JSON.stringify(retryPayload) });
+              }
+            }
+          } catch {}
+        }
+
+        if (resp.status === 402) {
+          return JSON.stringify({
+            error: "payment_required",
+            price: resp.headers.get("x-402-price"),
+            currency: resp.headers.get("x-402-currency"),
+            accepts: resp.headers.get("x-402-accepts"),
+            message: "Target agent requires payment but auto-pay failed. Ensure your org has sufficient credits.",
+          });
+        }
+      }
+
       return await resp.text();
     }
 
