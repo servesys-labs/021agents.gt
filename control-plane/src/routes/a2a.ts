@@ -19,8 +19,23 @@ import { getDbForOrg } from "../db/client";
 import { buildAgentCard, agentCardToJSON } from "../lib/a2a/card";
 import { parseAgentConfigJson } from "../schemas/common";
 
-// In-memory task storage (per-worker, for production consider using Durable Objects or DB)
+// In-memory task cache (fast reads). Tasks also persisted to a2a_tasks DB table for audit.
 const taskStore = new Map<string, A2ATask>();
+
+/** Persist A2A task to DB for audit trail. */
+async function persistA2ATask(env: any, task: A2ATask, callerOrgId: string, calleeOrgId: string, transferId?: string, amountUsd?: number) {
+  try {
+    const sql = await getDbForOrg(env.HYPERDRIVE, calleeOrgId);
+    const firstUserMsg = task.messages.find((m: any) => m.role === "user");
+    const input = String((firstUserMsg?.parts?.[0] as any)?.text || "");
+    const output = String((task.artifacts?.[0]?.parts?.[0] as any)?.text || "");
+    await sql`
+      INSERT INTO a2a_tasks (task_id, caller_org_id, callee_org_id, caller_agent_name, callee_agent_name, status, input_text, output_text, transfer_id, amount_usd, created_at, completed_at)
+      VALUES (${task.id}, ${callerOrgId}, ${calleeOrgId}, '', ${task.agentName || ''}, ${task.status.state.toLowerCase()}, ${input.slice(0, 5000)}, ${output.slice(0, 5000)}, ${transferId || ''}, ${amountUsd || 0}, ${task.status.timestamp || new Date().toISOString()}, ${task.status.state !== 'WORKING' ? task.status.timestamp : null})
+      ON CONFLICT (task_id) DO UPDATE SET status = ${task.status.state.toLowerCase()}, output_text = ${output.slice(0, 5000)}, completed_at = ${task.status.state !== 'WORKING' ? task.status.timestamp : null}
+    `;
+  } catch {} // non-blocking
+}
 
 /** A2A Task definition. */
 interface A2ATask {
@@ -392,10 +407,28 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         task.messages.push(responseMessage);
         task.artifacts.push({ id: generateId(), name: "response", parts: [{ text: output }] });
 
+        // Persist to DB for audit
+        const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
+        persistA2ATask(c.env, task, user.org_id, user.org_id, paymentReceipt?.transfer_id);
+
         return c.json(jsonrpcResponse(id, { task }));
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : String(e);
         task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+
+        // Persist failure to DB
+        persistA2ATask(c.env, task, user.org_id, user.org_id);
+
+        // Refund payment if task failed after payment
+        const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
+        if (paymentReceipt?.transfer_id) {
+          try {
+            const { refundTransfer } = await import("../logic/agent-payments");
+            const refundSql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+            await refundTransfer(refundSql, paymentReceipt.transfer_id, user.org_id, user.org_id, 0, `A2A task failed: ${errorMsg.slice(0, 200)}`);
+          } catch {} // best-effort refund
+        }
+
         return c.json(jsonrpcError(id, -32000, errorMsg), 500);
       }
     }
