@@ -18,15 +18,24 @@ const iconMap: Record<string, React.ComponentType<any>> = {
   Mail, Calendar, CreditCard, MessageSquare, Table, Users, Phone, Camera,
 };
 
+// Real runtime tools — must match TOOL_CATALOG in the backend
 const TOOLS = [
-  { id: "email", label: "Email", icon: "Mail" },
-  { id: "calendar", label: "Calendar", icon: "Calendar" },
-  { id: "stripe", label: "Stripe", icon: "CreditCard" },
-  { id: "slack", label: "Slack", icon: "MessageSquare" },
-  { id: "sheets", label: "Google Sheets", icon: "Table" },
-  { id: "crm", label: "CRM", icon: "Users" },
-  { id: "whatsapp", label: "WhatsApp", icon: "Phone" },
-  { id: "instagram", label: "Instagram", icon: "Camera" },
+  { id: "web-search", label: "Web Search", desc: "Search the web via Brave" },
+  { id: "browse", label: "Browse URL", desc: "Fetch and read web pages" },
+  { id: "http-request", label: "HTTP Request", desc: "Make API calls" },
+  { id: "web-crawl", label: "Web Crawl", desc: "Deep crawl websites" },
+  { id: "python-exec", label: "Python", desc: "Execute Python code" },
+  { id: "bash", label: "Bash", desc: "Run shell commands" },
+  { id: "execute-code", label: "JavaScript", desc: "Run JS in sandbox" },
+  { id: "read-file", label: "Read File", desc: "Read sandbox files" },
+  { id: "write-file", label: "Write File", desc: "Write sandbox files" },
+  { id: "edit-file", label: "Edit File", desc: "Edit files with diffs" },
+  { id: "knowledge-search", label: "Knowledge Base", desc: "Search embedded knowledge" },
+  { id: "store-knowledge", label: "Store Knowledge", desc: "Save to knowledge base" },
+  { id: "image-generate", label: "Image Gen", desc: "Generate images with AI" },
+  { id: "text-to-speech", label: "Text to Speech", desc: "Convert text to audio" },
+  { id: "db-query", label: "Database Query", desc: "Query connected databases" },
+  { id: "create-agent", label: "Create Agent", desc: "Spawn sub-agents" },
 ];
 
 interface AgentDetail {
@@ -55,6 +64,10 @@ export default function AgentSettingsPage() {
   const [tone, setTone] = useState("friendly");
   const [responseLength, setResponseLength] = useState("medium");
   const [plan, setPlan] = useState<"basic" | "standard" | "premium">("standard");
+  const [model, setModel] = useState("");
+  const [budgetLimitUsd, setBudgetLimitUsd] = useState(10);
+  const [maxTurns, setMaxTurns] = useState(50);
+  const [reasoningStrategy, setReasoningStrategy] = useState("");
   const [tools, setTools] = useState<string[]>([]);
   const [isLive, setIsLive] = useState(false);
 
@@ -82,6 +95,10 @@ export default function AgentSettingsPage() {
       setTone(cfg.tone || "friendly");
       setResponseLength(cfg.response_length || "medium");
       setPlan(cfg.plan || "standard");
+      setModel(cfg.model || "");
+      setBudgetLimitUsd(Number(cfg.governance?.budget_limit_usd ?? cfg.budget_limit_usd ?? 10));
+      setMaxTurns(Number(cfg.max_turns ?? 50));
+      setReasoningStrategy(cfg.reasoning_strategy || "");
       setTools(cfg.tools || []);
       setIsLive(data.is_active ?? false);
       // Handoff
@@ -116,14 +133,25 @@ export default function AgentSettingsPage() {
     try {
       await api.put(`/agents/${agentPathSegment(id)}`, {
         description,
+        system_prompt: persona,
+        plan,
+        model: model || undefined,
+        tools,
+        max_turns: maxTurns,
+        budget_limit_usd: budgetLimitUsd,
+        reasoning_strategy: reasoningStrategy || undefined,
         is_active: isLive,
         config_json: {
           ...(agent.config_json || {}),
           system_prompt: persona,
+          model: model || undefined,
           plan,
           tone,
           response_length: responseLength,
           tools,
+          max_turns: maxTurns,
+          reasoning_strategy: reasoningStrategy || undefined,
+          governance: { budget_limit_usd: budgetLimitUsd },
           handoff: {
             enabled: handoffEnabled,
             email: handoffEmail,
@@ -227,6 +255,62 @@ export default function AgentSettingsPage() {
             </div>
           </div>
 
+          <Input
+            label="Model"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="anthropic/claude-sonnet-4-6 (leave empty for plan default)"
+          />
+
+          <div className="grid grid-cols-2 gap-4">
+            <Input
+              label="Budget limit (USD per session)"
+              type="number"
+              min={0}
+              max={10000}
+              step={0.5}
+              value={String(budgetLimitUsd)}
+              onChange={(e) => setBudgetLimitUsd(Number(e.target.value))}
+            />
+            <Input
+              label="Max turns per session"
+              type="number"
+              min={1}
+              max={1000}
+              value={String(maxTurns)}
+              onChange={(e) => setMaxTurns(Number(e.target.value))}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-text">Reasoning Strategy</label>
+            <p className="text-xs text-text-secondary mb-2">
+              How the agent thinks before acting. "Auto" selects based on task complexity.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { key: "", label: "Auto" },
+                { key: "chain-of-thought", label: "Chain of Thought" },
+                { key: "plan-then-execute", label: "Plan Then Execute" },
+                { key: "step-back", label: "Step-Back" },
+                { key: "decompose", label: "Decompose" },
+                { key: "verify-then-respond", label: "Verify" },
+              ].map((s) => (
+                <button
+                  key={s.key}
+                  onClick={() => setReasoningStrategy(s.key)}
+                  className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                    reasoningStrategy === s.key
+                      ? "border-primary bg-primary-light text-primary"
+                      : "border-border text-text-secondary hover:border-gray-300"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <Card className="border-red-200 bg-red-50/40">
             <p className="text-sm font-medium text-text">Remove assistant</p>
             <p className="text-xs text-text-secondary mt-1 leading-relaxed">
@@ -293,26 +377,33 @@ export default function AgentSettingsPage() {
       )}
 
       {tab === "tools" && (
-        <div className="grid grid-cols-2 gap-3 max-w-lg">
-          {TOOLS.map((tool) => {
-            const Icon = iconMap[tool.icon];
-            const selected = tools.includes(tool.id);
-            return (
-              <button
-                key={tool.id}
-                onClick={() => toggleTool(tool.id)}
-                className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
-                  selected ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
-                }`}
-              >
-                {Icon && <Icon size={18} />}
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-text">{tool.label}</p>
-                </div>
-                {selected && <Check size={16} className="text-primary shrink-0" />}
-              </button>
-            );
-          })}
+        <div className="space-y-3 max-w-lg">
+          <p className="text-xs text-text-secondary">
+            Select which tools this agent can use. Tools are validated against the runtime catalog.
+          </p>
+          <div className="grid grid-cols-2 gap-3">
+            {TOOLS.map((tool) => {
+              const selected = tools.includes(tool.id);
+              return (
+                <button
+                  key={tool.id}
+                  onClick={() => toggleTool(tool.id)}
+                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                    selected ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
+                  }`}
+                >
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-text">{tool.label}</p>
+                    <p className="text-[10px] text-text-muted">{tool.desc}</p>
+                  </div>
+                  {selected && <Check size={16} className="text-primary shrink-0" />}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-xs text-text-muted">
+            Selected: {tools.length} tools ({tools.join(", ") || "none"})
+          </p>
         </div>
       )}
 

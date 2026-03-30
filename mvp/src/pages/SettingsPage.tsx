@@ -6,14 +6,24 @@ import { Badge } from "../components/ui/Badge";
 import { TabNav } from "../components/ui/TabNav";
 import { useToast } from "../components/ui/Toast";
 import { useAuth } from "../lib/auth";
+import { api } from "../lib/api";
 import { PRODUCT } from "../lib/product";
+import { Loader2 } from "lucide-react";
 
 type Tab = "account" | "organization" | "billing";
+
+interface BillingInfo {
+  credits_remaining_usd?: number;
+  total_spent_usd?: number;
+  total_sessions?: number;
+  plan?: string;
+}
 
 export default function SettingsPage() {
   const { user } = useAuth();
   const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("account");
+  const [saving, setSaving] = useState(false);
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -22,10 +32,66 @@ export default function SettingsPage() {
   const [industry, setIndustry] = useState("");
   const [timezone, setTimezone] = useState("");
 
+  const [billing, setBilling] = useState<BillingInfo | null>(null);
+  const [billingLoading, setBillingLoading] = useState(false);
+
   useEffect(() => {
     if (user?.name) setName(user.name);
     if (user?.email) setEmail(user.email);
   }, [user?.name, user?.email]);
+
+  // Pre-populate org settings from backend
+  useEffect(() => {
+    if (tab === "organization" && !orgName) {
+      api.get<any>("/org/settings").then((data) => {
+        if (data.business_name) setOrgName(data.business_name);
+        if (data.industry) setIndustry(data.industry);
+        if (data.timezone) setTimezone(data.timezone);
+      }).catch(() => {});
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    if (tab === "billing" && !billing) {
+      setBillingLoading(true);
+      Promise.all([
+        api.get<any>("/credits/balance").catch(() => ({})),
+        api.get<any>("/billing/usage").catch(() => ({})),
+      ]).then(([credits, usage]) => {
+        setBilling({
+          credits_remaining_usd: credits.balance_usd ?? credits.credits_remaining_usd ?? 0,
+          total_spent_usd: usage.total_cost_usd ?? usage.total_spent_usd ?? 0,
+          total_sessions: usage.total_sessions ?? 0,
+          plan: credits.plan || "free",
+        });
+      }).finally(() => setBillingLoading(false));
+    }
+  }, [tab]);
+
+  const saveAccount = async () => {
+    setSaving(true);
+    try {
+      // POST /org/settings accepts arbitrary fields — use it for profile updates too
+      await api.post("/org/settings", { owner_display_name: name, contact_email: email });
+      toast("Account settings saved");
+    } catch (err: any) {
+      toast(err.message || "Failed to save account settings");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveOrg = async () => {
+    setSaving(true);
+    try {
+      await api.post("/org/settings", { business_name: orgName, industry, timezone });
+      toast("Organization settings saved");
+    } catch (err: any) {
+      toast(err.message || "Failed to save organization settings");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "account", label: "Account" },
@@ -52,11 +118,15 @@ export default function SettingsPage() {
           <Card className="p-5">
             <p className="text-sm font-medium text-text mb-1">Password</p>
             <p className="text-xs text-text-secondary mb-3">Change your account password</p>
-            <Button size="sm" variant="secondary" onClick={() => toast("Password reset email sent")}>
+            <Button size="sm" variant="secondary" onClick={() => {
+              api.post("/auth/reset-password", { email }).then(() => toast("Password reset email sent")).catch(() => toast("Failed to send reset email"));
+            }}>
               Change password
             </Button>
           </Card>
-          <Button onClick={() => toast("Account settings saved")}>Save changes</Button>
+          <Button onClick={saveAccount} disabled={saving}>
+            {saving ? <><Loader2 size={14} className="animate-spin" /> Saving...</> : "Save changes"}
+          </Button>
         </div>
       )}
 
@@ -70,35 +140,49 @@ export default function SettingsPage() {
               <Input label="Timezone" value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="e.g. America/New_York" />
             </div>
           </Card>
-          <Card className="p-5">
-            <p className="text-sm font-medium text-text mb-1">API keys</p>
-            <p className="text-xs text-text-secondary mb-3">Keys for integrations and automation appear here when enabled for your workspace.</p>
-            <div className="flex items-center gap-2">
-              <code className="bg-surface-alt rounded px-3 py-1.5 text-xs text-text-muted flex-1">Not configured</code>
-              <Button size="sm" variant="secondary" disabled onClick={() => toast("No key to copy")}>
-                Copy
-              </Button>
-            </div>
-          </Card>
-          <Button onClick={() => toast("Organization settings saved")}>Save changes</Button>
+          <Button onClick={saveOrg} disabled={saving}>
+            {saving ? <><Loader2 size={14} className="animate-spin" /> Saving...</> : "Save changes"}
+          </Button>
         </div>
       )}
 
       {tab === "billing" && (
         <div className="space-y-4 mt-6">
-          <Card className="p-5">
-            <div className="flex items-center justify-between mb-2">
-              <div>
-                <p className="text-sm font-medium text-text">Plan</p>
-                <p className="text-xs text-text-secondary mt-0.5">Usage and invoices will show here when billing is connected to your workspace.</p>
-              </div>
-              <Badge variant="info">MVP</Badge>
+          {billingLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 size={20} className="animate-spin text-text-muted" />
             </div>
-          </Card>
-          <Card className="p-5">
-            <p className="text-sm font-medium text-text mb-1">Payment method</p>
-            <p className="text-xs text-text-secondary">No payment method on file.</p>
-          </Card>
+          ) : billing ? (
+            <>
+              <div className="grid grid-cols-3 gap-4">
+                <Card className="p-5 text-center">
+                  <p className="text-2xl font-bold text-text">${(billing.credits_remaining_usd || 0).toFixed(2)}</p>
+                  <p className="text-xs text-text-secondary mt-1">Credits remaining</p>
+                </Card>
+                <Card className="p-5 text-center">
+                  <p className="text-2xl font-bold text-text">${(billing.total_spent_usd || 0).toFixed(2)}</p>
+                  <p className="text-xs text-text-secondary mt-1">Total spent</p>
+                </Card>
+                <Card className="p-5 text-center">
+                  <p className="text-2xl font-bold text-text">{billing.total_sessions || 0}</p>
+                  <p className="text-xs text-text-secondary mt-1">Total sessions</p>
+                </Card>
+              </div>
+              <Card className="p-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-text">Plan</p>
+                    <p className="text-xs text-text-secondary mt-0.5">Your current billing plan</p>
+                  </div>
+                  <Badge variant="info" className="capitalize">{billing.plan}</Badge>
+                </div>
+              </Card>
+            </>
+          ) : (
+            <Card className="p-5">
+              <p className="text-sm text-text-secondary">Unable to load billing information.</p>
+            </Card>
+          )}
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { MessageSquare, Clock, TrendingUp, AlertTriangle, RefreshCw } from "lucide-react";
+import { MessageSquare, Clock, TrendingUp, AlertTriangle, RefreshCw, Loader2, Wrench } from "lucide-react";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
 import { StatCard } from "../components/ui/StatCard";
@@ -48,6 +48,33 @@ export default function AgentActivityPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<{ input: string; output: string; turns: any[] } | null>(null);
+  const [transcriptLoading, setTranscriptLoading] = useState(false);
+
+  const loadTranscript = useCallback(async (sessionId: string) => {
+    setTranscriptLoading(true);
+    setTranscript(null);
+    try {
+      const [detail, turns] = await Promise.all([
+        api.get<any>(`/sessions/${sessionId}`).catch(() => ({})),
+        api.get<any[]>(`/sessions/${sessionId}/turns`).catch(() => []),
+      ]);
+      setTranscript({
+        input: detail.input_text || "",
+        output: detail.output_text || "",
+        turns: Array.isArray(turns) ? turns : [],
+      });
+    } catch {
+      setTranscript({ input: "", output: "", turns: [] });
+    } finally {
+      setTranscriptLoading(false);
+    }
+  }, []);
+
+  const selectSession = useCallback((sessionId: string) => {
+    setSelectedSession(sessionId);
+    loadTranscript(sessionId);
+  }, [loadTranscript]);
 
   const fetchData = async () => {
     if (!id) return;
@@ -179,7 +206,7 @@ export default function AgentActivityPage() {
         {sessions.map((session) => (
           <button
             key={session.session_id}
-            onClick={() => setSelectedSession(session.session_id)}
+            onClick={() => selectSession(session.session_id)}
             className="w-full flex items-center gap-4 p-4 hover:bg-surface-alt transition-colors text-left"
           >
             <div className="w-8 h-8 rounded-full bg-neutral-light flex items-center justify-center text-text-secondary text-xs font-medium">
@@ -207,21 +234,84 @@ export default function AgentActivityPage() {
       </div>
 
       {/* Session detail modal */}
-      <Modal open={!!selectedSession} onClose={() => setSelectedSession(null)} title="Session Detail" wide>
+      <Modal open={!!selectedSession} onClose={() => { setSelectedSession(null); setTranscript(null); }} title="Session Detail" wide>
         {selectedSession && (() => {
           const session = sessions.find((s) => s.session_id === selectedSession);
           if (!session) return null;
           return (
-            <div className="space-y-3">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="font-medium text-text font-mono text-sm">{session.session_id}</span>
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-xs text-text-muted">{session.session_id}</span>
                 <Badge variant={statusVariant[session.status] || "info"}>{session.status}</Badge>
               </div>
-              <div className="bg-surface-alt rounded-lg p-4 text-sm text-text-secondary space-y-2">
-                <p><span className="font-medium text-text">Status:</span> {session.status}</p>
-                <p><span className="font-medium text-text">Cost:</span> ${(session.cost_total_usd || 0).toFixed(4)}</p>
-                <p><span className="font-medium text-text">Duration:</span> {(session.wall_clock_seconds || 0).toFixed(1)}s</p>
-                <p><span className="font-medium text-text">Created:</span> {new Date(session.created_at).toLocaleString()}</p>
+              <div className="grid grid-cols-4 gap-3 text-xs">
+                <div className="bg-surface-alt rounded-lg p-3 text-center">
+                  <p className="font-bold text-text">${(session.cost_total_usd || 0).toFixed(4)}</p>
+                  <p className="text-text-muted">Cost</p>
+                </div>
+                <div className="bg-surface-alt rounded-lg p-3 text-center">
+                  <p className="font-bold text-text">{(session.wall_clock_seconds || 0).toFixed(1)}s</p>
+                  <p className="text-text-muted">Duration</p>
+                </div>
+                <div className="bg-surface-alt rounded-lg p-3 text-center">
+                  <p className="font-bold text-text">{transcript?.turns.length || 0}</p>
+                  <p className="text-text-muted">Turns</p>
+                </div>
+                <div className="bg-surface-alt rounded-lg p-3 text-center">
+                  <p className="font-bold text-text">{new Date(session.created_at).toLocaleDateString()}</p>
+                  <p className="text-text-muted">Date</p>
+                </div>
+              </div>
+
+              {/* Conversation Transcript */}
+              <div className="border-t border-border pt-3">
+                <p className="text-xs font-medium text-text mb-2">Conversation</p>
+                {transcriptLoading ? (
+                  <div className="flex items-center justify-center py-6">
+                    <Loader2 size={16} className="animate-spin text-text-muted" />
+                  </div>
+                ) : transcript ? (
+                  <div className="space-y-2 max-h-80 overflow-y-auto">
+                    {/* User input */}
+                    {transcript.input && (
+                      <div className="flex justify-end">
+                        <div className="max-w-[75%] px-3 py-2 rounded-xl rounded-br-sm bg-primary text-white text-xs">
+                          {transcript.input}
+                        </div>
+                      </div>
+                    )}
+                    {/* Per-turn details */}
+                    {transcript.turns.map((turn: any, i: number) => (
+                      <div key={i} className="space-y-1">
+                        {turn.tool_calls?.length > 0 && (
+                          <div className="flex items-center gap-1 text-[10px] text-text-muted px-1">
+                            <Wrench size={10} />
+                            {turn.tool_calls.map((tc: any) => tc.function?.name || tc.name || "tool").join(", ")}
+                            <span className="ml-auto">{turn.latency_ms}ms | ${(turn.cost_total_usd || 0).toFixed(4)}</span>
+                          </div>
+                        )}
+                        {turn.content && (
+                          <div className="flex justify-start">
+                            <div className="max-w-[75%] px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 text-text text-xs whitespace-pre-wrap">
+                              {turn.content}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                    {/* Final output (if no turns or turns didn't capture it) */}
+                    {transcript.output && transcript.turns.length === 0 && (
+                      <div className="flex justify-start">
+                        <div className="max-w-[75%] px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 text-text text-xs whitespace-pre-wrap">
+                          {transcript.output}
+                        </div>
+                      </div>
+                    )}
+                    {!transcript.input && !transcript.output && transcript.turns.length === 0 && (
+                      <p className="text-xs text-text-muted text-center py-4">No transcript available for this session.</p>
+                    )}
+                  </div>
+                ) : null}
               </div>
             </div>
           );

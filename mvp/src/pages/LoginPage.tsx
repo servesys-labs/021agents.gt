@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../lib/auth";
+import { api } from "../lib/api";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
 import { PRODUCT } from "../lib/product";
@@ -23,7 +24,13 @@ export default function LoginPage() {
     try {
       if (mode === "login") {
         await login(email, password);
-        navigate("/");
+        // Check if user needs onboarding
+        try {
+          const me = await api.get<{ onboarding_complete?: boolean }>("/auth/me");
+          navigate(me.onboarding_complete === false ? "/onboarding" : "/");
+        } catch {
+          navigate("/");
+        }
       } else {
         await signup(email, password, name);
         navigate("/onboarding");

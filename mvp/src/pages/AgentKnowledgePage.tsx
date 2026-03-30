@@ -410,11 +410,11 @@ export default function AgentKnowledgePage() {
             ]}
           />
           <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
-            Changes apply to newly uploaded documents. Existing documents keep their current chunking. Re-upload to apply new settings.
+            These settings apply to your next upload. Existing documents keep their current chunking.
           </div>
           <div className="flex justify-end pt-2">
-            <Button onClick={() => { setShowSettings(false); toast("Settings saved"); }}>
-              Save Settings
+            <Button onClick={() => { setShowSettings(false); toast("Settings applied to next upload"); }}>
+              Apply
             </Button>
           </div>
         </div>

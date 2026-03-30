@@ -95,7 +95,7 @@ export default function AgentIntegrationsPage() {
   const handleConnect = async (app: string) => {
     setConnectingApp(app);
     try {
-      const result = await api.post<{ redirect_url?: string }>(`/connectors/auth/${app}`);
+      const result = await api.get<{ redirect_url?: string }>(`/connectors/auth/${app}`);
       if (result.redirect_url) {
         window.open(result.redirect_url, "_blank", "width=600,height=700");
       }

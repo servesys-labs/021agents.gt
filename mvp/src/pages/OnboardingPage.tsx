@@ -108,7 +108,24 @@ export default function OnboardingPage() {
         connected_tools: connectedTools,
         onboarding_complete: true,
       });
-      navigate("/");
+
+      // Create a default starter agent based on the user's business context
+      const agentName = `${(bizName || "my").toLowerCase().replace(/[^a-z0-9]/g, "-").slice(0, 20)}-assistant`;
+      const description = `AI assistant for ${bizName || "your business"}${industry ? ` in ${industry}` : ""}. Helps with: ${selectedUseCases.join(", ") || "general tasks"}.`;
+      try {
+        const result = await api.post<{ name?: string; agent_id?: string }>("/agents/create-from-description", {
+          name: agentName,
+          description,
+          plan: "standard",
+          tools: "auto",
+          auto_graph: true,
+        });
+        // Navigate directly to the new agent's playground
+        navigate(`/agents/${result.name || agentName}/play`);
+      } catch {
+        // If agent creation fails, still navigate to dashboard
+        navigate("/");
+      }
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to save settings");
     } finally {

@@ -154,7 +154,10 @@ export default function AgentInsightsPage() {
   if (!agentName) return <AgentNotFound />;
 
   const totalQuestions = topics.reduce((s, t) => s + t.count, 0);
-  const avgSentiment = sentimentData.length > 0 ? Math.round(sentimentData.reduce((s, d) => s + d.value, 0) / sentimentData.length) : 0;
+  // Calculate positive sentiment percentage (not avg of raw counts)
+  const sentimentTotal = sentimentData.reduce((s, d) => s + d.value, 0);
+  const positiveSentiment = sentimentData.find(d => d.label.toLowerCase() === "positive")?.value || 0;
+  const avgSentiment = sentimentTotal > 0 ? Math.round((positiveSentiment / sentimentTotal) * 100) : 0;
   const isEmpty = topics.length === 0 && gaps.length === 0 && sentimentData.length === 0 && resolutionData.length === 0;
 
   const posSent = sentimentCounts

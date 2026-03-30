@@ -406,9 +406,9 @@ Content-Type: application/json
                 {channel.status === "inactive" && (
                   <Button size="sm" variant="secondary" onClick={() => setConfiguring(channel.id)}>Enable</Button>
                 )}
-                {channel.status === "active" && (
-                  <button onClick={() => toggleChannel(channel.id)} className="relative w-10 h-6 rounded-full bg-success transition-colors">
-                    <span className="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow translate-x-4 transition-transform" />
+                {(channel.status === "active" || channel.status === "inactive") && (
+                  <button onClick={() => toggleChannel(channel.id)} className={`relative w-10 h-6 rounded-full transition-colors ${channel.status === "active" ? "bg-success" : "bg-gray-300"}`}>
+                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${channel.status === "active" ? "translate-x-4" : "translate-x-0"}`} />
                   </button>
                 )}
               </div>

@@ -1,6 +1,9 @@
 import { useState, useEffect } from "react";
-import { useParams, useNavigate } from "react-router-dom";
-import { Plus, Play, CheckCircle, XCircle, Clock, Trash2, RefreshCw, Sparkles, Lightbulb, ArrowRight, Loader2 } from "lucide-react";
+import { useParams } from "react-router-dom";
+import {
+  Plus, Play, CheckCircle, XCircle, Clock, Trash2, RefreshCw, Loader2,
+  Zap, RotateCcw, Shield, TrendingUp, ChevronDown, ChevronRight,
+} from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
@@ -14,616 +17,510 @@ import { api } from "../lib/api";
 import { agentPathSegment } from "../lib/agent-path";
 import { ensureArray } from "../lib/ensure-array";
 
-interface AgentDetail {
-  name: string;
-  description: string;
-  config_json: Record<string, any>;
-  is_active: boolean;
-  version: number;
-}
+// ── Types ────────────────────────────────────────────────────
 
-interface EvalTask {
-  id: string;
-  name?: string;
-  input: string;
-  expected: string;
-  grader: string;
-  rubric?: string;
-  tags?: string[];
-  auto_generated?: boolean;
-}
+interface AgentDetail { name: string; description: string; config_json: Record<string, any>; is_active: boolean; version: number }
+interface EvalTask { id: string; name?: string; input: string; expected: string; grader: string; rubric?: string; auto_generated?: boolean }
+interface EvalTrial { input: string; expected: string; actual: string; passed: boolean; latency_ms?: number; reasoning?: string }
+interface EvalRun { id: string; agent_name: string; created_at: string; status: string; pass_count: number; fail_count: number; total_count: number; trials?: EvalTrial[] }
+interface TrainingJob { id: string; status: string; algorithm: string; current_iteration: number; max_iterations: number; best_score: number; auto_activate: boolean; created_at: string; iterations?: TrainingIteration[] }
+interface TrainingIteration { iteration: number; eval_pass_rate: number; reward_score: number; changes: Record<string, unknown>; created_at: string }
+interface CircuitBreakerStatus { armed: boolean; minutes_since_activation: number; error_rate_pct: number; rollback_threshold_pct: number; would_rollback: boolean; sessions_since_activation: number }
+interface EvolutionSuggestion { area: string; severity: string; suggestion: string; auto_applicable: boolean }
 
-interface EvalTrial {
-  input: string;
-  expected: string;
-  actual: string;
-  passed: boolean;
-  latency_ms?: number;
-  reasoning?: string;
-}
+type Tab = "test" | "improve" | "history";
 
-interface EvalRun {
-  id: string;
-  agent_name: string;
-  created_at: string;
-  status: string;
-  pass_count: number;
-  fail_count: number;
-  total_count: number;
-  trials?: EvalTrial[];
-}
-
-interface EvolutionSuggestion {
-  area: string;
-  severity: string;
-  suggestion: string;
-  auto_applicable: boolean;
-}
+// ── Component ────────────────────────────────────────────────
 
 export default function AgentTestsPage() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const { toast } = useToast();
 
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("test");
 
-  const [runs, setRuns] = useState<EvalRun[]>([]);
+  // Test scenarios + eval runs
   const [scenarios, setScenarios] = useState<EvalTask[]>([]);
+  const [runs, setRuns] = useState<EvalRun[]>([]);
+  const [running, setRunning] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [newInput, setNewInput] = useState("");
   const [newExpected, setNewExpected] = useState("");
-  const [running, setRunning] = useState(false);
   const [selectedRun, setSelectedRun] = useState<EvalRun | null>(null);
   const [selectedTrial, setSelectedTrial] = useState<EvalTrial | null>(null);
-  const [tab, setTab] = useState<"scenarios" | "results" | "improve">("scenarios");
 
-  // Evolution
+  // Improve (training + suggestions combined)
+  const [improving, setImproving] = useState(false);
+  const [trainingJob, setTrainingJob] = useState<TrainingJob | null>(null);
   const [suggestions, setSuggestions] = useState<EvolutionSuggestion[]>([]);
-  const [evolving, setEvolving] = useState(false);
-  const [applyingSuggestion, setApplyingSuggestion] = useState(false);
+
+  // History
+  const [circuitBreaker, setCircuitBreaker] = useState<CircuitBreakerStatus | null>(null);
+  const [rollingBack, setRollingBack] = useState(false);
+
+  // ── Data Loading ─────────────────────────────────────────
 
   const fetchData = async () => {
     if (!id) return;
     setLoading(true);
     setError(null);
-    const q = encodeURIComponent(id.trim());
     try {
       const [agentData, evalRuns] = await Promise.all([
         api.get<AgentDetail>(`/agents/${agentPathSegment(id)}`),
-        api.get<EvalRun[]>(`/eval/runs?agent_name=${q}`),
+        api.get<EvalRun[]>(`/eval/runs?agent_name=${encodeURIComponent(id)}`),
       ]);
       setAgent(agentData);
       setRuns(ensureArray<EvalRun>(evalRuns));
 
-      // Auto-load test cases from agent's eval_config (generated by meta-agent)
+      // Load test cases from agent's eval_config
       const evalConfig = agentData.config_json?.eval_config;
       if (evalConfig?.test_cases && Array.isArray(evalConfig.test_cases)) {
-        const autoTests: EvalTask[] = evalConfig.test_cases.map((tc: any, i: number) => ({
-          id: `auto-${i}`,
-          name: tc.name || `test_${i + 1}`,
-          input: String(tc.input || ""),
-          expected: String(tc.expected || ""),
-          grader: String(tc.grader || "llm_rubric"),
-          rubric: tc.rubric ? String(tc.rubric) : undefined,
-          tags: Array.isArray(tc.tags) ? tc.tags : [],
-          auto_generated: true,
-        })).filter((t: EvalTask) => t.input.trim());
-
-        // Merge with any manually added scenarios (avoid duplicates by input)
+        const autoTests: EvalTask[] = evalConfig.test_cases
+          .map((tc: any, i: number) => ({
+            id: `auto-${i}`, name: tc.name || `test_${i + 1}`,
+            input: String(tc.input || ""), expected: String(tc.expected || ""),
+            grader: String(tc.grader || "llm_rubric"), rubric: tc.rubric ? String(tc.rubric) : undefined,
+            auto_generated: true,
+          }))
+          .filter((t: EvalTask) => t.input.trim());
         setScenarios((prev) => {
-          const existingInputs = new Set(prev.map((s) => s.input));
-          const newTests = autoTests.filter((t) => !existingInputs.has(t.input));
-          return [...newTests, ...prev];
+          const existing = new Set(prev.map((s) => s.input));
+          return [...autoTests.filter((t) => !existing.has(t.input)), ...prev];
         });
       }
-    } catch (err: any) {
-      if (err.status === 404) {
-        setAgent(null);
-      } else {
-        setError(err.message || "Failed to load data");
+
+      // Auto-run first eval if agent has auto-generated tests but no eval runs
+      const hasAutoTests = evalConfig?.test_cases?.length > 0 && evalConfig?.auto_generated;
+      const noRuns = ensureArray<EvalRun>(evalRuns).length === 0;
+      if (hasAutoTests && noRuns) {
+        // Fire-and-forget first eval — will show results on next load
+        const autoTasks = evalConfig.test_cases
+          .filter((tc: any) => String(tc.input || "").trim())
+          .map((tc: any) => ({ input: String(tc.input), expected: String(tc.expected || ""), grader: String(tc.grader || "llm_rubric") }));
+        if (autoTasks.length > 0) {
+          setRunning(true);
+          api.post<EvalRun>("/eval/run", { agent_name: id, tasks: autoTasks, trials: 1 })
+            .then((result) => {
+              setRuns([result]);
+              toast(`First eval: ${result.pass_count}/${result.total_count} passed`);
+              // Auto-switch to improve tab if score is below 80%
+              const rate = result.pass_count / Math.max(result.total_count, 1);
+              if (rate < 0.8) setTab("improve");
+            })
+            .catch(() => {})
+            .finally(() => setRunning(false));
+        }
       }
+
+      // Load training status
+      try {
+        const job = await api.get<TrainingJob>(`/training/jobs?agent_name=${encodeURIComponent(id)}&include_iterations=true`);
+        setTrainingJob(job);
+      } catch { setTrainingJob(null); }
+
+      try {
+        const cb = await api.get<CircuitBreakerStatus>(`/training/resources/${encodeURIComponent(id)}/circuit-breaker`);
+        setCircuitBreaker(cb);
+      } catch { setCircuitBreaker(null); }
+
+    } catch (err: any) {
+      if (err.status === 404) setAgent(null);
+      else setError(err.message || "Failed to load data");
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => {
-    if (id) fetchData();
-  }, [id]);
+  useEffect(() => { if (id) fetchData(); }, [id]);
 
-  const latestRun = runs.length > 0 ? runs[0] : null;
+  const latestRun = runs[0] || null;
+  const passRate = latestRun ? Math.round((latestRun.pass_count / Math.max(latestRun.total_count, 1)) * 100) : null;
+
+  // ── Actions ──────────────────────────────────────────────
 
   const addScenario = () => {
     if (!newInput.trim()) return;
-    const task: EvalTask = {
-      id: `task-${Date.now()}`,
-      input: newInput.trim(),
-      expected: newExpected.trim(),
-      grader: "llm_rubric",
-    };
-    setScenarios((prev) => [...prev, task]);
-    setNewInput("");
-    setNewExpected("");
-    setShowAdd(false);
-    toast("Test scenario added");
-  };
-
-  const deleteScenario = (taskId: string) => {
-    setScenarios((prev) => prev.filter((s) => s.id !== taskId));
-    toast("Scenario removed");
+    setScenarios((prev) => [...prev, { id: `task-${Date.now()}`, input: newInput.trim(), expected: newExpected.trim(), grader: "llm_rubric" }]);
+    setNewInput(""); setNewExpected(""); setShowAdd(false);
+    toast("Test added");
   };
 
   const runTests = async () => {
-    if (scenarios.length === 0) return;
+    if (scenarios.length === 0 || !id) return;
     setRunning(true);
-    setTab("results");
     try {
-      const result = await api.post<EvalRun>("/eval/runs", {
+      const result = await api.post<EvalRun>("/eval/run", {
         agent_name: id,
-        tasks: scenarios.map((s) => ({
-          input: s.input,
-          expected: s.expected,
-          grader: s.grader,
-        })),
+        tasks: scenarios.map((s) => ({ input: s.input, expected: s.expected, grader: s.grader })),
         trials: 1,
       });
-      // Refresh runs list
-      const updatedRuns = await api.get<unknown>(`/eval/runs?agent_name=${encodeURIComponent(id!.trim())}`);
+      const updatedRuns = await api.get<unknown>(`/eval/runs?agent_name=${encodeURIComponent(id)}`);
       setRuns(ensureArray<EvalRun>(updatedRuns));
-      const passCount = result.pass_count ?? 0;
-      const totalCount = result.total_count ?? scenarios.length;
-      toast(`Eval complete: ${passCount}/${totalCount} passed`);
+      toast(`${result.pass_count}/${result.total_count} passed`);
     } catch (err: any) {
-      toast(err.message || "Eval run failed");
-    } finally {
-      setRunning(false);
-    }
+      toast(err.message || "Eval failed");
+    } finally { setRunning(false); }
   };
 
   const viewRunDetail = async (run: EvalRun) => {
-    try {
-      const detail = await api.get<EvalRun>(`/eval/runs/${run.id}`);
-      setSelectedRun(detail);
-    } catch {
-      setSelectedRun(run);
-    }
+    try { setSelectedRun(await api.get<EvalRun>(`/eval/runs/${run.id}`)); }
+    catch { setSelectedRun(run); }
   };
 
-  const fetchEvolutionSuggestions = async () => {
-    if (!id) return;
-    setEvolving(true);
+  /** One-click improve: runs eval → gets suggestions → starts APO training → auto-activates */
+  const improveAgent = async () => {
+    if (!id || scenarios.length === 0) return;
+    setImproving(true);
+    setTab("improve");
     try {
-      const res = await api.post<{ suggestions: EvolutionSuggestion[]; auto_applied?: number }>(`/agents/${agentPathSegment(id)}/evolve`, {
-        auto_apply: false,
+      // Step 1: Run eval to get baseline
+      toast("Step 1/3: Running eval baseline...");
+      await api.post<EvalRun>("/eval/run", {
+        agent_name: id,
+        tasks: scenarios.map((s) => ({ input: s.input, expected: s.expected, grader: s.grader })),
+        trials: 1,
       });
-      setSuggestions(res.suggestions || []);
-      if (res.suggestions?.length === 0) {
-        toast("No improvements found — agent is performing well.");
+
+      // Step 2: Get suggestions
+      toast("Step 2/3: Analyzing results...");
+      const sugRes = await api.post<{ suggestions: EvolutionSuggestion[] }>(`/agents/${agentPathSegment(id)}/evolve`, { auto_apply: false });
+      setSuggestions(sugRes.suggestions || []);
+
+      // Step 3: Start training with auto-activate
+      toast("Step 3/3: Starting AI training...");
+      const job = await api.post<TrainingJob>("/training/jobs", {
+        agent_name: id,
+        algorithm: "apo",
+        max_iterations: 10,
+        auto_activate: true,
+      });
+      if (job.id) {
+        await api.post(`/training/jobs/${job.id}/auto-step`, {}).catch(() => {});
       }
+      setTrainingJob({ ...job, status: "running" });
+      toast("Training started. Your agent will improve automatically.");
     } catch (err: any) {
-      toast(err.message || "Failed to get suggestions");
-    } finally {
-      setEvolving(false);
-    }
+      toast(err.message || "Improvement failed");
+    } finally { setImproving(false); }
   };
 
-  const applyAutoSuggestions = async () => {
-    if (!id) return;
-    setApplyingSuggestion(true);
+  const rollback = async () => {
+    if (!id || !window.confirm("Revert to the config before the last improvement?")) return;
+    setRollingBack(true);
     try {
-      const res = await api.post<{ suggestions: EvolutionSuggestion[]; auto_applied: number }>(`/agents/${agentPathSegment(id)}/evolve`, {
-        auto_apply: true,
-      });
-      toast(`Applied ${res.auto_applied} improvement${res.auto_applied !== 1 ? "s" : ""} to agent.`);
-      setSuggestions(res.suggestions || []);
-      // Refresh agent data
+      await api.post(`/training/resources/${encodeURIComponent(id)}/rollback`, {});
+      toast("Rolled back.");
       fetchData();
-    } catch (err: any) {
-      toast(err.message || "Failed to apply suggestions");
-    } finally {
-      setApplyingSuggestion(false);
-    }
+    } catch (err: any) { toast(err.message || "Rollback failed"); }
+    finally { setRollingBack(false); }
   };
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-      </div>
-    );
-  }
+  // ── Render ───────────────────────────────────────────────
 
-  if (error) {
-    return (
-      <div className="text-center py-20">
-        <p className="text-text-secondary text-sm mb-4">{error}</p>
-        <Button variant="secondary" onClick={fetchData}>
-          <RefreshCw size={14} /> Retry
-        </Button>
-      </div>
-    );
-  }
-
+  if (loading) return <div className="flex items-center justify-center py-20"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>;
+  if (error) return <div className="text-center py-20"><p className="text-text-secondary text-sm mb-4">{error}</p><Button variant="secondary" onClick={fetchData}><RefreshCw size={14} /> Retry</Button></div>;
   if (!agent) return <AgentNotFound />;
-
-  const autoTestCount = scenarios.filter((s) => s.auto_generated).length;
-  const manualTestCount = scenarios.length - autoTestCount;
-  const evalConfig = agent.config_json?.eval_config;
-  const rubric = evalConfig?.rubric;
 
   return (
     <div>
-      <AgentNav agentName={agent.name}>
-        <Button size="sm" variant="secondary" onClick={() => setShowAdd(true)}>
-          <Plus size={14} /> Add Test
-        </Button>
-        <Button size="sm" onClick={runTests} disabled={running || scenarios.length === 0}>
-          <Play size={14} /> {running ? "Running..." : "Run All"}
-        </Button>
-      </AgentNav>
+      <AgentNav agentName={agent.name} />
 
-      {/* Auto-generated banner */}
-      {autoTestCount > 0 && (
-        <Card className="mb-4 p-3 bg-violet-50/60 border-violet-200">
-          <div className="flex items-center gap-2">
-            <Sparkles size={16} className="text-violet-600 shrink-0" />
-            <p className="text-sm text-violet-800">
-              <strong>{autoTestCount} test{autoTestCount !== 1 ? "s" : ""}</strong> auto-generated by AI.
-              {manualTestCount > 0 && ` + ${manualTestCount} manually added.`}
-              {" "}Run them to verify your agent works correctly.
-            </p>
+      {/* Score summary banner */}
+      {passRate !== null && (
+        <div className={`flex items-center gap-4 p-4 rounded-xl mb-6 ${passRate >= 80 ? "bg-emerald-50 border border-emerald-200" : passRate >= 50 ? "bg-amber-50 border border-amber-200" : "bg-red-50 border border-red-200"}`}>
+          <div className={`text-3xl font-bold ${passRate >= 80 ? "text-emerald-600" : passRate >= 50 ? "text-amber-600" : "text-red-600"}`}>{passRate}%</div>
+          <div className="flex-1">
+            <p className="text-sm font-medium text-text">Last eval: {latestRun!.pass_count}/{latestRun!.total_count} passed</p>
+            <p className="text-xs text-text-muted">{new Date(latestRun!.created_at).toLocaleString()}</p>
           </div>
-          {rubric && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {rubric.criteria?.map((c: any) => (
-                <span key={c.name} className="text-xs px-2 py-0.5 rounded-full bg-violet-100 text-violet-700">
-                  {c.name} ({Math.round((c.weight || 0) * 100)}%)
-                </span>
-              ))}
-              <span className="text-xs px-2 py-0.5 rounded-full bg-violet-200 text-violet-800">
-                Pass threshold: {Math.round((rubric.pass_threshold || 0.7) * 100)}%
-              </span>
-            </div>
-          )}
-        </Card>
-      )}
-
-      {/* Summary card from latest run */}
-      {latestRun && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          <Card>
-            <p className="text-xs text-text-secondary">Total Tests</p>
-            <p className="text-xl font-semibold text-text">{latestRun.total_count ?? 0}</p>
-          </Card>
-          <Card>
-            <div className="flex items-center gap-1.5">
-              <CheckCircle size={14} className="text-success" />
-              <p className="text-xs text-text-secondary">Passed</p>
-            </div>
-            <p className="text-xl font-semibold text-success">{latestRun.pass_count ?? 0}</p>
-          </Card>
-          <Card>
-            <div className="flex items-center gap-1.5">
-              <XCircle size={14} className="text-danger" />
-              <p className="text-xs text-text-secondary">Failed</p>
-            </div>
-            <p className="text-xl font-semibold text-danger">{latestRun.fail_count ?? 0}</p>
-          </Card>
-          <Card>
-            <p className="text-xs text-text-secondary">Pass Rate</p>
-            <p className="text-xl font-semibold text-text">
-              {(latestRun.total_count ?? 0) > 0
-                ? Math.round(((latestRun.pass_count ?? 0) / (latestRun.total_count ?? 1)) * 100)
-                : 0}%
-            </p>
-          </Card>
+          <Button size="sm" onClick={() => improveAgent()} disabled={improving || scenarios.length === 0}>
+            {improving ? <><Loader2 size={14} className="animate-spin" /> Improving...</> : <><Zap size={14} /> Improve Agent</>}
+          </Button>
         </div>
       )}
 
-      {/* Tabs */}
+      {/* 3 tabs */}
       <div className="flex gap-1 border-b border-border mb-6">
-        <button
-          onClick={() => setTab("scenarios")}
-          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-            tab === "scenarios" ? "border-primary text-primary" : "border-transparent text-text-secondary"
-          }`}
-        >
-          Test Scenarios ({scenarios.length})
-        </button>
-        <button
-          onClick={() => setTab("results")}
-          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
-            tab === "results" ? "border-primary text-primary" : "border-transparent text-text-secondary"
-          }`}
-        >
-          Eval Runs ({runs.length})
-        </button>
-        <button
-          onClick={() => { setTab("improve"); if (suggestions.length === 0 && runs.length > 0) fetchEvolutionSuggestions(); }}
-          className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors flex items-center gap-1.5 ${
-            tab === "improve" ? "border-primary text-primary" : "border-transparent text-text-secondary"
-          }`}
-        >
-          <Lightbulb size={14} />
-          Improve
-          {suggestions.length > 0 && (
-            <span className="px-1.5 py-0.5 text-xs rounded-full bg-amber-100 text-amber-800">{suggestions.length}</span>
-          )}
-        </button>
+        {([
+          { key: "test" as Tab, label: "Test", count: scenarios.length },
+          { key: "improve" as Tab, label: "Improve" },
+          { key: "history" as Tab, label: "History", count: runs.length },
+        ]).map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${tab === t.key ? "border-primary text-primary" : "border-transparent text-text-secondary"}`}
+          >
+            {t.label}
+            {t.count !== undefined && <span className="ml-1.5 text-xs text-text-muted">({t.count})</span>}
+            {t.key === "improve" && trainingJob?.status === "running" && (
+              <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded-full bg-green-100 text-green-800 animate-pulse">live</span>
+            )}
+          </button>
+        ))}
       </div>
 
-      {/* Scenarios tab */}
-      {tab === "scenarios" && (
-        <div className="space-y-3">
-          {scenarios.length === 0 && (
-            <div className="text-center py-12">
-              <Sparkles size={32} className="mx-auto text-text-muted mb-3" />
-              <p className="text-text-muted text-sm mb-2">No test scenarios yet.</p>
-              <p className="text-text-muted text-xs mb-4">Tests are auto-generated when you create an agent with AI. You can also add your own.</p>
-              <Button variant="secondary" onClick={() => setShowAdd(true)}>
-                <Plus size={14} /> Add first test
-              </Button>
-            </div>
-          )}
-          {scenarios.map((s) => (
-            <Card key={s.id}>
-              <div className="flex items-start justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    {s.name && <span className="text-xs font-mono font-medium text-text-secondary">{s.name}</span>}
-                    {s.auto_generated && (
-                      <Badge variant="info">AI-generated</Badge>
-                    )}
-                    {s.tags?.map((tag) => (
-                      <span key={tag} className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-text-muted">{tag}</span>
-                    ))}
-                  </div>
-                  <div className="space-y-1.5">
-                    <div>
-                      <span className="text-xs font-medium text-text-secondary">Input: </span>
-                      <span className="text-xs text-text">{s.input}</span>
-                    </div>
-                    {s.expected && (
-                      <div>
-                        <span className="text-xs font-medium text-text-secondary">Expected: </span>
-                        <span className="text-xs text-text">{s.expected}</span>
-                      </div>
-                    )}
-                    {s.rubric && (
-                      <div>
-                        <span className="text-xs font-medium text-text-secondary">Rubric: </span>
-                        <span className="text-xs text-text-muted italic">{s.rubric}</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <button onClick={() => deleteScenario(s.id)} className="p-1.5 rounded-lg hover:bg-surface-alt text-text-muted">
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {/* Results tab */}
-      {tab === "results" && (
-        <div className="space-y-3">
-          {running && (
-            <div className="flex items-center justify-center gap-3 py-12">
-              <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
-              <span className="text-sm text-text-secondary">Running evaluations...</span>
-            </div>
-          )}
-          {!running && runs.length === 0 && (
-            <div className="text-center py-12">
-              <p className="text-text-muted text-sm">No evals yet — create test scenarios and run them.</p>
-            </div>
-          )}
-          {!running && runs.map((run) => (
-            <Card key={run.id} hover onClick={() => viewRunDetail(run)}>
-              <div className="flex items-center gap-3">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-text font-mono">{String(run.id).slice(0, 8)}...</p>
-                    <Badge variant={run.status === "completed" ? "success" : run.status === "failed" ? "danger" : "info"}>
-                      {run.status}
-                    </Badge>
-                  </div>
-                  <p className="text-xs text-text-muted mt-0.5">
-                    {run.pass_count ?? 0} passed, {run.fail_count ?? 0} failed of {run.total_count ?? 0} &middot;{" "}
-                    {run.created_at ? new Date(run.created_at).toLocaleString() : ""}
-                  </p>
-                </div>
-                <div className="text-right shrink-0">
-                  <p className="text-lg font-semibold text-text">
-                    {(run.total_count ?? 0) > 0
-                      ? Math.round(((run.pass_count ?? 0) / (run.total_count ?? 1)) * 100)
-                      : 0}%
-                  </p>
-                </div>
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
-
-      {/* Improve tab */}
-      {tab === "improve" && (
+      {/* ═══════════════ TAB: TEST ═══════════════ */}
+      {tab === "test" && (
         <div className="space-y-4">
-          {runs.length === 0 ? (
-            <div className="text-center py-12">
-              <Lightbulb size={32} className="mx-auto text-text-muted mb-3" />
-              <p className="text-text-muted text-sm mb-2">Run your tests first.</p>
-              <p className="text-text-muted text-xs mb-4">
-                After running evals, AI will analyze failures and suggest specific improvements to your agent.
-              </p>
-              <Button variant="secondary" onClick={() => setTab("scenarios")}>
-                <ArrowRight size={14} /> Go to tests
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-text-secondary">Test scenarios define what your agent should handle. Run them to measure quality.</p>
+            <div className="flex gap-2">
+              <Button size="sm" variant="secondary" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Test</Button>
+              <Button size="sm" onClick={runTests} disabled={running || scenarios.length === 0}>
+                {running ? <><Loader2 size={14} className="animate-spin" /> Running...</> : <><Play size={14} /> Run All</>}
               </Button>
             </div>
+          </div>
+
+          {scenarios.length === 0 ? (
+            <Card className="p-8 text-center">
+              <p className="text-sm text-text-secondary mb-3">No test scenarios yet.</p>
+              <p className="text-xs text-text-muted mb-4">Add tests to measure and improve your agent's quality.</p>
+              <Button size="sm" onClick={() => setShowAdd(true)}><Plus size={14} /> Add First Test</Button>
+            </Card>
           ) : (
-            <>
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-text-secondary">
-                  AI analyzes eval failures and suggests targeted improvements.
-                </p>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="secondary" onClick={fetchEvolutionSuggestions} disabled={evolving}>
-                    {evolving ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                    Analyze
-                  </Button>
-                  {suggestions.some((s) => s.auto_applicable) && (
-                    <Button size="sm" onClick={applyAutoSuggestions} disabled={applyingSuggestion}>
-                      {applyingSuggestion ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
-                      Auto-fix
-                    </Button>
-                  )}
-                </div>
-              </div>
-
-              {evolving && (
-                <div className="flex items-center justify-center gap-3 py-8">
-                  <Loader2 size={20} className="animate-spin text-primary" />
-                  <span className="text-sm text-text-secondary">Analyzing eval results...</span>
-                </div>
-              )}
-
-              {!evolving && suggestions.length === 0 && (
-                <Card className="p-4 bg-green-50/60 border-green-200 text-center">
-                  <CheckCircle size={24} className="mx-auto text-green-600 mb-2" />
-                  <p className="text-sm text-green-800">No improvements needed. Agent is performing well.</p>
-                </Card>
-              )}
-
-              {suggestions.map((sug, i) => (
-                <Card key={i} className={`border-l-4 ${
-                  sug.severity === "high" ? "border-l-red-400" :
-                  sug.severity === "medium" ? "border-l-amber-400" : "border-l-blue-400"
-                }`}>
-                  <div className="flex items-start gap-3">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-2 mb-1">
-                        <Badge variant={sug.severity === "high" ? "danger" : sug.severity === "medium" ? "warning" : "info"}>
-                          {sug.severity}
-                        </Badge>
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-text-muted">{sug.area}</span>
-                        {sug.auto_applicable && (
-                          <Badge variant="success">auto-fixable</Badge>
-                        )}
-                      </div>
-                      <p className="text-sm text-text">{sug.suggestion}</p>
+            <div className="space-y-2">
+              {scenarios.map((s) => (
+                <Card key={s.id} className="p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-text font-medium truncate">{s.input}</p>
+                      {s.expected && <p className="text-xs text-text-muted mt-0.5 truncate">Expected: {s.expected}</p>}
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {s.auto_generated && <Badge variant="default" className="text-[10px]">auto</Badge>}
+                      <button onClick={() => setScenarios((prev) => prev.filter((x) => x.id !== s.id))} className="p-1 text-text-muted hover:text-red-500"><Trash2 size={12} /></button>
                     </div>
                   </div>
                 </Card>
               ))}
-            </>
+            </div>
           )}
         </div>
       )}
 
-      {/* Add scenario modal */}
-      <Modal open={showAdd} onClose={() => setShowAdd(false)} title="Add Test Scenario">
+      {/* ═══════════════ TAB: IMPROVE ═══════════════ */}
+      {tab === "improve" && (
+        <div className="space-y-6">
+          {/* Training status */}
+          {trainingJob ? (
+            <Card className="p-5">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Zap size={16} className={trainingJob.status === "running" ? "text-primary animate-pulse" : "text-text-muted"} />
+                  <h3 className="text-sm font-semibold text-text">
+                    {trainingJob.status === "running" ? "Improving your agent..." : trainingJob.status === "completed" ? "Improvement complete" : `Training ${trainingJob.status}`}
+                  </h3>
+                  <Badge variant={trainingJob.status === "running" ? "info" : trainingJob.status === "completed" ? "success" : "default"}>
+                    {trainingJob.status}
+                  </Badge>
+                </div>
+                <Button size="sm" variant="secondary" onClick={fetchData}><RefreshCw size={12} /></Button>
+              </div>
+
+              {/* Progress bar */}
+              <div className="mb-4">
+                <div className="flex justify-between text-xs text-text-muted mb-1">
+                  <span>Iteration {trainingJob.current_iteration}/{trainingJob.max_iterations}</span>
+                  <span>Best: {(trainingJob.best_score * 100).toFixed(1)}%</span>
+                </div>
+                <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-500 ${trainingJob.status === "running" ? "bg-primary animate-pulse" : "bg-green-500"}`}
+                    style={{ width: `${Math.round((trainingJob.current_iteration / Math.max(trainingJob.max_iterations, 1)) * 100)}%` }}
+                  />
+                </div>
+              </div>
+
+              {/* Iteration scores */}
+              {trainingJob.iterations && trainingJob.iterations.length > 0 && (
+                <div className="space-y-1.5">
+                  {trainingJob.iterations.map((it) => (
+                    <div key={it.iteration} className="flex items-center gap-3 text-xs">
+                      <span className="w-5 text-text-muted text-right">#{it.iteration}</span>
+                      <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${it.reward_score > 0.7 ? "bg-green-500" : it.reward_score > 0.4 ? "bg-amber-500" : "bg-red-400"}`} style={{ width: `${Math.round(it.reward_score * 100)}%` }} />
+                      </div>
+                      <span className="w-10 text-right font-medium text-text">{(it.reward_score * 100).toFixed(0)}%</span>
+                      <span className="text-text-muted">eval {(it.eval_pass_rate * 100).toFixed(0)}%</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Completed message */}
+              {trainingJob.status === "completed" && (
+                <div className="mt-4 p-3 bg-emerald-50 rounded-lg text-sm text-emerald-800">
+                  <CheckCircle size={14} className="inline mr-1.5" />
+                  Training complete. {trainingJob.auto_activate
+                    ? "Best config has been automatically activated."
+                    : "Review the results and activate when ready."}
+                </div>
+              )}
+            </Card>
+          ) : (
+            /* No training — show the one-click improve CTA */
+            <Card className="p-8 text-center">
+              <Zap size={24} className="text-primary mx-auto mb-3" />
+              <h3 className="text-lg font-semibold text-text mb-1">Improve your agent with AI</h3>
+              <p className="text-sm text-text-secondary mb-4 max-w-md mx-auto">
+                One click runs your test suite, analyzes failures, and uses AI to optimize your agent's prompt,
+                reasoning strategy, and tool selection. Changes are auto-applied with a safety net.
+              </p>
+              <Button onClick={improveAgent} disabled={improving || scenarios.length === 0} className="mx-auto">
+                {improving ? <><Loader2 size={14} className="animate-spin" /> Improving...</> : <><Zap size={14} /> Improve Agent</>}
+              </Button>
+              {scenarios.length === 0 && (
+                <p className="text-xs text-amber-600 mt-3">Add test scenarios first in the Test tab.</p>
+              )}
+
+              <div className="flex items-center justify-center gap-6 mt-6 text-xs text-text-muted">
+                <span className="flex items-center gap-1"><Shield size={10} /> Safety gates</span>
+                <span className="flex items-center gap-1"><RotateCcw size={10} /> Auto-rollback</span>
+                <span className="flex items-center gap-1"><TrendingUp size={10} /> 10 iterations</span>
+              </div>
+            </Card>
+          )}
+
+          {/* Suggestions from evolution analyzer */}
+          {suggestions.length > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-text mb-2">Analysis Findings</h4>
+              <div className="space-y-2">
+                {suggestions.map((sug, i) => (
+                  <Card key={i} className="p-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <Badge variant={sug.severity === "high" ? "danger" : sug.severity === "medium" ? "warning" : "default"} className="text-[10px]">{sug.severity}</Badge>
+                      <span className="text-xs font-medium text-text capitalize">{sug.area}</span>
+                      {sug.auto_applicable && <Badge variant="success" className="text-[10px]">auto-fixable</Badge>}
+                    </div>
+                    <p className="text-sm text-text-secondary">{sug.suggestion}</p>
+                  </Card>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══════════════ TAB: HISTORY ═══════════════ */}
+      {tab === "history" && (
         <div className="space-y-4">
-          <Textarea
-            label="Input message"
-            placeholder="The message the user would send..."
-            value={newInput}
-            onChange={(e) => setNewInput(e.target.value)}
-            rows={3}
-          />
-          <Textarea
-            label="Expected behavior"
-            placeholder="What should the agent do? e.g. Apologize, offer replacement, escalate if angry"
-            value={newExpected}
-            onChange={(e) => setNewExpected(e.target.value)}
-            rows={3}
-          />
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={() => setShowAdd(false)}>Cancel</Button>
-            <Button onClick={addScenario} disabled={!newInput.trim()}>Add Test</Button>
-          </div>
+          {/* Circuit breaker */}
+          {circuitBreaker?.armed && (
+            <Card className="p-3 border-amber-200 bg-amber-50">
+              <div className="flex items-center gap-2 text-xs">
+                <Shield size={14} className="text-amber-600" />
+                <span className="font-medium">Circuit breaker armed</span>
+                <span className="text-text-secondary">
+                  {circuitBreaker.minutes_since_activation}min since activation |
+                  {circuitBreaker.error_rate_pct}% errors |
+                  {circuitBreaker.sessions_since_activation} sessions
+                </span>
+                {circuitBreaker.would_rollback && <Badge variant="danger">ROLLBACK TRIGGERED</Badge>}
+                <Button size="sm" variant="danger" onClick={rollback} disabled={rollingBack} className="ml-auto">
+                  {rollingBack ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />} Rollback
+                </Button>
+              </div>
+            </Card>
+          )}
+
+          {/* Past eval runs */}
+          {runs.length === 0 ? (
+            <Card className="p-8 text-center">
+              <p className="text-sm text-text-secondary">No eval history yet. Run tests to start building history.</p>
+            </Card>
+          ) : (
+            <div className="space-y-2">
+              {runs.map((run) => {
+                const rate = Math.round((run.pass_count / Math.max(run.total_count, 1)) * 100);
+                return (
+                  <Card key={run.id} className="p-3 cursor-pointer hover:border-gray-300 transition-colors" onClick={() => viewRunDetail(run)}>
+                    <div className="flex items-center gap-4">
+                      <div className={`text-lg font-bold w-12 text-center ${rate >= 80 ? "text-emerald-600" : rate >= 50 ? "text-amber-600" : "text-red-600"}`}>{rate}%</div>
+                      <div className="flex-1">
+                        <p className="text-sm text-text">{run.pass_count}/{run.total_count} passed</p>
+                        <p className="text-xs text-text-muted">{new Date(run.created_at).toLocaleString()}</p>
+                      </div>
+                      <Badge variant={run.status === "completed" ? "success" : "info"}>{run.status}</Badge>
+                      <ChevronRight size={14} className="text-text-muted" />
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Rollback button (always available) */}
+          <Button variant="secondary" size="sm" onClick={rollback} disabled={rollingBack}>
+            <RotateCcw size={12} /> Revert to Previous Config
+          </Button>
+        </div>
+      )}
+
+      {/* ═══════════════ MODALS ═══════════════ */}
+
+      {/* Add test modal */}
+      <Modal open={showAdd} onClose={() => setShowAdd(false)} title="Add Test Scenario">
+        <div className="space-y-4 p-1">
+          <Textarea label="User input" placeholder="What would a user ask?" value={newInput} onChange={(e) => setNewInput(e.target.value)} rows={3} />
+          <Textarea label="Expected behavior (optional)" placeholder="What should the agent do or say?" value={newExpected} onChange={(e) => setNewExpected(e.target.value)} rows={2} />
+          <Button onClick={addScenario} disabled={!newInput.trim()}>Add Test</Button>
         </div>
       </Modal>
 
       {/* Run detail modal */}
       <Modal open={!!selectedRun} onClose={() => { setSelectedRun(null); setSelectedTrial(null); }} title="Eval Run Detail" wide>
         {selectedRun && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 mb-2">
-              <span className="font-medium text-text font-mono text-sm">{selectedRun.id}</span>
-              <Badge variant={selectedRun.status === "completed" ? "success" : "info"}>{selectedRun.status}</Badge>
+          <div className="space-y-3">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl font-bold text-text">{Math.round((selectedRun.pass_count / Math.max(selectedRun.total_count, 1)) * 100)}%</span>
+              <div>
+                <p className="text-sm text-text">{selectedRun.pass_count} passed, {selectedRun.fail_count} failed</p>
+                <p className="text-xs text-text-muted">{new Date(selectedRun.created_at).toLocaleString()}</p>
+              </div>
             </div>
-            <p className="text-xs text-text-muted">
-              {selectedRun.pass_count ?? 0} passed, {selectedRun.fail_count ?? 0} failed of {selectedRun.total_count ?? 0}
-            </p>
 
-            {selectedRun.trials && selectedRun.trials.length > 0 ? (
-              <div className="space-y-2 mt-4">
-                {selectedRun.trials.map((trial, idx) => (
-                  <Card key={idx} hover onClick={() => setSelectedTrial(trial)}>
-                    <div className="flex items-center gap-3">
-                      {trial.passed ? (
-                        <CheckCircle size={18} className="text-success shrink-0" />
-                      ) : (
-                        <XCircle size={18} className="text-danger shrink-0" />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-text truncate">{trial.input}</p>
-                      </div>
-                      <Badge variant={trial.passed ? "success" : "danger"}>{trial.passed ? "Pass" : "Fail"}</Badge>
-                    </div>
-                  </Card>
+            {selectedRun.trials && (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {selectedRun.trials.map((trial, i) => (
+                  <button key={i} onClick={() => setSelectedTrial(trial)} className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-colors hover:border-gray-300 ${trial.passed ? "border-emerald-200 bg-emerald-50/50" : "border-red-200 bg-red-50/50"}`}>
+                    {trial.passed ? <CheckCircle size={14} className="text-emerald-500 shrink-0" /> : <XCircle size={14} className="text-red-500 shrink-0" />}
+                    <span className="text-sm text-text truncate flex-1">{trial.input}</span>
+                    {trial.latency_ms && <span className="text-xs text-text-muted shrink-0"><Clock size={10} className="inline mr-0.5" />{trial.latency_ms}ms</span>}
+                  </button>
                 ))}
               </div>
-            ) : (
-              <p className="text-xs text-text-muted">No trial details available.</p>
             )}
           </div>
         )}
       </Modal>
 
       {/* Trial detail modal */}
-      <Modal open={!!selectedTrial} onClose={() => setSelectedTrial(null)} title="Trial Detail" wide>
+      <Modal open={!!selectedTrial} onClose={() => setSelectedTrial(null)} title={selectedTrial?.passed ? "Passed" : "Failed"}>
         {selectedTrial && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2">
-              {selectedTrial.passed ? (
-                <CheckCircle size={20} className="text-success" />
-              ) : (
-                <XCircle size={20} className="text-danger" />
-              )}
-              <Badge variant={selectedTrial.passed ? "success" : "danger"}>{selectedTrial.passed ? "Pass" : "Fail"}</Badge>
+          <div className="space-y-3">
+            <div>
+              <p className="text-xs font-medium text-text-secondary mb-1">Input</p>
+              <div className="bg-surface-alt rounded-lg p-3 text-sm text-text">{selectedTrial.input}</div>
             </div>
-            <div className="space-y-3">
-              <div>
-                <p className="text-xs font-medium text-text-secondary mb-1">Input</p>
-                <div className="bg-surface-alt rounded-lg p-3 text-sm text-text">{selectedTrial.input}</div>
-              </div>
-              <div>
-                <p className="text-xs font-medium text-text-secondary mb-1">Expected</p>
-                <div className="bg-surface-alt rounded-lg p-3 text-sm text-text">{selectedTrial.expected}</div>
-              </div>
-              <div>
-                <p className="text-xs font-medium text-text-secondary mb-1">Actual Response</p>
-                <div className={`rounded-lg p-3 text-sm text-text ${selectedTrial.passed ? "bg-emerald-50" : "bg-red-50"}`}>
-                  {selectedTrial.actual}
-                </div>
-              </div>
-              {selectedTrial.reasoning && (
-                <div>
-                  <p className="text-xs font-medium text-text-secondary mb-1">Reasoning</p>
-                  <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-800">{selectedTrial.reasoning}</div>
-                </div>
-              )}
-              {selectedTrial.latency_ms && (
-                <div className="flex items-center gap-1 text-xs text-text-muted">
-                  <Clock size={12} /> Response time: {selectedTrial.latency_ms}ms
-                </div>
-              )}
+            <div>
+              <p className="text-xs font-medium text-text-secondary mb-1">Expected</p>
+              <div className="bg-surface-alt rounded-lg p-3 text-sm text-text">{selectedTrial.expected}</div>
             </div>
+            <div>
+              <p className="text-xs font-medium text-text-secondary mb-1">Actual</p>
+              <div className={`rounded-lg p-3 text-sm ${selectedTrial.passed ? "bg-emerald-50 text-text" : "bg-red-50 text-text"}`}>{selectedTrial.actual}</div>
+            </div>
+            {selectedTrial.reasoning && (
+              <div>
+                <p className="text-xs font-medium text-text-secondary mb-1">Reasoning</p>
+                <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-800">{selectedTrial.reasoning}</div>
+              </div>
+            )}
           </div>
         )}
       </Modal>

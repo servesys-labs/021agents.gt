@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { Send, Bot, Wrench, Loader2 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
 import { api } from "../lib/api";
@@ -154,7 +156,7 @@ export default function AgentManagerPage() {
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
-      <AgentNav agentName={id} />
+      <AgentNav agentName={id?.replace(/-/g, " ") || "Agent"} />
 
       {/* Chat area */}
       <div className="flex-1 flex flex-col min-h-0">
@@ -204,13 +206,13 @@ export default function AgentManagerPage() {
                 className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"} animate-[fadeInUp_200ms_ease-out]`}
               >
                 <div
-                  className={`max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
+                  className={`max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
                     msg.role === "user"
-                      ? "bg-primary text-white rounded-br-md"
-                      : "bg-neutral-light text-text rounded-bl-md"
+                      ? "bg-primary text-white rounded-br-md whitespace-pre-wrap"
+                      : "bg-neutral-light text-text rounded-bl-md prose prose-sm prose-neutral max-w-none [&_pre]:bg-gray-800 [&_pre]:text-gray-100 [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:text-xs [&_pre]:overflow-x-auto [&_code]:bg-gray-200 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_a]:text-primary [&_a]:underline"
                   }`}
                 >
-                  {msg.content}
+                  {msg.role === "user" ? msg.content : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>}
                 </div>
               </div>
             );

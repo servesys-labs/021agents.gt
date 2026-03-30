@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import { Info, RefreshCw } from "lucide-react";
-import { ChatInterface, type Message } from "../components/ChatInterface";
+import { Info, RefreshCw, Trash2 } from "lucide-react";
+import { ChatInterface } from "../components/ChatInterface";
 import { InfoBox } from "../components/ui/InfoBox";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
 import { Button } from "../components/ui/Button";
-import { api, ApiError } from "../lib/api";
+import { api } from "../lib/api";
+import { useAgentStream } from "../lib/use-agent-stream";
 import { agentPathSegment } from "../lib/agent-path";
 
 interface AgentDetail {
@@ -17,16 +18,13 @@ interface AgentDetail {
   version: number;
 }
 
-let msgId = 0;
-
 export default function AgentPlaygroundPage() {
   const { id } = useParams<{ id: string }>();
-
   const [agent, setAgent] = useState<AgentDetail | null>(null);
   const [pageLoading, setPageLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [loading, setLoading] = useState(false);
+
+  const { messages, streaming, sessionMeta, send, stop, clear } = useAgentStream();
 
   const fetchAgent = async () => {
     setPageLoading(true);
@@ -51,70 +49,11 @@ export default function AgentPlaygroundPage() {
   }, [id]);
 
   const handleSend = useCallback(
-    async (text: string) => {
-      if (!id || !agent) return;
-
-      const userMsg: Message = { id: String(++msgId), role: "user", content: text, timestamp: new Date().toISOString() };
-      setMessages((prev) => [...prev, userMsg]);
-
-      const token = localStorage.getItem("agentos_token");
-      if (!token) {
-        const errorMsg: Message = {
-          id: String(++msgId),
-          role: "assistant",
-          content: "You need to be signed in to use the playground. Open Log in and try again.",
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, errorMsg]);
-        return;
-      }
-
-      setLoading(true);
-
-      try {
-        const result = await api.post<Record<string, unknown>>(`/runtime-proxy/agent/run`, {
-          agent_name: agent.name,
-          input: text,
-          task: text,
-        });
-
-        if (result.error != null && result.error !== "") {
-          const errText = typeof result.error === "string" ? result.error : JSON.stringify(result.error);
-          throw new Error(errText);
-        }
-
-        const response =
-          (typeof result.output === "string" && result.output) ||
-          (typeof result.result === "string" && result.result) ||
-          (typeof result.response === "string" && result.response) ||
-          JSON.stringify(result);
-
-        const assistantMsg: Message = {
-          id: String(++msgId),
-          role: "assistant",
-          content: response,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
-      } catch (err: unknown) {
-        const message =
-          err instanceof ApiError
-            ? err.message
-            : err instanceof Error
-              ? err.message
-              : "Failed to get response";
-        const errorMsg: Message = {
-          id: String(++msgId),
-          role: "assistant",
-          content: `Error: ${message}. Please try again.`,
-          timestamp: new Date().toISOString(),
-        };
-        setMessages((prev) => [...prev, errorMsg]);
-      } finally {
-        setLoading(false);
-      }
+    (text: string) => {
+      if (!agent) return;
+      send(agent.name, text);
     },
-    [id, agent],
+    [agent, send],
   );
 
   if (pageLoading) {
@@ -138,21 +77,40 @@ export default function AgentPlaygroundPage() {
 
   if (!agent) return <AgentNotFound />;
 
+  const model = agent.config_json?.model || "default";
+  const plan = agent.config_json?.plan || "standard";
+  const toolCount = (agent.config_json?.tools || []).length;
+
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
       <AgentNav agentName={agent.name} />
 
-      {/* Info bar */}
-      <InfoBox variant="info" icon={<Info size={14} />} className="mt-3">
-        This is a test environment. Messages here are not visible to your customers.
-      </InfoBox>
+      {/* Info bar with agent metadata */}
+      <div className="flex items-center justify-between px-4 mt-3">
+        <InfoBox variant="info" icon={<Info size={14} />} className="flex-1">
+          <span className="font-medium">{agent.name}</span>
+          <span className="mx-2 text-text-muted">|</span>
+          <span className="text-text-secondary">{model.split("/").pop()}</span>
+          <span className="mx-2 text-text-muted">|</span>
+          <span className="capitalize text-text-secondary">{plan}</span>
+          <span className="mx-2 text-text-muted">|</span>
+          <span className="text-text-secondary">{toolCount} tools</span>
+        </InfoBox>
+        {messages.length > 0 && (
+          <Button variant="ghost" size="sm" onClick={clear} className="ml-2" title="Clear conversation">
+            <Trash2 size={14} />
+          </Button>
+        )}
+      </div>
 
       {/* Chat */}
       <div className="flex-1 min-h-0 mt-2">
         <ChatInterface
           messages={messages}
           onSend={handleSend}
-          loading={loading}
+          onStop={stop}
+          streaming={streaming}
+          sessionMeta={sessionMeta}
           placeholder={`Message ${agent.name}...`}
         />
       </div>

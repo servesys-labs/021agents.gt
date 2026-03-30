@@ -237,20 +237,36 @@ export default function AgentBuilderPage() {
         setCreateError(err.message || "Rollout gate blocked creation. Try a different name or override in settings.");
         return;
       }
-      // Fallback to simple creation
+      // Fallback to simple creation — still create a complete agent with graph + tools
       if (err instanceof ApiError && (err.status === 422 || err.status >= 500)) {
-        setCreationPhase("AI designer unavailable, creating from your description...");
+        setCreationPhase("AI designer unavailable, creating with defaults...");
         try {
-          await api.post("/agents", {
-            name,
-            description: description.trim(),
-            system_prompt: buildSystemPrompt(),
-            tools: selectedTools.length > 0 ? selectedTools : undefined,
-            tags: personalFlow ? ["workspace:personal"] : [],
-          });
-          toast("Created assistant from your description.");
-          // Fallback: no agent_id available, use name
-          navigate(`/agents/${agentPathSegment(name)}/play`);
+          // Use the same create-from-description but with simpler params
+          // If that also fails, fall back to bare POST /agents with auto_graph
+          let fallbackResult: any;
+          try {
+            fallbackResult = await api.post("/agents/create-from-description", {
+              name,
+              description: description.trim(),
+              plan: plan,
+              tools: "auto",
+              auto_graph: true,
+              draft_only: false,
+            });
+          } catch {
+            // Final fallback — bare creation with auto_graph and default tools
+            fallbackResult = await api.post("/agents", {
+              name,
+              description: description.trim(),
+              system_prompt: buildSystemPrompt(),
+              plan: plan,
+              tools: selectedTools.length > 0 ? selectedTools : ["web-search", "python-exec", "browse"],
+              auto_graph: true,
+              tags: personalFlow ? ["workspace:personal"] : [],
+            });
+          }
+          toast("Created assistant. Some AI features may be limited — check settings to customize.");
+          navigate(`/agents/${agentPathSegment(fallbackResult?.name || name)}/play`);
           return;
         } catch (fallbackErr) {
           setCreateError(fallbackErr instanceof Error ? fallbackErr.message : "Failed to create assistant");
@@ -293,15 +309,17 @@ export default function AgentBuilderPage() {
         // Fallback to standard
       }
 
-      await api.post("/agents", {
+      // Retry with simpler description — still through meta-agent
+      const retryRes = await api.post<CreateResult>("/agents/create-from-description", {
         name,
         description: description.trim(),
-        system_prompt: buildSystemPrompt(),
-        tools: selectedTools,
-        tags: useCase ? [useCase, ...(personalFlow ? ["workspace:personal"] : [])] : [],
+        tools: selectedTools.length > 0 ? selectedTools.join(",") : "auto",
+        plan,
+        auto_graph: true,
+        draft_only: false,
       });
-      // Fallback: no agent_id available, use name
-      navigate(`/agents/${agentPathSegment(name)}/activity`);
+      toast("Created assistant.");
+      navigate(`/agents/${agentPathSegment(retryRes?.name || name)}/play`);
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : "Failed to create assistant");
     } finally {
@@ -399,14 +417,7 @@ export default function AgentBuilderPage() {
             </div>
           )}
 
-          <div className="flex items-center justify-between pt-2">
-            <button
-              onClick={() => setMode("advanced")}
-              className="text-sm text-text-secondary hover:text-text flex items-center gap-1 transition-colors"
-            >
-              <ChevronDown size={14} />
-              Customize manually
-            </button>
+          <div className="flex items-center justify-end pt-2">
             <Button onClick={handleQuickCreate} disabled={creating || !quickValid}>
               {creating ? (
                 <>
@@ -414,11 +425,14 @@ export default function AgentBuilderPage() {
                 </>
               ) : (
                 <>
-                  <Sparkles size={14} /> Create with AI
+                  <Sparkles size={14} /> Create Agent
                 </>
               )}
             </Button>
           </div>
+          <p className="text-[10px] text-text-muted text-right mt-1">
+            AI generates the system prompt, tools, test cases, and evaluation rubrics from your description.
+          </p>
         </div>
 
         {/* What the AI handles */}

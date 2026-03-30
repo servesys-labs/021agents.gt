@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useParams } from "react-router-dom";
-import { Phone, PhoneCall, PhoneOff, PhoneMissed, Settings, Volume2, Clock, Copy, Check, Plus, Loader2 } from "lucide-react";
+import { Phone, PhoneCall, PhoneOff, PhoneMissed, Settings, Volume2, Clock, Copy, Check, Plus, Loader2, Search, ShoppingCart, ArrowRight } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
@@ -26,13 +26,23 @@ interface VoiceConfigResponse {
   calls?: CallLog[];
 }
 
-interface PhoneNumber {
+interface TwilioNumber {
   id: string;
-  number: string;
-  label: string;
+  phone_number: string;
+  agent_name: string;
   provider: string;
-  status: "active" | "inactive";
-  assigned_at: string;
+  provider_sid: string;
+  status: string;
+  created_at: string;
+}
+
+interface AvailableNumber {
+  phone_number: string;
+  friendly_name: string;
+  locality: string;
+  region: string;
+  postal_code: string;
+  capabilities: Record<string, boolean>;
 }
 
 interface CallLog {
@@ -65,61 +75,60 @@ function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function normalizeVapiList(body: unknown): Record<string, unknown>[] {
-  if (Array.isArray(body)) return body as Record<string, unknown>[];
-  if (body && typeof body === "object") {
-    const data = (body as { data?: unknown }).data;
-    if (Array.isArray(data)) return data as Record<string, unknown>[];
+function formatPhone(raw: string): string {
+  const digits = raw.replace(/[^\d]/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `+1 (${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
   }
-  return [];
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+  return raw;
 }
 
 export default function AgentVoicePage() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
 
+  // Page state
   const [agentName, setAgentName] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [savingSettings, setSavingSettings] = useState(false);
-  const [savingLink, setSavingLink] = useState(false);
-  const [placingCall, setPlacingCall] = useState(false);
 
-  const [vapiConfigured, setVapiConfigured] = useState(false);
-  const [vapiAssistantId, setVapiAssistantId] = useState("");
-  const [vapiPhoneNumberId, setVapiPhoneNumberId] = useState("");
+  // Twilio numbers
+  const [twilioNumbers, setTwilioNumbers] = useState<TwilioNumber[]>([]);
+  const [twilioConfigured, setTwilioConfigured] = useState(false);
 
-  const [numbers, setNumbers] = useState<PhoneNumber[]>([]);
-  const [calls, setCalls] = useState<CallLog[]>([]);
-  const [showSetup, setShowSetup] = useState(false);
+  // Number search state
+  const [searchAreaCode, setSearchAreaCode] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [availableNumbers, setAvailableNumbers] = useState<AvailableNumber[]>([]);
+  const [hasSearched, setHasSearched] = useState(false);
+
+  // Buy confirmation
+  const [buyingNumber, setBuyingNumber] = useState<AvailableNumber | null>(null);
+  const [purchasing, setPurchasing] = useState(false);
+
+  // Test call
+  const [showTestCall, setShowTestCall] = useState(false);
+  const [testCallTo, setTestCallTo] = useState("");
+  const [testCallFrom, setTestCallFrom] = useState("");
+  const [placingTestCall, setPlacingTestCall] = useState(false);
+
+  // Voice settings
   const [showSettings, setShowSettings] = useState(false);
-  const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
-  const [copied, setCopied] = useState(false);
-
+  const [savingSettings, setSavingSettings] = useState(false);
   const [voice, setVoice] = useState("alloy");
   const [greeting, setGreeting] = useState("");
   const [language, setLanguage] = useState("en");
   const [maxDuration, setMaxDuration] = useState("600");
 
-  const [vapiAssistants, setVapiAssistants] = useState<{ id: string; name: string }[]>([]);
-  const [vapiPhones, setVapiPhones] = useState<{ id: string; number: string; label: string }[]>([]);
-  const [loadingVapiLists, setLoadingVapiLists] = useState(false);
-  const [pickAssistant, setPickAssistant] = useState("");
-  const [pickPhone, setPickPhone] = useState("");
+  // Calls
+  const [calls, setCalls] = useState<CallLog[]>([]);
+  const [selectedCall, setSelectedCall] = useState<CallLog | null>(null);
 
-  const [testCallPhone, setTestCallPhone] = useState("");
-
-  async function resolvePhoneDisplay(phoneId: string): Promise<string> {
-    try {
-      const body = await api.get<unknown>("/voice/vapi/phone-numbers");
-      const list = normalizeVapiList(body);
-      const found = list.find((p) => String(p.id ?? "") === phoneId);
-      const n = String(found?.number ?? found?.phoneNumber ?? "");
-      return n || phoneId;
-    } catch {
-      return phoneId;
-    }
-  }
+  // Misc
+  const [copied, setCopied] = useState(false);
 
   const loadVoicePage = useCallback(async () => {
     if (!id) return;
@@ -131,34 +140,31 @@ export default function AgentVoicePage() {
       const name = agent.name ?? id;
       setAgentName(name);
 
+      // Load voice config
       const config = await api.get<VoiceConfigResponse>(
         `/voice/config?agent_name=${encodeURIComponent(name)}`,
       );
-      const configured = Boolean(config.vapi_configured);
-      setVapiConfigured(configured);
-      setVapiAssistantId(String(config.vapi_assistant_id ?? ""));
-      setVapiPhoneNumberId(String(config.vapi_phone_number_id ?? ""));
       if (config.voice) setVoice(config.voice);
       if (config.greeting) setGreeting(config.greeting);
       if (config.language) setLanguage(config.language);
       if (config.max_duration != null) setMaxDuration(String(config.max_duration));
       setCalls(ensureArray<CallLog>(config.calls));
 
-      const pid = String(config.vapi_phone_number_id ?? "");
-      if (pid && configured) {
-        const label = await resolvePhoneDisplay(pid);
-        setNumbers([
-          {
-            id: pid,
-            number: label,
-            label: "Vapi line",
-            provider: "vapi",
-            status: "active",
-            assigned_at: new Date().toISOString(),
-          },
-        ]);
-      } else {
-        setNumbers([]);
+      // Load Twilio integration status + numbers
+      try {
+        const status = await api.get<{ configured: boolean }>("/voice/twilio/integration-status");
+        setTwilioConfigured(status.configured);
+      } catch {
+        setTwilioConfigured(false);
+      }
+
+      try {
+        const numResp = await api.get<{ numbers: TwilioNumber[] }>(
+          `/voice/twilio/numbers?agent_name=${encodeURIComponent(name)}`,
+        );
+        setTwilioNumbers(ensureArray<TwilioNumber>(numResp.numbers));
+      } catch {
+        setTwilioNumbers([]);
       }
     } catch (err: unknown) {
       const e = err as { status?: number; message?: string };
@@ -173,134 +179,85 @@ export default function AgentVoicePage() {
     loadVoicePage();
   }, [loadVoicePage]);
 
-  const loadVapiResources = async () => {
-    if (!vapiConfigured) {
-      toast("VAPI_API_KEY is not set on the control plane. Add it in Cloudflare Worker secrets.");
-      return;
-    }
-    setLoadingVapiLists(true);
+  // ── Search available numbers ──
+  const searchNumbers = async () => {
+    setSearching(true);
+    setHasSearched(true);
     try {
-      const [aBody, pBody] = await Promise.all([
-        api.get<unknown>("/voice/vapi/assistants"),
-        api.get<unknown>("/voice/vapi/phone-numbers"),
-      ]);
-      const rawA = normalizeVapiList(aBody);
-      const rawP = normalizeVapiList(pBody);
-      setVapiAssistants(
-        rawA.map((x) => ({
-          id: String(x.id ?? ""),
-          name: String(x.name ?? x.model ?? x.id ?? "Assistant"),
-        })).filter((x) => x.id),
+      const params = new URLSearchParams({ country: "US", limit: "20" });
+      if (searchAreaCode.trim()) params.set("area_code", searchAreaCode.trim());
+      const resp = await api.get<{ numbers: AvailableNumber[] }>(
+        `/voice/twilio/available-numbers?${params}`,
       );
-      setVapiPhones(
-        rawP.map((x) => ({
-          id: String(x.id ?? ""),
-          number: String(x.number ?? x.phoneNumber ?? x.e164 ?? ""),
-          label: String(x.name ?? x.friendlyName ?? x.number ?? x.id ?? ""),
-        })).filter((x) => x.id),
-      );
-      setPickAssistant((prev) => prev || vapiAssistantId || "");
-      setPickPhone((prev) => prev || vapiPhoneNumberId || "");
-    } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "Could not load Vapi assistants or phone numbers");
-    } finally {
-      setLoadingVapiLists(false);
-    }
-  };
-
-  const openSetup = () => {
-    setShowSetup(true);
-    setPickAssistant(vapiAssistantId);
-    setPickPhone(vapiPhoneNumberId);
-    void loadVapiResources();
-  };
-
-  const saveVoiceLink = async () => {
-    if (!id || !agentName) return;
-    if (!pickAssistant || !pickPhone) {
-      toast("Choose a Vapi assistant and a phone number");
-      return;
-    }
-    setSavingLink(true);
-    try {
-      const res = await api.put<{ ok: boolean; vapi_configured?: boolean; vapi_config_error?: string }>("/voice/config", {
-        agent_name: agentName,
-        voice,
-        greeting,
-        language,
-        max_duration: parseInt(maxDuration, 10) || 600,
-        vapi_assistant_id: pickAssistant,
-        vapi_phone_number_id: pickPhone,
-      });
-      setVapiAssistantId(pickAssistant);
-      setVapiPhoneNumberId(pickPhone);
-      setShowSetup(false);
-      if (res?.vapi_configured) {
-        toast("Voice linked — your agent's brain is now connected to voice calls.");
-      } else if (res?.vapi_config_error) {
-        toast(`Voice linked, but Vapi auto-config failed: ${res.vapi_config_error}`);
-      } else {
-        toast("Voice linked — inbound calls to this Vapi number will use this agent.");
+      setAvailableNumbers(ensureArray<AvailableNumber>(resp.numbers));
+      if (resp.numbers.length === 0) {
+        toast("No numbers found for that area code. Try another.");
       }
-      await loadVoicePage();
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "Failed to save");
+      toast(err instanceof Error ? err.message : "Search failed");
+      setAvailableNumbers([]);
     } finally {
-      setSavingLink(false);
+      setSearching(false);
     }
   };
 
-  const clearVoiceLink = async () => {
-    if (!agentName) return;
-    if (!window.confirm("Remove the linked Vapi phone number from this agent?")) return;
-    setSavingLink(true);
+  // ── Buy a number ──
+  const confirmBuy = async () => {
+    if (!buyingNumber || !agentName) return;
+    setPurchasing(true);
     try {
-      await api.put("/voice/config", {
-        agent_name: agentName,
-        vapi_assistant_id: "",
-        vapi_phone_number_id: "",
-      });
-      setVapiAssistantId("");
-      setVapiPhoneNumberId("");
-      setNumbers([]);
-      toast("Voice link removed");
+      await api.post<{ phone_number: string; agent_name: string; provider_sid: string; status: string }>(
+        "/voice/twilio/buy",
+        { phone_number: buyingNumber.phone_number, agent_name: agentName },
+      );
+      toast(`Number ${formatPhone(buyingNumber.phone_number)} purchased and assigned to ${agentName}`);
+      setBuyingNumber(null);
+      setAvailableNumbers([]);
+      setHasSearched(false);
+      setSearchAreaCode("");
       await loadVoicePage();
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "Failed to remove");
+      toast(err instanceof Error ? err.message : "Purchase failed");
     } finally {
-      setSavingLink(false);
+      setPurchasing(false);
     }
   };
 
+  // ── Remove a number ──
+  const removeNumber = async (num: TwilioNumber) => {
+    if (!window.confirm(`Release ${formatPhone(num.phone_number)}? This will remove it from Twilio and your agent.`)) return;
+    try {
+      await api.del(`/voice/twilio/numbers/${num.provider_sid}`);
+      toast("Number released");
+      await loadVoicePage();
+    } catch (err: unknown) {
+      toast(err instanceof Error ? err.message : "Failed to release number");
+    }
+  };
+
+  // ── Test call ──
   const placeTestCall = async () => {
-    if (!vapiAssistantId || !vapiPhoneNumberId) {
-      toast("Link a Vapi assistant and phone number first");
+    if (!testCallFrom || !testCallTo.trim()) {
+      toast("Enter the phone number to call (E.164, e.g. +15551234567)");
       return;
     }
-    const dest = testCallPhone.trim();
-    if (!dest) {
-      toast("Enter the customer phone number (E.164, e.g. +15551234567)");
-      return;
-    }
-    setPlacingCall(true);
+    setPlacingTestCall(true);
     try {
-      await api.post("/voice/vapi/calls", {
-        phone_number_id: vapiPhoneNumberId,
-        customer_phone: dest,
-        assistant_id: vapiAssistantId,
-        agent_name: agentName,
-        first_message: greeting.trim() || undefined,
+      await api.post("/voice/twilio/test-call", {
+        phone_number: testCallFrom,
+        to: testCallTo.trim(),
       });
-      toast("Outbound call started");
-      setTestCallPhone("");
-      await loadVoicePage();
+      toast("Test call initiated — your phone should ring shortly");
+      setShowTestCall(false);
+      setTestCallTo("");
     } catch (err: unknown) {
-      toast(err instanceof Error ? err.message : "Call failed");
+      toast(err instanceof Error ? err.message : "Test call failed");
     } finally {
-      setPlacingCall(false);
+      setPlacingTestCall(false);
     }
   };
 
+  // ── Save voice settings ──
   const saveVoiceSettings = async () => {
     if (!agentName) return;
     setSavingSettings(true);
@@ -311,8 +268,6 @@ export default function AgentVoicePage() {
         greeting,
         language,
         max_duration: parseInt(maxDuration, 10) || 600,
-        vapi_assistant_id: vapiAssistantId,
-        vapi_phone_number_id: vapiPhoneNumberId,
       });
       setShowSettings(false);
       toast("Voice settings saved");
@@ -323,20 +278,13 @@ export default function AgentVoicePage() {
     }
   };
 
-  const toggleNumber = (numId: string) => {
-    setNumbers((prev) =>
-      prev.map((n) =>
-        n.id === numId ? { ...n, status: n.status === "active" ? "inactive" : "active" } : n,
-      ),
-    );
-  };
-
   const copyNumber = (number: string) => {
     navigator.clipboard.writeText(number.replace(/[^+\d]/g, ""));
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // ── Loading / error / not found states ──
   if (loading) {
     return (
       <div className="flex items-center justify-center py-24">
@@ -357,7 +305,8 @@ export default function AgentVoicePage() {
 
   if (!agentName) return <AgentNotFound />;
 
-  const activeNumbers = numbers.filter((n) => n.status === "active");
+  const activeNumbers = twilioNumbers.filter((n) => n.status === "active");
+  const hasNumber = activeNumbers.length > 0;
   const completedCalls = calls.filter((c) => c.status === "completed");
   const totalMinutes = Math.round(calls.reduce((s, c) => s + c.duration_seconds, 0) / 60);
 
@@ -367,21 +316,20 @@ export default function AgentVoicePage() {
         <Button size="sm" variant="ghost" onClick={() => setShowSettings(true)}>
           <Settings size={14} /> Voice Settings
         </Button>
-        <Button size="sm" onClick={openSetup}>
-          <Plus size={14} /> {vapiPhoneNumberId ? "Change Vapi link" : "Link Vapi"}
-        </Button>
       </AgentNav>
 
-      {!vapiConfigured && (
+      {!twilioConfigured && (
         <Card className="mb-6 border-amber-200 bg-amber-50/50">
           <p className="text-sm text-amber-900">
-            <strong>Vapi is not configured on the server.</strong> Add{" "}
-            <code className="text-xs bg-white/80 px-1 rounded">VAPI_API_KEY</code> to your control-plane Worker secrets in Cloudflare,
-            then redeploy. This app never stores your Vapi key in the browser.
+            <strong>Twilio is not configured on the server.</strong> Add{" "}
+            <code className="text-xs bg-white/80 px-1 rounded">TWILIO_ACCOUNT_SID</code> and{" "}
+            <code className="text-xs bg-white/80 px-1 rounded">TWILIO_AUTH_TOKEN</code> to your control-plane Worker secrets in Cloudflare,
+            then redeploy.
           </p>
         </Card>
       )}
 
+      {/* Stats bar */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
         <Card>
           <div className="flex items-center gap-2 mb-1">
@@ -413,70 +361,37 @@ export default function AgentVoicePage() {
         </Card>
       </div>
 
-      {vapiConfigured && vapiAssistantId && vapiPhoneNumberId && (
-        <Card className="mb-8">
-          <p className="text-sm font-medium text-text mb-3">Test outbound call</p>
-          <p className="text-xs text-text-muted mb-3">
-            Uses your linked Vapi phone number as caller ID and the linked assistant. Charges apply per Vapi.
-          </p>
-          <div className="flex flex-col sm:flex-row gap-2 sm:items-end">
-            <div className="flex-1">
-              <Input
-                label="Customer phone (E.164)"
-                placeholder="+15551234567"
-                value={testCallPhone}
-                onChange={(e) => setTestCallPhone(e.target.value)}
-              />
-            </div>
-            <Button onClick={placeTestCall} disabled={placingCall}>
-              {placingCall ? <Loader2 size={14} className="animate-spin" /> : <PhoneCall size={14} />}
-              Call now
-            </Button>
-          </div>
-        </Card>
-      )}
-
-      <h2 className="text-lg font-medium text-text mb-3">Phone numbers</h2>
-      {numbers.length === 0 ? (
-        <Card className="mb-8">
-          <div className="text-center py-8">
-            <Phone size={36} className="mx-auto text-text-muted mb-3" />
-            <p className="text-sm font-medium text-text mb-1">No Vapi number linked</p>
-            <p className="text-xs text-text-muted mb-4">
-              Link a Vapi assistant and phone number purchased in your Vapi dashboard. The API key stays on Cloudflare.
-            </p>
-            <Button size="sm" onClick={openSetup} disabled={!vapiConfigured}>
-              <Plus size={14} /> Link Vapi
-            </Button>
-          </div>
-        </Card>
-      ) : (
+      {/* ── Section 1: Current Phone Number (if assigned) ── */}
+      {hasNumber && (
         <div className="space-y-3 mb-8">
-          {numbers.map((num) => (
+          <h2 className="text-lg font-medium text-text mb-3">Your Phone Number</h2>
+          {activeNumbers.map((num) => (
             <Card key={num.id}>
               <div className="flex items-center gap-4">
-                <div className="w-10 h-10 rounded-lg bg-emerald-50 flex items-center justify-center">
-                  <Phone size={20} className="text-success" />
+                <div className="w-12 h-12 rounded-xl bg-emerald-50 flex items-center justify-center">
+                  <Phone size={24} className="text-success" />
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="text-sm font-semibold text-text">{num.number}</span>
-                    <button type="button" onClick={() => copyNumber(num.number)} className="p-0.5 text-text-muted hover:text-text">
-                      {copied ? <Check size={12} /> : <Copy size={12} />}
+                    <span className="text-lg font-semibold text-text">{formatPhone(num.phone_number)}</span>
+                    <button type="button" onClick={() => copyNumber(num.phone_number)} className="p-1 text-text-muted hover:text-text transition-colors">
+                      {copied ? <Check size={14} /> : <Copy size={14} />}
                     </button>
                   </div>
-                  <p className="text-xs text-text-muted">{num.label} · Vapi · assistant {vapiAssistantId.slice(0, 8)}…</p>
+                  <p className="text-xs text-text-muted">Twilio · Assigned to {num.agent_name} · Since {new Date(num.created_at).toLocaleDateString()}</p>
                 </div>
                 <Badge variant={num.status === "active" ? "success" : "default"}>{num.status}</Badge>
                 <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => toggleNumber(num.id)}
-                    className={`relative w-10 h-6 rounded-full transition-colors ${num.status === "active" ? "bg-success" : "bg-gray-200"}`}
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      setTestCallFrom(num.phone_number);
+                      setShowTestCall(true);
+                    }}
                   >
-                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${num.status === "active" ? "translate-x-4" : ""}`} />
-                  </button>
-                  <Button size="sm" variant="ghost" onClick={clearVoiceLink} disabled={savingLink}>
+                    <PhoneCall size={14} /> Test Call
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => removeNumber(num)}>
                     <PhoneOff size={14} />
                   </Button>
                 </div>
@@ -486,10 +401,88 @@ export default function AgentVoicePage() {
         </div>
       )}
 
+      {/* ── Section 2: Get a Phone Number (if no number assigned) ── */}
+      {!hasNumber && (
+        <div className="mb-8">
+          <h2 className="text-lg font-medium text-text mb-3">Get a Phone Number</h2>
+          <Card>
+            {!hasSearched && availableNumbers.length === 0 && (
+              <div className="text-center py-8">
+                <Phone size={36} className="mx-auto text-text-muted mb-3" />
+                <p className="text-sm font-medium text-text mb-1">Add a phone number to your agent</p>
+                <p className="text-xs text-text-muted mb-6">
+                  Search for available numbers by area code, pick one you like, and it will be instantly assigned to your agent.
+                </p>
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-3 items-end">
+              <div className="flex-1 max-w-xs">
+                <Input
+                  label="Area code (optional)"
+                  placeholder="e.g. 415, 212, 310"
+                  value={searchAreaCode}
+                  onChange={(e) => {
+                    const val = e.target.value.replace(/\D/g, "").slice(0, 3);
+                    setSearchAreaCode(val);
+                  }}
+                  maxLength={3}
+                />
+              </div>
+              <Button onClick={searchNumbers} disabled={searching || !twilioConfigured}>
+                {searching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}
+                Search Available Numbers
+              </Button>
+            </div>
+
+            {/* Search results */}
+            {hasSearched && availableNumbers.length > 0 && (
+              <div className="mt-6">
+                <p className="text-xs text-text-muted mb-3">{availableNumbers.length} numbers available{searchAreaCode ? ` in area code ${searchAreaCode}` : ""}</p>
+                <div className="grid gap-2 max-h-96 overflow-y-auto">
+                  {availableNumbers.map((num) => (
+                    <div
+                      key={num.phone_number}
+                      className="flex items-center justify-between p-3 rounded-lg border border-border hover:border-primary/40 hover:bg-surface-alt transition-colors"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
+                          <Phone size={16} className="text-primary" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium text-text">{formatPhone(num.phone_number)}</p>
+                          <p className="text-xs text-text-muted">
+                            {[num.locality, num.region].filter(Boolean).join(", ") || "United States"}
+                          </p>
+                        </div>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => setBuyingNumber(num)}
+                      >
+                        Select <ArrowRight size={12} />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {hasSearched && availableNumbers.length === 0 && !searching && (
+              <p className="mt-4 text-sm text-text-muted text-center py-4">
+                No numbers found. Try a different area code.
+              </p>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* ── Section 3: Recent Calls ── */}
       <h2 className="text-lg font-medium text-text mb-3">Recent calls</h2>
-      <div className="bg-white rounded-xl border border-border divide-y divide-border">
+      <div className="bg-white rounded-xl border border-border divide-y divide-border mb-8">
         {calls.length === 0 && (
-          <p className="p-6 text-sm text-text-muted text-center">No calls yet (webhook must point to your control plane for history).</p>
+          <p className="p-6 text-sm text-text-muted text-center">No calls yet. {hasNumber ? "Try making a test call!" : "Get a phone number first."}</p>
         )}
         {calls.map((call) => {
           const status = callStatusConfig[call.status];
@@ -528,6 +521,67 @@ export default function AgentVoicePage() {
         })}
       </div>
 
+      {/* ── Buy Confirmation Modal ── */}
+      <Modal open={!!buyingNumber} onClose={() => setBuyingNumber(null)} title="Confirm purchase">
+        {buyingNumber && (
+          <div className="space-y-4">
+            <div className="text-center py-4">
+              <div className="w-16 h-16 rounded-2xl bg-emerald-50 flex items-center justify-center mx-auto mb-4">
+                <ShoppingCart size={28} className="text-success" />
+              </div>
+              <p className="text-lg font-semibold text-text mb-1">
+                {formatPhone(buyingNumber.phone_number)}
+              </p>
+              <p className="text-sm text-text-muted">
+                {[buyingNumber.locality, buyingNumber.region].filter(Boolean).join(", ") || "United States"}
+              </p>
+            </div>
+            <div className="bg-surface-alt rounded-lg p-4">
+              <p className="text-sm text-text">
+                Buy <strong>{formatPhone(buyingNumber.phone_number)}</strong> and assign to <strong>{agentName}</strong>?
+              </p>
+              <p className="text-xs text-text-muted mt-2">
+                This will cost $1.00/month. The number will be active immediately and incoming calls will be routed to your agent.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button variant="ghost" onClick={() => setBuyingNumber(null)} disabled={purchasing}>Cancel</Button>
+              <Button onClick={confirmBuy} disabled={purchasing}>
+                {purchasing ? <Loader2 size={14} className="animate-spin" /> : <ShoppingCart size={14} />}
+                Buy Number
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── Test Call Modal ── */}
+      <Modal open={showTestCall} onClose={() => setShowTestCall(false)} title="Test call">
+        <div className="space-y-4">
+          <p className="text-sm text-text-secondary">
+            We will call your phone from your agent's number. The agent will answer the call as if it were a real inbound call.
+          </p>
+          <div className="bg-surface-alt rounded-lg p-3">
+            <p className="text-xs text-text-muted mb-1">Calling from</p>
+            <p className="text-sm font-medium text-text">{formatPhone(testCallFrom)}</p>
+          </div>
+          <Input
+            label="Your phone number (E.164)"
+            placeholder="+15551234567"
+            value={testCallTo}
+            onChange={(e) => setTestCallTo(e.target.value)}
+          />
+          <div className="flex justify-end gap-2 pt-2">
+            <Button variant="ghost" onClick={() => setShowTestCall(false)}>Cancel</Button>
+            <Button onClick={placeTestCall} disabled={placingTestCall || !testCallTo.trim()}>
+              {placingTestCall ? <Loader2 size={14} className="animate-spin" /> : <PhoneCall size={14} />}
+              Call Now
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ── Call Detail Modal ── */}
       <Modal open={!!selectedCall} onClose={() => setSelectedCall(null)} title="Call details" wide>
         {selectedCall && (() => {
           const status = callStatusConfig[selectedCall.status];
@@ -561,60 +615,11 @@ export default function AgentVoicePage() {
         })()}
       </Modal>
 
-      <Modal open={showSetup} onClose={() => setShowSetup(false)} title="Link Vapi to this agent">
-        <div className="space-y-4">
-          <p className="text-sm text-text-secondary">
-            Choose the Vapi <strong>assistant</strong> and <strong>phone number</strong> from your Vapi account. Requests use the{" "}
-            <code className="text-xs bg-surface-alt px-1 rounded">VAPI_API_KEY</code> stored on the control plane (Cloudflare), not in this browser.
-          </p>
-          <div className="flex justify-end">
-            <Button type="button" size="sm" variant="secondary" onClick={loadVapiResources} disabled={loadingVapiLists || !vapiConfigured}>
-              {loadingVapiLists ? <Loader2 size={14} className="animate-spin" /> : null}
-              Refresh lists
-            </Button>
-          </div>
-          <Select
-            label="Vapi assistant"
-            value={pickAssistant}
-            onChange={(e) => setPickAssistant(e.target.value)}
-            options={[
-              { value: "", label: loadingVapiLists ? "Loading…" : "Select assistant" },
-              ...vapiAssistants.map((a) => ({ value: a.id, label: `${a.name} (${a.id.slice(0, 8)}…)` })),
-            ]}
-          />
-          <Select
-            label="Vapi phone number"
-            value={pickPhone}
-            onChange={(e) => setPickPhone(e.target.value)}
-            options={[
-              { value: "", label: loadingVapiLists ? "Loading…" : "Select number" },
-              ...vapiPhones.map((p) => ({
-                value: p.id,
-                label: p.number ? `${p.number} — ${p.label || p.id.slice(0, 8)}` : p.id,
-              })),
-            ]}
-          />
-          <p className="text-xs text-text-muted">
-            Buy or import numbers in{" "}
-            <a href="https://dashboard.vapi.ai" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-              dashboard.vapi.ai
-            </a>
-            . Point Vapi webhooks to your control plane <code className="text-[10px]">/api/v1/voice/vapi/webhook</code> (with signature secret if configured).
-          </p>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="ghost" onClick={() => setShowSetup(false)}>Cancel</Button>
-            <Button onClick={saveVoiceLink} disabled={savingLink || !vapiConfigured || !pickAssistant || !pickPhone}>
-              {savingLink ? <Loader2 size={14} className="animate-spin" /> : null}
-              Save link
-            </Button>
-          </div>
-        </div>
-      </Modal>
-
+      {/* ── Voice Settings Modal ── */}
       <Modal open={showSettings} onClose={() => setShowSettings(false)} title="Voice settings">
         <div className="space-y-4">
-          <Select label="Voice (UI / future TTS mapping)" value={voice} onChange={(e) => setVoice(e.target.value)} options={VOICES} />
-          <Textarea label="Greeting (used for test outbound calls)" value={greeting} onChange={(e) => setGreeting(e.target.value)} rows={4} />
+          <Select label="Voice model (TTS)" value={voice} onChange={(e) => setVoice(e.target.value)} options={VOICES} />
+          <Textarea label="First message (what the agent says when answering)" value={greeting} onChange={(e) => setGreeting(e.target.value)} rows={4} placeholder="Hello! Thanks for calling. How can I help you today?" />
           <Select
             label="Language"
             value={language}
@@ -630,7 +635,7 @@ export default function AgentVoicePage() {
             ]}
           />
           <Select
-            label="Max call duration (seconds)"
+            label="Max call duration"
             value={maxDuration}
             onChange={(e) => setMaxDuration(e.target.value)}
             options={[

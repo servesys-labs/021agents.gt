@@ -22,10 +22,12 @@ interface ApiAgent {
   agent_id: string;
   name: string;
   description: string;
+  config_json?: Record<string, any>;
   model?: string;
   tools?: string[];
   tags?: string[];
   version: string;
+  is_active?: boolean | number;
 }
 
 export default function DashboardPage() {
@@ -171,14 +173,20 @@ export default function DashboardPage() {
                         <Trash2 size={16} />
                       )}
                     </button>
-                    <Badge variant="success">Live</Badge>
+                    <Badge variant={agent.is_active ? "success" : "default"}>{agent.is_active ? "Live" : "Inactive"}</Badge>
                   </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-muted">
                   <span>v{agent.version}</span>
-                  {agent.tools && agent.tools.length > 0 && (
-                    <span className="truncate max-w-[200px]" title={agent.tools.join(", ")}>
-                      {agent.tools.length} tool{agent.tools.length === 1 ? "" : "s"}
+                  {(agent.config_json?.model || agent.model) && (
+                    <span>{(agent.config_json?.model || agent.model || "").split("/").pop()}</span>
+                  )}
+                  {agent.config_json?.plan && (
+                    <span className="capitalize">{agent.config_json.plan}</span>
+                  )}
+                  {((agent.config_json?.tools || agent.tools || []).length > 0) && (
+                    <span className="truncate max-w-[200px]" title={(agent.config_json?.tools || agent.tools || []).join(", ")}>
+                      {(agent.config_json?.tools || agent.tools || []).length} tool{(agent.config_json?.tools || agent.tools || []).length === 1 ? "" : "s"}
                     </span>
                   )}
                 </div>
