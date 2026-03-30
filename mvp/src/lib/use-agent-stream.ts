@@ -109,19 +109,18 @@ export function useAgentStream() {
   // Conversation history for multi-turn context — persists across sends
   const historyRef = useRef<Array<{ role: "user" | "assistant"; content: string }>>([]);
 
-  // Load stored conversation on first send (or when agent changes)
+  // Load stored conversation when agent is set/changed
   const loadHistory = useCallback((agentName: string) => {
-    if (currentAgentRef.current !== agentName) {
-      currentAgentRef.current = agentName;
-      const stored = loadStoredMessages(agentName);
-      if (stored.length > 0 && messages.length === 0) {
-        setMessages(stored);
-        historyRef.current = stored
-          .filter(m => m.role === "user" || m.role === "assistant")
-          .map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
-      }
+    if (!agentName) return;
+    currentAgentRef.current = agentName;
+    const stored = loadStoredMessages(agentName);
+    if (stored.length > 0) {
+      setMessages(stored);
+      historyRef.current = stored
+        .filter(m => m.role === "user" || m.role === "assistant")
+        .map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
     }
-  }, [messages.length]);
+  }, []);
 
   const send = useCallback(async (agentName: string, input: string) => {
     if (streaming) return;

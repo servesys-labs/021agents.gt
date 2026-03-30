@@ -82,7 +82,7 @@ export default function AgentPlaygroundPage() {
 
   const model = agent.config_json?.model || "default";
   const plan = agent.config_json?.plan || "standard";
-  const toolCount = (agent.config_json?.tools || []).length;
+  const toolCount = (agent as any).tools?.length || (agent.config_json?.tools || []).length;
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
