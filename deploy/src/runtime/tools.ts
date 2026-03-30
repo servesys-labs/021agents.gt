@@ -1638,12 +1638,14 @@ async function dispatch(
 
       const agentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       const now = new Date().toISOString();
+      const reasoningStrategy = args.reasoning_strategy ? String(args.reasoning_strategy) : undefined;
       const configJson = JSON.stringify({
         system_prompt: systemPrompt,
-        ...(model ? { model } : {}),  // omit model to let plan routing decide
+        ...(model ? { model } : {}),
         tools: validTools,
         max_turns: maxTurns,
         plan,
+        ...(reasoningStrategy ? { reasoning_strategy: reasoningStrategy } : {}),
         governance: { budget_limit_usd: budgetLimitUsd },
         version: "0.1.0",
       });
@@ -4124,6 +4126,7 @@ const TOOL_CATALOG: ToolDefinition[] = [
           tools: { type: "array", items: { type: "string" }, description: "Tool names to enable (validated against catalog)" },
           max_turns: { type: "number", description: "Max conversation turns, 1-1000 (default: 50)" },
           budget_limit_usd: { type: "number", description: "Max cost per session in USD (default: 10)" },
+          reasoning_strategy: { type: "string", enum: ["", "chain-of-thought", "plan-then-execute", "step-back", "decompose", "verify-then-respond"], description: "Reasoning strategy (empty = auto-select)" },
         },
         required: ["name"],
       },
