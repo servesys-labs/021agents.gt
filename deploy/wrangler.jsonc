@@ -99,6 +99,23 @@
     }
   ],
 
+  // Workflows — durable agent execution with step-at-a-time checkpointing
+  "workflows": [
+    {
+      "name": "agent-run",
+      "binding": "AGENT_RUN_WORKFLOW",
+      "class_name": "AgentRunWorkflow"
+    }
+  ],
+
+  // KV — workflow progress events (DO polls and pushes to client)
+  "kv_namespaces": [
+    {
+      "binding": "AGENT_PROGRESS_KV",
+      "id": "30da23c287ee4f4c93d1a1f08cdd48a0"
+    }
+  ],
+
   // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
     "DEFAULT_PLAN": "standard",
