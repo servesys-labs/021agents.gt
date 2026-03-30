@@ -697,14 +697,33 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           DO_SQL: this.sql.bind(this), DO_SESSION_ID: this.name,
         };
 
-        const result = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, {
-          agent_name: config.agentName || "agentos",
-          task: userText,
-          org_id: config.orgId || "",
-          project_id: config.projectId || "",
-        }, this.env.TELEMETRY_QUEUE);
-
-        let response = result.output || "I didn't catch that.";
+        let response = "I didn't catch that.";
+        if (this.env.AGENT_RUN_WORKFLOW) {
+          const history = this._loadConversationHistory(12);
+          const inst = await this.env.AGENT_RUN_WORKFLOW.create({
+            params: {
+              agent_name: config.agentName || "agentos", input: userText,
+              org_id: config.orgId || "", project_id: config.projectId || "",
+              channel: "voice", channel_user_id: "", history: history.map((m: any) => ({ role: m.role, content: m.content })),
+              progress_key: `voice:${this.name}:${Date.now()}`,
+            },
+          });
+          // Poll for completion (voice needs faster response — 30s max)
+          for (let i = 0; i < 15; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            const st = await inst.status().catch(() => ({ status: "unknown" as const }));
+            if (st.status === "complete") { response = ((st as any).output?.output || "").trim() || response; break; }
+            if (st.status === "errored") break;
+          }
+          this._appendConversationMessage("user", userText, "voice");
+          this._appendConversationMessage("assistant", response, "voice");
+        } else {
+          const result = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, {
+            agent_name: config.agentName || "agentos", task: userText,
+            org_id: config.orgId || "", project_id: config.projectId || "",
+          }, this.env.TELEMETRY_QUEUE);
+          response = result.output || response;
+        }
         // Strip markdown for voice
         response = response.replace(/#{1,6}\s*/g, "").replace(/\*{1,3}([^*]+)\*{1,3}/g, "$1")
           .replace(/`{1,3}[^`]*`{1,3}/g, "").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
@@ -1545,9 +1564,29 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           project_id: config.projectId || "",
         };
 
-        const result = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, request, this.env.TELEMETRY_QUEUE);
-
-        let response = result.output || "I didn't catch that. Could you say that again?";
+        let response = "I didn't catch that. Could you say that again?";
+        if (this.env.AGENT_RUN_WORKFLOW) {
+          const voiceHistory = this._loadConversationHistory(12);
+          const inst = await this.env.AGENT_RUN_WORKFLOW.create({
+            params: {
+              agent_name: agentName, input: userText,
+              org_id: orgId, project_id: config.projectId || "",
+              channel: "voice", channel_user_id: "", history: voiceHistory.map((m: any) => ({ role: m.role, content: m.content })),
+              progress_key: `voice:${this.name}:${Date.now()}`,
+            },
+          });
+          for (let i = 0; i < 15; i++) {
+            await new Promise(r => setTimeout(r, 2000));
+            const st = await inst.status().catch(() => ({ status: "unknown" as const }));
+            if (st.status === "complete") { response = ((st as any).output?.output || "").trim() || response; break; }
+            if (st.status === "errored") break;
+          }
+          this._appendConversationMessage("user", userText, "voice");
+          this._appendConversationMessage("assistant", response, "voice");
+        } else {
+          const legacyResult = await edgeRun(runtimeEnv, this.env.HYPERDRIVE, request, this.env.TELEMETRY_QUEUE);
+          response = legacyResult.output || response;
+        }
 
         // Strip markdown for voice
         response = response
@@ -3862,7 +3901,35 @@ export default {
             api_key_id: inp.api_key_id,
           })),
         };
-        const result = await edgeBatch(runtimeEnv, env.HYPERDRIVE, batchReq, env.TELEMETRY_QUEUE);
+        // Use Workflow for each batch item (parallel Workflow instances)
+        let result: any;
+        if (env.AGENT_RUN_WORKFLOW) {
+          const instances = await Promise.all(batchReq.inputs.map(async (inp: any, i: number) => {
+            const inst = await env.AGENT_RUN_WORKFLOW.create({
+              params: {
+                agent_name: inp.agent_name || "agentos",
+                input: inp.task || "",
+                org_id: inp.org_id || "", project_id: inp.project_id || "",
+                channel: inp.channel || "batch", channel_user_id: inp.channel_user_id || "",
+                history: [], progress_key: `batch:${Date.now()}:${i}`,
+              },
+            });
+            return inst;
+          }));
+          // Poll all instances (max 5 min)
+          const results = await Promise.all(instances.map(async (inst: any) => {
+            for (let i = 0; i < 150; i++) {
+              await new Promise(r => setTimeout(r, 2000));
+              const st = await inst.status().catch(() => ({ status: "unknown" }));
+              if (st.status === "complete") return { success: true, ...(st as any).output };
+              if (st.status === "errored") return { success: false, error: (st as any).error?.message || "failed", output: "" };
+            }
+            return { success: false, error: "timeout", output: "" };
+          }));
+          result = { results };
+        } else {
+          result = await edgeBatch(runtimeEnv, env.HYPERDRIVE, batchReq, env.TELEMETRY_QUEUE);
+        }
         return Response.json({
           outputs: result.results.map((item) => ({
             ok: item.success,
@@ -3977,6 +4044,14 @@ export default {
       };
 
       try {
+        // Resume via Workflow is not applicable — Workflows auto-resume on crash.
+        // For legacy checkpoints, fall back to edgeResume.
+        if (env.AGENT_RUN_WORKFLOW) {
+          return Response.json({
+            error: "Resume not needed — Cloudflare Workflows automatically resume from the last completed step on crash/deploy. Check the Workflow instance status instead.",
+            suggestion: "Use GET /api/v1/runs/{run_id} to check the status of a running Workflow instance.",
+          }, { status: 410 });
+        }
         const result = await edgeResume(runtimeEnv, env.HYPERDRIVE, checkpointId, env.TELEMETRY_QUEUE);
         return Response.json(result);
       } catch (err: any) {
