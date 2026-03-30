@@ -13,6 +13,7 @@ import { createToken, verifyToken } from "../auth/jwt";
 import { hashPassword, verifyPassword } from "../auth/password";
 import { verifyCfAccessToken, cfAccessEnabled, deriveDisplayName } from "../auth/cf-access";
 import { getDb } from "../db/client";
+import { sendPasswordResetEmail, sendVerificationEmail, sendWelcomeEmail } from "../lib/email";
 import { logSecurityEvent } from "../logic/security-events";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, RateLimitErrorSchema, AuthTokenResponse, UserProfile, TokenVerifyResponse, errorResponses } from "../schemas/openapi";
@@ -438,8 +439,10 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       INSERT INTO email_verification_tokens (token, user_id, expires_at, created_at)
       VALUES (${verifyToken}, ${userId}, ${verifyExpires}, now())
     `;
-    // TODO: Send verification email via email service
-    console.log(`[auth/signup] Email verification token generated for ${email}`);
+    // Send verification + welcome emails (fire-and-forget)
+    sendVerificationEmail(email, verifyToken).catch(() => {});
+    sendWelcomeEmail(email, name || email.split("@")[0]).catch(() => {});
+    console.log(`[auth/signup] Verification email sent to ${email}`);
   } catch (err) {
     console.warn("[auth/signup] Email verification token failed:", err);
   }
@@ -926,9 +929,9 @@ authRoutes.post("/forgot-password", async (c) => {
 
   auditAuthEvent(sql, "auth.forgot_password", userId, "", { email });
 
-  // TODO: Integrate email service to send reset link with token
-  // For now, token is stored and can be verified via POST /reset-password
-  console.log(`[auth] Password reset token generated for ${email}`);
+  // Send reset email (fire-and-forget)
+  sendPasswordResetEmail(email, token).catch(() => {});
+  console.log(`[auth] Password reset email sent to ${email}`);
 
   return c.json(successResponse);
 });
@@ -1038,8 +1041,9 @@ authRoutes.post("/resend-verification", async (c) => {
     VALUES (${token}, ${user.user_id}, ${expiresAt}, now())
   `;
 
-  // TODO: Integrate email service to send verification link
-  console.log(`[auth] Email verification token generated for ${user.email}`);
+  // Send verification email (fire-and-forget)
+  sendVerificationEmail(user.email, token).catch(() => {});
+  console.log(`[auth] Verification email sent to ${user.email}`);
 
   return c.json({ message: "Verification email sent" });
 });

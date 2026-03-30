@@ -942,7 +942,7 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
             body: JSON.stringify({
               agent_name: targetAgentName,
               input: text,
-              org_id: targetOrgId || user.org_id,
+              org_id: user.org_id,
               project_id: user.project_id,
               channel: "a2a",
             }),
