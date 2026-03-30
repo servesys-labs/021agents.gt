@@ -198,6 +198,13 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     let totalCost = 0;
     let totalToolCalls = 0;
     let finalOutput = "";
+    const startTime = Date.now();
+    const turnRecords: Array<{
+      turn: number; model: string; content: string;
+      input_tokens: number; output_tokens: number; cost_usd: number;
+      latency_ms: number; tool_calls: string[]; tool_results: Array<{ name: string; latency_ms: number; error?: string }>;
+      errors: string[];
+    }> = [];
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
 
@@ -269,6 +276,13 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         await this.emit(p.progress_key, {
           type: "turn_end", turn, model: llm.model, cost_usd: llm.cost_usd,
           tokens: llm.input_tokens + llm.output_tokens, done: true,
+        });
+        // Record final answer turn
+        turnRecords.push({
+          turn, model: llm.model, content: llm.content,
+          input_tokens: llm.input_tokens, output_tokens: llm.output_tokens,
+          cost_usd: llm.cost_usd, latency_ms: 0,
+          tool_calls: [], tool_results: [], errors: [],
         });
         break;
       }
@@ -363,6 +377,20 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         tool_calls: llm.tool_calls.length,
       });
 
+      // Accumulate turn record for telemetry
+      turnRecords.push({
+        turn,
+        model: llm.model,
+        content: llm.content,
+        input_tokens: llm.input_tokens,
+        output_tokens: llm.output_tokens,
+        cost_usd: llm.cost_usd + toolResultEntries.reduce((s, t) => s + (t.cost_usd || 0), 0),
+        latency_ms: 0, // TODO: measure per-turn wall clock
+        tool_calls: llm.tool_calls.map(tc => tc.name),
+        tool_results: toolResultEntries.map(tr => ({ name: tr.name, latency_ms: tr.latency_ms || 0, error: tr.error })),
+        errors: toolResultEntries.filter(tr => tr.error).map(tr => `${tr.name}: ${tr.error}`),
+      });
+
       // ── Loop detection (simple: same tool call 3x in a row) ──
       if (turn >= 3) {
         const recentTools = [];
@@ -418,6 +446,62 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // Emit final done event
     await step.do("finalize", async () => {
       await this.emit(p.progress_key, { type: "done", ...result });
+    });
+
+    // ═══════════════════════════════════════════════════════════
+    // STEP 5: WRITE TELEMETRY — persist everything for meta-agent
+    // ═══════════════════════════════════════════════════════════
+    // The old streamRun path wrote turns via writeTurn() but was never
+    // ported to Workflows. This step writes the session + all accumulated
+    // turn data to the telemetry queue for async DB persistence.
+
+    await step.do("write-telemetry", {
+      retries: { limit: 2, delay: "2 seconds", backoff: "linear" },
+      timeout: "30 seconds",
+    }, async () => {
+      const queue = (this.env as any).TELEMETRY_QUEUE;
+      if (!queue) return;
+
+      // Write session record
+      await queue.send({
+        type: "session",
+        payload: {
+          session_id: sessionId,
+          org_id: p.org_id || "",
+          project_id: p.project_id || "",
+          agent_name: p.agent_name,
+          model: config.model || "workflow",
+          status: result.output ? "success" : "error",
+          input_text: p.input.slice(0, 2000),
+          output_text: (result.output || "").slice(0, 2000),
+          step_count: result.turns,
+          action_count: result.tool_calls,
+          wall_clock_seconds: Math.round((Date.now() - startTime) / 1000),
+          cost_total_usd: result.cost_usd,
+          trace_id: traceId,
+          channel: p.channel || "workflow",
+        },
+      });
+
+      // Write individual turn records from accumulated data
+      for (const turnData of turnRecords) {
+        await queue.send({
+          type: "turn",
+          payload: {
+            session_id: sessionId,
+            turn_number: turnData.turn,
+            model_used: turnData.model,
+            input_tokens: turnData.input_tokens,
+            output_tokens: turnData.output_tokens,
+            latency_ms: turnData.latency_ms,
+            llm_content: (turnData.content || "").slice(0, 5000),
+            cost_total_usd: turnData.cost_usd,
+            tool_calls_json: JSON.stringify(turnData.tool_calls || []),
+            tool_results_json: JSON.stringify(turnData.tool_results || []),
+            errors_json: JSON.stringify(turnData.errors || []),
+          },
+        });
+      }
     });
 
     return result;
