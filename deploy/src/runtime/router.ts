@@ -44,6 +44,8 @@ export interface RouteDecision {
   complexity: ComplexityTier;
   category: TaskCategory;
   role: TaskRole;
+  /** Cost of the classification LLM call (included in routing overhead). */
+  routing_cost_usd: number;
 }
 
 export interface PlanRouting {
@@ -296,9 +298,12 @@ export async function selectModel(
   let complexity: ComplexityTier;
   let category: TaskCategory;
   let role: TaskRole;
+  // Classifier cost: ~250 input tokens + ~50 output tokens @ glm-4.7-flash ($0.05/$0.20 per 1M)
+  let routingCostUsd = 0;
 
   if (env) {
     const classification = await classifyTurn(input, env, sessionCache);
+    routingCostUsd = (250 / 1_000_000) * 0.05 + (50 / 1_000_000) * 0.20; // ~$0.0000225
     complexity = classification.complexity as ComplexityTier;
     category = classification.category as TaskCategory;
     role = classification.role as TaskRole;
@@ -323,6 +328,7 @@ export async function selectModel(
       complexity,
       category,
       role,
+      routing_cost_usd: routingCostUsd,
     };
   }
 

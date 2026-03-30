@@ -107,6 +107,19 @@ export async function deductCredits(
 ): Promise<{ success: boolean; balance_after_usd: number }> {
   if (amountUsd <= 0) return { success: true, balance_after_usd: 0 };
 
+  // Idempotency: don't double-deduct for the same session
+  if (sessionId) {
+    const existing = await sql`
+      SELECT 1 FROM credit_transactions
+      WHERE org_id = ${orgId} AND session_id = ${sessionId} AND type = 'burn'
+      LIMIT 1
+    `.catch(() => []);
+    if (existing.length > 0) {
+      const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`.catch(() => [{ balance_usd: 0 }]);
+      return { success: true, balance_after_usd: Number(bal.balance_usd) };
+    }
+  }
+
   const now = new Date().toISOString();
 
   const updated = await sql`

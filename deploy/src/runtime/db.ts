@@ -415,7 +415,30 @@ export async function writeBillingRecord(
       )
     `;
   } catch (err) {
-    console.error("[writeBillingRecord] billing_records insert failed", err);
+    console.error("[writeBillingRecord] billing_records insert failed, retrying...", err);
+    // Retry once after 1s — billing records are critical for revenue
+    try {
+      await new Promise(r => setTimeout(r, 1000));
+      const retrySql = await getDb(hyperdrive);
+      await retrySql`
+        INSERT INTO billing_records (
+          org_id, customer_id, agent_name, billing_user_id, api_key_id, cost_type, description,
+          model, provider, input_tokens, output_tokens,
+          inference_cost_usd, total_cost_usd,
+          session_id, trace_id, pricing_source, pricing_key, unit, quantity, unit_price_usd
+        ) VALUES (
+          ${orgId}, '', ${record.agent_name}, ${billingUserId}, ${apiKeyId}, 'inference',
+          ${sessionId ? `Edge session ${sessionId} (retry)` : "Edge session (retry)"},
+          ${record.model}, '',
+          ${record.input_tokens}, ${record.output_tokens},
+          ${record.cost_usd}, ${record.cost_usd},
+          ${sessionId}, ${traceId},
+          'fallback_env', ${`edge:${record.plan || "standard"}`}, 'session', 1, ${record.cost_usd}
+        )
+      `;
+    } catch (retryErr) {
+      console.error("[writeBillingRecord] RETRY ALSO FAILED — billing record lost", retryErr);
+    }
   }
 
   // Legacy metering table (optional schema) — non-fatal
