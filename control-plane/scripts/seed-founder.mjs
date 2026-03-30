@@ -337,7 +337,7 @@ async function seed() {
     `;
 
     // Marketplace listing
-    const apiBase = "https://api.oneshots.co/api/v1";
+    const apiBase = "https://agentos-control-plane.servesys.workers.dev/api/v1";
     await sql`
       INSERT INTO marketplace_listings (
         agent_name, org_id, display_name, short_description, long_description,
@@ -346,7 +346,7 @@ async function seed() {
       ) VALUES (
         ${agent.name}, ${ORG_ID}, ${agent.display_name}, ${agent.short_description}, ${agent.long_description},
         ${agent.category}, ${agent.tags}, ${agent.price_per_task_usd}, 0.85, true, true,
-        ${`${apiBase}/a2a?org=${ORG_ID}&agent=${agent.name}`}, now(), now()
+        ${`${apiBase.replace('/api/v1', '')}/a2a?org=${ORG_ID}&agent=${agent.name}`}, now(), now()
       )
     `;
 

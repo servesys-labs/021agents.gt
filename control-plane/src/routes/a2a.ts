@@ -384,7 +384,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
 
         // Forward to runtime via service binding
         const resp = await c.env.RUNTIME.fetch(
-          new Request("https://runtime/api/v1/run", {
+          new Request("https://runtime/run", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -559,7 +559,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         async start(controller) {
           try {
             const resp = await c.env.RUNTIME.fetch(
-              new Request("https://runtime/api/v1/runtime-proxy/runnable/stream", {
+              new Request("https://runtime/runtime-proxy/runnable/stream", {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -777,7 +777,7 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
     }
 
     const resp = await c.env.RUNTIME.fetch(
-      new Request("https://runtime/api/v1/run", {
+      new Request("https://runtime/run", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -932,7 +932,7 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
     async start(controller) {
       try {
         const resp = await c.env.RUNTIME.fetch(
-          new Request("https://runtime/api/v1/runtime-proxy/runnable/stream", {
+          new Request("https://runtime/runtime-proxy/runnable/stream", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
