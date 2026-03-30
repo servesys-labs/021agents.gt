@@ -44,7 +44,7 @@ export async function loadAgentConfig(
   // Default core tools when none are configured — must match TOOL_CATALOG names
   const DEFAULT_TOOLS = [
     "web-search", "browse", "http-request", "web-crawl",
-    "python-exec", "bash", "execute-code",
+    "python-exec", "bash",
     "read-file", "write-file", "edit-file",
     "knowledge-search", "store-knowledge",
     "create-agent", "list-agents", "run-agent",
@@ -52,7 +52,6 @@ export async function loadAgentConfig(
     "image-generate", "vision-analyze",
     "memory-save", "memory-recall",
     "text-to-speech", "mcp-call",
-    "discover-api",
   ];
 
   let rows: any[] = [];
