@@ -22,6 +22,9 @@ export interface Env {
   // Queue — async job processing
   JOB_QUEUE: Queue;
 
+  // KV — runtime agent progress events (shared with deploy worker)
+  AGENT_PROGRESS_KV?: KVNamespace;
+
   // Secrets (set via `wrangler secret put`)
   AUTH_JWT_SECRET: string;
   OPENROUTER_API_KEY: string;
@@ -32,6 +35,10 @@ export interface Env {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   SERVICE_TOKEN: string;
+
+  /** Growth controls */
+  OPEN_SIGNUPS?: string;          // "true" = anyone can sign up. Default: invite-only.
+  TRAINING_ENABLED?: string;      // "true" = training system active
 
   /** Voice integrations (optional secrets) */
   VAPI_API_KEY?: string;

@@ -14,7 +14,7 @@ interface AuthContextValue {
   user: User | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  signup: (email: string, password: string, name: string) => Promise<void>;
+  signup: (email: string, password: string, name: string, referralCode?: string) => Promise<void>;
   logout: () => void;
   setUser: (u: User) => void;
 }
@@ -56,11 +56,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser({ user_id: res.user_id, email: res.email, name: "", org_id: res.org_id });
   }, []);
 
-  const signup = useCallback(async (email: string, password: string, name: string) => {
+  const signup = useCallback(async (email: string, password: string, name: string, referralCode?: string) => {
     const res = await api.post<{ token: string; user_id: string; email: string; org_id: string }>("/auth/signup", {
       email,
       password,
       name,
+      ...(referralCode ? { referral_code: referralCode } : {}),
     });
     localStorage.setItem("agentos_token", res.token);
     setUser({ user_id: res.user_id, email: res.email, name, org_id: res.org_id, onboarding_complete: false });

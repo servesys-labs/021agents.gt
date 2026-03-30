@@ -442,7 +442,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     }
   }
 
-  // ── Step 3: Run eval ──────────────────────────────────────────
+  // ── Step 3: Run eval tasks via Workflow (crash-safe, checkpointed) ──
   let evalResult: EvalIterationResult = {
     eval_run_id: null,
     pass_rate: null,
@@ -451,39 +451,112 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     total_cost_usd: null,
   };
 
+  const progressEvents: Record<string, unknown>[] = [];
+
   try {
     const evalTasks = jobRow.eval_tasks_json
       ? JSON.parse(jobRow.eval_tasks_json)
       : [];
 
     if (evalTasks.length > 0) {
-      const payload = {
-        agent_name: job.agent_name,
-        eval_name: `training-${job_id}-iter-${iterationNumber}`,
-        trials: 1,
-        tasks: evalTasks,
-        // Fix #7: Pass prompt override to runtime instead of mutating agent config
-        ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
+      // Run each eval task through the Workflow-backed agent.run() path.
+      // This gives us per-task progress via KV, crash safety, and proper
+      // tool execution — unlike the batch eval endpoint which is simpler
+      // but doesn't go through the full Workflow.
+      const taskResults: Array<{ passed: boolean; output: string; cost_usd: number; latency_ms: number }> = [];
+      let totalCost = 0;
+      let totalLatency = 0;
+
+      for (const task of evalTasks) {
+        const taskInput = String(task.input || "");
+        const taskExpected = String(task.expected || "");
+        const grader = String(task.grader || "contains");
+        const taskStart = Date.now();
+
+        try {
+          // Call RUNTIME /run which routes to DO → Workflow
+          const runResp = await c.env.RUNTIME.fetch("https://runtime/run", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+            },
+            body: JSON.stringify({
+              input: taskInput,
+              agent_name: job.agent_name,
+              org_id: user.org_id,
+              ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
+            }),
+          });
+
+          const runResult = await runResp.json() as Record<string, unknown>;
+          const output = String(runResult.output || "");
+          const costUsd = Number(runResult.cost_usd || 0);
+          const latencyMs = Date.now() - taskStart;
+
+          // Grade the result
+          let passed = false;
+          if (grader === "contains" && taskExpected) {
+            passed = output.toLowerCase().includes(taskExpected.toLowerCase());
+          } else if (grader === "exact" && taskExpected) {
+            passed = output.trim() === taskExpected.trim();
+          } else if (!taskExpected) {
+            // No expected value — pass if we got a non-empty response
+            passed = output.length > 0;
+          }
+
+          taskResults.push({ passed, output, cost_usd: costUsd, latency_ms: latencyMs });
+          totalCost += costUsd;
+          totalLatency += latencyMs;
+        } catch (taskErr) {
+          taskResults.push({ passed: false, output: String(taskErr), cost_usd: 0, latency_ms: Date.now() - taskStart });
+        }
+      }
+
+      // Aggregate results
+      const passCount = taskResults.filter((r) => r.passed).length;
+      const passRate = evalTasks.length > 0 ? passCount / evalTasks.length : 0;
+      const avgLatency = taskResults.length > 0 ? totalLatency / taskResults.length : 0;
+
+      evalResult = {
+        eval_run_id: null, // Individual runs don't create eval_runs rows
+        pass_rate: passRate,
+        avg_score: passRate,
+        avg_latency_ms: avgLatency,
+        total_cost_usd: totalCost,
       };
 
-      const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/eval/run", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
-        },
-        body: JSON.stringify(payload),
-      });
+      // Collect KV progress events if available
+      if (c.env.AGENT_PROGRESS_KV) {
+        try {
+          const listResult = await c.env.AGENT_PROGRESS_KV.list({
+            prefix: `rpc:${job.agent_name}`,
+            limit: 10,
+          });
+          for (const key of listResult.keys) {
+            const raw = await c.env.AGENT_PROGRESS_KV.get(key.name);
+            if (raw) {
+              const events = JSON.parse(raw) as Record<string, unknown>[];
+              progressEvents.push(...events.slice(-5)); // Last 5 per key
+            }
+          }
+        } catch {
+          // KV not available — non-critical
+        }
+      }
 
-      if (resp.ok) {
-        const result = await resp.json() as Record<string, unknown>;
-        evalResult = {
-          eval_run_id: result.run_id as number ?? null,
-          pass_rate: result.pass_rate as number ?? null,
-          avg_score: result.avg_score as number ?? null,
-          avg_latency_ms: result.avg_latency_ms as number ?? null,
-          total_cost_usd: result.total_cost_usd as number ?? null,
-        };
+      // Write eval results to DB for reward aggregator
+      try {
+        const evalRunId = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
+        await sql`
+          INSERT INTO eval_runs (org_id, agent_name, pass_rate, avg_score, avg_latency_ms, total_cost_usd, total_tasks, total_trials, created_at)
+          VALUES (${user.org_id}, ${job.agent_name}, ${passRate}, ${passRate}, ${avgLatency}, ${totalCost}, ${evalTasks.length}, ${1}, now())
+          RETURNING id
+        `.then((rows: any) => {
+          if (rows.length > 0) evalResult.eval_run_id = rows[0].id;
+        });
+      } catch {
+        // eval_runs table may not exist in test env
       }
     }
   } catch (e) {
