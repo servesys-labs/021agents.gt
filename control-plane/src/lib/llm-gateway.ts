@@ -45,10 +45,8 @@ export async function callLLMGateway(
 
   // Determine endpoint and auth
   const useGateway = !!(cloudflareAccountId && aiGatewayId);
-  const isWorkersAI = model.startsWith("@cf/") || model.startsWith("workers-ai/");
-  const providerPath = isWorkersAI ? "compat" : "openrouter";
   const endpoint = useGateway
-    ? `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/${providerPath}/chat/completions`
+    ? `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/openrouter/chat/completions`
     : "https://openrouter.ai/api/v1/chat/completions";
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };

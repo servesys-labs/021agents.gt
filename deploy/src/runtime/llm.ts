@@ -76,11 +76,9 @@ export async function callLLM(
     payload.tools = tools.map(fixToolSchema);
   }
 
-  // Single endpoint for everything
-  // Workers AI (@cf/) uses /compat/ (direct CF), everything else uses /openrouter/
-  const isWorkersAI = model.startsWith("@cf/") || model.startsWith("workers-ai/");
-  const providerPath = isWorkersAI ? "compat" : "openrouter";
-  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
+  // Use /compat/ for direct provider access (no OpenRouter middleman)
+  // Falls back to /openrouter/ for models not configured on direct providers
+  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -168,11 +166,12 @@ export async function callLLM(
 //   dynamic/my-route                → dynamic/my-route (gateway dynamic routing)
 
 function normalizeModelId(model: string): string {
-  // Workers AI models need workers-ai/ prefix for /compat/ endpoint
+  // Workers AI models need workers-ai/ prefix
   if (model.startsWith("@cf/")) {
     return `workers-ai/${model}`;
   }
-  // Everything else is already in the right format for /compat/
+  // All other models: anthropic/, openai/, google/, deepseek/ — pass through
+  // OpenRouter accepts these prefixes natively
   return model;
 }
 
