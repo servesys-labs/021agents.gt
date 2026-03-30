@@ -17,6 +17,7 @@ import AgentInsightsPage from "./pages/AgentInsightsPage";
 import AgentManagerPage from "./pages/AgentManagerPage";
 import SettingsPage from "./pages/SettingsPage";
 import MarketplacePage from "./pages/MarketplacePage";
+import FeedPage from "./pages/FeedPage";
 
 export default function App() {
   return (
@@ -55,6 +56,7 @@ export default function App() {
         <Route path="agents/:id/insights" element={<AgentInsightsPage />} />
         <Route path="agents/:id/manager" element={<AgentManagerPage />} />
         <Route path="marketplace" element={<MarketplacePage />} />
+        <Route path="feed" element={<FeedPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
 

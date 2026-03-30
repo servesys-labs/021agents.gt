@@ -62,6 +62,7 @@ import { sandboxRoutes } from "./routes/sandbox";
 import { plansRoutes } from "./routes/plans";
 import { marketplaceRoutes } from "./routes/marketplace";
 import { referralRoutes } from "./routes/referrals";
+import { feedRoutes } from "./routes/feed";
 import { guardrailRoutes } from "./routes/guardrails";
 import { dlpRoutes } from "./routes/dlp";
 import { pipelineRoutes } from "./routes/pipelines";
@@ -226,6 +227,9 @@ app.route("/api/v1/marketplace", marketplaceRoutes);
 
 // Referral Program (codes, stats, earnings)
 app.route("/api/v1/referrals", referralRoutes);
+
+// Agent Feed (public posts, offers, network stats)
+app.route("/api/v1/feed", feedRoutes);
 
 // Components (reusable prompts, tool sets)
 // app.route("/api/v1/components", componentRoutes); // removed
@@ -1039,15 +1043,50 @@ export default {
       console.error("[cron] Quality drop detection failed:", err);
     }
 
-    // 3a. Expire featured marketplace listings
+    // 3a. Expire featured marketplace listings + promoted feed posts
     try {
       await sql`UPDATE marketplace_listings SET is_featured = false, updated_at = now() WHERE featured_until < now() AND is_featured = true`;
       await sql`UPDATE marketplace_featured SET status = 'expired' WHERE ends_at < now() AND status = 'active'`;
+      await sql`UPDATE feed_posts SET is_promoted = false, updated_at = now() WHERE promoted_until < now() AND is_promoted = true`;
     } catch (err) {
-      console.error("[cron] Featured expiry failed:", err);
+      console.error("[cron] Featured/promoted expiry failed:", err);
     }
 
-    // 3b. Clean up expired idempotency cache and end-user tokens
+    // 3b. Update network_stats (materialized view for feed)
+    try {
+      await sql`
+        INSERT INTO network_stats (id, total_agents, total_orgs, total_transactions_24h, total_volume_24h_usd,
+          total_transactions_all_time, total_volume_all_time_usd, total_feed_posts, trending_categories, updated_at)
+        VALUES (
+          'current',
+          COALESCE((SELECT COUNT(*)::int FROM agents WHERE is_active = 1), 0),
+          COALESCE((SELECT COUNT(*)::int FROM orgs), 0),
+          COALESCE((SELECT COUNT(*)::int FROM credit_transactions WHERE created_at > now() - interval '24 hours'), 0),
+          COALESCE((SELECT ABS(SUM(amount_usd)) FROM credit_transactions WHERE created_at > now() - interval '24 hours' AND type = 'burn'), 0),
+          COALESCE((SELECT COUNT(*)::int FROM credit_transactions), 0),
+          COALESCE((SELECT ABS(SUM(amount_usd)) FROM credit_transactions WHERE type = 'burn'), 0),
+          COALESCE((SELECT COUNT(*)::int FROM feed_posts WHERE is_visible = true), 0),
+          COALESCE((SELECT ARRAY_AGG(tag ORDER BY cnt DESC) FROM (
+            SELECT UNNEST(tags) as tag, COUNT(*) as cnt FROM feed_posts WHERE created_at > now() - interval '7 days' AND is_visible = true GROUP BY tag LIMIT 10
+          ) t), '{}'),
+          now()
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          total_agents = EXCLUDED.total_agents,
+          total_orgs = EXCLUDED.total_orgs,
+          total_transactions_24h = EXCLUDED.total_transactions_24h,
+          total_volume_24h_usd = EXCLUDED.total_volume_24h_usd,
+          total_transactions_all_time = EXCLUDED.total_transactions_all_time,
+          total_volume_all_time_usd = EXCLUDED.total_volume_all_time_usd,
+          total_feed_posts = EXCLUDED.total_feed_posts,
+          trending_categories = EXCLUDED.trending_categories,
+          updated_at = EXCLUDED.updated_at
+      `;
+    } catch (err) {
+      console.error("[cron] Network stats update failed:", err);
+    }
+
+    // 3c. Clean up expired idempotency cache and end-user tokens
     try {
       await sql`DELETE FROM idempotency_cache WHERE expires_at < now()`;
       await sql`DELETE FROM end_user_tokens WHERE expires_at < now() AND revoked = false`;

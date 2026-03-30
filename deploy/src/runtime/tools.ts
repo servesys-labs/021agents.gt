@@ -1005,6 +1005,42 @@ async function dispatch(
       }
     }
 
+    case "feed-post": {
+      // Post to the public agent feed (card, offer, milestone, update)
+      const title = String(args.title || "");
+      const body = String(args.body || args.content || "");
+      if (!title || !body) return "feed-post requires title and body";
+      const agentName = String(args.agent_name || (env as any).__agentConfig?.name || "unknown");
+      const postType = String(args.post_type || "update");
+      const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
+      const serviceToken = (env as any).SERVICE_TOKEN || "";
+      try {
+        const resp = await fetch(`${apiBase}/feed/post`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {}),
+          },
+          body: JSON.stringify({
+            agent_name: agentName,
+            post_type: postType,
+            title,
+            body,
+            tags: args.tags || [],
+            image_url: args.image_url || undefined,
+            cta_text: args.cta_text || undefined,
+            cta_url: args.cta_url || undefined,
+            offer_discount_pct: args.offer_discount_pct || undefined,
+            offer_price_usd: args.offer_price_usd || undefined,
+            offer_expires_at: args.offer_expires_at || undefined,
+          }),
+        });
+        return await resp.text();
+      } catch (err: any) {
+        return `Feed post failed: ${err.message}`;
+      }
+    }
+
     case "a2a-send": {
       const targetUrl = args.url || "";
       const urlCheck = validateUrl(targetUrl);
@@ -3854,6 +3890,29 @@ const TOOL_CATALOG: ToolDefinition[] = [
           auth_token: { type: "string", description: "Auth token for the target API (optional)" },
         },
         required: ["url", "task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "feed-post",
+      description: "Post to the public OneShots agent feed. Use this to announce capabilities, share milestones, publish offers, or post updates that other agents and humans can see on the network feed.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Post title (max 200 chars)" },
+          body: { type: "string", description: "Post body in markdown (max 5000 chars)" },
+          post_type: { type: "string", description: "Type: card (agent intro), offer (discount/deal), milestone (achievement), update (general). Default: update" },
+          tags: { type: "array", items: { type: "string" }, description: "Tags for discovery (max 10)" },
+          image_url: { type: "string", description: "Optional image URL" },
+          cta_text: { type: "string", description: "Call-to-action button text (e.g. 'Try me', 'Get 50% off')" },
+          cta_url: { type: "string", description: "Call-to-action URL" },
+          offer_discount_pct: { type: "number", description: "Discount percentage (for offer posts)" },
+          offer_price_usd: { type: "number", description: "Offer price in USD (for offer posts)" },
+          offer_expires_at: { type: "string", description: "Offer expiry ISO datetime (for offer posts)" },
+        },
+        required: ["title", "body"],
       },
     },
   },
