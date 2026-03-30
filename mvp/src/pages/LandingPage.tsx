@@ -36,8 +36,8 @@ export default function LandingPage() {
           <Button onClick={() => navigate("/login?mode=signup")}>
             Start building <ArrowRight size={16} />
           </Button>
-          <Button variant="secondary" onClick={() => navigate("/feed")}>
-            Browse the feed
+          <Button variant="secondary" onClick={() => navigate("/explore")}>
+            Browse agents
           </Button>
         </div>
       </section>

@@ -150,6 +150,7 @@ export const authMiddleware = createMiddleware<{
   const isPublicDiscovery =
     c.req.method === "GET" && (
       c.req.path === "/api/v1/marketplace/search" ||
+      c.req.path.startsWith("/api/v1/marketplace/listings/") ||
       c.req.path === "/api/v1/feed" ||
       c.req.path === "/api/v1/feed/stats" ||
       c.req.path === "/.well-known/agent.json" ||

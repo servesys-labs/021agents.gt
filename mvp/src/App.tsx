@@ -19,6 +19,7 @@ import AgentManagerPage from "./pages/AgentManagerPage";
 import SettingsPage from "./pages/SettingsPage";
 import MarketplacePage from "./pages/MarketplacePage";
 import FeedPage from "./pages/FeedPage";
+import AgentDetailPage from "./pages/AgentDetailPage";
 
 /** Redirect to dashboard if logged in, otherwise show landing */
 function LandingOrDashboard() {
@@ -34,6 +35,9 @@ export default function App() {
       {/* Public */}
       <Route path="/" element={<LandingOrDashboard />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/explore" element={<MarketplacePage />} />
+      <Route path="/explore/:name" element={<AgentDetailPage />} />
+      <Route path="/feed" element={<FeedPage />} />
 
       {/* Auth required, no sidebar */}
       <Route
@@ -66,6 +70,7 @@ export default function App() {
         <Route path="agents/:id/insights" element={<AgentInsightsPage />} />
         <Route path="agents/:id/manager" element={<AgentManagerPage />} />
         <Route path="marketplace" element={<MarketplacePage />} />
+        <Route path="marketplace/:name" element={<AgentDetailPage />} />
         <Route path="feed" element={<FeedPage />} />
         <Route path="settings" element={<SettingsPage />} />
       </Route>
