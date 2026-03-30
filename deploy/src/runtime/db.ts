@@ -52,6 +52,8 @@ export async function loadAgentConfig(
     "image-generate", "vision-analyze",
     "memory-save", "memory-recall",
     "text-to-speech", "mcp-call",
+    "save-project", "load-project",
+    "create-schedule", "list-schedules", "delete-schedule",
   ];
 
   let rows: any[] = [];
