@@ -721,7 +721,7 @@ async function dispatch(
   const effectiveToolDefs = () => getToolDefinitions(enabledTools || []);
   switch (normalizedTool) {
     case "web-search":
-      return braveSearch(env, args);
+      return perplexitySearch(env, args);
 
     case "browse":
       return browse(args);
@@ -801,8 +801,10 @@ async function dispatch(
 
       // Per-file sync to R2 for durability (non-blocking)
       if (filePath.startsWith("/workspace/") && env.STORAGE) {
+        const r2Org = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
+        const r2Agent = (env as any).__agentConfig?.name || "agent";
         import("./workspace").then(({ syncFileToR2 }) =>
-          syncFileToR2(env.STORAGE, args.org_id || "default", args.agent_name || "agent", filePath, args.content || "", sessionId),
+          syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, args.content || "", sessionId),
         ).catch(() => {});
       }
 
@@ -866,8 +868,10 @@ async function dispatch(
 
       // Sync edited file to R2 (non-blocking)
       if (editPath.startsWith("/workspace/") && env.STORAGE) {
+        const r2Org = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
+        const r2Agent = (env as any).__agentConfig?.name || "agent";
         import("./workspace").then(({ syncFileToR2 }) =>
-          syncFileToR2(env.STORAGE, args.org_id || "default", args.agent_name || "agent", editPath, newContent, sessionId),
+          syncFileToR2(env.STORAGE, r2Org, r2Agent, editPath, newContent, sessionId),
         ).catch(() => {});
       }
 
@@ -3158,6 +3162,57 @@ async function dispatch(
 // Route: Worker → AI Gateway (custom-brave) → Brave Search API
 // Auth: X-Subscription-Token from worker secret, cf-aig-authorization for gateway
 // Gateway provides: logging, caching, rate limiting, analytics
+
+// ── Web Search via Perplexity Sonar (through AI Gateway → OpenRouter) ──
+// Returns rich, cited, synthesized search results in one call.
+// No separate search API + browse + synthesize — Sonar does it all.
+
+async function perplexitySearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const query = args.query || "";
+  if (!query) return "web-search requires a query";
+
+  const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
+  const gatewayId = env.AI_GATEWAY_ID || "";
+  const cfToken = (env as any).AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN || "";
+
+  if (!accountId || !gatewayId) {
+    // Fallback to Brave if no gateway
+    return braveSearch(env, args);
+  }
+
+  try {
+    const resp = await fetch(
+      `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cfToken ? { "cf-aig-authorization": `Bearer ${cfToken}` } : {}),
+        },
+        body: JSON.stringify({
+          model: "perplexity/sonar",
+          messages: [{ role: "user", content: query }],
+        }),
+      },
+    );
+
+    if (!resp.ok) {
+      console.error(`[web-search] Perplexity Sonar failed ${resp.status}`);
+      return braveSearch(env, args);
+    }
+
+    const data = (await resp.json()) as any;
+    const content = data.choices?.[0]?.message?.content || "";
+    if (!content) return braveSearch(env, args);
+
+    return content;
+  } catch (err: any) {
+    console.error(`[web-search] Perplexity error: ${err.message}`);
+    return braveSearch(env, args);
+  }
+}
+
+// ── Brave Search (fallback) ──
 
 async function braveSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const query = args.query || "";
