@@ -36,7 +36,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            className="flex items-center gap-2 bg-white border border-border rounded-lg shadow-lg px-4 py-3 text-sm animate-slide-in-right"
+            className="flex items-center gap-2 bg-surface border border-border rounded-lg shadow-lg px-4 py-3 text-sm animate-slide-in-right"
           >
             {t.type === "success" && <CheckCircle size={16} className="text-success shrink-0" />}
             {t.type === "error" && <AlertCircle size={16} className="text-danger shrink-0" />}

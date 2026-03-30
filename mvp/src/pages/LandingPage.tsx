@@ -102,28 +102,28 @@ export default function LandingPage() {
       <section className="px-6 py-16 max-w-4xl mx-auto">
         <h2 className="text-2xl font-bold text-text text-center mb-10">One assistant, everything you need</h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-          <div className="p-6 rounded-xl border border-border bg-white">
+          <div className="p-6 rounded-xl border border-border bg-surface">
             <Globe size={20} className="text-primary mb-3" />
             <h3 className="text-sm font-semibold text-text mb-1">Web search and research</h3>
             <p className="text-sm text-text-secondary">
               Searches the internet for real-time answers. Finds prices, reads articles, checks competitors — no copy-pasting.
             </p>
           </div>
-          <div className="p-6 rounded-xl border border-border bg-white">
+          <div className="p-6 rounded-xl border border-border bg-surface">
             <Zap size={20} className="text-primary mb-3" />
             <h3 className="text-sm font-semibold text-text mb-1">Code and data analysis</h3>
             <p className="text-sm text-text-secondary">
               Runs Python, analyzes spreadsheets, makes charts, processes files. Like having a data analyst on call.
             </p>
           </div>
-          <div className="p-6 rounded-xl border border-border bg-white">
+          <div className="p-6 rounded-xl border border-border bg-surface">
             <MessageSquare size={20} className="text-primary mb-3" />
             <h3 className="text-sm font-semibold text-text mb-1">Customer support 24/7</h3>
             <p className="text-sm text-text-secondary">
               Answers FAQs, takes messages, qualifies leads. Works while you sleep, on every channel your customers use.
             </p>
           </div>
-          <div className="p-6 rounded-xl border border-border bg-white">
+          <div className="p-6 rounded-xl border border-border bg-surface">
             <Clock size={20} className="text-primary mb-3" />
             <h3 className="text-sm font-semibold text-text mb-1">Remembers everything</h3>
             <p className="text-sm text-text-secondary">
@@ -141,17 +141,17 @@ export default function LandingPage() {
             No monthly subscription. No hidden fees. Start with $5 free credits — that's enough for hundreds of conversations.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="p-5 rounded-xl border border-border bg-white text-center">
+            <div className="p-5 rounded-xl border border-border bg-surface text-center">
               <p className="text-lg font-bold text-text">$10</p>
               <p className="text-xs text-text-secondary mt-1">Starter — 1,000+ messages</p>
             </div>
-            <div className="p-5 rounded-xl border-2 border-primary bg-white text-center relative">
+            <div className="p-5 rounded-xl border-2 border-primary bg-surface text-center relative">
               <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 bg-primary text-white text-[10px] font-medium px-2 py-0.5 rounded-full">Popular</span>
               <p className="text-lg font-bold text-text">$50</p>
               <p className="text-xs text-text-secondary mt-1">Growth — 5,500+ messages</p>
               <p className="text-[10px] text-success mt-1">+10% bonus credits</p>
             </div>
-            <div className="p-5 rounded-xl border border-border bg-white text-center">
+            <div className="p-5 rounded-xl border border-border bg-surface text-center">
               <p className="text-lg font-bold text-text">$100</p>
               <p className="text-xs text-text-secondary mt-1">Scale — 12,000+ messages</p>
               <p className="text-[10px] text-success mt-1">+20% bonus credits</p>

@@ -319,11 +319,11 @@ export default function AgentVoicePage() {
       </AgentNav>
 
       {!twilioConfigured && (
-        <Card className="mb-6 border-amber-200 bg-amber-50/50">
-          <p className="text-sm text-amber-900">
+        <Card className="mb-6 border-warning bg-warning-light/50">
+          <p className="text-sm text-warning-dark">
             <strong>Twilio is not configured on the server.</strong> Add{" "}
-            <code className="text-xs bg-white/80 px-1 rounded">TWILIO_ACCOUNT_SID</code> and{" "}
-            <code className="text-xs bg-white/80 px-1 rounded">TWILIO_AUTH_TOKEN</code> to your control-plane Worker secrets in Cloudflare,
+            <code className="text-xs bg-surface/80 px-1 rounded">TWILIO_ACCOUNT_SID</code> and{" "}
+            <code className="text-xs bg-surface/80 px-1 rounded">TWILIO_AUTH_TOKEN</code> to your control-plane Worker secrets in Cloudflare,
             then redeploy.
           </p>
         </Card>
@@ -446,7 +446,7 @@ export default function AgentVoicePage() {
                       className="flex items-center justify-between p-3 rounded-lg border border-border hover:border-primary/40 hover:bg-surface-alt transition-colors"
                     >
                       <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-lg bg-blue-50 flex items-center justify-center">
+                        <div className="w-8 h-8 rounded-lg bg-info-light flex items-center justify-center">
                           <Phone size={16} className="text-primary" />
                         </div>
                         <div>
@@ -480,7 +480,7 @@ export default function AgentVoicePage() {
 
       {/* ── Section 3: Recent Calls ── */}
       <h2 className="text-lg font-medium text-text mb-3">Recent calls</h2>
-      <div className="bg-white rounded-xl border border-border divide-y divide-border mb-8">
+      <div className="bg-surface rounded-xl border border-border divide-y divide-border mb-8">
         {calls.length === 0 && (
           <p className="p-6 text-sm text-text-muted text-center">No calls yet. {hasNumber ? "Try making a test call!" : "Get a phone number first."}</p>
         )}
@@ -495,7 +495,7 @@ export default function AgentVoicePage() {
               className="w-full flex items-center gap-4 p-4 hover:bg-surface-alt transition-colors text-left"
             >
               <div className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                call.status === "completed" ? "bg-emerald-50" : call.status === "missed" ? "bg-red-50" : "bg-amber-50"
+                call.status === "completed" ? "bg-success-light" : call.status === "missed" ? "bg-danger-light" : "bg-warning-light"
               }`}>
                 <StatusIcon size={16} className={
                   call.status === "completed" ? "text-success" : call.status === "missed" ? "text-danger" : "text-warning"

@@ -247,8 +247,8 @@ export default function AgentTestsPage() {
 
       {/* Score summary banner */}
       {passRate !== null && (
-        <div className={`flex items-center gap-4 p-4 rounded-xl mb-6 ${passRate >= 80 ? "bg-emerald-50 border border-emerald-200" : passRate >= 50 ? "bg-amber-50 border border-amber-200" : "bg-red-50 border border-red-200"}`}>
-          <div className={`text-3xl font-bold ${passRate >= 80 ? "text-emerald-600" : passRate >= 50 ? "text-amber-600" : "text-red-600"}`}>{passRate}%</div>
+        <div className={`flex items-center gap-4 p-4 rounded-xl mb-6 ${passRate >= 80 ? "bg-success-light border border-success" : passRate >= 50 ? "bg-warning-light border border-warning" : "bg-danger-light border border-danger"}`}>
+          <div className={`text-3xl font-bold ${passRate >= 80 ? "text-success" : passRate >= 50 ? "text-warning-dark" : "text-danger"}`}>{passRate}%</div>
           <div className="flex-1">
             <p className="text-sm font-medium text-text">Last eval: {latestRun!.pass_count}/{latestRun!.total_count} passed</p>
             <p className="text-xs text-text-muted">{new Date(latestRun!.created_at).toLocaleString()}</p>
@@ -274,7 +274,7 @@ export default function AgentTestsPage() {
             {t.label}
             {t.count !== undefined && <span className="ml-1.5 text-xs text-text-muted">({t.count})</span>}
             {t.key === "improve" && trainingJob?.status === "running" && (
-              <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded-full bg-green-100 text-green-800 animate-pulse">live</span>
+              <span className="ml-1.5 px-1.5 py-0.5 text-[10px] rounded-full bg-success-light text-success animate-pulse">live</span>
             )}
           </button>
         ))}
@@ -310,7 +310,7 @@ export default function AgentTestsPage() {
                     </div>
                     <div className="flex items-center gap-1.5 shrink-0">
                       {s.auto_generated && <Badge variant="default" className="text-[10px]">auto</Badge>}
-                      <button onClick={() => setScenarios((prev) => prev.filter((x) => x.id !== s.id))} className="p-1 text-text-muted hover:text-red-500"><Trash2 size={12} /></button>
+                      <button onClick={() => setScenarios((prev) => prev.filter((x) => x.id !== s.id))} className="p-1 text-text-muted hover:text-danger"><Trash2 size={12} /></button>
                     </div>
                   </div>
                 </Card>
@@ -345,9 +345,9 @@ export default function AgentTestsPage() {
                   <span>Iteration {trainingJob.current_iteration}/{trainingJob.max_iterations}</span>
                   <span>Best: {(trainingJob.best_score * 100).toFixed(1)}%</span>
                 </div>
-                <div className="h-3 bg-gray-200 rounded-full overflow-hidden">
+                <div className="h-3 bg-surface-alt rounded-full overflow-hidden">
                   <div
-                    className={`h-full rounded-full transition-all duration-500 ${trainingJob.status === "running" ? "bg-primary animate-pulse" : "bg-green-500"}`}
+                    className={`h-full rounded-full transition-all duration-500 ${trainingJob.status === "running" ? "bg-primary animate-pulse" : "bg-success"}`}
                     style={{ width: `${Math.round((trainingJob.current_iteration / Math.max(trainingJob.max_iterations, 1)) * 100)}%` }}
                   />
                 </div>
@@ -359,8 +359,8 @@ export default function AgentTestsPage() {
                   {trainingJob.iterations.map((it) => (
                     <div key={it.iteration} className="flex items-center gap-3 text-xs">
                       <span className="w-5 text-text-muted text-right">#{it.iteration}</span>
-                      <div className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${it.reward_score > 0.7 ? "bg-green-500" : it.reward_score > 0.4 ? "bg-amber-500" : "bg-red-400"}`} style={{ width: `${Math.round(it.reward_score * 100)}%` }} />
+                      <div className="flex-1 h-2 bg-surface-alt rounded-full overflow-hidden">
+                        <div className={`h-full rounded-full ${it.reward_score > 0.7 ? "bg-success" : it.reward_score > 0.4 ? "bg-warning-dark" : "bg-danger"}`} style={{ width: `${Math.round(it.reward_score * 100)}%` }} />
                       </div>
                       <span className="w-10 text-right font-medium text-text">{(it.reward_score * 100).toFixed(0)}%</span>
                       <span className="text-text-muted">eval {(it.eval_pass_rate * 100).toFixed(0)}%</span>
@@ -371,7 +371,7 @@ export default function AgentTestsPage() {
 
               {/* Completed message */}
               {trainingJob.status === "completed" && (
-                <div className="mt-4 p-3 bg-emerald-50 rounded-lg text-sm text-emerald-800">
+                <div className="mt-4 p-3 bg-success-light rounded-lg text-sm text-success">
                   <CheckCircle size={14} className="inline mr-1.5" />
                   Training complete. {trainingJob.auto_activate
                     ? "Best config has been automatically activated."
@@ -392,7 +392,7 @@ export default function AgentTestsPage() {
                 {improving ? <><Loader2 size={14} className="animate-spin" /> Improving...</> : <><Zap size={14} /> Improve Agent</>}
               </Button>
               {scenarios.length === 0 && (
-                <p className="text-xs text-amber-600 mt-3">Add test scenarios first in the Test tab.</p>
+                <p className="text-xs text-warning-dark mt-3">Add test scenarios first in the Test tab.</p>
               )}
 
               <div className="flex items-center justify-center gap-6 mt-6 text-xs text-text-muted">
@@ -429,9 +429,9 @@ export default function AgentTestsPage() {
         <div className="space-y-4">
           {/* Circuit breaker */}
           {circuitBreaker?.armed && (
-            <Card className="p-3 border-amber-200 bg-amber-50">
+            <Card className="p-3 border-warning bg-warning-light">
               <div className="flex items-center gap-2 text-xs">
-                <Shield size={14} className="text-amber-600" />
+                <Shield size={14} className="text-warning-dark" />
                 <span className="font-medium">Circuit breaker armed</span>
                 <span className="text-text-secondary">
                   {circuitBreaker.minutes_since_activation}min since activation |
@@ -456,9 +456,9 @@ export default function AgentTestsPage() {
               {runs.map((run) => {
                 const rate = Math.round((run.pass_count / Math.max(run.total_count, 1)) * 100);
                 return (
-                  <Card key={run.id} className="p-3 cursor-pointer hover:border-gray-300 transition-colors" onClick={() => viewRunDetail(run)}>
+                  <Card key={run.id} className="p-3 cursor-pointer hover:border-border transition-colors" onClick={() => viewRunDetail(run)}>
                     <div className="flex items-center gap-4">
-                      <div className={`text-lg font-bold w-12 text-center ${rate >= 80 ? "text-emerald-600" : rate >= 50 ? "text-amber-600" : "text-red-600"}`}>{rate}%</div>
+                      <div className={`text-lg font-bold w-12 text-center ${rate >= 80 ? "text-success" : rate >= 50 ? "text-warning-dark" : "text-danger"}`}>{rate}%</div>
                       <div className="flex-1">
                         <p className="text-sm text-text">{run.pass_count}/{run.total_count} passed</p>
                         <p className="text-xs text-text-muted">{new Date(run.created_at).toLocaleString()}</p>
@@ -505,8 +505,8 @@ export default function AgentTestsPage() {
             {selectedRun.trials && (
               <div className="space-y-2 max-h-72 overflow-y-auto">
                 {selectedRun.trials.map((trial, i) => (
-                  <button key={i} onClick={() => setSelectedTrial(trial)} className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-colors hover:border-gray-300 ${trial.passed ? "border-emerald-200 bg-emerald-50/50" : "border-red-200 bg-red-50/50"}`}>
-                    {trial.passed ? <CheckCircle size={14} className="text-emerald-500 shrink-0" /> : <XCircle size={14} className="text-red-500 shrink-0" />}
+                  <button key={i} onClick={() => setSelectedTrial(trial)} className={`w-full flex items-center gap-3 p-3 rounded-lg border text-left transition-colors hover:border-border ${trial.passed ? "border-success bg-success-light/50" : "border-danger bg-danger-light/50"}`}>
+                    {trial.passed ? <CheckCircle size={14} className="text-success shrink-0" /> : <XCircle size={14} className="text-danger shrink-0" />}
                     <span className="text-sm text-text truncate flex-1">{trial.input}</span>
                     {trial.latency_ms && <span className="text-xs text-text-muted shrink-0"><Clock size={10} className="inline mr-0.5" />{trial.latency_ms}ms</span>}
                   </button>
@@ -531,12 +531,12 @@ export default function AgentTestsPage() {
             </div>
             <div>
               <p className="text-xs font-medium text-text-secondary mb-1">Actual</p>
-              <div className={`rounded-lg p-3 text-sm ${selectedTrial.passed ? "bg-emerald-50 text-text" : "bg-red-50 text-text"}`}>{selectedTrial.actual}</div>
+              <div className={`rounded-lg p-3 text-sm ${selectedTrial.passed ? "bg-success-light text-text" : "bg-danger-light text-text"}`}>{selectedTrial.actual}</div>
             </div>
             {selectedTrial.reasoning && (
               <div>
                 <p className="text-xs font-medium text-text-secondary mb-1">Reasoning</p>
-                <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-800">{selectedTrial.reasoning}</div>
+                <div className="bg-warning-light rounded-lg p-3 text-sm text-warning-dark">{selectedTrial.reasoning}</div>
               </div>
             )}
           </div>

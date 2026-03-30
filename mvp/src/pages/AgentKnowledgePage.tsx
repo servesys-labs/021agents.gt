@@ -47,8 +47,8 @@ function mapIndexEntryToKB(
 }
 
 function fileIcon(name: string) {
-  if (name.endsWith(".pdf")) return <FileText size={20} className="text-red-500" />;
-  return <File size={20} className="text-blue-500" />;
+  if (name.endsWith(".pdf")) return <FileText size={20} className="text-danger" />;
+  return <File size={20} className="text-primary" />;
 }
 
 const statusConfig = {
@@ -232,23 +232,15 @@ export default function AgentKnowledgePage() {
           onChange={(e) => handleFiles(e.target.files)}
         />
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <Card>
-          <p className="text-xs text-text-secondary">Documents</p>
-          <p className="text-xl font-semibold text-text">{docs.length}</p>
-        </Card>
-        <Card>
-          <p className="text-xs text-text-secondary">Chunks indexed</p>
-          <p className="text-xl font-semibold text-text">{totalChunks}</p>
-        </Card>
-        <Card>
-          <p className="text-xs text-text-secondary">Total files</p>
-          <p className="text-xl font-semibold text-text">{docs.length}</p>
-        </Card>
-      </div>
+      {/* Stats — only show when there are documents */}
+      {docs.length > 0 && (
+        <div className="flex items-center gap-6 mb-4 text-sm">
+          <span className="text-text-secondary"><span className="font-semibold text-text">{docs.length}</span> documents</span>
+          <span className="text-text-secondary"><span className="font-semibold text-text">{totalChunks}</span> chunks indexed</span>
+        </div>
+      )}
 
-      {/* Drop zone */}
+      {/* Drop zone — compact */}
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -256,20 +248,20 @@ export default function AgentKnowledgePage() {
         }}
         onDragLeave={() => setDragging(false)}
         onDrop={handleDrop}
-        className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors mb-6 ${
+        className={`border-2 border-dashed rounded-lg px-6 py-5 text-center transition-colors mb-5 ${
           dragging
             ? "border-primary bg-primary-light"
-            : "border-border hover:border-gray-300"
+            : "border-border hover:border-border"
         }`}
       >
-        <Upload size={32} className="mx-auto text-text-muted mb-3" />
+        <Upload size={24} className="mx-auto text-text-muted mb-2" />
         <p className="text-sm font-medium text-text">
           Drag & drop files here, or{" "}
           <button onClick={() => fileInputRef.current?.click()} className="text-primary hover:underline">
             browse
           </button>
         </p>
-        <p className="text-xs text-text-muted mt-1">
+        <p className="text-xs text-text-muted mt-0.5">
           PDF, Word, TXT, Markdown, CSV, JSON, HTML — up to 10MB each
         </p>
       </div>
@@ -284,20 +276,20 @@ export default function AgentKnowledgePage() {
               placeholder="Search documents..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-3 py-2 rounded-lg border border-border text-sm bg-white placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+              className="w-full pl-9 pr-3 py-2 rounded-lg border border-border text-sm bg-surface placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
             />
           </div>
         </div>
       )}
 
       {/* Document list */}
-      <div className="bg-white rounded-xl border border-border divide-y divide-border">
+      <div className="bg-surface rounded-xl border border-border divide-y divide-border">
         {filteredDocs.length === 0 && docs.length === 0 && (
-          <div className="p-12 text-center">
-            <FileText size={40} className="mx-auto text-text-muted mb-3" />
-            <p className="text-sm font-medium text-text mb-1">No knowledge base documents</p>
-            <p className="text-xs text-text-muted mb-4">
-              Upload files to teach your agent
+          <div className="px-6 py-8 text-center">
+            <FileText size={28} className="mx-auto text-text-muted mb-2" />
+            <p className="text-sm font-medium text-text mb-1">No documents yet</p>
+            <p className="text-xs text-text-muted mb-3">
+              Upload files to teach your agent about your business
             </p>
             <Button size="sm" onClick={() => fileInputRef.current?.click()}>
               <Upload size={14} /> Upload first document
@@ -333,7 +325,7 @@ export default function AgentKnowledgePage() {
                   e.stopPropagation();
                   deleteDoc(doc.id);
                 }}
-                className="p-1.5 rounded-lg hover:bg-red-50 text-text-muted hover:text-danger transition-colors"
+                className="p-1.5 rounded-lg hover:bg-danger-light text-text-muted hover:text-danger transition-colors"
               >
                 <Trash2 size={14} />
               </button>
@@ -409,7 +401,7 @@ export default function AgentKnowledgePage() {
               { value: "100", label: "100 — More overlap, better continuity" },
             ]}
           />
-          <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
+          <div className="bg-info-light rounded-lg p-3 text-xs text-info-dark">
             These settings apply to your next upload. Existing documents keep their current chunking.
           </div>
           <div className="flex justify-end pt-2">

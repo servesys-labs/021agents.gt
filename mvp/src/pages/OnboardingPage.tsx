@@ -174,7 +174,7 @@ export default function OnboardingPage() {
                 setPath("business");
                 setStep(0);
               }}
-              className="w-full text-left rounded-xl border border-border bg-white p-5 shadow-sm hover:border-primary/40 hover:shadow-md transition-all focus:outline-none focus:ring-2 focus:ring-primary/25"
+              className="w-full text-left rounded-xl border border-border bg-surface p-5 shadow-sm hover:border-primary/40 hover:shadow-md transition-all focus:outline-none focus:ring-2 focus:ring-primary/25"
             >
               <div className="flex items-start gap-4">
                 <div className="w-11 h-11 rounded-lg bg-primary-light flex items-center justify-center shrink-0">
@@ -195,7 +195,7 @@ export default function OnboardingPage() {
                 setPath("personal");
                 setStep(0);
               }}
-              className="w-full text-left rounded-xl border border-border bg-white p-5 shadow-sm hover:border-primary/40 hover:shadow-md transition-all focus:outline-none focus:ring-2 focus:ring-primary/25"
+              className="w-full text-left rounded-xl border border-border bg-surface p-5 shadow-sm hover:border-primary/40 hover:shadow-md transition-all focus:outline-none focus:ring-2 focus:ring-primary/25"
             >
               <div className="flex items-start gap-4">
                 <div className="w-11 h-11 rounded-lg bg-violet-100 flex items-center justify-center shrink-0">
@@ -228,7 +228,7 @@ export default function OnboardingPage() {
           <h1 className="text-2xl font-semibold text-text text-center mb-2 tracking-tight">{PRODUCT.onboardingPersonalHeadline}</h1>
           <p className="text-text-secondary text-center mb-8 text-sm max-w-md mx-auto leading-relaxed">{PRODUCT.onboardingPersonalSub}</p>
 
-          <div className="bg-white rounded-xl border border-border p-6 shadow-sm">
+          <div className="bg-surface rounded-xl border border-border p-6 shadow-sm">
             <StepWizard steps={personalSteps} currentStep={step}>
               {step === 0 && (
                 <div className="space-y-4">
@@ -257,7 +257,7 @@ export default function OnboardingPage() {
                       type="button"
                       onClick={() => togglePersonalHelp(item.id)}
                       className={`w-full text-left p-4 rounded-lg border transition-colors ${
-                        personalHelp.includes(item.id) ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
+                        personalHelp.includes(item.id) ? "border-primary bg-primary-light" : "border-border hover:border-border"
                       }`}
                     >
                       <p className="text-sm font-medium text-text">{item.label}</p>
@@ -284,7 +284,7 @@ export default function OnboardingPage() {
                         type="button"
                         onClick={() => toggleChatApp(id)}
                         className={`w-full flex items-center gap-3 p-4 rounded-lg border text-left transition-colors ${
-                          chatApps.includes(id) ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
+                          chatApps.includes(id) ? "border-primary bg-primary-light" : "border-border hover:border-border"
                         }`}
                       >
                         <Icon size={20} className="text-text-secondary shrink-0" />
@@ -297,7 +297,7 @@ export default function OnboardingPage() {
                   </div>
 
                   {submitError && (
-                    <div className="flex items-center gap-2 p-3 mt-4 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+                    <div className="flex items-center gap-2 p-3 mt-4 rounded-lg bg-danger-light border border-danger text-sm text-danger">
                       <AlertCircle size={16} className="shrink-0" />
                       <span>{submitError}</span>
                     </div>
@@ -330,7 +330,7 @@ export default function OnboardingPage() {
         <h1 className="text-2xl font-semibold text-text text-center mb-2 tracking-tight">{PRODUCT.onboardingBusinessHeadline}</h1>
         <p className="text-text-secondary text-center mb-8 text-sm">{PRODUCT.onboardingBusinessSub}</p>
 
-        <div className="bg-white rounded-xl border border-border p-6 shadow-sm">
+        <div className="bg-surface rounded-xl border border-border p-6 shadow-sm">
           <StepWizard steps={businessSteps} currentStep={step}>
             {step === 0 && (
               <div className="space-y-4">
@@ -353,7 +353,7 @@ export default function OnboardingPage() {
                         className={`py-2 px-3 rounded-lg border text-sm font-medium transition-colors ${
                           teamSize === size
                             ? "border-primary bg-primary-light text-primary"
-                            : "border-border text-text-secondary hover:border-gray-300"
+                            : "border-border text-text-secondary hover:border-border"
                         }`}
                       >
                         {size}
@@ -378,7 +378,7 @@ export default function OnboardingPage() {
                     type="button"
                     onClick={() => toggleUseCaseFixed(uc.id)}
                     className={`w-full text-left p-4 rounded-lg border transition-colors ${
-                      selectedUseCases.includes(uc.id) ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
+                      selectedUseCases.includes(uc.id) ? "border-primary bg-primary-light" : "border-border hover:border-border"
                     }`}
                   >
                     <p className="text-sm font-medium text-text">{uc.label}</p>
@@ -405,7 +405,7 @@ export default function OnboardingPage() {
                         type="button"
                         onClick={() => toggleTool(tool.id)}
                         className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
-                          connected ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
+                          connected ? "border-primary bg-primary-light" : "border-border hover:border-border"
                         }`}
                       >
                         {Icon && <Icon size={18} />}
@@ -419,7 +419,7 @@ export default function OnboardingPage() {
                 </div>
 
                 {submitError && (
-                  <div className="flex items-center gap-2 p-3 mt-4 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+                  <div className="flex items-center gap-2 p-3 mt-4 rounded-lg bg-danger-light border border-danger text-sm text-danger">
                     <AlertCircle size={16} className="shrink-0" />
                     <span>{submitError}</span>
                   </div>

@@ -101,7 +101,7 @@ export default function DashboardPage() {
     return (
       <div className="flex items-center justify-center py-20">
         <Card className="max-w-md w-full text-center">
-          <AlertCircle size={32} className="text-red-500 mx-auto mb-3" />
+          <AlertCircle size={32} className="text-danger mx-auto mb-3" />
           <h2 className="text-lg font-semibold text-text mb-1">Something went wrong</h2>
           <p className="text-sm text-text-secondary mb-4">{error}</p>
           <Button onClick={fetchData}>
@@ -119,12 +119,12 @@ export default function DashboardPage() {
 
   return (
     <div>
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between mb-8">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-6">
         <div>
-          <h1 className="text-2xl font-semibold text-text tracking-tight">{PRODUCT.dashboardTitle}</h1>
-          <p className="text-sm text-text-secondary mt-1 max-w-xl leading-relaxed">{PRODUCT.dashboardSubtitle}</p>
+          <h1 className="text-xl font-semibold text-text tracking-tight">{PRODUCT.dashboardTitle}</h1>
+          <p className="text-sm text-text-secondary mt-0.5">{PRODUCT.dashboardSubtitle}</p>
           {statsUnavailable && (
-            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3 inline-block">
+            <p className="text-xs text-warning-dark bg-warning-light border border-warning rounded-lg px-3 py-2 mt-3 inline-block">
               Usage stats are unavailable (check permissions). Your assistants still load below.
             </p>
           )}
@@ -139,7 +139,7 @@ export default function DashboardPage() {
 
       {/* Only show stats when user has activity — avoids discouraging wall of zeroes */}
       {(sessionCount > 0 || assistantCount > 1) && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-10">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           <StatCard icon={<Bot size={16} className="text-primary" />} label={PRODUCT.statAssistants} value={assistantCount} />
           <StatCard icon={<MessageSquare size={16} className="text-success" />} label={PRODUCT.statSessions} value={sessionCount} />
           <StatCard icon={<DollarSign size={16} className="text-danger" />} label="Spent" value={stats?.total_cost_usd ? `$${stats.total_cost_usd.toFixed(2)}` : "$0.00"} />
@@ -147,7 +147,7 @@ export default function DashboardPage() {
         </div>
       )}
 
-      <h2 className="text-lg font-semibold text-text mb-4 pb-3 border-b border-border">{PRODUCT.agentsSectionTitle}</h2>
+      <h2 className="text-sm font-semibold text-text mb-3 pb-2 border-b border-border uppercase tracking-wide text-text-secondary">{PRODUCT.agentsSectionTitle}</h2>
 
       {agents.length === 0 ? (
         <Card className="text-center py-14 px-6 max-w-lg mx-auto border-dashed">
@@ -159,7 +159,7 @@ export default function DashboardPage() {
           </Button>
         </Card>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {agents.map((agent) => {
             const path = agentPathSegment(agent.agent_id || agent.name);
             return (
@@ -196,7 +196,7 @@ export default function DashboardPage() {
                     title="Remove assistant"
                     disabled={removingName === agent.name}
                     onClick={(e) => removeAgent(e, agent)}
-                    className="ml-auto p-1.5 rounded-lg text-text-muted hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
+                    className="ml-auto p-1.5 rounded-lg text-text-muted hover:text-danger hover:bg-danger-light transition-colors disabled:opacity-50"
                   >
                     {removingName === agent.name ? (
                       <Loader2 size={14} className="animate-spin" />

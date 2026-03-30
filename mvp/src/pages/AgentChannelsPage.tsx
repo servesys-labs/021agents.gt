@@ -407,8 +407,8 @@ Content-Type: application/json
                   <Button size="sm" variant="secondary" onClick={() => setConfiguring(channel.id)}>Enable</Button>
                 )}
                 {(channel.status === "active" || channel.status === "inactive") && (
-                  <button onClick={() => toggleChannel(channel.id)} className={`relative w-10 h-6 rounded-full transition-colors ${channel.status === "active" ? "bg-success" : "bg-gray-300"}`}>
-                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${channel.status === "active" ? "translate-x-4" : "translate-x-0"}`} />
+                  <button onClick={() => toggleChannel(channel.id)} className={`relative w-10 h-6 rounded-full transition-colors ${channel.status === "active" ? "bg-success" : "bg-surface-alt"}`}>
+                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-surface rounded-full shadow transition-transform ${channel.status === "active" ? "translate-x-4" : "translate-x-0"}`} />
                   </button>
                 )}
               </div>
@@ -474,7 +474,7 @@ Content-Type: application/json
           </p>
           <Input label="Bot token (from BotFather)" type="password" autoComplete="off" placeholder="Paste token here"
             value={telegramBotToken} onChange={(e) => setTelegramBotToken(e.target.value)} />
-          {telegramConnectError && <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{telegramConnectError}</p>}
+          {telegramConnectError && <p className="text-sm text-danger bg-danger-light border border-danger rounded-lg px-3 py-2">{telegramConnectError}</p>}
           <Button onClick={connectTelegramBot} disabled={telegramConnecting}>
             {telegramConnecting ? <><Loader2 size={14} className="animate-spin" /> Connecting…</> : "Save token & register webhook"}
           </Button>
@@ -486,7 +486,7 @@ Content-Type: application/json
           )}
           {telegramDeepLink ? (
             <div className="flex flex-col sm:flex-row gap-6 items-start pt-2 border-t border-border">
-              <div className="rounded-lg border border-border p-2 bg-white shrink-0">
+              <div className="rounded-lg border border-border p-2 bg-surface shrink-0">
                 <img src={qrCodeImageUrl(telegramDeepLink, 180)} width={180} height={180} className="rounded" alt="Telegram QR" />
               </div>
               <div className="flex-1 min-w-0 space-y-2">
@@ -515,7 +515,7 @@ Content-Type: application/json
           <Input label="Permanent Access Token" type="password" placeholder="Paste your WhatsApp Cloud API access token" value={waAccessToken} onChange={(e) => setWaAccessToken(e.target.value)} />
           {whatsappDeepLink && (
             <div className="flex flex-col sm:flex-row gap-6 items-start">
-              <div className="rounded-lg border border-border p-2 bg-white shrink-0">
+              <div className="rounded-lg border border-border p-2 bg-surface shrink-0">
                 <img src={qrCodeImageUrl(whatsappDeepLink, 180)} width={180} height={180} className="rounded" alt="WhatsApp QR" />
               </div>
               <div className="flex-1 min-w-0 space-y-2">
@@ -527,7 +527,7 @@ Content-Type: application/json
               </div>
             </div>
           )}
-          <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
+          <div className="bg-info-light rounded-lg p-3 text-xs text-info-dark">
             After connecting, set the webhook URL shown in the confirmation to <code>messages</code> field in your Meta app's WhatsApp settings.
           </div>
           <div className="flex justify-end gap-2 pt-2">
@@ -550,7 +550,7 @@ Content-Type: application/json
           <Input label="Bot User OAuth Token" type="password" placeholder="xoxb-..." value={slackBotToken} onChange={(e) => setSlackBotToken(e.target.value)} />
           <Input label="Team ID" placeholder="T01ABC123" value={slackTeamId} onChange={(e) => setSlackTeamId(e.target.value)} />
           <Input label="Workspace name (optional)" placeholder="My Company" value={slackTeamName} onChange={(e) => setSlackTeamName(e.target.value)} />
-          <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
+          <div className="bg-info-light rounded-lg p-3 text-xs text-info-dark">
             After connecting, set the <strong>Event Request URL</strong> in your Slack app to the webhook URL shown in the confirmation.
             Subscribe to <code>message.im</code> and <code>app_mention</code> events.
           </div>
@@ -573,7 +573,7 @@ Content-Type: application/json
           <Input label="Instagram username" placeholder="@yourbusiness" value={igUsername} onChange={(e) => setIgUsername(e.target.value)} />
           <Input label="Facebook Page ID" placeholder="From Meta Business Suite" value={igPageId} onChange={(e) => setIgPageId(e.target.value)} />
           <Input label="Page Access Token" type="password" placeholder="Paste token with instagram_manage_messages scope" value={igPageToken} onChange={(e) => setIgPageToken(e.target.value)} />
-          <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
+          <div className="bg-info-light rounded-lg p-3 text-xs text-info-dark">
             After connecting, add the webhook URL to your Meta app's Instagram settings, subscribing to the <code>messages</code> field.
           </div>
           <div className="flex justify-end gap-2 pt-2">
@@ -594,7 +594,7 @@ Content-Type: application/json
           <Input label="Facebook Page ID" placeholder="From Page Settings → About" value={fbPageId} onChange={(e) => setFbPageId(e.target.value)} />
           <Input label="Page name (optional)" placeholder="My Business Page" value={fbPageName} onChange={(e) => setFbPageName(e.target.value)} />
           <Input label="Page Access Token" type="password" placeholder="Paste token with pages_messaging scope" value={fbPageToken} onChange={(e) => setFbPageToken(e.target.value)} />
-          <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
+          <div className="bg-info-light rounded-lg p-3 text-xs text-info-dark">
             After connecting, add the webhook URL to your Meta app's Messenger settings, subscribing to <code>messages</code> events.
           </div>
           <div className="flex justify-end gap-2 pt-2">
@@ -615,7 +615,7 @@ Content-Type: application/json
           <Input label="Phone number (E.164)" placeholder="+15550000000" value={smsPhone} onChange={(e) => setSmsPhone(e.target.value)} />
           <Select label="Provider" value={smsProvider} onChange={(e) => setSmsProvider(e.target.value)}
             options={[{ value: "twilio", label: "Twilio" }, { value: "vapi", label: "Vapi (existing voice number)" }]} />
-          <div className="bg-amber-50 rounded-lg p-3 text-xs text-amber-700">
+          <div className="bg-warning-light rounded-lg p-3 text-xs text-warning-dark">
             SMS integration requires a Twilio account or an existing Vapi phone number with SMS capability. Configure the SMS webhook URL in your provider dashboard after setup.
           </div>
           <div className="flex justify-end gap-2 pt-2">

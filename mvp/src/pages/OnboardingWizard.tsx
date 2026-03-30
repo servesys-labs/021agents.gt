@@ -223,7 +223,7 @@ export default function OnboardingWizard() {
             )}
 
             {error && (
-              <p className="text-sm text-danger bg-red-50 px-3 py-2 rounded-lg">{error}</p>
+              <p className="text-sm text-danger bg-danger-light px-3 py-2 rounded-lg">{error}</p>
             )}
 
             <div className="flex justify-between pt-2">
@@ -261,7 +261,7 @@ export default function OnboardingWizard() {
 
             {error && (
               <div className="mt-6">
-                <p className="text-sm text-danger bg-red-50 px-3 py-2 rounded-lg mb-3">{error}</p>
+                <p className="text-sm text-danger bg-danger-light px-3 py-2 rounded-lg mb-3">{error}</p>
                 <Button size="sm" onClick={() => { setStep(2); setCreating(false); }}>
                   Try again
                 </Button>

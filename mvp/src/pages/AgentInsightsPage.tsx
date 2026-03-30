@@ -247,7 +247,7 @@ export default function AgentInsightsPage() {
                       {trendIcon[topic.trend]}
                       {sentimentIcon[topic.sentiment]}
                     </div>
-                    <div className="w-full bg-gray-100 rounded-full h-1.5 mb-1.5">
+                    <div className="w-full bg-surface-alt rounded-full h-1.5 mb-1.5">
                       <div className="bg-primary rounded-full h-1.5 transition-all" style={{ width: `${barWidth}%` }} />
                     </div>
                     <p className="text-xs text-text-muted italic">"{topic.sample_question}"</p>
@@ -267,7 +267,7 @@ export default function AgentInsightsPage() {
       {tab === "gaps" && (
         <div className="space-y-3">
           {gaps.length > 0 && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 text-amber-700 text-xs rounded-lg mb-4">
+            <div className="flex items-center gap-2 px-3 py-2 bg-warning-light text-warning-dark text-xs rounded-lg mb-4">
               <Lightbulb size={14} />
               These are questions your agent couldn't confidently answer. Upload docs or update your knowledge base to fix them.
             </div>
@@ -280,7 +280,7 @@ export default function AgentInsightsPage() {
           {gaps.map((gap) => (
             <Card key={gap.question}>
               <div className="flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg bg-amber-50 flex items-center justify-center shrink-0">
+                <div className="w-8 h-8 rounded-lg bg-warning-light flex items-center justify-center shrink-0">
                   <AlertCircle size={16} className="text-warning" />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -289,9 +289,9 @@ export default function AgentInsightsPage() {
                     <Badge variant="default">{gap.category}</Badge>
                     <span className="text-xs text-text-muted">Asked {gap.count} times</span>
                   </div>
-                  <div className="flex items-start gap-1.5 mt-2 bg-blue-50 rounded-lg px-3 py-2">
+                  <div className="flex items-start gap-1.5 mt-2 bg-info-light rounded-lg px-3 py-2">
                     <Lightbulb size={12} className="text-primary mt-0.5 shrink-0" />
-                    <p className="text-xs text-blue-700">{gap.suggestion}</p>
+                    <p className="text-xs text-info-dark">{gap.suggestion}</p>
                   </div>
                 </div>
               </div>
@@ -357,10 +357,10 @@ export default function AgentInsightsPage() {
                     <div key={topic.topic} className="flex items-center gap-3">
                       <span className="text-xs text-text-secondary w-36 truncate">{topic.topic}</span>
                       {sentimentIcon[topic.sentiment]}
-                      <div className="flex-1 bg-gray-100 rounded-full h-2">
+                      <div className="flex-1 bg-surface-alt rounded-full h-2">
                         <div
                           className={`h-2 rounded-full ${
-                            topic.sentiment === "positive" ? "bg-success" : topic.sentiment === "negative" ? "bg-danger" : "bg-gray-300"
+                            topic.sentiment === "positive" ? "bg-success" : topic.sentiment === "negative" ? "bg-danger" : "bg-surface-alt"
                           }`}
                           style={{ width: `${(topic.count / (topics[0]?.count || 1)) * 100}%` }}
                         />

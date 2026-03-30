@@ -174,7 +174,7 @@ export function Sidebar() {
       <button
         type="button"
         onClick={() => setMobileOpen(true)}
-        className="md:hidden fixed top-4 left-4 z-50 p-2 bg-white rounded-lg border border-border shadow-sm"
+        className="md:hidden fixed top-4 left-4 z-50 p-2 bg-surface rounded-lg border border-border shadow-sm"
         aria-label="Open menu"
       >
         <Menu size={20} />
@@ -183,7 +183,7 @@ export function Sidebar() {
       {mobileOpen && (
         <div className="fixed inset-0 z-40 md:hidden">
           <button type="button" className="absolute inset-0 bg-black/30 cursor-default" aria-label="Close menu" onClick={() => setMobileOpen(false)} />
-          <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-white border-r border-border shadow-xl">
+          <div className="absolute left-0 top-0 bottom-0 w-72 max-w-[85vw] bg-surface border-r border-border shadow-xl">
             <button
               type="button"
               onClick={() => setMobileOpen(false)}
@@ -197,7 +197,7 @@ export function Sidebar() {
         </div>
       )}
 
-      <aside className="hidden md:block w-64 bg-white border-r border-border h-screen sticky top-0 shrink-0">
+      <aside className="hidden md:block w-64 bg-surface border-r border-border h-screen sticky top-0 shrink-0">
         {nav}
       </aside>
     </>

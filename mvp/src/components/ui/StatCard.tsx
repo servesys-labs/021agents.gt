@@ -1,5 +1,3 @@
-import { Card } from "./Card";
-
 interface StatCardProps {
   icon: React.ReactNode;
   label: string;
@@ -8,12 +6,12 @@ interface StatCardProps {
 
 export function StatCard({ icon, label, value }: StatCardProps) {
   return (
-    <Card className="transition-all duration-200 hover:shadow-sm hover:border-primary/20">
-      <div className="flex items-center gap-2 mb-1">
-        {icon}
-        <span className="text-xs text-text-secondary">{label}</span>
+    <div className="flex items-center gap-3 bg-surface rounded-lg border border-border px-4 py-3 transition-all duration-200 hover:shadow-sm hover:border-primary/20">
+      <div className="shrink-0">{icon}</div>
+      <div className="min-w-0">
+        <p className="text-xs text-text-secondary leading-none">{label}</p>
+        <p className="text-lg font-semibold text-text mt-0.5 leading-tight">{value}</p>
       </div>
-      <p className="text-xl font-semibold text-text">{value}</p>
-    </Card>
+    </div>
   );
 }

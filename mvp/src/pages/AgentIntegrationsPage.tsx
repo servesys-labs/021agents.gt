@@ -201,7 +201,7 @@ export default function AgentIntegrationsPage() {
             onClick={() => provider.connected ? setSelectedProvider(provider) : handleConnect(provider.app)}
           >
             <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-lg flex items-center justify-center text-lg border bg-gray-50 border-gray-200">
+              <div className="w-10 h-10 rounded-lg flex items-center justify-center text-lg border bg-surface-alt border-border">
                 {provider.app[0].toUpperCase()}
               </div>
               <div className="flex-1 min-w-0">
@@ -232,7 +232,7 @@ export default function AgentIntegrationsPage() {
         {selectedProvider && (
           <div className="space-y-4">
             <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-lg flex items-center justify-center text-xl border bg-gray-50 border-gray-200">
+              <div className="w-12 h-12 rounded-lg flex items-center justify-center text-xl border bg-surface-alt border-border">
                 {selectedProvider.app[0].toUpperCase()}
               </div>
               <div className="flex-1">
@@ -242,7 +242,7 @@ export default function AgentIntegrationsPage() {
               <Badge variant="success">Connected</Badge>
             </div>
 
-            <div className="flex items-center gap-2 px-3 py-2 bg-blue-50 text-blue-700 text-xs rounded-lg">
+            <div className="flex items-center gap-2 px-3 py-2 bg-info-light text-info-dark text-xs rounded-lg">
               <AlertCircle size={14} />
               Your agent automatically uses this integration when customers ask relevant questions.
             </div>

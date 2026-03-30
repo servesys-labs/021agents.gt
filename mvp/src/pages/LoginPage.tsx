@@ -92,7 +92,7 @@ export default function LoginPage() {
         </div>
 
         <div className="bg-surface rounded-xl border border-border p-6 shadow-lg overflow-hidden relative">
-          <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-primary to-blue-400" />
+          <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-primary to-primary" />
 
           {/* Tabs (only for login/signup) */}
           {(mode === "login" || mode === "signup") && (
@@ -192,12 +192,12 @@ export default function LoginPage() {
             )}
 
             {success && (
-              <p className="text-sm text-green-700 bg-green-50 px-3 py-2 rounded-lg flex items-center gap-2">
+              <p className="text-sm text-success bg-success-light px-3 py-2 rounded-lg flex items-center gap-2">
                 <CheckCircle size={14} /> {success}
               </p>
             )}
             {error && (
-              <p className="text-sm text-danger bg-red-50 px-3 py-2 rounded-lg">{error}</p>
+              <p className="text-sm text-danger bg-danger-light px-3 py-2 rounded-lg">{error}</p>
             )}
 
             <Button type="submit" className="w-full" disabled={loading}>

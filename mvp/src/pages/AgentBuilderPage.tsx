@@ -365,7 +365,7 @@ export default function AgentBuilderPage() {
           Describe what you need and AI will design everything — prompt, tools, conversation flow, and test cases.
         </p>
 
-        <div className="bg-white rounded-xl border border-border p-6 sm:p-8 shadow-sm space-y-5">
+        <div className="bg-surface rounded-xl border border-border p-6 sm:p-8 shadow-sm space-y-5">
           <Input
             label="Name (optional)"
             placeholder="e.g. Front Desk Helper"
@@ -396,7 +396,7 @@ export default function AgentBuilderPage() {
                   className={`p-2.5 rounded-lg border text-left transition-colors ${
                     plan === p.key
                       ? "border-primary bg-primary-light ring-1 ring-primary"
-                      : "border-border hover:border-gray-300"
+                      : "border-border hover:border-border"
                   }`}
                 >
                   <p className="text-sm font-semibold text-text">{p.label}</p>
@@ -425,7 +425,7 @@ export default function AgentBuilderPage() {
           )}
 
           {createError && (
-            <div className="flex items-center gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+            <div className="flex items-center gap-2 p-3 rounded-lg bg-danger-light border border-danger text-sm text-danger">
               <AlertCircle size={16} className="shrink-0" />
               <span>{createError}</span>
             </div>
@@ -433,17 +433,17 @@ export default function AgentBuilderPage() {
 
           {/* Creating progress */}
           {creating && creationSteps.length > 0 && (
-            <div className="p-4 rounded-lg bg-blue-50 border border-blue-200 space-y-2">
+            <div className="p-4 rounded-lg bg-info-light border border-info space-y-2">
               {creationSteps.map((step, i) => (
                 <div key={step.label} className="flex items-center gap-2.5 text-sm">
                   {step.done ? (
-                    <Check size={14} className="text-green-600 shrink-0" />
+                    <Check size={14} className="text-success shrink-0" />
                   ) : i === creationSteps.findIndex((s) => !s.done) ? (
                     <Loader2 size={14} className="animate-spin text-primary shrink-0" />
                   ) : (
-                    <div className="w-3.5 h-3.5 rounded-full border border-gray-300 shrink-0" />
+                    <div className="w-3.5 h-3.5 rounded-full border border-border shrink-0" />
                   )}
-                  <span className={step.done ? "text-text" : i === creationSteps.findIndex((s) => !s.done) ? "text-blue-700 font-medium" : "text-text-muted"}>
+                  <span className={step.done ? "text-text" : i === creationSteps.findIndex((s) => !s.done) ? "text-info-dark font-medium" : "text-text-muted"}>
                     {step.label}
                   </span>
                 </div>
@@ -477,7 +477,7 @@ export default function AgentBuilderPage() {
             { label: "Test cases", desc: "Auto-generated to verify quality" },
             { label: "Conversation flow", desc: "Graph designed automatically" },
           ].map((item) => (
-            <div key={item.label} className="p-3 rounded-lg border border-border bg-white/50 text-center">
+            <div key={item.label} className="p-3 rounded-lg border border-border bg-surface/50 text-center">
               <p className="text-xs font-medium text-text">{item.label}</p>
               <p className="text-xs text-text-secondary mt-0.5">{item.desc}</p>
             </div>
@@ -506,14 +506,14 @@ export default function AgentBuilderPage() {
         {personalFlow ? PRODUCT.createPersonalAgentIntro : PRODUCT.createAgentIntro}
       </p>
 
-      <Card className="mb-4 p-3 bg-blue-50/60 border-blue-200">
+      <Card className="mb-4 p-3 bg-info-light/60 border-info">
         <p className="text-xs text-text-secondary leading-relaxed">
           Even in advanced mode, AI generates the execution graph, test cases, and evaluation rubrics from your inputs.
           You control the details — AI handles the complexity.
         </p>
       </Card>
 
-      <div className="bg-white rounded-xl border border-border p-6 sm:p-8 shadow-sm">
+      <div className="bg-surface rounded-xl border border-border p-6 sm:p-8 shadow-sm">
         <StepWizard steps={steps} currentStep={step}>
           {/* Step 1: Basics */}
           {step === 0 && (
@@ -544,7 +544,7 @@ export default function AgentBuilderPage() {
                       type="button"
                       onClick={() => setUseCase(uc.id)}
                       className={`text-left p-3 rounded-lg border text-sm transition-colors ring-offset-2 focus:outline-none focus:ring-2 focus:ring-primary/30 ${
-                        useCase === uc.id ? "border-primary bg-primary-light shadow-sm" : "border-border hover:border-gray-300"
+                        useCase === uc.id ? "border-primary bg-primary-light shadow-sm" : "border-border hover:border-border"
                       }`}
                     >
                       <p className="font-medium text-text">{uc.label}</p>
@@ -579,7 +579,7 @@ export default function AgentBuilderPage() {
                       key={t}
                       onClick={() => setTone(t)}
                       className={`px-4 py-2 rounded-lg border text-sm font-medium capitalize transition-colors ${
-                        tone === t ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary hover:border-gray-300"
+                        tone === t ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary hover:border-border"
                       }`}
                     >
                       {t}
@@ -595,7 +595,7 @@ export default function AgentBuilderPage() {
                       key={l}
                       onClick={() => setResponseLength(l)}
                       className={`px-4 py-2 rounded-lg border text-sm font-medium capitalize transition-colors ${
-                        responseLength === l ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary hover:border-gray-300"
+                        responseLength === l ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary hover:border-border"
                       }`}
                     >
                       {l}
@@ -625,7 +625,7 @@ export default function AgentBuilderPage() {
                       key={tool.id}
                       onClick={() => toggleTool(tool.id)}
                       className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
-                        selected ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
+                        selected ? "border-primary bg-primary-light" : "border-border hover:border-border"
                       }`}
                     >
                       {Icon && <Icon size={18} />}
@@ -669,15 +669,15 @@ export default function AgentBuilderPage() {
                 </dl>
               </Card>
 
-              <Card className="bg-blue-50/60 border-blue-200">
-                <div className="flex items-center gap-2 text-sm text-blue-700">
+              <Card className="bg-info-light/60 border-info">
+                <div className="flex items-center gap-2 text-sm text-info-dark">
                   <TestTube2 size={16} />
                   <span>AI will also generate test cases and evaluation rubrics for this agent.</span>
                 </div>
               </Card>
 
               {createError && (
-                <div className="flex items-center gap-2 p-3 rounded-lg bg-red-50 border border-red-200 text-sm text-red-700">
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-danger-light border border-danger text-sm text-danger">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{createError}</span>
                 </div>

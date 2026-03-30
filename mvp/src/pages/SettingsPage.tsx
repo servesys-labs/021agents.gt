@@ -8,7 +8,8 @@ import { useToast } from "../components/ui/Toast";
 import { useAuth } from "../lib/auth";
 import { api } from "../lib/api";
 import { PRODUCT } from "../lib/product";
-import { Loader2, CreditCard, Sparkles, ExternalLink } from "lucide-react";
+import { Loader2, CreditCard, Sparkles, ExternalLink, Sun, Moon, Monitor } from "lucide-react";
+import { useTheme, type Theme } from "../lib/use-theme";
 
 type Tab = "account" | "organization" | "billing";
 
@@ -30,6 +31,7 @@ interface CreditPackage {
 export default function SettingsPage() {
   const { user } = useAuth();
   const { toast } = useToast();
+  const { theme, setTheme } = useTheme();
   const [tab, setTab] = useState<Tab>("account");
   const [saving, setSaving] = useState(false);
 
@@ -147,7 +149,7 @@ export default function SettingsPage() {
   ];
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-3xl">
       <h1 className="text-2xl font-semibold text-text tracking-tight mb-1">Settings</h1>
       <p className="text-sm text-text-secondary mb-8">{PRODUCT.settingsSubtitle}</p>
 
@@ -170,6 +172,30 @@ export default function SettingsPage() {
             }}>
               Change password
             </Button>
+          </Card>
+          <Card className="p-5">
+            <p className="text-sm font-medium text-text mb-1">Appearance</p>
+            <p className="text-xs text-text-secondary mb-3">Choose your preferred color theme</p>
+            <div className="flex gap-2">
+              {([
+                { key: "light" as Theme, label: "Light", icon: Sun },
+                { key: "dark" as Theme, label: "Dark", icon: Moon },
+                { key: "system" as Theme, label: "System", icon: Monitor },
+              ]).map((opt) => (
+                <button
+                  key={opt.key}
+                  onClick={() => setTheme(opt.key)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg border text-sm font-medium transition-colors ${
+                    theme === opt.key
+                      ? "border-primary bg-primary-light text-primary"
+                      : "border-border text-text-secondary hover:border-border"
+                  }`}
+                >
+                  <opt.icon size={16} />
+                  {opt.label}
+                </button>
+              ))}
+            </div>
           </Card>
           <Button onClick={saveAccount} disabled={saving}>
             {saving ? <><Loader2 size={14} className="animate-spin" /> Saving...</> : "Save changes"}

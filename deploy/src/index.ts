@@ -150,15 +150,42 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   };
 
   async onStart() {
-    // DO SQLite: fast local conversation cache
-    this.sql`CREATE TABLE IF NOT EXISTS conversation_messages (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      role TEXT NOT NULL,
-      content TEXT NOT NULL,
-      channel TEXT NOT NULL DEFAULT '',
-      created_at REAL NOT NULL DEFAULT (unixepoch('now'))
+    // ── Schema migrations with version tracking ────────────────────
+    // blockConcurrencyWhile ensures NO requests interleave during init.
+    // All schema changes, hydration, and checkpoint recovery happen atomically.
+    // See: https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/
+
+    // Migration tracking table
+    this.sql`CREATE TABLE IF NOT EXISTS _sql_schema_migrations (
+      id INTEGER PRIMARY KEY,
+      applied_at TEXT NOT NULL DEFAULT (datetime('now'))
     )`;
 
+    const schemaVersion = this.sql<{ version: number }>`
+      SELECT COALESCE(MAX(id), 0) as version FROM _sql_schema_migrations
+    `[0]?.version || 0;
+
+    if (schemaVersion < 1) {
+      // v1: Initial conversation_messages table with indexes
+      this.sql`CREATE TABLE IF NOT EXISTS conversation_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        channel TEXT NOT NULL DEFAULT '',
+        created_at REAL NOT NULL DEFAULT (unixepoch('now'))
+      )`;
+      // Index for time-based queries (recent messages, pruning)
+      this.sql`CREATE INDEX IF NOT EXISTS idx_conv_created_at ON conversation_messages(created_at)`;
+      // Index for role filtering (load user/assistant only)
+      this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role ON conversation_messages(role)`;
+      this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (1)`;
+    }
+
+    if (schemaVersion < 2) {
+      // v2: Composite index for the most common query pattern (role + id DESC)
+      this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role_id ON conversation_messages(role, id)`;
+      this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (2)`;
+    }
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
     // Load 100 to match the local retention cap — not just 24 (the per-request window)
@@ -3166,6 +3193,16 @@ export default {
         return Response.json({ ok: true });
       }
 
+      // ── Message deduplication (2s window) ──
+      // Telegram sometimes delivers the same webhook twice, or users send rapid messages.
+      // Use KV to deduplicate by message_id.
+      if (env.AGENT_PROGRESS_KV) {
+        const dedupeKey = `tg-dedup:${chatId}:${messageId}`;
+        const existing = await env.AGENT_PROGRESS_KV.get(dedupeKey);
+        if (existing) return Response.json({ ok: true }); // Already processing this message
+        await env.AGENT_PROGRESS_KV.put(dedupeKey, "1", { expirationTtl: 10 });
+      }
+
       // Typing indicator
       fetch(`${tgApi}/sendChatAction`, {
         method: "POST",
@@ -3192,8 +3229,23 @@ export default {
             const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
             mediaUrls.push(fileUrl);
             if (hasPhoto) { mediaTypes.push("image/jpeg"); inputParts.push("[User sent a photo]"); }
-            else if (hasVoice) { mediaTypes.push("audio/ogg"); inputParts.push("[User sent a voice message]"); }
-            else if (hasAudio) { mediaTypes.push(tgMimeType || "audio/mpeg"); inputParts.push(`[User sent audio${tgFileName ? ": " + tgFileName : ""}]`); }
+            else if (hasVoice || hasAudio) {
+              mediaTypes.push(hasVoice ? "audio/ogg" : (tgMimeType || "audio/mpeg"));
+              // Auto-transcribe voice/audio via Whisper STT
+              try {
+                const audioResp = await fetch(fileUrl);
+                const audioBytes = new Uint8Array(await audioResp.arrayBuffer());
+                const whisperResult = await env.AI.run("@cf/openai/whisper" as any, { audio: [...audioBytes] }) as any;
+                const transcript = whisperResult?.text || "";
+                if (transcript) {
+                  inputParts.push(`[Voice message transcription]: ${transcript}`);
+                } else {
+                  inputParts.push(hasVoice ? "[User sent a voice message — transcription failed]" : `[User sent audio${tgFileName ? ": " + tgFileName : ""}]`);
+                }
+              } catch {
+                inputParts.push(hasVoice ? "[User sent a voice message]" : `[User sent audio${tgFileName ? ": " + tgFileName : ""}]`);
+              }
+            }
             else if (hasDocument) {
               mediaTypes.push(tgMimeType || "application/octet-stream");
               inputParts.push(`[User sent document: ${tgFileName || "file"}]`);

@@ -164,7 +164,7 @@ export default function AgentActivityPage() {
       <AgentNav agentName={agent.name} />
 
       {/* Stats row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
         <StatCard icon={<MessageSquare size={14} className="text-primary" />} label="Sessions" value={totalSessions} />
         <StatCard icon={<Clock size={14} className="text-warning" />} label="Avg latency" value={avgLatencyMs > 0 ? `${avgLatencyMs}ms` : "—"} />
         <StatCard icon={<TrendingUp size={14} className="text-success" />} label="Success rate" value={`${successRate}%`} />
@@ -173,7 +173,7 @@ export default function AgentActivityPage() {
 
       {/* Charts — only show if we have data */}
       {chartData.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-6">
           <Card>
             <p className="text-sm font-medium text-text mb-3">Sessions by day</p>
             <SimpleChart
@@ -194,8 +194,8 @@ export default function AgentActivityPage() {
       )}
 
       {/* Sessions list */}
-      <h2 className="text-lg font-medium text-text mb-4">Recent Sessions</h2>
-      <div className="bg-white rounded-xl border border-border divide-y divide-border">
+      <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide mb-3">Recent Sessions</h2>
+      <div className="bg-surface rounded-xl border border-border divide-y divide-border">
         {sessions.length === 0 && (
           <EmptyState
             icon={<MessageSquare size={24} />}
@@ -292,7 +292,7 @@ export default function AgentActivityPage() {
                         )}
                         {turn.content && (
                           <div className="flex justify-start">
-                            <div className="max-w-[75%] px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 text-text text-xs whitespace-pre-wrap">
+                            <div className="max-w-[75%] px-3 py-2 rounded-xl rounded-bl-sm bg-surface-alt text-text text-xs whitespace-pre-wrap">
                               {turn.content}
                             </div>
                           </div>
@@ -302,7 +302,7 @@ export default function AgentActivityPage() {
                     {/* Final output (if no turns or turns didn't capture it) */}
                     {transcript.output && transcript.turns.length === 0 && (
                       <div className="flex justify-start">
-                        <div className="max-w-[75%] px-3 py-2 rounded-xl rounded-bl-sm bg-gray-100 text-text text-xs whitespace-pre-wrap">
+                        <div className="max-w-[75%] px-3 py-2 rounded-xl rounded-bl-sm bg-surface-alt text-text text-xs whitespace-pre-wrap">
                           {transcript.output}
                         </div>
                       </div>

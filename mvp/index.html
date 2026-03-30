@@ -25,6 +25,10 @@
     <title>OneShots — The Open Agent Economy</title>
   </head>
   <body>
+    <script>
+      // Prevent flash of wrong theme — runs before React mounts
+      (function(){var t=localStorage.getItem("oneshots_theme")||"system";var d=t==="system"?window.matchMedia("(prefers-color-scheme:dark)").matches:t==="dark";if(d)document.documentElement.classList.add("dark")})();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -28,6 +28,35 @@
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
 }
 
+/* ── Dark mode — warm slate palette inspired by Perplexity ────── */
+.dark {
+  --color-primary: #6b8afd;
+  --color-primary-hover: #8ba4fe;
+  --color-primary-light: rgba(107, 138, 253, 0.12);
+  --color-surface: #1e2022;
+  --color-surface-alt: #171919;
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-text: #e8e8e6;
+  --color-text-secondary: #9b9b97;
+  --color-text-muted: #6b6b67;
+  --color-success: #34d399;
+  --color-success-light: rgba(52, 211, 153, 0.12);
+  --color-success-dark: #6ee7b7;
+  --color-warning: #fbbf24;
+  --color-warning-light: rgba(251, 191, 36, 0.12);
+  --color-warning-dark: #fcd34d;
+  --color-danger: #f87171;
+  --color-danger-light: rgba(248, 113, 113, 0.10);
+  --color-danger-dark: #fca5a5;
+  --color-info: #6b8afd;
+  --color-info-light: rgba(107, 138, 253, 0.10);
+  --color-info-dark: #a5b4fc;
+  --color-neutral-light: #262829;
+  --color-neutral: #9b9b97;
+  --color-neutral-dark: #d4d4cf;
+  color-scheme: dark;
+}
+
 body {
   font-family: var(--font-sans);
   font-feature-settings: "cv02", "cv03", "cv11";

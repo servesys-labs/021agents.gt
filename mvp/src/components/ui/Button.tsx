@@ -7,9 +7,9 @@ const base = "inline-flex items-center justify-center font-medium rounded-lg tra
 
 const variants: Record<Variant, string> = {
   primary: "bg-primary text-white hover:bg-primary-hover focus:ring-primary",
-  secondary: "bg-white text-text border border-border hover:bg-surface-alt focus:ring-primary",
+  secondary: "bg-surface text-text border border-border hover:bg-surface-alt focus:ring-primary",
   ghost: "text-text-secondary hover:bg-surface-alt focus:ring-primary",
-  danger: "bg-danger text-white hover:bg-red-600 focus:ring-danger",
+  danger: "bg-danger text-white hover:bg-danger focus:ring-danger",
 };
 
 const sizes: Record<Size, string> = {

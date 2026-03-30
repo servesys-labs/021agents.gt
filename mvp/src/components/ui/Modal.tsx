@@ -33,7 +33,7 @@ export function Modal({ open, onClose, title, children, wide }: ModalProps) {
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm animate-[fadeIn_150ms_ease-out]"
       onClick={(e) => e.target === overlayRef.current && onClose()}
     >
-      <div className={`bg-white rounded-xl shadow-xl border border-border mx-4 ${wide ? "max-w-2xl" : "max-w-md"} w-full max-h-[85vh] overflow-y-auto animate-[slideUp_200ms_ease-out]`}>
+      <div className={`bg-surface rounded-xl shadow-xl border border-border mx-4 ${wide ? "max-w-2xl" : "max-w-md"} w-full max-h-[85vh] overflow-y-auto animate-[slideUp_200ms_ease-out]`}>
         {title && (
           <div className="flex items-center justify-between px-5 py-4 border-b border-border">
             <h2 className="text-lg font-semibold">{title}</h2>

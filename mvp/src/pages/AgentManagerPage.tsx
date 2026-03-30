@@ -192,7 +192,7 @@ export default function AgentManagerPage() {
             if (msg.isToolActivity) {
               return (
                 <div key={msg.id} className="flex justify-start animate-[fadeInUp_200ms_ease-out]">
-                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-50 border border-amber-200 text-xs text-amber-700">
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-warning-light border border-warning text-xs text-warning-dark">
                     <Wrench size={12} />
                     {msg.content}
                   </div>
@@ -220,7 +220,7 @@ export default function AgentManagerPage() {
 
           {loading && (
             <div className="flex justify-start">
-              <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3">
+              <div className="bg-surface-alt rounded-2xl rounded-bl-md px-4 py-3">
                 <div className="flex items-center gap-2 text-xs text-text-secondary">
                   <Loader2 size={14} className="animate-spin" />
                   Analyzing your agent...
@@ -231,7 +231,7 @@ export default function AgentManagerPage() {
 
           {error && (
             <div className="flex justify-start">
-              <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-4 py-2.5 rounded-2xl rounded-bl-md max-w-[80%]">
+              <div className="bg-danger-light border border-danger text-danger text-sm px-4 py-2.5 rounded-2xl rounded-bl-md max-w-[80%]">
                 {error}
               </div>
             </div>
@@ -241,7 +241,7 @@ export default function AgentManagerPage() {
         </div>
 
         {/* Input */}
-        <div className="border-t border-border px-4 py-3 bg-white">
+        <div className="border-t border-border px-4 py-3 bg-surface">
           <form onSubmit={handleSubmit} className="flex items-end gap-2">
             <textarea
               ref={textareaRef}
