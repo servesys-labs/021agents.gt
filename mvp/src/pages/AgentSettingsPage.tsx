@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Check, RefreshCw, Loader2, Trash2 } from "lucide-react";
+import { Check, RefreshCw, Loader2, Trash2, ChevronDown, ChevronUp } from "lucide-react";
 import { Button } from "../components/ui/Button";
 import { AgentNav } from "../components/AgentNav";
 import { AgentNotFound } from "../components/AgentNotFound";
-import { TabNav } from "../components/ui/TabNav";
+
 import { Input } from "../components/ui/Input";
 import { Textarea } from "../components/ui/Textarea";
 import { Card } from "../components/ui/Card";
@@ -46,8 +46,6 @@ interface AgentDetail {
   version: number;
 }
 
-type Tab = "general" | "behavior" | "tools" | "handoff" | "deploy";
-
 export default function AgentSettingsPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -58,7 +56,7 @@ export default function AgentSettingsPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [tab, setTab] = useState<Tab>("general");
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [description, setDescription] = useState("");
   const [persona, setPersona] = useState("");
   const [tone, setTone] = useState("friendly");
@@ -206,25 +204,17 @@ export default function AgentSettingsPage() {
 
   if (!agent) return <AgentNotFound />;
 
-  const tabs: { key: Tab; label: string }[] = [
-    { key: "general", label: "General" },
-    { key: "behavior", label: "Behavior" },
-    { key: "tools", label: "Tools" },
-    { key: "handoff", label: "Live Handoff" },
-    { key: "deploy", label: "Deployment" },
-  ];
-
   return (
     <div>
       <AgentNav agentName={agent.name} />
 
-      <TabNav tabs={tabs} active={tab} onChange={(k) => setTab(k as Tab)} />
-
-      {tab === "general" && (
-        <div className="space-y-4 max-w-lg">
+      <div className="space-y-6 max-w-lg">
+        {/* ── Essentials (always visible) ── */}
+        <div className="space-y-4">
           <Input label="Agent name" value={agent.name} disabled />
           <Input label="Description" value={description} onChange={(e) => setDescription(e.target.value)} />
 
+          {/* Plan selector */}
           <div className="space-y-1.5">
             <label className="block text-sm font-medium text-text">LLM Plan</label>
             <p className="text-xs text-text-secondary mb-2">
@@ -255,225 +245,7 @@ export default function AgentSettingsPage() {
             </div>
           </div>
 
-          <Input
-            label="Model"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="anthropic/claude-sonnet-4-6 (leave empty for plan default)"
-          />
-
-          <div className="grid grid-cols-2 gap-4">
-            <Input
-              label="Budget limit (USD per session)"
-              type="number"
-              min={0}
-              max={10000}
-              step={0.5}
-              value={String(budgetLimitUsd)}
-              onChange={(e) => setBudgetLimitUsd(Number(e.target.value))}
-            />
-            <Input
-              label="Max turns per session"
-              type="number"
-              min={1}
-              max={1000}
-              value={String(maxTurns)}
-              onChange={(e) => setMaxTurns(Number(e.target.value))}
-            />
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-text">Reasoning Strategy</label>
-            <p className="text-xs text-text-secondary mb-2">
-              How the agent thinks before acting. "Auto" selects based on task complexity.
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {[
-                { key: "", label: "Auto" },
-                { key: "chain-of-thought", label: "Chain of Thought" },
-                { key: "plan-then-execute", label: "Plan Then Execute" },
-                { key: "step-back", label: "Step-Back" },
-                { key: "decompose", label: "Decompose" },
-                { key: "verify-then-respond", label: "Verify" },
-              ].map((s) => (
-                <button
-                  key={s.key}
-                  onClick={() => setReasoningStrategy(s.key)}
-                  className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-                    reasoningStrategy === s.key
-                      ? "border-primary bg-primary-light text-primary"
-                      : "border-border text-text-secondary hover:border-gray-300"
-                  }`}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <Card className="border-red-200 bg-red-50/40">
-            <p className="text-sm font-medium text-text">Remove assistant</p>
-            <p className="text-xs text-text-secondary mt-1 leading-relaxed">
-              This deactivates the agent for your organization. Data may be retained per your plan; contact support for a full data purge if needed.
-            </p>
-            <Button
-              type="button"
-              variant="danger"
-              size="sm"
-              className="mt-3"
-              disabled={deleting}
-              onClick={handleDelete}
-            >
-              {deleting ? (
-                <>
-                  <Loader2 size={14} className="animate-spin" /> Removing…
-                </>
-              ) : (
-                <>
-                  <Trash2 size={14} /> Remove assistant
-                </>
-              )}
-            </Button>
-          </Card>
-        </div>
-      )}
-
-      {tab === "behavior" && (
-        <div className="space-y-4 max-w-lg">
-          <Textarea label="Persona / System prompt" value={persona} onChange={(e) => setPersona(e.target.value)} rows={6} />
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-text">Tone</label>
-            <div className="flex gap-2">
-              {["friendly", "professional", "casual"].map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setTone(t)}
-                  className={`px-4 py-2 rounded-lg border text-sm font-medium capitalize transition-colors ${
-                    tone === t ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary"
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="space-y-1.5">
-            <label className="block text-sm font-medium text-text">Response length</label>
-            <div className="flex gap-2">
-              {["short", "medium", "detailed"].map((l) => (
-                <button
-                  key={l}
-                  onClick={() => setResponseLength(l)}
-                  className={`px-4 py-2 rounded-lg border text-sm font-medium capitalize transition-colors ${
-                    responseLength === l ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary"
-                  }`}
-                >
-                  {l}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {tab === "tools" && (
-        <div className="space-y-3 max-w-lg">
-          <p className="text-xs text-text-secondary">
-            Select which tools this agent can use. Tools are validated against the runtime catalog.
-          </p>
-          <div className="grid grid-cols-2 gap-3">
-            {TOOLS.map((tool) => {
-              const selected = tools.includes(tool.id);
-              return (
-                <button
-                  key={tool.id}
-                  onClick={() => toggleTool(tool.id)}
-                  className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
-                    selected ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
-                  }`}
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-text">{tool.label}</p>
-                    <p className="text-[10px] text-text-muted">{tool.desc}</p>
-                  </div>
-                  {selected && <Check size={16} className="text-primary shrink-0" />}
-                </button>
-              );
-            })}
-          </div>
-          <p className="text-xs text-text-muted">
-            Selected: {tools.length} tools ({tools.join(", ") || "none"})
-          </p>
-        </div>
-      )}
-
-      {tab === "handoff" && (
-        <div className="space-y-4 max-w-lg">
-          <Card>
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-text">Enable live handoff</p>
-                <p className="text-xs text-text-secondary mt-0.5">
-                  When the agent can't handle a request, escalate to a human
-                </p>
-              </div>
-              <button
-                onClick={() => setHandoffEnabled(!handoffEnabled)}
-                className={`relative w-11 h-6 rounded-full transition-colors ${handoffEnabled ? "bg-success" : "bg-gray-200"}`}
-              >
-                <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${handoffEnabled ? "translate-x-5" : ""}`} />
-              </button>
-            </div>
-          </Card>
-
-          {handoffEnabled && (
-            <>
-              <div className="space-y-1.5">
-                <label className="block text-sm font-medium text-text">Escalation triggers</label>
-                <p className="text-xs text-text-muted mb-2">When should the agent hand off to a human?</p>
-                <div className="flex flex-wrap gap-2">
-                  {["angry_customer", "refund_request", "complex_order", "billing_issue", "technical_problem", "custom_request"].map((trigger) => (
-                    <button
-                      key={trigger}
-                      onClick={() =>
-                        setHandoffTriggers((prev) =>
-                          prev.includes(trigger) ? prev.filter((t) => t !== trigger) : [...prev, trigger],
-                        )
-                      }
-                      className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-                        handoffTriggers.includes(trigger)
-                          ? "border-primary bg-primary-light text-primary"
-                          : "border-border text-text-secondary hover:border-gray-300"
-                      }`}
-                    >
-                      {trigger.replace(/_/g, " ")}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <Textarea
-                label="Handoff message"
-                value={handoffMessage}
-                onChange={(e) => setHandoffMessage(e.target.value)}
-                rows={3}
-              />
-
-              <p className="text-xs font-medium text-text mt-4 mb-2">Notify via</p>
-              <Input label="Email" placeholder="support@yourbusiness.com" value={handoffEmail} onChange={(e) => setHandoffEmail(e.target.value)} />
-              <Input label="SMS / Phone" placeholder="+1 555 000 0000" value={handoffPhone} onChange={(e) => setHandoffPhone(e.target.value)} />
-              <Input label="Slack channel" placeholder="#support-alerts" value={handoffSlack} onChange={(e) => setHandoffSlack(e.target.value)} />
-
-              <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
-                When triggered, the agent will send the handoff message to the customer and notify you via your preferred channels with the conversation context.
-              </div>
-            </>
-          )}
-        </div>
-      )}
-
-      {tab === "deploy" && (
-        <div className="space-y-4 max-w-lg">
+          {/* Status toggle */}
           <Card>
             <div className="flex items-center justify-between">
               <div>
@@ -490,23 +262,260 @@ export default function AgentSettingsPage() {
               </button>
             </div>
           </Card>
-          <Card>
-            <p className="text-sm font-medium text-text mb-2">Widget embed code</p>
-            <code className="block bg-surface-alt rounded-lg p-3 text-xs text-text-secondary break-all">
-              {`<script src="https://oneshots.co/widget/${id}.js"></script>`}
-            </code>
-          </Card>
-          <Card>
-            <p className="text-sm font-medium text-text mb-1">API endpoint</p>
-            <Badge variant="info">{`POST /api/v1/agents/${id}/chat`}</Badge>
-          </Card>
         </div>
-      )}
 
-      <div className="mt-8">
-        <Button onClick={handleSave} disabled={saving}>
-          {saving ? <><Loader2 size={14} className="animate-spin" /> Saving...</> : "Save Changes"}
-        </Button>
+        {/* ── Advanced settings toggle ── */}
+        <button
+          onClick={() => setShowAdvanced(!showAdvanced)}
+          className="flex items-center gap-2 text-sm font-medium text-text-secondary hover:text-text transition-colors"
+        >
+          {showAdvanced ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+          {showAdvanced ? "Hide advanced settings" : "Show advanced settings"}
+        </button>
+
+        {showAdvanced && (
+          <div className="space-y-6 border-t border-border pt-6">
+            {/* Behavior */}
+            <div className="space-y-4">
+              <h3 className="text-sm font-semibold text-text">Behavior</h3>
+              <Textarea label="Persona / System prompt" value={persona} onChange={(e) => setPersona(e.target.value)} rows={6} />
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-text">Tone</label>
+                <div className="flex gap-2">
+                  {["friendly", "professional", "casual"].map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setTone(t)}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium capitalize transition-colors ${
+                        tone === t ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary"
+                      }`}
+                    >
+                      {t}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-text">Response length</label>
+                <div className="flex gap-2">
+                  {["short", "medium", "detailed"].map((l) => (
+                    <button
+                      key={l}
+                      onClick={() => setResponseLength(l)}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium capitalize transition-colors ${
+                        responseLength === l ? "border-primary bg-primary-light text-primary" : "border-border text-text-secondary"
+                      }`}
+                    >
+                      {l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Tools */}
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold text-text">Tools</h3>
+              <p className="text-xs text-text-secondary">
+                Select which tools this agent can use. Tools are validated against the runtime catalog.
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                {TOOLS.map((tool) => {
+                  const selected = tools.includes(tool.id);
+                  return (
+                    <button
+                      key={tool.id}
+                      onClick={() => toggleTool(tool.id)}
+                      className={`flex items-center gap-3 p-3 rounded-lg border text-left transition-colors ${
+                        selected ? "border-primary bg-primary-light" : "border-border hover:border-gray-300"
+                      }`}
+                    >
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-text">{tool.label}</p>
+                        <p className="text-[10px] text-text-muted">{tool.desc}</p>
+                      </div>
+                      {selected && <Check size={16} className="text-primary shrink-0" />}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-xs text-text-muted">
+                Selected: {tools.length} tools ({tools.join(", ") || "none"})
+              </p>
+            </div>
+
+            {/* Model & Limits */}
+            <div className="space-y-4">
+              <h3 className="text-sm font-semibold text-text">Model & Limits</h3>
+              <Input
+                label="Model override"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="anthropic/claude-sonnet-4-6 (leave empty for plan default)"
+              />
+              <div className="grid grid-cols-2 gap-4">
+                <Input
+                  label="Budget limit (USD per session)"
+                  type="number"
+                  min={0}
+                  max={10000}
+                  step={0.5}
+                  value={String(budgetLimitUsd)}
+                  onChange={(e) => setBudgetLimitUsd(Number(e.target.value))}
+                />
+                <Input
+                  label="Max turns per session"
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={String(maxTurns)}
+                  onChange={(e) => setMaxTurns(Number(e.target.value))}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-text">Reasoning Strategy</label>
+                <p className="text-xs text-text-secondary mb-2">
+                  How the agent thinks before acting. "Auto" selects based on task complexity.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {[
+                    { key: "", label: "Auto" },
+                    { key: "chain-of-thought", label: "Chain of Thought" },
+                    { key: "plan-then-execute", label: "Plan Then Execute" },
+                    { key: "step-back", label: "Step-Back" },
+                    { key: "decompose", label: "Decompose" },
+                    { key: "verify-then-respond", label: "Verify" },
+                  ].map((s) => (
+                    <button
+                      key={s.key}
+                      onClick={() => setReasoningStrategy(s.key)}
+                      className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                        reasoningStrategy === s.key
+                          ? "border-primary bg-primary-light text-primary"
+                          : "border-border text-text-secondary hover:border-gray-300"
+                      }`}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Live Handoff */}
+            <div className="space-y-4">
+              <h3 className="text-sm font-semibold text-text">Live Handoff</h3>
+              <Card>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-text">Enable live handoff</p>
+                    <p className="text-xs text-text-secondary mt-0.5">
+                      When the agent can't handle a request, escalate to a human
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => setHandoffEnabled(!handoffEnabled)}
+                    className={`relative w-11 h-6 rounded-full transition-colors ${handoffEnabled ? "bg-success" : "bg-gray-200"}`}
+                  >
+                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform ${handoffEnabled ? "translate-x-5" : ""}`} />
+                  </button>
+                </div>
+              </Card>
+
+              {handoffEnabled && (
+                <>
+                  <div className="space-y-1.5">
+                    <label className="block text-sm font-medium text-text">Escalation triggers</label>
+                    <p className="text-xs text-text-muted mb-2">When should the agent hand off to a human?</p>
+                    <div className="flex flex-wrap gap-2">
+                      {["angry_customer", "refund_request", "complex_order", "billing_issue", "technical_problem", "custom_request"].map((trigger) => (
+                        <button
+                          key={trigger}
+                          onClick={() =>
+                            setHandoffTriggers((prev) =>
+                              prev.includes(trigger) ? prev.filter((t) => t !== trigger) : [...prev, trigger],
+                            )
+                          }
+                          className={`px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
+                            handoffTriggers.includes(trigger)
+                              ? "border-primary bg-primary-light text-primary"
+                              : "border-border text-text-secondary hover:border-gray-300"
+                          }`}
+                        >
+                          {trigger.replace(/_/g, " ")}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <Textarea
+                    label="Handoff message"
+                    value={handoffMessage}
+                    onChange={(e) => setHandoffMessage(e.target.value)}
+                    rows={3}
+                  />
+
+                  <p className="text-xs font-medium text-text mt-4 mb-2">Notify via</p>
+                  <Input label="Email" placeholder="support@yourbusiness.com" value={handoffEmail} onChange={(e) => setHandoffEmail(e.target.value)} />
+                  <Input label="SMS / Phone" placeholder="+1 555 000 0000" value={handoffPhone} onChange={(e) => setHandoffPhone(e.target.value)} />
+                  <Input label="Slack channel" placeholder="#support-alerts" value={handoffSlack} onChange={(e) => setHandoffSlack(e.target.value)} />
+
+                  <div className="bg-blue-50 rounded-lg p-3 text-xs text-blue-700">
+                    When triggered, the agent will send the handoff message to the customer and notify you via your preferred channels with the conversation context.
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Deployment */}
+            <div className="space-y-4">
+              <h3 className="text-sm font-semibold text-text">Deployment</h3>
+              <Card>
+                <p className="text-sm font-medium text-text mb-2">Widget embed code</p>
+                <code className="block bg-surface-alt rounded-lg p-3 text-xs text-text-secondary break-all">
+                  {`<script src="https://oneshots.co/widget/${id}.js"></script>`}
+                </code>
+              </Card>
+              <Card>
+                <p className="text-sm font-medium text-text mb-1">API endpoint</p>
+                <Badge variant="info">{`POST /api/v1/agents/${id}/chat`}</Badge>
+              </Card>
+            </div>
+          </div>
+        )}
+
+        {/* ── Delete (always at bottom) ── */}
+        <Card className="border-red-200 bg-red-50/40">
+          <p className="text-sm font-medium text-text">Remove assistant</p>
+          <p className="text-xs text-text-secondary mt-1 leading-relaxed">
+            This deactivates the agent for your organization. Data may be retained per your plan; contact support for a full data purge if needed.
+          </p>
+          <Button
+            type="button"
+            variant="danger"
+            size="sm"
+            className="mt-3"
+            disabled={deleting}
+            onClick={handleDelete}
+          >
+            {deleting ? (
+              <>
+                <Loader2 size={14} className="animate-spin" /> Removing…
+              </>
+            ) : (
+              <>
+                <Trash2 size={14} /> Remove assistant
+              </>
+            )}
+          </Button>
+        </Card>
+
+        {/* Save */}
+        <div>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? <><Loader2 size={14} className="animate-spin" /> Saving...</> : "Save Changes"}
+          </Button>
+        </div>
       </div>
     </div>
   );

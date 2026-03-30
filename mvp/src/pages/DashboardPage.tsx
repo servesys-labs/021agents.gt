@@ -163,47 +163,17 @@ export default function DashboardPage() {
           {agents.map((agent) => {
             const path = agentPathSegment(agent.agent_id || agent.name);
             return (
-              <Card key={agent.agent_id || agent.name} hover onClick={() => navigate(`/agents/${path}/activity`)}>
-                <div className="flex items-start justify-between gap-3 mb-3">
+              <Card key={agent.agent_id || agent.name} hover onClick={() => navigate(`/agents/${path}/play`)}>
+                <div className="flex items-start justify-between gap-3 mb-2">
                   <div className="min-w-0">
                     <h3 className="text-sm font-semibold text-text truncate">{agent.name}</h3>
-                    <p className="text-xs text-text-secondary mt-0.5 line-clamp-2">{agent.description || "—"}</p>
+                    <p className="text-xs text-text-secondary mt-0.5 line-clamp-2">{agent.description || "No description"}</p>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      title="Remove assistant"
-                      disabled={removingName === agent.name}
-                      onClick={(e) => removeAgent(e, agent)}
-                      className="p-1.5 rounded-lg text-text-muted hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
-                    >
-                      {removingName === agent.name ? (
-                        <Loader2 size={16} className="animate-spin" />
-                      ) : (
-                        <Trash2 size={16} />
-                      )}
-                    </button>
-                    <Badge variant={agent.is_active ? "success" : "default"}>{agent.is_active ? "Live" : "Inactive"}</Badge>
-                  </div>
+                  <Badge variant={agent.is_active ? "success" : "default"}>{agent.is_active ? "Live" : "Draft"}</Badge>
                 </div>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-muted">
-                  <span>v{agent.version}</span>
-                  {(agent.config_json?.model || agent.model) && (
-                    <span>{(agent.config_json?.model || agent.model || "").split("/").pop()}</span>
-                  )}
-                  {agent.config_json?.plan && (
-                    <span className="capitalize">{agent.config_json.plan}</span>
-                  )}
-                  {((agent.config_json?.tools || agent.tools || []).length > 0) && (
-                    <span className="truncate max-w-[200px]" title={(agent.config_json?.tools || agent.tools || []).join(", ")}>
-                      {(agent.config_json?.tools || agent.tools || []).length} tool{(agent.config_json?.tools || agent.tools || []).length === 1 ? "" : "s"}
-                    </span>
-                  )}
-                </div>
-                <div className="flex flex-wrap gap-2 mt-4">
+                <div className="flex items-center gap-2 mt-3">
                   <Button
                     size="sm"
-                    variant="secondary"
                     onClick={(e) => {
                       e.stopPropagation();
                       navigate(`/agents/${path}/play`);
@@ -216,21 +186,24 @@ export default function DashboardPage() {
                     variant="ghost"
                     onClick={(e) => {
                       e.stopPropagation();
-                      navigate(`/agents/${path}/flow`);
+                      navigate(`/agents/${path}/settings`);
                     }}
                   >
-                    Edit flow
+                    Settings
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      navigate(`/agents/${path}/tests`);
-                    }}
+                  <button
+                    type="button"
+                    title="Remove assistant"
+                    disabled={removingName === agent.name}
+                    onClick={(e) => removeAgent(e, agent)}
+                    className="ml-auto p-1.5 rounded-lg text-text-muted hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-50"
                   >
-                    Evals
-                  </Button>
+                    {removingName === agent.name ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <Trash2 size={14} />
+                    )}
+                  </button>
                 </div>
               </Card>
             );

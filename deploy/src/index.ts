@@ -3056,7 +3056,7 @@ export default {
     // Bot token loaded from Supabase per-agent (channel_config table) or env fallback.
     // Runs on main worker because dispatch workers can't call back to main (CF routing).
     const telegramMatch = url.pathname.match(/^\/chat\/telegram\/([a-zA-Z0-9_-]+)\/webhook$/);
-    if ((telegramMatch || url.pathname === "/chat/telegram/webhook") && request.method === "POST") {
+    if ((telegramMatch || url.pathname === "/chat/telegram/webhook" || url.pathname === "/api/v1/chat/telegram/webhook") && request.method === "POST") {
       const agentName = telegramMatch?.[1] || env.TELEGRAM_AGENT_NAME || "my-assistant";
 
       // Load bot token + org_id: try Supabase first, fall back to env
