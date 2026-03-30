@@ -48,6 +48,13 @@ export interface Env extends Cloudflare.Env {
   BRAVE_SEARCH_KEY?: string;     // Brave Search API key
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_AGENT_NAME?: string;
+  WHATSAPP_APP_SECRET?: string;   // Meta HMAC verification for WhatsApp webhooks
+  WHATSAPP_VERIFY_TOKEN?: string; // Meta handshake verification token
+  SLACK_SIGNING_SECRET?: string;  // Slack request signature verification
+  INSTAGRAM_APP_SECRET?: string;  // Meta HMAC verification for Instagram webhooks
+  INSTAGRAM_VERIFY_TOKEN?: string;// Meta handshake verification token for Instagram
+  FACEBOOK_APP_SECRET?: string;   // Meta HMAC verification for Messenger webhooks
+  FACEBOOK_VERIFY_TOKEN?: string; // Meta handshake verification token for Messenger
   ENABLE_LANGCHAIN_TOOLS?: string;
   VAPI_API_KEY?: string;         // Vapi API key (for make-voice-call tool)
   AGENT_RUN_WORKFLOW?: any;      // Cloudflare Workflow for durable agent runs
@@ -3254,6 +3261,711 @@ export default {
 
       // Return immediately — Telegram gets 200 OK, agent runs in background
       return Response.json({ ok: true });
+    }
+
+    // ── WhatsApp Cloud API Webhook ──────────────────────────────
+    // Handles: text, image, document, audio, video, location, contacts
+    if ((url.pathname === "/chat/whatsapp/webhook" || url.pathname === "/api/v1/chat/whatsapp/webhook") && request.method === "POST") {
+      const rawBody = await request.arrayBuffer();
+
+      // GET = Meta verification handshake
+      // (handled below for GET)
+
+      // Signature verification
+      const sig = request.headers.get("x-hub-signature-256") ?? "";
+      const appSecret = env.WHATSAPP_APP_SECRET ?? "";
+      if (appSecret && sig) {
+        const expected = sig.startsWith("sha256=") ? sig.slice(7) : sig;
+        try {
+          const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(appSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+          const mac = await crypto.subtle.sign("HMAC", key, rawBody);
+          const hex = [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, "0")).join("");
+          if (hex !== expected) return Response.json({ error: "Invalid signature" }, { status: 401 });
+        } catch {
+          return Response.json({ error: "Signature verification failed" }, { status: 401 });
+        }
+      }
+
+      let payload: any;
+      try { payload = JSON.parse(new TextDecoder().decode(rawBody)); } catch { return Response.json({ ok: true }); }
+      if (payload.object !== "whatsapp_business_account") return Response.json({ ok: true });
+
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(env.HYPERDRIVE);
+
+      for (const entry of payload.entry || []) {
+        for (const change of entry.changes || []) {
+          if (change.field !== "messages") continue;
+          const value = change.value || {};
+          const phoneNumberId = value.metadata?.phone_number_id || "";
+          const messages = value.messages || [];
+
+          // Resolve org
+          let orgId = "";
+          try {
+            const rows = await sql`SELECT org_id FROM channel_configs WHERE channel = 'whatsapp' AND config->>'phone_number_id' = ${phoneNumberId} AND is_active = true LIMIT 1`;
+            if (rows.length > 0) orgId = String(rows[0].org_id);
+          } catch {}
+          if (!orgId) continue;
+
+          // Get access token
+          let waToken = "";
+          try {
+            const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'WHATSAPP_ACCESS_TOKEN' AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`;
+            if (rows.length > 0) waToken = String(rows[0].value_encrypted);
+          } catch {}
+          if (!waToken) continue;
+
+          // Resolve agent
+          let waAgentName = "";
+          try {
+            const rows = await sql`SELECT agent_name FROM channel_configs WHERE org_id = ${orgId} AND channel = 'whatsapp' AND is_active = true LIMIT 1`;
+            waAgentName = rows[0]?.agent_name || "";
+          } catch {}
+          if (!waAgentName) {
+            try {
+              const rows = await sql`SELECT name FROM agents WHERE org_id = ${orgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+              waAgentName = rows[0]?.name || "whatsapp-bot";
+            } catch {}
+          }
+
+          for (const msg of messages) {
+            const from = String(msg.from || "");
+            const msgId = msg.id || "";
+            const msgType = msg.type || "";
+
+            // Mark as read
+            if (msgId) {
+              fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${waToken}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ messaging_product: "whatsapp", status: "read", message_id: msgId }),
+              }).catch(() => {});
+            }
+
+            // Build input
+            const inputParts: string[] = [];
+            const waMediaUrls: string[] = [];
+            const waMediaTypes: string[] = [];
+
+            if (msgType === "text" && msg.text?.body) {
+              inputParts.push(String(msg.text.body));
+            } else if (msgType === "image" && msg.image) {
+              if (msg.image.caption) inputParts.push(String(msg.image.caption));
+              inputParts.push("[User sent an image]");
+              try {
+                const mediaResp = await fetch(`https://graph.facebook.com/v21.0/${msg.image.id}`, { headers: { Authorization: `Bearer ${waToken}` } });
+                const mediaData = await mediaResp.json() as any;
+                if (mediaData.url) { waMediaUrls.push(mediaData.url); waMediaTypes.push(mediaData.mime_type || "image/jpeg"); }
+              } catch {}
+            } else if (msgType === "document" && msg.document) {
+              if (msg.document.caption) inputParts.push(String(msg.document.caption));
+              inputParts.push(`[User sent document: ${msg.document.filename || "file"}]`);
+              try {
+                const mediaResp = await fetch(`https://graph.facebook.com/v21.0/${msg.document.id}`, { headers: { Authorization: `Bearer ${waToken}` } });
+                const mediaData = await mediaResp.json() as any;
+                if (mediaData.url) { waMediaUrls.push(mediaData.url); waMediaTypes.push(mediaData.mime_type || "application/octet-stream"); }
+              } catch {}
+            } else if (msgType === "audio" && msg.audio) {
+              inputParts.push("[User sent an audio message]");
+              try {
+                const mediaResp = await fetch(`https://graph.facebook.com/v21.0/${msg.audio.id}`, { headers: { Authorization: `Bearer ${waToken}` } });
+                const mediaData = await mediaResp.json() as any;
+                if (mediaData.url) { waMediaUrls.push(mediaData.url); waMediaTypes.push(mediaData.mime_type || "audio/ogg"); }
+              } catch {}
+            } else if (msgType === "video" && msg.video) {
+              if (msg.video.caption) inputParts.push(String(msg.video.caption));
+              inputParts.push("[User sent a video]");
+            } else if (msgType === "location" && msg.location) {
+              inputParts.push(`[User shared location: ${msg.location.latitude}, ${msg.location.longitude}${msg.location.name ? " — " + msg.location.name : ""}]`);
+            } else if (msgType === "contacts" && msg.contacts?.length) {
+              for (const contact of msg.contacts) {
+                inputParts.push(`[User shared contact: ${contact.name?.formatted_name || "Unknown"}${contact.phones?.[0]?.phone ? " " + contact.phones[0].phone : ""}]`);
+              }
+            } else if (msgType === "reaction") {
+              continue;
+            } else {
+              continue;
+            }
+
+            const waInput = inputParts.join("\n");
+            if (!waInput) continue;
+
+            // Run in background
+            ctx.waitUntil((async () => {
+              try {
+                const result = await runViaAgent(env, waAgentName, waInput, {
+                  org_id: orgId,
+                  channel: "whatsapp",
+                  channel_user_id: from,
+                  ...(waMediaUrls.length ? { media_urls: waMediaUrls, media_types: waMediaTypes } : {}),
+                });
+                let output = result.output || "";
+                if (!output && result.error) output = "Sorry, I couldn't process that.";
+                if (!output) return;
+                // Chunked reply
+                const chunks = tgChunkMessage(output, 4096);
+                for (let i = 0; i < chunks.length; i++) {
+                  const body: any = { messaging_product: "whatsapp", to: from, type: "text", text: { body: chunks[i] } };
+                  if (i === 0 && msgId) body.context = { message_id: msgId };
+                  await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+                    method: "POST",
+                    headers: { Authorization: `Bearer ${waToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                  }).catch(() => {});
+                }
+              } catch {}
+            })());
+          }
+        }
+      }
+      return Response.json({ ok: true });
+    }
+
+    // GET /chat/whatsapp/webhook — Meta verification handshake
+    if ((url.pathname === "/chat/whatsapp/webhook" || url.pathname === "/api/v1/chat/whatsapp/webhook") && request.method === "GET") {
+      const verifyToken = env.WHATSAPP_VERIFY_TOKEN || "agentos-whatsapp-verify";
+      const mode = url.searchParams.get("hub.mode");
+      const token = url.searchParams.get("hub.verify_token");
+      const challenge = url.searchParams.get("hub.challenge");
+      if (mode === "subscribe" && token === verifyToken) {
+        return new Response(challenge || "", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }
+      return Response.json({ error: "Verification failed" }, { status: 403 });
+    }
+
+    // ── Slack Events API Webhook ──────────────────────────────────
+    if ((url.pathname === "/chat/slack/webhook" || url.pathname === "/api/v1/chat/slack/webhook") && request.method === "POST") {
+      const rawBody = await request.text();
+
+      // Signature verification
+      const slackSigningSecret = env.SLACK_SIGNING_SECRET ?? "";
+      if (slackSigningSecret) {
+        const ts = request.headers.get("x-slack-request-timestamp") ?? "";
+        const slackSig = request.headers.get("x-slack-signature") ?? "";
+        const basestring = `v0:${ts}:${rawBody}`;
+        try {
+          const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(slackSigningSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+          const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(basestring));
+          const hex = "v0=" + [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, "0")).join("");
+          if (hex !== slackSig) return Response.json({ error: "Invalid signature" }, { status: 401 });
+        } catch {}
+      }
+
+      let slackPayload: any;
+      try { slackPayload = JSON.parse(rawBody); } catch { return Response.json({ ok: true }); }
+
+      // URL verification challenge
+      if (slackPayload.type === "url_verification") {
+        return Response.json({ challenge: slackPayload.challenge });
+      }
+      if (slackPayload.type !== "event_callback") return Response.json({ ok: true });
+
+      const slackEvent = slackPayload.event;
+      if (!slackEvent) return Response.json({ ok: true });
+
+      const isMsg = slackEvent.type === "message" && !slackEvent.bot_id && !slackEvent.subtype && slackEvent.text;
+      const isFileShare = slackEvent.type === "message" && !slackEvent.bot_id && slackEvent.subtype === "file_share";
+      const isMention = slackEvent.type === "app_mention" && slackEvent.text;
+      if (!isMsg && !isMention && !isFileShare) return Response.json({ ok: true });
+
+      const slackTeamId = slackPayload.team_id || "";
+      const slackChannelId = slackEvent.channel || "";
+      const slackUserId = slackEvent.user || "";
+      const slackThreadTs = slackEvent.thread_ts || slackEvent.ts || "";
+
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(env.HYPERDRIVE);
+
+      let slackOrgId = "";
+      try {
+        const rows = await sql`SELECT org_id FROM channel_configs WHERE channel = 'slack' AND config->>'team_id' = ${slackTeamId} AND is_active = true LIMIT 1`;
+        if (rows.length > 0) slackOrgId = String(rows[0].org_id);
+      } catch {}
+      if (!slackOrgId) return Response.json({ ok: true });
+
+      let slackBotToken = "";
+      try {
+        const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'SLACK_BOT_TOKEN' AND org_id = ${slackOrgId} ORDER BY created_at DESC LIMIT 1`;
+        if (rows.length > 0) slackBotToken = String(rows[0].value_encrypted);
+      } catch {}
+      if (!slackBotToken) return Response.json({ ok: true });
+
+      let slackAgentName = "";
+      try {
+        const rows = await sql`SELECT agent_name FROM channel_configs WHERE org_id = ${slackOrgId} AND channel = 'slack' AND is_active = true LIMIT 1`;
+        slackAgentName = rows[0]?.agent_name || "";
+      } catch {}
+      if (!slackAgentName) {
+        try {
+          const rows = await sql`SELECT name FROM agents WHERE org_id = ${slackOrgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+          slackAgentName = rows[0]?.name || "slack-bot";
+        } catch {}
+      }
+
+      // Build input
+      const slackInputParts: string[] = [];
+      const slackMediaUrls: string[] = [];
+      const slackMediaTypes: string[] = [];
+      const cleanSlackText = String(slackEvent.text || "").replace(/<@[A-Z0-9]+>/g, "").trim();
+      if (cleanSlackText) slackInputParts.push(cleanSlackText);
+
+      // Handle file attachments
+      if (slackEvent.files?.length) {
+        for (const file of slackEvent.files) {
+          const mime = file.mimetype || "";
+          const fname = file.name || "file";
+          if (file.url_private) {
+            slackMediaUrls.push(file.url_private);
+            slackMediaTypes.push(mime || "application/octet-stream");
+            if (mime.startsWith("image/")) slackInputParts.push(`[User shared image: ${fname}]`);
+            else slackInputParts.push(`[User shared file: ${fname}]`);
+
+            // Inject text content for readable files
+            if ((mime.startsWith("text/") || /^(txt|md|csv|json|yaml|yml|xml|log|py|js|ts|html|css)$/.test(file.filetype || "")) && (file.size || 0) < 100_000) {
+              try {
+                const dlResp = await fetch(file.url_private, { headers: { Authorization: `Bearer ${slackBotToken}` } });
+                if (dlResp.ok) slackInputParts.push(`[Content of ${fname}]:\n${await dlResp.text()}`);
+              } catch {}
+            }
+          }
+        }
+      }
+
+      const slackInput = slackInputParts.join("\n");
+      if (!slackInput) return Response.json({ ok: true });
+
+      // Run in background
+      ctx.waitUntil((async () => {
+        try {
+          const result = await runViaAgent(env, slackAgentName, slackInput, {
+            org_id: slackOrgId,
+            channel: "slack",
+            channel_user_id: slackUserId,
+            ...(slackMediaUrls.length ? { media_urls: slackMediaUrls, media_types: slackMediaTypes } : {}),
+          });
+          let output = result.output || "";
+          if (!output && result.error) output = "Sorry, I couldn't process that.";
+          if (!output) return;
+          const chunks = tgChunkMessage(output, 3000);
+          for (const chunk of chunks) {
+            await fetch("https://slack.com/api/chat.postMessage", {
+              method: "POST",
+              headers: { Authorization: `Bearer ${slackBotToken}`, "Content-Type": "application/json" },
+              body: JSON.stringify({ channel: slackChannelId, text: chunk, thread_ts: slackThreadTs }),
+            }).catch(() => {});
+          }
+        } catch {}
+      })());
+
+      return Response.json({ ok: true });
+    }
+
+    // ── Instagram DMs Webhook ──────────────────────────────────
+    // Instagram Messaging API (via Meta Graph API) — handles text, images,
+    // story replies, story mentions, shared reels, reactions, likes.
+    if ((url.pathname === "/chat/instagram/webhook" || url.pathname === "/api/v1/chat/instagram/webhook") && request.method === "POST") {
+      const rawBody = await request.arrayBuffer();
+      const sig = request.headers.get("x-hub-signature-256") ?? "";
+      const appSecret = env.INSTAGRAM_APP_SECRET ?? env.FACEBOOK_APP_SECRET ?? "";
+      if (appSecret && sig) {
+        const expected = sig.startsWith("sha256=") ? sig.slice(7) : sig;
+        try {
+          const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(appSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+          const mac = await crypto.subtle.sign("HMAC", key, rawBody);
+          const hex = [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, "0")).join("");
+          if (hex !== expected) return Response.json({ error: "Invalid signature" }, { status: 401 });
+        } catch { return Response.json({ error: "Signature verification failed" }, { status: 401 }); }
+      }
+
+      let igPayload: any;
+      try { igPayload = JSON.parse(new TextDecoder().decode(rawBody)); } catch { return Response.json({ ok: true }); }
+      if (igPayload.object !== "instagram") return Response.json({ ok: true });
+
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(env.HYPERDRIVE);
+
+      for (const entry of igPayload.entry || []) {
+        const igPageUserId = entry.id || "";
+
+        for (const messaging of entry.messaging || []) {
+          const senderId = messaging.sender?.id || "";
+          const recipientId = messaging.recipient?.id || "";
+          if (!senderId || senderId === recipientId) continue;
+
+          // Resolve org
+          let igOrgId = "";
+          try {
+            const rows = await sql`SELECT org_id FROM channel_configs WHERE channel = 'instagram' AND (config->>'page_id' = ${igPageUserId} OR config->>'ig_user_id' = ${recipientId}) AND is_active = true LIMIT 1`;
+            if (rows.length > 0) igOrgId = String(rows[0].org_id);
+          } catch {}
+          if (!igOrgId) continue;
+
+          let igPageToken = "";
+          try {
+            const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'INSTAGRAM_PAGE_TOKEN' AND org_id = ${igOrgId} ORDER BY created_at DESC LIMIT 1`;
+            if (rows.length > 0) igPageToken = String(rows[0].value_encrypted);
+          } catch {}
+          if (!igPageToken) continue;
+
+          // Resolve agent
+          let igAgentName = "";
+          try {
+            const rows = await sql`SELECT agent_name FROM channel_configs WHERE org_id = ${igOrgId} AND channel = 'instagram' AND is_active = true LIMIT 1`;
+            igAgentName = rows[0]?.agent_name || "";
+          } catch {}
+          if (!igAgentName) {
+            try {
+              const rows = await sql`SELECT name FROM agents WHERE org_id = ${igOrgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+              igAgentName = rows[0]?.name || "instagram-bot";
+            } catch {}
+          }
+
+          // Build input from various IG message types
+          const igInputParts: string[] = [];
+          const igMediaUrls: string[] = [];
+          const igMediaTypes: string[] = [];
+          const igMsg = messaging.message;
+          const igPostback = messaging.postback;
+
+          if (igMsg) {
+            // Text message
+            if (igMsg.text) igInputParts.push(String(igMsg.text));
+
+            // Attachments: images, video, audio, files, share (story/reel shares)
+            if (igMsg.attachments?.length) {
+              for (const att of igMsg.attachments) {
+                const attType = att.type || "";
+                const attUrl = att.payload?.url || "";
+                if (attType === "image" && attUrl) {
+                  igMediaUrls.push(attUrl);
+                  igMediaTypes.push("image/jpeg");
+                  igInputParts.push("[User sent an image]");
+                } else if (attType === "video" && attUrl) {
+                  igMediaUrls.push(attUrl);
+                  igMediaTypes.push("video/mp4");
+                  igInputParts.push("[User sent a video]");
+                } else if (attType === "audio" && attUrl) {
+                  igMediaUrls.push(attUrl);
+                  igMediaTypes.push("audio/mp4");
+                  igInputParts.push("[User sent a voice message]");
+                } else if (attType === "file" && attUrl) {
+                  igMediaUrls.push(attUrl);
+                  igMediaTypes.push("application/octet-stream");
+                  igInputParts.push("[User sent a file]");
+                } else if (attType === "share") {
+                  // Shared post/reel/story
+                  const shareUrl = att.payload?.url || "";
+                  if (shareUrl) igInputParts.push(`[User shared a post: ${shareUrl}]`);
+                  else igInputParts.push("[User shared a post]");
+                } else if (attType === "story_mention") {
+                  // User mentioned the business in their story
+                  const storyUrl = att.payload?.url || "";
+                  igInputParts.push(`[User mentioned you in their story${storyUrl ? ": " + storyUrl : ""}]`);
+                  if (storyUrl) { igMediaUrls.push(storyUrl); igMediaTypes.push("image/jpeg"); }
+                }
+              }
+            }
+
+            // Story reply — user replied to a story
+            if (igMsg.reply_to?.story) {
+              const storyUrl = igMsg.reply_to.story.url || "";
+              igInputParts.push(`[This is a reply to your story${storyUrl ? ": " + storyUrl : ""}]`);
+              if (storyUrl) { igMediaUrls.push(storyUrl); igMediaTypes.push("image/jpeg"); }
+            }
+
+            // Reel reply
+            if (igMsg.reply_to?.mid) {
+              igInputParts.push("[This is a reply to a previous message]");
+            }
+
+            // Quick reply payload
+            if (igMsg.quick_reply?.payload) {
+              igInputParts.push(`[Quick reply: ${igMsg.quick_reply.payload}]`);
+            }
+
+            // Reaction — the user reacted to a message
+            if (igMsg.is_deleted) continue; // Skip unsent messages
+
+          } else if (messaging.reaction) {
+            // Reaction event (like/emoji on a message) — skip agent invocation
+            continue;
+
+          } else if (igPostback) {
+            // Postback from ice-breaker buttons or get-started
+            igInputParts.push(igPostback.payload || igPostback.title || "Get started");
+
+          } else if (messaging.referral) {
+            // Referral — user clicked an ad or link that opens IG DM
+            igInputParts.push(`[User arrived via referral${messaging.referral.ref ? ": " + messaging.referral.ref : ""}]`);
+
+          } else {
+            continue;
+          }
+
+          const igInput = igInputParts.join("\n");
+          if (!igInput) continue;
+
+          // Mark as seen (Instagram Messaging API)
+          fetch(`https://graph.facebook.com/v21.0/${igPageUserId}/messages`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${igPageToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ recipient: { id: senderId }, sender_action: "mark_seen" }),
+          }).catch(() => {});
+
+          // Typing indicator
+          fetch(`https://graph.facebook.com/v21.0/${igPageUserId}/messages`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${igPageToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ recipient: { id: senderId }, sender_action: "typing_on" }),
+          }).catch(() => {});
+
+          // Run agent in background
+          ctx.waitUntil((async () => {
+            try {
+              const result = await runViaAgent(env, igAgentName, igInput, {
+                org_id: igOrgId,
+                channel: "instagram",
+                channel_user_id: senderId,
+                ...(igMediaUrls.length ? { media_urls: igMediaUrls, media_types: igMediaTypes } : {}),
+              });
+              let output = result.output || "";
+              if (!output && result.error) output = "Sorry, I couldn't process that.";
+              if (!output) return;
+
+              // IG message limit is 1000 chars
+              const chunks = tgChunkMessage(output, 1000);
+              for (const chunk of chunks) {
+                await fetch(`https://graph.facebook.com/v21.0/${igPageUserId}/messages`, {
+                  method: "POST",
+                  headers: { Authorization: `Bearer ${igPageToken}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    recipient: { id: senderId },
+                    message: { text: chunk },
+                    messaging_type: "RESPONSE",
+                  }),
+                }).catch(() => {});
+              }
+            } catch {}
+          })());
+        }
+      }
+      return Response.json({ ok: true });
+    }
+
+    // GET /chat/instagram/webhook — Meta verification handshake
+    if ((url.pathname === "/chat/instagram/webhook" || url.pathname === "/api/v1/chat/instagram/webhook") && request.method === "GET") {
+      const verifyToken = env.INSTAGRAM_VERIFY_TOKEN || env.FACEBOOK_VERIFY_TOKEN || "agentos-meta-verify";
+      const mode = url.searchParams.get("hub.mode");
+      const token = url.searchParams.get("hub.verify_token");
+      const challenge = url.searchParams.get("hub.challenge");
+      if (mode === "subscribe" && token === verifyToken) {
+        return new Response(challenge || "", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }
+      return Response.json({ error: "Verification failed" }, { status: 403 });
+    }
+
+    // ── Facebook Messenger Webhook ───────────────────────────────
+    // Handles text, images, video, audio, files, stickers, location,
+    // quick replies, postbacks (Get Started, persistent menu), referrals.
+    if ((url.pathname === "/chat/messenger/webhook" || url.pathname === "/api/v1/chat/messenger/webhook") && request.method === "POST") {
+      const rawBody = await request.arrayBuffer();
+      const sig = request.headers.get("x-hub-signature-256") ?? "";
+      const appSecret = env.FACEBOOK_APP_SECRET ?? "";
+      if (appSecret && sig) {
+        const expected = sig.startsWith("sha256=") ? sig.slice(7) : sig;
+        try {
+          const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(appSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+          const mac = await crypto.subtle.sign("HMAC", key, rawBody);
+          const hex = [...new Uint8Array(mac)].map(b => b.toString(16).padStart(2, "0")).join("");
+          if (hex !== expected) return Response.json({ error: "Invalid signature" }, { status: 401 });
+        } catch { return Response.json({ error: "Signature verification failed" }, { status: 401 }); }
+      }
+
+      let fbPayload: any;
+      try { fbPayload = JSON.parse(new TextDecoder().decode(rawBody)); } catch { return Response.json({ ok: true }); }
+      if (fbPayload.object !== "page") return Response.json({ ok: true });
+
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(env.HYPERDRIVE);
+
+      for (const entry of fbPayload.entry || []) {
+        const pageId = entry.id || "";
+
+        for (const messaging of entry.messaging || []) {
+          const senderId = messaging.sender?.id || "";
+          const recipientId = messaging.recipient?.id || "";
+          if (!senderId || senderId === recipientId) continue;
+
+          // Resolve org
+          let fbOrgId = "";
+          try {
+            const rows = await sql`SELECT org_id FROM channel_configs WHERE channel = 'messenger' AND config->>'page_id' = ${pageId} AND is_active = true LIMIT 1`;
+            if (rows.length > 0) fbOrgId = String(rows[0].org_id);
+          } catch {}
+          if (!fbOrgId) continue;
+
+          let fbPageToken = "";
+          try {
+            const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'FACEBOOK_PAGE_TOKEN' AND org_id = ${fbOrgId} ORDER BY created_at DESC LIMIT 1`;
+            if (rows.length > 0) fbPageToken = String(rows[0].value_encrypted);
+          } catch {}
+          if (!fbPageToken) continue;
+
+          // Resolve agent
+          let fbAgentName = "";
+          try {
+            const rows = await sql`SELECT agent_name FROM channel_configs WHERE org_id = ${fbOrgId} AND channel = 'messenger' AND is_active = true LIMIT 1`;
+            fbAgentName = rows[0]?.agent_name || "";
+          } catch {}
+          if (!fbAgentName) {
+            try {
+              const rows = await sql`SELECT name FROM agents WHERE org_id = ${fbOrgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+              fbAgentName = rows[0]?.name || "messenger-bot";
+            } catch {}
+          }
+
+          // Build input
+          const fbInputParts: string[] = [];
+          const fbMediaUrls: string[] = [];
+          const fbMediaTypes: string[] = [];
+          const fbMsg = messaging.message;
+          const fbPostback = messaging.postback;
+
+          if (fbMsg) {
+            // Skip echo messages (messages sent by the page itself)
+            if (fbMsg.is_echo) continue;
+
+            // Text
+            if (fbMsg.text) fbInputParts.push(String(fbMsg.text));
+
+            // Attachments: image, video, audio, file, location, fallback (link shares)
+            if (fbMsg.attachments?.length) {
+              for (const att of fbMsg.attachments) {
+                const attType = att.type || "";
+                const attUrl = att.payload?.url || "";
+                if (attType === "image" && attUrl) {
+                  fbMediaUrls.push(attUrl);
+                  fbMediaTypes.push("image/jpeg");
+                  // Check if sticker
+                  if (att.payload?.sticker_id) {
+                    fbInputParts.push(`[User sent a sticker (${att.payload.sticker_id})]`);
+                  } else {
+                    fbInputParts.push("[User sent an image]");
+                  }
+                } else if (attType === "video" && attUrl) {
+                  fbMediaUrls.push(attUrl);
+                  fbMediaTypes.push("video/mp4");
+                  fbInputParts.push("[User sent a video]");
+                } else if (attType === "audio" && attUrl) {
+                  fbMediaUrls.push(attUrl);
+                  fbMediaTypes.push("audio/mp4");
+                  fbInputParts.push("[User sent a voice message]");
+                } else if (attType === "file" && attUrl) {
+                  fbMediaUrls.push(attUrl);
+                  fbMediaTypes.push("application/octet-stream");
+                  fbInputParts.push("[User sent a file]");
+                } else if (attType === "location" && att.payload) {
+                  const lat = att.payload.coordinates?.lat || "";
+                  const lng = att.payload.coordinates?.long || "";
+                  fbInputParts.push(`[User shared location: ${lat}, ${lng}]`);
+                } else if (attType === "fallback") {
+                  // Link share / unfurled URL
+                  const title = att.title || "";
+                  const shareUrl = att.url || attUrl || "";
+                  fbInputParts.push(`[User shared a link${title ? ": " + title : ""}${shareUrl ? " " + shareUrl : ""}]`);
+                }
+              }
+            }
+
+            // Quick reply
+            if (fbMsg.quick_reply?.payload) {
+              fbInputParts.push(`[Quick reply: ${fbMsg.quick_reply.payload}]`);
+            }
+
+          } else if (fbPostback) {
+            // Postback from Get Started button, persistent menu, or generic template buttons
+            fbInputParts.push(fbPostback.payload || fbPostback.title || "Get started");
+            if (fbPostback.referral?.ref) {
+              fbInputParts.push(`[Referral: ${fbPostback.referral.ref}]`);
+            }
+
+          } else if (messaging.referral) {
+            // Direct referral (m.me link, ad click, etc.)
+            fbInputParts.push(`[User arrived via referral${messaging.referral.ref ? ": " + messaging.referral.ref : ""}]`);
+
+          } else if (messaging.read || messaging.delivery) {
+            // Read receipt / delivery confirmation — skip
+            continue;
+
+          } else if (messaging.optin) {
+            // Plugin opt-in (Send to Messenger, checkbox plugin)
+            fbInputParts.push(`[User opted in${messaging.optin.ref ? " with ref: " + messaging.optin.ref : ""}]`);
+
+          } else {
+            continue;
+          }
+
+          const fbInput = fbInputParts.join("\n");
+          if (!fbInput) continue;
+
+          // Mark as seen
+          fetch(`https://graph.facebook.com/v21.0/${pageId}/messages`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${fbPageToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ recipient: { id: senderId }, sender_action: "mark_seen" }),
+          }).catch(() => {});
+
+          // Typing indicator
+          fetch(`https://graph.facebook.com/v21.0/${pageId}/messages`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${fbPageToken}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ recipient: { id: senderId }, sender_action: "typing_on" }),
+          }).catch(() => {});
+
+          // Run agent in background
+          ctx.waitUntil((async () => {
+            try {
+              const result = await runViaAgent(env, fbAgentName, fbInput, {
+                org_id: fbOrgId,
+                channel: "messenger",
+                channel_user_id: senderId,
+                ...(fbMediaUrls.length ? { media_urls: fbMediaUrls, media_types: fbMediaTypes } : {}),
+              });
+              let output = result.output || "";
+              if (!output && result.error) output = "Sorry, I couldn't process that.";
+              if (!output) return;
+
+              // Messenger limit is 2000 chars per message
+              const chunks = tgChunkMessage(output, 2000);
+              for (const chunk of chunks) {
+                await fetch(`https://graph.facebook.com/v21.0/${pageId}/messages`, {
+                  method: "POST",
+                  headers: { Authorization: `Bearer ${fbPageToken}`, "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                    recipient: { id: senderId },
+                    message: { text: chunk },
+                    messaging_type: "RESPONSE",
+                  }),
+                }).catch(() => {});
+              }
+            } catch {}
+          })());
+        }
+      }
+      return Response.json({ ok: true });
+    }
+
+    // GET /chat/messenger/webhook — Meta verification handshake
+    if ((url.pathname === "/chat/messenger/webhook" || url.pathname === "/api/v1/chat/messenger/webhook") && request.method === "GET") {
+      const verifyToken = env.FACEBOOK_VERIFY_TOKEN || "agentos-meta-verify";
+      const mode = url.searchParams.get("hub.mode");
+      const token = url.searchParams.get("hub.verify_token");
+      const challenge = url.searchParams.get("hub.challenge");
+      if (mode === "subscribe" && token === verifyToken) {
+        return new Response(challenge || "", { status: 200, headers: { "Content-Type": "text/plain" } });
+      }
+      return Response.json({ error: "Verification failed" }, { status: 403 });
     }
 
     // ── /cf/* — Cloudflare binding endpoints ────────────────────────

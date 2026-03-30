@@ -258,7 +258,7 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
             <button
               type="button"
               onClick={onStop}
-              className="p-2 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors"
+              className="p-2.5 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
               title="Stop generation"
             >
               <Square size={18} />
@@ -267,7 +267,7 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
             <button
               type="submit"
               disabled={!input.trim() || isActive}
-              className="p-2 rounded-lg bg-primary text-white hover:bg-primary-hover disabled:opacity-50 disabled:pointer-events-none transition-colors"
+              className="p-2.5 rounded-lg bg-primary text-white hover:bg-primary-hover disabled:opacity-50 disabled:pointer-events-none transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
             >
               <Send size={18} />
             </button>

@@ -699,8 +699,8 @@ chatPlatformRoutes.openapi(telegramConnectRoute, async (c): Promise<any> => {
     `;
   } catch {}
 
-  // Register webhook with Telegram
-  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/api/v1/chat/telegram/webhook`;
+  // Register webhook with Telegram — points to deploy worker (no /api/v1 prefix)
+  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/telegram/webhook`;
   let webhookRegistered = false;
   try {
     const resp = await fetch(`https://api.telegram.org/bot${botToken}/setWebhook`, {
@@ -1127,7 +1127,8 @@ chatPlatformRoutes.openapi(whatsappConnectRoute, async (c): Promise<any> => {
         is_active = true, updated_at = ${now}
   `;
 
-  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/api/v1/chat/whatsapp/webhook`;
+  // Webhook URL points to deploy worker (handles all chat webhooks with ctx.waitUntil)
+  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/whatsapp/webhook`;
 
   return c.json({ ok: true, phone_number_id: body.phone_number_id, webhook_url: webhookUrl });
 });
@@ -1320,7 +1321,7 @@ chatPlatformRoutes.openapi(slackConnectRoute, async (c): Promise<any> => {
         is_active = true, updated_at = ${now}
   `;
 
-  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/api/v1/chat/slack/webhook`;
+  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/slack/webhook`;
   return c.json({ ok: true, team_id: body.team_id, webhook_url: webhookUrl });
 });
 
@@ -1540,7 +1541,8 @@ chatPlatformRoutes.openapi(instagramConnectRoute, async (c): Promise<any> => {
         is_active = true, updated_at = ${now}
   `;
 
-  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/api/v1/chat/instagram/webhook`;
+  // Webhook URL points to deploy worker (handles all chat webhooks with ctx.waitUntil)
+  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/instagram/webhook`;
   return c.json({ ok: true, webhook_url: webhookUrl });
 });
 
@@ -1694,7 +1696,8 @@ chatPlatformRoutes.openapi(messengerConnectRoute, async (c): Promise<any> => {
         is_active = true, updated_at = ${now}
   `;
 
-  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/api/v1/chat/messenger/webhook`;
+  // Webhook URL points to deploy worker (handles all chat webhooks with ctx.waitUntil)
+  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/messenger/webhook`;
   return c.json({ ok: true, webhook_url: webhookUrl });
 });
 

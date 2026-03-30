@@ -135,6 +135,59 @@ app.get("/api/v1/health", (c) =>
   c.json({ status: "ok", version: "0.2.0", service: "control-plane", timestamp: Date.now() }),
 );
 
+// Detailed health — checks DB, billing system, runtime connectivity
+app.get("/api/v1/health/detailed", async (c) => {
+  const checks: Record<string, { ok: boolean; latency_ms: number; error?: string }> = {};
+
+  // DB check
+  const dbStart = Date.now();
+  try {
+    const { getDb } = await import("./db/client");
+    const sql = await getDb(c.env.HYPERDRIVE);
+    await sql`SELECT 1`;
+    checks.database = { ok: true, latency_ms: Date.now() - dbStart };
+  } catch (err: any) {
+    checks.database = { ok: false, latency_ms: Date.now() - dbStart, error: err.message };
+  }
+
+  // Billing system check
+  const billStart = Date.now();
+  try {
+    const { getDb } = await import("./db/client");
+    const sql = await getDb(c.env.HYPERDRIVE);
+    const [stats] = await sql`
+      SELECT
+        (SELECT COUNT(*) FROM credit_transactions WHERE created_at > now() - interval '1 hour') as tx_last_hour,
+        (SELECT COUNT(*) FROM credit_transactions WHERE type = 'burn' AND created_at > now() - interval '1 hour') as burns_last_hour,
+        (SELECT COALESCE(SUM(ABS(amount_usd)), 0) FROM credit_transactions WHERE type = 'burn' AND created_at > now() - interval '1 hour') as revenue_last_hour_usd
+    `;
+    checks.billing = {
+      ok: true, latency_ms: Date.now() - billStart,
+      ...stats as any,
+    };
+  } catch (err: any) {
+    checks.billing = { ok: false, latency_ms: Date.now() - billStart, error: err.message };
+  }
+
+  // Runtime check
+  const rtStart = Date.now();
+  try {
+    const resp = await c.env.RUNTIME.fetch("https://runtime/health", { signal: AbortSignal.timeout(5000) });
+    const data = await resp.json() as any;
+    checks.runtime = { ok: resp.status === 200, latency_ms: Date.now() - rtStart, ...data };
+  } catch (err: any) {
+    checks.runtime = { ok: false, latency_ms: Date.now() - rtStart, error: err.message };
+  }
+
+  const allOk = Object.values(checks).every(c => c.ok);
+  return c.json({
+    status: allOk ? "healthy" : "degraded",
+    version: "0.2.0",
+    timestamp: Date.now(),
+    checks,
+  }, allOk ? 200 : 503);
+});
+
 // ── API Routes ───────────────────────────────────────────────────────────
 // Auth (public + protected)
 app.route("/api/v1/auth", authRoutes);
