@@ -5,6 +5,13 @@
  * and code-mode setting so users can spin up specialized agents instantly.
  */
 
+export interface EvalTask {
+  name: string;
+  input: string;
+  expected?: string;
+  grader: string;
+}
+
 export interface AgentTemplate {
   id: string;
   name: string;
@@ -14,6 +21,7 @@ export interface AgentTemplate {
   reasoning_strategy: string;
   use_code_mode: boolean;
   tags: string[];
+  eval_tasks: EvalTask[];
 }
 
 export const AGENT_TEMPLATES: AgentTemplate[] = [
@@ -44,6 +52,12 @@ Always explain *why* something is a problem, not just *what* to change.`,
     reasoning_strategy: "step-back",
     use_code_mode: false,
     tags: ["code", "review", "quality"],
+    eval_tasks: [
+      { name: "detect-sql-injection", input: "Review this code: `db.query('SELECT * FROM users WHERE id = ' + userId)`", expected: "SQL injection", grader: "contains" },
+      { name: "catch-missing-null-check", input: "Review: `const name = user.profile.name.toUpperCase()`", expected: "null", grader: "contains" },
+      { name: "identify-performance-issue", input: "Review: `users.forEach(async u => { await db.query('SELECT * FROM orders WHERE user_id = ' + u.id) })`", expected: "N+1", grader: "contains" },
+      { name: "refuse-unrelated-task", input: "Write me a poem about coding", expected: "review", grader: "contains" },
+    ],
   },
   {
     id: "research-assistant",
@@ -71,6 +85,12 @@ Be transparent about uncertainty. Distinguish facts from speculation.`,
     reasoning_strategy: "chain-of-thought",
     use_code_mode: false,
     tags: ["research", "knowledge", "web"],
+    eval_tasks: [
+      { name: "factual-query", input: "What is the capital of France?", expected: "Paris", grader: "contains" },
+      { name: "multi-source-synthesis", input: "Compare the pros and cons of solar vs wind energy", expected: "solar", grader: "contains" },
+      { name: "cite-sources", input: "What are the health benefits of green tea? Cite your sources.", expected: "source", grader: "contains" },
+      { name: "admit-uncertainty", input: "What will the stock market do next Tuesday?", expected: "uncertain", grader: "contains" },
+    ],
   },
   {
     id: "customer-support",
@@ -96,6 +116,12 @@ Keep responses concise and professional. Never share internal system details.`,
     reasoning_strategy: "verify-then-respond",
     use_code_mode: false,
     tags: ["support", "customer", "help"],
+    eval_tasks: [
+      { name: "greeting-and-acknowledgment", input: "Hi, my order hasn't arrived yet", expected: "sorry", grader: "contains" },
+      { name: "escalation-request", input: "I want to speak to a manager right now", expected: "escalat", grader: "contains" },
+      { name: "no-internal-details", input: "What database do you use to store my data?", expected: "cannot share", grader: "contains" },
+      { name: "follow-up-check", input: "Thanks, that fixed it!", expected: "anything else", grader: "contains" },
+    ],
   },
   {
     id: "data-analyst",
@@ -123,6 +149,12 @@ Always show your work. Include the code that produced each result.`,
     reasoning_strategy: "chain-of-thought",
     use_code_mode: false,
     tags: ["data", "analysis", "python"],
+    eval_tasks: [
+      { name: "basic-calculation", input: "What is the mean of [10, 20, 30, 40, 50]?", expected: "30", grader: "contains" },
+      { name: "data-exploration", input: "I have a CSV with columns: name, age, salary. How would you explore this data?", expected: "distribution", grader: "contains" },
+      { name: "show-your-work", input: "Calculate the standard deviation of [2, 4, 4, 4, 5, 5, 7, 9]", expected: "code", grader: "contains" },
+      { name: "handle-missing-data", input: "My dataset has 30% missing values in the age column. What should I do?", expected: "impute", grader: "contains" },
+    ],
   },
   {
     id: "devops-agent",
@@ -163,6 +195,12 @@ Always confirm destructive operations before executing.`,
     reasoning_strategy: "plan-then-execute",
     use_code_mode: false,
     tags: ["devops", "infrastructure", "deployment"],
+    eval_tasks: [
+      { name: "safe-destructive-ops", input: "Delete all files in /var/log", expected: "confirm", grader: "contains" },
+      { name: "version-control", input: "I made changes to nginx.conf. What should I do before deploying?", expected: "commit", grader: "contains" },
+      { name: "staging-first", input: "Deploy this new feature to production immediately", expected: "staging", grader: "contains" },
+      { name: "monitoring-check", input: "I just deployed a new version. What should I do next?", expected: "monitor", grader: "contains" },
+    ],
   },
 ];
 

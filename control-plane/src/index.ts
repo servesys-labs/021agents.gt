@@ -69,6 +69,7 @@ import { feedbackRoutes } from "./routes/feedback";
 import { codemodeRoutes } from "./routes/codemode";
 import { a2aRoutes } from "./routes/a2a";
 import { dashboardRoutes } from "./routes/dashboard";
+import { trainingRoutes } from "./routes/training";
 import { domainRoutes } from "./routes/domains";
 import { publicAgentRoutes } from "./routes/public-api";
 import { hostnameMiddleware } from "./middleware/hostname";
@@ -241,6 +242,9 @@ app.route("/api/v1/codemode", codemodeRoutes);
 // Dashboard (aggregated stats + activity)
 app.route("/api/v1/dashboard", dashboardRoutes);
 
+// Training (Agent Lightning-style training loop)
+app.route("/api/v1/training", trainingRoutes);
+
 // Custom domains management
 app.route("/api/v1/domains", domainRoutes);
 
@@ -350,6 +354,7 @@ app.doc("/api/v1/_openapi-raw.json", {
     { name: "Security Events", description: "Security event log" },
     { name: "Public API", description: "Public-facing API endpoints" },
     { name: "A2A", description: "Agent-to-Agent protocol" },
+    { name: "Training", description: "Agent training loop — eval, optimize, version, rollback" },
     { name: "System", description: "Health and system status" },
     { name: "Widget", description: "Embeddable chat widget" },
   ],
@@ -669,6 +674,53 @@ export default {
             `.catch(() => {});
 
             console.log(`[queue] Evolution analysis for ${agentName}: ${records.length} sessions, ${proposals.length} proposals`);
+          }
+        } else if (job.type === "training_step") {
+          // Advance one training iteration — called by cron or auto-step
+          const jobId = String(job.payload.job_id || "");
+          const orgId = String(job.payload.org_id || "");
+          if (!jobId || !orgId) { msg.ack(); continue; }
+
+          // Check job is still running
+          const jobRows = await sql`
+            SELECT status, current_iteration, max_iterations FROM training_jobs
+            WHERE job_id = ${jobId} AND org_id = ${orgId}
+          `;
+          if (jobRows.length === 0 || jobRows[0].status !== "running") {
+            msg.ack();
+            continue;
+          }
+
+          // Call the training step endpoint internally
+          try {
+            const stepResp = await app.fetch(
+              new Request(`https://internal/api/v1/training/jobs/${jobId}/step`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${env.SERVICE_TOKEN}`,
+                },
+              }),
+              env,
+            );
+            const stepResult = await stepResp.json() as Record<string, unknown>;
+
+            // If training should continue, enqueue next step
+            if (stepResult.should_continue) {
+              await env.JOB_QUEUE.send({
+                type: "training_step",
+                payload: { job_id: jobId, org_id: orgId },
+              });
+            }
+
+            console.log(`[queue] Training step for job ${jobId}: iteration ${stepResult.iteration_number}, continue=${stepResult.should_continue}`);
+          } catch (stepErr) {
+            console.error(`[queue] Training step failed for job ${jobId}:`, stepErr);
+            // Mark job as failed
+            await sql`
+              UPDATE training_jobs SET status = 'failed', completed_at = ${now}
+              WHERE job_id = ${jobId}
+            `.catch(() => {});
           }
         }
 
