@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, Trash2, Wifi, WifiOff, Settings2 } from "lucide-react";
+import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, History, ChevronDown } from "lucide-react";
 import { ChatInterface } from "../components/ChatInterface";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -87,11 +87,15 @@ export default function MyAssistantPage() {
               {sessionMeta.total_cost_usd !== undefined && `$${sessionMeta.total_cost_usd.toFixed(4)}`}
             </span>
           )}
-          {messages.length > 0 && (
-            <Button variant="ghost" size="sm" onClick={clear} title="New conversation">
-              <Trash2 size={14} />
-            </Button>
-          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => { clear(); }}
+            title="New conversation"
+            className="flex items-center gap-1"
+          >
+            <Plus size={14} /> New
+          </Button>
           <Button
             variant="ghost"
             size="sm"

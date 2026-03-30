@@ -31,31 +31,75 @@ function ToolCallCard({ msg }: { msg: ChatMessage }) {
   const [expanded, setExpanded] = useState(false);
   const isRunning = msg.toolStatus === "running";
   const isError = msg.toolStatus === "error";
+  const isDone = msg.toolStatus === "done";
 
   return (
-    <div className={`border rounded-lg overflow-hidden text-xs ${
-      isError ? "border-red-200 bg-red-50" : isRunning ? "border-amber-200 bg-amber-50" : "border-border bg-surface"
+    <div className={`border rounded-xl overflow-hidden text-xs transition-colors ${
+      isError ? "border-danger bg-danger-light/50" :
+      isRunning ? "border-primary/20 bg-primary/[0.03]" :
+      "border-border/60 bg-surface-alt/30"
     }`}>
       <button
-        onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-black/5 transition-colors"
+        onClick={() => !isRunning && setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-black/[0.03] transition-colors"
       >
-        <Wrench size={12} className={isError ? "text-red-500" : isRunning ? "text-amber-500 animate-spin" : "text-green-600"} />
-        <span className="font-medium text-text">{msg.toolName}</span>
-        {isRunning && <span className="text-amber-600 animate-pulse">running...</span>}
-        {msg.toolLatencyMs && !isRunning && (
-          <span className="text-text-muted ml-auto flex items-center gap-1">
-            <Clock size={10} /> {msg.toolLatencyMs < 1000 ? `${msg.toolLatencyMs}ms` : `${(msg.toolLatencyMs / 1000).toFixed(1)}s`}
-          </span>
+        {isRunning ? (
+          <div className="w-4 h-4 rounded-full border-2 border-primary border-t-transparent animate-spin shrink-0" />
+        ) : isError ? (
+          <AlertTriangle size={13} className="text-danger shrink-0" />
+        ) : (
+          <div className="w-4 h-4 rounded-full bg-success-light flex items-center justify-center shrink-0">
+            <Wrench size={9} className="text-success" />
+          </div>
         )}
-        {!isRunning && (expanded ? <ChevronDown size={12} className="ml-auto text-text-muted" /> : <ChevronRight size={12} className="ml-auto text-text-muted" />)}
+        <span className={`font-medium ${isRunning ? "text-primary" : "text-text"}`}>{msg.toolName}</span>
+        {isRunning && <span className="text-primary/60 animate-pulse ml-1">running...</span>}
+        <span className="flex items-center gap-2 ml-auto">
+          {msg.toolLatencyMs && isDone && (
+            <span className="text-text-muted flex items-center gap-0.5">
+              <Clock size={9} /> {msg.toolLatencyMs < 1000 ? `${msg.toolLatencyMs}ms` : `${(msg.toolLatencyMs / 1000).toFixed(1)}s`}
+            </span>
+          )}
+          {!isRunning && (expanded ? <ChevronDown size={11} className="text-text-muted" /> : <ChevronRight size={11} className="text-text-muted" />)}
+        </span>
       </button>
       {expanded && (msg.toolResult || msg.toolError) && (
-        <div className="border-t border-border/50 px-3 py-2 max-h-48 overflow-y-auto">
-          {msg.toolError && <pre className="text-red-600 whitespace-pre-wrap break-words">{msg.toolError}</pre>}
-          {msg.toolResult && <pre className="text-text-secondary whitespace-pre-wrap break-words">{msg.toolResult}</pre>}
+        <div className="border-t border-border/30 px-3 py-2 max-h-60 overflow-y-auto bg-[#1e1e2e] rounded-b-xl">
+          {msg.toolError && <pre className="text-red-400 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">{msg.toolError}</pre>}
+          {msg.toolResult && <pre className="text-[#cdd6f4] whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">{msg.toolResult}</pre>}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Thinking Block (collapsible like Claude) ────────────────
+
+function ThinkingBlock({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const preview = content.length > 120 ? content.slice(0, 120) + "..." : content;
+
+  return (
+    <div className="flex justify-start animate-[fadeInUp_150ms_ease-out]">
+      <div className="max-w-[85%]">
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="flex items-center gap-1.5 text-xs font-medium text-purple-600 hover:text-purple-800 transition-colors mb-0.5"
+        >
+          <Brain size={12} />
+          <span>Thinking</span>
+          {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        </button>
+        {expanded ? (
+          <div className="px-3 py-2 rounded-lg border border-purple-200 bg-purple-50/50 text-xs leading-relaxed text-purple-800 whitespace-pre-wrap">
+            {content}
+          </div>
+        ) : (
+          <p className="px-3 py-1 text-[11px] text-purple-400 italic truncate max-w-md">
+            {preview}
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -144,17 +188,10 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
             );
           }
 
-          // Thinking trace
+          // Thinking trace (collapsible like Claude)
           if (msg.role === "thinking") {
             return (
-              <div key={msg.id} className="flex justify-start animate-[fadeInUp_150ms_ease-out]">
-                <div className="max-w-[85%] px-3 py-2 rounded-lg border border-purple-200 bg-purple-50 text-xs leading-relaxed text-purple-800">
-                  <div className="flex items-center gap-1.5 font-medium mb-1 text-purple-600">
-                    <Brain size={12} /> Thinking
-                  </div>
-                  <div className="whitespace-pre-wrap">{msg.content}</div>
-                </div>
-              </div>
+              <ThinkingBlock key={msg.id} content={msg.content} />
             );
           }
 
@@ -175,9 +212,9 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
             return (
               <div key={msg.id} className="flex justify-center animate-[fadeInUp_150ms_ease-out]">
                 <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs ${
-                  isWarning ? "bg-amber-50 text-amber-700 border border-amber-200" :
-                  msg.strategy ? "bg-indigo-50 text-indigo-700 border border-indigo-200" :
-                  "bg-gray-100 text-text-muted"
+                  isWarning ? "bg-warning-light text-warning-dark border border-warning" :
+                  msg.strategy ? "bg-info-light text-info-dark border border-info" :
+                  "bg-surface-alt text-text-muted"
                 }`}>
                   {isWarning ? <AlertTriangle size={10} /> : msg.strategy ? <Brain size={10} /> : <Info size={10} />}
                   {msg.content}
@@ -190,12 +227,12 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
           if (msg.role === "error") {
             return (
               <div key={msg.id} className="flex justify-start animate-[fadeInUp_150ms_ease-out]">
-                <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-red-50 text-red-700 border border-red-200">
+                <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-danger-light text-danger border border-danger">
                   {msg.content.includes("[") ? (
                     <span dangerouslySetInnerHTML={{
                       __html: msg.content.replace(
                         /\[([^\]]+)\]\(([^)]+)\)/g,
-                        '<a href="$2" class="underline font-medium hover:text-red-900">$1</a>'
+                        '<a href="$2" class="underline font-medium hover:text-danger-dark">$1</a>'
                       )
                     }} />
                   ) : msg.content}
@@ -208,7 +245,28 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
           return (
             <div key={msg.id} className="flex justify-start animate-[fadeInUp_200ms_ease-out]">
               <div className="max-w-[80%]">
-                <div className="px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-neutral-light text-text prose prose-sm prose-neutral max-w-none [&_pre]:bg-gray-800 [&_pre]:text-gray-100 [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:text-xs [&_pre]:overflow-x-auto [&_code]:bg-gray-200 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_table]:text-xs [&_th]:px-2 [&_th]:py-1 [&_td]:px-2 [&_td]:py-1 [&_a]:text-primary [&_a]:underline">
+                <div className={`px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-surface border border-border/50 text-text
+                  prose prose-sm prose-neutral dark:prose-invert max-w-none
+                  [&>*:first-child]:mt-0 [&>*:last-child]:mb-0
+                  [&_p]:my-2 [&_p]:leading-relaxed
+                  [&_h1]:text-base [&_h1]:font-bold [&_h1]:mt-4 [&_h1]:mb-2
+                  [&_h2]:text-sm [&_h2]:font-bold [&_h2]:mt-3 [&_h2]:mb-1.5
+                  [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mb-1
+                  [&_ul]:my-2 [&_ul]:pl-4 [&_ul]:space-y-1
+                  [&_ol]:my-2 [&_ol]:pl-4 [&_ol]:space-y-1
+                  [&_li]:leading-relaxed
+                  [&_pre]:bg-[#1e1e2e] [&_pre]:text-[#cdd6f4] [&_pre]:rounded-xl [&_pre]:p-4 [&_pre]:my-3 [&_pre]:text-xs [&_pre]:overflow-x-auto [&_pre]:leading-relaxed
+                  [&_code]:bg-surface-alt [&_code]:text-primary [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_code]:text-xs [&_code]:font-mono
+                  [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:rounded-none
+                  [&_blockquote]:border-l-2 [&_blockquote]:border-primary/30 [&_blockquote]:pl-3 [&_blockquote]:my-2 [&_blockquote]:text-text-secondary [&_blockquote]:italic
+                  [&_hr]:my-3 [&_hr]:border-border
+                  [&_table]:my-3 [&_table]:text-xs [&_table]:w-full
+                  [&_th]:px-3 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:border-b [&_th]:border-border [&_th]:bg-surface-alt
+                  [&_td]:px-3 [&_td]:py-1.5 [&_td]:border-b [&_td]:border-border/50
+                  [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2
+                  [&_strong]:font-semibold [&_strong]:text-text
+                  [&_em]:italic
+                `}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                 </div>
                 {msg.turnInfo && (
@@ -226,7 +284,7 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
         {/* Streaming indicator */}
         {streaming && !messages.some(m => (m as ChatMessage).role === "tool" && (m as ChatMessage).toolStatus === "running") && (
           <div className="flex justify-start">
-            <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3">
+            <div className="bg-surface-alt rounded-2xl rounded-bl-md px-4 py-3">
               <div className="flex gap-1">
                 <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
                 <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -239,7 +297,7 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
         {/* Legacy loading indicator */}
         {loading && !streaming && (
           <div className="flex justify-start">
-            <div className="bg-gray-100 rounded-2xl rounded-bl-md px-4 py-3">
+            <div className="bg-surface-alt rounded-2xl rounded-bl-md px-4 py-3">
               <div className="flex gap-1">
                 <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
                 <span className="w-2 h-2 bg-text-muted rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -266,13 +324,13 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
             onInput={handleInput}
             placeholder={placeholder || "Type a message..."}
             rows={1}
-            className="flex-1 resize-none rounded-lg border border-border px-3 py-2 text-sm bg-white placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
+            className="flex-1 resize-none rounded-lg border border-border px-3 py-2 text-sm bg-surface placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
           />
           {streaming && onStop ? (
             <button
               type="button"
               onClick={onStop}
-              className="p-2.5 rounded-lg bg-red-500 text-white hover:bg-red-600 transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
+              className="p-2.5 rounded-lg bg-danger text-white hover:bg-danger transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
               title="Stop generation"
             >
               <Square size={18} />
