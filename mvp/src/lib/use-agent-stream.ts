@@ -518,7 +518,29 @@ export function useAgentStream() {
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
+    abortRef.current = null;
     setStreaming(false);
+    // Finalize any partial assistant message
+    if (streamBuf.current && assistantIdRef.current) {
+      const finalContent = streamBuf.current;
+      const msgId = assistantIdRef.current;
+      setMessages(prev => prev.map(m =>
+        m.id === msgId ? { ...m, content: finalContent } : m
+      ));
+    }
+    // Mark any running tools as stopped
+    setMessages(prev => prev.map(m =>
+      m.role === "tool" && (m as any).toolStatus === "running"
+        ? { ...m, toolStatus: "error" as const, toolError: "Stopped by user" }
+        : m
+    ));
+    // Save conversation even if stopped early
+    if (currentAgentRef.current) {
+      setMessages(prev => {
+        storeMessages(currentAgentRef.current, prev, currentSessionIdRef.current);
+        return prev;
+      });
+    }
   }, []);
 
   const clear = useCallback(() => {

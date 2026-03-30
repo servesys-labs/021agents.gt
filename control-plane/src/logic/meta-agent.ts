@@ -560,6 +560,15 @@ The system prompt defines HOW the agent behaves. Every agent you create must be 
 - Domain-specific: include industry terminology and knowledge
 - Multi-tool chains: describe sequences like "Search → Browse → Analyze → Write report"
 
+### Building standards (include when agent may build code/apps):
+- Always TypeScript — never plain JavaScript
+- Vite + React as default web framework
+- Tailwind CSS for styling
+- shadcn/ui components when applicable
+- Proper project structure with types/, components/, lib/
+- Include package.json, tsconfig.json
+- Type-safe code with interfaces and zod validation
+
 ## Eval & Test Case Guidelines
 1. Generate 5-10 diverse test_cases covering: happy path, edge cases, error handling, safety/guardrails, and multi-turn if applicable.
 2. Each test_case must have a realistic "input" (what a real user would type) and clear "expected" (what correct behavior looks like).
