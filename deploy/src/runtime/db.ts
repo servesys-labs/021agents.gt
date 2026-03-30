@@ -49,6 +49,9 @@ export async function loadAgentConfig(
     "knowledge-search", "store-knowledge",
     "create-agent", "list-agents", "run-agent",
     "marketplace-search", "a2a-send", "feed-post",
+    "image-generate", "vision-analyze",
+    "memory-save", "memory-recall",
+    "text-to-speech",
     "discover-api",
   ];
 

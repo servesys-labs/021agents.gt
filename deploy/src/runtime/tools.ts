@@ -954,6 +954,18 @@ async function dispatch(
     case "image-generate":
       return imageGenerate(env, args);
 
+    case "vision-analyze":
+      return visionAnalyze(env, args);
+
+    case "memory-save":
+      return memorySave(env, args);
+
+    case "memory-recall":
+      return memoryRecall(env, args);
+
+    case "memory-delete":
+      return memoryDelete(env, args);
+
     case "text-to-speech":
       return textToSpeech(env, args);
 
@@ -3339,6 +3351,136 @@ async function imageGenerate(env: RuntimeEnv, args: Record<string, any>): Promis
   });
 }
 
+// ── Vision / Image Analysis (Gemini via CF AI Gateway) ───────
+
+async function visionAnalyze(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const imageUrl = args.image_url || args.url || "";
+  const prompt = args.prompt || args.question || "Describe this image in detail.";
+  if (!imageUrl) return "vision-analyze requires image_url";
+
+  try {
+    const { callLLM } = await import("./llm");
+    const response = await callLLM(
+      env,
+      [
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: imageUrl } },
+            { type: "text", text: prompt },
+          ] as any,
+        },
+      ],
+      [], // no tools needed for vision
+      { model: "google/gemini-3.1-pro-preview", max_tokens: 2000 },
+    );
+    return response.content || "Vision analysis returned no result";
+  } catch (err: any) {
+    return `Vision analysis failed: ${err.message}`;
+  }
+}
+
+// ── Curated Persistent Memory (episodic + semantic via control-plane) ──
+
+async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const content = String(args.content || args.value || "").trim();
+  const memoryType = String(args.type || "semantic").trim(); // episodic, semantic
+  const key = String(args.key || args.name || "").trim();
+  if (!content) return "memory-save requires content";
+
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
+  const serviceToken = (env as any).SERVICE_TOKEN || "";
+
+  try {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+
+    if (memoryType === "episodic") {
+      // Save as episodic memory (timestamped events/observations)
+      const resp = await fetch(`${apiBase}/memory/${agentName}/episodes`, {
+        method: "POST", headers,
+        body: JSON.stringify({ content, source: "agent", metadata: key ? { key } : {} }),
+      });
+      return await resp.text();
+    } else {
+      // Save as semantic fact (key-value knowledge)
+      const resp = await fetch(`${apiBase}/memory/${agentName}/facts`, {
+        method: "POST", headers,
+        body: JSON.stringify({ key: key || content.slice(0, 50), value: content, category: args.category || "general" }),
+      });
+      return await resp.text();
+    }
+  } catch (err: any) {
+    return `Memory save failed: ${err.message}`;
+  }
+}
+
+async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const query = String(args.query || args.key || "").trim();
+  const memoryType = String(args.type || "all").trim(); // episodic, semantic, all
+
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
+  const serviceToken = (env as any).SERVICE_TOKEN || "";
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+
+  try {
+    const results: any[] = [];
+
+    if (memoryType === "all" || memoryType === "semantic") {
+      const resp = await fetch(`${apiBase}/memory/${agentName}/facts?limit=20`, { headers });
+      if (resp.ok) {
+        const data = (await resp.json()) as any;
+        const facts = (data.facts || data || []) as any[];
+        const filtered = query
+          ? facts.filter((f: any) => JSON.stringify(f).toLowerCase().includes(query.toLowerCase()))
+          : facts;
+        results.push(...filtered.map((f: any) => ({ type: "semantic", key: f.key, value: f.value, category: f.category })));
+      }
+    }
+
+    if (memoryType === "all" || memoryType === "episodic") {
+      const resp = await fetch(`${apiBase}/memory/${agentName}/episodes?limit=20`, { headers });
+      if (resp.ok) {
+        const data = (await resp.json()) as any;
+        const episodes = (data.episodes || data || []) as any[];
+        const filtered = query
+          ? episodes.filter((e: any) => JSON.stringify(e).toLowerCase().includes(query.toLowerCase()))
+          : episodes;
+        results.push(...filtered.map((e: any) => ({ type: "episodic", content: e.content, created: e.created_at })));
+      }
+    }
+
+    if (results.length === 0) return "No memories found" + (query ? ` matching "${query}"` : "");
+    return JSON.stringify(results);
+  } catch (err: any) {
+    return `Memory recall failed: ${err.message}`;
+  }
+}
+
+async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const memoryType = String(args.type || "semantic").trim();
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const apiBase = (env as any).CONTROL_PLANE_URL || "https://api.oneshots.co/api/v1";
+  const serviceToken = (env as any).SERVICE_TOKEN || "";
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (serviceToken) headers.Authorization = `Bearer ${serviceToken}`;
+
+  try {
+    if (memoryType === "semantic" && args.fact_id) {
+      await fetch(`${apiBase}/memory/${agentName}/facts/${args.fact_id}`, { method: "DELETE", headers });
+      return JSON.stringify({ deleted: true, type: "semantic", id: args.fact_id });
+    }
+    return "memory-delete requires type and fact_id (for semantic) or clears episodic via memory-clear";
+  } catch (err: any) {
+    return `Memory delete failed: ${err.message}`;
+  }
+}
+
 // ── TTS (Workers AI Deepgram) ─────────────────────────────────
 
 async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
@@ -3759,13 +3901,75 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "image-generate",
-      description: "Generate an image from a text prompt",
+      description: "Generate an image from a text prompt using FLUX. Returns an R2 storage key for the generated image.",
       parameters: {
         type: "object",
         properties: {
-          prompt: { type: "string", description: "Image description prompt" },
+          prompt: { type: "string", description: "Detailed image description prompt" },
         },
         required: ["prompt"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "vision-analyze",
+      description: "Analyze an image using AI vision. Describe contents, extract text, answer questions about images. Supports URLs to images.",
+      parameters: {
+        type: "object",
+        properties: {
+          image_url: { type: "string", description: "URL of the image to analyze" },
+          prompt: { type: "string", description: "Question or instruction for the vision model (default: describe the image)" },
+        },
+        required: ["image_url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory-save",
+      description: "Save a memory for later recall. Use for user preferences, important facts, project context, or observations that should persist across conversations.",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "The memory content to save" },
+          key: { type: "string", description: "Short label for the memory (e.g. 'user-timezone', 'project-stack')" },
+          type: { type: "string", description: "Memory type: 'semantic' for facts/preferences (default), 'episodic' for events/observations" },
+          category: { type: "string", description: "Category for organization (e.g. 'preferences', 'project', 'contacts')" },
+        },
+        required: ["content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory-recall",
+      description: "Recall saved memories. Search by keyword or browse by type. Use this to remember user preferences, past decisions, project context.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query to find relevant memories" },
+          type: { type: "string", description: "Filter by type: 'semantic', 'episodic', or 'all' (default: all)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory-delete",
+      description: "Delete a specific memory entry by its ID.",
+      parameters: {
+        type: "object",
+        properties: {
+          fact_id: { type: "string", description: "The ID of the semantic fact to delete" },
+          type: { type: "string", description: "Memory type: 'semantic' (default)" },
+        },
+        required: ["fact_id"],
       },
     },
   },
