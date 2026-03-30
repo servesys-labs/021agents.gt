@@ -258,12 +258,8 @@ app.route("/v1", openapiRoutes);
 // End-user token management (SaaS multi-tenant)
 app.route("/api/v1/end-user-tokens", endUserTokenRoutes);
 
-// Ops observability + Alerts
-app.route("/api/v1/ops", opsObservabilityRoutes);
+// Ops observability + Alerts (already registered above — skip duplicates)
 app.route("/api/v1/alerts", alertRoutes);
-
-// Compliance (GDPR, data export, account deletion)
-app.route("/api/v1/compliance", complianceRoutes);
 app.route("/api/v1/session-management", sessionMgmtRoutes);
 app.route("/api/v1/security-events", securityEventRoutes);
 app.route("/api/v1/secrets-rotation", secretsRotationRoutes);
@@ -1260,65 +1256,5 @@ export default {
       console.error("[cron] Canary auto-promotion failed:", err);
     }
 
-    // 6. SLO breach detection — check SLO definitions against actual metrics
-    try {
-      const slos = await sql`
-        SELECT sd.id, sd.org_id, sd.agent_name, sd.metric, sd.threshold, sd.comparison, sd.window_days
-        FROM slo_definitions sd
-        WHERE sd.is_active = true
-        LIMIT 100
-      `;
-
-      for (const slo of slos) {
-        const agentName = String(slo.agent_name);
-        const orgId = String(slo.org_id);
-        const windowDays = Number(slo.window_days || 7);
-        const since = nowEpoch - windowDays * 86400;
-        const metric = String(slo.metric);
-        const threshold = Number(slo.threshold);
-        const comparison = String(slo.comparison || "gte"); // gte = actual must be >= threshold
-
-        let actual = 0;
-        if (metric === "success_rate") {
-          const rows = await sql`
-            SELECT COUNT(*) as total, SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as successes
-            FROM sessions WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
-          `;
-          const total = Number(rows[0]?.total || 0);
-          if (total < 5) continue;
-          actual = Number(rows[0]?.successes || 0) / total;
-        } else if (metric === "avg_latency_ms") {
-          const rows = await sql`
-            SELECT AVG(wall_clock_seconds * 1000) as avg_ms
-            FROM sessions WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
-          `;
-          actual = Number(rows[0]?.avg_ms || 0);
-        } else if (metric === "error_rate") {
-          const rows = await sql`
-            SELECT COUNT(*) as total, SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors
-            FROM sessions WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
-          `;
-          const total = Number(rows[0]?.total || 0);
-          if (total < 5) continue;
-          actual = Number(rows[0]?.errors || 0) / total;
-        }
-
-        const breached = comparison === "gte" ? actual < threshold
-          : comparison === "lte" ? actual > threshold
-          : false;
-
-        if (breached) {
-          // Log SLO breach
-          await sql`
-            INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
-            VALUES (${orgId}, 'system', 'slo.breach', 'agent', ${agentName},
-                    ${JSON.stringify({ slo_id: slo.id, metric, threshold, actual, comparison, window_days: windowDays })}, now())
-          `.catch(() => {});
-          console.log(`[cron] SLO breach: ${agentName} ${metric}=${actual.toFixed(3)} (threshold: ${comparison} ${threshold})`);
-        }
-      }
-    } catch (err) {
-      console.error("[cron] SLO breach detection failed:", err);
-    }
   },
 };
