@@ -811,6 +811,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               channel_user_id: data.channel_user_id || "",
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: progressKey,
+              ...(data.system_prompt_override ? { system_prompt_override: data.system_prompt_override } : {}),
             },
           });
 
@@ -1575,6 +1576,7 @@ async function runViaAgent(
     channel_user_id?: string;
     api_key_id?: string;
     delegation?: Record<string, unknown>;
+    system_prompt_override?: string;
   },
 ): Promise<{ output: string; success: boolean; error?: string; turns: number; tool_calls: number; cost_usd: number; latency_ms: number; session_id: string; trace_id: string; stop_reason: string; [key: string]: unknown }> {
   // Per-user DO isolation: each user gets their own conversation thread
@@ -1603,6 +1605,7 @@ async function runViaAgent(
       channel_user_id: opts?.channel_user_id || "",
       api_key_id: opts?.api_key_id || "",
       delegation: opts?.delegation,
+      ...(opts?.system_prompt_override ? { system_prompt_override: opts.system_prompt_override } : {}),
     }),
   }));
   return resp.json() as any;
@@ -1854,6 +1857,7 @@ export default {
           channel_user_id?: string;
           api_key_id?: string;
           delegation?: Record<string, unknown>;
+          system_prompt_override?: string;
         };
         const result = await runViaAgent(env, body.agent_name || "agentos", body.input || "", {
           org_id: body.org_id,
@@ -1862,6 +1866,7 @@ export default {
           channel_user_id: body.channel_user_id,
           api_key_id: body.api_key_id,
           delegation: body.delegation,
+          system_prompt_override: body.system_prompt_override,
         });
         return Response.json(result);
       } catch (err) {

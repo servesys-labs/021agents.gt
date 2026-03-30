@@ -101,6 +101,8 @@ function makeSql() {
 
     if (query.includes("INSERT INTO agent_versions")) return { count: 1 };
     if (query.includes("INSERT INTO guardrail_events")) return { count: 1 };
+    if (query.includes("INSERT INTO eval_runs")) return [{ id: 42 }]; // RETURNING id
+    if (query.includes("INSERT INTO audit_log")) return { count: 1 };
     if (query.includes("INSERT INTO release_channels")) return { count: 1 };
 
     // ── UPDATE with RETURNING (atomic CAS for step) ──
@@ -856,5 +858,69 @@ describe("agent templates", () => {
         expect(task.name).toBeDefined();
       }
     }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// SECTION 9: Progress Endpoint
+// ══════════════════════════════════════════════════════════════════════
+
+describe("training progress", () => {
+  it("returns empty events when KV is unavailable", async () => {
+    const app = buildApp();
+    const env = mockEnv();
+
+    const createRes = await app.request("/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent_name: "test-agent", algorithm: "baseline", max_iterations: 3, eval_tasks: [{ input: "test", grader: "contains" }] }),
+    }, env);
+    const { job_id } = await createRes.json() as any;
+
+    // KV not configured — should return gracefully
+    const res = await app.request(`/jobs/${job_id}/progress`, { method: "GET" }, env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.events).toEqual([]);
+    expect(body.source).toBe("unavailable");
+  });
+
+  it("returns events from KV when available", async () => {
+    const app = buildApp();
+    const mockKV = {
+      list: async () => ({
+        keys: [{ name: "rpc:test-agent:12345" }],
+      }),
+      get: async () => JSON.stringify([
+        { type: "turn_start", turn: 1, ts: 1000 },
+        { type: "done", output: "hello", ts: 2000 },
+      ]),
+    };
+    const env = { ...mockEnv(), AGENT_PROGRESS_KV: mockKV } as any;
+
+    const createRes = await app.request("/jobs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent_name: "test-agent", algorithm: "baseline", max_iterations: 3, eval_tasks: [{ input: "test", grader: "contains" }] }),
+    }, env);
+    const { job_id } = await createRes.json() as any;
+
+    const res = await app.request(`/jobs/${job_id}/progress`, { method: "GET" }, env);
+    expect(res.status).toBe(200);
+    const body = await res.json() as any;
+    expect(body.source).toBe("kv");
+    expect(body.events.length).toBe(2);
+    expect(body.events[0].type).toBe("turn_start");
+    expect(body.events[1].type).toBe("done");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// SECTION 10: Auth Scopes
+// ══════════════════════════════════════════════════════════════════════
+
+describe("training auth scopes", () => {
+  it("training scopes exist in ALL_SCOPES", async () => {
+    const { ALL_SCOPES } = await import("../src/auth/types");
+    expect(ALL_SCOPES.has("training:read")).toBe(true);
+    expect(ALL_SCOPES.has("training:write")).toBe(true);
   });
 });

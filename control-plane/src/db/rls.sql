@@ -112,10 +112,11 @@ BEGIN
     'workflows',
     'workflow_runs',
     'workflow_approvals',
-    -- Subgraphs
-    'subgraph_definitions',
-    'graph_snapshots',
-    'graph_checkpoints'
+    -- Training
+    'training_jobs',
+    'training_iterations',
+    'training_resources',
+    'training_rewards'
   ]
   LOOP
     IF to_regclass(t) IS NOT NULL THEN

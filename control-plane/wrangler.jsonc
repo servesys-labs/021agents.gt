@@ -46,6 +46,14 @@
     }
   ],
 
+  // KV — shared with runtime worker for real-time agent progress events
+  "kv_namespaces": [
+    {
+      "binding": "AGENT_PROGRESS_KV",
+      "id": "30da23c287ee4f4c93d1a1f08cdd48a0"
+    }
+  ],
+
   // Queues — async job processing
   "queues": {
     "producers": [

@@ -7,7 +7,7 @@
  */
 import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
-import { ErrorSchema, errorResponses } from "../schemas/openapi";
+import { errorResponses } from "../schemas/openapi";
 import { requireScope } from "../middleware/auth";
 import { getDbForOrg } from "../db/client";
 import { getAlgorithm } from "../logic/training-algorithms";

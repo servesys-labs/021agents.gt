@@ -1,0 +1,13 @@
+$kind: http-request
+name: Get Eval Run Progress (Real-time)
+method: GET
+url: '{{base_url}}/api/v1/eval/runs/{{run_id}}/progress'
+order: 2300
+params:
+  - key: agent_name
+    value: '{{agent_name}}'
+    disabled: true
+description: |-
+  Returns real-time Workflow progress events from KV for an eval run.
+  Events include: turn_start, thinking, tool_calls, tool_result, turn_end, done, error.
+  Requires AGENT_PROGRESS_KV binding configured on the control-plane worker.
