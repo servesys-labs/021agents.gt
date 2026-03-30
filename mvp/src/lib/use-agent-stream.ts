@@ -236,6 +236,7 @@ export function useAgentStream() {
         body: JSON.stringify({
           agent_name: agentName,
           input,
+          session_id: currentSessionIdRef.current,
           // Pass conversation history for multi-turn context
           history: historyRef.current.slice(0, -1), // exclude current message (already in input)
         }),

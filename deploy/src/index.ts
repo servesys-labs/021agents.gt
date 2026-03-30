@@ -16,7 +16,8 @@ import {
   callable,
   routeAgentRequest,
 } from "agents";
-import { getSandbox, type Sandbox } from "@cloudflare/sandbox";
+import { getSandbox, Sandbox } from "@cloudflare/sandbox";
+import { ContainerProxy } from "@cloudflare/containers";
 import {
   loadRuntimeEventsPage, replayOtelEventsAtCursor, buildRuntimeRunTree,
   writeEvalRun, writeEvalTrial, listEvalRuns, getEvalRun, listEvalTrialsByRun,
@@ -26,11 +27,89 @@ import {
 // streamRun removed — all execution goes through Cloudflare Workflows
 import { getCircuitStatus } from "./runtime/tools";
 
-// Re-export Sandbox so Cloudflare can discover the Durable Object class.
-// Lifecycle hooks (onStart/onStop/onError) and internet control are configured
-// via getSafeSandbox() in runtime/tools.ts where we control the container behavior.
+// ── AgentSandbox — Sandbox with lifecycle hooks + controlled outbound ──
+// Sandbox extends Container extends DurableObject.
 // Per CF Containers docs: https://developers.cloudflare.com/containers/
-export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
+//
+// Lifecycle hooks give us visibility into OOM kills, crashes, and graceful shutdowns.
+// outboundByHost lets sandbox code access platform resources (R2, KV) via HTTP
+// while keeping arbitrary internet access blocked (enableInternet = false).
+export class AgentSandbox extends Sandbox<Env> {
+  // Block arbitrary internet — sandbox code can't exfiltrate data
+  enableInternet = false;
+
+  onStart() {
+    console.log(`[sandbox] Started: ${this.ctx.id.toString().slice(0, 16)}`);
+  }
+
+  onStop(params: { exitCode: number; reason: string }) {
+    if (params.exitCode !== 0) {
+      console.error(`[sandbox] Stopped with exit code ${params.exitCode}: ${params.reason}`);
+    }
+  }
+
+  onError(error: unknown) {
+    console.error("[sandbox] Container error:", error);
+    // Emit to telemetry queue if available for alerting
+    if (this.env.TELEMETRY_QUEUE) {
+      this.env.TELEMETRY_QUEUE.send({
+        type: "event",
+        payload: {
+          event_type: "sandbox.error",
+          error: String(error).slice(0, 500),
+          instance_id: this.ctx.id.toString().slice(0, 16),
+          created_at: new Date().toISOString(),
+        },
+      }).catch(() => {});
+    }
+  }
+}
+
+// Export ContainerProxy so outbound interception works
+// (required by CF when using outbound handlers — see docs)
+export { ContainerProxy };
+
+// Static outbound handlers — give sandbox code controlled access to platform resources.
+// Sandbox code can call http://platform.r2/path or http://platform.kv/key
+// and the request is handled by the Worker (with full binding access), not sent to the internet.
+(AgentSandbox as any).outboundByHost = {
+  // R2 storage access: sandbox code can read/write files via http://platform.r2/{path}
+  "platform.r2": async (request: Request, env: Env) => {
+    if (!env.STORAGE) return new Response("R2 not configured", { status: 503 });
+    const url = new URL(request.url);
+    const key = url.pathname.slice(1); // strip leading /
+    if (!key) return new Response("Key required", { status: 400 });
+
+    if (request.method === "GET") {
+      const obj = await env.STORAGE.get(key);
+      if (!obj) return new Response("Not found", { status: 404 });
+      return new Response(obj.body, {
+        headers: { "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream" },
+      });
+    }
+    if (request.method === "PUT") {
+      const body = await request.arrayBuffer();
+      await env.STORAGE.put(key, body);
+      return new Response("OK", { status: 200 });
+    }
+    return new Response("Method not allowed", { status: 405 });
+  },
+
+  // KV access: sandbox code can read config via http://platform.kv/{key}
+  "platform.kv": async (request: Request, env: Env) => {
+    if (!env.AGENT_PROGRESS_KV) return new Response("KV not configured", { status: 503 });
+    const url = new URL(request.url);
+    const key = url.pathname.slice(1);
+    if (!key) return new Response("Key required", { status: 400 });
+
+    if (request.method === "GET") {
+      const value = await env.AGENT_PROGRESS_KV.get(key);
+      if (value === null) return new Response("Not found", { status: 404 });
+      return new Response(value);
+    }
+    return new Response("Method not allowed — KV is read-only from sandbox", { status: 405 });
+  },
+};
 
 // Re-export Workflow so Cloudflare can discover it
 export { AgentRunWorkflow } from "./workflow";
@@ -1741,8 +1820,11 @@ async function runViaAgent(
   // Include org_id to prevent cross-org collision
   const userId = opts?.channel_user_id || "";
   const orgId = opts?.org_id || "";
+  const sessionId = (opts as any)?.session_id || "";
   const orgPrefix = orgId ? `${orgId}-` : "";
-  const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
+  const doName = userId
+    ? `${orgPrefix}${agentName}-u-${userId}${sessionId ? `-s-${sessionId}` : ""}`
+    : `${orgPrefix}${agentName}${sessionId ? `-s-${sessionId}` : ""}`;
   const agentId = env.AGENTOS_AGENT.idFromName(doName);
   const agent = env.AGENTOS_AGENT.get(agentId);
   const headers: Record<string, string> = {
@@ -2532,15 +2614,19 @@ export default {
         const body = await request.json() as {
           agent_name?: string; task?: string; input?: unknown;
           org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
-          api_key_id?: string;
+          api_key_id?: string; session_id?: string;
         };
 
         const agentName = body.agent_name || "agentos";
         const task = runnableInputToTask(body.input, body.task);
         const userId = body.channel_user_id || "";
         const orgId = body.org_id || "";
+        const sessionId = body.session_id || "";
         const orgPrefix = orgId ? `${orgId}-` : "";
-        const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
+        // Include session_id in DO name so each session gets its own DO instance
+        const doName = userId
+          ? `${orgPrefix}${agentName}-u-${userId}${sessionId ? `-s-${sessionId}` : ""}`
+          : `${orgPrefix}${agentName}${sessionId ? `-s-${sessionId}` : ""}`;
         const agentId = env.AGENTOS_AGENT.idFromName(doName);
         const agent = env.AGENTOS_AGENT.get(agentId);
 

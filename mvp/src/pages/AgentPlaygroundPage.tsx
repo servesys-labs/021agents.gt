@@ -30,14 +30,10 @@ export default function AgentPlaygroundPage() {
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [sessions, setSessions] = useState<StoredSession[]>([]);
 
-  const handleNewSession = useCallback(async () => {
-    // 1. Clear frontend
+  const handleNewSession = useCallback(() => {
+    // Clear frontend + generate new session ID → next message goes to a NEW DO instance
     clear();
-    // 2. Tell the DO to reset server-side conversation
     if (agent) {
-      try {
-        await api.post(`/runtime-proxy/runnable/reset`, { agent_name: agent.name }).catch(() => {});
-      } catch {}
       setSessions(loadSessionList(agent.name));
     }
   }, [agent, clear]);
