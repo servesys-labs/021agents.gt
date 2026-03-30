@@ -71,12 +71,13 @@ export const REASONING_STRATEGIES: Record<string, ReasoningStrategy> = {
       "about the overall approach.",
     prompt:
       "[Reasoning Strategy: Plan Then Execute]\n" +
-      "Before using any tools or writing any code:\n" +
-      "1. State what you need to accomplish\n" +
-      "2. List the specific steps you'll take (in order)\n" +
-      "3. Identify which tools you'll use for each step\n" +
-      "4. Note any risks or failure points\n" +
-      "Then execute your plan step by step, checking progress after each step.",
+      "MANDATORY: Your FIRST response must be a visible plan — NOT a tool call. Output a structured plan like this:\n\n" +
+      "## Plan\n" +
+      "1. **Step name** — what you'll do (tool: `tool-name`)\n" +
+      "2. **Step name** — what you'll do (tool: `tool-name`)\n" +
+      "...\n\n" +
+      "Then say 'Executing now.' and start calling tools to execute each step.\n" +
+      "DO NOT skip the plan. DO NOT start with a tool call. The user must see the plan FIRST.",
     trigger: "first_turn_only",
     complexity_threshold: 0,
   },
