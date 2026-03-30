@@ -143,12 +143,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   private _runLock: Promise<void> = Promise.resolve();
 
   /** Acquire a serial execution lock — only one run at a time per DO. */
-  private _withRunLock<T>(fn: () => Promise<T>): Promise<T> {
+  private _withRunLock<T>(fn: () => Promise<T>, timeoutMs = 30_000): Promise<T> {
     let release: () => void;
     const next = new Promise<void>((r) => { release = r; });
     const prev = this._runLock;
     this._runLock = next;
-    return prev.then(fn).finally(() => release!());
+    // Wait for previous run to finish, but don't wait forever
+    return Promise.race([
+      prev.then(fn),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Agent is busy processing another request. Please try again in a moment.")), timeoutMs),
+      ),
+    ]).finally(() => release!());
   }
 
   initialState: AgentState = {
@@ -180,6 +186,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       content TEXT NOT NULL,
       channel TEXT NOT NULL DEFAULT '',
       created_at REAL NOT NULL DEFAULT (unixepoch('now'))
+    )`;
+
+    // Run checkpoints: per-turn state for crash recovery
+    this.sql`CREATE TABLE IF NOT EXISTS run_checkpoints (
+      session_id TEXT NOT NULL,
+      turn INTEGER NOT NULL,
+      messages_json TEXT NOT NULL DEFAULT '[]',
+      output TEXT NOT NULL DEFAULT '',
+      cost_usd REAL NOT NULL DEFAULT 0,
+      tool_calls INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, turn)
     )`;
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
