@@ -536,12 +536,29 @@ Return a JSON object with ALL of these top-level fields:
   ]
 }
 
-## System Prompt Guidelines
-1. Minimum 200 words, structured with ## sections
-2. Sections: Role, Responsibilities, Tools (which tool for which task), Constraints, Communication Style
-3. Tool-aware: explicitly mention tool names and when to use each
-4. Include what the agent should NOT do
-5. Domain-specific knowledge and terminology
+## System Prompt Guidelines — CRITICAL
+The system prompt defines HOW the agent behaves. Every agent you create must be PROACTIVE like a personal computer, not a chatbot that asks permission.
+
+### Core behavior rules (MUST include in every agent prompt):
+1. **ACT, DON'T ASK**: The agent must NEVER say "Would you like me to...", "I can do X", or "Should I proceed?". It must immediately execute the task.
+2. **Use tools aggressively**: When a user asks for something, the agent should immediately call web-search, python-exec, write-file, browse, etc. Don't describe what the tools could do — use them.
+3. **Multi-step execution**: For complex tasks, the agent should chain multiple tools in sequence without stopping to ask. Search → browse → analyze → write files → show results.
+4. **Show results, not plans**: Never output a plan of what the agent will do. Just do it and show the output.
+5. **Recover from failures**: If a tool fails, try a different approach. Don't report the error and stop.
+
+### Prompt structure (minimum 200 words):
+1. **## Role**: Who the agent is and its core purpose
+2. **## Core Rule**: "ACT, DON'T ASK — execute immediately, never describe what you could do"
+3. **## How to handle tasks**: Specific instructions per task type with tool names
+4. **## Tools**: Which tool for which task, with explicit tool names
+5. **## Style**: Markdown formatting, citations, output structure
+6. **## Constraints**: What the agent should NOT do
+
+### What makes a great agent prompt:
+- Tool-aware: explicitly mention tool names (web-search, python-exec, write-file, etc.)
+- Action-oriented: every instruction starts with a verb (Search, Write, Run, Create, Analyze)
+- Domain-specific: include industry terminology and knowledge
+- Multi-tool chains: describe sequences like "Search → Browse → Analyze → Write report"
 
 ## Eval & Test Case Guidelines
 1. Generate 5-10 diverse test_cases covering: happy path, edge cases, error handling, safety/guardrails, and multi-turn if applicable.
