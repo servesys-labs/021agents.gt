@@ -337,7 +337,7 @@ async function seed() {
     `;
 
     // Marketplace listing
-    const apiBase = "https://agentos-control-plane.servesys.workers.dev/api/v1";
+    const apiBase = "https://api.oneshots.co/api/v1";
     await sql`
       INSERT INTO marketplace_listings (
         agent_name, org_id, display_name, short_description, long_description,

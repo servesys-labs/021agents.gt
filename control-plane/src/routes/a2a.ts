@@ -392,9 +392,10 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
             },
             body: JSON.stringify({
               agent_name: targetAgentName,
-              task: text,
-              org_id: user.org_id,
+              input: text,
+              org_id: targetOrgId,
               project_id: user.project_id,
+              channel: "a2a",
             }),
           }),
         );
@@ -940,9 +941,10 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
             },
             body: JSON.stringify({
               agent_name: targetAgentName,
-              task: text,
-              org_id: user.org_id,
+              input: text,
+              org_id: targetOrgId || user.org_id,
               project_id: user.project_id,
+              channel: "a2a",
             }),
           }),
         );

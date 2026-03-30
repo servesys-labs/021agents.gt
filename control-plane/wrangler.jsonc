@@ -77,6 +77,11 @@
     ]
   },
 
+  // Custom domain — api.oneshots.co
+  "routes": [
+    { "pattern": "api.oneshots.co/*", "zone_name": "oneshots.co" }
+  ],
+
   // Environment variables (secrets via `wrangler secret put`)
   "vars": {
     "RUNTIME_WORKER_URL": "https://runtime.oneshots.co"
