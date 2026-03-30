@@ -319,6 +319,38 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
           targetAgentName = (rows[0] as { name: string }).name;
         }
 
+        // ── x-402 Payment Gate ──────────────────────────────────
+        // Check if agent requires payment. If so, verify receipt or return 402.
+        const agentRows = await sql`
+          SELECT config_json FROM agents WHERE name = ${targetAgentName} AND org_id = ${user.org_id} AND is_active = 1 LIMIT 1
+        `.catch(() => []);
+        if (agentRows.length > 0) {
+          const { getAgentPricing, build402Headers, verifyPaymentReceipt } = await import("../logic/agent-payments");
+          const cfg = typeof agentRows[0].config_json === "string" ? JSON.parse(agentRows[0].config_json) : agentRows[0].config_json || {};
+          const pricing = getAgentPricing(cfg);
+
+          if (pricing?.requires_payment) {
+            const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
+
+            if (!paymentReceipt?.transfer_id) {
+              // No payment — return 402 with x-402 headers
+              task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+              const headers402 = build402Headers(pricing, targetAgentName, user.org_id);
+              return c.json(jsonrpcError(id, -32000, "Payment required"), {
+                status: 402 as any,
+                headers: headers402,
+              });
+            }
+
+            // Verify payment receipt
+            const verification = await verifyPaymentReceipt(sql, paymentReceipt.transfer_id, user.org_id, pricing.price_per_task_usd);
+            if (!verification.valid) {
+              task.status = { state: "FAILED", timestamp: new Date().toISOString() };
+              return c.json(jsonrpcError(id, -32000, `Payment verification failed: ${verification.error}`), 402 as any);
+            }
+          }
+        }
+
         // Forward to runtime via service binding
         const resp = await c.env.RUNTIME.fetch(
           new Request("https://runtime/api/v1/run", {

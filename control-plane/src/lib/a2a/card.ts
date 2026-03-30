@@ -89,6 +89,15 @@ export function buildAgentCard(config: AgentConfig, baseUrl: string = ""): Agent
       pushNotifications: false,
       multiTurn: true,
     },
+    // x-402 pricing (if agent charges for services)
+    ...((config as any).pricing ? {
+      pricing: {
+        price_per_task_usd: (config as any).pricing.price_per_task_usd || 0,
+        price_per_1k_tokens_usd: (config as any).pricing.price_per_1k_tokens_usd || 0,
+        accepts: ["oneshots-credits"],
+        protocol: "x-402",
+      },
+    } : {}),
     skills,
     securitySchemes: [{ type: "http", scheme: "bearer" }],
     interfaces: [

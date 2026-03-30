@@ -246,6 +246,57 @@ creditRoutes.openapi(checkoutRoute, async (c): Promise<any> => {
   return c.json({ checkout_url: session.url, session_id: session.id });
 });
 
+// ── POST /transfer — Transfer credits to another org (A2A payments) ──
+
+const transferRoute = createRoute({
+  method: "post",
+  path: "/transfer",
+  tags: ["Credits"],
+  summary: "Transfer credits to another organization for A2A agent payments",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            to_org_id: z.string().min(1),
+            amount_usd: z.number().positive().max(1000),
+            description: z.string().max(500).default("A2A credit transfer"),
+            task_id: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Transfer result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 500),
+  },
+});
+
+creditRoutes.openapi(transferRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const body = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const { transferCredits } = await import("../logic/agent-payments");
+  const result = await transferCredits(
+    sql, user.org_id, body.to_org_id, body.amount_usd,
+    body.description, body.task_id || "",
+  );
+
+  if (!result.success) {
+    return c.json({ error: result.error }, 400);
+  }
+
+  return c.json({
+    transfer_id: result.transfer_id,
+    from_org: user.org_id,
+    to_org: body.to_org_id,
+    amount_usd: body.amount_usd,
+    from_balance_after: result.from_balance_after,
+  });
+});
+
 // ── POST /add — Manual credit adjustment (admin only) ─────────────
 
 const addCreditsRoute = createRoute({
