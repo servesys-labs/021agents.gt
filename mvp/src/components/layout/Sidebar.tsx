@@ -123,35 +123,32 @@ export function Sidebar() {
 
         <div className="pt-3 mt-3 border-t border-border">
           <NavLink
-            to="/marketplace"
-            onClick={() => setMobileOpen(false)}
-            className={({ isActive }) => topNavClass(isActive)}
-          >
-            <Store size={18} />
-            Marketplace
-          </NavLink>
-          <NavLink
-            to="/feed"
-            onClick={() => setMobileOpen(false)}
-            className={({ isActive }) => topNavClass(isActive)}
-          >
-            <Rss size={18} />
-            Feed
-          </NavLink>
-          <NavLink
             to="/settings"
             onClick={() => setMobileOpen(false)}
-            className={({ isActive }) =>
-              `flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                isActive
-                  ? "bg-primary-light text-primary border-l-2 border-primary"
-                  : "text-text-secondary hover:bg-surface-alt hover:text-text"
-              }`
-            }
+            className={({ isActive }) => topNavClass(isActive)}
           >
             <Settings size={18} />
             Settings
           </NavLink>
+          <div className="mt-2 pt-2 border-t border-border/50">
+            <p className="px-3 py-1 text-[10px] font-medium text-text-muted uppercase tracking-wider">Explore</p>
+            <NavLink
+              to="/marketplace"
+              onClick={() => setMobileOpen(false)}
+              className={({ isActive }) => topNavClass(isActive)}
+            >
+              <Store size={18} />
+              Marketplace
+            </NavLink>
+            <NavLink
+              to="/feed"
+              onClick={() => setMobileOpen(false)}
+              className={({ isActive }) => topNavClass(isActive)}
+            >
+              <Rss size={18} />
+              Feed
+            </NavLink>
+          </div>
         </div>
       </nav>
 

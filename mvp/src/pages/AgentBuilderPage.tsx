@@ -97,6 +97,7 @@ export default function AgentBuilderPage() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [creationPhase, setCreationPhase] = useState("");
+  const [creationSteps, setCreationSteps] = useState<{ label: string; done: boolean }[]>([]);
   const [createResult, setCreateResult] = useState<CreateResult | null>(null);
 
   // Advanced mode state (for power users who expand the form)
@@ -202,8 +203,23 @@ export default function AgentBuilderPage() {
     setCreateError(null);
     setCreationPhase("Designing your agent with AI...");
 
+    setCreationSteps([
+      { label: "Analyzing your description", done: false },
+      { label: "Designing system prompt", done: false },
+      { label: "Selecting tools", done: false },
+      { label: "Generating test cases", done: false },
+    ]);
+
+    // Simulate progress while API works
+    const progressTimer = setInterval(() => {
+      setCreationSteps((prev) => {
+        const nextUndone = prev.findIndex((s) => !s.done);
+        if (nextUndone === -1 || nextUndone >= prev.length - 1) return prev;
+        return prev.map((s, i) => (i === nextUndone ? { ...s, done: true } : s));
+      });
+    }, 2500);
+
     try {
-      setCreationPhase("Building agent, tools, graph, and test cases...");
       const res = await api.post<CreateResult>("/agents/create-from-description", {
         description: buildMetaDescription(),
         name: name || undefined,
@@ -212,6 +228,9 @@ export default function AgentBuilderPage() {
         draft_only: false,
         auto_graph: true,
       });
+
+      clearInterval(progressTimer);
+      setCreationSteps((prev) => prev.map((s) => ({ ...s, done: true })));
 
       setCreateResult(res);
       const agentPath = agentPathSegment(res.agent_id || res.name || name);
@@ -234,11 +253,13 @@ export default function AgentBuilderPage() {
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
+        clearInterval(progressTimer);
         setCreateError(err.message || "Rollout gate blocked creation. Try a different name or override in settings.");
         return;
       }
       // Fallback to simple creation — still create a complete agent with graph + tools
       if (err instanceof ApiError && (err.status === 422 || err.status >= 500)) {
+        clearInterval(progressTimer);
         setCreationPhase("AI designer unavailable, creating with defaults...");
         try {
           // Use the same create-from-description but with simpler params
@@ -273,6 +294,7 @@ export default function AgentBuilderPage() {
           return;
         }
       }
+      clearInterval(progressTimer);
       setCreateError(err instanceof Error ? err.message : "Failed to create assistant");
     } finally {
       setCreating(false);
@@ -410,10 +432,22 @@ export default function AgentBuilderPage() {
           )}
 
           {/* Creating progress */}
-          {creating && creationPhase && (
-            <div className="flex items-center gap-2 p-3 rounded-lg bg-blue-50 border border-blue-200 text-sm text-blue-700">
-              <Loader2 size={16} className="animate-spin shrink-0" />
-              <span>{creationPhase}</span>
+          {creating && creationSteps.length > 0 && (
+            <div className="p-4 rounded-lg bg-blue-50 border border-blue-200 space-y-2">
+              {creationSteps.map((step, i) => (
+                <div key={step.label} className="flex items-center gap-2.5 text-sm">
+                  {step.done ? (
+                    <Check size={14} className="text-green-600 shrink-0" />
+                  ) : i === creationSteps.findIndex((s) => !s.done) ? (
+                    <Loader2 size={14} className="animate-spin text-primary shrink-0" />
+                  ) : (
+                    <div className="w-3.5 h-3.5 rounded-full border border-gray-300 shrink-0" />
+                  )}
+                  <span className={step.done ? "text-text" : i === creationSteps.findIndex((s) => !s.done) ? "text-blue-700 font-medium" : "text-text-muted"}>
+                    {step.label}
+                  </span>
+                </div>
+              ))}
             </div>
           )}
 
