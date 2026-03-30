@@ -41,6 +41,7 @@ export { Sandbox as AgentSandbox } from "@cloudflare/sandbox";
 
 // Re-export Workflow so Cloudflare can discover it
 export { AgentRunWorkflow } from "./workflow";
+import type { RunOutput } from "./workflow";
 
 // ---------------------------------------------------------------------------
 // Environment bindings
@@ -336,9 +337,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   }
 
   /**
-   * Run the agent entirely at the edge using CF bindings.
-   * No backend hop — LLM, tools, DB all execute here.
-   * Errors surface directly; no silent fallback to backend.
+   * Run the agent via Cloudflare Workflow (durable, crash-safe, parallel tools).
+   * Falls back to legacy edgeRun if Workflow bindings unavailable.
    */
   private async _runAtEdge(
     input: string,
@@ -354,6 +354,53 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const config = this.state.config;
     const started = Date.now();
 
+    // ── Workflow path (primary) ──
+    if (this.env.AGENT_RUN_WORKFLOW) {
+      const history = this._loadConversationHistory(24);
+      const progressKey = `rpc:${this.name}:${Date.now()}`;
+      const instance = await this.env.AGENT_RUN_WORKFLOW.create({
+        params: {
+          agent_name: config.agentName || "agentos",
+          input,
+          org_id: config.orgId || "",
+          project_id: config.projectId || "",
+          channel: "rpc",
+          channel_user_id: "",
+          history: history.map((m: any) => ({ role: m.role, content: m.content })),
+          progress_key: progressKey,
+          parent_session_id: opts?.delegation?.parent_session_id,
+          parent_depth: opts?.delegation?.parent_depth,
+        },
+      });
+
+      // Poll for completion
+      const maxWait = 300_000;
+      const pollStart = Date.now();
+      while (Date.now() - pollStart < maxWait) {
+        await new Promise(r => setTimeout(r, 2000));
+        const status = await instance.status().catch(() => ({ status: "unknown" as const }));
+        if (status.status === "complete") {
+          const out = (status as any).output as RunOutput | undefined;
+          this._appendConversationMessage("user", input, "rpc");
+          this._appendConversationMessage("assistant", out?.output || "", "rpc");
+          return [{
+            output: out?.output || "",
+            session_id: out?.session_id || "",
+            trace_id: out?.trace_id || "",
+            tool_calls: out?.tool_calls || 0,
+            cost_usd: out?.cost_usd || 0,
+            stop_reason: "complete",
+            wall_clock_ms: Date.now() - started,
+          }] as any;
+        }
+        if (status.status === "errored" || status.status === "terminated") {
+          throw new Error((status as any).error?.message || "Workflow failed");
+        }
+      }
+      throw new Error("Workflow timed out");
+    }
+
+    // ── Legacy path (fallback) ──
     const runtimeEnv: RuntimeEnv = {
       AI: this.env.AI,
       HYPERDRIVE: this.env.HYPERDRIVE,
@@ -370,7 +417,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
       OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
       DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-      DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "deepseek/deepseek-chat-v3-0324",
+      DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
       DO_SQL: this.sql.bind(this),
       DO_SESSION_ID: this.name,
     };
@@ -939,78 +986,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       return Response.json({ error: "WebSocket upgrade required" }, { status: 426 });
     }
 
-    // POST /run/workflow — Durable agent run via Cloudflare Workflow (crash-safe, no state corruption)
-    // The DO triggers the Workflow, then polls KV for progress and returns the final result.
-    // For SSE streaming, use /run/workflow/stream which polls and emits events.
-    if (url.pathname === "/run/workflow" && request.method === "POST") {
-      if (!(await this._isAuthorized(request))) {
-        return Response.json({ error: "unauthorized" }, { status: 401 });
-      }
-      const data = await request.json() as any;
-      const agentName = data.agent_name || this.state.config.agentName || "agentos";
-      const input = String(data.input || "");
-      const history = this._loadConversationHistory(24);
-      const progressKey = `run:${this.name}:${Date.now()}`;
+    // /run/workflow removed — /run now uses Workflow as primary path
 
-      if (!this.env.AGENT_RUN_WORKFLOW) {
-        return Response.json({ error: "Workflows not configured" }, { status: 501 });
-      }
-
-      try {
-        const instance = await this.env.AGENT_RUN_WORKFLOW.create({
-          params: {
-            agent_name: agentName,
-            input,
-            org_id: data.org_id || this.state.config.orgId || "",
-            project_id: data.project_id || this.state.config.projectId || "",
-            channel: data.channel || "workflow",
-            channel_user_id: data.channel_user_id || "",
-            history: history.map((m: any) => ({ role: m.role, content: m.content })),
-            progress_key: progressKey,
-          },
-        });
-
-        // Poll for completion (max 5 minutes)
-        const maxWait = 300_000;
-        const start = Date.now();
-        let status: any = { status: "running" };
-
-        while (Date.now() - start < maxWait) {
-          await new Promise(r => setTimeout(r, 2000));
-          try {
-            status = await instance.status();
-          } catch { continue; }
-
-          if (status.status === "complete" || status.status === "errored" || status.status === "terminated") {
-            break;
-          }
-        }
-
-        if (status.status === "complete" && status.output) {
-          const result = status.output as { output: string; turns: number; tool_calls: number; cost_usd: number; session_id: string };
-          this._appendConversationMessage("user", input, data.channel || "workflow");
-          this._appendConversationMessage("assistant", result.output, data.channel || "workflow");
-          return Response.json({ status: "completed", success: true, ...result });
-        }
-
-        if (status.status === "errored") {
-          return Response.json({ status: "error", success: false, error: status.error?.message || "Workflow failed" }, { status: 500 });
-        }
-
-        // Still running after max wait — return instance ID for polling
-        return Response.json({
-          status: "running",
-          success: true,
-          instance_id: instance.id,
-          progress_key: progressKey,
-          message: "Run is still in progress. Poll /run/workflow/status for updates.",
-        }, { status: 202 });
-      } catch (err: any) {
-        return Response.json({ error: `Workflow failed: ${err.message}` }, { status: 500 });
-      }
-    }
-
-    // GET /run/checkpoint — read the latest checkpoint for a session (crash recovery)
+    // GET /run/checkpoint — legacy checkpoint for crash recovery (Workflow handles this now)
     if (url.pathname === "/run/checkpoint" && request.method === "GET") {
       const sessionId = url.searchParams.get("session_id");
       if (!sessionId) return Response.json({ error: "session_id required" }, { status: 400 });
