@@ -96,8 +96,8 @@ export type {
 export { createHarnessCodeTool, getHarnessToolDefs } from "./codemode";
 export { buildSandboxModules, HARNESS_MODULE_SOURCE, HARNESS_TYPE_DEFS } from "./harness-modules";
 
-// Stream (legacy fallback)
-export { streamRun } from "./stream";
+// Stream — legacy, no longer imported (Workflow is the execution engine)
+// export { streamRun } from "./stream";
 export type { RuntimeEvent as ProtocolRuntimeEvent, TurnEndEvent, DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent } from "./protocol";
 export { validateEvent, serializeForSSE, serializeForWebSocket } from "./protocol";
 

@@ -460,17 +460,7 @@ export async function streamRun(
     let output = "";
     let lastModel = config.model;
 
-    // Turn-level checkpoint: save state after each turn so runs can resume on crash/deploy.
-    // Stored in DO SQLite via env.DO_SQL (if available).
-    const saveCheckpoint = (turn: number) => {
-      if (!env.DO_SQL) return;
-      try {
-        env.DO_SQL`
-          INSERT OR REPLACE INTO run_checkpoints (session_id, turn, messages_json, output, cost_usd, tool_calls, created_at)
-          VALUES (${sessionId}, ${turn}, ${JSON.stringify(messages.slice(-20))}, ${output}, ${cumulativeCost}, ${totalToolCalls}, ${new Date().toISOString()})
-        `;
-      } catch {} // non-blocking — don't fail the run if checkpoint fails
-    };
+    // Checkpointing handled by Workflow steps — no manual DO SQLite checkpoints needed.
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
       const lineage = (env as any).__delegationLineage;
@@ -479,8 +469,6 @@ export async function streamRun(
         lineage.cumulative_cost_usd = cumulativeCost;
       }
 
-      // Checkpoint after every completed turn (not the first)
-      if (turn > 1) saveCheckpoint(turn - 1);
 
       // Yield between turns: cooperative yield to the event loop.
       // If the run was aborted (lock timeout, new request cancelled us), stop cleanly.
@@ -542,8 +530,6 @@ export async function streamRun(
         ]);
       } catch (err: any) {
         send(serializeForWebSocket({ type: "error", message: `LLM failed: ${err.message}`, code: "LLM_ERROR" }));
-        // Save checkpoint before breaking so output from previous turns isn't lost
-        saveCheckpoint(turn);
         break;
       }
 
