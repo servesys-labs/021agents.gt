@@ -23,12 +23,15 @@ import { executeTools, getToolDefinitions } from "./tools";
 import { loadAgentConfig, resolvePlanRouting, writeSession, writeTurn, writeBillingRecord } from "./db";
 import { createWorkingMemory, buildMemoryContext, queueFactExtraction } from "./memory";
 import { selectModel, type PlanRouting } from "./router";
-import { createLoopState, detectLoop } from "./middleware";
+import { createLoopState, detectLoop, maybeSummarize } from "./middleware";
 import { serializeForWebSocket } from "./protocol";
 import { createBackpressureController } from "./backpressure";
 import { estimateTokenCost } from "./pricing";
 import { attachDelegationLineage, type DelegationContextInput } from "./delegation";
 import { attachToolPolicyEnvelope } from "./policy-envelope";
+import { selectReasoningStrategy, autoSelectStrategy } from "./reasoning-strategies";
+import { loadSkills, formatSkillsPrompt } from "./skills";
+import { loadStartupContext } from "./progress";
 
 type WsSend = (data: string) => void;
 
@@ -303,12 +306,12 @@ export async function streamRun(
       delegation: opts?.delegation,
     });
 
-    // Tools
+    // ── 1. TOOLS ──────────────────────────────────────────────
     const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
     const blockedSet = new Set(config.blocked_tools);
     const activeTools = toolDefs.filter((t) => !blockedSet.has(t.function.name));
 
-    // Hydrate workspace from R2 on cold start (restore previous files)
+    // ── 2. WORKSPACE HYDRATION (restore files from R2) ──────
     if (env.STORAGE && env.SANDBOX) {
       try {
         const { hydrateWorkspace } = await import("./workspace");
@@ -322,11 +325,9 @@ export async function streamRun(
       } catch {}
     }
 
-    // Memory
+    // ── 3. STATE INITIALIZATION ─────────────────────────────
     const workingMemory = createWorkingMemory(100);
     const loopState = createLoopState();
-
-    // Build messages
     const isVoiceChannel = opts?.channel === "voice";
 
     // Voice: override model for speed + reliable tool calling
@@ -335,11 +336,36 @@ export async function streamRun(
       config.provider = "openrouter";
     }
 
+    // ── 4. SYSTEM PROMPT ASSEMBLY ───────────────────────────
+    // Build a cohesive system prompt from: base prompt + skills + startup context + voice rules
     const messages: LLMMessage[] = [];
+    const sysPromptParts: string[] = [];
+
+    // 4a. Base system prompt
     if (config.system_prompt) {
-      let sysPrompt = config.system_prompt;
-      if (isVoiceChannel) {
-        sysPrompt += `\n\n[VOICE MODE — The user is on a phone call. You MUST follow these rules:
+      sysPromptParts.push(config.system_prompt);
+    }
+
+    // 4b. Skills (loaded from DB, cached 1min) — agent-specific capabilities
+    if (!isVoiceChannel) {
+      try {
+        const skills = await loadSkills(hyperdrive, config.org_id || "", config.agent_name || agentName);
+        const skillsBlock = formatSkillsPrompt(skills);
+        if (skillsBlock) sysPromptParts.push(skillsBlock);
+      } catch {}
+    }
+
+    // 4c. Startup context (prior session progress) — cross-session awareness
+    if (!isVoiceChannel) {
+      try {
+        const startup = await loadStartupContext(hyperdrive, config.agent_name || agentName, config.org_id || "");
+        if (startup.context_block) sysPromptParts.push(startup.context_block);
+      } catch {}
+    }
+
+    // 4d. Voice mode rules
+    if (isVoiceChannel) {
+      sysPromptParts.push(`[VOICE MODE — The user is on a phone call. You MUST follow these rules:
 1. Keep every response to 1-2 sentences MAX. Be extremely concise.
 2. Speak naturally — use contractions, casual tone. Say "I'll" not "I will".
 3. NEVER use markdown, asterisks, hashes, bullet points, code blocks, or any formatting.
@@ -347,12 +373,14 @@ export async function streamRun(
 5. If you need to share details, summarize them verbally — don't list them.
 6. Ask one question at a time. Don't give multiple options in one turn.
 7. Use filler phrases naturally: "Sure thing", "Got it", "Let me check that for you".
-8. If a tool call takes time, say "One moment" before running it.]`;
-      }
-      messages.push({ role: "system", content: sysPrompt });
+8. If a tool call takes time, say "One moment" before running it.]`);
     }
 
-    // Memory context
+    if (sysPromptParts.length > 0) {
+      messages.push({ role: "system", content: sysPromptParts.join("\n\n") });
+    }
+
+    // ── 5. MEMORY CONTEXT (working + episodic + semantic + procedural) ──
     try {
       const memCtx = await buildMemoryContext(env, hyperdrive, input, workingMemory, {
         agent_name: config.agent_name, org_id: config.org_id,
@@ -360,7 +388,7 @@ export async function streamRun(
       if (memCtx) messages.push({ role: "system", content: memCtx });
     } catch {}
 
-    // Conversation history from DO (shared across ingress channels).
+    // ── 6. CONVERSATION HISTORY (from DO, shared across channels) ──
     const history = Array.isArray(opts?.history_messages) ? opts?.history_messages : [];
     for (const msg of history) {
       const role = msg?.role;
@@ -369,7 +397,23 @@ export async function streamRun(
       messages.push({ role, content });
     }
 
-    // Channel formatting
+    // ── 7. REASONING STRATEGY (injected before user message) ──
+    // Auto-selects reasoning approach based on task complexity, or uses agent config.
+    if (!isVoiceChannel) {
+      const strategyPrompt =
+        selectReasoningStrategy(config.reasoning_strategy as string | undefined, input, 1) ||
+        autoSelectStrategy(input, activeTools.length);
+      if (strategyPrompt) {
+        messages.push({ role: "system", content: strategyPrompt });
+        send(serializeForWebSocket({
+          type: "reasoning",
+          strategy: config.reasoning_strategy || "auto",
+          prompt: strategyPrompt.slice(0, 200),
+        } as any));
+      }
+    }
+
+    // ── 8. USER MESSAGE ─────────────────────────────────────
     let task = input;
     const channel = (opts?.channel || "").toLowerCase();
     if (["telegram", "discord", "whatsapp", "sms"].includes(channel)) {
@@ -410,6 +454,26 @@ export async function streamRun(
         lineage.cumulative_cost_usd = cumulativeCost;
       }
 
+      // ── CONTEXT COMPRESSION — summarize when messages exceed token budget ──
+      if (turn > 2 && !isVoiceChannel) {
+        try {
+          const compressed = await maybeSummarize(env, messages, {
+            maxChars: 80_000,
+            keepRecentCount: 8,
+            model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+            provider: "workers-ai",
+          });
+          if (compressed.summarized) {
+            messages.splice(0, messages.length, ...compressed.messages);
+            cumulativeCost += compressed.cost_usd;
+            send(serializeForWebSocket({
+              type: "system",
+              message: "Context compressed to fit token budget.",
+            } as any));
+          }
+        } catch {}
+      }
+
       // Budget check
       if (cumulativeCost >= config.budget_limit_usd) {
         send(serializeForWebSocket({ type: "error", message: "Budget exhausted", code: "BUDGET_EXHAUSTED" }));
@@ -438,6 +502,23 @@ export async function streamRun(
       cumulativeCost += llmResponse.cost_usd;
       totalInputTokens += llmResponse.usage.input_tokens;
       totalOutputTokens += llmResponse.usage.output_tokens;
+
+      // Always capture the latest non-empty content as output
+      if (llmResponse.content && llmResponse.content.trim()) {
+        output = llmResponse.content;
+      }
+
+      // ── EXTENDED THINKING TRACE ──────────────────────────
+      // When the model produces content alongside tool calls, that content is
+      // the model's reasoning ("I'll search for...", "Let me check...").
+      // Emit it as a visible thinking trace so users see WHY the agent acts.
+      if (llmResponse.tool_calls.length > 0 && llmResponse.content && llmResponse.content.trim()) {
+        send(serializeForWebSocket({
+          type: "thinking",
+          content: llmResponse.content.trim(),
+          turn,
+        } as any));
+      }
 
       // No tool calls → final answer
       if (llmResponse.tool_calls.length === 0) {
@@ -572,6 +653,29 @@ export async function streamRun(
       if (turn === 1) {
         queueFactExtraction(env, hyperdrive, input, sessionId, config.agent_name, config.org_id);
       }
+    }
+
+    // Recovery: if tools ran but no final text output, make one last LLM call
+    // without tools to force the model to synthesize a response.
+    if (!output && totalToolCalls > 0 && messages.length > 1) {
+      try {
+        send(serializeForWebSocket({ type: "turn_start", turn: 0, model: lastModel }));
+        const recoveryResponse = await streamLLM(env, messages, [], {
+          model: lastModel,
+          provider: config.provider,
+          max_tokens: 4096,
+        }, send);
+        output = recoveryResponse.content || "";
+        cumulativeCost += recoveryResponse.cost_usd;
+        totalInputTokens += recoveryResponse.usage.input_tokens;
+        totalOutputTokens += recoveryResponse.usage.output_tokens;
+        send(serializeForWebSocket({
+          type: "turn_end", turn: 0, model: recoveryResponse.model,
+          cost_usd: recoveryResponse.cost_usd,
+          tokens: recoveryResponse.usage.input_tokens + recoveryResponse.usage.output_tokens,
+          done: true,
+        }));
+      } catch {}
     }
 
     const elapsedMs = Date.now() - started;
