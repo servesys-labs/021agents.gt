@@ -38,7 +38,7 @@ export default function LoginPage() {
         }
       } else {
         await signup(email, password, name, inviteCode || undefined);
-        navigate("/onboarding");
+        navigate("/my-assistant");
       }
     } catch (err: any) {
       setError(err.message || "Something went wrong");

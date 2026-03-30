@@ -83,14 +83,14 @@ export function Sidebar() {
           <Plus size={18} />
           {PRODUCT.newAgentCta}
         </Link>
-        <Link
-          to="/agents/new?kind=personal"
+        <NavLink
+          to="/my-assistant"
           onClick={() => setMobileOpen(false)}
-          className={topNavClass(isPersonalNew)}
+          className={({ isActive }) => topNavClass(isActive)}
         >
           <User size={18} />
-          Personal assistant
-        </Link>
+          My Assistant
+        </NavLink>
 
         <div className="pt-3 mt-3 border-t border-border">
           <div className="flex items-center justify-between px-3 py-1">

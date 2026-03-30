@@ -20,12 +20,13 @@ import SettingsPage from "./pages/SettingsPage";
 import MarketplacePage from "./pages/MarketplacePage";
 import FeedPage from "./pages/FeedPage";
 import AgentDetailPage from "./pages/AgentDetailPage";
+import MyAssistantPage from "./pages/MyAssistantPage";
 
 /** Redirect to dashboard if logged in, otherwise show landing */
 function LandingOrDashboard() {
   const { user, loading } = useAuth();
   if (loading) return <div className="flex items-center justify-center h-screen"><div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" /></div>;
-  if (user) return <Navigate to="/dashboard" replace />;
+  if (user) return <Navigate to="/my-assistant" replace />;
   return <LandingPage />;
 }
 
@@ -58,6 +59,7 @@ export default function App() {
         }
       >
         <Route path="dashboard" element={<DashboardPage />} />
+        <Route path="my-assistant" element={<MyAssistantPage />} />
         <Route path="agents/new" element={<AgentBuilderPage />} />
         <Route path="agents/:id/play" element={<AgentPlaygroundPage />} />
         <Route path="agents/:id/settings" element={<AgentSettingsPage />} />
