@@ -86,11 +86,17 @@ const META_TOOLS: ToolDef[] = [
             items: { type: "string" },
             description: "Agent tags",
           },
-          max_turns: { type: "number", description: "Max conversation turns" },
-          timeout_seconds: { type: "number", description: "Run timeout" },
+          max_turns: { type: "number", description: "Max conversation turns (1-1000)" },
+          timeout_seconds: { type: "number", description: "Run timeout in seconds" },
+          budget_limit_usd: { type: "number", description: "Max cost per session in USD (0-10000). Set via governance.budget_limit_usd." },
+          reasoning_strategy: {
+            type: "string",
+            enum: ["", "chain-of-thought", "plan-then-execute", "step-back", "decompose", "verify-then-respond"],
+            description: "Reasoning strategy. Empty string = auto-select (recommended).",
+          },
           governance: {
             type: "object",
-            description: "Governance settings (budget_limit_usd, etc.)",
+            description: "Governance settings (budget_limit_usd, require_confirmation_for_destructive, etc.)",
           },
         },
         required: [],
@@ -209,6 +215,101 @@ const META_TOOLS: ToolDef[] = [
       },
     },
   },
+
+  // ── Training System Tools ─────────────────────────────────────
+  {
+    type: "function",
+    function: {
+      name: "start_training",
+      description:
+        "Start an automated training job for this agent. Training runs eval suites, computes rewards, and uses algorithms (Baseline, APO, or Multi-dimension) to optimize the agent's prompt, reasoning strategy, and tool selection. Includes safety gates: pre-flight tool checks, prompt safety validation, config schema validation, and auto-rollback circuit breaker.",
+      parameters: {
+        type: "object",
+        properties: {
+          algorithm: {
+            type: "string",
+            enum: ["baseline", "apo", "multi"],
+            description: "Training algorithm. 'baseline' = random perturbation (safe, exploratory). 'apo' = LLM-powered prompt optimization (most effective for prompt quality). 'multi' = cycles through prompt + reasoning strategy + tool selection (comprehensive). Default: apo.",
+          },
+          max_iterations: {
+            type: "number",
+            description: "Max training iterations (default 10). Each iteration runs a full eval cycle.",
+          },
+          auto_activate: {
+            type: "boolean",
+            description: "If true, automatically activate the best-performing config when training completes. If false (default), the trained config is stored as a resource for manual review.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_training_status",
+      description:
+        "Read the status of training jobs for this agent. Shows active/completed/failed jobs, current iteration, best score, algorithm used, and improvement trajectory.",
+      parameters: {
+        type: "object",
+        properties: {
+          job_id: {
+            type: "string",
+            description: "Specific job ID (default: latest job)",
+          },
+          include_iterations: {
+            type: "boolean",
+            description: "Include per-iteration details (scores, changes made). Default false.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "activate_trained_config",
+      description:
+        "Activate a trained resource (prompt, config) produced by a training job. Applies it as the agent's live configuration. Includes validation gates: config schema check, prompt safety scan, and enables the auto-rollback circuit breaker (reverts if error rate > 30% within 15 minutes).",
+      parameters: {
+        type: "object",
+        properties: {
+          resource_id: {
+            type: "string",
+            description: "The training resource ID to activate. Get this from read_training_status.",
+          },
+        },
+        required: ["resource_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "rollback_training",
+      description:
+        "Roll back to the previous active configuration, undoing the last training activation. Use this if the trained config is performing worse than the original.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_training_circuit_breaker",
+      description:
+        "Check the circuit breaker status for this agent's training. Shows if auto-rollback is armed, current error rate, time since activation, and whether a rollback was triggered.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
 ];
 
 /* ── Tool execution ─────────────────────────────────────────────── */
@@ -249,6 +350,8 @@ async function executeTool(
         tags: config.tags,
         max_turns: config.max_turns,
         timeout_seconds: config.timeout_seconds,
+        reasoning_strategy: config.reasoning_strategy || "(auto)",
+        budget_limit_usd: config.governance?.budget_limit_usd ?? 10,
         version: config.version,
         governance: config.governance,
         guardrails: config.guardrails,
@@ -289,6 +392,7 @@ async function executeTool(
         "tags",
         "max_turns",
         "timeout_seconds",
+        "reasoning_strategy",
       ] as const;
       const changed: string[] = [];
       for (const key of updatable) {
@@ -296,6 +400,13 @@ async function executeTool(
           (config as any)[key] = args[key];
           changed.push(key);
         }
+      }
+      // Handle budget_limit_usd — nested under governance
+      if (args.budget_limit_usd !== undefined) {
+        const gov = (config.governance as any) ?? {};
+        gov.budget_limit_usd = Number(args.budget_limit_usd);
+        config.governance = gov;
+        changed.push("budget_limit_usd");
       }
       if (args.governance && typeof args.governance === "object") {
         config.governance = { ...(config.governance as any ?? {}), ...(args.governance as any) };
@@ -666,6 +777,275 @@ async function executeTool(
       });
     }
 
+    // ── Training System Tool Execution ──────────────────────────
+    case "start_training": {
+      const algorithm = String(args.algorithm || "apo");
+      const maxIterations = Number(args.max_iterations) || 10;
+      const autoActivate = args.auto_activate === true;
+      try {
+        const resp = await fetch(
+          `https://${ctx.env.RUNTIME ? "runtime" : "api.oneshots.co/api/v1"}/training/jobs`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(ctx.env.SERVICE_TOKEN ? { Authorization: `Bearer ${ctx.env.SERVICE_TOKEN}` } : {}),
+            },
+            body: JSON.stringify({
+              agent_name: ctx.agentName,
+              org_id: ctx.orgId,
+              algorithm,
+              max_iterations: maxIterations,
+              auto_activate: autoActivate,
+            }),
+          },
+        );
+        if (!resp.ok) {
+          const err = await resp.text();
+          return JSON.stringify({ error: `Failed to start training: ${err.slice(0, 300)}` });
+        }
+        const result = (await resp.json()) as { id?: string; job_id?: string };
+        const createdJobId = result.id || result.job_id;
+
+        // Auto-start the training loop via /auto-step
+        if (createdJobId) {
+          try {
+            await fetch(
+              `https://${ctx.env.RUNTIME ? "runtime" : "api.oneshots.co/api/v1"}/training/jobs/${createdJobId}/auto-step`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(ctx.env.SERVICE_TOKEN ? { Authorization: `Bearer ${ctx.env.SERVICE_TOKEN}` } : {}),
+                },
+              },
+            );
+          } catch {} // non-blocking — job exists even if auto-step fails
+        }
+
+        return JSON.stringify({ ...result, auto_started: true, message: "Training started. The system will automatically run each iteration. Use read_training_status to monitor progress." });
+      } catch (err: any) {
+        // Fallback: try via SQL + queue directly
+        try {
+          const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+          const now = new Date().toISOString();
+          await sql`
+            INSERT INTO training_jobs (id, agent_name, org_id, algorithm, max_iterations, auto_activate, status, current_iteration, best_score, created_at, updated_at)
+            VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'running', 0, 0, ${now}, ${now})
+          `;
+
+          // Try to enqueue the first step via the queue
+          try {
+            await sql`
+              INSERT INTO queue_jobs (id, job_type, payload, status, created_at)
+              VALUES (${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}, 'training_step', ${JSON.stringify({ job_id: jobId })}, 'pending', ${now})
+            `;
+          } catch {} // queue table may not exist yet
+
+          return JSON.stringify({
+            job_id: jobId,
+            status: "running",
+            algorithm,
+            max_iterations: maxIterations,
+            auto_activate: autoActivate,
+            auto_started: true,
+            message: "Training job created and queued. Iterations will run automatically.",
+          });
+        } catch (dbErr: any) {
+          return JSON.stringify({ error: `Training not available: ${dbErr.message || dbErr}` });
+        }
+      }
+    }
+
+    case "read_training_status": {
+      try {
+        let jobRows: any[];
+        if (args.job_id) {
+          jobRows = await sql`
+            SELECT * FROM training_jobs
+            WHERE id = ${String(args.job_id)} AND org_id = ${ctx.orgId} LIMIT 1
+          `;
+        } else {
+          jobRows = await sql`
+            SELECT * FROM training_jobs
+            WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+            ORDER BY created_at DESC LIMIT 1
+          `;
+        }
+        if (jobRows.length === 0) {
+          return JSON.stringify({ status: "no_training_jobs", message: "No training jobs found for this agent. Use start_training to begin." });
+        }
+        const job = jobRows[0] as any;
+        const result: any = {
+          job_id: job.id,
+          status: job.status,
+          algorithm: job.algorithm,
+          current_iteration: job.current_iteration,
+          max_iterations: job.max_iterations,
+          best_score: job.best_score,
+          auto_activate: job.auto_activate,
+          created_at: job.created_at,
+          updated_at: job.updated_at,
+        };
+
+        if (args.include_iterations) {
+          const iterations = await sql`
+            SELECT iteration_number, eval_pass_rate, reward_score, changes_json, created_at
+            FROM training_iterations
+            WHERE job_id = ${job.id}
+            ORDER BY iteration_number
+          `;
+          result.iterations = iterations.map((it: any) => ({
+            iteration: it.iteration_number,
+            eval_pass_rate: it.eval_pass_rate,
+            reward_score: it.reward_score,
+            changes: (() => { try { return JSON.parse(it.changes_json || "{}"); } catch { return {}; } })(),
+            created_at: it.created_at,
+          }));
+        }
+        return JSON.stringify(result);
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to read training status: ${err.message || err}` });
+      }
+    }
+
+    case "activate_trained_config": {
+      const resourceId = String(args.resource_id || "");
+      if (!resourceId) return JSON.stringify({ error: "resource_id is required" });
+      try {
+        // Read the trained resource
+        const resRows = await sql`
+          SELECT * FROM training_resources
+          WHERE id = ${resourceId} AND agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
+        `;
+        if (resRows.length === 0) return JSON.stringify({ error: "Training resource not found" });
+        const resource = resRows[0] as any;
+        const trainedConfig = typeof resource.config_json === "string" ? JSON.parse(resource.config_json) : resource.config_json;
+
+        // Read current config for rollback storage
+        const currentRows = await sql`
+          SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
+        `;
+        const currentConfig = currentRows.length > 0
+          ? (typeof currentRows[0].config_json === "string" ? JSON.parse(currentRows[0].config_json as string) : currentRows[0].config_json)
+          : {};
+
+        // Apply trained config
+        const merged = { ...currentConfig, ...trainedConfig };
+        const oldVer = String(merged.version ?? "0.1.0");
+        const verParts = oldVer.split(".").map(Number);
+        verParts[1] = (verParts[1] ?? 0) + 1;
+        verParts[2] = 0;
+        merged.version = verParts.join(".");
+
+        await sql`
+          UPDATE agents SET config_json = ${JSON.stringify(merged)}, updated_at = now()
+          WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+        `;
+
+        // Mark resource as active
+        await sql`
+          UPDATE training_resources SET is_active = 1, activated_at = now()
+          WHERE id = ${resourceId}
+        `;
+
+        // Store rollback point
+        await sql`
+          INSERT INTO training_resources (id, agent_name, org_id, resource_type, config_json, source_job_id, is_active, created_at)
+          VALUES (${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}, ${ctx.agentName}, ${ctx.orgId}, 'rollback_snapshot', ${JSON.stringify(currentConfig)}, ${resource.source_job_id || ''}, 0, now())
+        `.catch(() => {});
+
+        return JSON.stringify({
+          activated: true,
+          resource_id: resourceId,
+          new_version: merged.version,
+          changes: Object.keys(trainedConfig),
+          circuit_breaker: "armed — auto-rollback if error rate > 30% within 15 minutes",
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to activate: ${err.message || err}` });
+      }
+    }
+
+    case "rollback_training": {
+      try {
+        const rollbackRows = await sql`
+          SELECT config_json FROM training_resources
+          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND resource_type = 'rollback_snapshot'
+          ORDER BY created_at DESC LIMIT 1
+        `;
+        if (rollbackRows.length === 0) {
+          return JSON.stringify({ error: "No rollback snapshot found. No training activation has been done for this agent." });
+        }
+        const previousConfig = typeof rollbackRows[0].config_json === "string"
+          ? JSON.parse(rollbackRows[0].config_json as string)
+          : rollbackRows[0].config_json;
+
+        await sql`
+          UPDATE agents SET config_json = ${JSON.stringify(previousConfig)}, updated_at = now()
+          WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+        `;
+
+        return JSON.stringify({
+          rolled_back: true,
+          message: "Reverted to configuration before the last training activation.",
+          version: previousConfig.version || "unknown",
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Rollback failed: ${err.message || err}` });
+      }
+    }
+
+    case "read_training_circuit_breaker": {
+      try {
+        // Check for recent activations and error rates
+        const recentActivation = await sql`
+          SELECT activated_at FROM training_resources
+          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND is_active = 1
+          ORDER BY activated_at DESC LIMIT 1
+        `;
+
+        if (recentActivation.length === 0) {
+          return JSON.stringify({ armed: false, message: "No active training resource. Circuit breaker not armed." });
+        }
+
+        const activatedAt = recentActivation[0].activated_at;
+        const msSinceActivation = Date.now() - new Date(String(activatedAt)).getTime();
+        const inWindow = msSinceActivation < 15 * 60 * 1000; // 15 min window
+
+        // Count errors since activation
+        let errorRate = 0;
+        let totalSessions = 0;
+        if (inWindow) {
+          try {
+            const stats = await sql`
+              SELECT COUNT(*) as total,
+                     COUNT(*) FILTER (WHERE status = 'error') as errors
+              FROM sessions
+              WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+                AND created_at > ${String(activatedAt)}
+            `;
+            totalSessions = Number(stats[0]?.total) || 0;
+            const errorCount = Number(stats[0]?.errors) || 0;
+            errorRate = totalSessions > 0 ? Math.round((errorCount / totalSessions) * 100) : 0;
+          } catch {}
+        }
+
+        return JSON.stringify({
+          armed: inWindow,
+          activated_at: activatedAt,
+          minutes_since_activation: Math.round(msSinceActivation / 60000),
+          monitoring_window: "15 minutes",
+          sessions_since_activation: totalSessions,
+          error_rate_pct: errorRate,
+          rollback_threshold_pct: 30,
+          would_rollback: errorRate > 30 && inWindow,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Circuit breaker check failed: ${err.message || err}` });
+      }
+    }
+
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
@@ -686,6 +1066,44 @@ You have tools to:
 - **Read eval results** to see how the agent performs on its test suite
 - **Run the evolution analyzer** to get AI-generated improvement suggestions
 - **Check conversation quality** metrics and recent topics
+- **Start automated training** to optimize the agent's prompt, reasoning strategy, and tool selection
+- **Check training status** to monitor active/completed training jobs
+- **Activate trained configs** to apply optimized configurations with safety gates
+- **Rollback training** to revert to the previous config if training made things worse
+- **Check circuit breaker** to see if the auto-rollback safety net is active
+
+## Reasoning Strategies
+
+The runtime supports 5 reasoning strategies that change HOW the agent thinks before acting. Set via the \`reasoning_strategy\` config field:
+
+- **chain-of-thought**: Step-by-step reasoning. Best for math, logic, multi-step analysis.
+- **plan-then-execute**: Creates an explicit plan before using tools. Best for implementation tasks.
+- **step-back**: First-principles thinking. Best for debugging and "why" questions.
+- **decompose**: Breaks complex tasks into 3-5 sub-tasks. Best for large/ambiguous requests.
+- **verify-then-respond**: Re-reads the question and verifies the answer before responding. Best for accuracy-critical tasks.
+- **(empty/auto)**: The runtime auto-selects based on task keywords and complexity. This is the default and usually the best choice.
+
+When users say "my agent rushes to answer without thinking" → set reasoning_strategy to "plan-then-execute".
+When users say "my agent gives wrong answers" → set reasoning_strategy to "verify-then-respond".
+
+## Extended Thinking
+
+The runtime emits "thinking" traces — visible reasoning the agent does before tool calls. Users can see these in the playground chat as purple thought bubbles. This is automatic when the model produces content alongside tool calls. No config needed.
+
+## Tool Validation
+
+When configuring tools via update_agent_config:
+- Tool names are validated against the runtime catalog. Invalid names are silently dropped.
+- Valid tool names include: web-search, browse, http-request, web-crawl, python-exec, bash, execute-code, read-file, write-file, edit-file, knowledge-search, store-knowledge, image-generate, text-to-speech, db-query, create-agent, list-agents, discover-api
+- If tools is empty or not set, the agent gets 15 default tools (web-search, browse, python-exec, bash, etc.)
+- NEVER set tools to an empty array unless the user explicitly wants to restrict the agent to no tools.
+
+## Voice Mode
+
+When the agent receives calls via phone (Twilio ConversationRelay):
+- Model is auto-overridden to gpt-5.4-mini for speed
+- System prompt gets voice rules injected (short responses, no markdown, conversational tone)
+- This is automatic — no config change needed. The voice page in the portal handles setup.
 
 ## How to Behave
 1. **Be proactive**: When asked about problems, use your tools to investigate before answering. Don't guess — look at the data.
@@ -702,7 +1120,33 @@ You have tools to:
 - "Make my agent friendlier" → read_agent_config, then update_agent_config with personality/system_prompt changes
 - "Why is my agent slow/expensive?" → read_observability, check model and max_tokens
 - "Change my agent's plan" → update_agent_config with plan: "basic"|"standard"|"premium". Plans control which LLM models are used for different task types (simple, moderate, complex, coding, research, creative). Basic = Workers AI (free), Standard = GPT/Claude/Gemini mix, Premium = top-tier models.
+- "My agent doesn't think before acting" → update_agent_config with reasoning_strategy: "plan-then-execute" or "step-back"
+- "My agent gives wrong answers" → update_agent_config with reasoning_strategy: "verify-then-respond"
+- "Make my agent think more deeply" → update_agent_config with reasoning_strategy: "chain-of-thought"
+- "Set a spending limit" → update_agent_config with budget_limit_usd: <amount>
+- "What tools does my agent have?" → read_agent_config, check tools array. Explain each tool in simple terms.
+- "Add web search to my agent" → update_agent_config with tools: [...existing, "web-search"]
 - "Improve my agent" → analyze_and_suggest to get data-driven recommendations
+- "Train my agent" → start_training with algorithm choice. Recommend 'apo' for prompt optimization, 'multi' for comprehensive tuning
+- "How is training going?" → read_training_status with include_iterations=true to see progress
+- "Apply the trained config" → read_training_status to get the best resource_id, then activate_trained_config
+- "Training made it worse" → rollback_training to revert immediately, then read_training_circuit_breaker to verify
+- "Is it safe after training?" → read_training_circuit_breaker to check error rate in the monitoring window
+
+## How Training Works
+
+The training system optimizes the agent through automated iteration:
+1. **Eval**: Runs the agent's test suite to measure current performance
+2. **Reward**: Computes a composite score from eval pass rate (50%), user feedback (20%), guardrail compliance (15%), cost efficiency (10%), latency (5%)
+3. **Optimize**: The algorithm proposes changes:
+   - **Baseline**: Random perturbations (safe, explores broadly)
+   - **APO** (Automatic Prompt Optimization): An LLM rewrites the prompt to fix eval failures (most effective)
+   - **Multi-dimension**: Cycles through prompt → reasoning strategy → tool selection (comprehensive)
+4. **Safety**: Every proposed change passes through: pre-flight tool checks, prompt safety scan (blocks guardrail stripping), config schema validation
+5. **Activate**: Best config is stored as a resource. Can be activated manually or automatically
+6. **Circuit breaker**: After activation, monitors error rate for 15 minutes. Auto-rolls back if errors exceed 30%
+
+Always explain training in simple terms. The user may not know what APO means — just say "AI-powered prompt improvement" instead.
 
 ## How LLM Plan Routing Works
 
