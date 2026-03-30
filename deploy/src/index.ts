@@ -157,6 +157,19 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     ]).finally(() => release!());
   }
 
+  /**
+   * Create a yield callback for streamRun — briefly releases the DO lock between
+   * turns so queued requests (health checks, short queries, status polls) can proceed.
+   * The yield pauses for ~10ms, allowing the DO's event loop to process other requests.
+   */
+  private _createYieldCallback(): () => Promise<void> {
+    return () => new Promise<void>((resolve) => {
+      // Release the current lock slot momentarily
+      // setTimeout(0) yields to the event loop, letting queued microtasks/fetches proceed
+      setTimeout(resolve, 10);
+    });
+  }
+
   initialState: AgentState = {
     config: {
       plan: "standard",
@@ -782,6 +795,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               api_key_id: data.api_key_id,
               history_messages: history,
               delegation: data.delegation,
+              yieldBetweenTurns: this._createYieldCallback(),
             },
           );
         }
@@ -907,6 +921,32 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       return Response.json({ error: "WebSocket upgrade required" }, { status: 426 });
     }
 
+    // GET /run/checkpoint — read the latest checkpoint for a session (crash recovery)
+    if (url.pathname === "/run/checkpoint" && request.method === "GET") {
+      const sessionId = url.searchParams.get("session_id");
+      if (!sessionId) return Response.json({ error: "session_id required" }, { status: 400 });
+      try {
+        const rows = this.sql<{ session_id: string; turn: number; messages_json: string; output: string; cost_usd: number; tool_calls: number; created_at: string }>`
+          SELECT * FROM run_checkpoints WHERE session_id = ${sessionId} ORDER BY turn DESC LIMIT 1
+        `;
+        if (rows.length === 0) return Response.json({ checkpoint: null });
+        const cp = rows[0];
+        return Response.json({
+          checkpoint: {
+            session_id: cp.session_id,
+            turn: cp.turn,
+            output: cp.output,
+            cost_usd: cp.cost_usd,
+            tool_calls: cp.tool_calls,
+            created_at: cp.created_at,
+            messages: (() => { try { return JSON.parse(cp.messages_json); } catch { return []; } })(),
+          },
+        });
+      } catch {
+        return Response.json({ checkpoint: null });
+      }
+    }
+
     if (url.pathname === "/run" && request.method === "POST") {
       if (!(await this._isAuthorized(request))) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -995,6 +1035,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             api_key_id: data.api_key_id,
             history_messages: history,
             delegation: data.delegation,
+            yieldBetweenTurns: this._createYieldCallback(),
           },
         );
       } catch (err) {
@@ -1095,6 +1136,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               api_key_id: data.api_key_id,
               history_messages: history,
               delegation: data.delegation,
+              yieldBetweenTurns: self._createYieldCallback(),
             },
           ).then(() => {
             self._appendConversationMessage("user", inputText, data.channel || "sse");

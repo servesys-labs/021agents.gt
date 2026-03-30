@@ -293,6 +293,8 @@ export async function streamRun(
     api_key_id?: string;
     history_messages?: Array<{ role: "user" | "assistant"; content: string }>;
     delegation?: DelegationContextInput;
+    /** Called between turns — allows the DO to yield the run lock so queued requests can proceed. */
+    yieldBetweenTurns?: () => Promise<void>;
   },
 ): Promise<void> {
   const started = Date.now();
@@ -478,6 +480,12 @@ export async function streamRun(
 
       // Checkpoint after every completed turn (not the first)
       if (turn > 1) saveCheckpoint(turn - 1);
+
+      // Yield between turns: briefly release the DO lock so queued requests
+      // (health checks, short queries) can proceed. Re-acquires before continuing.
+      if (turn > 1 && opts?.yieldBetweenTurns) {
+        try { await opts.yieldBetweenTurns(); } catch {}
+      }
 
       // ── CONTEXT COMPRESSION — summarize when messages exceed token budget ──
       if (turn > 2 && !isVoiceChannel) {
