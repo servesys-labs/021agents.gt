@@ -1699,116 +1699,83 @@ async function dispatch(
     }
 
     case "run-agent": {
-      // Delegate to the runtime's own /run endpoint on the same DO namespace
+      // Delegate to a sub-agent via child Workflow (parallel, crash-safe, KV state sharing)
       const agentName = String(args.agent_name || "");
       const task = String(args.task || "");
       if (!agentName || !task) return "run-agent requires agent_name and task";
-      const channel = args.channel || "internal";
-      const lineage = (env as any).__delegationLineage as
-        | {
-            session_id?: string;
-            trace_id?: string;
-            agent_name?: string;
-            depth?: number;
-            org_id?: string;
-            project_id?: string;
-            budget_limit_usd?: number;
-            cumulative_cost_usd?: number;
-            turn?: number;
-            max_turns?: number;
-            policy_hints?: Record<string, unknown>;
-          }
-        | undefined;
 
+      const lineage = (env as any).__delegationLineage as Record<string, any> | undefined;
       const orgId = String(args.org_id || lineage?.org_id || "");
       const parentDepth = Number(lineage?.depth) || 0;
       const MAX_DELEGATION_DEPTH = 6;
       if (parentDepth >= MAX_DELEGATION_DEPTH) {
-        return JSON.stringify({
-          output: "",
-          error: `delegation_depth_exceeded`,
-          delegation_trace: {
-            max_depth: MAX_DELEGATION_DEPTH,
-            parent_depth: parentDepth,
-          },
-        });
+        return JSON.stringify({ output: "", error: "delegation_depth_exceeded", max_depth: MAX_DELEGATION_DEPTH });
       }
 
-      const budgetLimit = Number(lineage?.budget_limit_usd ?? 0);
-      const spent = Number(lineage?.cumulative_cost_usd ?? 0);
-      const budgetRemaining = budgetLimit > 0 ? Math.max(0, budgetLimit - spent) : undefined;
+      const workflow = (env as any).AGENT_RUN_WORKFLOW;
+      const kv = (env as any).AGENT_PROGRESS_KV;
 
-      const delegation = lineage?.session_id
-        ? {
-            parent_session_id: String(lineage.session_id),
-            parent_trace_id: String(lineage.trace_id || ""),
-            parent_agent_name: String(lineage.agent_name || ""),
-            parent_depth: parentDepth,
-            inherited_budget_limit_usd: budgetLimit || undefined,
-            inherited_budget_remaining_usd: budgetRemaining,
-            inherited_turn: Number(lineage.turn) || undefined,
-            inherited_max_turns: Number(lineage.max_turns) || undefined,
-            policy_hints: lineage.policy_hints,
-          }
-        : undefined;
+      if (!workflow) {
+        return JSON.stringify({ output: "", error: "AGENT_RUN_WORKFLOW binding not available for delegation" });
+      }
 
       try {
-        // Internal fetch to the same worker — the DO namespace routes to the correct agent
-        const runtimeUrl = (env as any).RUNTIME_URL || "https://runtime.agentos.workers.dev";
-        const resp = await fetch(`${runtimeUrl}/run`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${(env as any).SERVICE_TOKEN || ""}`,
-          },
-          body: JSON.stringify({
+        // Spawn child Workflow — runs independently with its own agent config
+        const childProgressKey = `child:${sessionId}:${agentName}:${Date.now()}`;
+        const instance = await workflow.create({
+          params: {
             agent_name: agentName,
             input: task,
-            channel,
             org_id: orgId,
             project_id: lineage?.project_id || "",
-            delegation,
-          }),
+            channel: "delegation",
+            channel_user_id: "",
+            history: [], // child starts fresh
+            progress_key: childProgressKey,
+            parent_session_id: lineage?.session_id || sessionId,
+            parent_depth: parentDepth + 1,
+          },
         });
-        const raw = await resp.text();
-        let childOutput = raw;
+
+        // Poll for child completion (max 5 min)
+        let childOutput = "";
         let childSessionId = "";
-        let childTraceId = "";
-        try {
-          const parsed = JSON.parse(raw) as {
-            output?: string;
-            session_id?: string;
-            trace_id?: string;
-            success?: boolean;
-          };
-          if (typeof parsed.output === "string") childOutput = parsed.output;
-          if (typeof parsed.session_id === "string") childSessionId = parsed.session_id;
-          if (typeof parsed.trace_id === "string") childTraceId = parsed.trace_id;
-        } catch {
-          /* plain-text response */
+        let childCostUsd = 0;
+        for (let i = 0; i < 150; i++) {
+          await new Promise(r => setTimeout(r, 2000));
+          try {
+            const st = await instance.status();
+            if (st.status === "complete") {
+              const out = (st as any).output;
+              childOutput = out?.output || "";
+              childSessionId = out?.session_id || "";
+              childCostUsd = out?.cost_usd || 0;
+              break;
+            }
+            if (st.status === "errored") {
+              childOutput = `[Sub-agent error: ${(st as any).error?.message || "unknown"}]`;
+              break;
+            }
+            if (st.status === "terminated") {
+              childOutput = "[Sub-agent was terminated]";
+              break;
+            }
+          } catch {}
         }
 
-        const delegationTrace = {
-          parent_session_id: delegation?.parent_session_id,
-          parent_trace_id: delegation?.parent_trace_id,
-          parent_agent_name: delegation?.parent_agent_name,
-          parent_depth: delegation?.parent_depth,
-          child_session_id: childSessionId || undefined,
-          child_trace_id: childTraceId || undefined,
-          child_agent_name: agentName,
-          child_depth: delegation ? parentDepth + 1 : 0,
-          inherited_budget_limit_usd: delegation?.inherited_budget_limit_usd,
-          inherited_budget_remaining_usd: delegation?.inherited_budget_remaining_usd,
-          correlation_id: crypto.randomUUID().slice(0, 12),
-        };
-
-        const payload = {
+        return JSON.stringify({
           output: childOutput.slice(0, 9500),
-          delegation_trace: delegationTrace,
-        };
-        return JSON.stringify(payload);
+          delegation_trace: {
+            parent_session_id: lineage?.session_id || sessionId,
+            child_session_id: childSessionId,
+            child_agent_name: agentName,
+            child_depth: parentDepth + 1,
+            child_cost_usd: childCostUsd,
+            correlation_id: crypto.randomUUID().slice(0, 12),
+          },
+        });
       } catch (err: any) {
-        return `Failed to run agent: ${err.message || err}`;
+        return JSON.stringify({ output: "", error: `Delegation failed: ${err.message || err}` });
       }
     }
 
@@ -4162,8 +4129,10 @@ const TOOL_CATALOG: ToolDefinition[] = [
     function: {
       name: "run-agent",
       description:
-        "Delegate a task to another agent. Returns JSON with `output` (sub-agent text) and `delegation_trace` " +
-        "(parent/child session ids, depth, budget hints). Parent lineage is filled automatically when nested.",
+        "Delegate a task to another agent via a child Workflow. The sub-agent runs in parallel with its own " +
+        "config, tools, and reasoning strategy. Returns the sub-agent's output and cost. " +
+        "Use this for tasks that need a specialist (e.g., delegate research to a research-bot). " +
+        "Max delegation depth: 6. Each child runs crash-safe via Cloudflare Workflows.",
       parameters: {
         type: "object",
         properties: {

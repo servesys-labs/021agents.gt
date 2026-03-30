@@ -47,7 +47,7 @@ export async function loadAgentConfig(
     "python-exec", "bash", "execute-code",
     "read-file", "write-file", "edit-file",
     "knowledge-search", "store-knowledge",
-    "create-agent", "list-agents",
+    "create-agent", "list-agents", "run-agent",
     "discover-api",
   ];
 
