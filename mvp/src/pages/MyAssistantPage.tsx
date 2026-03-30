@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, Sparkles } from "lucide-react";
+import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, Sparkles, History, ChevronDown, X } from "lucide-react";
 import { MetaAgentPanel } from "../components/MetaAgentPanel";
 import { ChatInterface } from "../components/ChatInterface";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { api } from "../lib/api";
-import { useAgentStream } from "../lib/use-agent-stream";
+import { useAgentStream, loadSessionList, deleteSession, type StoredSession } from "../lib/use-agent-stream";
 import { useNavigate } from "react-router-dom";
 
 const AGENT_NAME = "my-assistant";
@@ -22,10 +22,16 @@ export default function MyAssistantPage() {
   const [loading, setLoading] = useState(true);
   const { messages, streaming, sessionMeta, send, stop, clear, loadHistory } = useAgentStream();
   const [metaOpen, setMetaOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [sessions, setSessions] = useState<StoredSession[]>([]);
 
   useEffect(() => {
     api.get<AgentInfo>(`/agents/${AGENT_NAME}`)
-      .then((a) => { setAgent(a); loadHistory(AGENT_NAME); })
+      .then((a) => {
+        setAgent(a);
+        loadHistory(AGENT_NAME);
+        setSessions(loadSessionList(AGENT_NAME));
+      })
       .catch(() => setAgent(null))
       .finally(() => setLoading(false));
   }, []);
@@ -92,12 +98,44 @@ export default function MyAssistantPage() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => { clear(); }}
+            onClick={() => { clear(); setSessions(loadSessionList(AGENT_NAME)); }}
             title="New conversation"
             className="flex items-center gap-1"
           >
             <Plus size={14} /> New
           </Button>
+          <div className="relative">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => { setSessions(loadSessionList(AGENT_NAME)); setSessionsOpen(!sessionsOpen); }}
+              title="Session history"
+            >
+              <History size={14} />
+            </Button>
+            {sessionsOpen && sessions.length > 0 && (
+              <div className="absolute right-0 top-full mt-1 w-72 max-h-80 overflow-y-auto bg-surface border border-border rounded-xl shadow-lg z-50">
+                <div className="px-3 py-2 border-b border-border">
+                  <p className="text-xs font-medium text-text-secondary">Recent conversations</p>
+                </div>
+                {sessions.map(s => (
+                  <button
+                    key={s.id}
+                    onClick={() => {
+                      loadHistory(AGENT_NAME, s.id);
+                      setSessionsOpen(false);
+                    }}
+                    className="w-full px-3 py-2 text-left hover:bg-surface-alt transition-colors border-b border-border/30 last:border-0 group"
+                  >
+                    <p className="text-xs font-medium text-text truncate">{s.title}</p>
+                    <p className="text-[10px] text-text-muted mt-0.5">
+                      {s.messageCount} messages · {new Date(s.updatedAt).toLocaleDateString()}
+                    </p>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <Button
             variant="ghost"
             size="sm"

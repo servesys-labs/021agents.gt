@@ -74,26 +74,89 @@ function makeId() {
 }
 
 const STORAGE_KEY_PREFIX = "oneshots_chat_";
+const SESSIONS_KEY_PREFIX = "oneshots_sessions_";
 const MAX_STORED_MESSAGES = 50;
+const MAX_SESSIONS = 20;
 
-function loadStoredMessages(agentName: string): ChatMessage[] {
+export interface StoredSession {
+  id: string;
+  agentName: string;
+  title: string; // first user message truncated
+  updatedAt: string;
+  messageCount: number;
+}
+
+function getSessionListKey(agentName: string) { return SESSIONS_KEY_PREFIX + agentName; }
+function getSessionDataKey(agentName: string, sessionId: string) { return STORAGE_KEY_PREFIX + agentName + "_" + sessionId; }
+
+function loadSessionList(agentName: string): StoredSession[] {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + agentName);
+    const raw = localStorage.getItem(getSessionListKey(agentName));
     if (!raw) return [];
-    const msgs = JSON.parse(raw) as ChatMessage[];
-    return Array.isArray(msgs) ? msgs.slice(-MAX_STORED_MESSAGES) : [];
+    return JSON.parse(raw) as StoredSession[];
   } catch { return []; }
 }
 
-function storeMessages(agentName: string, msgs: ChatMessage[]) {
+function saveSessionList(agentName: string, sessions: StoredSession[]) {
   try {
-    // Only store user + assistant messages (skip tool/thinking/system for size)
+    localStorage.setItem(getSessionListKey(agentName), JSON.stringify(sessions.slice(0, MAX_SESSIONS)));
+  } catch {}
+}
+
+function loadStoredMessages(agentName: string, sessionId?: string): ChatMessage[] {
+  try {
+    // Try session-specific key first
+    if (sessionId) {
+      const raw = localStorage.getItem(getSessionDataKey(agentName, sessionId));
+      if (raw) return JSON.parse(raw) as ChatMessage[];
+    }
+    // Fallback: load legacy single-session key and migrate
+    const legacyKey = STORAGE_KEY_PREFIX + agentName;
+    const raw = localStorage.getItem(legacyKey);
+    if (!raw) return [];
+    const msgs = JSON.parse(raw) as ChatMessage[];
+    if (!Array.isArray(msgs) || msgs.length === 0) return [];
+    // Migrate legacy to session format
+    const newSessionId = "session_" + Date.now();
+    localStorage.setItem(getSessionDataKey(agentName, newSessionId), raw);
+    localStorage.removeItem(legacyKey);
+    const title = msgs.find(m => m.role === "user")?.content.slice(0, 60) || "Conversation";
+    const sessions = loadSessionList(agentName);
+    sessions.unshift({ id: newSessionId, agentName, title, updatedAt: new Date().toISOString(), messageCount: msgs.length });
+    saveSessionList(agentName, sessions);
+    return msgs.slice(-MAX_STORED_MESSAGES);
+  } catch { return []; }
+}
+
+function storeMessages(agentName: string, msgs: ChatMessage[], sessionId: string) {
+  try {
     const toStore = msgs
       .filter(m => m.role === "user" || m.role === "assistant")
       .slice(-MAX_STORED_MESSAGES);
-    localStorage.setItem(STORAGE_KEY_PREFIX + agentName, JSON.stringify(toStore));
+    localStorage.setItem(getSessionDataKey(agentName, sessionId), JSON.stringify(toStore));
+    // Update session list
+    const sessions = loadSessionList(agentName);
+    const existing = sessions.findIndex(s => s.id === sessionId);
+    const title = toStore.find(m => m.role === "user")?.content.slice(0, 60) || "Conversation";
+    const entry: StoredSession = { id: sessionId, agentName, title, updatedAt: new Date().toISOString(), messageCount: toStore.length };
+    if (existing >= 0) {
+      sessions[existing] = entry;
+    } else {
+      sessions.unshift(entry);
+    }
+    saveSessionList(agentName, sessions);
   } catch {}
 }
+
+function deleteSession(agentName: string, sessionId: string) {
+  try {
+    localStorage.removeItem(getSessionDataKey(agentName, sessionId));
+    const sessions = loadSessionList(agentName).filter(s => s.id !== sessionId);
+    saveSessionList(agentName, sessions);
+  } catch {}
+}
+
+export { loadSessionList, deleteSession };
 
 export function useAgentStream() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -101,6 +164,7 @@ export function useAgentStream() {
   const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const currentAgentRef = useRef("");
+  const currentSessionIdRef = useRef("session_" + Date.now());
 
   // Mutable ref for building the streaming assistant message
   const streamBuf = useRef("");
@@ -110,10 +174,19 @@ export function useAgentStream() {
   const historyRef = useRef<Array<{ role: "user" | "assistant"; content: string }>>([]);
 
   // Load stored conversation when agent is set/changed
-  const loadHistory = useCallback((agentName: string) => {
+  const loadHistory = useCallback((agentName: string, sessionId?: string) => {
     if (!agentName) return;
     currentAgentRef.current = agentName;
-    const stored = loadStoredMessages(agentName);
+    if (sessionId) {
+      currentSessionIdRef.current = sessionId;
+    } else {
+      // Load most recent session
+      const sessions = loadSessionList(agentName);
+      if (sessions.length > 0) {
+        currentSessionIdRef.current = sessions[0].id;
+      }
+    }
+    const stored = loadStoredMessages(agentName, currentSessionIdRef.current);
     if (stored.length > 0) {
       setMessages(stored);
       historyRef.current = stored
@@ -408,7 +481,7 @@ export function useAgentStream() {
 
         // Persist conversation to localStorage
         setMessages(prev => {
-          if (currentAgentRef.current) storeMessages(currentAgentRef.current, prev);
+          if (currentAgentRef.current) storeMessages(currentAgentRef.current, prev, currentSessionIdRef.current);
           return prev;
         });
         break;
@@ -452,10 +525,9 @@ export function useAgentStream() {
     setMessages([]);
     setSessionMeta(null);
     historyRef.current = [];
-    if (currentAgentRef.current) {
-      localStorage.removeItem(STORAGE_KEY_PREFIX + currentAgentRef.current);
-    }
+    // Start a new session (old one stays in session list)
+    currentSessionIdRef.current = "session_" + Date.now();
   }, []);
 
-  return { messages, streaming, sessionMeta, send, stop, clear, loadHistory };
+  return { messages, streaming, sessionMeta, send, stop, clear, loadHistory, currentSessionId: currentSessionIdRef.current };
 }
