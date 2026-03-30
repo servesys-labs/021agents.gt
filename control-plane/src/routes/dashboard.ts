@@ -65,25 +65,41 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
   let avg_latency_ms = 0;
   let error_rate_pct = 0;
   try {
-    const [sessionStats] = await sql`
+    // Sessions may have empty org_id (pre-fix), also count agent name matches
+    const agentNames = await sql`SELECT name FROM agents WHERE org_id = ${user.org_id}`;
+    const names = agentNames.map((a: any) => a.name);
+
+    const [sessionStats] = names.length > 0 ? await sql`
       SELECT
         COUNT(*) as total,
         COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0) as active,
-        COALESCE(SUM(turn_count), 0) as runs,
+        COALESCE(SUM(step_count), 0) as runs,
         COALESCE(AVG(wall_clock_seconds), 0) as avg_latency_s,
         COALESCE(
           SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)::float
           / NULLIF(COUNT(*), 0), 0
         ) as error_rate
       FROM sessions
-      WHERE org_id = ${user.org_id}
-    `;
+      WHERE org_id = ${user.org_id} OR (org_id = '' AND agent_name = ANY(${names}))
+    ` : [{ total: 0, active: 0, runs: 0, avg_latency_s: 0, error_rate: 0 }];
+
     total_sessions = Number(sessionStats.total);
     active_sessions = Number(sessionStats.active);
     total_runs = Number(sessionStats.runs);
     avg_latency_ms = Math.round(Number(sessionStats.avg_latency_s) * 1000);
     error_rate_pct = Math.round(Number(sessionStats.error_rate) * 10000) / 100;
-  } catch {}
+
+    // Fallback: count credit transactions as session proxy if sessions are empty
+    if (total_sessions === 0) {
+      const [txCount] = await sql`
+        SELECT COUNT(*) as c FROM credit_transactions
+        WHERE org_id = ${user.org_id} AND type = 'burn'
+      `;
+      total_sessions = Number(txCount.c);
+    }
+  } catch (err) {
+    console.error("[dashboard] Session stats failed:", err);
+  }
 
   let total_cost_usd = 0;
   try {
