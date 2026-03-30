@@ -126,12 +126,23 @@ export async function transferCredits(
           updated_at = ${now}
     `;
 
-    // Platform fee audit (if > 0)
+    // Referral earnings — distribute from platform fee to referrers
+    let referralPayout = 0;
     if (platformFee > 0) {
+      try {
+        const { distributeReferralEarnings } = await import("./referrals");
+        const payouts = await distributeReferralEarnings(sql, toOrg, amountUsd, transferId);
+        referralPayout = payouts.total_payout;
+      } catch {} // non-blocking — if referral system fails, platform keeps full fee
+    }
+
+    // Platform retains: total fee minus referral payouts
+    const platformRetained = platformFee - referralPayout;
+    if (platformRetained > 0) {
       await sql`
         INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-        VALUES ('platform', 'transfer_in', ${platformFee}, 0, ${'Platform fee: ' + description}, ${transferId}, 'marketplace_fee', ${now})
-      `.catch(() => {}); // non-blocking
+        VALUES ('platform', 'transfer_in', ${platformRetained}, 0, ${'Platform fee: ' + description}, ${transferId}, 'marketplace_fee', ${now})
+      `.catch(() => {});
     }
 
     // Read updated balances

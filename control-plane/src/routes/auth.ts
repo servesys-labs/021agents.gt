@@ -42,6 +42,7 @@ const SignupRequest = z.object({
   email: z.string().min(1).email(),
   password: z.string().min(8).max(128),
   name: z.string().default(""),
+  referral_code: z.string().max(50).optional(),
 });
 
 const LoginRequest = z.object({
@@ -310,6 +311,21 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
   } catch (err) {
     console.warn("[auth/signup] org_settings insert failed:", err);
   }
+
+  // Apply referral code if provided
+  const referralCode = (c.req.valid("json") as any).referral_code;
+  if (referralCode) {
+    try {
+      const { applyReferralCode } = await import("../logic/referrals");
+      await applyReferralCode(sql, orgId, referralCode);
+    } catch {} // non-blocking — signup succeeds even if referral fails
+  }
+
+  // Auto-create default referral code for the new org
+  try {
+    const { createReferralCode } = await import("../logic/referrals");
+    await createReferralCode(sql, orgId, { label: "Default" });
+  } catch {} // non-blocking
 
   // Seed default event_types for the org (best-effort, idempotent)
   try {
