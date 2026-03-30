@@ -828,6 +828,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: progressKey,
               ...(data.system_prompt_override ? { system_prompt_override: data.system_prompt_override } : {}),
+              ...(data.media_urls?.length ? { media_urls: data.media_urls, media_types: data.media_types } : {}),
             },
           });
 
@@ -884,39 +885,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 wall_clock_seconds: 0, cost_total_usd: result.cost_usd || 0,
               }).catch(() => {});
 
-              // Deduct credits (critical: sync /run path must bill)
-              const costUsd = Number(result.cost_usd) || 0;
-              const orgId = data.org_id || "";
-              const sessionId = result.session_id || "";
-              if (costUsd > 0 && orgId) {
-                const { getDb } = await import("./runtime/db");
-                const sql = await getDb(this.env.HYPERDRIVE);
-                try {
-                  const dup = await sql`SELECT 1 FROM credit_transactions WHERE session_id = ${sessionId} AND type = 'burn' LIMIT 1`;
-                  if (dup.length === 0) {
-                    const now = new Date().toISOString();
-                    const updated = await sql`
-                      UPDATE org_credit_balance
-                      SET balance_usd = balance_usd - ${costUsd},
-                          lifetime_consumed_usd = lifetime_consumed_usd + ${costUsd},
-                          last_deduction_at = ${now}, updated_at = ${now}
-                      WHERE org_id = ${orgId} AND balance_usd >= ${costUsd}
-                    `;
-                    if (updated.count > 0) {
-                      const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`;
-                      await sql`
-                        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, agent_name, session_id, created_at)
-                        VALUES (${orgId}, 'burn', ${-costUsd}, ${Number(bal.balance_usd)}, ${'Agent run: ' + agentName}, ${agentName}, ${sessionId}, ${now})
-                      `;
-                      console.log(`[run-billing] Deducted $${costUsd} from org ${orgId}`);
-                    } else {
-                      console.error(`[run-billing] Insufficient credits for org ${orgId}, cost $${costUsd}`);
-                    }
-                  }
-                } catch (err: any) {
-                  console.error("[run-billing] Credit deduction failed:", err.message);
-                }
-              }
+              // NOTE: Credit deduction happens in control-plane (runtime-proxy.ts / public-api.ts)
+              // DO only writes billing_records + sessions for analytics. Single deduction point
+              // prevents double-billing when requests go through control-plane → runtime → DO.
             }
 
             return Response.json({ status: "completed", success: true, ...result });
@@ -1000,53 +971,20 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                       self._appendConversationMessage("user", inputText, data.channel || "sse");
                       self._appendConversationMessage("assistant", evt.output || "", data.channel || "sse");
 
-                      // Write billing record + deduct credits (critical: SSE path must bill)
+                      // Write billing record only — credit deduction happens in control-plane
+                      // (avoids double-billing: DO writes record, control-plane deducts)
                       const costUsd = Number(evt.cost_usd) || 0;
                       const orgId = data.org_id || self.state.config?.orgId || "";
                       if (costUsd > 0 && orgId && self.env.HYPERDRIVE) {
-                        (async () => {
-                          try {
-                            const { writeBillingRecord, getDb } = await import("./runtime/db");
-                            // 1. Write billing record
-                            await writeBillingRecord(self.env.HYPERDRIVE, {
-                              session_id: evt.session_id || "",
-                              org_id: orgId,
-                              agent_name: agentName,
-                              model: "workflow",
-                              input_tokens: 0,
-                              output_tokens: 0,
-                              cost_usd: costUsd,
-                              plan: "standard",
-                              trace_id: evt.trace_id || "",
-                            });
-                            // 2. Deduct credits (atomic SQL)
-                            const sql = await getDb(self.env.HYPERDRIVE);
-                            const sessionId = evt.session_id || "";
-                            // Idempotency: check if already deducted for this session
-                            const dup = await sql`SELECT 1 FROM credit_transactions WHERE session_id = ${sessionId} AND type = 'burn' LIMIT 1`;
-                            if (dup.length > 0) return; // Already billed
-                            const now = new Date().toISOString();
-                            const updated = await sql`
-                              UPDATE org_credit_balance
-                              SET balance_usd = balance_usd - ${costUsd},
-                                  lifetime_consumed_usd = lifetime_consumed_usd + ${costUsd},
-                                  last_deduction_at = ${now}, updated_at = ${now}
-                              WHERE org_id = ${orgId} AND balance_usd >= ${costUsd}
-                            `;
-                            if (updated.count === 0) {
-                              console.error(`[sse-billing] Insufficient credits for org ${orgId}, cost $${costUsd}`);
-                              return;
-                            }
-                            const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`;
-                            await sql`
-                              INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, agent_name, session_id, created_at)
-                              VALUES (${orgId}, 'burn', ${-costUsd}, ${Number(bal.balance_usd)}, ${'Agent run: ' + agentName}, ${agentName}, ${sessionId}, ${now})
-                            `;
-                            console.log(`[sse-billing] Deducted $${costUsd} from org ${orgId} (session: ${sessionId})`);
-                          } catch (err: any) {
-                            console.error("[sse-billing] Billing failed:", err.message);
-                          }
-                        })();
+                        import("./runtime/db").then(({ writeBillingRecord }) =>
+                          writeBillingRecord(self.env.HYPERDRIVE, {
+                            session_id: evt.session_id || "", org_id: orgId,
+                            agent_name: agentName, model: "workflow",
+                            input_tokens: 0, output_tokens: 0,
+                            cost_usd: costUsd, plan: "standard",
+                            trace_id: evt.trace_id || "",
+                          })
+                        ).catch((err: any) => console.error("[sse-billing] writeBillingRecord failed:", err.message));
                       }
                     }
                     if (evt.type === "error") done = true;
@@ -1174,6 +1112,50 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           }
           this._appendConversationMessage("user", userText, "voice");
           this._appendConversationMessage("assistant", response, "voice");
+
+          // Billing for voice WebSocket path (direct WS — no control-plane proxy)
+          if (this.env.HYPERDRIVE) {
+            const voiceResult = (st as any)?.output || {};
+            const voiceCost = Number(voiceResult.cost_usd) || 0;
+            const voiceSessionId = voiceResult.session_id || "";
+            if (voiceCost > 0 && orgId) {
+              (async () => {
+                try {
+                  const { writeBillingRecord, getDb } = await import("./runtime/db");
+                  await writeBillingRecord(this.env.HYPERDRIVE, {
+                    session_id: voiceSessionId, org_id: orgId,
+                    agent_name: agentName, model: "workflow",
+                    input_tokens: 0, output_tokens: 0, cost_usd: voiceCost,
+                    plan: "standard", trace_id: voiceResult.trace_id || "",
+                  });
+                  // Direct WS path must deduct (no control-plane in the loop)
+                  const sql = await getDb(this.env.HYPERDRIVE);
+                  if (voiceSessionId) {
+                    const dup = await sql`SELECT 1 FROM credit_transactions WHERE session_id = ${voiceSessionId} AND type = 'burn' LIMIT 1`;
+                    if (dup.length > 0) return;
+                  }
+                  const now = new Date().toISOString();
+                  const updated = await sql`
+                    UPDATE org_credit_balance SET balance_usd = balance_usd - ${voiceCost},
+                      lifetime_consumed_usd = lifetime_consumed_usd + ${voiceCost},
+                      last_deduction_at = ${now}, updated_at = ${now}
+                    WHERE org_id = ${orgId} AND balance_usd >= ${voiceCost}
+                  `;
+                  if (updated.count > 0) {
+                    const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${orgId}`;
+                    await sql`
+                      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, agent_name, session_id, created_at)
+                      VALUES (${orgId}, 'burn', ${-voiceCost}, ${Number(bal.balance_usd)}, ${'Voice run: ' + agentName}, ${agentName}, ${voiceSessionId}, ${now})
+                    `;
+                  } else {
+                    console.error(`[voice-ws-billing] Insufficient credits for org ${orgId}`);
+                  }
+                } catch (err: any) {
+                  console.error("[voice-ws-billing] Billing failed:", err.message);
+                }
+              })();
+            }
+          }
         } else {
           response = "Voice processing requires Workflow binding. Please contact support.";
         }
@@ -1646,6 +1628,44 @@ export class AgentOSMcpServer extends Agent<Env> {
 // Worker entry point — routes to agents
 // ---------------------------------------------------------------------------
 
+/** Markdown-aware message chunking for Telegram (4096 char limit).
+ *  Splits at natural boundaries, preserves code blocks. */
+function tgChunkMessage(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  let insideCodeBlock = false;
+  let codeLang = "";
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) { chunks.push(remaining); break; }
+    const reserve = 20;
+    let splitAt = maxLen - reserve;
+    // Find natural split: double newline > newline > space
+    let best = -1;
+    const dnl = remaining.lastIndexOf("\n\n", splitAt);
+    if (dnl > maxLen * 0.3) best = dnl + 1;
+    if (best === -1) { const nl = remaining.lastIndexOf("\n", splitAt); if (nl > maxLen * 0.3) best = nl + 1; }
+    if (best === -1) { const sp = remaining.lastIndexOf(" ", splitAt); if (sp > maxLen * 0.3) best = sp + 1; }
+    if (best === -1) best = splitAt;
+
+    let chunk = remaining.slice(0, best);
+    remaining = remaining.slice(best);
+    const fenceCount = (chunk.match(/```/g) || []).length;
+    if (insideCodeBlock) chunk = "```" + codeLang + "\n" + chunk;
+    const total = (insideCodeBlock ? 1 : 0) + fenceCount;
+    if (total % 2 === 1) {
+      chunk += "\n```";
+      insideCodeBlock = true;
+      const lm = chunk.match(/```(\w+)/);
+      codeLang = lm ? lm[1] : "";
+    } else { insideCodeBlock = false; codeLang = ""; }
+    chunks.push(chunk);
+  }
+  if (chunks.length > 1) return chunks.map((c, i) => `${c}\n(${i + 1}/${chunks.length})`);
+  return chunks;
+}
+
 function detectLang(code: string): "javascript" | "python" | "bash" {
   const py = [/\b(def |class |import |from |print\()/m, /\b(lambda |yield )\b/].filter(r => r.test(code)).length;
   const js = [/\b(const|let|var|function|=>)\b/, /\bconsole\.\b/].filter(r => r.test(code)).length;
@@ -1676,6 +1696,8 @@ async function runViaAgent(
     api_key_id?: string;
     delegation?: Record<string, unknown>;
     system_prompt_override?: string;
+    media_urls?: string[];
+    media_types?: string[];
   },
 ): Promise<{ output: string; success: boolean; error?: string; turns: number; tool_calls: number; cost_usd: number; latency_ms: number; session_id: string; trace_id: string; stop_reason: string; [key: string]: unknown }> {
   // Per-user DO isolation: each user gets their own conversation thread
@@ -1705,6 +1727,7 @@ async function runViaAgent(
       api_key_id: opts?.api_key_id || "",
       delegation: opts?.delegation,
       ...(opts?.system_prompt_override ? { system_prompt_override: opts.system_prompt_override } : {}),
+      ...(opts?.media_urls?.length ? { media_urls: opts.media_urls, media_types: opts.media_types } : {}),
     }),
   }));
   return resp.json() as any;
@@ -3053,34 +3076,85 @@ export default {
 
       const payload = await request.json() as any;
       const msg = payload.message || payload.edited_message;
-      if (!msg?.text) return Response.json({ ok: true });
+      if (!msg) return Response.json({ ok: true });
 
       const chatId = msg.chat?.id;
-      const text = msg.text || "";
+      if (!chatId) return Response.json({ ok: true });
       const messageId = msg.message_id;
+      const chatType = msg.chat?.type || "private";
       const tgApi = `https://api.telegram.org/bot${botToken}`;
 
-      if (text.startsWith("/start")) {
+      // ── Parse media ──
+      const rawText = msg.text || "";
+      const rawCaption = msg.caption || "";
+      const contentText = rawText || rawCaption;
+      let hasPhoto = false, hasDocument = false, hasVoice = false, hasAudio = false, hasVideo = false;
+      let tgFileId = "", tgFileName = "", tgMimeType = "";
+
+      if (msg.photo?.length) { hasPhoto = true; tgFileId = msg.photo[msg.photo.length - 1].file_id; }
+      if (msg.document) { hasDocument = true; tgFileId = msg.document.file_id; tgFileName = msg.document.file_name || ""; tgMimeType = msg.document.mime_type || ""; }
+      if (msg.voice) { hasVoice = true; tgFileId = msg.voice.file_id; tgMimeType = msg.voice.mime_type || "audio/ogg"; }
+      if (msg.audio) { hasAudio = true; tgFileId = msg.audio.file_id; tgFileName = msg.audio.file_name || ""; tgMimeType = msg.audio.mime_type || "audio/mpeg"; }
+      if (msg.video) { hasVideo = true; tgFileId = msg.video.file_id; tgMimeType = msg.video.mime_type || "video/mp4"; }
+
+      const hasMedia = hasPhoto || hasDocument || hasVoice || hasAudio || hasVideo;
+      if (!contentText && !hasMedia) return Response.json({ ok: true });
+
+      // ── Group mention filtering — only process if addressed to bot ──
+      if (chatType === "group" || chatType === "supergroup") {
+        if (!contentText.startsWith("/")) {
+          let botId = 0, botUsername = "";
+          try {
+            const meResp = await fetch(`${tgApi}/getMe`);
+            const meData = await meResp.json() as any;
+            if (meData.ok) { botId = meData.result.id; botUsername = meData.result.username || ""; }
+          } catch {}
+          let addressed = false;
+          if (msg.reply_to_message?.from?.id === botId) addressed = true;
+          if (!addressed && botUsername && contentText.toLowerCase().includes(`@${botUsername.toLowerCase()}`)) addressed = true;
+          if (!addressed) {
+            for (const ent of (msg.entities || msg.caption_entities || [])) {
+              if (ent.type === "mention") {
+                const mention = contentText.slice(ent.offset, ent.offset + ent.length);
+                if (botUsername && mention.toLowerCase() === `@${botUsername.toLowerCase()}`) { addressed = true; break; }
+              }
+              if (ent.type === "text_mention" && ent.user?.id === botId) { addressed = true; break; }
+            }
+          }
+          if (!addressed) return Response.json({ ok: true });
+        }
+      }
+
+      // ── Handle commands ──
+      if (contentText.startsWith("/start")) {
         await fetch(`${tgApi}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: `Hi! I'm ${agentName}. Send me a message and I'll help.`, parse_mode: "Markdown" }),
+          body: JSON.stringify({ chat_id: chatId, text: `Hi! I'm ${agentName}. Send me a message, photo, voice note, or document and I'll help.\n\nCommands:\n/new — Clear conversation\n/help — Show help`, parse_mode: "Markdown" }),
         });
         return Response.json({ ok: true });
       }
 
-      // /new — clear conversation history and start fresh
-      if (text.startsWith("/new")) {
-        const userId = String(chatId);
+      if (contentText.startsWith("/new")) {
+        const tgUserId = String(chatId);
         const tgOrgPrefix = telegramOrgId ? `${telegramOrgId}-` : "";
-        const doName = userId ? `${tgOrgPrefix}${agentName}-u-${userId}` : `${tgOrgPrefix}${agentName}`;
-        const agentId = env.AGENTOS_AGENT.idFromName(doName);
-        const agent = env.AGENTOS_AGENT.get(agentId);
-        await agent.fetch(new Request("http://internal/reset", { method: "POST" }));
+        const doName = tgUserId ? `${tgOrgPrefix}${agentName}-u-${tgUserId}` : `${tgOrgPrefix}${agentName}`;
+        const agId = env.AGENTOS_AGENT.idFromName(doName);
+        const agentDo = env.AGENTOS_AGENT.get(agId);
+        await agentDo.fetch(new Request("http://internal/reset", { method: "POST" }));
         await fetch(`${tgApi}/sendMessage`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ chat_id: chatId, text: "Conversation cleared. Send a new message to start fresh.", parse_mode: "Markdown" }),
+        });
+        return Response.json({ ok: true });
+      }
+
+      if (contentText.startsWith("/help")) {
+        await fetch(`${tgApi}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: "I can help with research, code, data analysis, and more.\n\nCommands:\n/new — Clear conversation and start fresh\n/help — Show this message\n\nJust send text, photos, voice notes, or documents!", parse_mode: "Markdown" }),
         });
         return Response.json({ ok: true });
       }
@@ -3092,13 +3166,46 @@ export default {
         body: JSON.stringify({ chat_id: chatId, action: "typing" }),
       }).catch(() => {});
 
-      // Run agent in background — return 200 immediately to avoid Telegram 60s timeout.
-      // Uses runViaAgent which creates a per-user DO instance: {agent}-u-{chatId}
-      const userInput = text.startsWith("/ask ") ? text.slice(5) : text;
+      // ── Build agent input with media context ──
+      const inputParts: string[] = [];
+      const mediaUrls: string[] = [];
+      const mediaTypes: string[] = [];
 
+      let cleanText = contentText;
+      if (cleanText.startsWith("/ask ")) cleanText = cleanText.slice(5);
+      if (chatType !== "private") cleanText = cleanText.replace(/@\w+/g, "").trim();
+      if (cleanText) inputParts.push(cleanText);
+
+      if (hasMedia && tgFileId) {
+        try {
+          const fileResp = await fetch(`${tgApi}/getFile?file_id=${encodeURIComponent(tgFileId)}`);
+          const fileData = await fileResp.json() as any;
+          if (fileData.ok) {
+            const filePath = fileData.result.file_path as string;
+            const fileUrl = `https://api.telegram.org/file/bot${botToken}/${filePath}`;
+            mediaUrls.push(fileUrl);
+            if (hasPhoto) { mediaTypes.push("image/jpeg"); inputParts.push("[User sent a photo]"); }
+            else if (hasVoice) { mediaTypes.push("audio/ogg"); inputParts.push("[User sent a voice message]"); }
+            else if (hasAudio) { mediaTypes.push(tgMimeType || "audio/mpeg"); inputParts.push(`[User sent audio${tgFileName ? ": " + tgFileName : ""}]`); }
+            else if (hasDocument) {
+              mediaTypes.push(tgMimeType || "application/octet-stream");
+              inputParts.push(`[User sent document: ${tgFileName || "file"}]`);
+              // Inject text content for readable docs (<100KB)
+              if ((tgMimeType?.startsWith("text/") || /\.(txt|md|csv|json|yaml|yml|xml|log|py|js|ts|html|css)$/i.test(tgFileName)) && fileData.result.file_size < 100_000) {
+                try { const dlResp = await fetch(fileUrl); inputParts.push(`[Content of ${tgFileName}]:\n${await dlResp.text()}`); } catch {}
+              }
+            }
+            else if (hasVideo) { mediaTypes.push(tgMimeType || "video/mp4"); inputParts.push("[User sent a video]"); }
+          }
+        } catch {}
+      }
+
+      const userInput = inputParts.join("\n");
+      if (!userInput) return Response.json({ ok: true });
+
+      // ── Run agent in background — return 200 immediately ──
       ctx.waitUntil((async () => {
         try {
-          // Keep typing indicator alive while agent works
           const typingInterval = setInterval(() => {
             fetch(`${tgApi}/sendChatAction`, {
               method: "POST",
@@ -3111,6 +3218,7 @@ export default {
             org_id: telegramOrgId,
             channel: "telegram",
             channel_user_id: String(chatId),
+            ...(mediaUrls.length ? { media_urls: mediaUrls, media_types: mediaTypes } : {}),
           });
 
           clearInterval(typingInterval);
@@ -3118,17 +3226,22 @@ export default {
           if (!output && result.error) output = "Sorry, I couldn't process that. Try again.";
           if (!output) output = "No response generated.";
 
-          for (let i = 0; i < output.length; i += 4000) {
-            await fetch(`${tgApi}/sendMessage`, {
+          // Markdown-aware chunking (preserves code blocks)
+          const chunks = tgChunkMessage(output, 4096);
+          for (let i = 0; i < chunks.length; i++) {
+            const sendBody: any = { chat_id: chatId, text: chunks[i], parse_mode: "Markdown" };
+            if (i === 0) sendBody.reply_to_message_id = messageId;
+            const sendResp = await fetch(`${tgApi}/sendMessage`, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                chat_id: chatId,
-                text: output.slice(i, i + 4000),
-                reply_to_message_id: i === 0 ? messageId : undefined,
-                parse_mode: "Markdown",
-              }),
+              body: JSON.stringify(sendBody),
             });
+            const sendData = await sendResp.json() as any;
+            // Retry without markdown if parse fails
+            if (!sendData.ok && String(sendData.description || "").toLowerCase().includes("can't parse")) {
+              delete sendBody.parse_mode;
+              await fetch(`${tgApi}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sendBody) }).catch(() => {});
+            }
           }
         } catch (err: any) {
           await fetch(`${tgApi}/sendMessage`, {

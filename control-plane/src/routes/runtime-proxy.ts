@@ -293,20 +293,21 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
   if (!agentName) return c.json({ error: "agent_name is required" }, 400);
   if (inputs.length === 0) return c.json({ error: "inputs array is required" }, 400);
 
-  // Credit gate: verify org has credits before batch run
+  // Credit gate: verify org has enough credits for the batch
+  // Estimate: ~$0.01 per item minimum (actual cost deducted per-item after completion)
   const batchOrgId = user.org_id;
+  const estimatedBatchCost = inputs.length * 0.01; // conservative $0.01/item estimate
   try {
     const creditSql = await getDbForOrg(c.env.HYPERDRIVE, batchOrgId);
-    const hasEnough = await hasCredits(creditSql, batchOrgId, 1);
+    const hasEnough = await hasCredits(creditSql, batchOrgId, Math.max(1, estimatedBatchCost));
     if (!hasEnough) {
       return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+        error: `Insufficient credits for batch of ${inputs.length} items (estimated ~$${estimatedBatchCost.toFixed(2)}). Purchase credits at https://app.oneshots.co/settings?tab=billing`,
         code: "insufficient_credits",
-        balance_cents: 0,
       }, 402);
     }
-  } catch {
-    // If credit check fails, allow the run
+  } catch (err: any) {
+    console.error(`[batch] Credit check failed for org ${batchOrgId}: ${err.message}`);
   }
 
   // Check runtime health before processing

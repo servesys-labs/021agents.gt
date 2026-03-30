@@ -114,24 +114,367 @@ async function verifySlackSignature(signingSecret: string, timestamp: string, bo
   }
 }
 
-async function getTelegramToken(sql: any): Promise<string> {
+async function getTelegramToken(sql: any, orgId?: string): Promise<string> {
   try {
-    const rows = await sql`
-      SELECT value_encrypted FROM secrets WHERE name = 'TELEGRAM_BOT_TOKEN' ORDER BY created_at DESC LIMIT 1
-    `;
+    const rows = orgId
+      ? await sql`SELECT value_encrypted FROM secrets WHERE name = 'TELEGRAM_BOT_TOKEN' AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`
+      : await sql`SELECT value_encrypted FROM secrets WHERE name = 'TELEGRAM_BOT_TOKEN' ORDER BY created_at DESC LIMIT 1`;
     if (rows.length > 0 && rows[0].value_encrypted) return String(rows[0].value_encrypted);
   } catch {}
   return "";
 }
 
-async function sendTelegramMessage(token: string, chatId: number, text: string, replyTo?: number) {
-  const body: any = { chat_id: chatId, text };
+// ── Markdown-aware message chunking ──────────────────────────────────────
+// Inspired by Hermes: splits at natural boundaries, preserves code blocks
+
+function chunkMessage(text: string, maxLen: number): string[] {
+  if (text.length <= maxLen) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  let insideCodeBlock = false;
+  let codeLang = "";
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLen) {
+      chunks.push(remaining);
+      break;
+    }
+
+    // Reserve space for chunk indicator and possible code fence
+    const reserve = 20;
+    let splitAt = maxLen - reserve;
+
+    // Find a good split point: prefer double newline, then newline, then space
+    let best = -1;
+    const doubleNl = remaining.lastIndexOf("\n\n", splitAt);
+    if (doubleNl > maxLen * 0.3) best = doubleNl + 1;
+    if (best === -1) {
+      const nl = remaining.lastIndexOf("\n", splitAt);
+      if (nl > maxLen * 0.3) best = nl + 1;
+    }
+    if (best === -1) {
+      const sp = remaining.lastIndexOf(" ", splitAt);
+      if (sp > maxLen * 0.3) best = sp + 1;
+    }
+    if (best === -1) best = splitAt;
+
+    let chunk = remaining.slice(0, best);
+    remaining = remaining.slice(best);
+
+    // Track code fences in this chunk
+    const fences = chunk.match(/```/g);
+    const fenceCount = fences ? fences.length : 0;
+
+    if (insideCodeBlock) {
+      // We're continuing from a split inside a code block — reopen
+      chunk = "```" + codeLang + "\n" + chunk;
+    }
+
+    // Check if we end inside a code block
+    const totalFences = (insideCodeBlock ? 1 : 0) + fenceCount;
+    if (totalFences % 2 === 1) {
+      // Odd fences = we're inside a code block at the end, close it
+      chunk = chunk + "\n```";
+      insideCodeBlock = true;
+      // Try to detect language from the opening fence
+      const langMatch = chunk.match(/```(\w+)/);
+      codeLang = langMatch ? langMatch[1] : "";
+    } else {
+      insideCodeBlock = false;
+      codeLang = "";
+    }
+
+    chunks.push(chunk);
+  }
+
+  // Add chunk indicators if multiple
+  if (chunks.length > 1) {
+    return chunks.map((c, i) => `${c}\n(${i + 1}/${chunks.length})`);
+  }
+  return chunks;
+}
+
+// ── Telegram helpers ────────────────────────────────────────────────────
+
+const TG_API = "https://api.telegram.org";
+
+async function sendTelegramMessage(
+  token: string,
+  chatId: number,
+  text: string,
+  replyTo?: number,
+  parseMode: string = "Markdown",
+) {
+  const body: any = { chat_id: chatId, text, parse_mode: parseMode };
   if (replyTo) body.reply_to_message_id = replyTo;
-  await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+  try {
+    const resp = await fetch(`${TG_API}/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json() as any;
+    // Retry without parse mode if markdown fails
+    if (!data.ok && String(data.description || "").toLowerCase().includes("can't parse")) {
+      delete body.parse_mode;
+      await fetch(`${TG_API}/bot${token}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+  } catch {}
+}
+
+/** Send typing indicator. */
+async function sendTelegramTyping(token: string, chatId: number) {
+  await fetch(`${TG_API}/bot${token}/sendChatAction`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+  }).catch(() => {});
+}
+
+/** Get a Telegram file's download URL. */
+async function getTelegramFileUrl(token: string, fileId: string): Promise<string | null> {
+  try {
+    const resp = await fetch(`${TG_API}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`);
+    const data = await resp.json() as any;
+    if (data.ok) return `${TG_API}/file/bot${token}/${data.result.file_path}`;
+  } catch {}
+  return null;
+}
+
+/** Download a file from Telegram into bytes. */
+async function downloadTelegramFile(token: string, fileId: string): Promise<{ bytes: ArrayBuffer; path: string } | null> {
+  try {
+    const resp = await fetch(`${TG_API}/bot${token}/getFile?file_id=${encodeURIComponent(fileId)}`);
+    const data = await resp.json() as any;
+    if (!data.ok) return null;
+    const filePath = data.result.file_path as string;
+    const fileResp = await fetch(`${TG_API}/file/bot${token}/${filePath}`);
+    if (!fileResp.ok) return null;
+    return { bytes: await fileResp.arrayBuffer(), path: filePath };
+  } catch {}
+  return null;
+}
+
+/** Send a photo via Telegram (from URL). */
+async function sendTelegramPhoto(token: string, chatId: number, photoUrl: string, caption?: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, photo: photoUrl };
+  if (caption) body.caption = caption.slice(0, 1024);
+  if (replyTo) body.reply_to_message_id = replyTo;
+  await fetch(`${TG_API}/bot${token}/sendPhoto`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   }).catch(() => {});
+}
+
+/** Send a document via Telegram (from URL). */
+async function sendTelegramDocument(token: string, chatId: number, docUrl: string, caption?: string, filename?: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, document: docUrl };
+  if (caption) body.caption = caption.slice(0, 1024);
+  if (filename) body.caption = (body.caption ? body.caption + "\n" : "") + filename;
+  if (replyTo) body.reply_to_message_id = replyTo;
+  await fetch(`${TG_API}/bot${token}/sendDocument`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+/** Send a voice/audio via Telegram (from URL). */
+async function sendTelegramVoice(token: string, chatId: number, audioUrl: string, replyTo?: number) {
+  const body: any = { chat_id: chatId, voice: audioUrl };
+  if (replyTo) body.reply_to_message_id = replyTo;
+  await fetch(`${TG_API}/bot${token}/sendVoice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+/** Get bot info (username, id). */
+async function getTelegramBotInfo(token: string): Promise<{ id: number; username: string } | null> {
+  try {
+    const resp = await fetch(`${TG_API}/bot${token}/getMe`);
+    const data = await resp.json() as any;
+    if (data.ok) return { id: data.result.id, username: data.result.username || "" };
+  } catch {}
+  return null;
+}
+
+/** Check if a group message mentions the bot or is a reply to the bot. */
+function shouldProcessGroupMessage(
+  message: any,
+  botId: number,
+  botUsername: string,
+): boolean {
+  // Always process DMs
+  const chatType = message.chat?.type || "private";
+  if (chatType === "private") return true;
+
+  // Always process commands
+  const text = message.text || message.caption || "";
+  if (text.startsWith("/")) return true;
+
+  // Check if replying to the bot
+  const replyTo = message.reply_to_message;
+  if (replyTo?.from?.id === botId) return true;
+
+  // Check for @mention in text
+  if (botUsername && text.toLowerCase().includes(`@${botUsername.toLowerCase()}`)) return true;
+
+  // Check entities for mentions
+  const entities = message.entities || message.caption_entities || [];
+  for (const ent of entities) {
+    if (ent.type === "mention") {
+      const mentionText = text.slice(ent.offset, ent.offset + ent.length);
+      if (mentionText.toLowerCase() === `@${botUsername.toLowerCase()}`) return true;
+    }
+    if (ent.type === "text_mention" && ent.user?.id === botId) return true;
+  }
+
+  return false;
+}
+
+/** Strip @bot mention from text for cleaner agent input. */
+function stripBotMention(text: string, botUsername: string): string {
+  if (!botUsername) return text;
+  return text.replace(new RegExp(`@${botUsername}\\b`, "gi"), "").trim();
+}
+
+/** Parse Telegram message to extract text + media info. */
+function parseTelegramMessage(message: any): {
+  text: string;
+  hasPhoto: boolean;
+  hasDocument: boolean;
+  hasVoice: boolean;
+  hasAudio: boolean;
+  hasVideo: boolean;
+  hasSticker: boolean;
+  fileId: string;
+  fileName: string;
+  mimeType: string;
+  caption: string;
+} {
+  const text = message.text || "";
+  const caption = message.caption || "";
+  let hasPhoto = false, hasDocument = false, hasVoice = false, hasAudio = false, hasVideo = false, hasSticker = false;
+  let fileId = "", fileName = "", mimeType = "";
+
+  if (message.photo?.length) {
+    hasPhoto = true;
+    fileId = message.photo[message.photo.length - 1].file_id; // Highest res
+  }
+  if (message.document) {
+    hasDocument = true;
+    fileId = message.document.file_id;
+    fileName = message.document.file_name || "";
+    mimeType = message.document.mime_type || "";
+  }
+  if (message.voice) {
+    hasVoice = true;
+    fileId = message.voice.file_id;
+    mimeType = message.voice.mime_type || "audio/ogg";
+  }
+  if (message.audio) {
+    hasAudio = true;
+    fileId = message.audio.file_id;
+    fileName = message.audio.file_name || "";
+    mimeType = message.audio.mime_type || "audio/mpeg";
+  }
+  if (message.video) {
+    hasVideo = true;
+    fileId = message.video.file_id;
+    mimeType = message.video.mime_type || "video/mp4";
+  }
+  if (message.sticker) {
+    hasSticker = true;
+    fileId = message.sticker.file_id;
+  }
+
+  return { text, hasPhoto, hasDocument, hasVoice, hasAudio, hasVideo, hasSticker, fileId, fileName, mimeType, caption };
+}
+
+// ── WhatsApp helpers ────────────────────────────────────────────────────
+
+/** Mark a WhatsApp message as read. */
+async function markWhatsAppRead(token: string, phoneNumberId: string, messageId: string) {
+  await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      status: "read",
+      message_id: messageId,
+    }),
+  }).catch(() => {});
+}
+
+/** Download WhatsApp media by media ID. */
+async function downloadWhatsAppMedia(token: string, mediaId: string): Promise<{ url: string; mimeType: string } | null> {
+  try {
+    // Step 1: Get media URL
+    const resp = await fetch(`https://graph.facebook.com/v21.0/${mediaId}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await resp.json() as any;
+    if (!data.url) return null;
+    return { url: data.url, mimeType: data.mime_type || "" };
+  } catch {}
+  return null;
+}
+
+/** Send a WhatsApp image message. */
+async function sendWhatsAppImage(token: string, phoneNumberId: string, to: string, imageUrl: string, caption?: string) {
+  await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "image",
+      image: { link: imageUrl, ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+    }),
+  }).catch(() => {});
+}
+
+/** Send a WhatsApp document message. */
+async function sendWhatsAppDocument(token: string, phoneNumberId: string, to: string, docUrl: string, filename?: string, caption?: string) {
+  await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to,
+      type: "document",
+      document: { link: docUrl, ...(filename ? { filename } : {}), ...(caption ? { caption: caption.slice(0, 1024) } : {}) },
+    }),
+  }).catch(() => {});
+}
+
+/** Send a WhatsApp text reply with chunking. */
+async function sendWhatsAppText(token: string, phoneNumberId: string, to: string, text: string, contextMessageId?: string) {
+  const chunks = chunkMessage(text, 4096);
+  for (let i = 0; i < chunks.length; i++) {
+    const body: any = {
+      messaging_product: "whatsapp",
+      to,
+      type: "text",
+      text: { body: chunks[i] },
+    };
+    // Reply context on first chunk only
+    if (i === 0 && contextMessageId) {
+      body.context = { message_id: contextMessageId };
+    }
+    await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).catch(() => {});
+  }
 }
 
 // ── POST /chat/telegram/webhook ────────────────────────────────────────
@@ -160,53 +503,127 @@ const telegramWebhookRoute = createRoute({
 });
 chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
   const sql = await getDb(c.env.HYPERDRIVE);
-  const botToken = await getTelegramToken(sql);
-  if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
-
-  const payload = c.req.valid("json");
-  const message = (payload as any)?.message;
-  if (!message || !message.text) return c.json({ ok: true });
+  const payload = c.req.valid("json") as any;
+  const message = payload?.message || payload?.edited_message;
+  if (!message) return c.json({ ok: true });
 
   const chatId = message.chat?.id;
-  const text = String(message.text || "");
+  if (!chatId) return c.json({ ok: true });
   const messageId = message.message_id;
 
+  // Parse media and text
+  const parsed = parseTelegramMessage(message);
+  const hasContent = parsed.text || parsed.caption || parsed.hasPhoto || parsed.hasDocument || parsed.hasVoice || parsed.hasAudio || parsed.hasVideo;
+  if (!hasContent) return c.json({ ok: true });
+
+  // Resolve org from channel_configs (multi-tenant)
+  let orgId = "";
+  try {
+    const rows = await sql`
+      SELECT org_id FROM channel_configs
+      WHERE channel = 'telegram' AND is_active = true
+      ORDER BY created_at ASC LIMIT 1
+    `;
+    if (rows.length > 0) orgId = String(rows[0].org_id);
+  } catch {}
+
+  // Get bot token (org-scoped if possible, else global)
+  const botToken = orgId ? await getTelegramToken(sql, orgId) : await getTelegramToken(sql);
+  if (!botToken) return c.json({ error: "TELEGRAM_BOT_TOKEN not configured" }, 503);
+
+  // Group filtering: only process if DM, command, reply-to-bot, or @mention
+  const chatType = message.chat?.type || "private";
+  if (chatType === "group" || chatType === "supergroup") {
+    const botInfo = await getTelegramBotInfo(botToken);
+    if (botInfo && !shouldProcessGroupMessage(message, botInfo.id, botInfo.username)) {
+      return c.json({ ok: true }); // Silently ignore non-addressed group messages
+    }
+  }
+
+  const rawText = parsed.text || parsed.caption || "";
+
   // Handle commands
-  if (text.startsWith("/start")) {
+  if (rawText.startsWith("/start")) {
     await sendTelegramMessage(botToken, chatId, "Hi! I'm your OneShots agent. Send me a message and I'll help.");
     return c.json({ ok: true });
   }
-  if (text.startsWith("/help")) {
-    await sendTelegramMessage(botToken, chatId, "I can help with research, code, data analysis, and more. Just send a message.");
+  if (rawText.startsWith("/help")) {
+    await sendTelegramMessage(botToken, chatId, "I can help with research, code, data analysis, and more. Just send a message, photo, voice note, or document.");
     return c.json({ ok: true });
   }
-  if (text.startsWith("/status")) {
+  if (rawText.startsWith("/status")) {
     await sendTelegramMessage(botToken, chatId, "Agent is running.");
     return c.json({ ok: true });
   }
 
   // Send typing indicator
-  try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendChatAction`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, action: "typing" }),
-    });
-  } catch {}
+  await sendTelegramTyping(botToken, chatId);
+
+  // Build agent input — include media context
+  const inputParts: string[] = [];
+
+  // Strip bot mention from text for cleaner input
+  const botInfo = chatType !== "private" ? await getTelegramBotInfo(botToken) : null;
+  let cleanText = rawText.startsWith("/ask ") ? rawText.slice(5) : rawText;
+  if (botInfo) cleanText = stripBotMention(cleanText, botInfo.username);
+  if (cleanText) inputParts.push(cleanText);
+
+  // Handle media: download and pass URL/description to agent
+  const mediaUrls: string[] = [];
+  const mediaTypes: string[] = [];
+
+  if (parsed.fileId && (parsed.hasPhoto || parsed.hasDocument || parsed.hasVoice || parsed.hasAudio || parsed.hasVideo)) {
+    const fileUrl = await getTelegramFileUrl(botToken, parsed.fileId);
+    if (fileUrl) {
+      mediaUrls.push(fileUrl);
+      if (parsed.hasPhoto) {
+        mediaTypes.push("image");
+        inputParts.push("[User sent a photo]");
+      } else if (parsed.hasVoice) {
+        mediaTypes.push("audio/ogg");
+        inputParts.push("[User sent a voice message]");
+      } else if (parsed.hasAudio) {
+        mediaTypes.push(parsed.mimeType || "audio/mpeg");
+        inputParts.push(`[User sent audio${parsed.fileName ? ": " + parsed.fileName : ""}]`);
+      } else if (parsed.hasDocument) {
+        mediaTypes.push(parsed.mimeType || "application/octet-stream");
+        inputParts.push(`[User sent document: ${parsed.fileName || "file"}]`);
+        // For text-readable docs, try to inject content
+        if (parsed.mimeType?.startsWith("text/") || /\.(txt|md|csv|json|yaml|yml|xml|log|py|js|ts|html|css)$/i.test(parsed.fileName)) {
+          const downloaded = await downloadTelegramFile(botToken, parsed.fileId);
+          if (downloaded && downloaded.bytes.byteLength < 100_000) {
+            const textContent = new TextDecoder().decode(downloaded.bytes);
+            inputParts.push(`[Content of ${parsed.fileName}]:\n${textContent}`);
+          }
+        }
+      } else if (parsed.hasVideo) {
+        mediaTypes.push(parsed.mimeType || "video/mp4");
+        inputParts.push("[User sent a video]");
+      }
+    }
+  }
+
+  const input = inputParts.join("\n");
+  if (!input) return c.json({ ok: true });
+
+  // Resolve agent name
+  const agentName = orgId ? await resolveChannelAgent(sql, orgId, "telegram") : "telegram-bot";
 
   // Invoke agent via RUNTIME service binding
   let output = "";
   try {
-    const inputText = text.startsWith("/ask ") ? text.slice(5) : text;
     const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/invoke", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        agent_name: "telegram-bot",
-        input: inputText,
+        agent_name: agentName,
+        input,
         channel: "telegram",
         channel_user_id: String(chatId),
+        org_id: orgId || undefined,
         wait: true,
+        // Pass media context so agent can process images/audio
+        ...(mediaUrls.length > 0 ? { media_urls: mediaUrls, media_types: mediaTypes } : {}),
       }),
     });
     const data = await resp.json() as any;
@@ -215,11 +632,11 @@ chatPlatformRoutes.openapi(telegramWebhookRoute, async (c): Promise<any> => {
     output = `Sorry, I encountered an error: ${String(e.message).slice(0, 200)}`;
   }
 
-  // Send reply (split long messages for Telegram 4096 char limit)
+  // Send reply with markdown-aware chunking
   if (output) {
-    for (let i = 0; i < output.length; i += 4000) {
-      const chunk = output.slice(i, i + 4000);
-      await sendTelegramMessage(botToken, chatId, chunk, i === 0 ? messageId : undefined);
+    const chunks = chunkMessage(output, 4096);
+    for (let i = 0; i < chunks.length; i++) {
+      await sendTelegramMessage(botToken, chatId, chunks[i], i === 0 ? messageId : undefined);
     }
   }
 
@@ -528,42 +945,132 @@ chatPlatformRoutes.openapi(whatsappWebhookRoute, async (c): Promise<any> => {
       const phoneNumberId = value.metadata?.phone_number_id || "";
       const messages = value.messages || [];
 
+      // Resolve org from phone_number_id stored in channel_configs
+      let orgId = "";
+      try {
+        const rows = await sql`
+          SELECT org_id FROM channel_configs
+          WHERE channel = 'whatsapp' AND config->>'phone_number_id' = ${phoneNumberId} AND is_active = true
+          LIMIT 1
+        `;
+        if (rows.length > 0) orgId = String(rows[0].org_id);
+      } catch {}
+
+      if (!orgId) continue;
+
+      const waToken = await getSecret(sql, "WHATSAPP_ACCESS_TOKEN", orgId);
+      if (!waToken) continue;
+
       for (const msg of messages) {
-        if (msg.type !== "text" || !msg.text?.body) continue;
         const from = String(msg.from || "");
-        const text = String(msg.text.body);
+        const msgId = msg.id || "";
+        const msgType = msg.type || "";
 
-        // Resolve org from phone_number_id stored in channel_configs
-        let orgId = "";
-        try {
-          const rows = await sql`
-            SELECT org_id FROM channel_configs
-            WHERE channel = 'whatsapp' AND config->>'phone_number_id' = ${phoneNumberId} AND is_active = true
-            LIMIT 1
-          `;
-          if (rows.length > 0) orgId = String(rows[0].org_id);
-        } catch {}
+        // Mark message as read immediately
+        if (msgId) {
+          await markWhatsAppRead(waToken, phoneNumberId, msgId);
+        }
 
-        if (!orgId) continue;
+        // Build agent input from various message types
+        const inputParts: string[] = [];
+        const mediaUrls: string[] = [];
+        const mediaTypes: string[] = [];
+
+        if (msgType === "text" && msg.text?.body) {
+          inputParts.push(String(msg.text.body));
+
+        } else if (msgType === "image" && msg.image) {
+          // Image message: download via Cloud API
+          if (msg.image.caption) inputParts.push(String(msg.image.caption));
+          inputParts.push("[User sent an image]");
+          const mediaInfo = await downloadWhatsAppMedia(waToken, msg.image.id);
+          if (mediaInfo) {
+            mediaUrls.push(mediaInfo.url);
+            mediaTypes.push(mediaInfo.mimeType || "image/jpeg");
+          }
+
+        } else if (msgType === "document" && msg.document) {
+          // Document message
+          const fileName = msg.document.filename || "document";
+          if (msg.document.caption) inputParts.push(String(msg.document.caption));
+          inputParts.push(`[User sent document: ${fileName}]`);
+          const mediaInfo = await downloadWhatsAppMedia(waToken, msg.document.id);
+          if (mediaInfo) {
+            mediaUrls.push(mediaInfo.url);
+            mediaTypes.push(mediaInfo.mimeType || "application/octet-stream");
+          }
+
+        } else if (msgType === "audio" && msg.audio) {
+          // Audio message
+          inputParts.push("[User sent an audio message]");
+          const mediaInfo = await downloadWhatsAppMedia(waToken, msg.audio.id);
+          if (mediaInfo) {
+            mediaUrls.push(mediaInfo.url);
+            mediaTypes.push(mediaInfo.mimeType || "audio/ogg");
+          }
+
+        } else if (msgType === "video" && msg.video) {
+          // Video message
+          if (msg.video.caption) inputParts.push(String(msg.video.caption));
+          inputParts.push("[User sent a video]");
+          const mediaInfo = await downloadWhatsAppMedia(waToken, msg.video.id);
+          if (mediaInfo) {
+            mediaUrls.push(mediaInfo.url);
+            mediaTypes.push(mediaInfo.mimeType || "video/mp4");
+          }
+
+        } else if (msgType === "sticker" && msg.sticker) {
+          inputParts.push("[User sent a sticker]");
+
+        } else if (msgType === "location" && msg.location) {
+          inputParts.push(`[User shared location: ${msg.location.latitude}, ${msg.location.longitude}${msg.location.name ? " — " + msg.location.name : ""}]`);
+
+        } else if (msgType === "contacts" && msg.contacts?.length) {
+          for (const contact of msg.contacts) {
+            const name = contact.name?.formatted_name || "Unknown";
+            const phone = contact.phones?.[0]?.phone || "";
+            inputParts.push(`[User shared contact: ${name}${phone ? " " + phone : ""}]`);
+          }
+
+        } else if (msgType === "reaction" && msg.reaction) {
+          // Reactions — acknowledge but don't invoke agent
+          continue;
+
+        } else {
+          // Unsupported type — skip
+          continue;
+        }
+
+        const input = inputParts.join("\n");
+        if (!input) continue;
 
         const agentName = await resolveChannelAgent(sql, orgId, "whatsapp");
-        const output = await invokeAgent(c.env, agentName, text, "whatsapp", from, orgId);
 
-        // Reply via WhatsApp Cloud API
-        const waToken = await getSecret(sql, "WHATSAPP_ACCESS_TOKEN", orgId);
-        if (waToken && phoneNumberId && output) {
-          try {
-            await fetch(`https://graph.facebook.com/v21.0/${phoneNumberId}/messages`, {
-              method: "POST",
-              headers: { Authorization: `Bearer ${waToken}`, "Content-Type": "application/json" },
-              body: JSON.stringify({
-                messaging_product: "whatsapp",
-                to: from,
-                type: "text",
-                text: { body: output.slice(0, 4096) },
-              }),
-            });
-          } catch {}
+        // Invoke agent
+        let output = "";
+        try {
+          const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/invoke", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              agent_name: agentName,
+              input,
+              channel: "whatsapp",
+              channel_user_id: from,
+              org_id: orgId,
+              wait: true,
+              ...(mediaUrls.length > 0 ? { media_urls: mediaUrls, media_types: mediaTypes } : {}),
+            }),
+          });
+          const data = await resp.json() as any;
+          output = typeof data.output === "string" ? data.output : String(data.output || "");
+        } catch (e: any) {
+          output = `Sorry, I encountered an error: ${String(e.message).slice(0, 200)}`;
+        }
+
+        // Reply with markdown-aware chunking
+        if (output && phoneNumberId) {
+          await sendWhatsAppText(waToken, phoneNumberId, from, output, msgId);
         }
       }
     }
@@ -670,17 +1177,17 @@ chatPlatformRoutes.openapi(slackWebhookRoute, async (c): Promise<any> => {
   const event = payload.event;
   if (!event) return c.json({ ok: true });
 
-  // Only respond to messages (not bot messages) and app_mentions
+  // Handle messages (not bot), app_mentions, and file_share subtypes
   const isMessage = event.type === "message" && !event.bot_id && !event.subtype && event.text;
+  const isFileShare = event.type === "message" && !event.bot_id && event.subtype === "file_share";
   const isMention = event.type === "app_mention" && event.text;
-  if (!isMessage && !isMention) return c.json({ ok: true });
-
-  const text = String(event.text || "").replace(/<@[A-Z0-9]+>/g, "").trim();
-  if (!text) return c.json({ ok: true });
+  if (!isMessage && !isMention && !isFileShare) return c.json({ ok: true });
 
   const channelId = event.channel || "";
   const userId = event.user || "";
   const teamId = payload.team_id || "";
+  // Thread support: reply in thread if message is in a thread, or create thread from the message
+  const threadTs = event.thread_ts || event.ts || "";
 
   // Resolve org from team_id
   const sql = await getDb(c.env.HYPERDRIVE);
@@ -696,23 +1203,75 @@ chatPlatformRoutes.openapi(slackWebhookRoute, async (c): Promise<any> => {
 
   if (!orgId) return c.json({ ok: true });
 
-  const agentName = await resolveChannelAgent(sql, orgId, "slack");
-  const output = await invokeAgent(c.env, agentName, text, "slack", userId, orgId);
-
-  // Reply via Slack Web API
   const botToken = await getSecret(sql, "SLACK_BOT_TOKEN", orgId);
+  if (!botToken) return c.json({ ok: true });
+
+  // Build input: text + file context
+  const inputParts: string[] = [];
+  const mediaUrls: string[] = [];
+  const mediaTypes: string[] = [];
+
+  // Strip @mentions from text
+  const cleanText = String(event.text || "").replace(/<@[A-Z0-9]+>/g, "").trim();
+  if (cleanText) inputParts.push(cleanText);
+
+  // Handle file attachments (images, documents, etc.)
+  if (event.files?.length) {
+    for (const file of event.files) {
+      const fileType = file.filetype || "";
+      const fileName = file.name || "file";
+      const mimeType = file.mimetype || "";
+
+      if (mimeType.startsWith("image/") && file.url_private) {
+        mediaUrls.push(file.url_private);
+        mediaTypes.push(mimeType);
+        inputParts.push(`[User shared image: ${fileName}]`);
+      } else if (file.url_private) {
+        mediaUrls.push(file.url_private);
+        mediaTypes.push(mimeType || "application/octet-stream");
+        inputParts.push(`[User shared file: ${fileName} (${fileType})]`);
+
+        // For text-readable files, try to download and inject content
+        if ((mimeType.startsWith("text/") || /^(txt|md|csv|json|yaml|yml|xml|log|py|js|ts|html|css)$/.test(fileType)) && (file.size || 0) < 100_000) {
+          try {
+            const dlResp = await fetch(file.url_private, {
+              headers: { Authorization: `Bearer ${botToken}` },
+            });
+            if (dlResp.ok) {
+              const content = await dlResp.text();
+              inputParts.push(`[Content of ${fileName}]:\n${content}`);
+            }
+          } catch {}
+        }
+      }
+    }
+  }
+
+  const input = inputParts.join("\n");
+  if (!input) return c.json({ ok: true });
+
+  const agentName = await resolveChannelAgent(sql, orgId, "slack");
+  const output = await invokeAgent(c.env, agentName, input, "slack", userId, orgId);
+
+  // Reply via Slack Web API with chunking and thread support
   if (botToken && channelId && output) {
-    try {
-      await fetch("https://slack.com/api/chat.postMessage", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${botToken}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          channel: channelId,
-          text: output.slice(0, 3000),
-          ...(event.ts && isMessage ? { thread_ts: event.ts } : {}),
-        }),
-      });
-    } catch {}
+    const chunks = chunkMessage(output, 3000); // Slack limit ~4000 but leave room for formatting
+    for (let i = 0; i < chunks.length; i++) {
+      try {
+        await fetch("https://slack.com/api/chat.postMessage", {
+          method: "POST",
+          headers: { Authorization: `Bearer ${botToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channel: channelId,
+            text: chunks[i],
+            thread_ts: threadTs,
+            // Unfurl links in first chunk only
+            unfurl_links: i === 0,
+            unfurl_media: i === 0,
+          }),
+        });
+      } catch {}
+    }
   }
 
   return c.json({ ok: true });

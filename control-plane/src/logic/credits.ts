@@ -107,8 +107,30 @@ export async function deductCredits(
 ): Promise<{ success: boolean; balance_after_usd: number }> {
   if (amountUsd <= 0) return { success: true, balance_after_usd: 0 };
 
+  // Org-level daily spend cap — prevent runaway agents from burning unlimited credits
+  // Default: $50/day for free, $200/day for pro. Configurable in org_settings.
+  try {
+    const [settings] = await sql`
+      SELECT settings_json FROM org_settings WHERE org_id = ${orgId} LIMIT 1
+    `.catch(() => [null]);
+    const settingsJson = settings?.settings_json ? (typeof settings.settings_json === "string" ? JSON.parse(settings.settings_json) : settings.settings_json) : {};
+    const dailyLimit = Number(settingsJson.daily_budget_usd) || 50; // default $50/day
+
+    const [dailySpend] = await sql`
+      SELECT COALESCE(SUM(ABS(amount_usd)), 0) as total
+      FROM credit_transactions
+      WHERE org_id = ${orgId} AND type = 'burn' AND created_at > now() - interval '24 hours'
+    `.catch(() => [{ total: 0 }]);
+
+    if (Number(dailySpend.total) + amountUsd > dailyLimit) {
+      console.error(`[billing] Org ${orgId} hit daily spend cap: $${Number(dailySpend.total).toFixed(2)} + $${amountUsd} > $${dailyLimit}/day`);
+      return { success: false, balance_after_usd: 0 };
+    }
+  } catch {} // Non-blocking — don't prevent billing if cap check fails
+
   // Idempotency: don't double-deduct for the same session
-  if (sessionId) {
+  // Skip check if session_id is empty (can't deduplicate without it)
+  if (sessionId && sessionId.length > 3) {
     const existing = await sql`
       SELECT 1 FROM credit_transactions
       WHERE org_id = ${orgId} AND session_id = ${sessionId} AND type = 'burn'

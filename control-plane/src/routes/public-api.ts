@@ -273,8 +273,13 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     try {
       const costUsd = Number(result.cost_usd || 0);
       const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-      await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
-    } catch {}
+      const deductResult = await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+      if (!deductResult.success) {
+        console.error(`[public-api-billing] FAILED deduction $${costUsd} from org ${orgId} — insufficient credits`);
+      }
+    } catch (err: any) {
+      console.error(`[public-api-billing] Credit deduction error for org ${orgId}: ${err.message}`);
+    }
 
     // Store idempotency cache if key was provided
     if (body.idempotency_key) {
@@ -725,8 +730,13 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
     try {
       const costUsd = Number(result.cost_usd || 0);
       const deductSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-      await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
-    } catch {}
+      const deductResult = await deductCredits(deductSql, orgId, costUsd, `Agent run: ${agentName}`, agentName, String(result.session_id || ""));
+      if (!deductResult.success) {
+        console.error(`[public-api-billing] FAILED deduction $${costUsd} from org ${orgId} — insufficient credits`);
+      }
+    } catch (err: any) {
+      console.error(`[public-api-billing] Credit deduction error for org ${orgId}: ${err.message}`);
+    }
 
     // Store idempotency cache if key was provided
     if (idempotencyKey) {

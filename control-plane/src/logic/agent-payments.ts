@@ -226,28 +226,43 @@ export async function refundTransfer(
     `;
     if (existing.length > 0) return { success: true }; // already refunded
 
-    // Deduct from receiver (with balance check to prevent negative)
-    const refundDeducted = await sql`
-      UPDATE org_credit_balance
-      SET balance_usd = GREATEST(0, balance_usd - ${amountUsd}), updated_at = ${now}
-      WHERE org_id = ${toOrg}
-    `;
+    // Atomic: debit receiver + credit sender + audit in single transaction
+    await sql.begin(async (tx: any) => {
+      // Deduct from receiver (only if they have enough)
+      const deducted = await tx`
+        UPDATE org_credit_balance
+        SET balance_usd = balance_usd - ${amountUsd}, updated_at = ${now}
+        WHERE org_id = ${toOrg} AND balance_usd >= ${amountUsd}
+      `;
+      if (deducted.count === 0) {
+        // Receiver doesn't have enough — partial refund of what they have
+        const [receiverBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
+        const available = Math.max(0, Number(receiverBal?.balance_usd || 0));
+        if (available > 0) {
+          await tx`UPDATE org_credit_balance SET balance_usd = 0, updated_at = ${now} WHERE org_id = ${toOrg}`;
+          await tx`UPDATE org_credit_balance SET balance_usd = balance_usd + ${available}, updated_at = ${now} WHERE org_id = ${fromOrg}`;
+          await tx`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+            VALUES (${fromOrg}, 'refund', ${available}, 0, ${reason + ' (partial)'}, ${refundId}, 'a2a_refund', ${now})`;
+          console.warn(`[refund] Partial refund $${available} of $${amountUsd} — receiver ${toOrg} had insufficient balance`);
+        }
+        return;
+      }
 
-    // Credit back to sender
-    await sql`
-      UPDATE org_credit_balance
-      SET balance_usd = balance_usd + ${amountUsd}, updated_at = ${now}
-      WHERE org_id = ${fromOrg}
-    `;
+      // Full refund path
+      await tx`UPDATE org_credit_balance SET balance_usd = balance_usd + ${amountUsd}, updated_at = ${now} WHERE org_id = ${fromOrg}`;
 
-    // Audit
-    await sql`
-      INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
-      VALUES (${fromOrg}, 'refund', ${amountUsd}, 0, ${reason}, ${refundId}, 'a2a_refund', ${now})
-    `;
+      // Audit trails
+      const [senderBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${fromOrg}`;
+      const [receiverBal] = await tx`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${toOrg}`;
+      await tx`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+        VALUES (${fromOrg}, 'refund', ${amountUsd}, ${Number(senderBal.balance_usd)}, ${reason}, ${refundId}, 'a2a_refund', ${now})`;
+      await tx`INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+        VALUES (${toOrg}, 'refund', ${-amountUsd}, ${Number(receiverBal.balance_usd)}, ${'Refund debit: ' + reason}, ${refundId + '-debit'}, 'a2a_refund', ${now})`;
+    });
 
     return { success: true };
   } catch (err: any) {
+    console.error(`[refund] Failed for transfer ${transferId}: ${err.message}`);
     return { success: false, error: `Refund failed: ${err.message}` };
   }
 }

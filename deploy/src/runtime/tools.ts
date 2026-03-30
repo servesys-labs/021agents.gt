@@ -389,7 +389,9 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
 function calculateToolCost(toolName: string, latencyMs: number): number {
   const model = TOOL_COSTS[toolName];
   if (!model) return 0;
-  return model.flat_usd + (latencyMs * model.per_ms_usd);
+  const baseCost = model.flat_usd + (latencyMs * model.per_ms_usd);
+  // Apply platform margin (same multiplier as LLM costs)
+  return baseCost * 1.4; // MARGIN_MULTIPLIER from pricing.ts
 }
 
 /**

@@ -44,6 +44,10 @@ export interface AgentRunParams {
   parent_depth?: number;
   /** Override the system prompt for this run (used by training eval) */
   system_prompt_override?: string;
+  /** Media URLs attached to the user message (images, audio, documents) */
+  media_urls?: string[];
+  /** MIME types corresponding to each media_url entry */
+  media_types?: string[];
 }
 
 export interface RunOutput {
@@ -143,7 +147,24 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     for (const msg of p.history) {
       messages.push({ role: msg.role, content: msg.content });
     }
-    messages.push({ role: "user", content: p.input });
+    // Build user message — multimodal if media URLs are present (images, etc.)
+    if (p.media_urls?.length) {
+      const contentParts: Array<{ type: string; text?: string; image_url?: { url: string }; source?: { type: string; media_type: string; url: string } }> = [];
+      if (p.input) contentParts.push({ type: "text", text: p.input });
+      for (let i = 0; i < p.media_urls.length; i++) {
+        const url = p.media_urls[i];
+        const mimeType = p.media_types?.[i] || "";
+        if (mimeType.startsWith("image") || /\.(jpg|jpeg|png|gif|webp)$/i.test(url)) {
+          contentParts.push({ type: "image_url", image_url: { url } });
+        } else {
+          // Non-image media: include as text reference (audio/video transcription handled by tools)
+          contentParts.push({ type: "text", text: `[Attached media: ${url}]` });
+        }
+      }
+      messages.push({ role: "user", content: contentParts as any });
+    } else {
+      messages.push({ role: "user", content: p.input });
+    }
 
     // ═══════════════════════════════════════════════════════════
     // STEP 3: AGENTIC TURN LOOP

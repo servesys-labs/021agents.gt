@@ -111,13 +111,19 @@ async function recordTelephonyBilling(
       )
     `;
 
-    // Fire-and-forget credit deduction for telephony cost
+    // Credit deduction for telephony cost (awaited, not fire-and-forget)
     if (opts.cost_usd > 0) {
-      // deductCredits expects USD, not cents — pass cost_usd directly
-      deductCredits(sql, opts.org_id, opts.cost_usd, `Voice call: ${opts.call_id}`, opts.agent_name || "voice", traceId).catch(() => {});
+      try {
+        const result = await deductCredits(sql, opts.org_id, opts.cost_usd, `Voice call: ${opts.call_id}`, opts.agent_name || "voice", traceId);
+        if (!result.success) {
+          console.error(`[voice-billing] FAILED to deduct $${opts.cost_usd} from org ${opts.org_id} — insufficient credits (balance: $${result.balance_after_usd})`);
+        }
+      } catch (err: any) {
+        console.error(`[voice-billing] Credit deduction error for org ${opts.org_id}: ${err.message}`);
+      }
     }
-  } catch {
-    /* best-effort */
+  } catch (err: any) {
+    console.error(`[voice-billing] recordTelephonyBilling failed: ${err.message}`);
   }
 }
 

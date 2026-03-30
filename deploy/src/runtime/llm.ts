@@ -16,7 +16,7 @@
  */
 
 import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv } from "./types";
-import { estimateTokenCost } from "./pricing";
+// Pricing imported dynamically in callLLM to avoid circular deps
 
 /**
  * Call an LLM through CF AI Gateway /compat/ endpoint.
@@ -141,7 +141,8 @@ export async function callLLM(
     } catch {}
   }
 
-  const costUsd = providerCost > 0 ? providerCost : estimateTokenCost(data.model || model, inputTokens, outputTokens);
+  const { calculateCustomerCost } = await import("./pricing");
+  const costUsd = calculateCustomerCost(data.model || model, inputTokens, outputTokens, providerCost);
 
   return {
     content: msg.content || msg.reasoning || (choice as any).text || "",

@@ -1,25 +1,47 @@
 /**
- * Model pricing table — per 1M tokens in USD.
- * Source: OpenRouter API (https://openrouter.ai/api/v1/models) as of March 2026.
- * Used to calculate real LLM cost at runtime.
- * No rounding, no minimums — exact cost to $0.000001.
+ * Model pricing + margin — per 1M tokens in USD.
+ *
+ * All LLM calls route through CF AI Gateway which reports actual cost.
+ * When the gateway returns cost data, we use that (source of truth).
+ * This table is ONLY the fallback when gateway doesn't report cost.
+ *
+ * REVENUE MODEL:
+ *   Customer pays: actual_cost × MARGIN_MULTIPLIER
+ *   Platform keeps: actual_cost × (MARGIN_MULTIPLIER - 1)
+ *
+ * Example at 1.4x margin:
+ *   LLM cost = $0.001 → Customer pays $0.0014 → Platform earns $0.0004
+ *   On $100K monthly LLM spend → $40K gross margin
+ *
+ * Source: OpenRouter API pricing as of March 2026.
  */
 
+// ── Margin ──────────────────────────────────────────────────────
+// Applied to ALL costs (LLM + tools). This is how OneShots makes money.
+// 1.4x = 40% gross margin on compute costs.
+export const MARGIN_MULTIPLIER = 1.4;
+
+// ── Model pricing (fallback when AI Gateway doesn't report cost) ──
 const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   // ── OpenAI GPT-5.4 family ─────────────────────────────────────
-  "openai/gpt-5.4-pro":    { input: 30.00, output: 180.00 },  // $0.00003/tok in, $0.00018/tok out
-  "openai/gpt-5.4":        { input: 2.50,  output: 15.00 },   // $0.0000025/tok in, $0.000015/tok out
-  "openai/gpt-5.4-mini":   { input: 0.75,  output: 4.50 },    // $0.00000075/tok in, $0.0000045/tok out
-  "openai/gpt-5.4-nano":   { input: 0.20,  output: 1.25 },    // $0.0000002/tok in, $0.00000125/tok out
+  "openai/gpt-5.4-pro":    { input: 30.00, output: 180.00 },
+  "openai/gpt-5.4":        { input: 2.50,  output: 15.00 },
+  "openai/gpt-5.4-mini":   { input: 0.75,  output: 4.50 },
+  "openai/gpt-5.4-nano":   { input: 0.20,  output: 1.25 },
+  "openai/gpt-5.4-20260305": { input: 2.50,  output: 15.00 },
 
   // ── Anthropic Claude 4.6 ──────────────────────────────────────
-  "anthropic/claude-opus-4.6":   { input: 5.00,  output: 25.00 },  // $0.000005/tok in, $0.000025/tok out
-  "anthropic/claude-sonnet-4.6": { input: 3.00,  output: 15.00 },  // $0.000003/tok in, $0.000015/tok out
+  "anthropic/claude-opus-4.6":   { input: 5.00,  output: 25.00 },
+  "anthropic/claude-sonnet-4.6": { input: 3.00,  output: 15.00 },
+  "anthropic/claude-haiku-4.5":  { input: 0.80,  output: 4.00 },
 
   // ── Google Gemini 3.1 ─────────────────────────────────────────
-  "google/gemini-3.1-pro-preview":        { input: 2.00,  output: 12.00 },  // $0.000002/tok in, $0.000012/tok out
-  "google/gemini-3.1-flash-lite-preview": { input: 0.25,  output: 1.50 },   // $0.00000025/tok in, $0.0000015/tok out
-  "google/gemini-3-flash-preview":        { input: 0.50,  output: 3.00 },   // $0.0000005/tok in, $0.000003/tok out
+  "google/gemini-3.1-pro-preview":        { input: 2.00,  output: 12.00 },
+  "google/gemini-3.1-flash-lite-preview": { input: 0.25,  output: 1.50 },
+  "google/gemini-3.1-flash-preview":      { input: 0.50,  output: 3.00 },
+  "google/gemini-3-flash-preview":        { input: 0.50,  output: 3.00 },
+  "google/gemini-3-pro-preview":          { input: 2.00,  output: 12.00 },
+  "google/gemini-3.1-flash-lite-preview-20260303": { input: 0.25, output: 1.50 },
 
   // ── DeepSeek ──────────────────────────────────────────────────
   "deepseek/deepseek-chat-v3-0324": { input: 0.27, output: 1.10 },
@@ -30,14 +52,16 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "mistralai/mistral-large-latest": { input: 2.00, output: 6.00 },
   "mistralai/mistral-small-latest": { input: 0.20, output: 0.60 },
 
-  // ── Workers AI (Cloudflare on-edge) ───────────────────────────
+  // ── Meta Llama ────────────────────────────────────────────────
+  "meta-llama/llama-4-maverick": { input: 0.20, output: 0.60 },
+  "meta-llama/llama-4-scout":    { input: 0.15, output: 0.45 },
+
+  // ── Workers AI (Cloudflare on-edge, near-zero cost) ───────────
   "@cf/moonshotai/kimi-k2.5":                  { input: 0.10, output: 0.40 },
   "@cf/zai-org/glm-4.7-flash":                 { input: 0.05, output: 0.20 },
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast":  { input: 0.10, output: 0.20 },
   "@cf/mistral/mistral-7b-instruct-v0.2-lora": { input: 0.01, output: 0.03 },
 };
-
-const DEFAULT_PRICING = { input: 1.00, output: 3.00 };
 
 /**
  * Estimate token count from text when the API doesn't report usage.
@@ -48,33 +72,53 @@ const DEFAULT_PRICING = { input: 1.00, output: 3.00 };
  */
 export function estimateTokensFromText(text: string): number {
   if (!text) return 0;
-  // Count words (split on whitespace)
   const words = text.split(/\s+/).filter(Boolean).length;
-  // Count code-like characters (braces, brackets, operators) — these often tokenize individually
   const codeChars = (text.match(/[{}[\]();:,<>=!&|+\-*/%]/g) || []).length;
-  // CJK characters typically tokenize to ~1 token each
   const cjkChars = (text.match(/[\u3000-\u9fff\uac00-\ud7af]/g) || []).length;
-  // Base: ~1.3 tokens per English word + code chars + CJK chars
   const estimate = Math.ceil(words * 1.3) + codeChars + cjkChars;
-  // Add 10% safety margin to avoid undercharging
   return Math.ceil(estimate * 1.1);
 }
 
 /**
+ * Calculate the cost the customer pays for an LLM call.
+ *
+ * Priority:
+ *   1. If AI Gateway returned actual cost (providerCost > 0), use that × margin
+ *   2. Else estimate from token counts × model pricing × margin
+ *
+ * All costs include the platform margin (MARGIN_MULTIPLIER).
+ */
+export function calculateCustomerCost(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  providerCost: number = 0,
+): number {
+  // If gateway reported actual cost, apply margin and return
+  if (providerCost > 0) {
+    return providerCost * MARGIN_MULTIPLIER;
+  }
+
+  // Fallback: estimate from token counts
+  return estimateTokenCost(model, inputTokens, outputTokens);
+}
+
+/**
  * Estimate LLM token cost from model name and token counts.
- * Returns cost in USD with full precision.
+ * Returns cost in USD WITH margin applied.
  */
 export function estimateTokenCost(model: string, inputTokens: number, outputTokens: number): number {
   let pricing = MODEL_PRICING[model];
   if (!pricing) {
-    // Prefix match for versioned model names
+    // Prefix match for versioned model names (e.g., "openai/gpt-5.4-20260305" → "openai/gpt-5.4")
     const key = Object.keys(MODEL_PRICING).find((k) => model.startsWith(k) || k.startsWith(model));
     pricing = key ? MODEL_PRICING[key] : undefined;
     if (!pricing) {
-      // Unknown model — use default but log for operator awareness
-      console.warn(`[pricing] Unknown model '${model}' — using default pricing ($${DEFAULT_PRICING.input}/$${DEFAULT_PRICING.output} per 1M tokens). Add to MODEL_PRICING to prevent over/undercharging.`);
-      pricing = DEFAULT_PRICING;
+      console.warn(`[pricing] Unknown model '${model}' — REJECTING. All models must route through AI Gateway for accurate cost tracking.`);
+      // Charge at a high rate to flag the issue ($5/$15 per 1M = expensive enough to notice)
+      pricing = { input: 5.00, output: 15.00 };
     }
   }
-  return (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
+  const baseCost = (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;
+  return baseCost * MARGIN_MULTIPLIER;
 }
