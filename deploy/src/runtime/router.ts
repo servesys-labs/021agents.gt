@@ -324,7 +324,7 @@ export async function selectModel(
     return {
       model: defaultModel,
       provider: defaultProvider,
-      max_tokens: complexity === "complex" ? 8192 : complexity === "moderate" ? 4096 : 2048,
+      max_tokens: 0, // Let model decide output length
       complexity,
       category,
       role,
@@ -340,7 +340,7 @@ export async function selectModel(
       return {
         model: route.model || defaultModel,
         provider: route.provider || defaultProvider,
-        max_tokens: route.max_tokens || 4096,
+        max_tokens: 0, // Let model decide
         complexity,
         category,
         role,
@@ -356,7 +356,7 @@ export async function selectModel(
       return {
         model: route.model || defaultModel,
         provider: route.provider || defaultProvider,
-        max_tokens: route.max_tokens || 4096,
+        max_tokens: 0, // Let model decide
         complexity,
         category,
         role,
@@ -368,7 +368,7 @@ export async function selectModel(
   return {
     model: defaultModel,
     provider: defaultProvider,
-    max_tokens: complexity === "complex" ? 8192 : 4096,
+    max_tokens: 0, // Let model decide
     complexity,
     category,
     role,

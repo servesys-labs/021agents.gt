@@ -605,7 +605,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      max_tokens: 16384,
+
       temperature: 0.3,
       metadata: { agent: "meta-agent-build", org_id: opts.orgId || "" },
     },
@@ -788,7 +788,7 @@ Return ONLY valid JSON.`,
             content: `Agent: ${agentName}\nDescription: ${agentDescription}\n\nScenarios to expand:\n${scenarios.map((s, i) => `${i + 1}. ${s}`).join("\n")}`,
           },
         ],
-        max_tokens: 4096,
+
         temperature: 0.3,
         metadata: { agent: "meta-agent-eval" },
       },
@@ -926,7 +926,7 @@ Failures:
 ${failureSummary || "None"}`,
           },
         ],
-        max_tokens: 4096,
+
         temperature: 0.3,
         metadata: { agent: "meta-agent-evolution" },
       },

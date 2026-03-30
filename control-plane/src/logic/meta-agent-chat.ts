@@ -1365,7 +1365,7 @@ export async function runMetaChat(
         messages: llmMessages as any,
         tools: META_TOOLS,
         tool_choice: "auto",
-        max_tokens: 4096,
+
         temperature: 0.3,
         metadata: { agent: "meta-agent", org_id: ctx.orgId },
       },
