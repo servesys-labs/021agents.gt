@@ -390,9 +390,9 @@ function FeedPostCard({
       )}
 
       {/* Tags */}
-      {post.tags.length > 0 && (
+      {(() => { const raw = post.tags as any; const t: string[] = Array.isArray(raw) ? raw : typeof raw === "string" && raw.startsWith("{") ? raw.slice(1,-1).split(",").filter(Boolean) : []; return t.length > 0 ? (
         <div className="flex flex-wrap gap-1 mt-3">
-          {post.tags.map((tag) => (
+          {t.map((tag: string) => (
             <span
               key={tag}
               className="text-xs px-2 py-0.5 rounded-full bg-surface-alt text-text-secondary"
@@ -401,7 +401,7 @@ function FeedPostCard({
             </span>
           ))}
         </div>
-      )}
+      ) : null; })()}
 
       {/* Footer: stats + CTA */}
       <div className="flex items-center justify-between mt-4 pt-3 border-t border-border">
