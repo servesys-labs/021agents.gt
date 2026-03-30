@@ -23,7 +23,7 @@ import {
   createWebSocketSendWithBackpressure,
   type RuntimeEnv,
 } from "./runtime";
-import { streamRun } from "./runtime/stream";
+// streamRun removed — all execution goes through Cloudflare Workflows
 import { getCircuitStatus } from "./runtime/tools";
 
 // Re-export Sandbox so Cloudflare can discover the Durable Object class
@@ -97,49 +97,6 @@ function normalizePlan(value?: string): string {
 export class AgentOSAgent extends Agent<Env, AgentState> {
   // Concurrency guard: prevent overlapping runs from corrupting conversation state.
   // DOs are single-threaded but async yields allow interleaving.
-  private _runLock: Promise<void> = Promise.resolve();
-
-  /** True while a run is in progress — prevents concurrent execution that corrupts state. */
-  private _running = false;
-
-  /**
-   * Guard against concurrent execution. Instead of queuing (which caused zombie
-   * tasks and corrupted SQLite state), reject immediately with a clear error.
-   * The client can retry after a short delay.
-   *
-   * Why not queue: if request A is running and request B queues, and A times out,
-   * B starts while A's streamRun continues in the background. Both write to
-   * conversation_messages simultaneously → corrupted history → permanent bad state.
-   * Immediate rejection is safer and gives the user clear feedback.
-   */
-  private async _withRunLock<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    if (this._running) {
-      throw new Error("Agent is busy processing another request. Please wait a moment and try again.");
-    }
-    this._running = true;
-    const abort = new AbortController();
-    // Hard timeout: 5 minutes max per run
-    const timer = setTimeout(() => abort.abort(), 300_000);
-    try {
-      return await fn(abort.signal);
-    } finally {
-      clearTimeout(timer);
-      this._running = false;
-    }
-  }
-
-  /**
-   * Create a yield callback for streamRun — yields the event loop between turns
-   * so the DO can process incoming request acceptance (prevents HTTP-level timeouts).
-   * The lock stays held; this is a cooperative yield, not a lock release.
-   */
-  private _createYieldCallback(signal?: AbortSignal): () => Promise<void> {
-    return () => new Promise<void>((resolve, reject) => {
-      if (signal?.aborted) { reject(new Error("Run aborted")); return; }
-      setTimeout(resolve, 1);
-    });
-  }
-
   initialState: AgentState = {
     config: {
       plan: "standard",
@@ -628,117 +585,79 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
 
     if (data.type === "run") {
-      await this._withRunLock(async (signal) => {
       const config = this.state.config;
-      const runtimeEnv: RuntimeEnv = {
-        AI: this.env.AI,
-        HYPERDRIVE: this.env.HYPERDRIVE,
-        VECTORIZE: this.env.VECTORIZE,
-        STORAGE: this.env.STORAGE,
-        SANDBOX: this.env.SANDBOX,
-        LOADER: this.env.LOADER,
-        TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
-        BROWSER: this.env.BROWSER,
-        OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
-        AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
-        AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
-        CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
-        CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
-        DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
-        DO_SQL: this.sql.bind(this),
-        DO_SESSION_ID: this.name,
-      };
-
       const inputText = String(data.input || "");
       const history = this._loadConversationHistory(24);
-      let finalOutput = "";
-      let clientDisconnected = false;
-
-      // Create backpressure-controlled send function with disconnect detection
-      const { send } = createWebSocketSendWithBackpressure(connection, {
-        highWatermarkBytes: 100 * 1024, // 100KB
-        lowWatermarkBytes: 20 * 1024,   // 20KB
-        maxMessages: 1000,
-      });
-
-      const sendAndCapture = async (msg: string) => {
-        // Check if client is still connected before sending
-        if (clientDisconnected || connection.readyState !== 1 /* OPEN */) {
-          clientDisconnected = true;
-          return; // silently skip — run will still complete and persist
-        }
-        try {
-          await send(msg);
-          try {
-            const parsed = JSON.parse(msg) as { type?: string; output?: string };
-            if (parsed.type === "done" && typeof parsed.output === "string") {
-              finalOutput = parsed.output;
-            }
-          } catch {
-            // ignore malformed ws payloads
-          }
-        } catch (err) {
-          // Backpressure overflow or connection closed mid-send
-          if (connection.readyState !== 1) {
-            clientDisconnected = true;
-          } else {
-            console.warn("[AgentOSAgent] WebSocket backpressure overflow:", err);
-          }
-        }
-      };
+      const wsAgentName = data.agent_name || config.agentName || "agentos";
 
       try {
-        {
-          // Stream the run — tokens flow to client in real-time
-          await streamRun(
-            runtimeEnv,
-            this.env.HYPERDRIVE,
-            inputText,
-            data.agent_name || config.agentName || "agentos",
-            sendAndCapture,
-            {
-              org_id: data.org_id || config.orgId || "",
-              project_id: data.project_id || config.projectId || "",
-              channel: data.channel || "websocket",
-              channel_user_id: data.channel_user_id,
-              api_key_id: data.api_key_id,
-              history_messages: history,
-              delegation: data.delegation,
-              yieldBetweenTurns: this._createYieldCallback(signal),
-            },
-          );
+        if (!this.env.AGENT_RUN_WORKFLOW || !this.env.AGENT_PROGRESS_KV) {
+          throw new Error("Workflow bindings not configured");
+        }
+
+        const progressKey = `ws:${this.name}:${Date.now()}`;
+        const instance = await this.env.AGENT_RUN_WORKFLOW.create({
+          params: {
+            agent_name: wsAgentName, input: inputText,
+            org_id: data.org_id || config.orgId || "",
+            project_id: data.project_id || config.projectId || "",
+            channel: data.channel || "websocket",
+            channel_user_id: data.channel_user_id || "",
+            history: history.map((m: any) => ({ role: m.role, content: m.content })),
+            progress_key: progressKey,
+          },
+        });
+
+        // Poll KV for progress events → push to WebSocket client in real-time
+        let lastIdx = 0;
+        let done = false;
+        const maxWait = 300_000;
+        const pollStart = Date.now();
+
+        while (!done && Date.now() - pollStart < maxWait && connection.readyState === 1) {
+          await new Promise(r => setTimeout(r, 500));
+          try {
+            const raw = await this.env.AGENT_PROGRESS_KV.get(progressKey);
+            if (!raw) continue;
+            const events = JSON.parse(raw) as any[];
+            for (let i = lastIdx; i < events.length; i++) {
+              try { connection.send(JSON.stringify(events[i])); } catch { done = true; break; }
+              if (events[i].type === "done") {
+                done = true;
+                this._appendConversationMessage("user", inputText, data.channel || "websocket");
+                this._appendConversationMessage("assistant", events[i].output || "", data.channel || "websocket");
+                // Billing
+                if (this.env.HYPERDRIVE && events[i].cost_usd > 0) {
+                  const { writeBillingRecord } = await import("./runtime/db");
+                  writeBillingRecord(this.env.HYPERDRIVE, {
+                    session_id: events[i].session_id || "", org_id: data.org_id || "",
+                    agent_name: wsAgentName, model: "workflow",
+                    input_tokens: 0, output_tokens: 0,
+                    cost_usd: events[i].cost_usd || 0, plan: "standard",
+                    trace_id: events[i].trace_id || "",
+                  }).catch(() => {});
+                }
+              }
+              if (events[i].type === "error") done = true;
+            }
+            lastIdx = events.length;
+          } catch {}
+          // Check Workflow status
+          if (!done) {
+            try {
+              const st = await instance.status();
+              if (st.status === "errored" || st.status === "terminated") {
+                connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" }));
+                done = true;
+              }
+            } catch {}
+          }
         }
       } catch (err) {
-        // Notify client of the error
-        try {
-          connection.send(JSON.stringify({ type: "error", message: String(err) }));
-        } catch {}
-        // Still persist the user message with an error marker so context isn't silently lost
-        const channel = data.channel || "websocket";
-        this._appendConversationMessage("user", inputText, channel);
-        this._appendConversationMessage("assistant", "[Error: response failed]", channel);
-        return;
+        try { connection.send(JSON.stringify({ type: "error", message: String(err) })); } catch {}
+        this._appendConversationMessage("user", inputText, data.channel || "websocket");
+        this._appendConversationMessage("assistant", "[Error]", data.channel || "websocket");
       }
-
-      // Start periodic checkpoint alarm for hibernation safety
-      try {
-        this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-      } catch {}
-
-      // Only persist both messages atomically — skip if assistant produced nothing
-      const channel = data.channel || "websocket";
-      if (finalOutput.trim()) {
-        this._appendConversationMessage("user", inputText, channel);
-        this._appendConversationMessage("assistant", finalOutput, channel);
-      } else {
-        // Assistant produced no output (e.g. empty response) — still save user msg
-        // with a marker so the LLM doesn't see an orphaned user turn next time
-        this._appendConversationMessage("user", inputText, channel);
-        this._appendConversationMessage("assistant", "[No response generated]", channel);
-      }
-      }); // end _withRunLock
     }
   }
 
@@ -851,139 +770,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             instance_id: instance.id, progress_key: progressKey,
           }, { status: 202 });
         } catch (err: any) {
-          // Workflow unavailable — fall through to legacy path
-          console.warn(`[Workflow] Failed: ${err.message}, falling back to streamRun`);
+          return Response.json({
+            status: "error", success: false,
+            error: `Workflow execution failed: ${err.message}`,
+          }, { status: 500 });
         }
-      }
-
-      // ── Legacy path (direct streamRun — fallback if Workflow unavailable) ──
-      if (this._running) {
-        return Response.json({
-          status: "busy", success: false,
-          error: "Agent is processing another request. Please wait a moment and try again.",
-          retry_after_ms: 5000,
-        }, { status: 429 });
-      }
-      return this._withRunLock(async (signal) => {
-      // Load fresh config from DB — DO state may have stale/empty tools
-      let config = { ...this.state.config };
-      try {
-        const { loadAgentConfig } = await import("./runtime/db");
-        const dbConfig = await loadAgentConfig(this.env.HYPERDRIVE, data.agent_name || config.agentName || "agentos", {
-          provider: config.provider || "openrouter",
-          model: config.model || "openai/gpt-5.4-mini",
-          plan: config.plan || "standard",
-        });
-        // Merge DB config into DO state — DB takes priority for tools, system_prompt
-        if (dbConfig.tools.length > 0) config.tools = dbConfig.tools as any;
-        if (dbConfig.system_prompt && dbConfig.system_prompt !== "You are a helpful AI assistant.") {
-          config.systemPrompt = dbConfig.system_prompt;
-        }
-        if (dbConfig.model) config.model = dbConfig.model;
-        if (dbConfig.plan) config.plan = dbConfig.plan;
-      } catch {}
-      const inputText = String(data.input || "");
-      const history = this._loadConversationHistory(24);
-      let finalOutput = "";
-      const debugToolErrors: any[] = [];
-      let finalSessionId = "";
-      let finalTraceId = "";
-      let finalTurns = 0;
-      let finalToolCalls = 0;
-      let finalCostUsd = 0;
-      let finalLatencyMs = 0;
-      const runtimeEnv: RuntimeEnv = {
-        AI: this.env.AI,
-        HYPERDRIVE: this.env.HYPERDRIVE,
-        VECTORIZE: this.env.VECTORIZE,
-        STORAGE: this.env.STORAGE,
-        SANDBOX: this.env.SANDBOX,
-        LOADER: this.env.LOADER,
-        TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
-        BROWSER: this.env.BROWSER,
-        AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
-        AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-      BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
-        CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
-        CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
-        DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
-        DO_SQL: this.sql.bind(this),
-        DO_SESSION_ID: this.name,
-      };
-
-      // Run in DO context (no Worker timeout) — result written to Supabase
-      try {
-        await streamRun(
-          runtimeEnv,
-          this.env.HYPERDRIVE,
-          inputText,
-          data.agent_name || config.agentName || "agentos",
-          (msg) => {
-            try {
-              const parsed = JSON.parse(msg) as Record<string, any>;
-              if (parsed.type === "done") {
-                if (typeof parsed.output === "string") finalOutput = parsed.output;
-                if (typeof parsed.session_id === "string") finalSessionId = parsed.session_id;
-                if (typeof parsed.trace_id === "string") finalTraceId = parsed.trace_id;
-                finalTurns = Number(parsed.turns) || 0;
-                finalToolCalls = Number(parsed.tool_calls) || 0;
-                finalCostUsd = Number(parsed.cost_usd) || 0;
-                finalLatencyMs = Number(parsed.latency_ms) || 0;
-              }
-              // Capture tool errors for debugging
-              if (parsed.type === "tool_result" && parsed.error) {
-                (debugToolErrors as any[]).push({ tool: parsed.name, error: parsed.error });
-              }
-            } catch {
-              // ignore malformed payload
-            }
-          },
-          {
-            org_id: data.org_id || config.orgId || "",
-            project_id: data.project_id || config.projectId || "",
-            channel: data.channel || "async_rest",
-            channel_user_id: data.channel_user_id,
-            api_key_id: data.api_key_id,
-            history_messages: history,
-            delegation: data.delegation,
-            yieldBetweenTurns: this._createYieldCallback(signal),
-          },
-        );
-      } catch (err) {
-        const channel = data.channel || "async_rest";
-        this._appendConversationMessage("user", inputText, channel);
-        this._appendConversationMessage("assistant", "[Error: response failed]", channel);
-        return Response.json({ status: "error", success: false, error: String(err) }, { status: 500 });
-      }
-
-      // Start periodic checkpoint alarm for hibernation safety
-      try {
-        this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-      } catch {}
-
-      const restChannel = data.channel || "async_rest";
-      if (finalOutput.trim()) {
-        this._appendConversationMessage("user", inputText, restChannel);
-        this._appendConversationMessage("assistant", finalOutput, restChannel);
-      } else {
-        this._appendConversationMessage("user", inputText, restChannel);
-        this._appendConversationMessage("assistant", "[No response generated]", restChannel);
       }
 
       return Response.json({
-        status: "completed",
-        success: true,
-        output: finalOutput,
-        session_id: finalSessionId,
-        trace_id: finalTraceId,
-        turns: finalTurns,
-        tool_calls: finalToolCalls,
-        cost_usd: finalCostUsd,
-        latency_ms: finalLatencyMs,
-        ...(debugToolErrors.length > 0 ? { _debug_tool_errors: debugToolErrors } : {}),
-      });
-      }); // end _withRunLock
+        status: "error", success: false,
+        error: "AGENT_RUN_WORKFLOW binding not configured.",
+      }, { status: 501 });
     }
     // POST /run/stream — SSE streaming for REST clients (portal, curl, etc.)
     // Uses Workflow for durable execution + KV polling for SSE events.
@@ -1076,102 +873,19 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             },
           });
         } catch (err: any) {
-          console.warn(`[Workflow SSE] Failed: ${err.message}, falling back to legacy streamRun`);
+          // Stream error as SSE event
+          const enc = new TextEncoder();
+          const errStream = new ReadableStream({
+            start(c) {
+              c.enqueue(enc.encode(`data: ${JSON.stringify({ type: "error", message: err.message || "Workflow failed" })}\n\n`));
+              c.close();
+            },
+          });
+          return new Response(errStream, { headers: { "Content-Type": "text/event-stream" }, status: 500 });
         }
       }
 
-      // ── Legacy SSE path (direct streamRun — fallback) ──
-      if (this._running) {
-        return Response.json({
-          status: "busy", success: false,
-          error: "Agent is processing another request. Please wait and try again.",
-          retry_after_ms: 5000,
-        }, { status: 429 });
-      }
-      const config = this.state.config;
-      const legacyInput = inputText || String(data.input || "");
-      const legacyHistory = this._loadConversationHistory(24);
-      const runtimeEnv: RuntimeEnv = {
-        AI: this.env.AI,
-        HYPERDRIVE: this.env.HYPERDRIVE,
-        VECTORIZE: this.env.VECTORIZE,
-        STORAGE: this.env.STORAGE,
-        SANDBOX: this.env.SANDBOX,
-        LOADER: this.env.LOADER,
-        TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE,
-        BROWSER: this.env.BROWSER,
-        AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
-        AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
-        CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
-        CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
-        DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-        DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
-        DO_SQL: this.sql.bind(this),
-        DO_SESSION_ID: this.name,
-      };
-
-      const encoder = new TextEncoder();
-      let finalOutput = "";
-      const self = this;
-      const legacyAgentName = data.agent_name || config.agentName || "agentos";
-
-      // Cancel any running task on this DO before starting SSE stream
-      if (this._runAbort) this._runAbort.abort();
-      const sseAbort = new AbortController();
-      this._runAbort = sseAbort;
-
-      const stream = new ReadableStream({
-        start(controller) {
-          const send = (msg: string) => {
-            try {
-              controller.enqueue(encoder.encode(`data: ${msg}\n\n`));
-              const parsed = JSON.parse(msg) as { type?: string; output?: string };
-              if (parsed.type === "done" && typeof parsed.output === "string") {
-                finalOutput = parsed.output;
-              }
-            } catch {
-              // If controller is closed, silently drop
-            }
-          };
-
-          streamRun(
-            runtimeEnv,
-            self.env.HYPERDRIVE,
-            legacyInput,
-            legacyAgentName,
-            send,
-            {
-              org_id: data.org_id || config.orgId || "",
-              project_id: data.project_id || config.projectId || "",
-              channel: data.channel || "sse",
-              channel_user_id: data.channel_user_id,
-              api_key_id: data.api_key_id,
-              history_messages: legacyHistory,
-              delegation: data.delegation,
-              yieldBetweenTurns: self._createYieldCallback(sseAbort.signal),
-            },
-          ).then(() => {
-            self._appendConversationMessage("user", legacyInput, data.channel || "sse");
-            self._appendConversationMessage("assistant", finalOutput, data.channel || "sse");
-            try { controller.close(); } catch {}
-          }).catch((err) => {
-            try {
-              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: String(err) })}\n\n`));
-              controller.close();
-            } catch {}
-          });
-        },
-      });
-
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache",
-          "Connection": "keep-alive",
-          "X-Accel-Buffering": "no",
-        },
-      });
+      return Response.json({ error: "AGENT_RUN_WORKFLOW binding not configured." }, { status: 501 });
     }
 
     // POST /reset — clear conversation history (for /new command)
