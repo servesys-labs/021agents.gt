@@ -91,6 +91,30 @@ function normalizePlan(value?: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Email helper — build a simple MIME reply message
+// ---------------------------------------------------------------------------
+
+function buildMIMEString(opts: { from: string; to: string; subject: string; body: string; inReplyTo?: string }): string {
+  const messageId = `<${crypto.randomUUID()}@agentos.dev>`;
+
+  let mime = `From: ${opts.from}\r\n`;
+  mime += `To: ${opts.to}\r\n`;
+  mime += `Subject: ${opts.subject}\r\n`;
+  mime += `Message-ID: ${messageId}\r\n`;
+  mime += `Date: ${new Date().toUTCString()}\r\n`;
+  if (opts.inReplyTo) {
+    mime += `In-Reply-To: ${opts.inReplyTo}\r\n`;
+    mime += `References: ${opts.inReplyTo}\r\n`;
+  }
+  mime += `MIME-Version: 1.0\r\n`;
+  mime += `Content-Type: text/plain; charset=UTF-8\r\n`;
+  mime += `Content-Transfer-Encoding: 7bit\r\n`;
+  mime += `\r\n`;
+  mime += opts.body;
+  return mime;
+}
+
+// ---------------------------------------------------------------------------
 // AgentOS Agent — main agent with @callable methods
 // ---------------------------------------------------------------------------
 
@@ -658,6 +682,89 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         this._appendConversationMessage("user", inputText, data.channel || "websocket");
         this._appendConversationMessage("assistant", "[Error]", data.channel || "websocket");
       }
+    }
+  }
+
+  // ── Email entrypoint ─────────────────────────────────────────────
+  // Receives inbound emails routed via CF Email Routing → agent DO.
+  // Parses the email, runs the agent with the email body as input,
+  // and replies to the sender with the agent's response.
+
+  async onEmail(email: ForwardableEmailMessage) {
+    const from = email.from;
+    const to = email.to;
+    const subject = email.headers.get("subject") || "(no subject)";
+    const messageId = email.headers.get("message-id") || "";
+
+    // Read the email body (text/plain preferred, fall back to raw)
+    let body = "";
+    try {
+      const reader = email.raw.getReader();
+      const chunks: Uint8Array[] = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) chunks.push(value);
+      }
+      const raw = new TextDecoder().decode(
+        chunks.reduce((acc, c) => new Uint8Array([...acc, ...c]), new Uint8Array()),
+      );
+      // Extract text/plain body from raw MIME (simple heuristic)
+      const plainMatch = raw.match(/Content-Type:\s*text\/plain[\s\S]*?\r?\n\r?\n([\s\S]*?)(?:\r?\n--|\r?\n\r?\n)/i);
+      body = plainMatch ? plainMatch[1].trim() : raw.slice(0, 4000);
+    } catch {
+      body = `Email from ${from}: ${subject}`;
+    }
+
+    const input = `[Email from ${from}]\nSubject: ${subject}\n\n${body}`.slice(0, 8000);
+
+    console.log(`[onEmail] Received from ${from}, subject: "${subject}", body length: ${body.length}`);
+
+    // Run the agent
+    try {
+      const results = await this.run(input);
+      const output = (results[0] as any)?.output || "I received your email but couldn't generate a response.";
+
+      // Reply to sender using raw MIME via email.reply()
+      const replyMime = buildMIMEString({
+        from: to,
+        to: from,
+        subject: `Re: ${subject}`,
+        body: output,
+        inReplyTo: messageId,
+      });
+      await email.reply(new Response(replyMime) as any);
+
+      // Log to conversation
+      this._appendConversationMessage("user", input, "email");
+      this._appendConversationMessage("assistant", output, "email");
+
+      // Telemetry
+      if (this.env.TELEMETRY_QUEUE) {
+        this.env.TELEMETRY_QUEUE.send({
+          type: "event",
+          payload: {
+            event_type: "email.processed",
+            agent_name: this.state.config.agentName,
+            from_email: from,
+            subject,
+            cost_usd: (results[0] as any)?.cost_usd || 0,
+            created_at: new Date().toISOString(),
+          },
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.error(`[onEmail] Agent run failed for email from ${from}:`, err);
+      try {
+        const errMime = buildMIMEString({
+          from: to,
+          to: from,
+          subject: `Re: ${subject}`,
+          body: "I'm sorry, I wasn't able to process your email at this time. Please try again later.",
+          inReplyTo: messageId,
+        });
+        await email.reply(new Response(errMime) as any);
+      } catch {}
     }
   }
 
@@ -4356,6 +4463,39 @@ export default {
       }
     } finally {
       await sql.end();
+    }
+  },
+
+  // ── Email handler — route inbound emails to the target agent DO ──
+  async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Determine which agent should handle this email.
+    // Convention: emails to agent-name@yourdomain.com route to that agent.
+    // e.g., support@agents.oneshots.co → agent "support"
+    const toAddress = message.to;
+    const agentName = toAddress.split("@")[0].toLowerCase().replace(/[^a-z0-9-]/g, "") || "default";
+    const orgId = ""; // Email routing doesn't carry org context — agent resolves from DB
+
+    console.log(`[email] Routing email from ${message.from} to agent "${agentName}"`);
+
+    try {
+      // Get or create the agent DO instance
+      const agentId = env.AGENTOS_AGENT.idFromName(agentName);
+      const agent = env.AGENTOS_AGENT.get(agentId);
+
+      // Forward the email to the agent's onEmail handler
+      await (agent as any).onEmail(message);
+    } catch (err) {
+      console.error(`[email] Failed to route email to agent "${agentName}":`, err);
+      // Reply with error
+      try {
+        const errMime = buildMIMEString({
+          from: toAddress,
+          to: message.from,
+          subject: `Re: ${message.headers.get("subject") || ""}`,
+          body: "Sorry, this agent is currently unavailable. Please try again later.",
+        });
+        await message.reply(new Response(errMime) as any);
+      } catch {}
     }
   },
 } satisfies ExportedHandler<Env>;

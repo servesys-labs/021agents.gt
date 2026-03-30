@@ -116,6 +116,11 @@
     }
   ],
 
+  // Email Routing — inbound emails routed to agent DOs
+  // Configure in CF Dashboard: Email Routing → catch-all → Worker "agentos"
+  // Emails to agent-name@yourdomain.com → agent DO "agent-name"
+  "email_routing": true,
+
   // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
     "DEFAULT_PLAN": "standard",
