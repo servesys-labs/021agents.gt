@@ -1548,6 +1548,7 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       env: {
         RUNTIME: c.env.RUNTIME,
         SERVICE_TOKEN: c.env.SERVICE_TOKEN,
+        JOB_QUEUE: c.env.JOB_QUEUE,
       },
     });
 

@@ -48,6 +48,7 @@ interface MetaChatContext {
   env: {
     RUNTIME?: { fetch: (input: RequestInfo, init?: RequestInit) => Promise<Response> };
     SERVICE_TOKEN?: string;
+    JOB_QUEUE?: { send: (message: unknown) => Promise<void> };
   };
 }
 
@@ -879,13 +880,22 @@ async function executeTool(
           VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'created', 0, NULL, ${now})
         `;
 
-        // NOTE: To start the first training step, the caller should use
-        // POST /training/jobs/{id}/auto-step or the JOB_QUEUE binding.
-        // The meta-agent cannot directly access the Queue binding from logic code.
+        // Enqueue the first training step so it actually runs
+        if (ctx.env.JOB_QUEUE) {
+          try {
+            await (ctx.env.JOB_QUEUE as any).send({
+              type: "training_step",
+              payload: { job_id: jobId },
+            });
+            await sql`UPDATE training_jobs SET status = 'running', started_at = ${now} WHERE job_id = ${jobId}`;
+          } catch (err) {
+            console.error("[meta-agent] Failed to enqueue training step:", err);
+          }
+        }
 
         return JSON.stringify({
           job_id: jobId,
-          status: "created",
+          status: "running",
           algorithm,
           max_iterations: maxIterations,
           auto_activate: autoActivate,
