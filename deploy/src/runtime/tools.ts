@@ -996,8 +996,12 @@ async function dispatch(
         const params = new URLSearchParams({ q: query, limit: String(args.limit || 5) });
         if (args.category) params.set("category", String(args.category));
         if (args.max_price) params.set("max_price", String(args.max_price));
+        const serviceToken = (env as any).SERVICE_TOKEN || "";
         const resp = await fetch(`${apiBase}/marketplace/search?${params}`, {
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {}),
+          },
         });
         return await resp.text();
       } catch (err: any) {

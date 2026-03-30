@@ -146,11 +146,32 @@ export const authMiddleware = createMiddleware<{
     c.req.method !== "POST" &&
     (c.req.path === "/api/v1/plans" || c.req.path.startsWith("/api/v1/plans/"));
 
+  // Public discovery endpoints (marketplace search, feed, agent cards)
+  const isPublicDiscovery =
+    c.req.method === "GET" && (
+      c.req.path === "/api/v1/marketplace/search" ||
+      c.req.path === "/api/v1/feed" ||
+      c.req.path === "/api/v1/feed/stats" ||
+      c.req.path === "/.well-known/agent.json" ||
+      c.req.path === "/.well-known/agents.json"
+    );
+
+  // Service-to-service auth via SERVICE_TOKEN (runtime tools calling control-plane)
+  const isServiceAuth = (() => {
+    const serviceToken = c.env.SERVICE_TOKEN || "";
+    if (!serviceToken) return false;
+    const authHeader = c.req.header("Authorization") || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+    return token === serviceToken;
+  })();
+
   // Skip auth for public routes
   if (
     PUBLIC_PATHS.has(c.req.path) ||
     c.req.path.startsWith("/api/v1/auth/") ||
     isPublicPlansRead ||
+    isPublicDiscovery ||
+    isServiceAuth ||
     isPublicVoiceWebhook(c.req.path, c.req.method) ||
     isPublicExternalWebhook(c.req.path, c.req.method)
   ) {
