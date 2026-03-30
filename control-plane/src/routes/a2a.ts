@@ -136,14 +136,23 @@ const agentCardRoute = createRoute({
 a2aRoutes.openapi(agentCardRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const agentParam = new URL(c.req.url).searchParams.get("agent") || "";
+  const orgParam = new URL(c.req.url).searchParams.get("org") || user.org_id;
 
-  const rows = await sql`
-    SELECT name, description, config_json
-    FROM agents
-    WHERE org_id = ${user.org_id} AND is_active = 1
-    ORDER BY created_at DESC
-    LIMIT 1
-  `;
+  const rows = agentParam
+    ? await sql`
+        SELECT name, description, config_json
+        FROM agents
+        WHERE name = ${agentParam} AND org_id = ${orgParam} AND is_active = 1
+        LIMIT 1
+      `
+    : await sql`
+        SELECT name, description, config_json
+        FROM agents
+        WHERE org_id = ${orgParam} AND is_active = 1
+        ORDER BY created_at DESC
+        LIMIT 1
+      `;
 
   if (rows.length === 0) {
     return c.json({ error: "No agents available" }, 404);
