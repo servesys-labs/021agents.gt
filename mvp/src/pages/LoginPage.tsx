@@ -11,6 +11,11 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
+  const [inviteCode, setInviteCode] = useState(() => {
+    // Pre-fill from URL: /login?ref=xxx or /signup?ref=xxx
+    const params = new URLSearchParams(window.location.search);
+    return params.get("ref") || "";
+  });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const { login, signup } = useAuth();
@@ -32,7 +37,7 @@ export default function LoginPage() {
           navigate("/");
         }
       } else {
-        await signup(email, password, name);
+        await signup(email, password, name, inviteCode || undefined);
         navigate("/onboarding");
       }
     } catch (err: any) {
@@ -82,12 +87,21 @@ export default function LoginPage() {
 
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === "signup" && (
-              <Input
-                label="Name"
-                placeholder="Your name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-              />
+              <>
+                <Input
+                  label="Invite code"
+                  placeholder="Enter your invite code"
+                  value={inviteCode}
+                  onChange={(e) => setInviteCode(e.target.value)}
+                  required
+                />
+                <Input
+                  label="Name"
+                  placeholder="Your name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                />
+              </>
             )}
             <Input
               label="Email"

@@ -229,6 +229,19 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
   if (signupLimit) return signupLimit as any;
 
   const { email, password, name } = c.req.valid("json");
+  const referralCode = (c.req.valid("json") as any).referral_code;
+
+  // ── Invite-only gate ──────────────────────────────────────
+  // Signup requires a valid referral code. This controls growth rate —
+  // each org gets a limited number of invite codes (default 5).
+  // Set OPEN_SIGNUPS=true in env to disable (for launch/testing).
+  const openSignups = c.env.OPEN_SIGNUPS === "true" || c.env.OPEN_SIGNUPS === "1";
+  if (!openSignups && !referralCode) {
+    return c.json({
+      error: "Invite required. You need a referral code from an existing user to create an account.",
+      code: "invite_required",
+    }, 403);
+  }
 
   let sql;
   try {
@@ -247,6 +260,26 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
   } catch (err: any) {
     console.error("[auth/signup] User lookup failed:", err);
     return c.json({ error: "Database query failed", detail: err.message }, 500);
+  }
+
+  // Validate invite code before creating anything
+  if (!openSignups && referralCode) {
+    try {
+      const [codeRow] = await sql`
+        SELECT org_id, uses, max_uses, is_active FROM referral_codes WHERE code = ${referralCode}
+      `;
+      if (!codeRow) {
+        return c.json({ error: "Invalid invite code.", code: "invalid_invite" }, 403);
+      }
+      if (!codeRow.is_active) {
+        return c.json({ error: "This invite code is no longer active.", code: "invite_inactive" }, 403);
+      }
+      if (codeRow.max_uses && Number(codeRow.uses) >= Number(codeRow.max_uses)) {
+        return c.json({ error: "This invite code has reached its limit. Ask your referrer for a new one.", code: "invite_exhausted" }, 403);
+      }
+    } catch {
+      // If referral_codes table doesn't exist yet, allow signup
+    }
   }
 
   const userId = generateId();
@@ -312,8 +345,7 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
     console.warn("[auth/signup] org_settings insert failed:", err);
   }
 
-  // Apply referral code if provided
-  const referralCode = (c.req.valid("json") as any).referral_code;
+  // Apply referral code if provided (referralCode declared at top of handler)
   if (referralCode) {
     try {
       const { applyReferralCode } = await import("../logic/referrals");
@@ -321,10 +353,10 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
     } catch {} // non-blocking — signup succeeds even if referral fails
   }
 
-  // Auto-create default referral code for the new org
+  // Auto-create default referral code for the new org (5 invites to start)
   try {
     const { createReferralCode } = await import("../logic/referrals");
-    await createReferralCode(sql, orgId, { label: "Default" });
+    await createReferralCode(sql, orgId, { label: "Your invite link", maxUses: 5 });
   } catch {} // non-blocking
 
   // Seed default event_types for the org (best-effort, idempotent)
