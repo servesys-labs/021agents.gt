@@ -138,6 +138,16 @@ export function useAgentStream() {
         return;
       }
 
+      if (resp.status === 402) {
+        setMessages(prev => [...prev, {
+          id: makeId(), role: "error",
+          content: "You've run out of credits. [Buy more credits](/settings?tab=billing) to continue using your assistant.",
+          timestamp: new Date().toISOString(),
+        }]);
+        setStreaming(false);
+        return;
+      }
+
       if (!resp.ok || !resp.body) {
         const text = await resp.text().catch(() => "Unknown error");
         throw new Error(text);

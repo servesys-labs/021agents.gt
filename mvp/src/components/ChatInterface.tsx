@@ -177,7 +177,14 @@ export function ChatInterface({ messages, onSend, onStop, loading, streaming, se
             return (
               <div key={msg.id} className="flex justify-start animate-[fadeInUp_150ms_ease-out]">
                 <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-red-50 text-red-700 border border-red-200">
-                  {msg.content}
+                  {msg.content.includes("[") ? (
+                    <span dangerouslySetInnerHTML={{
+                      __html: msg.content.replace(
+                        /\[([^\]]+)\]\(([^)]+)\)/g,
+                        '<a href="$2" class="underline font-medium hover:text-red-900">$1</a>'
+                      )
+                    }} />
+                  ) : msg.content}
                 </div>
               </div>
             );

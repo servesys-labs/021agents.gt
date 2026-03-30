@@ -414,9 +414,9 @@ Be concise, helpful, and action-oriented. Show results, not process.`,
     console.warn("[auth/signup] org_settings insert failed:", err);
   }
 
-  // Seed free tier credits ($1.00 — enough for ~10-50 agent runs)
+  // Seed free tier credits ($5.00 — enough for ~50-200 agent runs)
   try {
-    const FREE_TIER_USD = 1.00;
+    const FREE_TIER_USD = 5.00;
     await sql`
       INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
       VALUES (${orgId}, ${FREE_TIER_USD}, ${FREE_TIER_USD}, now())
