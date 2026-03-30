@@ -353,7 +353,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       for (const tr of toolResultEntries) {
         await this.emit(p.progress_key, {
           type: "tool_result", name: tr.name, tool_call_id: tr.tool_call_id,
-          result: (tr.result || "").slice(0, 500),
+          result: (tr.result || "").slice(0, 3000),
           error: tr.error, latency_ms: tr.latency_ms,
         });
       }
