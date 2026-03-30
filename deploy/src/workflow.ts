@@ -224,13 +224,23 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       totalCost += llm.cost_usd;
 
       // ── Thinking trace ──
-      if (llm.tool_calls.length > 0 && llm.content) {
+      if (llm.content) {
         await this.emit(p.progress_key, { type: "thinking", content: llm.content, turn });
       }
 
-      // ── No tools → final answer ──
+      // ── No tools → final answer (stream as tokens for the frontend) ──
       if (llm.tool_calls.length === 0) {
         finalOutput = llm.content;
+        // Emit content as token chunks so frontend shows streaming
+        const words = llm.content.split(/(\s+)/);
+        let chunk = "";
+        for (let i = 0; i < words.length; i++) {
+          chunk += words[i];
+          if (chunk.length > 40 || i === words.length - 1) {
+            await this.emit(p.progress_key, { type: "token", content: chunk });
+            chunk = "";
+          }
+        }
         await this.emit(p.progress_key, {
           type: "turn_end", turn, model: llm.model, cost_usd: llm.cost_usd,
           tokens: llm.input_tokens + llm.output_tokens, done: true,
@@ -239,11 +249,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       }
 
       // ── PARALLEL TOOL EXECUTION ──
-      // Each tool is its own step.do() — independent retries, checkpointing.
-      // Promise.all runs them concurrently. This is the real parallelism.
-      await this.emit(p.progress_key, {
-        type: "tool_calls", tools: llm.tool_calls.map(tc => tc.name), turn,
-      });
+      // Emit individual tool_call events (not plural) so frontend shows each tool card
+      for (const tc of llm.tool_calls) {
+        await this.emit(p.progress_key, {
+          type: "tool_call", name: tc.name, tool_call_id: tc.id, turn,
+        });
+      }
 
       const toolResultEntries = await Promise.all(
         llm.tool_calls.map((tc, i) =>

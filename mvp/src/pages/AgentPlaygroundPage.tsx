@@ -24,7 +24,7 @@ export default function AgentPlaygroundPage() {
   const [pageLoading, setPageLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
 
-  const { messages, streaming, sessionMeta, send, stop, clear } = useAgentStream();
+  const { messages, streaming, sessionMeta, send, stop, clear, loadHistory } = useAgentStream();
 
   const fetchAgent = async () => {
     setPageLoading(true);
@@ -33,6 +33,7 @@ export default function AgentPlaygroundPage() {
       if (!id) throw new Error("Missing agent");
       const data = await api.get<AgentDetail>(`/agents/${agentPathSegment(id)}`);
       setAgent(data);
+      loadHistory(data.name);
     } catch (err: any) {
       if (err.status === 404) {
         setAgent(null);

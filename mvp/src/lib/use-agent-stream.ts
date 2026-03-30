@@ -73,11 +73,34 @@ function makeId() {
   return `msg-${++nextId}-${Date.now()}`;
 }
 
+const STORAGE_KEY_PREFIX = "oneshots_chat_";
+const MAX_STORED_MESSAGES = 50;
+
+function loadStoredMessages(agentName: string): ChatMessage[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PREFIX + agentName);
+    if (!raw) return [];
+    const msgs = JSON.parse(raw) as ChatMessage[];
+    return Array.isArray(msgs) ? msgs.slice(-MAX_STORED_MESSAGES) : [];
+  } catch { return []; }
+}
+
+function storeMessages(agentName: string, msgs: ChatMessage[]) {
+  try {
+    // Only store user + assistant messages (skip tool/thinking/system for size)
+    const toStore = msgs
+      .filter(m => m.role === "user" || m.role === "assistant")
+      .slice(-MAX_STORED_MESSAGES);
+    localStorage.setItem(STORAGE_KEY_PREFIX + agentName, JSON.stringify(toStore));
+  } catch {}
+}
+
 export function useAgentStream() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const currentAgentRef = useRef("");
 
   // Mutable ref for building the streaming assistant message
   const streamBuf = useRef("");
@@ -86,8 +109,23 @@ export function useAgentStream() {
   // Conversation history for multi-turn context — persists across sends
   const historyRef = useRef<Array<{ role: "user" | "assistant"; content: string }>>([]);
 
+  // Load stored conversation on first send (or when agent changes)
+  const loadHistory = useCallback((agentName: string) => {
+    if (currentAgentRef.current !== agentName) {
+      currentAgentRef.current = agentName;
+      const stored = loadStoredMessages(agentName);
+      if (stored.length > 0 && messages.length === 0) {
+        setMessages(stored);
+        historyRef.current = stored
+          .filter(m => m.role === "user" || m.role === "assistant")
+          .map(m => ({ role: m.role as "user" | "assistant", content: m.content }));
+      }
+    }
+  }, [messages.length]);
+
   const send = useCallback(async (agentName: string, input: string) => {
     if (streaming) return;
+    loadHistory(agentName);
 
     // Add user message
     const userMsg: ChatMessage = {
@@ -297,6 +335,25 @@ export function useAgentStream() {
         break;
       }
 
+      case "tool_calls": {
+        // Plural tool_calls event — emit individual tool cards
+        const toolNames = Array.isArray(event.tools) ? event.tools : [];
+        for (const name of toolNames) {
+          const toolMsgId = makeId();
+          toolCallsRef.current.set(String(name), toolMsgId);
+          setMessages(prev => [...prev, {
+            id: toolMsgId, role: "tool" as const,
+            content: "",
+            timestamp: new Date().toISOString(),
+            toolName: String(name),
+            toolStatus: "running" as const,
+          }]);
+        }
+        streamBuf.current = "";
+        assistantIdRef.current = "";
+        break;
+      }
+
       case "turn_end": {
         // Turn completed — attach cost info to last assistant message
         if (assistantIdRef.current) {
@@ -339,6 +396,12 @@ export function useAgentStream() {
             timestamp: new Date().toISOString(),
           }]);
         }
+
+        // Persist conversation to localStorage
+        setMessages(prev => {
+          if (currentAgentRef.current) storeMessages(currentAgentRef.current, prev);
+          return prev;
+        });
         break;
       }
 
@@ -380,7 +443,10 @@ export function useAgentStream() {
     setMessages([]);
     setSessionMeta(null);
     historyRef.current = [];
+    if (currentAgentRef.current) {
+      localStorage.removeItem(STORAGE_KEY_PREFIX + currentAgentRef.current);
+    }
   }, []);
 
-  return { messages, streaming, sessionMeta, send, stop, clear };
+  return { messages, streaming, sessionMeta, send, stop, clear, loadHistory };
 }

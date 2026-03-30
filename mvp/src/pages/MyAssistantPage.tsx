@@ -19,11 +19,11 @@ export default function MyAssistantPage() {
   const navigate = useNavigate();
   const [agent, setAgent] = useState<AgentInfo | null>(null);
   const [loading, setLoading] = useState(true);
-  const { messages, streaming, sessionMeta, send, stop, clear } = useAgentStream();
+  const { messages, streaming, sessionMeta, send, stop, clear, loadHistory } = useAgentStream();
 
   useEffect(() => {
     api.get<AgentInfo>(`/agents/${AGENT_NAME}`)
-      .then(setAgent)
+      .then((a) => { setAgent(a); loadHistory(AGENT_NAME); })
       .catch(() => setAgent(null))
       .finally(() => setLoading(false));
   }, []);
