@@ -1918,3 +1918,167 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
     resourceSpans,
   });
 });
+
+// ══════════════════════════════════════════════════════════════════
+// Delegation Tree + A2A Transaction Observability
+// ══════════════════════════════════════════════════════════════════
+
+// GET /delegation-tree/:session_id — recursive parent→child delegation chain
+const delegationTreeRoute = createRoute({
+  method: "get",
+  path: "/delegation-tree/{session_id}",
+  tags: ["Observability"],
+  summary: "Get full delegation tree for a session (parent + all children recursively)",
+  middleware: [requireScope("observability:read")],
+  request: { params: z.object({ session_id: z.string() }) },
+  responses: {
+    200: { description: "Delegation tree", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(delegationTreeRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { session_id } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Get all delegation events in the chain (up to 100)
+  const events = await sql`
+    WITH RECURSIVE chain AS (
+      SELECT * FROM delegation_events WHERE parent_session_id = ${session_id} AND org_id = ${user.org_id}
+      UNION ALL
+      SELECT d.* FROM delegation_events d JOIN chain c ON d.parent_session_id = c.child_session_id
+    )
+    SELECT * FROM chain ORDER BY depth, created_at LIMIT 100
+  `;
+
+  // Build tree
+  const totalCost = events.reduce((sum: number, e: any) => sum + Number(e.child_cost_usd || 0), 0);
+
+  return c.json({
+    root_session_id: session_id,
+    delegation_count: events.length,
+    total_child_cost_usd: Math.round(totalCost * 1_000_000) / 1_000_000,
+    max_depth: events.length > 0 ? Math.max(...events.map((e: any) => Number(e.depth))) : 0,
+    events: events.map((e: any) => ({
+      parent_session_id: e.parent_session_id,
+      child_session_id: e.child_session_id,
+      parent_agent: e.parent_agent_name,
+      child_agent: e.child_agent_name,
+      depth: e.depth,
+      status: e.status,
+      cost_usd: Number(e.child_cost_usd || 0),
+      input_preview: e.input_preview,
+      output_preview: e.output_preview,
+      error: e.error_message,
+      created_at: e.created_at,
+      completed_at: e.completed_at,
+    })),
+  });
+});
+
+// GET /a2a-transactions — A2A transaction history for the org
+const a2aTransactionsRoute = createRoute({
+  method: "get",
+  path: "/a2a-transactions",
+  tags: ["Observability"],
+  summary: "List A2A transactions (tasks sent/received, payments) for the org",
+  middleware: [requireScope("observability:read")],
+  request: {
+    query: z.object({
+      direction: z.enum(["incoming", "outgoing", "all"]).default("all"),
+      limit: z.coerce.number().min(1).max(100).default(50),
+      agent_name: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "A2A transactions", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(a2aTransactionsRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { direction, limit, agent_name } = c.req.valid("query");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  let rows: any[];
+  if (direction === "incoming") {
+    rows = await sql`
+      SELECT * FROM a2a_tasks WHERE callee_org_id = ${user.org_id}
+      ${agent_name ? sql`AND callee_agent_name = ${agent_name}` : sql``}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
+  } else if (direction === "outgoing") {
+    rows = await sql`
+      SELECT * FROM a2a_tasks WHERE caller_org_id = ${user.org_id}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
+  } else {
+    rows = await sql`
+      SELECT * FROM a2a_tasks WHERE caller_org_id = ${user.org_id} OR callee_org_id = ${user.org_id}
+      ORDER BY created_at DESC LIMIT ${limit}
+    `;
+  }
+
+  return c.json({
+    total: rows.length,
+    transactions: rows.map((r: any) => ({
+      task_id: r.task_id,
+      direction: r.caller_org_id === user.org_id ? "outgoing" : "incoming",
+      caller_org_id: r.caller_org_id,
+      callee_org_id: r.callee_org_id,
+      callee_agent: r.callee_agent_name,
+      status: r.status,
+      input_preview: (r.input_text || "").slice(0, 200),
+      output_preview: (r.output_text || "").slice(0, 200),
+      amount_usd: Number(r.amount_usd || 0),
+      cost_usd: Number(r.cost_usd || 0),
+      transfer_id: r.transfer_id,
+      created_at: r.created_at,
+      completed_at: r.completed_at,
+    })),
+  });
+});
+
+// GET /a2a-revenue/:agent_name — Revenue summary for an agent
+const a2aRevenueRoute = createRoute({
+  method: "get",
+  path: "/a2a-revenue/{agent_name}",
+  tags: ["Observability"],
+  summary: "Get A2A revenue summary for a specific agent",
+  middleware: [requireScope("observability:read")],
+  request: { params: z.object({ agent_name: z.string() }) },
+  responses: {
+    200: { description: "Revenue summary", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(401, 500),
+  },
+});
+
+observabilityRoutes.openapi(a2aRevenueRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name } = c.req.valid("param");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const [summary] = await sql`
+    SELECT
+      COUNT(*) as total_tasks,
+      COUNT(*) FILTER (WHERE status = 'completed') as completed_tasks,
+      COUNT(*) FILTER (WHERE status = 'failed') as failed_tasks,
+      COALESCE(SUM(amount_usd) FILTER (WHERE status = 'completed'), 0) as total_revenue_usd,
+      COALESCE(AVG(amount_usd) FILTER (WHERE status = 'completed'), 0) as avg_revenue_per_task,
+      COUNT(DISTINCT caller_org_id) as unique_callers
+    FROM a2a_tasks
+    WHERE callee_org_id = ${user.org_id} AND callee_agent_name = ${agent_name}
+  `;
+
+  return c.json({
+    agent_name,
+    total_tasks: Number(summary.total_tasks || 0),
+    completed_tasks: Number(summary.completed_tasks || 0),
+    failed_tasks: Number(summary.failed_tasks || 0),
+    total_revenue_usd: Number(summary.total_revenue_usd || 0),
+    avg_revenue_per_task: Number(summary.avg_revenue_per_task || 0),
+    unique_callers: Number(summary.unique_callers || 0),
+  });
+});

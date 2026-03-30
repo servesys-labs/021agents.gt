@@ -1831,18 +1831,48 @@ async function dispatch(
           } catch {}
         }
 
+        const correlationId = crypto.randomUUID().slice(0, 12);
+        const parentSessionId = lineage?.session_id || sessionId;
+        const parentAgentName = lineage?.agent_name || "unknown";
+        const status = childOutput.startsWith("[Sub-agent error") || childOutput.startsWith("[Sub-agent was") ? "failed" : "completed";
+
+        // Write delegation event to DB for observability + audit
+        if ((env as any).HYPERDRIVE) {
+          try {
+            const { getDb } = await import("./db");
+            const sql = await getDb((env as any).HYPERDRIVE);
+            await sql`
+              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, correlation_id, status, child_cost_usd, input_preview, output_preview, created_at, completed_at)
+              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${childOutput.slice(0, 500)}, now(), ${status !== "running" ? "now()" : null})
+            `;
+          } catch {} // non-blocking
+        }
+
         return JSON.stringify({
           output: childOutput.slice(0, 9500),
           delegation_trace: {
-            parent_session_id: lineage?.session_id || sessionId,
+            parent_session_id: parentSessionId,
             child_session_id: childSessionId,
+            parent_agent_name: parentAgentName,
             child_agent_name: agentName,
             child_depth: parentDepth + 1,
             child_cost_usd: childCostUsd,
-            correlation_id: crypto.randomUUID().slice(0, 12),
+            correlation_id: correlationId,
+            status,
           },
         });
       } catch (err: any) {
+        // Write failed delegation event
+        if ((env as any).HYPERDRIVE) {
+          try {
+            const { getDb } = await import("./db");
+            const sql = await getDb((env as any).HYPERDRIVE);
+            await sql`
+              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, status, error_message, input_preview, created_at, completed_at)
+              VALUES (${lineage?.session_id || sessionId}, '', ${lineage?.agent_name || "unknown"}, ${agentName}, ${orgId}, ${parentDepth + 1}, 'failed', ${(err.message || String(err)).slice(0, 500)}, ${task.slice(0, 500)}, now(), now())
+            `;
+          } catch {}
+        }
         return JSON.stringify({ output: "", error: `Delegation failed: ${err.message || err}` });
       }
     }
