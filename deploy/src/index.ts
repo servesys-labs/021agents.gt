@@ -1040,16 +1040,81 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       if (!(await this._isAuthorized(request))) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
-      // Reject immediately if busy — return clean JSON, not a thrown error
+      const data = await request.json() as any;
+      const inputText = String(data.input || "");
+      const agentName = data.agent_name || this.state.config.agentName || "agentos";
+
+      // ── Workflow path (durable, crash-safe) ──
+      if (this.env.AGENT_RUN_WORKFLOW && this.env.AGENT_PROGRESS_KV) {
+        const history = this._loadConversationHistory(24);
+        const progressKey = `run:${this.name}:${Date.now()}`;
+
+        try {
+          const instance = await this.env.AGENT_RUN_WORKFLOW.create({
+            params: {
+              agent_name: agentName,
+              input: inputText,
+              org_id: data.org_id || this.state.config.orgId || "",
+              project_id: data.project_id || this.state.config.projectId || "",
+              channel: data.channel || "rest",
+              channel_user_id: data.channel_user_id || "",
+              history: history.map((m: any) => ({ role: m.role, content: m.content })),
+              progress_key: progressKey,
+            },
+          });
+
+          // Poll for completion (max 5 min)
+          const maxWait = 300_000;
+          const start = Date.now();
+          let result: any = null;
+
+          while (Date.now() - start < maxWait) {
+            await new Promise(r => setTimeout(r, 2000));
+            try {
+              const status = await instance.status();
+              if (status.status === "complete") {
+                result = status.output;
+                break;
+              }
+              if (status.status === "errored") {
+                return Response.json({
+                  status: "error", success: false,
+                  error: status.error?.message || "Agent run failed",
+                }, { status: 500 });
+              }
+              if (status.status === "terminated") {
+                return Response.json({
+                  status: "error", success: false, error: "Run was terminated",
+                }, { status: 500 });
+              }
+            } catch { /* poll retry */ }
+          }
+
+          if (result) {
+            this._appendConversationMessage("user", inputText, data.channel || "rest");
+            this._appendConversationMessage("assistant", result.output || "", data.channel || "rest");
+            return Response.json({ status: "completed", success: true, ...result });
+          }
+
+          // Still running — return instance ID for client to poll
+          return Response.json({
+            status: "running", success: true,
+            instance_id: instance.id, progress_key: progressKey,
+          }, { status: 202 });
+        } catch (err: any) {
+          // Workflow unavailable — fall through to legacy path
+          console.warn(`[Workflow] Failed: ${err.message}, falling back to streamRun`);
+        }
+      }
+
+      // ── Legacy path (direct streamRun — fallback if Workflow unavailable) ──
       if (this._running) {
         return Response.json({
-          status: "busy",
-          success: false,
+          status: "busy", success: false,
           error: "Agent is processing another request. Please wait a moment and try again.",
           retry_after_ms: 5000,
         }, { status: 429 });
       }
-      const data = await request.json() as any;
       return this._withRunLock(async (signal) => {
       // Load fresh config from DB — DO state may have stale/empty tools
       let config = { ...this.state.config };
@@ -1172,23 +1237,111 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }); // end _withRunLock
     }
     // POST /run/stream — SSE streaming for REST clients (portal, curl, etc.)
-    // Returns text/event-stream with real-time token/tool/turn events.
+    // Uses Workflow for durable execution + KV polling for SSE events.
     if (url.pathname === "/run/stream" && request.method === "POST") {
       if (!(await this._isAuthorized(request))) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
+      const data = await request.json() as any;
+      const inputText = String(data.input || "");
+      const agentName = data.agent_name || this.state.config.agentName || "agentos";
+
+      // ── Workflow SSE path — trigger Workflow, stream progress from KV ──
+      if (this.env.AGENT_RUN_WORKFLOW && this.env.AGENT_PROGRESS_KV) {
+        const history = this._loadConversationHistory(24);
+        const progressKey = `run:${this.name}:${Date.now()}`;
+
+        try {
+          const instance = await this.env.AGENT_RUN_WORKFLOW.create({
+            params: {
+              agent_name: agentName,
+              input: inputText,
+              org_id: data.org_id || "",
+              project_id: data.project_id || "",
+              channel: data.channel || "sse",
+              channel_user_id: data.channel_user_id || "",
+              history: history.map((m: any) => ({ role: m.role, content: m.content })),
+              progress_key: progressKey,
+            },
+          });
+
+          // Stream SSE events by polling KV
+          const encoder = new TextEncoder();
+          let lastEventIndex = 0;
+          const self = this;
+
+          const stream = new ReadableStream({
+            async pull(controller) {
+              const maxWait = 300_000;
+              const start = Date.now();
+              let done = false;
+
+              while (!done && Date.now() - start < maxWait) {
+                await new Promise(r => setTimeout(r, 500));
+
+                // Read events from KV
+                try {
+                  const raw = await self.env.AGENT_PROGRESS_KV!.get(progressKey);
+                  if (!raw) continue;
+                  const events = JSON.parse(raw) as any[];
+
+                  // Send new events since last poll
+                  for (let i = lastEventIndex; i < events.length; i++) {
+                    const evt = events[i];
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(evt)}\n\n`));
+
+                    if (evt.type === "done") {
+                      done = true;
+                      // Save conversation
+                      self._appendConversationMessage("user", inputText, data.channel || "sse");
+                      self._appendConversationMessage("assistant", evt.output || "", data.channel || "sse");
+                    }
+                    if (evt.type === "error") done = true;
+                  }
+                  lastEventIndex = events.length;
+                } catch { /* KV read failed, retry */ }
+
+                // Also check Workflow status
+                try {
+                  const status = await instance.status();
+                  if (status.status === "errored") {
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: status.error?.message || "Run failed" })}\n\n`));
+                    done = true;
+                  }
+                  if (status.status === "terminated") {
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: "Run terminated" })}\n\n`));
+                    done = true;
+                  }
+                } catch {}
+              }
+
+              controller.close();
+            },
+          });
+
+          return new Response(stream, {
+            headers: {
+              "Content-Type": "text/event-stream",
+              "Cache-Control": "no-cache",
+              "Connection": "keep-alive",
+            },
+          });
+        } catch (err: any) {
+          console.warn(`[Workflow SSE] Failed: ${err.message}, falling back to legacy streamRun`);
+        }
+      }
+
+      // ── Legacy SSE path (direct streamRun — fallback) ──
       if (this._running) {
         return Response.json({
-          status: "busy",
-          success: false,
+          status: "busy", success: false,
           error: "Agent is processing another request. Please wait and try again.",
           retry_after_ms: 5000,
         }, { status: 429 });
       }
-      const data = await request.json() as any;
       const config = this.state.config;
-      const inputText = String(data.input || "");
-      const history = this._loadConversationHistory(24);
+      const legacyInput = inputText || String(data.input || "");
+      const legacyHistory = this._loadConversationHistory(24);
       const runtimeEnv: RuntimeEnv = {
         AI: this.env.AI,
         HYPERDRIVE: this.env.HYPERDRIVE,
@@ -1212,7 +1365,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const encoder = new TextEncoder();
       let finalOutput = "";
       const self = this;
-      const agentName = data.agent_name || config.agentName || "agentos";
+      const legacyAgentName = data.agent_name || config.agentName || "agentos";
 
       // Cancel any running task on this DO before starting SSE stream
       if (this._runAbort) this._runAbort.abort();
@@ -1236,8 +1389,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           streamRun(
             runtimeEnv,
             self.env.HYPERDRIVE,
-            inputText,
-            agentName,
+            legacyInput,
+            legacyAgentName,
             send,
             {
               org_id: data.org_id || config.orgId || "",
@@ -1245,12 +1398,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               channel: data.channel || "sse",
               channel_user_id: data.channel_user_id,
               api_key_id: data.api_key_id,
-              history_messages: history,
+              history_messages: legacyHistory,
               delegation: data.delegation,
               yieldBetweenTurns: self._createYieldCallback(sseAbort.signal),
             },
           ).then(() => {
-            self._appendConversationMessage("user", inputText, data.channel || "sse");
+            self._appendConversationMessage("user", legacyInput, data.channel || "sse");
             self._appendConversationMessage("assistant", finalOutput, data.channel || "sse");
             try { controller.close(); } catch {}
           }).catch((err) => {
