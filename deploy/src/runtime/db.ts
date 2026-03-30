@@ -41,22 +41,57 @@ export async function loadAgentConfig(
   agentName: string,
   defaults: { provider: string; model: string; plan: string },
 ): Promise<AgentConfig> {
+  // Default core tools when none are configured — must match TOOL_CATALOG names
+  const DEFAULT_TOOLS = [
+    "web-search", "browse", "http-request", "web-crawl",
+    "python-exec", "bash", "execute-code",
+    "read-file", "write-file", "edit-file",
+    "knowledge-search", "store-knowledge",
+    "create-agent", "list-agents",
+    "discover-api",
+  ];
+
   let rows: any[] = [];
+  let dbFailed = false;
   try {
     const sql = await getDb(hyperdrive);
     rows = await sql`
-      SELECT name, org_id, project_id, config_json, description, tools, system_prompt, model, plan
+      SELECT name, org_id, project_id, config_json, description
       FROM agents
       WHERE name = ${agentName} AND is_active = 1
       LIMIT 1
     `;
   } catch (err) {
-    // DB connection failed — return defaults so agent can still run
+    dbFailed = true;
     console.error(`[DB] loadAgentConfig failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
   }
 
   if (rows.length === 0) {
-    // Agent not in DB — return sensible defaults
+    if (dbFailed) {
+      // DB error — return MINIMAL tools to prevent privilege escalation.
+      // A restricted agent must not gain full access because of a transient DB failure.
+      console.warn(`[DB] Returning restricted defaults for ${agentName} due to DB error`);
+      return {
+        agent_name: agentName,
+        system_prompt: "You are a helpful AI assistant. Note: your configuration could not be loaded from the database. Some features may be limited.",
+        provider: defaults.provider,
+        model: defaults.model,
+        plan: defaults.plan,
+        max_turns: 10,
+        budget_limit_usd: 1.0,
+        tools: [],  // empty = only discover-api available
+        blocked_tools: [],
+        allowed_domains: [],
+        blocked_domains: [],
+        max_tokens_per_turn: 0,
+        require_confirmation_for_destructive: true,
+        parallel_tool_calls: false,
+        require_human_approval: false,
+        org_id: "",
+        project_id: "",
+      };
+    }
+    // Agent genuinely not in DB — return full defaults for development/onboarding
     return {
       agent_name: agentName,
       system_prompt: "You are a helpful AI assistant.",
@@ -65,7 +100,7 @@ export async function loadAgentConfig(
       plan: defaults.plan,
       max_turns: 50,
       budget_limit_usd: 10.0,
-      tools: [],
+      tools: DEFAULT_TOOLS,
       blocked_tools: [],
       allowed_domains: [],
       blocked_domains: [],
@@ -89,26 +124,46 @@ export async function loadAgentConfig(
     );
   }
 
-  // Merge top-level agent columns with config_json (top-level takes priority)
-  // API stores tools, system_prompt, model, plan at the row level, not always in config_json
-  const topLevelTools = parseJsonArray(row.tools);
+  // Tools come from config_json (no top-level tools column in DB)
   const cfgTools = parseJsonArray(cfg.tools);
-  const mergedTools = topLevelTools.length > 0 ? topLevelTools : cfgTools;
+  let mergedTools = cfgTools;
+
+  // Default core tools when none are configured
+  if (mergedTools.length === 0) {
+    mergedTools = DEFAULT_TOOLS;
+  }
+
+  // ── Runtime Config Validation ──────────────────────────────
+  // Validate and warn on bad config — don't crash, but log so operators can fix.
+  const KNOWN_PROVIDERS = new Set(["openrouter", "workers-ai", "anthropic", "openai", "google"]);
+  const resolvedProvider = String(cfg.provider || defaults.provider);
+  const resolvedModel = String(cfg.model || defaults.model);
+  if (resolvedProvider && !KNOWN_PROVIDERS.has(resolvedProvider) && !resolvedProvider.includes("/")) {
+    console.warn(`[config:${agentName}] Unknown provider '${resolvedProvider}' — may fail at LLM call`);
+  }
+  if (resolvedModel && !resolvedModel.includes("/") && !resolvedModel.startsWith("@cf/")) {
+    console.warn(`[config:${agentName}] Model '${resolvedModel}' missing provider prefix (e.g. 'openai/gpt-5.4-mini') — may fail at LLM call`);
+  }
+  const VALID_PLANS = new Set(["basic", "standard", "premium"]);
+  const resolvedPlan = String(cfg.plan || defaults.plan);
+  if (resolvedPlan && !VALID_PLANS.has(resolvedPlan)) {
+    console.warn(`[config:${agentName}] Unknown plan '${resolvedPlan}' — falling back to 'standard' routing`);
+  }
 
   return {
     agent_name: row.name || agentName,
-    system_prompt: String(row.system_prompt || cfg.system_prompt || cfg.systemPrompt || row.description || "You are a helpful AI assistant."),
+    system_prompt: String(cfg.system_prompt || cfg.systemPrompt || row.description || "You are a helpful AI assistant."),
     provider: String(cfg.provider || defaults.provider),
-    model: String(row.model || cfg.model || defaults.model),
-    plan: String(row.plan || cfg.plan || defaults.plan),
-    max_turns: Number(cfg.max_turns || cfg.maxTurns) || 50,
-    budget_limit_usd: Number(cfg.budget_limit_usd || cfg.budgetLimitUsd) || 10.0,
+    model: String(cfg.model || defaults.model),
+    plan: String(cfg.plan || defaults.plan),
+    max_turns: toInt(cfg.max_turns ?? cfg.maxTurns, 50),
+    budget_limit_usd: toFloat(cfg.budget_limit_usd ?? cfg.budgetLimitUsd ?? governance.budget_limit_usd, 10.0),
     tools: mergedTools,
     blocked_tools: parseJsonArray(cfg.blocked_tools || cfg.blockedTools || governance.blocked_tools),
     allowed_domains: parseJsonArray(cfg.allowed_domains || cfg.allowedDomains || governance.allowed_domains),
     blocked_domains: parseJsonArray(cfg.blocked_domains || cfg.blockedDomains || governance.blocked_domains),
     deploy_policy: policyAttach.ok ? (cfgRec.deploy_policy as AgentConfig["deploy_policy"]) : undefined,
-    max_tokens_per_turn: Number(cfg.max_tokens_per_turn || governance.max_tokens_per_turn) || 0,
+    max_tokens_per_turn: toInt(cfg.max_tokens_per_turn ?? governance.max_tokens_per_turn, 0),
     require_confirmation_for_destructive:
       cfg.require_confirmation_for_destructive === true
       || governance.require_confirmation_for_destructive === true,
@@ -1486,6 +1541,20 @@ function parseJson(val: any): Record<string, any> | undefined {
     }
   }
   return undefined;
+}
+
+/** Safe int parse — preserves 0, falls back to default for NaN/undefined/null. */
+function toInt(val: unknown, fallback: number): number {
+  if (val === null || val === undefined || val === "") return fallback;
+  const n = Number(val);
+  return Number.isFinite(n) ? Math.floor(n) : fallback;
+}
+
+/** Safe float parse — preserves 0.0, falls back to default for NaN/undefined/null. */
+function toFloat(val: unknown, fallback: number): number {
+  if (val === null || val === undefined || val === "") return fallback;
+  const n = Number(val);
+  return Number.isFinite(n) ? n : fallback;
 }
 
 // ── Durable Conversation Persistence (Supabase) ─────────────

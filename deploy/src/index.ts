@@ -895,10 +895,27 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
       const data = await request.json() as any;
       return this._withRunLock(async () => {
-      const config = this.state.config;
+      // Load fresh config from DB — DO state may have stale/empty tools
+      let config = { ...this.state.config };
+      try {
+        const { loadAgentConfig } = await import("./runtime/db");
+        const dbConfig = await loadAgentConfig(this.env.HYPERDRIVE, data.agent_name || config.agentName || "agentos", {
+          provider: config.provider || "openrouter",
+          model: config.model || "@cf/moonshotai/kimi-k2.5",
+          plan: config.plan || "standard",
+        });
+        // Merge DB config into DO state — DB takes priority for tools, system_prompt
+        if (dbConfig.tools.length > 0) config.tools = dbConfig.tools as any;
+        if (dbConfig.system_prompt && dbConfig.system_prompt !== "You are a helpful AI assistant.") {
+          config.systemPrompt = dbConfig.system_prompt;
+        }
+        if (dbConfig.model) config.model = dbConfig.model;
+        if (dbConfig.plan) config.plan = dbConfig.plan;
+      } catch {}
       const inputText = String(data.input || "");
       const history = this._loadConversationHistory(24);
       let finalOutput = "";
+      const debugToolErrors: any[] = [];
       let finalSessionId = "";
       let finalTraceId = "";
       let finalTurns = 0;
@@ -934,16 +951,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           data.agent_name || config.agentName || "agentos",
           (msg) => {
             try {
-              const parsed = JSON.parse(msg) as {
-                type?: string;
-                output?: string;
-                session_id?: string;
-                trace_id?: string;
-                turns?: number;
-                tool_calls?: number;
-                cost_usd?: number;
-                latency_ms?: number;
-              };
+              const parsed = JSON.parse(msg) as Record<string, any>;
               if (parsed.type === "done") {
                 if (typeof parsed.output === "string") finalOutput = parsed.output;
                 if (typeof parsed.session_id === "string") finalSessionId = parsed.session_id;
@@ -952,6 +960,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 finalToolCalls = Number(parsed.tool_calls) || 0;
                 finalCostUsd = Number(parsed.cost_usd) || 0;
                 finalLatencyMs = Number(parsed.latency_ms) || 0;
+              }
+              // Capture tool errors for debugging
+              if (parsed.type === "tool_result" && parsed.error) {
+                (debugToolErrors as any[]).push({ tool: parsed.name, error: parsed.error });
               }
             } catch {
               // ignore malformed payload
@@ -998,6 +1010,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         tool_calls: finalToolCalls,
         cost_usd: finalCostUsd,
         latency_ms: finalLatencyMs,
+        ...(debugToolErrors.length > 0 ? { _debug_tool_errors: debugToolErrors } : {}),
       });
       }); // end _withRunLock
     }
