@@ -306,16 +306,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       this.sql`BEGIN`;
       try {
         // v4: Agent-to-agent mailbox for inter-agent IPC (Phase 6.1)
-        this.sql`CREATE TABLE IF NOT EXISTS mailbox (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          from_session TEXT NOT NULL,
-          to_session TEXT NOT NULL,
-          message_type TEXT NOT NULL CHECK(message_type IN ('text','permission_request','permission_response','shutdown','plan_approval')),
-          payload TEXT NOT NULL DEFAULT '',
-          read_at REAL,
-          created_at REAL NOT NULL DEFAULT (unixepoch('now'))
-        )`;
-        this.sql`CREATE INDEX IF NOT EXISTS idx_mailbox_to ON mailbox(to_session, read_at)`;
+        const { createMailboxTable } = await import("./runtime/mailbox");
+        createMailboxTable(this.sql.bind(this));
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (4)`;
         this.sql`COMMIT`;
       } catch (e) {

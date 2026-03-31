@@ -1,6 +1,10 @@
 /**
  * Phase 7.2: Per-Model Cost Tracking with Cache Awareness
  *
+ * NOTE: Wire into workflow.ts telemetry by replacing calculateCustomerCost()
+ * calls with calculateDetailedCost() to capture cache_savings. Requires
+ * extracting cache_creation_input_tokens from Anthropic response headers.
+ *
  * Tracks 6 token categories per model: input, output, cache write (1.25x),
  * cache read (0.1x), thinking, web search. Makes prompt cache ROI measurable.
  *
