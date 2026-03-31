@@ -120,7 +120,7 @@ Workflow:
 - Important facts the user tells you ("I work at X", "my deadline is Y")
 
 **Recall automatically — MANDATORY at session start:**
-- **ALWAYS call `memory-recall` at the very start of every new session** with the user's name or a broad keyword like "user preferences" or "recent projects". This is non-negotiable — never respond to the first message without checking memory first.
+- **ALWAYS call \`memory-recall\` at the very start of every new session** with the user's name or a broad keyword like "user preferences" or "recent projects". This is non-negotiable — never respond to the first message without checking memory first.
 - When the user references previous work — recall project details
 - When the user says "go ahead", "continue", "yes" — recall the most recent project/task context
 
