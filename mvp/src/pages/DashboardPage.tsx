@@ -14,6 +14,7 @@ import { api } from "../lib/api";
 import { useToast } from "../components/ui/Toast";
 import { PRODUCT } from "../lib/product";
 import { agentPathSegment } from "../lib/agent-path";
+import { timeAgo } from "../lib/time-ago";
 
 interface DashboardStats {
   total_agents?: number;
@@ -44,14 +45,6 @@ interface ActivityItem {
   message: string;
   agent_name: string;
   timestamp: number;
-}
-
-function timeAgo(ts: number) {
-  const diff = Math.floor((Date.now() / 1000) - ts);
-  if (diff < 60) return "just now";
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 // Deterministic color per agent name
@@ -473,7 +466,7 @@ export default function DashboardPage() {
                       <span className="text-text-muted">{item.type === "error" ? "failed" : "session completed"}</span>
                     </span>
                   </div>
-                  <span className="text-[10px] text-text-muted shrink-0">{timeAgo(item.timestamp)}</span>
+                  <span className="text-[10px] text-text-muted shrink-0">{timeAgo(new Date(item.timestamp * 1000))}</span>
                 </div>
               ))}
             </div>
