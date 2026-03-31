@@ -841,8 +841,26 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     if (data.type === "run") {
       const config = this.state.config;
       const inputText = String(data.input || "");
-      const history = this._loadConversationHistory(24);
       const wsAgentName = data.agent_name || config.agentName || "agentos";
+
+      // Persist user message IMMEDIATELY (before workflow starts)
+      // so it survives even if the DO crashes mid-run
+      this._appendConversationMessage("user", inputText, data.channel || "websocket");
+
+      // Use DO SQLite history (primary) — falls back to client-sent history
+      // when SQLite is empty (after crash/redeploy before hydration completes)
+      let history = this._loadConversationHistory(24);
+      if (history.length === 0 && Array.isArray(data.history) && data.history.length > 0) {
+        history = data.history
+          .filter((m: any) => m.role === "user" || m.role === "assistant")
+          .map((m: any) => ({ role: m.role, content: String(m.content || "") }))
+          .slice(-24);
+        // Backfill SQLite from client history so subsequent turns have context
+        for (const msg of history) {
+          this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
+            VALUES (${msg.role}, ${msg.content.slice(0, 8000)}, 'websocket', ${new Date().toISOString()})`;
+        }
+      }
 
       try {
         if (!this.env.AGENT_RUN_WORKFLOW || !this.env.AGENT_PROGRESS_KV) {
@@ -878,7 +896,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               try { connection.send(JSON.stringify(events[i])); } catch { done = true; break; }
               if (events[i].type === "done") {
                 done = true;
-                this._appendConversationMessage("user", inputText, data.channel || "websocket");
+                // User message already saved before workflow started
                 this._appendConversationMessage("assistant", events[i].output || "", data.channel || "websocket");
                 // Billing
                 if (this.env.HYPERDRIVE && events[i].cost_usd > 0) {
