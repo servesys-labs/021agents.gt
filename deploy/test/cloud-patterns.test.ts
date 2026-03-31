@@ -46,13 +46,21 @@ describe("hashArgs", () => {
 
 describe("isDuplicateWrite", () => {
   it("returns false for new UUIDs", () => {
-    expect(isDuplicateWrite("unique-uuid-" + Date.now())).toBe(false);
+    expect(isDuplicateWrite("unique-uuid-" + Date.now(), "test-session")).toBe(false);
   });
 
-  it("returns true for seen UUIDs", () => {
+  it("returns true for seen UUIDs within same session", () => {
+    const sid = "dup-session-" + Date.now();
     const uuid = "dup-test-" + Date.now();
-    isDuplicateWrite(uuid); // first call
-    expect(isDuplicateWrite(uuid)).toBe(true); // duplicate
+    isDuplicateWrite(uuid, sid); // first call
+    expect(isDuplicateWrite(uuid, sid)).toBe(true); // duplicate
+  });
+
+  it("different sessions have independent dedup sets", () => {
+    const uuid = "cross-session-" + Date.now();
+    isDuplicateWrite(uuid, "session-A");
+    // Same UUID in different session is NOT a duplicate
+    expect(isDuplicateWrite(uuid, "session-B")).toBe(false);
   });
 });
 
@@ -175,9 +183,18 @@ describe("EventSequencer", () => {
     const cursor = seq.getLatestSeq();
     seq.push("turn_end", { turn: 1 });
 
-    const after = seq.getAfter(cursor);
-    expect(after.length).toBe(1);
-    expect(after[0].type).toBe("turn_end");
+    const { events, resyncRequired } = seq.getAfter(cursor);
+    expect(events.length).toBe(1);
+    expect(events[0].type).toBe("turn_end");
+    expect(resyncRequired).toBe(false);
+  });
+
+  it("signals resync when requested seq was evicted", () => {
+    const seq = new EventSequencer(5);
+    for (let i = 0; i < 10; i++) seq.push("token", { i });
+    // Requesting seq 1 which was evicted
+    const { resyncRequired } = seq.getAfter(1);
+    expect(resyncRequired).toBe(true);
   });
 
   it("evicts oldest events when over capacity", () => {
