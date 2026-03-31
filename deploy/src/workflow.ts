@@ -31,6 +31,8 @@ import { sanitizeUnicode, sanitizeDeep } from "./runtime/sanitize";
 import { validateUrl } from "./runtime/ssrf";
 import { shouldCompact, compactMessages } from "./runtime/compact";
 import { repairConversation } from "./runtime/conversation-repair";
+import { migrateConfig } from "./runtime/config-migrations";
+import { logger } from "./runtime/logger";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -142,7 +144,16 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       };
     });
 
-    const config = bootstrap.config;
+    // Phase 10.3: Migrate config to current version
+    const { config: migratedConfig, migrated: configMigrated, from: migratedFrom, to: migratedTo } = migrateConfig(bootstrap.config);
+    const config = migratedConfig;
+    if (configMigrated) {
+      console.log(`[config-migration] ${p.agent_name}: ${migratedFrom} → ${migratedTo}`);
+    }
+
+    // Phase 7.4: Initialize structured logger
+    logger.init(this.env as any, { session_id: sessionId, trace_id: traceId, org_id: p.org_id, agent_name: p.agent_name });
+    logger.info("session_start", { channel: p.channel, config_version: config.config_version, config_migrated: configMigrated });
 
     await this.emit(p.progress_key, {
       type: "session_start", session_id: sessionId, trace_id: traceId,

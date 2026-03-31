@@ -106,13 +106,22 @@ export async function searchEpisodes(
   }
 
   // Score by keyword overlap and return top N
+  // Phase 4.4: Deduplicate episodes by session_id before returning
+  const seenIds = new Set<string>();
   return rows
     .map((row: any) => {
       const text = `${row.input} ${row.output}`.toLowerCase();
       const score = keywords.filter((k) => text.includes(k)).length / keywords.length;
       return { ...row, _score: score };
     })
-    .filter((r: any) => r._score > 0.2)
+    .filter((r: any) => {
+      if (r._score <= 0.2) return false;
+      // Deduplicate by session ID
+      const id = r.id || "";
+      if (seenIds.has(id)) return false;
+      seenIds.add(id);
+      return true;
+    })
     .sort((a: any, b: any) => b._score - a._score)
     .slice(0, limit)
     .map((r: any) => ({
@@ -233,6 +242,39 @@ export async function recordProcedureOutcome(
     }
   } catch {
     // Table may not exist
+  }
+}
+
+/**
+ * Phase 4.2: Store a learned procedure (tool sequence) from a successful session.
+ * Deduplicates by name — if a procedure with the same name exists, updates its
+ * success rate as a rolling average.
+ */
+export async function storeProcedure(
+  hyperdrive: Hyperdrive,
+  procedure: {
+    name: string;
+    description: string;
+    agent_name: string;
+    steps: Array<{ tool: string; args_summary?: string }>;
+    source_session_id: string;
+  },
+): Promise<void> {
+  const { getDb } = await import("./db");
+  const sql = await getDb(hyperdrive);
+  try {
+    const stepsJson = JSON.stringify(procedure.steps);
+    await sql`
+      INSERT INTO procedures (name, description, agent_name, steps, success_count, failure_count, last_used)
+      VALUES (${procedure.name}, ${procedure.description}, ${procedure.agent_name}, ${stepsJson}, 1, 0, ${new Date().toISOString()})
+      ON CONFLICT (name, agent_name) DO UPDATE SET
+        steps = ${stepsJson},
+        success_count = procedures.success_count + 1,
+        description = CASE WHEN LENGTH(${procedure.description}) > LENGTH(procedures.description) THEN ${procedure.description} ELSE procedures.description END,
+        last_used = ${new Date().toISOString()}
+    `;
+  } catch {
+    // Table may not exist — best effort
   }
 }
 
@@ -453,21 +495,47 @@ export function queueFactExtraction(
  *   3. Episodic memory (relevant past interactions)
  *   4. Procedural memory (learned tool sequences)
  */
+/**
+ * Build memory context for injection into system prompt.
+ *
+ * Phase 4.3: Token budgeting — each section gets a proportional allocation
+ * of the maxChars budget. Prevents memory from overflowing the context window.
+ *
+ * Budget allocation:
+ *   Working memory: 20% (most recent, highest priority)
+ *   Facts: 30% (factual knowledge)
+ *   Episodes: 30% (past interactions)
+ *   Procedures: 20% (learned sequences)
+ */
 export async function buildMemoryContext(
   env: RuntimeEnv,
   hyperdrive: Hyperdrive,
   query: string,
   workingMemory: WorkingMemory,
-  opts: { agent_name?: string; org_id?: string },
+  opts: { agent_name?: string; org_id?: string; maxChars?: number },
 ): Promise<string> {
+  const maxChars = opts.maxChars || 4000;
   const sections: string[] = [];
+  let remaining = maxChars;
 
-  // 1. Working memory
+  // Helper: truncate section to budget, preserving complete lines
+  function truncateSection(text: string, budget: number): string {
+    if (text.length <= budget) return text;
+    const truncated = text.slice(0, budget);
+    const lastNewline = truncated.lastIndexOf("\n");
+    return (lastNewline > 0 ? truncated.slice(0, lastNewline) : truncated) + "\n[...truncated]";
+  }
+
+  // 1. Working memory (20% budget)
+  const wmBudget = Math.floor(maxChars * 0.2);
   const snapshot = wmSnapshot(workingMemory);
   const wmKeys = Object.keys(snapshot);
   if (wmKeys.length > 0) {
     const wmLines = wmKeys.slice(0, 10).map((k) => `- ${k}: ${JSON.stringify(snapshot[k])}`);
-    sections.push(`[Working Memory]\n${wmLines.join("\n")}`);
+    const wmSection = `[Working Memory]\n${wmLines.join("\n")}`;
+    const truncated = truncateSection(wmSection, wmBudget);
+    sections.push(truncated);
+    remaining -= truncated.length;
   }
 
   // 2-4: Fetch from Supabase/Vectorize in parallel
@@ -477,10 +545,15 @@ export async function buildMemoryContext(
     findBestProcedures(hyperdrive, query, { agent_name: opts.agent_name, limit: 3 }).catch(() => []),
   ]);
 
+  // Redistribute remaining budget across non-empty sections
+  const activeSections = [facts.length > 0, episodes.length > 0, procedures.length > 0].filter(Boolean).length;
+  const perSectionBudget = activeSections > 0 ? Math.floor(remaining / activeSections) : 0;
+
   // 2. Semantic facts
   if (facts.length > 0) {
     const factLines = facts.map((f) => `- [${f.category}] ${f.content}`);
-    sections.push(`[Known Facts]\n${factLines.join("\n")}`);
+    const factSection = `[Known Facts]\n${factLines.join("\n")}`;
+    sections.push(truncateSection(factSection, perSectionBudget));
   }
 
   // 3. Episodic memory
@@ -488,7 +561,8 @@ export async function buildMemoryContext(
     const epLines = episodes.map(
       (ep) => `- User asked: "${ep.input.slice(0, 100)}..." → Agent: "${ep.output.slice(0, 150)}..."`,
     );
-    sections.push(`[Past Interactions]\n${epLines.join("\n")}`);
+    const epSection = `[Past Interactions]\n${epLines.join("\n")}`;
+    sections.push(truncateSection(epSection, perSectionBudget));
   }
 
   // 4. Procedural memory
@@ -497,7 +571,8 @@ export async function buildMemoryContext(
       const stepsStr = p.steps.slice(0, 5).map((s) => s.tool || "?").join(" → ");
       return `- ${p.name} (${Math.round(p.success_rate * 100)}% success): ${stepsStr}`;
     });
-    sections.push(`[Learned Procedures]\n${procLines.join("\n")}`);
+    const procSection = `[Learned Procedures]\n${procLines.join("\n")}`;
+    sections.push(truncateSection(procSection, perSectionBudget));
   }
 
   return sections.length > 0 ? sections.join("\n\n") : "";

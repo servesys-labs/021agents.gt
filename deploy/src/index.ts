@@ -302,6 +302,28 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
     }
 
+    if (schemaVersion < 4) {
+      this.sql`BEGIN`;
+      try {
+        // v4: Agent-to-agent mailbox for inter-agent IPC (Phase 6.1)
+        this.sql`CREATE TABLE IF NOT EXISTS mailbox (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          from_session TEXT NOT NULL,
+          to_session TEXT NOT NULL,
+          message_type TEXT NOT NULL CHECK(message_type IN ('text','permission_request','permission_response','shutdown','plan_approval')),
+          payload TEXT NOT NULL DEFAULT '',
+          read_at REAL,
+          created_at REAL NOT NULL DEFAULT (unixepoch('now'))
+        )`;
+        this.sql`CREATE INDEX IF NOT EXISTS idx_mailbox_to ON mailbox(to_session, read_at)`;
+        this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (4)`;
+        this.sql`COMMIT`;
+      } catch (e) {
+        this.sql`ROLLBACK`;
+        throw e;
+      }
+    }
+
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
     // Load 100 to match the local retention cap — not just 24 (the per-request window)
     const localCount = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;

@@ -544,13 +544,32 @@ export function calculateInfraCost(session: {
   };
 }
 
+// ── Phase 3.1: Concurrency Safety Classification ──────────────────────
+// Read-only / isolated tools can run in parallel. Stateful tools run serially.
+const CONCURRENT_SAFE_TOOLS = new Set([
+  "read-file", "grep", "glob",                       // Read-only filesystem
+  "web-search", "web-crawl", "browser-render",        // External APIs (isolated)
+  "knowledge-search", "store-knowledge",              // Vector ops (isolated)
+  "http-request",                                     // External HTTP (isolated)
+  "image-generate", "text-to-speech", "speech-to-text", // AI services (isolated)
+  "self-check", "adapt-strategy",                     // DB reads (no mutations)
+  "load-project",                                     // R2 reads
+  "discover-tools",                                   // Pure logic
+]);
+
+function isConcurrentSafe(toolName: string): boolean {
+  return CONCURRENT_SAFE_TOOLS.has(toolName);
+}
+
 /**
- * Execute tool calls — parallel when safe, sequential for sandbox-stateful ops.
- */
-/**
- * Execute tool calls — parallel when safe, sequential for sandbox-stateful ops.
+ * Execute tool calls — concurrent-safe tools run in parallel, unsafe tools run serially.
+ *
+ * Phase 3.1: Inspired by Claude Code's StreamingToolExecutor which classifies each
+ * tool as concurrent-safe and executes safe tools in parallel while serializing
+ * unsafe ones. Results are returned in original tool_call order regardless of
+ * execution order.
+ *
  * @param enabledTools - agent's configured tool list; passed to codemode to prevent privilege escalation.
- *   If empty/undefined, codemode tools will only see their scope-filtered subset.
  */
 export async function executeTools(
   env: RuntimeEnv,
@@ -561,10 +580,31 @@ export async function executeTools(
 ): Promise<ToolResult[]> {
   const envelope = (env as any).__agentConfig as { enabled_tools?: string[] } | undefined;
   const effectiveEnabledTools = enabledTools ?? envelope?.enabled_tools;
+
   if (parallel && toolCalls.length > 1) {
-    return Promise.all(
-      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId, effectiveEnabledTools)),
-    );
+    // Partition into concurrent-safe and unsafe
+    const safe = toolCalls.filter(tc => isConcurrentSafe(tc.name));
+    const unsafe = toolCalls.filter(tc => !isConcurrentSafe(tc.name));
+
+    // Execute safe tools in parallel
+    const safeResults = safe.length > 0
+      ? await Promise.all(safe.map(tc => executeSingleTool(env, tc, sessionId, effectiveEnabledTools)))
+      : [];
+
+    // Execute unsafe tools serially
+    const unsafeResults: ToolResult[] = [];
+    for (const tc of unsafe) {
+      unsafeResults.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools));
+    }
+
+    // Merge results in original tool_call order
+    const resultMap = new Map<string, ToolResult>();
+    for (const r of [...safeResults, ...unsafeResults]) {
+      resultMap.set(r.tool_call_id, r);
+    }
+    return toolCalls.map(tc => resultMap.get(tc.id) || {
+      tool_call_id: tc.id, name: tc.name, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0,
+    });
   }
   const results: ToolResult[] = [];
   for (const tc of toolCalls) {

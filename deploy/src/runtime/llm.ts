@@ -117,6 +117,10 @@ export async function callLLM(
 
   if (opts.metadata) {
     headers["cf-aig-metadata"] = JSON.stringify(opts.metadata);
+    // Phase 5.1: Propagate trace_id for distributed tracing
+    if (opts.metadata.trace_id) {
+      headers["X-Trace-Id"] = opts.metadata.trace_id;
+    }
   }
 
   // OpenRouter auth
