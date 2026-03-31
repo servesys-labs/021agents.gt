@@ -1,4 +1,4 @@
-name: CI
+name: CI / Deploy
 
 on:
   push:
@@ -7,48 +7,30 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  # ── Control Plane (Cloudflare Worker) ──────────────────────────────
+  control-plane:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.12", "3.13"]
-
+    defaults:
+      run:
+        working-directory: control-plane
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-node@v4
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          pip install -e ".[dev]"
-          pip install pyyaml python-multipart
-          chmod +x scripts/prod_check.sh
-
-      - name: Run preflight (quick)
+          node-version: "22"
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Test
+        run: npm test
+      - name: Deploy
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: npx wrangler deploy
         env:
-          AGENTOS_AUTH_REQUIRED: "true"
-          AGENTOS_JWT_SECRET: "ci-jwt-secret-not-for-prod"
-          AGENTOS_SECRET_ENCRYPTION_KEY: "ci-encryption-secret-not-for-prod"
-        run: |
-          scripts/prod_check.sh --quick
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-      - name: Check import
-        run: python -c "import agentos; print(f'AgentOS {agentos.__version__}')"
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Check syntax
-        run: python -m py_compile agentos/cli.py agentos/agent.py agentos/api/app.py
-
-  deploy-runtime:
+  # ── Runtime Worker (Cloudflare Worker + DO + Containers) ───────────
+  deploy:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -58,26 +40,31 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install deploy dependencies
-        run: npm ci
-      - name: Run deploy runtime tests (governance parity harness)
+      - run: npm ci
+      - name: Test
         run: npm test
+      - name: Deploy
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
-  portal:
+  # ── MVP Frontend (Cloudflare Workers Static Assets) ────────────────
+  mvp:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: portal
+        working-directory: mvp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install portal dependencies
-        run: npm ci --legacy-peer-deps
-      - name: Run portal checks
-        run: |
-          npm run typecheck
-          npm run test
-          npm run lint
-          npm run build
+      - run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Deploy
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
