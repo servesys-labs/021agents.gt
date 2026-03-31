@@ -767,6 +767,44 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
 
   let optimizationResult = await algorithm.optimize(ctx);
 
+  // Phase 7.6: Multi-dimension optimization
+  // After 3+ iterations, if prompt optimization has converged but score is below
+  // target, try optimizing temperature and reasoning strategy instead.
+  if (iterationNumber >= 3 && history.length >= 2) {
+    const last2 = history.slice(-2).map(h => h.reward_score || 0);
+    const promptImprovement = Math.abs(last2[1] - last2[0]) / Math.max(last2[0], 0.01);
+    if (promptImprovement < 0.02) {
+      // Prompt converged — try temperature grid search
+      let currentConfig: any = {};
+      try { currentConfig = JSON.parse(currentResources.find((r: any) => r.resource_type === "system_prompt")?.value || "{}"); } catch {}
+      const currentTemp = Number(currentConfig.temperature || 0.7);
+      const tempCandidates = [0.1, 0.3, 0.5, 0.7, 0.9].filter(t => Math.abs(t - currentTemp) > 0.05);
+      if (tempCandidates.length > 0) {
+        const nextTemp = tempCandidates[iterationNumber % tempCandidates.length];
+        optimizationResult.metadata.multi_dimension = "temperature";
+        optimizationResult.metadata.temperature_candidate = nextTemp;
+        // The training eval will use this temperature on the next iteration
+        for (const update of optimizationResult.updatedResources) {
+          if (update.resource_type === "system_prompt") {
+            try {
+              const parsed = JSON.parse(update.value);
+              parsed.temperature = nextTemp;
+              update.value = JSON.stringify(parsed);
+            } catch { /* keep original */ }
+          }
+        }
+      }
+
+      // Also try rotating reasoning strategies
+      const strategies = ["auto", "chain-of-thought", "plan-then-execute", "step-back", "verify-then-respond"];
+      const currentStrategy = (currentConfig as any).reasoning_strategy || "auto";
+      const nextStrategy = strategies[(strategies.indexOf(currentStrategy) + 1) % strategies.length];
+      if (nextStrategy !== currentStrategy) {
+        optimizationResult.metadata.reasoning_strategy_candidate = nextStrategy;
+      }
+    }
+  }
+
   // If APO needs LLM calls, execute them here (where we have env.AI)
   if (optimizationResult.metadata.requires_llm_calls) {
     try {
