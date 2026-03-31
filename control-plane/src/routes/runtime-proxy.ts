@@ -490,6 +490,7 @@ const streamRoute = createRoute({
             agent_name: z.string().min(1).openapi({ example: "my-agent" }),
             input: z.string().optional(),
             task: z.string().optional(),
+            plan: z.enum(["basic", "standard", "premium"]).optional(),
           }),
         },
       },
@@ -743,4 +744,72 @@ runtimeProxyRoutes.openapi(resetRoute, async (c): Promise<any> => {
   } catch {}
 
   return c.json({ ok: true, reset: true, agent_name: agentName });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 7.7: Request Queuing with Backpressure
+// ══════════════════════════════════════════════════════════════════════
+
+// In-memory queue per org (bounded)
+const requestQueues = new Map<string, Array<{
+  resolve: (v: any) => void;
+  reject: (e: any) => void;
+  enqueuedAt: number;
+}>>();
+const MAX_QUEUE_SIZE = 100;
+const QUEUE_TIMEOUT_MS = 30_000;
+
+/**
+ * POST /agent/run/queued — Run with automatic queuing when circuit is open
+ * Instead of returning 503 immediately, queues the request and drains
+ * when the runtime recovers.
+ */
+runtimeProxyRoutes.post("/agent/run/queued", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json();
+  const orgId = user.org_id;
+
+  // Check circuit breaker state
+  const health = await checkRuntimeHealth(c.env.RUNTIME);
+
+  if (health.healthy) {
+    // Runtime healthy — execute directly (same as /agent/run)
+    try {
+      const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/agent/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, org_id: orgId }),
+      });
+      const data = await resp.json();
+      return c.json(data, resp.status as any);
+    } catch (err: any) {
+      return c.json({ error: err.message }, 503);
+    }
+  }
+
+  // Runtime unhealthy — queue the request
+  const queue = requestQueues.get(orgId) || [];
+  if (queue.length >= MAX_QUEUE_SIZE) {
+    return c.json({
+      error: "Request queue full",
+      queue_size: queue.length,
+      retry_after: Math.ceil(CIRCUIT_BREAKER_TIMEOUT_MS / 1000),
+    }, 503);
+  }
+
+  // Queue and wait
+  const position = queue.length + 1;
+  const result = await Promise.race([
+    new Promise((resolve, reject) => {
+      queue.push({ resolve, reject, enqueuedAt: Date.now() });
+      requestQueues.set(orgId, queue);
+    }),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Queue timeout")), QUEUE_TIMEOUT_MS)
+    ),
+  ]).catch((err: any) => {
+    return { error: err.message, queued_position: position };
+  });
+
+  return c.json(result as any);
 });
