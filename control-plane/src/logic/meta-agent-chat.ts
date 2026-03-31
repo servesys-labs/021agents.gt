@@ -52,6 +52,54 @@ interface MetaChatContext {
   };
 }
 
+/* ── Progressive tool discovery ─────────────────────────────────── */
+
+// Tool groups — only send relevant tools each turn to save tokens
+const TOOL_GROUPS: Record<string, string[]> = {
+  config: ["read_agent_config", "update_agent_config"],
+  sessions: ["read_sessions", "read_session_messages", "read_observability", "read_conversation_quality"],
+  training: ["start_training", "read_training_status", "activate_trained_config", "rollback_training", "read_training_circuit_breaker"],
+  eval: ["read_eval_results", "add_eval_test_cases", "test_agent", "analyze_and_suggest"],
+  marketplace: ["marketplace_publish", "marketplace_stats"],
+  analytics: ["run_query"],
+};
+
+// Always-included tools (cheap to send, always useful)
+const CORE_TOOLS = ["read_agent_config", "update_agent_config", "run_query"];
+
+function selectMetaTools(context: string): ToolDef[] {
+  const selected = new Set(CORE_TOOLS);
+
+  // Match context to tool groups
+  if (/session|user|usage|conversation|message|activity|error|fail|log/.test(context)) {
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+  }
+  if (/train|improv|optimi|apo|iteration|score|reward/.test(context)) {
+    TOOL_GROUPS.training.forEach(t => selected.add(t));
+  }
+  if (/eval|test|pass|fail|grader|rubric|quality/.test(context)) {
+    TOOL_GROUPS.eval.forEach(t => selected.add(t));
+  }
+  if (/publish|marketplace|rating|listing|earn/.test(context)) {
+    TOOL_GROUPS.marketplace.forEach(t => selected.add(t));
+  }
+  if (/cost|expensive|spend|billing|credit|budget|bash|tool_calls|diagnos/.test(context)) {
+    TOOL_GROUPS.analytics.forEach(t => selected.add(t));
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+  }
+  if (/how.*doing|health|overview|status|check/.test(context)) {
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+    TOOL_GROUPS.eval.forEach(t => selected.add(t));
+  }
+
+  // If nothing matched beyond core, send everything (first message, vague query)
+  if (selected.size <= CORE_TOOLS.length) {
+    return META_TOOLS;
+  }
+
+  return META_TOOLS.filter(t => selected.has(t.function.name));
+}
+
 /* ── Tool definitions ───────────────────────────────────────────── */
 
 const META_TOOLS: ToolDef[] = [
@@ -131,7 +179,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "read_session_messages",
       description:
-        "Read messages from a specific session to understand what happened in a conversation.",
+        "Read full turn-by-turn details from a session including tool calls, arguments, results, costs, and errors. Use this to diagnose what the agent did, what tools it called, and where it went wrong.",
       parameters: {
         type: "object",
         properties: {
@@ -397,6 +445,32 @@ const META_TOOLS: ToolDef[] = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "run_query",
+      description:
+        "Run a READ-ONLY SQL query against the database to analyze sessions, turns, costs, tool usage, training jobs, eval results, and more. " +
+        "Only SELECT statements are allowed — INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE will be rejected. " +
+        "Available tables: sessions (session_id, agent_name, org_id, model, status, step_count, action_count, input_text, output_text, cost_total_usd, wall_clock_seconds, created_at, ended_at), " +
+        "turns (session_id, turn_number, model_used, llm_content, tool_calls_json, tool_results_json, errors_json, cost_total_usd, cost_tool_usd, latency_ms, input_tokens, output_tokens, execution_mode, started_at), " +
+        "agents (name, org_id, description, config_json, is_active, version, created_at), " +
+        "training_jobs (job_id, org_id, agent_name, algorithm, status, current_iteration, max_iterations, best_score, eval_tasks_json, created_at), " +
+        "training_iterations (iteration_id, job_id, iteration_number, status, eval_pass_rate, reward_score, eval_cost_usd, created_at), " +
+        "training_resources (resource_id, job_id, agent_name, resource_type, resource_key, version, content_text, is_active, eval_score), " +
+        "eval_test_cases (id, agent_name, org_id, input, expected_output, grader, tags, created_at), " +
+        "credit_transactions (id, org_id, type, amount_usd, description, created_at), " +
+        "billing_records (id, org_id, session_id, agent_name, model, input_tokens, output_tokens, cost_usd, total_cost_usd, created_at). " +
+        "Use this for cost analysis, tool usage patterns, error diagnosis, performance trends, and any ad-hoc investigation.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "SQL SELECT query to run" },
+        },
+        required: ["query"],
+      },
+    },
+  },
 ];
 
 /* ── Tool execution ─────────────────────────────────────────────── */
@@ -558,10 +632,12 @@ async function executeTool(
     case "read_sessions": {
       const limit = Number(args.limit) || 20;
       const rows = await sql`
-        SELECT session_id, model, step_count, created_at, ended_at
+        SELECT session_id, model, status, step_count, action_count,
+               input_text, output_text, cost_total_usd,
+               wall_clock_seconds, created_at, ended_at
         FROM sessions
-        WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
-        ORDER BY ended_at DESC
+        WHERE agent_name = ${ctx.agentName} AND (org_id = ${ctx.orgId} OR org_id = '')
+        ORDER BY created_at DESC
         LIMIT ${limit}
       `;
       return JSON.stringify({
@@ -569,7 +645,13 @@ async function executeTool(
         sessions: rows.map((r: any) => ({
           session_id: r.session_id,
           model: r.model,
+          status: r.status,
           step_count: r.step_count,
+          tool_calls: r.action_count,
+          input_preview: String(r.input_text || "").slice(0, 200),
+          output_preview: String(r.output_text || "").slice(0, 200),
+          cost_usd: r.cost_total_usd,
+          latency_s: r.wall_clock_seconds,
           created_at: r.created_at,
           ended_at: r.ended_at,
         })),
@@ -581,7 +663,11 @@ async function executeTool(
       if (!sessionId) return JSON.stringify({ error: "session_id required" });
       const limit = Number(args.limit) || 50;
       const rows = await sql`
-        SELECT t.turn_number, t.llm_content, t.started_at
+        SELECT t.turn_number, t.model_used, t.llm_content,
+               t.tool_calls_json, t.tool_results_json, t.errors_json,
+               t.cost_total_usd, t.cost_tool_usd, t.latency_ms,
+               t.input_tokens, t.output_tokens, t.execution_mode,
+               t.started_at
         FROM turns t
         JOIN sessions s ON t.session_id = s.session_id
         WHERE t.session_id = ${sessionId} AND s.org_id = ${ctx.orgId}
@@ -590,12 +676,42 @@ async function executeTool(
       `;
       return JSON.stringify({
         session_id: sessionId,
-        message_count: rows.length,
-        messages: rows.map((r: any) => ({
-          turn_number: r.turn_number,
-          content: String(r.llm_content || "").slice(0, 500),
-          started_at: r.started_at,
-        })),
+        turn_count: rows.length,
+        turns: rows.map((r: any) => {
+          let toolCalls: any[] = [];
+          let toolResults: any[] = [];
+          let errors: any[] = [];
+          try { toolCalls = JSON.parse(r.tool_calls_json || "[]"); } catch {}
+          try { toolResults = JSON.parse(r.tool_results_json || "[]"); } catch {}
+          try { errors = JSON.parse(r.errors_json || "[]"); } catch {}
+
+          return {
+            turn: r.turn_number,
+            model: r.model_used,
+            content: String(r.llm_content || "").slice(0, 1000),
+            tool_calls: toolCalls.map((tc: any) => {
+              let args: any = {};
+              try { args = JSON.parse(tc.arguments || "{}"); } catch {}
+              return {
+                name: tc.name,
+                arguments: args,
+              };
+            }),
+            tool_results: toolResults.map((tr: any) => ({
+              name: tr.name,
+              result: String(tr.result || "").slice(0, 500),
+              error: tr.error || null,
+              latency_ms: tr.latency_ms,
+              cost_usd: tr.cost_usd,
+            })),
+            errors,
+            cost_usd: r.cost_total_usd,
+            tool_cost_usd: r.cost_tool_usd,
+            latency_ms: r.latency_ms,
+            tokens: (r.input_tokens || 0) + (r.output_tokens || 0),
+            started_at: r.started_at,
+          };
+        }),
       });
     }
 
@@ -875,17 +991,61 @@ async function executeTool(
       try {
         const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         const now = new Date().toISOString();
+
+        // Load eval test cases from agent config or eval_test_cases table
+        let evalTasks: Array<{ input: string; expected: string; grader: string }> = [];
+        try {
+          const testRows = await sql`
+            SELECT input, expected_output, grader FROM eval_test_cases
+            WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+            ORDER BY created_at DESC LIMIT 20
+          `;
+          if (testRows.length > 0) {
+            evalTasks = testRows.map((r: any) => ({
+              input: String(r.input || ""),
+              expected: String(r.expected_output || ""),
+              grader: String(r.grader || "contains"),
+            }));
+          }
+        } catch {}
+
+        // Fallback: generate basic test tasks if none exist
+        if (evalTasks.length === 0) {
+          evalTasks = [
+            { input: "Hello, how can you help me?", expected: "", grader: "non_empty" },
+            { input: "What tools do you have?", expected: "", grader: "non_empty" },
+          ];
+        }
+
         await sql`
-          INSERT INTO training_jobs (job_id, agent_name, org_id, algorithm, max_iterations, auto_activate, status, current_iteration, best_score, created_at)
-          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'created', 0, NULL, ${now})
+          INSERT INTO training_jobs (job_id, agent_name, org_id, algorithm, max_iterations, auto_activate,
+            status, current_iteration, best_score, eval_tasks_json, created_at)
+          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate},
+            'created', 0, NULL, ${JSON.stringify(evalTasks)}, ${now})
         `;
 
-        // Enqueue the first training step so it actually runs
+        // Snapshot current system prompt as initial resource
+        try {
+          const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+          if (agentRows.length > 0) {
+            const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+            const prompt = String(config.system_prompt ?? "");
+            if (prompt) {
+              const resId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+              await sql`
+                INSERT INTO training_resources (resource_id, job_id, org_id, agent_name, resource_type, resource_key, version, content_text, source, is_active, created_at)
+                VALUES (${resId}, ${jobId}, ${ctx.orgId}, ${ctx.agentName}, 'system_prompt', 'main', 0, ${prompt}, 'initial', true, ${now})
+              `;
+            }
+          }
+        } catch {}
+
+        // Enqueue the first training step — MUST include org_id for queue consumer auth
         if (ctx.env.JOB_QUEUE) {
           try {
             await (ctx.env.JOB_QUEUE as any).send({
               type: "training_step",
-              payload: { job_id: jobId },
+              payload: { job_id: jobId, org_id: ctx.orgId },
             });
             await sql`UPDATE training_jobs SET status = 'running', started_at = ${now} WHERE job_id = ${jobId}`;
           } catch (err) {
@@ -899,7 +1059,8 @@ async function executeTool(
           algorithm,
           max_iterations: maxIterations,
           auto_activate: autoActivate,
-          message: "Training job created. Call POST /training/jobs/{id}/auto-step to begin iterations, then use read_training_status to monitor progress.",
+          eval_task_count: evalTasks.length,
+          message: `Training job started with ${evalTasks.length} eval tasks. Use read_training_status to monitor progress.`,
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Training not available: ${err.message || err}` });
@@ -1224,7 +1385,9 @@ async function executeTool(
       }
       try {
         // Read current eval config from agent
-        const [agent] = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+        const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+        if (!agentRows.length) return JSON.stringify({ error: `Agent '${ctx.agentName}' not found` });
+        const agent = agentRows[0];
         const config = typeof agent.config_json === "string" ? JSON.parse(agent.config_json) : agent.config_json || {};
         const evalConfig = config.eval_config || { test_cases: [], rubric: { criteria: [], pass_threshold: 0.7 }, scenarios: [] };
 
@@ -1293,6 +1456,43 @@ async function executeTool(
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Test failed: ${err.message || err}` });
+      }
+    }
+
+    case "run_query": {
+      const query = String(args.query || "").trim();
+      if (!query) return JSON.stringify({ error: "query is required" });
+
+      // Strict read-only enforcement
+      const normalized = query.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
+      const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "SET ", "COPY"];
+      for (const keyword of forbidden) {
+        if (normalized.includes(keyword)) {
+          return JSON.stringify({ error: `Forbidden: ${keyword} statements are not allowed. Only SELECT queries permitted.` });
+        }
+      }
+      if (!normalized.startsWith("SELECT") && !normalized.startsWith("WITH") && !normalized.startsWith("EXPLAIN")) {
+        return JSON.stringify({ error: "Only SELECT, WITH (CTE), or EXPLAIN queries are allowed." });
+      }
+
+      try {
+        // Scope to this org — inject org_id filter reminder
+        const rows = await sql.unsafe(query, [], { prepare: false });
+        const result = Array.isArray(rows) ? rows : [];
+
+        // Cap output size
+        const maxRows = 100;
+        const truncated = result.length > maxRows;
+        const output = result.slice(0, maxRows);
+
+        return JSON.stringify({
+          row_count: result.length,
+          truncated,
+          rows: output,
+          note: truncated ? `Showing first ${maxRows} of ${result.length} rows. Add LIMIT to your query.` : undefined,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Query failed: ${err.message || err}` });
       }
     }
 
@@ -1487,12 +1687,46 @@ export async function runMetaChat(
     }),
   ];
 
+  // ── Message history trimming — prevent context overflow ──
+  const MAX_CONTEXT_CHARS = 200_000;
+  if (JSON.stringify(llmMessages).length > MAX_CONTEXT_CHARS) {
+    const system = llmMessages.filter((m: any) => m.role === "system");
+    const recent = llmMessages.filter((m: any) => m.role !== "system").slice(-12);
+    llmMessages.length = 0;
+    llmMessages.push(...system, ...recent);
+  }
+
   const MAX_TOOL_ROUNDS = 8;
   let round = 0;
+  let totalCost = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalToolCalls = 0;
   const outputMessages: MetaChatMessage[] = [];
+  const turnRecords: Array<{
+    turn: number;
+    model: string;
+    content: string;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    tool_calls: Array<{ name: string; arguments: Record<string, unknown> }>;
+    tool_results: Array<{ name: string; result: string; latency_ms: number; error?: string }>;
+  }> = [];
+  const sessionId = `meta_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
 
   while (round < MAX_TOOL_ROUNDS) {
     round++;
+
+    // ── Progressive tool discovery: select relevant tools for this turn ──
+    // Build context from the last user message + recent tool results
+    const recentContext = llmMessages
+      .slice(-4)
+      .map((m: any) => String(m.content || "").slice(0, 200))
+      .join(" ")
+      .toLowerCase();
+
+    const relevantTools = selectMetaTools(recentContext);
 
     const { callLLMGateway } = await import("../lib/llm-gateway");
     const llmResult = await callLLMGateway(
@@ -1506,13 +1740,20 @@ export async function runMetaChat(
       {
         model: "anthropic/claude-sonnet-4-6",
         messages: llmMessages as any,
-        tools: META_TOOLS,
+        tools: relevantTools,
         tool_choice: "auto",
 
         temperature: 0.3,
         metadata: { agent: "meta-agent", org_id: ctx.orgId },
       },
     );
+
+    const turnCostUsd = (llmResult as any).cost_usd || 0;
+    const turnInputTokens = (llmResult as any).usage?.input_tokens || (llmResult as any).input_tokens || 0;
+    const turnOutputTokens = (llmResult as any).usage?.output_tokens || (llmResult as any).output_tokens || 0;
+    totalCost += turnCostUsd;
+    totalInputTokens += turnInputTokens;
+    totalOutputTokens += turnOutputTokens;
 
     const msg = {
       role: "assistant" as const,
@@ -1529,6 +1770,16 @@ export async function runMetaChat(
       };
       outputMessages.push(assistantMsg);
       llmMessages.push({ role: "assistant", content: msg.content || "" });
+      turnRecords.push({
+        turn: round,
+        model: "anthropic/claude-sonnet-4-6",
+        content: msg.content || "",
+        input_tokens: turnInputTokens,
+        output_tokens: turnOutputTokens,
+        cost_usd: turnCostUsd,
+        tool_calls: [],
+        tool_results: [],
+      });
       break;
     }
 
@@ -1545,19 +1796,36 @@ export async function runMetaChat(
       tool_calls: toolCalls,
     } as any);
 
-    // Execute each tool call
+    // Execute each tool call with timing
+    const turnToolCalls: typeof turnRecords[0]["tool_calls"] = [];
+    const turnToolResults: typeof turnRecords[0]["tool_results"] = [];
+
     for (const tc of toolCalls) {
       let args: Record<string, unknown> = {};
       try {
         args = JSON.parse(tc.function.arguments || "{}");
       } catch {}
 
+      const toolStart = Date.now();
       let result: string;
+      let toolError: string | undefined;
       try {
         result = await executeTool(tc.function.name, args, ctx);
       } catch (err: any) {
-        result = JSON.stringify({ error: err.message || "Tool execution failed" });
+        toolError = err.message || "Tool execution failed";
+        result = JSON.stringify({ error: toolError });
       }
+      const toolLatencyMs = Date.now() - toolStart;
+
+      turnToolCalls.push({ name: tc.function.name, arguments: args });
+      turnToolResults.push({
+        name: tc.function.name,
+        result: result.slice(0, 2000),
+        latency_ms: toolLatencyMs,
+        error: toolError,
+      });
+
+      totalToolCalls++;
 
       const toolMsg: MetaChatMessage = {
         role: "tool",
@@ -1571,6 +1839,18 @@ export async function runMetaChat(
         tool_call_id: tc.id,
       } as any);
     }
+
+    // Record this turn
+    turnRecords.push({
+      turn: round,
+      model: "anthropic/claude-sonnet-4-6",
+      content: msg.content || "",
+      input_tokens: turnInputTokens,
+      output_tokens: turnOutputTokens,
+      cost_usd: turnCostUsd,
+      tool_calls: turnToolCalls,
+      tool_results: turnToolResults,
+    });
   }
 
   // Extract final assistant text
@@ -1578,8 +1858,63 @@ export async function runMetaChat(
     .reverse()
     .find((m) => m.role === "assistant" && m.content);
 
+  // ── Telemetry: write session + turns + credit deduction ──
+  // Same comprehensive telemetry as runtime agents
+  const userInput = messages.find(m => m.role === "user")?.content || "";
+  try {
+    const sql = await getDbForOrg(ctx.hyperdrive, ctx.orgId);
+    const now = new Date().toISOString();
+
+    // Write session record
+    await sql`
+      INSERT INTO sessions (session_id, org_id, agent_name, model, status, input_text, output_text,
+        step_count, action_count, cost_total_usd, wall_clock_seconds, created_at, ended_at)
+      VALUES (
+        ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'anthropic/claude-sonnet-4-6',
+        'success', ${userInput.slice(0, 2000)}, ${(lastAssistant?.content || "").slice(0, 5000)},
+        ${round}, ${totalToolCalls}, ${totalCost}, ${0}, ${now}, ${now}
+      )
+      ON CONFLICT (session_id) DO NOTHING
+    `;
+
+    // Write per-turn records
+    for (const t of turnRecords) {
+      await sql`
+        INSERT INTO turns (session_id, turn_number, model_used, llm_content,
+          tool_calls_json, tool_results_json, errors_json,
+          input_tokens, output_tokens, cost_total_usd, latency_ms, execution_mode, started_at)
+        VALUES (
+          ${sessionId}, ${t.turn}, ${t.model}, ${t.content.slice(0, 10000)},
+          ${JSON.stringify(t.tool_calls)}, ${JSON.stringify(t.tool_results)}, '[]',
+          ${t.input_tokens}, ${t.output_tokens}, ${t.cost_usd}, ${0},
+          'meta-agent', ${now}
+        )
+      `;
+    }
+
+    // Deduct credits
+    if (totalCost > 0) {
+      await sql`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, description, created_at)
+        VALUES (${ctx.orgId}, 'burn', ${-totalCost}, ${'meta-agent: ' + ctx.agentName + ' (' + round + ' turns, ' + totalToolCalls + ' tools)'}, ${now})
+      `;
+      await sql`
+        UPDATE organizations SET credit_balance_usd = COALESCE(credit_balance_usd, 0) - ${totalCost}
+        WHERE org_id = ${ctx.orgId}
+      `.catch(() => {});
+    }
+  } catch (err) {
+    console.error("[meta-agent] Telemetry write failed:", err);
+  }
+
   return {
     messages: outputMessages,
     response: lastAssistant?.content || "I wasn't able to generate a response. Please try again.",
+    cost_usd: totalCost,
+    turns: round,
+    session_id: sessionId,
+    input_tokens: totalInputTokens,
+    output_tokens: totalOutputTokens,
+    tool_calls: totalToolCalls,
   };
 }
