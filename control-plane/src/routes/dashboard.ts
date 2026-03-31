@@ -327,6 +327,74 @@ dashboardRoutes.get("/stats/by-model", requireScope("observability:read"), async
 });
 
 /**
+ * GET /stats/tool-health — Per-tool call count, error rate, avg latency
+ * Phase 5.3: Circuit breaker observability
+ */
+dashboardRoutes.get("/stats/tool-health", requireScope("observability:read"), async (c) => {
+  const orgId = c.get("user").org_id;
+  const sql = await getDbForOrg(c, orgId);
+  try {
+    // Parse tool_calls JSON from turns to get per-tool stats
+    const rows = await sql`
+      SELECT
+        tool_name,
+        COUNT(*) as call_count,
+        COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '') as error_count,
+        ROUND(AVG(latency_ms)::numeric, 0) as avg_latency_ms,
+        ROUND(COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '')::numeric / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
+      FROM (
+        SELECT
+          jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'name' as tool_name,
+          (jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
+          jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'error' as error
+        FROM turns t
+        JOIN sessions s ON t.session_id = s.session_id
+        WHERE s.org_id = ${orgId}
+          AND t.created_at > NOW() - INTERVAL '7 days'
+          AND t.tool_results IS NOT NULL AND t.tool_results != '[]'
+      ) tool_stats
+      WHERE tool_name IS NOT NULL
+      GROUP BY tool_name
+      ORDER BY error_rate_pct DESC, call_count DESC
+      LIMIT 50
+    `;
+    return c.json({ tools: rows });
+  } catch (err) {
+    return c.json({ tools: [], error: String(err) });
+  }
+});
+
+/**
+ * GET /stats/routing — Phase 10.1: Intent router feedback (misroute tracking)
+ */
+dashboardRoutes.get("/stats/routing", requireScope("observability:read"), async (c) => {
+  const orgId = c.get("user").org_id;
+  const sql = await getDbForOrg(c, orgId);
+  try {
+    // Find sessions where user started with one agent but the conversation
+    // was short (1-2 turns) and low-rated — suggests misroute
+    const rows = await sql`
+      SELECT
+        s.agent_name,
+        COUNT(*) as total_sessions,
+        COUNT(*) FILTER (WHERE s.step_count <= 2 AND COALESCE(f.rating, 5) <= 2) as likely_misroutes,
+        ROUND(AVG(COALESCE(f.rating, 0)) FILTER (WHERE f.rating IS NOT NULL)::numeric, 1) as avg_rating,
+        ROUND(COUNT(*) FILTER (WHERE s.step_count <= 2 AND COALESCE(f.rating, 5) <= 2)::numeric / NULLIF(COUNT(*), 0) * 100, 1) as misroute_rate_pct
+      FROM sessions s
+      LEFT JOIN session_feedback f ON s.session_id = f.session_id
+      WHERE s.org_id = ${orgId}
+        AND s.created_at > NOW() - INTERVAL '30 days'
+      GROUP BY s.agent_name
+      HAVING COUNT(*) >= 5
+      ORDER BY misroute_rate_pct DESC
+    `;
+    return c.json({ routing: rows });
+  } catch (err) {
+    return c.json({ routing: [], error: String(err) });
+  }
+});
+
+/**
  * GET /stats/trends — Daily cost, sessions, errors over time period
  */
 dashboardRoutes.get("/stats/trends", requireScope("observability:read"), async (c) => {

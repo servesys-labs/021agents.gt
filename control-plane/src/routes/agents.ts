@@ -203,9 +203,9 @@ async function resolveAgentName(
     `;
     if (rows.length > 0) return String(rows[0].name);
   }
-  // Fall back to treating it as a name (backwards compatible)
+  // Fall back to treating it as a name (case-insensitive)
   const rows = await sql`
-    SELECT name FROM agents WHERE name = ${identifier} AND org_id = ${orgId} LIMIT 1
+    SELECT name FROM agents WHERE LOWER(name) = LOWER(${identifier}) AND org_id = ${orgId} LIMIT 1
   `;
   return rows.length > 0 ? String(rows[0].name) : null;
 }
@@ -310,12 +310,15 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
     const user = c.get("user");
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
-    // Check for existing agent with same name in org
+    // Normalize agent name to lowercase — prevents case-variant duplicates
+    req.name = req.name.toLowerCase().replace(/\s+/g, "-");
+
+    // Check for existing agent with same name in org (case-insensitive)
     const existing = await sql`
-      SELECT name FROM agents WHERE name = ${req.name} AND org_id = ${user.org_id} LIMIT 1
+      SELECT name FROM agents WHERE LOWER(name) = LOWER(${req.name}) AND org_id = ${user.org_id} LIMIT 1
     `;
     if (existing.length > 0) {
-      return c.json({ error: `Agent '${req.name}' already exists` }, 409);
+      return c.json({ error: `Agent '${existing[0].name}' already exists (names are case-insensitive)` }, 409);
     }
 
     // Enforce org agent limit
@@ -519,6 +522,22 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     `;
 
     await snapshotVersion(sql, name, newVersion, existingConfig, user.user_id);
+
+    // Phase 10.4: Deploy policy audit trail
+    // Log policy-relevant field changes for compliance
+    const policyFields = ["deploy_policy", "tools", "model", "governance", "system_prompt"];
+    for (const field of policyFields) {
+      const oldVal = rows[0] ? JSON.stringify((parseConfig((rows[0] as any).config_json) as any)[field]) : null;
+      const newVal = JSON.stringify((existingConfig as any)[field]);
+      if (oldVal !== newVal) {
+        sql`
+          INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+          VALUES (${user.org_id}, ${user.user_id}, 'config_change', 'agent', ${name},
+            ${JSON.stringify({ field, old_hash: oldVal?.slice(0, 50), new_hash: newVal?.slice(0, 50), version: newVersion })},
+            NOW())
+        `.catch(() => {}); // fire-and-forget
+      }
+    }
 
     // Notify runtime of config change (fire-and-forget)
     // This triggers the DO to reload config on next request
@@ -779,12 +798,12 @@ agentRoutes.openapi(cloneAgentRoute, async (c): Promise<any> => {
     LIMIT 1
   `;
 
-  // Check target name doesn't exist
+  // Check target name doesn't exist (case-insensitive)
   const existCheck = await sql`
-    SELECT name FROM agents WHERE name = ${newNameValue} AND org_id = ${user.org_id} LIMIT 1
+    SELECT name FROM agents WHERE LOWER(name) = LOWER(${newNameValue}) AND org_id = ${user.org_id} LIMIT 1
   `;
   if (existCheck.length > 0) {
-    return c.json({ error: `Agent '${newNameValue}' already exists` }, 409);
+    return c.json({ error: `Agent '${existCheck[0].name}' already exists (names are case-insensitive)` }, 409);
   }
 
   const config = parseConfig((rows[0] as Record<string, unknown>).config_json);
@@ -1555,6 +1574,8 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
     return c.json({
       response: result.response,
       messages: result.messages,
+      cost_usd: result.cost_usd || 0,
+      turns: result.turns || 0,
     });
   } catch (err: any) {
     console.error(`[meta-chat] Error for agent ${agentName}:`, err);

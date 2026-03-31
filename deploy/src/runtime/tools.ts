@@ -32,6 +32,10 @@ function checkToolRateLimit(toolName: string, sessionId: unknown, maxCalls: numb
   }
   return false;
 }
+// Phase 10.5: Per-session file mtime cache for staleness detection
+// Tracks last-known mtime per file path to detect concurrent modifications
+const fileStateCache = new Map<string, string>();
+
 const DYNAMIC_WORKER_CACHE_LIMIT = 32;
 const DYNAMIC_WORKER_CACHE_TTL_MS = 5 * 60_000;
 type DynamicWorkerCacheEntry = { worker: any; expiresAt: number };
@@ -929,6 +933,19 @@ async function dispatch(
       const editPath = args.path || "";
       const read = await sandbox.exec(`cat "${editPath}"`, { timeout: 10 });
       const content = read.stdout || "";
+
+      // Phase 10.5: Staleness detection — check if file was modified since last read
+      const mtimeCheck = await sandbox.exec(`stat -c%Y "${editPath}" 2>/dev/null || stat -f%m "${editPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "0" }));
+      const currentMtime = (mtimeCheck.stdout || "0").trim();
+      const cacheKey = `${sessionId}:${editPath}`;
+      const lastKnownMtime = fileStateCache.get(cacheKey);
+      if (lastKnownMtime && lastKnownMtime !== currentMtime) {
+        // File changed since we last read it — warn the agent
+        return `Warning: ${editPath} was modified since it was last read (mtime ${lastKnownMtime} → ${currentMtime}). Re-read the file before editing to avoid overwriting changes.`;
+      }
+      // Update cache with current mtime (will be updated again after write)
+      fileStateCache.set(cacheKey, currentMtime);
+
       const oldText = args.old_text || args.old_string || "";
       if (!content.includes(oldText)) return `Error: old_text not found in ${editPath}`;
       const newContent = content.replace(oldText, args.new_text || args.new_string || "");
@@ -961,6 +978,10 @@ async function dispatch(
       }
 
       await sandbox.writeFile(editPath, newContent);
+
+      // Phase 10.5: Update mtime cache after successful write
+      const newMtime = await sandbox.exec(`stat -c%Y "${editPath}" 2>/dev/null || stat -f%m "${editPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "0" }));
+      fileStateCache.set(cacheKey, (newMtime.stdout || "0").trim());
 
       // Sync edited file to R2 (non-blocking, user-scoped)
       if (editPath.startsWith("/workspace/") && env.STORAGE) {
