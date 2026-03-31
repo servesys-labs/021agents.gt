@@ -226,15 +226,24 @@ export async function callLLM(
   const { calculateCustomerCost } = await import("./pricing");
   const costUsd = calculateCustomerCost(data.model || model, inputTokens, outputTokens, providerCost);
 
+  // Phase 9.3: Detect model refusal (stop_reason=refusal or content_filter)
+  const stopReason = choice.finish_reason || data.stop_reason || "";
+  const isRefusal = stopReason === "refusal" || stopReason === "content_filter";
+
+  const content = isRefusal
+    ? "I'm unable to help with that request due to usage policies. Try rephrasing your request or adjusting the task."
+    : (msg.content || msg.reasoning || (choice as any).text || "");
+
   return {
-    content: msg.content || msg.reasoning || (choice as any).text || "",
+    content,
     model: data.model || model,
-    tool_calls: parseToolCalls(msg.tool_calls || []),
+    tool_calls: isRefusal ? [] : parseToolCalls(msg.tool_calls || []),
     usage: { input_tokens: inputTokens, output_tokens: outputTokens },
     cost_usd: costUsd,
     latency_ms: latencyMs,
     gateway_log_id: gatewayLogId,
     gateway_event_id: gatewayEventId,
+    refusal: isRefusal,
   };
 }
 

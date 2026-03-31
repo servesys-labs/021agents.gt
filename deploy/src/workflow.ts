@@ -211,6 +211,19 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     if (effectiveSystemPrompt) {
       messages.push({ role: "system", content: effectiveSystemPrompt });
     }
+
+    // ── Phase 4.1: Anti-hallucination behavioral guardrails ──
+    // These instructions improve agent reliability by preventing common failure modes.
+    // Inspired by Claude Code's system prompt patterns that enforce disciplined behavior.
+    messages.push({ role: "system", content: `## Behavioral Rules
+- Read files before editing. Never guess file contents.
+- Report outcomes faithfully. If a command fails, say so with the error output. Never claim success when output shows failure.
+- If an approach fails, diagnose why before trying alternatives. Read the error, check assumptions, try a focused fix. Do not retry the same failed command without changes.
+- Do not add features, refactoring, or improvements beyond what was asked.
+- When multiple tools are needed, prefer parallel execution for read-only tools (grep, glob, read-file). Use sequential execution for mutations (write-file, edit-file, bash).
+- Prefer dedicated tools over bash equivalents: use grep tool instead of bash grep, read-file instead of bash cat.
+- If a tool returns empty output, acknowledge it rather than fabricating content.` });
+
     if (bootstrap.reasoning_prompt) {
       messages.push({ role: "system", content: bootstrap.reasoning_prompt });
     }
