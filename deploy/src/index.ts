@@ -316,12 +316,15 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
-    // Load 24 messages — caps memory usage on cold start hydration
+    // MUST have a timeout — if Hyperdrive hangs, blockConcurrencyWhile blocks ALL messages
     const localCount = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
     if ((localCount[0]?.cnt || 0) === 0 && this.env.HYPERDRIVE) {
       try {
         const { loadConversationHistory } = await import("./runtime/db");
-        const messages = await loadConversationHistory(this.env.HYPERDRIVE, this.name, 24);
+        const messages = await Promise.race([
+          loadConversationHistory(this.env.HYPERDRIVE, this.name, 24),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("hydration timeout")), 5000)),
+        ]);
         for (const msg of messages) {
           this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
             VALUES (${msg.role}, ${msg.content.slice(0, 8000)}, ${msg.channel}, ${msg.created_at || new Date().toISOString()})`;
