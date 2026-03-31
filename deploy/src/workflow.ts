@@ -27,6 +27,8 @@ import {
   WorkflowEvent,
   NonRetryableError,
 } from "cloudflare:workers";
+import { sanitizeUnicode, sanitizeDeep } from "./runtime/sanitize";
+import { validateUrl } from "./runtime/ssrf";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -48,6 +50,12 @@ export interface AgentRunParams {
   media_urls?: string[];
   /** MIME types corresponding to each media_url entry */
   media_types?: string[];
+  /** Cost ceiling override for A2A tasks — ensures agent can't spend more than caller authorized */
+  budget_limit_usd_override?: number;
+  /** Override the LLM plan for this run (basic/standard/premium) */
+  plan_override?: string;
+  /** Override the agent's tool list for this run — scopes a sub-agent to only these tools */
+  tools_override?: string[];
 }
 
 export interface RunOutput {
@@ -55,6 +63,8 @@ export interface RunOutput {
   turns: number;
   tool_calls: number;
   cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
   session_id: string;
   trace_id: string;
 }
@@ -91,6 +101,16 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         plan: "standard",
       });
 
+      // Apply plan override if provided (mid-session model switching)
+      if (p.plan_override && ["basic", "standard", "premium"].includes(p.plan_override)) {
+        config.plan = p.plan_override;
+      }
+
+      // Apply tools override — scopes sub-agent to only specified tools
+      if (p.tools_override && p.tools_override.length > 0) {
+        config.tools = p.tools_override;
+      }
+
       // Reasoning strategy
       const { selectReasoningStrategy, autoSelectStrategy } = await import("./runtime/reasoning-strategies");
       const { getToolDefinitions } = await import("./runtime/tools");
@@ -108,7 +128,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           tools: config.tools,
           blocked_tools: config.blocked_tools || [],
           max_turns: config.max_turns || 50,
-          budget_limit_usd: config.budget_limit_usd || 10,
+          budget_limit_usd: p.budget_limit_usd_override
+            ? Math.min(p.budget_limit_usd_override, config.budget_limit_usd || 10)
+            : (config.budget_limit_usd || 10),
           parallel_tool_calls: config.parallel_tool_calls !== false,
           reasoning_strategy: config.reasoning_strategy,
           routing: config.routing,
@@ -161,21 +183,51 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // ═══════════════════════════════════════════════════════════
 
     let messages: Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [];
-    // Use system_prompt_override if provided (training eval), otherwise use agent config
-    const effectiveSystemPrompt = p.system_prompt_override || config.system_prompt;
+
+    // ── Phase 0 Security: Sanitize all inputs ──
+    // Defends against ASCII smuggling, hidden prompt injection, Unicode tag attacks
+    const safeInput = sanitizeUnicode(p.input);
+    const safeHistory = (p.history || []).map(msg => ({
+      role: msg.role,
+      content: sanitizeUnicode(msg.content),
+    }));
+
+    // ── Phase 0 Security: Validate system prompt override ──
+    const MAX_SYSTEM_PROMPT_OVERRIDE_CHARS = 50_000;
+    let effectiveSystemPrompt = config.system_prompt;
+    if (p.system_prompt_override) {
+      if (p.system_prompt_override.length > MAX_SYSTEM_PROMPT_OVERRIDE_CHARS) {
+        throw new NonRetryableError(
+          `system_prompt_override exceeds ${MAX_SYSTEM_PROMPT_OVERRIDE_CHARS} char limit (got ${p.system_prompt_override.length})`
+        );
+      }
+      effectiveSystemPrompt = sanitizeUnicode(p.system_prompt_override);
+    }
+
     if (effectiveSystemPrompt) {
       messages.push({ role: "system", content: effectiveSystemPrompt });
     }
     if (bootstrap.reasoning_prompt) {
       messages.push({ role: "system", content: bootstrap.reasoning_prompt });
     }
-    for (const msg of p.history) {
+    for (const msg of safeHistory) {
       messages.push({ role: msg.role, content: msg.content });
     }
+
+    // ── Phase 0 Security: Validate media URLs for SSRF ──
+    if (p.media_urls?.length) {
+      for (const url of p.media_urls) {
+        const check = validateUrl(url);
+        if (!check.valid) {
+          throw new NonRetryableError(`Blocked media URL: ${check.reason}`);
+        }
+      }
+    }
+
     // Build user message — multimodal if media URLs are present (images, etc.)
     if (p.media_urls?.length) {
       const contentParts: Array<{ type: string; text?: string; image_url?: { url: string }; source?: { type: string; media_type: string; url: string } }> = [];
-      if (p.input) contentParts.push({ type: "text", text: p.input });
+      if (safeInput) contentParts.push({ type: "text", text: safeInput });
       for (let i = 0; i < p.media_urls.length; i++) {
         const url = p.media_urls[i];
         const mimeType = p.media_types?.[i] || "";
@@ -188,7 +240,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       }
       messages.push({ role: "user", content: contentParts as any });
     } else {
-      messages.push({ role: "user", content: p.input });
+      messages.push({ role: "user", content: safeInput });
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -197,6 +249,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 
     let totalCost = 0;
     let totalToolCalls = 0;
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
     let finalOutput = "";
     const startTime = Date.now();
     const turnRecords: Array<{
@@ -235,7 +289,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN || "",
         } as any);
 
-        const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
+        const { selectToolsForQuery } = await import("./runtime/tools");
+        const allToolDefs = getToolDefinitions(config.tools, config.blocked_tools);
+
+        // Progressive tool discovery: only send relevant tools per turn
+        // Build context from last 3 messages + current input
+        const recentContext = messages.slice(-3).map(m => m.content || "").join(" ");
+        const toolDefs = selectToolsForQuery(allToolDefs, p.input, recentContext);
+
         const response = await callLLM(
           { AI: this.env.AI, CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID, AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN, CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN } as any,
           messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
@@ -254,6 +315,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       });
 
       totalCost += llm.cost_usd;
+      totalInputTokens += llm.input_tokens;
+      totalOutputTokens += llm.output_tokens;
 
       // ── Thinking trace (only when LLM is reasoning before tool calls) ──
       if (llm.content && llm.tool_calls.length > 0) {
@@ -290,13 +353,48 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // ── PARALLEL TOOL EXECUTION ──
       // Emit individual tool_call events (not plural) so frontend shows each tool card
       for (const tc of llm.tool_calls) {
+        // Include args preview so UI can show what was searched/executed
+        let argsPreview = "";
+        try {
+          const parsed = JSON.parse(tc.arguments || "{}");
+          argsPreview = parsed.query || parsed.code?.slice(0, 120) || parsed.url || parsed.path || parsed.input?.slice(0, 120) || "";
+        } catch {}
         await this.emit(p.progress_key, {
           type: "tool_call", name: tc.name, tool_call_id: tc.id, turn,
+          args_preview: argsPreview,
         });
       }
 
+      // Handle discover-tools calls locally (no need for external execution)
+      const discoverCalls = llm.tool_calls.filter(tc => tc.name === "discover-tools");
+      if (discoverCalls.length > 0) {
+        const { discoverTools, getToolDefinitions: gtd } = await import("./runtime/tools");
+        const allTools = gtd(config.tools, config.blocked_tools);
+        for (const dc of discoverCalls) {
+          const query = JSON.parse(dc.arguments || "{}").query || "";
+          const discovered = discoverTools(allTools, query);
+          const resultText = discovered.tools.length > 0
+            ? `Found ${discovered.tools.length} tools: ${discovered.tools.join(", ")}. These tools are now available for your next action.`
+            : "No matching tools found. Try a different description.";
+          messages.push({ role: "assistant", content: llm.content || "", tool_calls: [dc] });
+          messages.push({ role: "tool", tool_call_id: dc.id, name: dc.name, content: resultText });
+          await this.emit(p.progress_key, {
+            type: "tool_result", name: "discover-tools", tool_call_id: dc.id,
+            result: resultText, latency_ms: 0, cost_usd: 0,
+          });
+        }
+        // If discover-tools was the only call, continue to next turn
+        if (llm.tool_calls.every(tc => tc.name === "discover-tools")) {
+          totalToolCalls += discoverCalls.length;
+          continue;
+        }
+      }
+
+      // Filter out discover-tools from actual execution
+      const executableCalls = llm.tool_calls.filter(tc => tc.name !== "discover-tools");
+
       const toolResultEntries = await Promise.all(
-        llm.tool_calls.map((tc, i) =>
+        executableCalls.map((tc, i) =>
           step.do(`tool-${turn}-${i}-${tc.name}`, {
             retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
             timeout: "5 minutes",
@@ -342,26 +440,64 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         )
       );
 
-      totalToolCalls += llm.tool_calls.length;
+      totalToolCalls += executableCalls.length + discoverCalls.length;
 
       // Accumulate tool costs (was missing — caused silent zero billing for tools)
       for (const tr of toolResultEntries) {
         totalCost += tr.cost_usd || 0;
       }
 
-      // Emit tool results
-      for (const tr of toolResultEntries) {
+      // Emit tool results + file_change events for write-file/edit-file
+      for (let i = 0; i < toolResultEntries.length; i++) {
+        const tr = toolResultEntries[i];
         await this.emit(p.progress_key, {
           type: "tool_result", name: tr.name, tool_call_id: tr.tool_call_id,
           result: (tr.result || "").slice(0, 3000),
           error: tr.error, latency_ms: tr.latency_ms,
+          cost_usd: tr.cost_usd || 0,
         });
+
+        // Emit file_change events for file-writing tools so UI can show code diffs
+        if (!tr.error && (tr.name === "write-file" || tr.name === "edit-file")) {
+          try {
+            const tc = executableCalls[i];
+            const tcArgs = JSON.parse(tc?.arguments || "{}");
+            const filePath = tcArgs.path || "";
+            const ext = filePath.split(".").pop()?.toLowerCase() || "";
+            const lang = { ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", py: "python", json: "json", html: "html", css: "css", md: "markdown", sql: "sql", sh: "bash", yaml: "yaml", yml: "yaml" }[ext] || ext;
+
+            if (tr.name === "write-file") {
+              const content = tcArgs.content || "";
+              await this.emit(p.progress_key, {
+                type: "file_change",
+                change_type: "create",
+                path: filePath,
+                language: lang,
+                content: content.slice(0, 10000), // Cap at 10KB for streaming
+                size: content.length,
+                tool_call_id: tr.tool_call_id,
+              });
+            } else if (tr.name === "edit-file") {
+              await this.emit(p.progress_key, {
+                type: "file_change",
+                change_type: "edit",
+                path: filePath,
+                language: lang,
+                old_text: (tcArgs.old_text || tcArgs.old_string || "").slice(0, 5000),
+                new_text: (tcArgs.new_text || tcArgs.new_string || "").slice(0, 5000),
+                tool_call_id: tr.tool_call_id,
+              });
+            }
+          } catch { /* non-critical — don't fail tool processing for file events */ }
+        }
       }
 
       // ── Build messages for next turn ──
+      // Use executableCalls (not llm.tool_calls) to avoid double-adding discover-tools
+      // which was already pushed to messages in the discover-tools handler above.
       messages.push({
         role: "assistant", content: llm.content || "",
-        tool_calls: llm.tool_calls,
+        tool_calls: executableCalls,
       });
       for (const tr of toolResultEntries) {
         messages.push({
@@ -374,7 +510,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       await this.emit(p.progress_key, {
         type: "turn_end", turn, model: llm.model, cost_usd: llm.cost_usd,
         tokens: llm.input_tokens + llm.output_tokens, done: false,
-        tool_calls: llm.tool_calls.length,
+        tool_calls: executableCalls.length,
       });
 
       // Accumulate turn record for telemetry
@@ -385,9 +521,19 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         input_tokens: llm.input_tokens,
         output_tokens: llm.output_tokens,
         cost_usd: llm.cost_usd + toolResultEntries.reduce((s, t) => s + (t.cost_usd || 0), 0),
-        latency_ms: 0, // TODO: measure per-turn wall clock
-        tool_calls: llm.tool_calls.map(tc => tc.name),
-        tool_results: toolResultEntries.map(tr => ({ name: tr.name, latency_ms: tr.latency_ms || 0, error: tr.error })),
+        latency_ms: 0,
+        tool_calls: executableCalls.map(tc => {
+          let args: Record<string, unknown> = {};
+          try { args = JSON.parse(tc.arguments || "{}"); } catch {}
+          return { name: tc.name, arguments: args };
+        }),
+        tool_results: toolResultEntries.map(tr => ({
+          name: tr.name,
+          result: (tr.result || "").slice(0, 2000),
+          latency_ms: tr.latency_ms || 0,
+          cost_usd: tr.cost_usd || 0,
+          error: tr.error,
+        })),
         errors: toolResultEntries.filter(tr => tr.error).map(tr => `${tr.name}: ${tr.error}`),
       });
 
@@ -439,6 +585,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       turns: totalToolCalls > 0 ? Math.ceil(totalToolCalls) : 1,
       tool_calls: totalToolCalls,
       cost_usd: Math.round(totalCost * 1_000_000) / 1_000_000,
+      input_tokens: totalInputTokens,
+      output_tokens: totalOutputTokens,
       session_id: sessionId,
       trace_id: traceId,
     };

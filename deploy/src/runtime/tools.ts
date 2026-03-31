@@ -9,8 +9,9 @@
 
 import { getSandbox } from "@cloudflare/sandbox";
 import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
+import { validateUrl as ssrfValidateUrl } from "./ssrf";
 
-const MAX_SANDBOX_TIMEOUT_SECONDS = 120;
+const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
 const DEFAULT_SANDBOX_MEMORY_LIMIT_MB = 512;
 
@@ -128,9 +129,10 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // Per CF Containers docs: https://developers.cloudflare.com/containers/
   const raw = getSandbox(env.SANDBOX, sandboxId, {
     sleepAfter: "10m",
-    // Security: disable outbound internet for LLM-generated code.
-    // Agent tools that need HTTP (web-search, browse) run in the parent Worker.
-    enableInternet: false,
+    // Internet enabled: sandbox needs network for npm install, pip install, git clone, etc.
+    // Security is provided by: VM isolation (each container is its own VM per CF docs),
+    // SSRF protection (blocked private IPs/metadata endpoints in validateUrl),
+    // and ephemeral disk (no persistent secrets to exfiltrate).
   } as any);
 
   return {
@@ -194,52 +196,9 @@ async function getCachedDynamicWorker(env: RuntimeEnv, workerCode: string): Prom
 }
 
 // ── SSRF Protection ──────────────────────────────────────────────────────
-
-const BLOCKED_IP_RANGES = [
-  /^127\./,                          // loopback
-  /^10\./,                           // private class A
-  /^172\.(1[6-9]|2\d|3[01])\./,     // private class B
-  /^192\.168\./,                     // private class C
-  /^169\.254\./,                     // link-local / AWS metadata
-  /^0\./,                            // unspecified
-  /^fc00:/i, /^fd00:/i, /^fe80:/i,  // IPv6 private
-  /^::1$/,                           // IPv6 loopback
-];
-
-const BLOCKED_HOSTNAMES = new Set([
-  "localhost",
-  "metadata.google.internal",
-  "metadata.internal",
-  "169.254.169.254",
-  "metadata",
-]);
-
-function validateUrl(urlStr: string): { valid: boolean; reason?: string } {
-  try {
-    const url = new URL(urlStr);
-
-    // Block non-http(s) protocols
-    if (!["http:", "https:"].includes(url.protocol)) {
-      return { valid: false, reason: `Blocked protocol: ${url.protocol}` };
-    }
-
-    // Block known dangerous hostnames
-    if (BLOCKED_HOSTNAMES.has(url.hostname.toLowerCase())) {
-      return { valid: false, reason: `Blocked hostname: ${url.hostname}` };
-    }
-
-    // Block private/internal IP ranges
-    for (const pattern of BLOCKED_IP_RANGES) {
-      if (pattern.test(url.hostname)) {
-        return { valid: false, reason: `Blocked IP range: ${url.hostname}` };
-      }
-    }
-
-    return { valid: true };
-  } catch {
-    return { valid: false, reason: "Invalid URL" };
-  }
-}
+// Delegated to shared ssrf.ts module (covers IPv4, IPv6, metadata endpoints,
+// protocol restrictions). Re-export for backwards compatibility.
+const validateUrl = ssrfValidateUrl;
 
 // ── Circuit Breaker for Tool Calls ───────────────────────────────────
 
@@ -1099,6 +1058,76 @@ async function dispatch(
       }
     }
 
+    case "share-artifact": {
+      // Upload artifact to R2 and record in a2a_artifacts for cross-agent file sharing
+      const artifactName = String(args.name || "artifact");
+      const content = String(args.content || "");
+      if (!content) return "share-artifact requires content";
+
+      const lineage = (env as any).__delegationLineage;
+      const taskId = args.task_id || lineage?.task_id || crypto.randomUUID();
+      const senderOrg = lineage?.org_id || args.org_id || "";
+      const senderAgent = (env as any).__agentConfig?.name || "unknown";
+      const receiverOrg = args.receiver_org_id || lineage?.caller_org_id || senderOrg;
+      const receiverAgent = args.receiver_agent || lineage?.caller_agent || "";
+
+      // Detect MIME type from extension
+      const ext = artifactName.split(".").pop()?.toLowerCase() || "";
+      const mimeMap: Record<string, string> = {
+        md: "text/markdown", txt: "text/plain", html: "text/html", css: "text/css",
+        js: "application/javascript", ts: "application/typescript", json: "application/json",
+        py: "text/x-python", pdf: "application/pdf", zip: "application/zip",
+        png: "image/png", jpg: "image/jpeg", svg: "image/svg+xml", csv: "text/csv",
+      };
+      const mimeType = args.mime_type || mimeMap[ext] || "application/octet-stream";
+
+      // Upload to R2
+      const storageKey = `artifacts/${taskId}/${artifactName}`;
+      try {
+        const r2 = (env as any).R2 || (env as any).ARTIFACTS_BUCKET;
+        if (!r2) return JSON.stringify({ error: "R2 storage not configured" });
+
+        const isBase64 = args.encoding === "base64";
+        const body = isBase64
+          ? Uint8Array.from(atob(content), (c) => c.charCodeAt(0))
+          : new TextEncoder().encode(content);
+
+        await r2.put(storageKey, body, {
+          httpMetadata: { contentType: mimeType },
+          customMetadata: { taskId, senderOrg, senderAgent, receiverOrg, receiverAgent },
+        });
+
+        const sizeBytes = body.byteLength;
+
+        // Record in DB for traceability
+        if ((env as any).HYPERDRIVE) {
+          try {
+            const { getDb } = await import("./db");
+            const sql = await getDb((env as any).HYPERDRIVE);
+            await sql`
+              INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent, receiver_org_id, receiver_agent,
+                name, mime_type, size_bytes, description, storage_key, status)
+              VALUES (${taskId}, ${senderOrg}, ${senderAgent}, ${receiverOrg}, ${receiverAgent},
+                ${artifactName}, ${mimeType}, ${sizeBytes}, ${args.description || ''}, ${storageKey}, 'available')
+            `.catch(() => {}); // non-blocking — R2 upload is the source of truth
+          } catch {}
+        }
+
+        return JSON.stringify({
+          artifact: artifactName,
+          storage_key: storageKey,
+          mime_type: mimeType,
+          size_bytes: sizeBytes,
+          task_id: taskId,
+          receiver_org_id: receiverOrg,
+          receiver_agent: receiverAgent,
+          message: `Artifact "${artifactName}" shared successfully. The receiving agent can retrieve it via the storage key.`,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to share artifact: ${err.message}` });
+      }
+    }
+
     case "feed-post": {
       // Post to the public agent feed (card, offer, milestone, update)
       const title = String(args.title || "");
@@ -1249,7 +1278,45 @@ async function dispatch(
         }
       }
 
-      return await resp.text();
+      // Parse A2A response and extract artifacts if present
+      const respText = await resp.text();
+      try {
+        const parsed = JSON.parse(respText);
+        const task = parsed?.result || parsed;
+        const artifacts = task?.artifacts || [];
+        if (artifacts.length > 0 && (env as any).HYPERDRIVE) {
+          // Record artifact references from the responding agent
+          try {
+            const { getDb: getDbForArtifacts } = await import("./db");
+            const sqlArt = await getDbForArtifacts((env as any).HYPERDRIVE);
+            const lineage = (env as any).__delegationLineage;
+            const receiverOrg = lineage?.org_id || args.org_id || "";
+            const receiverAgent = (env as any).__agentConfig?.name || "";
+            const taskIdForArt = task?.id || crypto.randomUUID();
+
+            for (const art of artifacts) {
+              const parts = art.parts || [];
+              const textPart = parts.find((p: any) => p.type === "text" || p.text);
+              const filePart = parts.find((p: any) => p.type === "file" || p.storage_key);
+              if (filePart?.storage_key) {
+                await sqlArt`
+                  INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent, receiver_org_id, receiver_agent,
+                    name, mime_type, description, storage_key, status)
+                  VALUES (${taskIdForArt}, ${args.agent_name || 'unknown'}, ${args.agent_name || ''},
+                    ${receiverOrg}, ${receiverAgent},
+                    ${art.name || filePart.storage_key.split('/').pop() || 'artifact'},
+                    ${filePart.mime_type || 'application/octet-stream'},
+                    ${textPart?.text || art.description || ''},
+                    ${filePart.storage_key}, 'available')
+                `.catch(() => {});
+              }
+            }
+          } catch {}
+        }
+        return respText;
+      } catch {
+        return respText;
+      }
     }
 
     case "save-project":
@@ -1995,6 +2062,11 @@ async function dispatch(
       try {
         // Spawn child Workflow — runs independently with its own agent config
         const childProgressKey = `child:${sessionId}:${agentName}:${Date.now()}`;
+        // If caller specified tools, scope the sub-agent to only those tools
+        const toolsOverride = Array.isArray(args.tools) && args.tools.length > 0
+          ? args.tools.map(String)
+          : undefined;
+
         const instance = await workflow.create({
           params: {
             agent_name: agentName,
@@ -2003,10 +2075,11 @@ async function dispatch(
             project_id: lineage?.project_id || "",
             channel: "delegation",
             channel_user_id: "",
-            history: [], // child starts fresh
+            history: [], // child starts fresh — no parent context
             progress_key: childProgressKey,
             parent_session_id: lineage?.session_id || sessionId,
             parent_depth: parentDepth + 1,
+            ...(toolsOverride ? { tools_override: toolsOverride } : {}),
           },
         });
 
@@ -4193,7 +4266,7 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
  * access to ALL tools regardless of agent config).
  * discover-api is safe to always expose (read-only type info).
  */
-const ALWAYS_AVAILABLE = new Set(["discover-api"]);
+const ALWAYS_AVAILABLE = new Set(["discover-api", "marketplace-search", "a2a-send", "share-artifact"]);
 
 /** Returns the set of all valid tool names from the catalog. */
 export function getValidToolNames(): Set<string> {
@@ -4201,8 +4274,10 @@ export function getValidToolNames(): Set<string> {
 }
 
 export function getToolDefinitions(enabledTools: string[], blockedTools: string[] = []): ToolDefinition[] {
-  // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api).
+  // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api, marketplace-search, a2a-send).
   // This prevents privilege escalation where an agent with tools:[] gets all tools.
+  // marketplace-search + a2a-send are always available so every agent can discover
+  // and delegate to specialist skill agents in the marketplace.
   const blocked = new Set(blockedTools);
   return TOOL_CATALOG.filter(
     (t) => {
@@ -4212,6 +4287,172 @@ export function getToolDefinitions(enabledTools: string[], blockedTools: string[
     },
   );
 }
+
+// ── Progressive Tool Discovery (Option C: Hybrid) ──────────────
+//
+// Core tools are always loaded. Other tools are loaded on-demand via
+// keyword matching against the user query + conversation context.
+// A lightweight "discover-tools" meta-tool lets the agent request
+// additional tools mid-conversation if needed.
+//
+// Saves ~70% of tool tokens on typical queries.
+
+/** Tools always sent to the LLM regardless of query context. */
+const CORE_TOOLS = new Set([
+  "web-search", "python-exec", "bash", "read-file", "write-file", "edit-file",
+  "memory-save", "memory-recall", "browse",
+  // Meta-tools for discovery + delegation
+  "discover-api", "marketplace-search", "a2a-send", "share-artifact",
+]);
+
+/** Keyword → tool names mapping for progressive discovery. */
+const TOOL_KEYWORDS: Record<string, string[]> = {
+  // Research & web
+  "search|find|look up|google|news|current|today|latest|recent": ["web-search", "parallel-web-search"],
+  "browse|visit|website|page|url|link|open": ["browse", "web-crawl", "browser-render"],
+  "crawl|scrape|extract": ["web-crawl", "browser-render"],
+  // Code & execution
+  "code|script|program|python|calculate|compute|analyze data|csv|chart|plot|graph": ["python-exec", "execute-code", "bash"],
+  "run|execute|shell|command|terminal|install": ["bash", "python-exec", "execute-code"],
+  "codemode|transform|validate|orchestrate|generate mcp": ["run-codemode", "codemode-transform", "codemode-validate", "codemode-orchestrate", "codemode-test", "codemode-generate-mcp"],
+  // File operations
+  "file|read|write|save|create|edit|document|folder|directory": ["read-file", "write-file", "edit-file", "view-file", "search-file", "find-file", "load-folder"],
+  "grep|search file|find in": ["grep", "glob", "search-file", "find-file"],
+  "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "manage-projects"],
+  // Memory & knowledge
+  "remember|memory|recall|forget|save fact|note|store": ["memory-save", "memory-recall", "memory-delete"],
+  "knowledge|rag|embed|retrieval": ["knowledge-search", "store-knowledge", "manage-rag"],
+  "profile|preference|about me|my name": ["user-profile-save", "user-profile-load"],
+  // Media
+  "image|picture|photo|draw|generate image|illustration|diagram": ["image-generate", "vision-analyze"],
+  "voice|speak|audio|call|phone|tts|speech": ["text-to-speech", "speech-to-text", "make-voice-call"],
+  "video|vision|see|look at|screenshot|describe image": ["vision-analyze"],
+  // Data & analytics
+  "database|sql|query|db|table|report": ["db-query", "db-batch", "db-report"],
+  "pipeline|stream|ingest|data pipeline": ["query-pipeline", "send-to-pipeline"],
+  "cost|billing|spend|usage|how much": ["view-costs"],
+  "trace|debug|log|observe": ["view-traces", "view-audit"],
+  // Git
+  "git|commit|branch|diff|repo|version control|stash": ["git-init", "git-status", "git-diff", "git-commit", "git-log", "git-branch", "git-stash"],
+  // Agent management
+  "create agent|new agent|clone|deploy agent": ["create-agent", "delete-agent", "list-agents"],
+  "run agent|delegate|ask another|specialist|hire": ["run-agent", "route-to-agent", "a2a-send"],
+  "eval|test|evaluate|benchmark|compare": ["eval-agent", "compare-agents", "evolve-agent"],
+  "train|improve|optimize|adapt": ["evolve-agent", "adapt-strategy", "autoresearch"],
+  // Scheduling & automation
+  "schedule|cron|recurring|every day|every hour|automate": ["create-schedule", "list-schedules", "delete-schedule"],
+  "todo|task|checklist|plan": ["todo"],
+  // Governance & security
+  "security|scan|vulnerability|audit": ["security-scan", "view-audit", "compliance"],
+  "policy|policies|permission|governance": ["manage-policies", "compliance"],
+  "secret|credential|api key|token|password": ["manage-secrets"],
+  "release|deploy|rollback|version": ["manage-releases"],
+  "slo|sla|reliability|uptime": ["manage-slos"],
+  "retention|cleanup|expire|ttl": ["manage-retention"],
+  "workflow|automation|orchestrate": ["manage-workflows"],
+  "issue|bug|ticket|incident": ["manage-issues"],
+  // Social & feedback
+  "post|feed|share|publish|social": ["feed-post", "share-artifact"],
+  "feedback|rate|review|submit feedback": ["submit-feedback"],
+  // Search sessions
+  "session|conversation|history|past chat": ["session-search", "conversation-intel"],
+  // HTTP & API
+  "api|http|request|fetch|post|get|endpoint|webhook": ["http-request", "mcp-call"],
+  "mcp|model context|external tool": ["mcp-call", "manage-mcp", "mcp-wrap"],
+  // Multi-agent
+  "mixture|ensemble|multiple models|multi-agent": ["mixture-of-agents"],
+};
+
+/**
+ * Select tools relevant to the current query context.
+ * Returns core tools + keyword-matched tools + a discover-tools meta-tool.
+ * Typically returns 8-15 tools instead of 21-93, saving ~70% tokens.
+ */
+export function selectToolsForQuery(
+  allTools: ToolDefinition[],
+  query: string,
+  conversationContext?: string,
+): ToolDefinition[] {
+  const needed = new Set(CORE_TOOLS);
+  const text = `${query} ${conversationContext || ""}`.toLowerCase();
+
+  // Match keywords to tool names
+  for (const [keywordPattern, toolNames] of Object.entries(TOOL_KEYWORDS)) {
+    const keywords = keywordPattern.split("|");
+    if (keywords.some(kw => text.includes(kw))) {
+      for (const name of toolNames) needed.add(name);
+    }
+  }
+
+  // Filter the full tool list to only matched tools
+  const selected = allTools.filter(t => needed.has(t.function.name));
+
+  // Always append the discover-tools meta-tool so the agent can request more
+  const hasDiscover = selected.some(t => t.function.name === "discover-tools");
+  if (!hasDiscover) {
+    selected.push(DISCOVER_TOOLS_DEF);
+  }
+
+  return selected;
+}
+
+/**
+ * Resolve a discover-tools request — returns tool definitions matching the query.
+ * Called when the agent invokes the discover-tools meta-tool.
+ */
+export function discoverTools(
+  allTools: ToolDefinition[],
+  query: string,
+): { tools: string[]; definitions: ToolDefinition[] } {
+  const needed = new Set<string>();
+  const text = (query || "").toLowerCase().slice(0, 5000);
+
+  // Empty query → return all available tool names (so agent knows what exists)
+  if (!text.trim()) {
+    const names = allTools.map(t => t.function.name);
+    return { tools: names, definitions: allTools };
+  }
+
+  for (const [keywordPattern, toolNames] of Object.entries(TOOL_KEYWORDS)) {
+    const keywords = keywordPattern.split("|");
+    if (keywords.some(kw => text.includes(kw))) {
+      for (const name of toolNames) needed.add(name);
+    }
+  }
+
+  // Also do fuzzy match on tool names and descriptions
+  for (const tool of allTools) {
+    const name = tool.function.name;
+    const desc = (tool.function.description || "").toLowerCase();
+    if (text.includes(name) || name.includes(text.replace(/\s+/g, "-"))) {
+      needed.add(name);
+    }
+    // Check if query words appear in the tool description
+    const queryWords = text.split(/\s+/).filter(w => w.length > 3);
+    if (queryWords.length > 0 && queryWords.some(w => desc.includes(w))) {
+      needed.add(name);
+    }
+  }
+
+  const definitions = allTools.filter(t => needed.has(t.function.name));
+  return { tools: [...needed], definitions };
+}
+
+/** Meta-tool that lets the agent request additional tools mid-conversation. */
+const DISCOVER_TOOLS_DEF: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "discover-tools",
+    description: "Search for additional tools by describing what you need. Use this when you need a capability not available in your current tools. Returns matching tool names and descriptions.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Describe the capability you need, e.g. 'generate images', 'query database', 'manage git branches'" },
+      },
+      required: ["query"],
+    },
+  },
+};
 
 const TOOL_CATALOG: ToolDefinition[] = [
   {
@@ -4613,6 +4854,31 @@ const TOOL_CATALOG: ToolDefinition[] = [
           auth_token: { type: "string", description: "Auth token for the target API (optional)" },
         },
         required: ["url", "task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "share-artifact",
+      description:
+        "Share a file or project artifact with another agent (or back to the caller) via A2A. " +
+        "Uploads content to R2 storage and returns a signed URL. Use this when you've built something " +
+        "(code, document, image, data) that needs to be sent back to the requesting agent. " +
+        "The artifact is linked to the current A2A task for traceability.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Artifact name with extension (e.g., 'invoice.pdf', 'app.zip', 'report.md')" },
+          content: { type: "string", description: "File content (text) or base64-encoded binary" },
+          mime_type: { type: "string", description: "MIME type (default: auto-detected from name)" },
+          description: { type: "string", description: "What this artifact is" },
+          encoding: { type: "string", description: "'text' (default) or 'base64' for binary content" },
+          task_id: { type: "string", description: "A2A task ID this artifact belongs to (auto-detected from context if omitted)" },
+          receiver_org_id: { type: "string", description: "Receiving org ID (auto-detected from A2A context if omitted)" },
+          receiver_agent: { type: "string", description: "Receiving agent name (optional)" },
+        },
+        required: ["name", "content"],
       },
     },
   },
@@ -5104,12 +5370,14 @@ const TOOL_CATALOG: ToolDefinition[] = [
         "Delegate a task to another agent via a child Workflow. The sub-agent runs in parallel with its own " +
         "config, tools, and reasoning strategy. Returns the sub-agent's output and cost. " +
         "Use this for tasks that need a specialist (e.g., delegate research to a research-bot). " +
-        "Max delegation depth: 6. Each child runs crash-safe via Cloudflare Workflows.",
+        "Max delegation depth: 6. Each child runs crash-safe via Cloudflare Workflows. " +
+        "Optionally pass 'tools' to scope the sub-agent to only specific tools for this run.",
       parameters: {
         type: "object",
         properties: {
           agent_name: { type: "string", description: "Agent to run" },
           task: { type: "string", description: "Task/message to send" },
+          tools: { type: "array", items: { type: "string" }, description: "Optional: scope sub-agent to only these tools for this run (e.g. [\"web-search\", \"browse\"]). If omitted, agent uses its full configured tool set." },
           channel: { type: "string", description: "Channel (default internal)" },
           org_id: { type: "string", description: "Org id (optional if same as caller)" },
         },

@@ -52,10 +52,14 @@ export const apiKeyRateLimitMiddleware = createMiddleware<{
   if (!c.req.path.startsWith("/v1/")) return next();
 
   const user = c.get("user");
-  if (!user || user.auth_method !== "api_key" || !user.user_id) return next();
+  if (!user || !user.user_id) return next();
 
-  // Use user_id + org_id as rate limit key (proxy for api_key identity)
-  const rateKey = `${user.org_id}:${user.user_id}`;
+  // Rate limit API key and end-user token requests (both have rateLimitRpm/Rpd)
+  // Portal JWT users are rate-limited by the global middleware, not here
+  if (user.auth_method !== "api_key" && user.auth_method !== "end_user_token") return next();
+
+  // Use user_id + org_id + auth_method as rate limit key
+  const rateKey = `${user.org_id}:${user.user_id}:${user.auth_method}`;
 
   const minBucket = getMinuteBucket();
   const dayBucket = getDayBucket();
