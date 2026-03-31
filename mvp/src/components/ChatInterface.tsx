@@ -4,6 +4,7 @@ import {
   Clock, Zap, Bot, Copy, Check, RefreshCw, Image as ImageIcon, Paperclip,
   X, FileText, FolderOpen, Plus, FolderClosed,
   DollarSign, Layers, ShieldAlert, ShieldOff, Users,
+  ThumbsUp, ThumbsDown, Download, Slash,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -272,8 +273,10 @@ function SessionSummary({ meta }: { meta: SessionMeta }) {
 // ── Message Actions (hover bar) ─────────────────────────────
 
 function MessageActions({ msg, onRetry }: { msg: ChatMessage; onRetry?: (id: string) => void }) {
+  const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
+
   return (
-    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity mt-1 px-1">
+    <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity mt-1 px-1">
       <CopyButton text={msg.content} />
       {onRetry && msg.role === "assistant" && (
         <button
@@ -284,8 +287,93 @@ function MessageActions({ msg, onRetry }: { msg: ChatMessage; onRetry?: (id: str
           <RefreshCw size={12} className="text-text-muted" />
         </button>
       )}
+      {/* Thumbs up/down feedback */}
+      {msg.role === "assistant" && (
+        <>
+          <button
+            onClick={() => setFeedback(f => f === "up" ? null : "up")}
+            className={`p-1 rounded transition-colors ${feedback === "up" ? "bg-success-light text-success" : "hover:bg-surface-alt text-text-muted"}`}
+            title="Good response"
+          >
+            <ThumbsUp size={11} />
+          </button>
+          <button
+            onClick={() => setFeedback(f => f === "down" ? null : "down")}
+            className={`p-1 rounded transition-colors ${feedback === "down" ? "bg-danger-light text-danger" : "hover:bg-surface-alt text-text-muted"}`}
+            title="Poor response"
+          >
+            <ThumbsDown size={11} />
+          </button>
+        </>
+      )}
     </div>
   );
+}
+
+// ── Slash Command Palette ──────────────────────────────────
+
+const SLASH_COMMANDS = [
+  { name: "batch", description: "Decompose & execute tasks in parallel", icon: "⚡" },
+  { name: "review", description: "Three-lens code review (reuse, quality, efficiency)", icon: "🔍" },
+  { name: "debug", description: "Diagnose agent issues & errors", icon: "🔧" },
+  { name: "verify", description: "Run tests to verify a change works", icon: "✅" },
+  { name: "remember", description: "Curate agent memory (dedup, promote, clean)", icon: "🧠" },
+  { name: "skillify", description: "Extract a process into a reusable skill", icon: "📝" },
+  { name: "schedule", description: "Create a recurring agent task", icon: "📅" },
+  { name: "docs", description: "Load relevant documentation for context", icon: "📚" },
+];
+
+function SlashCommandPalette({ query, onSelect, visible }: {
+  query: string;
+  onSelect: (cmd: string) => void;
+  visible: boolean;
+}) {
+  if (!visible) return null;
+
+  const filtered = query
+    ? SLASH_COMMANDS.filter(c => c.name.includes(query.toLowerCase()))
+    : SLASH_COMMANDS;
+
+  if (filtered.length === 0) return null;
+
+  return (
+    <div className="absolute bottom-full left-0 right-0 mb-1 mx-4 bg-surface border border-border rounded-xl shadow-lg overflow-hidden z-20 animate-[fadeInUp_100ms_ease-out]">
+      <div className="px-3 py-1.5 border-b border-border/50">
+        <span className="text-[10px] font-medium text-text-muted uppercase tracking-wide">Skills</span>
+      </div>
+      <div className="max-h-64 overflow-y-auto">
+        {filtered.map(cmd => (
+          <button
+            key={cmd.name}
+            onClick={() => onSelect(cmd.name)}
+            className="w-full flex items-center gap-3 px-3 py-2 hover:bg-surface-alt transition-colors text-left"
+          >
+            <span className="text-base">{cmd.icon}</span>
+            <div className="flex-1 min-w-0">
+              <span className="text-sm font-medium text-text">/{cmd.name}</span>
+              <span className="text-xs text-text-muted ml-2">{cmd.description}</span>
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Export Conversation ─────────────────────────────────────
+
+function exportAsMarkdown(messages: ChatMessage[]): string {
+  const lines: string[] = [];
+  for (const msg of messages) {
+    if (msg.role === "user") {
+      lines.push(`## User\n\n${msg.content}\n`);
+    } else if (msg.role === "assistant") {
+      lines.push(`## Assistant\n\n${msg.content}\n`);
+    } else if (msg.role === "tool") {
+      lines.push(`> **Tool: ${msg.toolName}** (${msg.toolStatus})\n> ${(msg.toolResult || msg.toolError || "").slice(0, 200)}\n`);
+    }
+  }
+  return lines.join("\n---\n\n");
 }
 
 // ── Markdown prose classes ──────────────────────────────────
@@ -321,6 +409,8 @@ export function ChatInterface({
   const [attachments, setAttachments] = useState<{ url: string; type: string; name: string }[]>([]);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
+  const [slashPaletteVisible, setSlashPaletteVisible] = useState(false);
+  const [slashQuery, setSlashQuery] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const [showNewProjectInput, setShowNewProjectInput] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -362,6 +452,24 @@ export function ChatInterface({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isActive]);
+
+  // ── Keyboard shortcuts ──
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const isMod = e.metaKey || e.ctrlKey;
+      // Cmd+/ → Focus textarea (start typing)
+      if (isMod && e.key === "/") {
+        e.preventDefault();
+        textareaRef.current?.focus();
+      }
+      // Escape → Close slash palette or stop generation
+      if (e.key === "Escape") {
+        if (slashPaletteVisible) setSlashPaletteVisible(false);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [slashPaletteVisible]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -565,12 +673,16 @@ export function ChatInterface({
             );
           }
 
-          // Assistant message
+          // Assistant message — with agent avatar
           const isLastMsg = idx === messages.length - 1;
           const isStreaming = isLastMsg && streaming && msg.role === "assistant";
           return (
-            <div key={msg.id} className="animate-[fadeInUp_200ms_ease-out] group">
-              <div className="min-w-0">
+            <div key={msg.id} className="animate-[fadeInUp_200ms_ease-out] group flex gap-2.5">
+              {/* Agent avatar */}
+              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/10 flex items-center justify-center shrink-0 mt-0.5">
+                <Bot size={14} className="text-primary" />
+              </div>
+              <div className="min-w-0 flex-1">
                 <div className={`px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-surface border border-border/40 text-text ${PROSE_CLASSES} ${isStreaming ? "streaming-cursor" : ""}`}>
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
@@ -620,7 +732,34 @@ export function ChatInterface({
       {sessionMeta && <SessionSummary meta={sessionMeta} />}
 
       {/* Composer — seamless with chat area */}
-      <div className="px-4 pb-2 pt-0">
+      <div className="px-4 pb-2 pt-0 relative">
+        {/* Slash command palette (positioned above input) */}
+        <SlashCommandPalette
+          query={slashQuery}
+          visible={slashPaletteVisible}
+          onSelect={(cmd) => {
+            setInput(`/${cmd} `);
+            setSlashPaletteVisible(false);
+            textareaRef.current?.focus();
+          }}
+        />
+
+        {/* Export conversation button */}
+        {messages.length > 2 && (
+          <div className="flex justify-end mb-1">
+            <button
+              onClick={() => {
+                const md = exportAsMarkdown(messages as ChatMessage[]);
+                navigator.clipboard.writeText(md);
+              }}
+              className="text-[10px] text-text-muted hover:text-text flex items-center gap-1 transition-colors"
+              title="Copy conversation as Markdown"
+            >
+              <Download size={10} /> Export
+            </button>
+          </div>
+        )}
+
         <form
           onSubmit={handleSubmit}
           className="border-t border-border/50 pt-2"
@@ -648,7 +787,17 @@ export function ChatInterface({
           <textarea
             ref={textareaRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              const v = e.target.value;
+              setInput(v);
+              // Slash command palette detection
+              if (v.startsWith("/") && !v.includes(" ")) {
+                setSlashPaletteVisible(true);
+                setSlashQuery(v.slice(1));
+              } else {
+                setSlashPaletteVisible(false);
+              }
+            }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             onDrop={handleDrop}
