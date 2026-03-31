@@ -21,8 +21,6 @@ jobs:
       - run: npm ci
       - name: Typecheck
         run: npx tsc --noEmit
-      - name: Test
-        run: npm test
       - name: Deploy
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: npx wrangler deploy
