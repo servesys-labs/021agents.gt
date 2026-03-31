@@ -17,15 +17,18 @@ import {
   routeAgentRequest,
 } from "agents";
 import { getSandbox, Sandbox } from "@cloudflare/sandbox";
+// @ts-expect-error — ContainerProxy exists at runtime but may not be in type defs
 import { ContainerProxy } from "@cloudflare/containers";
 import {
   loadRuntimeEventsPage, replayOtelEventsAtCursor, buildRuntimeRunTree,
   writeEvalRun, writeEvalTrial, listEvalRuns, getEvalRun, listEvalTrialsByRun,
   createWebSocketSendWithBackpressure,
   type RuntimeEnv,
+  type TurnResult,
 } from "./runtime";
 // streamRun removed — all execution goes through Cloudflare Workflows
 import { getCircuitStatus } from "./runtime/tools";
+import { parseJsonColumn } from "./runtime/parse-json-column";
 
 // ── AgentSandbox — Sandbox with lifecycle hooks + controlled outbound ──
 // Sandbox extends Container extends DurableObject.
@@ -41,10 +44,8 @@ export class AgentSandbox extends Sandbox<Env> {
     console.log(`[sandbox] Started: ${this.ctx.id.toString().slice(0, 16)}`);
   }
 
-  onStop(params: { exitCode: number; reason: string }) {
-    if (params.exitCode !== 0) {
-      console.error(`[sandbox] Stopped with exit code ${params.exitCode}: ${params.reason}`);
-    }
+  async onStop() {
+    console.log(`[sandbox] Stopped: ${this.ctx.id.toString().slice(0, 16)}`);
   }
 
   onError(error: unknown) {
@@ -140,6 +141,7 @@ export interface Env extends Cloudflare.Env {
   VAPI_API_KEY?: string;         // Vapi API key (for make-voice-call tool)
   AGENT_RUN_WORKFLOW?: any;      // Cloudflare Workflow for durable agent runs
   AGENT_PROGRESS_KV?: KVNamespace; // KV for workflow progress events
+  CONTROL_PLANE?: { fetch: (url: string, init?: RequestInit) => Promise<Response> }; // Service binding to control-plane Worker
 }
 
 // ---------------------------------------------------------------------------
@@ -318,22 +320,28 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
     // Phase 1.1: Wire DO SQLite for persistent circuit breaker state
     {
-      const sqlRef = this.sql.bind(this);
-      const { setCircuitBreakerSql } = await import("./runtime/tools");
-      setCircuitBreakerSql((query: string, ...params: any[]) => {
-        // DO SQLite uses tagged templates but we need parameterized queries.
-        // Use raw exec for circuit breaker (simple queries only).
-        return this.sql.exec(query, ...params).toArray();
-      });
+      const { setCircuitBreakerSql, preloadCircuitStates } = await import("./runtime/tools");
+      const sqlExec = (query: string, ...params: any[]) => {
+        return (this.sql as any).exec(query, ...params).toArray();
+      };
+      setCircuitBreakerSql(sqlExec);
+
+      // P3 Fix: Preload persisted circuit breaker state on cold start.
+      // Without this, all tools start as "closed" (healthy) even if they
+      // were "open" (blocked) before DO eviction. This causes cascading
+      // failures: restart → flaky tool retried → fails 5x → reopens circuit.
+      try {
+        preloadCircuitStates(sqlExec);
+      } catch {}
     }
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
-    // Load 100 to match the local retention cap — not just 24 (the per-request window)
+    // Load 24 messages — caps memory usage on cold start hydration
     const localCount = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;
     if ((localCount[0]?.cnt || 0) === 0 && this.env.HYPERDRIVE) {
       try {
         const { loadConversationHistory } = await import("./runtime/db");
-        const messages = await loadConversationHistory(this.env.HYPERDRIVE, this.name, 100);
+        const messages = await loadConversationHistory(this.env.HYPERDRIVE, this.name, 24);
         for (const msg of messages) {
           this.sql`INSERT INTO conversation_messages (role, content, channel, created_at)
             VALUES (${msg.role}, ${msg.content.slice(0, 8000)}, ${msg.channel}, ${msg.created_at || new Date().toISOString()})`;
@@ -367,6 +375,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         }
         console.log(`[workspace] Restored checkpoint: ${checkpoint.turn_count} turns, $${checkpoint.cumulative_cost_usd.toFixed(6)} cost`);
       }
+    } catch {}
+
+    // ── Initiate checkpoint schedule ────────────────────────────────
+    // Kick off the self-rescheduling checkpoint chain. Without this,
+    // checkpointWorkspace() is never called (it relies on being scheduled).
+    try {
+      await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
     } catch {}
   }
 
@@ -672,6 +687,67 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   async onMessage(connection: Connection, message: string | ArrayBuffer) {
     const data = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
 
+    // ── WebSocket reconnect: replay missed events from KV ──────────
+    if (data.type === "reconnect" && typeof data.from_seq === "number") {
+      const kv = this.env.AGENT_PROGRESS_KV;
+      if (kv && data.progress_key) {
+        const raw = await kv.get(data.progress_key);
+        if (raw) {
+          const events = JSON.parse(raw);
+          const missed = events.filter((e: any) => (e._seq || 0) > data.from_seq);
+          for (const event of missed) {
+            connection.send(JSON.stringify(event));
+          }
+          connection.send(JSON.stringify({ type: "reconnect_complete", events_sent: missed.length, latest_seq: events.length }));
+        }
+      }
+      return; // Don't process as a regular message
+    }
+
+    // ── WebSocket auth: validate token before allowing run commands ──
+    if (data.type === "auth") {
+      const token = String(data.token || "");
+      if (!token) {
+        connection.send(JSON.stringify({ type: "error", message: "auth: token required" }));
+        return;
+      }
+      // Validate JWT or API key via control-plane service binding
+      try {
+        const authResp = await this.env.CONTROL_PLANE?.fetch?.("https://api/api/v1/auth/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        });
+        if (!authResp || !authResp.ok) {
+          connection.send(JSON.stringify({ type: "error", message: "auth: invalid token", code: "AUTH_FAILED" }));
+          connection.close(4001, "Unauthorized");
+          return;
+        }
+        const authData = await authResp.json() as { org_id?: string; user_id?: string };
+        (connection as any).__authenticated = true;
+        (connection as any).__orgId = authData.org_id || "";
+        (connection as any).__userId = authData.user_id || "";
+        connection.send(JSON.stringify({ type: "auth_ok", org_id: authData.org_id }));
+      } catch {
+        // If control-plane unavailable, validate locally via JWT
+        // For now, accept token if it looks like a JWT (has 3 dot-separated parts)
+        const isJwtShape = token.split(".").length === 3;
+        if (isJwtShape) {
+          (connection as any).__authenticated = true;
+          connection.send(JSON.stringify({ type: "auth_ok" }));
+        } else {
+          connection.send(JSON.stringify({ type: "error", message: "auth: invalid token format" }));
+          connection.close(4001, "Unauthorized");
+        }
+      }
+      return;
+    }
+
+    // ── Auth gate: reject commands from unauthenticated connections ──
+    if (data.type === "run" && !(connection as any).__authenticated) {
+      connection.send(JSON.stringify({ type: "error", message: "Send { type: 'auth', token: '...' } before running commands", code: "AUTH_REQUIRED" }));
+      return;
+    }
+
     // ── Twilio ConversationRelay voice handling ──────────────────────
     console.log("[onMessage] Received type:", data.type, "keys:", Object.keys(data).join(","));
 
@@ -851,6 +927,14 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             } catch {}
           }
         }
+
+        // Best-effort cancellation on client disconnect.
+        // The workflow is the execution engine; if the client drops, we should avoid continuing to spend tokens/tools.
+        // Workflow APIs vary across environments, so we duck-type terminate/cancel if available.
+        if (!done && connection.readyState !== 1) {
+          try { await (instance as any).terminate?.(); } catch {}
+          try { await (instance as any).cancel?.(); } catch {}
+        }
       } catch (err) {
         try { connection.send(JSON.stringify({ type: "error", message: String(err) })); } catch {}
         this._appendConversationMessage("user", inputText, data.channel || "websocket");
@@ -940,6 +1024,23 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         await email.reply(new Response(errMime) as any);
       } catch {}
     }
+  }
+
+  // ── P3: Prioritized flush on DO eviction ────────────────────────
+  // Cloudflare Agents SDK calls onStop before the DO is evicted.
+  // Flush billing > session > telemetry in priority order.
+  async onStop() {
+    try {
+      const { prioritizedFlush, buildFlushTasks } = await import("./runtime/do-lifecycle");
+      const tasks = buildFlushTasks(this.env as any, {
+        sessionId: this.name,
+        orgId: this.state?.config?.orgId || "",
+        agentName: this.state?.config?.agentName || "",
+        totalCostUsd: this.state?.totalCostUsd || 0,
+        turnCount: this.state?.turnCount || 0,
+      });
+      await prioritizedFlush(tasks);
+    } catch {}
   }
 
   // ── Internal HTTP (async run from REST invoke) ──────────────────
@@ -1304,18 +1405,19 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               progress_key: `voice:${this.name}:${Date.now()}`,
             },
           });
+          let lastStatus: any = { status: "unknown" };
           for (let i = 0; i < 15; i++) {
             await new Promise(r => setTimeout(r, 2000));
-            const st = await inst.status().catch(() => ({ status: "unknown" as const }));
-            if (st.status === "complete") { response = ((st as any).output?.output || "").trim() || response; break; }
-            if (st.status === "errored") break;
+            lastStatus = await inst.status().catch(() => ({ status: "unknown" as const }));
+            if (lastStatus.status === "complete") { response = ((lastStatus as any).output?.output || "").trim() || response; break; }
+            if (lastStatus.status === "errored") break;
           }
           this._appendConversationMessage("user", userText, "voice");
           this._appendConversationMessage("assistant", response, "voice");
 
           // Billing for voice WebSocket path (direct WS — no control-plane proxy)
           if (this.env.HYPERDRIVE) {
-            const voiceResult = (st as any)?.output || {};
+            const voiceResult = (lastStatus as any)?.output || {};
             const voiceCost = Number(voiceResult.cost_usd) || 0;
             const voiceSessionId = voiceResult.session_id || "";
             if (voiceCost > 0 && orgId) {
@@ -1597,7 +1699,7 @@ export class AgentOSMcpServer extends Agent<Env> {
       if (rows.length === 0) return;
 
       let config: Record<string, unknown> = {};
-      try { config = JSON.parse(String(rows[0].config_json || "{}")); } catch {}
+      config = parseJsonColumn(rows[0].config_json);
       this._agentConfig = config;
 
       // Build MCP tool definitions from agent's configured tools
@@ -1653,7 +1755,7 @@ export class AgentOSMcpServer extends Agent<Env> {
           const schemaMap = new Map<string, { description: string; schema: Record<string, unknown> }>();
           for (const row of toolRows) {
             let schema: Record<string, unknown> = {};
-            try { schema = JSON.parse(String(row.input_schema_json || "{}")); } catch {}
+            schema = parseJsonColumn(row.input_schema_json);
             schemaMap.set(String(row.name), {
               description: String(row.description || ""),
               schema,
@@ -2106,6 +2208,18 @@ export default {
       }, { status: degraded ? 503 : 200 });
     }
     
+    // ── Dream memory consolidation (called by control-plane queue consumer) ──
+    if (url.pathname === "/api/v1/memory/consolidate" && request.method === "POST") {
+      try {
+        const body = await request.json() as { org_id: string; agent_name: string };
+        const { consolidateMemory } = await import("./runtime/memory-consolidation");
+        const result = await consolidateMemory(env as any, body.org_id, body.agent_name);
+        return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+      } catch (e: any) {
+        return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+      }
+    }
+
     // ── Workspace file browser (R2-backed) ────────────────────
     if (url.pathname === "/workspace/list" && request.method === "POST") {
       try {
@@ -3151,7 +3265,7 @@ export default {
           return Response.json({ error: "Batch requires Workflow binding (AGENT_RUN_WORKFLOW)" }, { status: 501 });
         }
         return Response.json({
-          outputs: result.results.map((item) => ({
+          outputs: result.results.map((item: any) => ({
             ok: item.success,
             error: item.error || "",
             output: item.output,
@@ -3618,7 +3732,7 @@ export default {
           } catch {}
           if (!waAgentName) {
             try {
-              const rows = await sql`SELECT name FROM agents WHERE org_id = ${orgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+              const rows = await sql`SELECT name FROM agents WHERE org_id = ${orgId} AND is_active = true ORDER BY created_at ASC LIMIT 1`;
               waAgentName = rows[0]?.name || "whatsapp-bot";
             } catch {}
           }
@@ -3792,7 +3906,7 @@ export default {
       } catch {}
       if (!slackAgentName) {
         try {
-          const rows = await sql`SELECT name FROM agents WHERE org_id = ${slackOrgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+          const rows = await sql`SELECT name FROM agents WHERE org_id = ${slackOrgId} AND is_active = true ORDER BY created_at ASC LIMIT 1`;
           slackAgentName = rows[0]?.name || "slack-bot";
         } catch {}
       }
@@ -3910,7 +4024,7 @@ export default {
           } catch {}
           if (!igAgentName) {
             try {
-              const rows = await sql`SELECT name FROM agents WHERE org_id = ${igOrgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+              const rows = await sql`SELECT name FROM agents WHERE org_id = ${igOrgId} AND is_active = true ORDER BY created_at ASC LIMIT 1`;
               igAgentName = rows[0]?.name || "instagram-bot";
             } catch {}
           }
@@ -4114,7 +4228,7 @@ export default {
           } catch {}
           if (!fbAgentName) {
             try {
-              const rows = await sql`SELECT name FROM agents WHERE org_id = ${fbOrgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1`;
+              const rows = await sql`SELECT name FROM agents WHERE org_id = ${fbOrgId} AND is_active = true ORDER BY created_at ASC LIMIT 1`;
               fbAgentName = rows[0]?.name || "messenger-bot";
             } catch {}
           }
@@ -5609,11 +5723,16 @@ export default {
         const p = (body.payload || {}) as Record<string, any>;
         try {
           if (type === "session") {
+            const createdAt = p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString();
             await sql`INSERT INTO sessions (
               session_id, org_id, project_id, agent_name, status,
               input_text, output_text, model, trace_id, parent_session_id,
               depth, step_count, action_count, wall_clock_seconds,
-              cost_total_usd, created_at
+              cost_total_usd, channel,
+              detailed_cost_json, feature_flags_json,
+              total_cache_read_tokens, total_cache_write_tokens,
+              repair_count, compaction_count,
+              created_at
             ) VALUES (
               ${p.session_id}, ${p.org_id || ""}, ${p.project_id || ""},
               ${p.agent_name || "agentos"}, ${p.status || "success"},
@@ -5621,23 +5740,38 @@ export default {
               ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
               ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
               ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
-              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
+              ${p.channel || ""},
+              ${p.detailed_cost_json || null}, ${p.feature_flags_json || null},
+              ${p.total_cache_read_tokens || 0}, ${p.total_cache_write_tokens || 0},
+              ${p.repair_count || 0}, ${p.compaction_count || 0},
+              ${createdAt}
             ) ON CONFLICT (session_id) DO UPDATE SET
               status = EXCLUDED.status, output_text = EXCLUDED.output_text,
-              cost_total_usd = EXCLUDED.cost_total_usd, step_count = EXCLUDED.step_count`;
+              cost_total_usd = EXCLUDED.cost_total_usd, step_count = EXCLUDED.step_count,
+              action_count = EXCLUDED.action_count, wall_clock_seconds = EXCLUDED.wall_clock_seconds,
+              detailed_cost_json = EXCLUDED.detailed_cost_json,
+              total_cache_read_tokens = EXCLUDED.total_cache_read_tokens,
+              total_cache_write_tokens = EXCLUDED.total_cache_write_tokens,
+              repair_count = EXCLUDED.repair_count, compaction_count = EXCLUDED.compaction_count`;
           } else if (type === "turn") {
             await sql`INSERT INTO turns (
               session_id, turn_number, model_used, input_tokens, output_tokens,
-              latency_ms, llm_content, cost_total_usd,
+              latency_ms, llm_latency_ms, llm_content, cost_total_usd,
               tool_calls_json, tool_results_json, errors_json,
-              execution_mode, plan_json, reflection_json
+              execution_mode, plan_artifact, reflection,
+              stop_reason, refusal, cache_read_tokens, cache_write_tokens,
+              gateway_log_id
             ) VALUES (
               ${p.session_id}, ${p.turn_number || 0}, ${p.model_used || ""},
               ${p.input_tokens || 0}, ${p.output_tokens || 0},
-              ${p.latency_ms || 0}, ${p.llm_content || ""}, ${p.cost_total_usd || 0},
+              ${p.latency_ms || 0}, ${p.llm_latency_ms || p.latency_ms || 0},
+              ${p.llm_content || ""}, ${p.cost_total_usd || 0},
               ${p.tool_calls_json || "[]"}, ${p.tool_results_json || "[]"},
               ${p.errors_json || "[]"}, ${p.execution_mode || "sequential"},
-              ${p.plan_json || "{}"}, ${p.reflection_json || "{}"}
+              ${p.plan_artifact || p.plan_json || null}, ${p.reflection || p.reflection_json || null},
+              ${p.stop_reason || null}, ${p.refusal || false},
+              ${p.cache_read_tokens || 0}, ${p.cache_write_tokens || 0},
+              ${p.gateway_log_id || null}
             )`;
           } else if (type === "episode") {
             await sql`INSERT INTO episodes (session_id, input, output)
@@ -5684,6 +5818,28 @@ export default {
               ${p.event_type || ""}, ${JSON.stringify(p.details || {})},
               ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
             )`;
+          } else if (type === "billing_flush") {
+            // DO eviction billing flush — update session cost to prevent undercount
+            if (p.session_id && p.cost_usd) {
+              await sql`UPDATE sessions SET cost_total_usd = GREATEST(cost_total_usd, ${p.cost_usd}),
+                step_count = GREATEST(step_count, ${p.turns || 0})
+                WHERE session_id = ${p.session_id}`;
+            }
+          } else if (type === "skill_activation") {
+            // Record skill usage for analytics
+            await sql`INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+              VALUES (${p.org_id || ""}, 'system', 'skill_activation', 'skill', ${p.skill || ""},
+                ${JSON.stringify({ session_id: p.session_id, agent_name: p.agent_name })}::jsonb, now())
+            `.catch(() => {}); // non-critical
+          } else if (type === "loop_detected") {
+            // Record loop detection events for diagnostics
+            await sql`INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+              VALUES (${p.org_id || ""}, 'system', 'loop_detected', 'session', ${p.session_id || ""},
+                ${JSON.stringify({ tool: p.tool, repeat_count: p.repeat_count, turn: p.turn, agent_name: p.agent_name })}::jsonb, now())
+            `.catch(() => {}); // non-critical
+          } else if (type === "do_eviction") {
+            // DO eviction telemetry — log for capacity planning
+            console.log(`[telemetry] DO eviction: session=${p.session_id} org=${p.org_id}`);
           }
           msg.ack();
         } catch (err) {

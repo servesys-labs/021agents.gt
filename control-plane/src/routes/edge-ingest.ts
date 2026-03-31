@@ -213,11 +213,11 @@ edgeIngestRoutes.openapi(ingestTurnRoute, async (c): Promise<any> => {
     INSERT INTO turns (
       session_id, turn_number, model_used, input_tokens, output_tokens, latency_ms,
       llm_content, cost_total_usd, tool_calls_json, tool_results_json, errors_json,
-      execution_mode, plan_json, reflection_json, started_at, ended_at
+      execution_mode, plan_artifact, reflection, created_at
     ) VALUES (
       ${sessionId}, ${turnNumber}, ${modelUsed}, ${inputTokens}, ${outputTokens}, ${latencyMs},
       ${llmContent}, ${costTotalUsd}, ${toolCallsJson}, ${toolResultsJson}, ${errorsJson},
-      ${executionMode}, ${planJson}, ${reflectionJson}, ${startedAt}, ${endedAt}
+      ${executionMode}, ${planJson}, ${reflectionJson}, ${startedAt}
     )
   `;
 

@@ -43,7 +43,7 @@ deployRoutes.openapi(deployAgentRoute, async (c): Promise<any> => {
 
   // Mark active
   const now = new Date().toISOString();
-  await sql`UPDATE agents SET is_active = 1, updated_at = ${now} WHERE name = ${agentName}`;
+  await sql`UPDATE agents SET is_active = true, updated_at = ${now} WHERE name = ${agentName}`;
 
   return c.json({
     deployed: true,
@@ -79,7 +79,7 @@ deployRoutes.openapi(undeployAgentRoute, async (c): Promise<any> => {
 
   const now = new Date().toISOString();
   try {
-    await sql`UPDATE agents SET is_active = 0, updated_at = ${now} WHERE name = ${agentName}`;
+    await sql`UPDATE agents SET is_active = false, updated_at = ${now} WHERE name = ${agentName}`;
   } catch {}
 
   return c.json({ removed: true, agent: agentName });

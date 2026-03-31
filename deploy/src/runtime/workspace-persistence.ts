@@ -8,6 +8,8 @@
  * R2 is the durable backup (survives DO eviction).
  */
 
+import { parseJsonColumn } from "./parse-json-column";
+
 // ── Types ─────────────────────────────────────────────────────
 
 export interface WorkspaceFile {
@@ -91,11 +93,7 @@ export function loadCheckpointFromSQLite(
   const rows = sql`SELECT checkpoint_json FROM workspace_checkpoints
     WHERE session_id = ${sessionId} ORDER BY created_at DESC LIMIT 1`;
   if (rows.length === 0) return null;
-  try {
-    return JSON.parse(rows[0].checkpoint_json);
-  } catch {
-    return null;
-  }
+  return parseJsonColumn<WorkspaceCheckpoint | null>(rows[0].checkpoint_json, null);
 }
 
 // ── Checkpoint: R2 (durable backup) ──────────────────────────

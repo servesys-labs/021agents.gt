@@ -15,6 +15,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const batchApiRoutes = createOpenAPIRouter();
 
@@ -264,7 +265,7 @@ batchApiRoutes.openapi(listBatchesRoute, async (c): Promise<any> => {
       total_tasks: Number(r.total_tasks),
       completed_tasks: Number(r.completed_tasks),
       failed_tasks: Number(r.failed_tasks),
-      metadata: r.metadata_json ? JSON.parse(String(r.metadata_json)) : null,
+      metadata: parseJsonColumn(r.metadata_json, null),
       created_at: r.created_at,
       updated_at: r.updated_at,
       completed_at: r.completed_at || null,
@@ -359,7 +360,7 @@ batchApiRoutes.openapi(getBatchRoute, async (c): Promise<any> => {
       total_tasks: Number(batch.total_tasks),
       completed_tasks: Number(batch.completed_tasks),
       failed_tasks: Number(batch.failed_tasks),
-      metadata: batch.metadata_json ? JSON.parse(String(batch.metadata_json)) : null,
+      metadata: parseJsonColumn(batch.metadata_json, null),
       error: batch.error || null,
       created_at: batch.created_at,
       updated_at: batch.updated_at,

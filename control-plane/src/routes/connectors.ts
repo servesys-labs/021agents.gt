@@ -161,7 +161,7 @@ connectorRoutes.openapi(callToolRoute, async (c): Promise<any> => {
     const now = new Date().toISOString();
     try {
       await sql`
-        INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+        INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
         VALUES (${user.org_id}, ${user.user_id}, 'connector.tool_call', 'connector', ${toolName},
                 ${JSON.stringify({ provider: "pipedream", app, duration_ms: durationMs })}, ${now})
       `;
@@ -293,7 +293,7 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
   try {
     const nowEpoch = new Date().toISOString();
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
       VALUES (${user.org_id}, ${user.user_id}, 'connector.token_stored', 'connector', ${connectorName},
               ${JSON.stringify({ scopes, token_type: tokenType })}, ${nowEpoch})
     `;

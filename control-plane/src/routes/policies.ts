@@ -8,6 +8,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const policyRoutes = createOpenAPIRouter();
 
@@ -99,7 +100,7 @@ policyRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
       VALUES (${user.org_id}, ${user.user_id}, 'policy.create', 'policy', ${policyId}, ${JSON.stringify({ name })}, ${now})
     `;
   } catch {}
@@ -128,14 +129,10 @@ policyRoutes.openapi(getPolicyRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { policy_id: policyId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
-  const rows = await sql`SELECT * FROM policy_templates WHERE policy_id = ${policyId}`;
+  const rows = await sql`SELECT * FROM policy_templates WHERE policy_id = ${policyId} AND (org_id = ${user.org_id} OR org_id = '')`;
   if (rows.length === 0) return c.json({ error: "Policy not found" }, 404);
   const d: any = { ...rows[0] };
-  try {
-    d.policy = JSON.parse(d.policy_json || "{}");
-  } catch {
-    d.policy = {};
-  }
+  d.policy = parseJsonColumn(d.policy_json);
   delete d.policy_json;
   return c.json(d);
 });

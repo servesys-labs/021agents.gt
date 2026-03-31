@@ -10,6 +10,7 @@ import { requireScope } from "../middleware/auth";
 import { latestEvalGate, rolloutRecommendation } from "../logic/gate-pack";
 import { getThresholds } from "../logic/policies";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const releaseRoutes = createOpenAPIRouter();
 
@@ -161,7 +162,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
           ORDER BY agent_name DESC NULLS LAST LIMIT 1
         `;
         if (policyRows.length > 0) {
-          const policy = JSON.parse(String(policyRows[0].config_json || "{}"));
+          const policy = parseJsonColumn(policyRows[0].config_json);
           if (policy.override_requires_approval) {
             if (!approvedBy || approvedBy === user.user_id) {
               return c.json({
@@ -188,7 +189,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
       const now = Date.now() / 1000;
       try {
         await sql`
-          INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+          INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
           VALUES (${user.org_id}, ${user.user_id}, 'agent.promote_override', 'agent', ${agentName},
                   ${JSON.stringify({
                     from: fromChannel,
@@ -225,7 +226,7 @@ releaseRoutes.openapi(promoteRoute, async (c): Promise<any> => {
   // Audit
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
       VALUES (${user.org_id}, ${user.user_id}, 'agent.promoted', 'agent', ${agentName},
               ${JSON.stringify({ from: fromChannel, to: toChannel, version })}, ${now})
     `;
@@ -258,7 +259,7 @@ releaseRoutes.openapi(getCanaryRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
   `;
   if (rows.length === 0) return c.json({ canary: null });
   return c.json({ canary: rows[0] });
@@ -309,7 +310,7 @@ releaseRoutes.openapi(createCanaryRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE canary_splits
-    SET is_active = 0
+    SET is_active = false
     WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
   `;
   await sql`
@@ -349,7 +350,7 @@ releaseRoutes.openapi(deleteCanaryRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
     UPDATE canary_splits
-    SET is_active = 0
+    SET is_active = false
     WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
   `;
   return c.json({ removed: true });
@@ -382,7 +383,7 @@ releaseRoutes.openapi(validateCanaryRoute, async (c): Promise<any> => {
   // Get active canary split
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -504,7 +505,7 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   // Get active canary split before deactivating
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -516,7 +517,7 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   // Deactivate canary split
   await sql`
     UPDATE canary_splits
-    SET is_active = 0
+    SET is_active = false
     WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
   `;
 
@@ -556,7 +557,7 @@ releaseRoutes.openapi(rollbackCanaryRoute, async (c): Promise<any> => {
   // Audit log
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
       VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_rollback', 'agent', ${agentName},
               ${JSON.stringify({
                 primary_version: primaryVersion,
@@ -584,7 +585,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
   // 1. Read the canary_splits for the agent
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -694,7 +695,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     await sql`
       UPDATE canary_splits
       SET canary_weight = 1.0
-      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
     `;
 
     // Update production channel to canary version
@@ -714,7 +715,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     // Audit
     try {
       await sql`
-        INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+        INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
         VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_auto_promoted', 'agent', ${agentName},
                 ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, metrics, slo_results: sloResults })}, ${now})
       `;
@@ -732,8 +733,8 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     // 3b. Auto-rollback: set canary_weight to 0.0
     await sql`
       UPDATE canary_splits
-      SET canary_weight = 0.0, is_active = 0
-      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+      SET canary_weight = 0.0, is_active = false
+      WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
     `;
 
     // Record rollback in evolution_ledger
@@ -746,7 +747,7 @@ releaseRoutes.post("/:agent_name/auto-promote", requireScope("releases:write"), 
     // Audit
     try {
       await sql`
-        INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+        INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
         VALUES (${user.org_id}, ${user.user_id}, 'agent.canary_auto_rollback', 'agent', ${agentName},
                 ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, metrics, slo_results: sloResults })}, ${now})
       `;
@@ -779,7 +780,7 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   // Get active canary split
   const splits = await sql`
     SELECT * FROM canary_splits
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
     LIMIT 1
   `;
   if (splits.length === 0) {
@@ -792,8 +793,8 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   // Set canary_weight to 0.0 and deactivate
   await sql`
     UPDATE canary_splits
-    SET canary_weight = 0.0, is_active = 0
-    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = 1
+    SET canary_weight = 0.0, is_active = false
+    WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND is_active = true
   `;
 
   // Ensure production channel reflects primary version
@@ -820,7 +821,7 @@ releaseRoutes.post("/:agent_name/auto-rollback", requireScope("releases:write"),
   // Audit
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
       VALUES (${user.org_id}, ${user.user_id}, 'agent.explicit_auto_rollback', 'agent', ${agentName},
               ${JSON.stringify({ primary_version: primaryVersion, canary_version: canaryVersion, reason })}, ${now})
     `;

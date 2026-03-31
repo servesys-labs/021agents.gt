@@ -11,6 +11,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { Env } from "../env";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const pipelineRoutes = createOpenAPIRouter();
 
@@ -583,7 +584,7 @@ pipelineRoutes.openapi(getPipelineRoute, async (c): Promise<any> => {
 
   const pipeline = rows[0];
   let config: Record<string, unknown> = {};
-  try { config = JSON.parse(String(pipeline.config_json || "{}")); } catch {}
+  config = parseJsonColumn(pipeline.config_json);
 
   // Resolve stream and sink names
   let streamName = "";
@@ -645,7 +646,7 @@ pipelineRoutes.openapi(updatePipelineRoute, async (c): Promise<any> => {
   if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
 
   let config: Record<string, unknown> = {};
-  try { config = JSON.parse(String(rows[0].config_json || "{}")); } catch {}
+  config = parseJsonColumn(rows[0].config_json);
 
   if (body.sql) config.sql = body.sql;
   const description = body.description !== undefined ? body.description : null;
@@ -902,7 +903,7 @@ pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
   const result = await cfApi(c.env, "/pipelines", "POST", {
     name: resource.name,
     type: resource.type,
-    config: JSON.parse(String(resource.config_json || "{}")),
+    config: parseJsonColumn(resource.config_json),
   });
 
   if (result.ok) {

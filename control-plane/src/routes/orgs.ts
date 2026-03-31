@@ -10,6 +10,7 @@ import { getDbForOrg } from "../db/client";
 import type { Sql } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const orgRoutes = createOpenAPIRouter();
 
@@ -519,7 +520,7 @@ orgRoutes.openapi(getSettingsRoute, async (c): Promise<any> => {
     return c.json({ onboarding_complete: false });
   }
 
-  const settings = JSON.parse(String(rows[0].settings_json || "{}"));
+  const settings = parseJsonColumn(rows[0].settings_json);
   return c.json({
     onboarding_complete: settings.onboarding_complete ?? false,
     default_connectors: settings.default_connectors ?? [],
@@ -563,7 +564,7 @@ orgRoutes.openapi(updateSettingsRoute, async (c): Promise<any> => {
     SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
   `;
   const current = existing.length > 0
-    ? JSON.parse(String(existing[0].settings_json || "{}"))
+    ? parseJsonColumn(existing[0].settings_json)
     : {};
 
   const merged = {

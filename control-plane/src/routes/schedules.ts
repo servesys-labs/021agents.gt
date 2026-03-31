@@ -154,14 +154,14 @@ scheduleRoutes.openapi(updateScheduleRoute, async (c): Promise<any> => {
   if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
   if (cron && task) {
-    await sql`UPDATE schedules SET cron = ${cron}, task = ${task} WHERE schedule_id = ${scheduleId}`;
+    await sql`UPDATE schedules SET cron = ${cron}, task = ${task} WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
   } else if (cron) {
-    await sql`UPDATE schedules SET cron = ${cron} WHERE schedule_id = ${scheduleId}`;
+    await sql`UPDATE schedules SET cron = ${cron} WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
   } else if (task) {
-    await sql`UPDATE schedules SET task = ${task} WHERE schedule_id = ${scheduleId}`;
+    await sql`UPDATE schedules SET task = ${task} WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
   }
 
-  const updated = await sql`SELECT * FROM schedules WHERE schedule_id = ${scheduleId}`;
+  const updated = await sql`SELECT * FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
   const s = updated[0] as any;
   return c.json({
     schedule_id: s.schedule_id,

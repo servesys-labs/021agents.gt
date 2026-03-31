@@ -285,7 +285,7 @@ codemodeRoutes.openapi(updateSnippetRoute, async (c): Promise<any> => {
     WHERE id = ${id} AND org_id = ${user.org_id}
   `;
 
-  const updated = await sql`SELECT * FROM codemode_snippets WHERE id = ${id} LIMIT 1`;
+  const updated = await sql`SELECT * FROM codemode_snippets WHERE id = ${id} AND org_id = ${user.org_id} LIMIT 1`;
 
   // Invalidate runtime snippet cache
   await notifyRuntimeOfSnippetInvalidation(c.env, id, user.org_id);

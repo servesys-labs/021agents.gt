@@ -5,6 +5,7 @@
  */
 
 import { getDb } from "../db/client";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 /* ── Platform tool inventory ────────────────────────────────────── */
 /*
@@ -328,7 +329,7 @@ async function resolveDefaultModel(
       ORDER BY created_at DESC LIMIT 1
     `;
     if (rows.length > 0) {
-      const config = JSON.parse(String(rows[0].config_json || "{}"));
+      const config = parseJsonColumn(rows[0].config_json);
       const routing = config.routing ?? config.plan_routing ?? {};
       if (routing.default?.model) return routing.default.model;
       if (routing.general?.model) return routing.general.model;
@@ -447,7 +448,14 @@ Return a JSON object with ALL of these top-level fields:
     "system_prompt": "DETAILED 200+ word prompt (see guidelines)",
     "model": "${agentModel}",
     "tools": ["tool-name-1", "tool-name-2"],
+    "blocked_tools": ["tools-to-deny"],
+    "allowed_domains": ["api.example.com"],
+    "blocked_domains": ["internal.corp.net"],
     "max_turns": 50,
+    "temperature": 0.7,
+    "timeout_seconds": 300,
+    "parallel_tool_calls": true,
+    "reasoning_strategy": "",
     "tags": ["tag1", "tag2"],
     "version": "0.1.0"
   },

@@ -318,7 +318,7 @@ publicAgentRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
       if (trackUserId) {
         const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
         sql`
-          INSERT INTO end_user_usage (org_id, end_user_id, agent_name, session_id, cost_usd, latency_ms, tokens_used, created_at)
+          INSERT INTO end_user_usage (org_id, end_user_id, agent_name, session_id, cost_usd, latency_ms, input_tokens, created_at)
           VALUES (${orgId}, ${trackUserId}, ${agentName}, ${String(result.session_id || "")},
                   ${Number(result.cost_usd || 0)}, ${Number(result.latency_ms || 0)},
                   ${Number(result.total_tokens || 0)}, now())
@@ -643,7 +643,7 @@ publicAgentRoutes.openapi(agentRunUploadRoute, async (c): Promise<any> => {
       });
 
       await sql`
-        INSERT INTO file_uploads (file_id, org_id, agent_name, r2_key, file_name, content_type, size_bytes)
+        INSERT INTO file_uploads (file_id, org_id, agent_name, r2_key, original_name, content_type, size_bytes)
         VALUES (${fileId}, ${orgId}, ${agentName}, ${r2Key}, ${file.name}, ${file.type || "application/octet-stream"}, ${file.size})
       `;
 

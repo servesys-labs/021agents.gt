@@ -10,6 +10,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import rawDefault from "../../../config/default.json";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const plansRoutes = createOpenAPIRouter();
 
@@ -206,7 +207,7 @@ plansRoutes.openapi(createPlanRoute, async (c): Promise<any> => {
     const rows = await sql`
       SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
-    if (rows.length > 0) existing = JSON.parse(String(rows[0].config_json || "{}"));
+    if (rows.length > 0) existing = parseJsonColumn(rows[0].config_json);
   } catch {
     return c.json({ error: "Failed to load project config" }, 500);
   }

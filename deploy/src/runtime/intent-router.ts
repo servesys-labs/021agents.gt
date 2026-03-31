@@ -223,7 +223,7 @@ export async function getAgentCapabilitiesCached(
 
     const rows = await sql`
       SELECT name, description, config_json FROM agents
-      WHERE org_id = ${orgId} AND is_active = 1
+      WHERE org_id = ${orgId} AND is_active = true
     `;
 
     const capabilities = rows.map((a: any) => {

@@ -46,7 +46,7 @@ async function auditLog(
 ): Promise<void> {
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
       VALUES (${orgId}, ${userId}, ${action}, ${resourceType}, ${resourceId}, ${JSON.stringify(details)}, now())
     `;
   } catch { /* non-critical */ }
@@ -292,25 +292,25 @@ complianceRoutes.openapi(dataExportRoute, async (c): Promise<any> => {
       orgSettings,
       orgMembers,
     ] = await Promise.all([
-      sql`SELECT * FROM agents WHERE org_id = ${orgId}`,
-      sql`SELECT * FROM agent_versions WHERE org_id = ${orgId}`,
-      sql`SELECT * FROM sessions WHERE org_id = ${orgId}`,
-      sql`SELECT t.* FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.org_id = ${orgId}`,
-      sql`SELECT * FROM conversations WHERE org_id = ${orgId}`,
+      sql`SELECT * FROM agents WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM agent_versions WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM sessions WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT t.* FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM conversations WHERE org_id = ${orgId} LIMIT 10000`,
       sql`SELECT cm.* FROM conversation_messages cm
           JOIN conversations cv ON cm.conversation_id = cv.conversation_id
-          WHERE cv.org_id = ${orgId}`,
+          WHERE cv.org_id = ${orgId} LIMIT 10000`,
       sql`SELECT key_id, org_id, user_id, name, scopes, created_at, expires_at, last_used_at, revoked
-          FROM api_keys WHERE org_id = ${orgId}`,
-      sql`SELECT * FROM billing_records WHERE org_id = ${orgId}`,
-      sql`SELECT * FROM webhooks WHERE org_id = ${orgId}`,
+          FROM api_keys WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM billing_records WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM webhooks WHERE org_id = ${orgId} LIMIT 10000`,
       sql`SELECT wd.* FROM webhook_deliveries wd
           JOIN webhooks w ON wd.webhook_id = w.webhook_id
-          WHERE w.org_id = ${orgId}`,
+          WHERE w.org_id = ${orgId} LIMIT 10000`,
       sql`SELECT file_id, org_id, uploaded_by, filename, content_type, size_bytes, created_at
-          FROM file_uploads WHERE org_id = ${orgId}`,
-      sql`SELECT * FROM org_settings WHERE org_id = ${orgId}`,
-      sql`SELECT * FROM org_members WHERE org_id = ${orgId}`,
+          FROM file_uploads WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM org_settings WHERE org_id = ${orgId} LIMIT 10000`,
+      sql`SELECT * FROM org_members WHERE org_id = ${orgId} LIMIT 10000`,
     ]);
 
     // Attach turns to sessions, messages to conversations

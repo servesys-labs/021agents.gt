@@ -8,6 +8,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const sessionRoutes = createOpenAPIRouter();
 
@@ -253,7 +254,9 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
   if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
 
   const rows = await sql`
-    SELECT * FROM turns WHERE session_id = ${sessionId} ORDER BY turn_number
+    SELECT * FROM turns WHERE session_id = ${sessionId}
+      AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
+    ORDER BY turn_number
   `;
 
   return c.json(
@@ -262,10 +265,10 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
       let toolResults: any[] = [];
       let planArtifact: any = {};
       let reflection: any = {};
-      try { toolCalls = JSON.parse(r.tool_calls_json || "[]"); } catch {}
-      try { toolResults = JSON.parse(r.tool_results_json || "[]"); } catch {}
-      try { planArtifact = JSON.parse(r.plan_json || "{}"); } catch {}
-      try { reflection = JSON.parse(r.reflection_json || "{}"); } catch {}
+      toolCalls = parseJsonColumn(r.tool_calls_json, []);
+      toolResults = parseJsonColumn(r.tool_results_json, []);
+      try { planArtifact = JSON.parse(r.plan_artifact || "{}"); } catch {}
+      try { reflection = JSON.parse(r.reflection || "{}"); } catch {}
 
       return {
         turn_number: Number(r.turn_number || 0),
@@ -280,8 +283,7 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
         execution_mode: r.execution_mode || "sequential",
         plan_artifact: planArtifact,
         reflection,
-        started_at: Number(r.started_at || 0),
-        ended_at: Number(r.ended_at || 0),
+        created_at: r.created_at || null,
       };
     }),
   );
@@ -312,8 +314,10 @@ sessionRoutes.openapi(getSessionRuntimeRoute, async (c): Promise<any> => {
 
   // Build runtime profile from turns
   const turns = await sql`
-    SELECT turn_number, execution_mode, plan_json, reflection_json, latency_ms, cost_total_usd
-    FROM turns WHERE session_id = ${sessionId} ORDER BY turn_number
+    SELECT turn_number, execution_mode, plan_artifact, reflection, latency_ms, cost_total_usd
+    FROM turns WHERE session_id = ${sessionId}
+      AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
+    ORDER BY turn_number
   `;
 
   return c.json({
@@ -321,8 +325,8 @@ sessionRoutes.openapi(getSessionRuntimeRoute, async (c): Promise<any> => {
     turns: turns.map((t: any) => ({
       turn_number: Number(t.turn_number),
       execution_mode: t.execution_mode || "sequential",
-      plan: (() => { try { return JSON.parse(t.plan_json || "{}"); } catch { return {}; } })(),
-      reflection: (() => { try { return JSON.parse(t.reflection_json || "{}"); } catch { return {}; } })(),
+      plan: parseJsonColumn(t.plan_artifact),
+      reflection: parseJsonColumn(t.reflection),
       latency_ms: Number(t.latency_ms || 0),
       cost_total_usd: Number(t.cost_total_usd || 0),
     })),
@@ -357,7 +361,7 @@ sessionRoutes.openapi(getSessionTraceRoute, async (c): Promise<any> => {
   const traceId = sessionRows[0].trace_id;
 
   const sessions = await sql`
-    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at
+    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at LIMIT 100
   `;
 
   // Cost rollup — scope to org via trace_id already validated above, but also filter by org_id
@@ -571,6 +575,7 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
       SELECT turn_number, model_used, llm_content, input_tokens, output_tokens,
              cost_total_usd, latency_ms, tool_calls_json, tool_results_json
       FROM turns WHERE session_id = ${sessionId}
+        AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
       ORDER BY turn_number ASC
     `;
 
@@ -587,8 +592,8 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
     const parsedTurns = (turns as any[]).map((t) => {
       let tool_calls: unknown[] = [];
       let tool_results: unknown[] = [];
-      try { tool_calls = JSON.parse(t.tool_calls_json || "[]"); } catch {}
-      try { tool_results = JSON.parse(t.tool_results_json || "[]"); } catch {}
+      tool_calls = parseJsonColumn(t.tool_calls_json, []);
+      tool_results = parseJsonColumn(t.tool_results_json, []);
       return {
         ...t,
         content: t.llm_content,

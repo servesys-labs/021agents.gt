@@ -104,15 +104,27 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
     ORDER BY created_at DESC LIMIT 500
   `;
 
+  // Batch-fetch all turns for all sessions to avoid N+1 queries
+  const allSessionIds = sessions.map((s: any) => String(s.session_id));
+  const allTurns = allSessionIds.length > 0
+    ? await sql`
+        SELECT session_id, turn_number, model_used, tool_calls_json, tool_results_json, error
+        FROM turns
+        WHERE session_id = ANY(${allSessionIds})
+        ORDER BY session_id, turn_number ASC
+      `.catch(() => [])
+    : [];
+  const turnsBySession = new Map<string, any[]>();
+  for (const t of allTurns) {
+    const sid = String(t.session_id);
+    if (!turnsBySession.has(sid)) turnsBySession.set(sid, []);
+    turnsBySession.get(sid)!.push(t);
+  }
+
   // Enrich with turn-level data (tool calls + errors)
   const records: SessionRecord[] = [];
   for (const session of sessions) {
-    const turns = await sql`
-      SELECT turn_number, model_used, tool_calls_json, tool_results_json, error
-      FROM turns
-      WHERE session_id = ${session.session_id}
-      ORDER BY turn_number ASC LIMIT 100
-    `.catch(() => []);
+    const turns = (turnsBySession.get(String(session.session_id)) || []).slice(0, 100);
 
     const toolCalls: ToolCallRecord[] = [];
     const errors: ErrorRecord[] = [];

@@ -12,7 +12,7 @@ import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import type { CurrentUser } from "../auth/types";
 import { createToken } from "../auth/jwt";
 import { getDbForOrg } from "../db/client";
-import { requireScope } from "../middleware/auth";
+import { requireScope, invalidateAuthCache } from "../middleware/auth";
 
 export const endUserTokenRoutes = createOpenAPIRouter();
 
@@ -116,10 +116,10 @@ endUserTokenRoutes.openapi(mintTokenRoute, async (c): Promise<any> => {
   await sql`
     INSERT INTO end_user_tokens (
       token_id, org_id, end_user_id, api_key_id, allowed_agents,
-      rate_limit_rpm, rate_limit_rpd, expires_at, is_revoked, created_at
+      rate_limit_rpm, rate_limit_rpd, expires_at, revoked, created_at
     ) VALUES (
       ${tokenId}, ${user.org_id}, ${req.end_user_id}, ${user.user_id},
-      ${JSON.stringify(req.allowed_agents ?? [])},
+      ${req.allowed_agents ?? []},
       ${req.rate_limit_rpm ?? 60}, ${req.rate_limit_rpd ?? 10000},
       ${expiresAt}, ${false}, ${new Date().toISOString()}
     )
@@ -178,7 +178,7 @@ endUserTokenRoutes.openapi(listTokensRoute, async (c): Promise<any> => {
       SELECT token_id, end_user_id, api_key_id, allowed_agents, rate_limit_rpm,
              rate_limit_rpd, expires_at, is_revoked, created_at
       FROM end_user_tokens
-      WHERE org_id = ${user.org_id} AND end_user_id = ${endUserId} AND is_revoked = false
+      WHERE org_id = ${user.org_id} AND end_user_id = ${endUserId} AND revoked = false
         AND expires_at > now()
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -188,7 +188,7 @@ endUserTokenRoutes.openapi(listTokensRoute, async (c): Promise<any> => {
       SELECT token_id, end_user_id, api_key_id, allowed_agents, rate_limit_rpm,
              rate_limit_rpd, expires_at, is_revoked, created_at
       FROM end_user_tokens
-      WHERE org_id = ${user.org_id} AND is_revoked = false AND expires_at > now()
+      WHERE org_id = ${user.org_id} AND revoked = false AND expires_at > now()
       ORDER BY created_at DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
@@ -247,7 +247,7 @@ endUserTokenRoutes.openapi(revokeTokenRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
-    UPDATE end_user_tokens SET is_revoked = true
+    UPDATE end_user_tokens SET revoked = true
     WHERE token_id = ${tokenId} AND org_id = ${user.org_id}
     RETURNING token_id
   `;
@@ -255,6 +255,9 @@ endUserTokenRoutes.openapi(revokeTokenRoute, async (c): Promise<any> => {
   if (result.length === 0) {
     return c.json({ error: "Token not found" }, 404);
   }
+
+  // Invalidate cached auth so revoked token is rejected immediately
+  await invalidateAuthCache(c.env);
 
   return c.json({ revoked: tokenId });
 });
@@ -315,7 +318,7 @@ endUserTokenRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
     SELECT
       COUNT(*)::int AS total_requests,
       COALESCE(SUM(cost_usd), 0)::float AS total_cost_usd,
-      COALESCE(SUM(tokens_used), 0)::int AS total_tokens
+      COALESCE(SUM(input_tokens + output_tokens), 0)::int AS total_tokens
     FROM end_user_usage
     WHERE org_id = ${user.org_id} AND end_user_id = ${endUserId}
       AND created_at > now() - ${days + " days"}::interval
@@ -327,7 +330,7 @@ endUserTokenRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
       agent_name,
       COUNT(*)::int AS requests,
       COALESCE(SUM(cost_usd), 0)::float AS cost_usd,
-      COALESCE(SUM(tokens_used), 0)::int AS tokens,
+      COALESCE(SUM(input_tokens + output_tokens), 0)::int AS tokens,
       COALESCE(AVG(latency_ms), 0)::float AS avg_latency_ms
     FROM end_user_usage
     WHERE org_id = ${user.org_id} AND end_user_id = ${endUserId}

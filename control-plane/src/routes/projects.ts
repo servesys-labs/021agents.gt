@@ -9,6 +9,7 @@ import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { ORCHESTRATOR_SYSTEM_PROMPT, ORCHESTRATOR_TOOLS } from "../templates/orchestrator";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const projectRoutes = createOpenAPIRouter();
 
@@ -147,7 +148,7 @@ projectRoutes.openapi(createProjectRoute, async (c): Promise<any> => {
         VALUES (
           ${agentId}, ${agentName}, ${user.org_id}, ${projectId}, ${configJson},
           ${`Orchestrator meta-agent for ${name} — builds, tests, and continuously improves all agents`},
-          ${"0.1.0"}, 1, ${user.user_id}, ${now}, ${now}
+          ${"0.1.0"}, true, ${user.user_id}, ${now}, ${now}
         )
       `;
       metaAgent = { name: agentName, created: true, tools_count: ORCHESTRATOR_TOOLS.length };
@@ -207,7 +208,7 @@ projectRoutes.openapi(getProjectRoute, async (c): Promise<any> => {
     return c.json({ error: e.message }, e.status || 400);
   }
 
-  const envs = await sql`SELECT * FROM environments WHERE project_id = ${projectId}`;
+  const envs = await sql`SELECT * FROM environments WHERE project_id = ${projectId} AND project_id IN (SELECT project_id FROM projects WHERE org_id = ${user.org_id})`;
   return c.json({ project, environments: envs });
 });
 
@@ -241,7 +242,7 @@ projectRoutes.openapi(listEnvsRoute, async (c): Promise<any> => {
     return c.json({ error: e.message }, e.status || 400);
   }
 
-  const rows = await sql`SELECT * FROM environments WHERE project_id = ${projectId}`;
+  const rows = await sql`SELECT * FROM environments WHERE project_id = ${projectId} AND project_id IN (SELECT project_id FROM projects WHERE org_id = ${user.org_id})`;
   return c.json({ environments: rows });
 });
 
@@ -359,12 +360,8 @@ projectRoutes.openapi(getCanvasLayoutRoute, async (c): Promise<any> => {
 
   let layout: any = {};
   let assignments: any[] = [];
-  try {
-    layout = JSON.parse(rows[0].layout_json || "{}");
-  } catch {}
-  try {
-    assignments = JSON.parse(rows[0].assignments_json || "[]");
-  } catch {}
+  layout = parseJsonColumn(rows[0].layout_json);
+  assignments = parseJsonColumn(rows[0].assignments_json, []);
 
   return c.json({
     nodes: layout.nodes || [],

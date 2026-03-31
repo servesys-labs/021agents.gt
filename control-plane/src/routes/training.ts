@@ -26,6 +26,7 @@ import type {
   IterationHistory,
   OptimizationContext,
 } from "../logic/training-algorithms";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const trainingRoutes = createOpenAPIRouter();
 
@@ -53,8 +54,8 @@ async function auditTraining(
 ): Promise<void> {
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
-      VALUES (${orgId}, ${userId}, ${action}, 'training', ${resourceId}, ${JSON.stringify(details)}, now())
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+      VALUES (${orgId}, ${userId}, ${action}, 'training', ${resourceId}, ${JSON.stringify(details)}::jsonb, now())
     `;
   } catch { /* non-critical */ }
 }
@@ -139,45 +140,48 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
 
   const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
-  await sql`
-    INSERT INTO training_jobs (
-      job_id, org_id, agent_name, algorithm, status, config_json,
-      dataset_name, eval_tasks_json, max_iterations, auto_activate,
-      created_by, tags
-    ) VALUES (
-      ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
-      ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
-      ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
-      ${body.max_iterations}, ${body.auto_activate},
-      ${user.user_id}, ${body.tags && body.tags.length > 0 ? body.tags : sql`'{}'::text[]`}
-    )
-  `;
+  // Wrap job creation + initial resource snapshot in a transaction
+  await sql.begin(async (tx: any) => {
+    await tx`
+      INSERT INTO training_jobs (
+        job_id, org_id, agent_name, algorithm, status, config_json,
+        dataset_name, eval_tasks_json, max_iterations, auto_activate,
+        created_by, tags
+      ) VALUES (
+        ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
+        ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
+        ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
+        ${body.max_iterations}, ${body.auto_activate},
+        ${user.user_id}, ${body.tags && body.tags.length > 0 ? body.tags : sql`'{}'::text[]`}
+      )
+    `;
 
-  // Snapshot current system prompt as initial resource (version 0)
-  const agentRows = await sql`
-    SELECT config_json FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
-  `;
-  if (agentRows.length > 0) {
-    let config: Record<string, unknown> = {};
-    try { config = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
-    const systemPrompt = String(config.system_prompt ?? "");
+    // Snapshot current system prompt as initial resource (version 0)
+    const agentRows = await tx`
+      SELECT config_json FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
+    `;
+    if (agentRows.length > 0) {
+      let config: Record<string, unknown> = {};
+      config = parseJsonColumn(agentRows[0].config_json);
+      const systemPrompt = String(config.system_prompt ?? "");
 
-    if (systemPrompt) {
-      await sql`
-        INSERT INTO training_resources (
-          resource_id, org_id, agent_name, job_id,
-          resource_type, resource_key, version,
-          content_text, source, is_active
-        ) VALUES (
-          ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
-          ${user.org_id}, ${body.agent_name}, ${jobId},
-          'system_prompt', 'main', 0,
-          ${systemPrompt}, 'initial', true
-        )
-        ON CONFLICT (org_id, agent_name, resource_type, resource_key, version) DO NOTHING
-      `;
+      if (systemPrompt) {
+        await tx`
+          INSERT INTO training_resources (
+            resource_id, org_id, agent_name, job_id,
+            resource_type, resource_key, version,
+            content_text, source, is_active
+          ) VALUES (
+            ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
+            ${user.org_id}, ${body.agent_name}, ${jobId},
+            'system_prompt', 'main', 0,
+            ${systemPrompt}, 'initial', true
+          )
+          ON CONFLICT (org_id, agent_name, resource_type, resource_key, version) DO NOTHING
+        `;
+      }
     }
-  }
+  });
 
   auditTraining(sql, user.org_id, user.user_id, "training.created", jobId, {
     agent_name: body.agent_name, algorithm: body.algorithm, max_iterations: body.max_iterations,
@@ -301,7 +305,7 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
   const job = jobs[0] as any;
   return c.json({
     ...job,
-    config: JSON.parse(job.config_json || "{}"),
+    config: parseJsonColumn(job.config_json),
     iterations: iterations.map((i: any) => ({
       iteration_id: i.iteration_id,
       iteration_number: i.iteration_number,
@@ -309,9 +313,9 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
       pass_rate: i.pass_rate,
       avg_score: i.avg_score,
       reward_score: i.reward_score,
-      reward_breakdown: JSON.parse(i.reward_breakdown_json || "{}"),
+      reward_breakdown: parseJsonColumn(i.reward_breakdown_json),
       resource_version: i.resource_version,
-      algorithm_output: JSON.parse(i.algorithm_output_json || "{}"),
+      algorithm_output: parseJsonColumn(i.algorithm_output_json),
       started_at: i.started_at,
       completed_at: i.completed_at,
     })),
@@ -379,7 +383,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     org_id: jobRow.org_id,
     agent_name: jobRow.agent_name,
     algorithm: jobRow.algorithm,
-    config_json: JSON.parse(jobRow.config_json || "{}"),
+    config_json: parseJsonColumn(jobRow.config_json),
     current_iteration: iterationNumber,
     max_iterations: jobRow.max_iterations,
     best_score: jobRow.best_score,
@@ -441,7 +445,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     resource_key: r.resource_key,
     version: r.version,
     content_text: r.content_text,
-    content_json: r.content_json ? JSON.parse(r.content_json) : null,
+    content_json: parseJsonColumn(r.content_json, null),
     is_active: r.is_active,
     eval_score: r.eval_score,
   }));
@@ -461,7 +465,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
     `;
     if (agentRows.length > 0) {
-      const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+      const config = parseJsonColumn(agentRows[0].config_json);
       originalPrompt = config.system_prompt ?? null;
     }
   }
@@ -478,9 +482,26 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   const progressEvents: Record<string, unknown>[] = [];
 
   try {
-    const evalTasks = jobRow.eval_tasks_json
-      ? JSON.parse(jobRow.eval_tasks_json)
-      : [];
+    const evalTasks = parseJsonColumn<any[]>(jobRow.eval_tasks_json, []);
+
+    if (evalTasks.length === 0) {
+      // FAIL: No eval tasks configured. Training cannot optimize without evaluation signal.
+      await sql`
+        UPDATE training_iterations SET status = 'failed', error = 'no_eval_tasks', completed_at = NOW()
+        WHERE job_id = ${job_id} AND iteration_number = ${iterationNumber}
+      `.catch(() => {});
+      await emitTrainingEvent(c.env, job_id, job.agent_name, {
+        type: "eval_failed",
+        iteration: iterationNumber,
+        error: "No eval tasks configured. Add test cases before training.",
+      });
+      return c.json({
+        iteration_number: iterationNumber,
+        status: "failed",
+        error: "No eval tasks configured. Training requires at least one test case.",
+        should_continue: false,
+      });
+    }
 
     if (evalTasks.length > 0) {
       // Run each eval task through the Workflow-backed agent.run() path.
@@ -752,7 +773,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
     resource_version: h.resource_version,
-    algorithm_output_json: JSON.parse(h.algorithm_output_json || "{}"),
+    algorithm_output_json: parseJsonColumn(h.algorithm_output_json),
   }));
 
   const algorithm = getAlgorithm(job.algorithm, job.config_json);
@@ -776,7 +797,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     if (promptImprovement < 0.02) {
       // Prompt converged — try temperature grid search
       let currentConfig: any = {};
-      try { currentConfig = JSON.parse(currentResources.find((r: any) => r.resource_type === "system_prompt")?.value || "{}"); } catch {}
+      try { currentConfig = JSON.parse(currentResources.find((r: any) => r.resource_type === "system_prompt")?.content_text || "{}"); } catch {}
       const currentTemp = Number(currentConfig.temperature || 0.7);
       const tempCandidates = [0.1, 0.3, 0.5, 0.7, 0.9].filter(t => Math.abs(t - currentTemp) > 0.05);
       if (tempCandidates.length > 0) {
@@ -785,11 +806,11 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         optimizationResult.metadata.temperature_candidate = nextTemp;
         // The training eval will use this temperature on the next iteration
         for (const update of optimizationResult.updatedResources) {
-          if (update.resource_type === "system_prompt") {
+          if (update.resourceType === "system_prompt") {
             try {
-              const parsed = JSON.parse(update.value);
+              const parsed = JSON.parse(update.contentText || "{}");
               parsed.temperature = nextTemp;
-              update.value = JSON.stringify(parsed);
+              update.contentText = JSON.stringify(parsed);
             } catch { /* keep original */ }
           }
         }
@@ -942,7 +963,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
     `;
     if (agentRows.length > 0) {
-      const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+      const config = parseJsonColumn(agentRows[0].config_json);
       config.system_prompt = newPromptResource.contentText;
       await sql`
         UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
@@ -975,7 +996,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
     resource_version: h.resource_version,
-    algorithm_output_json: JSON.parse(h.algorithm_output_json || "{}"),
+    algorithm_output_json: parseJsonColumn(h.algorithm_output_json),
   }));
 
   const freshCtx: OptimizationContext = {
@@ -1033,7 +1054,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
             SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
           `;
           if (agentRows.length > 0) {
-            const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+            const config = parseJsonColumn(agentRows[0].config_json);
             config.system_prompt = bestResourceRows[0].content_text;
             await sql`
               UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
@@ -1581,7 +1602,7 @@ trainingRoutes.openapi(activateResourceRoute, async (c): Promise<any> => {
         SELECT config_json FROM agents WHERE name = ${agent_name} AND org_id = ${user.org_id}
       `;
       if (agentRows.length > 0) {
-        const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+        const config = parseJsonColumn(agentRows[0].config_json);
         config.system_prompt = resourceRows[0].content_text;
         await sql`
           UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()

@@ -11,6 +11,11 @@ import { getSandbox } from "@cloudflare/sandbox";
 import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
 import { validateUrl as ssrfValidateUrl } from "./ssrf";
 import { scratchWrite, scratchRead, scratchList } from "./scratch";
+import { retrieveToolResult, cleanupSessionResults } from "./result-storage";
+import { writeToMailbox } from "./mailbox";
+import { ToolError, CircuitBreakerError, classifyFetchError } from "./errors";
+import { createChildAbortController, createSiblingGroup } from "./abort";
+import { parseJsonColumn } from "./parse-json-column";
 
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
@@ -35,7 +40,15 @@ function checkToolRateLimit(toolName: string, sessionId: unknown, maxCalls: numb
 }
 // Phase 10.5: Per-session file mtime cache for staleness detection
 // Tracks last-known mtime per file path to detect concurrent modifications
+const FILE_STATE_CACHE_MAX = 1000;
 const fileStateCache = new Map<string, string>();
+function fileStateCacheSet(key: string, value: string) {
+  if (fileStateCache.size >= FILE_STATE_CACHE_MAX) {
+    const firstKey = fileStateCache.keys().next().value;
+    if (firstKey !== undefined) fileStateCache.delete(firstKey);
+  }
+  fileStateCache.set(key, value);
+}
 
 const DYNAMIC_WORKER_CACHE_LIMIT = 32;
 const DYNAMIC_WORKER_CACHE_TTL_MS = 5 * 60_000;
@@ -468,6 +481,16 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   "scratch-write":     { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV write
   "scratch-read":      { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV read
   "scratch-list":      { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV list
+
+  // Result retrieval (R2 GET)
+  "retrieve-result":   { flat_usd: 0.00000036, per_ms_usd: 0 },  // R2 GET
+
+  // Inter-agent messaging (DO SQLite write)
+  "send-message":      { flat_usd: 0.000001,   per_ms_usd: 0 },  // DO SQLite write
+
+  // Team memory (Hyperdrive queries)
+  "team-fact-write":   { flat_usd: 0.00005,    per_ms_usd: 0 },  // DB write
+  "team-observation":  { flat_usd: 0.00005,    per_ms_usd: 0 },  // DB write
 };
 
 /** Calculate tool cost from flat fee + duration. */
@@ -614,6 +637,7 @@ export async function executeTools(
   sessionId: string,
   parallel: boolean = true,
   enabledTools?: string[],
+  parentAbort?: AbortController,
 ): Promise<ToolResult[]> {
   const envelope = (env as any).__agentConfig as { enabled_tools?: string[] } | undefined;
   const effectiveEnabledTools = enabledTools ?? envelope?.enabled_tools;
@@ -623,15 +647,26 @@ export async function executeTools(
     const safe = toolCalls.filter(tc => isConcurrentSafe(tc.name));
     const unsafe = toolCalls.filter(tc => !isConcurrentSafe(tc.name));
 
-    // Execute safe tools in parallel
+    // Phase 3.3: Abort hierarchy — create sibling group so if one parallel
+    // tool fails critically, others are cancelled (saves budget + latency).
+    // Parent abort propagates down; child aborts don't propagate up to parent.
+    const turnAbort = parentAbort || new AbortController();
+    const siblingControllers = safe.length > 1
+      ? createSiblingGroup(turnAbort, safe.length)
+      : safe.map(() => createChildAbortController(turnAbort));
+
+    // Execute safe tools in parallel with abort support
     const safeResults = safe.length > 0
-      ? await Promise.all(safe.map(tc => executeSingleTool(env, tc, sessionId, effectiveEnabledTools)))
+      ? await Promise.all(safe.map((tc, i) =>
+          executeSingleTool(env, tc, sessionId, effectiveEnabledTools, siblingControllers[i]?.signal)
+        ))
       : [];
 
-    // Execute unsafe tools serially
+    // Execute unsafe tools serially (each gets its own child abort)
     const unsafeResults: ToolResult[] = [];
     for (const tc of unsafe) {
-      unsafeResults.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools));
+      const childAbort = createChildAbortController(turnAbort);
+      unsafeResults.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools, childAbort.signal));
     }
 
     // Merge results in original tool_call order
@@ -640,7 +675,7 @@ export async function executeTools(
       resultMap.set(r.tool_call_id, r);
     }
     return toolCalls.map(tc => resultMap.get(tc.id) || {
-      tool_call_id: tc.id, name: tc.name, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0,
+      tool: tc.name, tool_call_id: tc.id, name: tc.name, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0,
     });
   }
   const results: ToolResult[] = [];
@@ -650,24 +685,41 @@ export async function executeTools(
   return results;
 }
 
+// Re-export abort utilities for use in workflow.ts and index.ts
+export { createChildAbortController, createSiblingGroup } from "./abort";
+
 async function executeSingleTool(
   env: RuntimeEnv,
   tc: ToolCall,
   sessionId: string,
   enabledTools?: string[],
+  signal?: AbortSignal,
 ): Promise<ToolResult> {
   const started = Date.now();
   // Normalize tool name: LLMs often convert hyphens to underscores
   tc = { ...tc, name: tc.name.replace(/_/g, "-") };
 
-  // Check circuit breaker before executing
-  const circuitCheck = canExecute(tc.name, (env as any).TELEMETRY_QUEUE);
-  if (!circuitCheck.allowed) {
+  // Phase 3.3: Check abort signal before execution
+  if (signal?.aborted) {
     return {
       tool: tc.name,
       tool_call_id: tc.id,
       result: "",
-      error: circuitCheck.reason,
+      error: `Tool execution cancelled: ${signal.reason || "aborted"}`,
+      latency_ms: 0,
+      cost_usd: 0,
+    };
+  }
+
+  // Check circuit breaker before executing
+  const circuitCheck = canExecute(tc.name, (env as any).TELEMETRY_QUEUE);
+  if (!circuitCheck.allowed) {
+    const cbErr = new CircuitBreakerError(tc.name);
+    return {
+      tool: tc.name,
+      tool_call_id: tc.id,
+      result: "",
+      error: cbErr.userMessage || circuitCheck.reason,
       latency_ms: 0,
       cost_usd: 0,
     };
@@ -743,21 +795,21 @@ async function executeSingleTool(
     }
   }
 
-  // ── Governance: Destructive action detection ──────────────────
+  // ── Governance: Permission auto-classification ───────────────
   if (config?.require_confirmation_for_destructive) {
-    const DESTRUCTIVE_KEYWORDS = /\b(delete|drop|remove|destroy|kill|force|truncate|wipe|purge)\b/i;
-    const toolArgs = JSON.stringify(args);
-    const destructiveTools = new Set(["delete-agent", "bash", "python-exec", "manage-secrets", "manage-retention"]);
-    if (destructiveTools.has(tc.name) || DESTRUCTIVE_KEYWORDS.test(toolArgs)) {
-      // Check if the tool call looks destructive
-      const isDestructive = destructiveTools.has(tc.name) || DESTRUCTIVE_KEYWORDS.test(toolArgs);
-      if (isDestructive) {
+    const { shouldAutoApprove, classifyPermission } = await import("./permission-classifier");
+    const classification = classifyPermission(tc.name, args, { agentConfig: config });
+
+    if (classification.level === "dangerous" && !classification.autoApprove) {
+      // Check if auto-approve is configured
+      if (!shouldAutoApprove(tc.name, args, config as any)) {
         return {
           tool: tc.name, tool_call_id: tc.id,
           result: JSON.stringify({
             blocked: true,
-            reason: "Destructive action requires human confirmation",
-            action: toolArgs.slice(0, 200),
+            reason: classification.reason,
+            level: classification.level,
+            action: JSON.stringify(args).slice(0, 200),
             tool: tc.name,
           }),
           error: "governance:destructive_blocked",
@@ -783,17 +835,22 @@ async function executeSingleTool(
     };
   } catch (err: any) {
     const latencyMs = Date.now() - started;
-    
+
     // Record failure for circuit breaker (only for external service errors, not arg errors)
     if (isExternalServiceError(err)) {
       recordFailure(tc.name, (env as any).TELEMETRY_QUEUE);
     }
-    
+
+    // Wrap raw errors in structured ToolError for telemetry-safe reporting
+    const toolErr = err instanceof ToolError ? err : new ToolError(tc.name, err.message || String(err), {
+      retryable: isExternalServiceError(err),
+    });
+
     return {
       tool: tc.name,
       tool_call_id: tc.id,
       result: "",
-      error: err.message || String(err),
+      error: toolErr.userMessage || toolErr.message,
       latency_ms: latencyMs,
       cost_usd: calculateToolCost(tc.name, latencyMs),
     };
@@ -801,17 +858,13 @@ async function executeSingleTool(
 }
 
 function isExternalServiceError(err: any): boolean {
-  // Network errors, timeouts, 5xx errors from external services
-  const msg = String(err.message || err).toLowerCase();
-  return (
-    msg.includes("timeout") ||
-    msg.includes("network") ||
-    msg.includes("econnrefused") ||
-    msg.includes("5") || // 5xx
-    msg.includes("503") ||
-    msg.includes("502") ||
-    msg.includes("504")
-  );
+  // Use structured error classification instead of fragile string matching.
+  // classifyFetchError handles network, timeout, TLS, rate-limit, and HTTP errors.
+  const classified = classifyFetchError(err);
+  return classified.kind === "network"
+    || classified.kind === "timeout"
+    || classified.kind === "rate_limit"
+    || (classified.kind === "http" && (classified.status ?? 0) >= 500);
 }
 
 async function dispatch(
@@ -837,8 +890,48 @@ async function dispatch(
       return httpRequest(args);
 
     case "bash": {
+      const cmd = String(args.command || "");
+      // Sandbox egress control: block commands that access private/metadata URLs.
+      // This is defense-in-depth — the sandbox VM provides network isolation,
+      // and SSRF validation catches direct URLs. This layer catches obvious patterns
+      // but CANNOT catch all bypass techniques (base64, eval, variable expansion).
+      // For production: use CF Container network policies when available.
+
+      // Block direct private IP access patterns
+      const BLOCKED_PATTERNS = [
+        /169\.254\.169\.254/,                         // AWS metadata
+        /metadata\.google\.internal/,                  // GCP metadata
+        /100\.100\.100\.200/,                         // Azure metadata
+        /\blocalhost\b/,                              // localhost
+        /127\.0\.0\.1/,                               // loopback
+        /\[::1\]/,                                    // IPv6 loopback
+        /0\.0\.0\.0/,                                 // any interface
+        /10\.\d+\.\d+\.\d+/,                         // RFC1918
+        /172\.(1[6-9]|2\d|3[01])\.\d+\.\d+/,        // RFC1918
+        /192\.168\.\d+\.\d+/,                        // RFC1918
+        /base64\s+(-d|--decode)/i,                    // base64 decode (bypass attempt)
+        /\$\(.*curl.*\)/,                             // command substitution with curl
+        /`.*curl.*`/,                                 // backtick substitution with curl
+        /eval\s+.*http/i,                             // eval with http
+      ];
+      for (const pattern of BLOCKED_PATTERNS) {
+        if (pattern.test(cmd)) {
+          return JSON.stringify({ stdout: "", stderr: `Egress blocked: command matches restricted pattern`, exit_code: 1 });
+        }
+      }
+
+      // Also check extracted URLs via SSRF validator
+      const urlPattern = /(?:curl|wget|fetch|http\.get|requests\.get)\s+['"]?(https?:\/\/[^\s'"]+)/gi;
+      let urlMatch: RegExpExecArray | null;
+      while ((urlMatch = urlPattern.exec(cmd)) !== null) {
+        const check = validateUrl(urlMatch[1]);
+        if (!check.valid) {
+          return JSON.stringify({ stdout: "", stderr: `Egress blocked: ${check.reason}`, exit_code: 1 });
+        }
+      }
+
       try {
-        const r = await sandboxExecWithLimits(env, sessionId, args.command || "", args.timeout_seconds);
+        const r = await sandboxExecWithLimits(env, sessionId, cmd, args.timeout_seconds);
         return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
       } catch (err: any) {
         return JSON.stringify({ stdout: "", stderr: `Sandbox error: ${err.message || err}`, exit_code: 1 });
@@ -847,6 +940,15 @@ async function dispatch(
 
     case "python-exec": {
       const code = String(args.code || "");
+      // Validate URLs in Python HTTP calls
+      const pyUrlPattern = /(?:requests\.(?:get|post|put|delete|patch)|urlopen|urllib\.request)\s*\(\s*['"]?(https?:\/\/[^\s'")\]]+)/gi;
+      let pyMatch: RegExpExecArray | null;
+      while ((pyMatch = pyUrlPattern.exec(code)) !== null) {
+        const check = validateUrl(pyMatch[1]);
+        if (!check.valid) {
+          return JSON.stringify({ stdout: "", stderr: `Egress blocked: ${check.reason}`, exit_code: 1 });
+        }
+      }
       // Write code to temp file then execute — sandbox reuses warm container via session ID
       try {
         const sandbox = getSafeSandbox(env, `session-${sessionId}`);
@@ -986,11 +1088,13 @@ async function dispatch(
         return `Warning: ${editPath} was modified since it was last read (mtime ${lastKnownMtime} → ${currentMtime}). Re-read the file before editing to avoid overwriting changes.`;
       }
       // Update cache with current mtime (will be updated again after write)
-      fileStateCache.set(cacheKey, currentMtime);
+      fileStateCacheSet(cacheKey, currentMtime);
 
       const oldText = args.old_text || args.old_string || "";
       if (!content.includes(oldText)) return `Error: old_text not found in ${editPath}`;
-      const newContent = content.replace(oldText, args.new_text || args.new_string || "");
+      const newContent = args.replace_all
+        ? content.replaceAll(oldText, args.new_text || args.new_string || "")
+        : content.replace(oldText, args.new_text || args.new_string || "");
 
       // Lint-on-edit: run syntax validation BEFORE applying (SWE-agent ACI pattern)
       // Detects language from file extension and runs appropriate linter
@@ -1023,7 +1127,7 @@ async function dispatch(
 
       // Phase 10.5: Update mtime cache after successful write
       const newMtime = await sandbox.exec(`stat -c%Y "${editPath}" 2>/dev/null || stat -f%m "${editPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "0" }));
-      fileStateCache.set(cacheKey, (newMtime.stdout || "0").trim());
+      fileStateCacheSet(cacheKey, (newMtime.stdout || "0").trim());
 
       // Sync edited file to R2 (non-blocking, user-scoped)
       if (editPath.startsWith("/workspace/") && env.STORAGE) {
@@ -1161,6 +1265,28 @@ async function dispatch(
 
     case "memory-delete":
       return memoryDelete(env, args);
+
+    case "team-fact-write": {
+      const content = String(args.content || "");
+      const category = String(args.category || "general");
+      if (!content) return "team-fact-write requires content";
+      const orgId = (env as any).__agentConfig?.org_id || "";
+      const agentName = (env as any).__agentConfig?.name || "";
+      const { writeTeamFact } = await import("./team-memory");
+      await writeTeamFact(env, orgId, agentName, content, category);
+      return `Team fact recorded: ${content.slice(0, 100)}`;
+    }
+
+    case "team-observation": {
+      const content = String(args.content || "");
+      const target = String(args.target_agent || "");
+      if (!content) return "team-observation requires content";
+      const orgId = (env as any).__agentConfig?.org_id || "";
+      const agentName = (env as any).__agentConfig?.name || "";
+      const { writeTeamObservation } = await import("./team-memory");
+      await writeTeamObservation(env, orgId, agentName, content, target || undefined);
+      return `Observation recorded${target ? ` about ${target}` : ""}`;
+    }
 
     case "mcp-call": {
       // Call a tool on a registered MCP server
@@ -1449,6 +1575,7 @@ async function dispatch(
 
                 // Referral payouts (best-effort)
                 try {
+                  // @ts-expect-error — referrals module may not exist in all deployments
                   const { distributeReferralEarnings } = await import("../logic/referrals").catch(() => ({ distributeReferralEarnings: null }));
                   if (distributeReferralEarnings) {
                     await distributeReferralEarnings(sql, paymentAddress, amountUsd, transferId);
@@ -2173,7 +2300,7 @@ async function dispatch(
       // Enforce org agent limit
       if (orgId) {
         try {
-          const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${orgId} AND is_active = 1`;
+          const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${orgId} AND is_active = true`;
           const current = countRows[0]?.cnt || 0;
           const limitRows = await sql`SELECT (limits_json->>'max_agents')::int as max_agents FROM org_settings WHERE org_id = ${orgId} LIMIT 1`.catch(() => []);
           const maxAgents = limitRows[0]?.max_agents || 50;
@@ -2227,7 +2354,7 @@ async function dispatch(
       if (!agentName) return "delete-agent requires agent_name";
       if (!args.confirm) return "delete-agent requires confirm=true as safety check";
       try {
-        await sql`UPDATE agents SET is_active = 0 WHERE name = ${agentName} AND org_id = ${orgId}`;
+        await sql`UPDATE agents SET is_active = false WHERE name = ${agentName} AND org_id = ${orgId}`;
         // Cascade: soft-delete related sessions, schedules
         await sql`UPDATE sessions SET status = 'archived' WHERE agent_name = ${agentName} AND org_id = ${orgId}`;
         await sql`DELETE FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId}`;
@@ -2320,7 +2447,7 @@ async function dispatch(
             const sql = await getDb((env as any).HYPERDRIVE);
             await sql`
               INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, correlation_id, status, child_cost_usd, input_preview, output_preview, created_at, completed_at)
-              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${childOutput.slice(0, 500)}, now(), ${status !== "running" ? "now()" : null})
+              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${childOutput.slice(0, 500)}, now(), ${(status as string) !== "running" ? "now()" : null})
             `;
           } catch {} // non-blocking
         }
@@ -2469,12 +2596,12 @@ async function dispatch(
       try {
         const rows = await sql`
           SELECT name, description, config_json, is_active, created_at
-          FROM agents WHERE org_id = ${orgId} AND is_active = 1
+          FROM agents WHERE org_id = ${orgId} AND is_active = true
           ORDER BY created_at DESC LIMIT 100
         `;
         // Extract model from config_json for display
         const enriched = rows.map((r: any) => {
-          const cfg = JSON.parse(r.config_json || "{}");
+          const cfg = parseJsonColumn(r.config_json);
           return { name: r.name, description: r.description, model: cfg.model || "default", is_active: r.is_active, created_at: r.created_at };
         });
         return JSON.stringify(enriched);
@@ -2505,7 +2632,7 @@ async function dispatch(
       try {
         const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const cfg = JSON.parse(agent[0].config_json || "{}");
+        const cfg = parseJsonColumn(agent[0].config_json);
         const tools = Array.isArray(cfg.tools) ? cfg.tools : [];
         // Basic OWASP LLM Top 10 probe checks
         const findings: { probe: string; risk: string; detail: string }[] = [];
@@ -2593,7 +2720,7 @@ async function dispatch(
       try {
         const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const cfg = JSON.parse(agent[0].config_json || "{}");
+        const cfg = parseJsonColumn(agent[0].config_json);
         const governance = cfg.governance || {};
         const checks = {
           has_system_prompt: Boolean(cfg.system_prompt || cfg.systemPrompt),
@@ -2763,10 +2890,13 @@ async function dispatch(
           const name = String(args.name || "");
           const value = String(args.value || "");
           if (!name || !value) return "create requires name and value";
+          // Encrypt value using pgcrypto — ENCRYPTION_KEY must be set in env
+          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
+          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set. Cannot store secrets securely.";
           await sql`
             INSERT INTO secrets (name, org_id, value_encrypted, created_at)
-            VALUES (${name}, ${orgId}, ${value}, ${new Date().toISOString()})
-            ON CONFLICT (name, org_id) DO UPDATE SET value_encrypted = EXCLUDED.value_encrypted
+            VALUES (${name}, ${orgId}, pgp_sym_encrypt(${value}, ${encKey}), ${new Date().toISOString()})
+            ON CONFLICT (name, org_id) DO UPDATE SET value_encrypted = pgp_sym_encrypt(EXCLUDED.value_encrypted::text, ${encKey})
           `;
           return JSON.stringify({ stored: true, name });
         }
@@ -2774,7 +2904,9 @@ async function dispatch(
           const name = String(args.name || "");
           const value = String(args.value || "");
           if (!name || !value) return "rotate requires name and new value";
-          await sql`UPDATE secrets SET value_encrypted = ${value} WHERE name = ${name} AND org_id = ${orgId}`;
+          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
+          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set.";
+          await sql`UPDATE secrets SET value_encrypted = pgp_sym_encrypt(${value}, ${encKey}) WHERE name = ${name} AND org_id = ${orgId}`;
           return JSON.stringify({ rotated: true, name });
         }
         if (action === "delete") {
@@ -3469,6 +3601,27 @@ async function dispatch(
       if (!traceId) return "scratch-list requires a trace context (only available in delegated runs)";
       const keys = await scratchList(env, traceId);
       return keys.length > 0 ? keys.join("\n") : "(scratch is empty)";
+    }
+
+    case "retrieve-result": {
+      const key = String(args.key || "");
+      if (!key) return "retrieve-result requires a key (provided in truncated tool results)";
+      const content = await retrieveToolResult(env, key);
+      return content ?? "Result not found or expired (results are retained for 7 days).";
+    }
+
+    case "send-message": {
+      const to = String(args.to || "");
+      const message = String(args.message || "");
+      if (!to || !message) return "send-message requires 'to' (session ID) and 'message'";
+      const doSql = (env as any).DO_SQL;
+      if (!doSql) return "Mailbox not available (not running in a Durable Object context)";
+      try {
+        writeToMailbox(doSql, sessionId, to, "text", message);
+        return `Message sent to ${to}`;
+      } catch (e: any) {
+        return `Failed to send message: ${e.message}`;
+      }
     }
 
     default:
@@ -4182,7 +4335,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
       // Edge TTS requires a server-side library; fall through to Deepgram on Workers
       const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
       audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-        : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+        : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
         : await new Response(audioRaw as BodyInit).arrayBuffer();
       modelUsed = "@cf/deepgram/aura-2-en (edge fallback)";
     } catch {
@@ -4210,7 +4363,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
       // Fallback to Deepgram
       const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
       audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-        : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+        : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
         : await new Response(audioRaw as BodyInit).arrayBuffer();
       modelUsed = "@cf/deepgram/aura-2-en (openai fallback)";
     }
@@ -4218,7 +4371,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
     // Default: Deepgram Aura via Workers AI (free)
     const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
     audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-      : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+      : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
       : await new Response(audioRaw as BodyInit).arrayBuffer();
     modelUsed = "@cf/deepgram/aura-2-en";
   }
@@ -4486,7 +4639,7 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
  * access to ALL tools regardless of agent config).
  * discover-api is safe to always expose (read-only type info).
  */
-const ALWAYS_AVAILABLE = new Set(["discover-api", "marketplace-search", "a2a-send", "share-artifact"]);
+const ALWAYS_AVAILABLE = new Set(["discover-api", "marketplace-search", "a2a-send", "share-artifact", "retrieve-result"]);
 
 /** Returns the set of all valid tool names from the catalog. */
 export function getValidToolNames(): Set<string> {
@@ -4540,7 +4693,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "grep|search file|find in": ["grep", "glob", "search-file", "find-file"],
   "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "manage-projects"],
   // Memory & knowledge
-  "remember|memory|recall|forget|save fact|note|store": ["memory-save", "memory-recall", "memory-delete"],
+  "remember|memory|recall|forget|save fact|note|store": ["memory-save", "memory-recall", "memory-delete", "team-fact-write", "team-observation"],
   "knowledge|rag|embed|retrieval": ["knowledge-search", "store-knowledge", "manage-rag"],
   "profile|preference|about me|my name": ["user-profile-save", "user-profile-load"],
   // Media
@@ -4581,6 +4734,9 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "mcp|model context|external tool": ["mcp-call", "manage-mcp", "mcp-wrap"],
   // Multi-agent
   "mixture|ensemble|multiple models|multi-agent": ["mixture-of-agents"],
+  // Inter-agent coordination (delegated runs)
+  "scratch|shared state|pass data|coordinate": ["scratch-write", "scratch-read", "scratch-list", "send-message"],
+  "team|team fact|team knowledge|shared fact|org knowledge": ["team-fact-write", "team-observation"],
 };
 
 /**
@@ -4929,6 +5085,36 @@ const TOOL_CATALOG: ToolDefinition[] = [
           type: { type: "string", description: "Memory type: 'semantic' (default)" },
         },
         required: ["fact_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "team-fact-write",
+      description: "Record an org-wide team fact that other agents in this organization can see. Use for shared knowledge like deployment processes, architecture decisions, coding conventions, or important context that applies across the team.",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "The fact content to share with the team (max 1000 chars)" },
+          category: { type: "string", description: "Category: 'process', 'architecture', 'convention', 'decision', or 'general' (default: general)" },
+        },
+        required: ["content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "team-observation",
+      description: "Record an observation about another agent or the team. Used for cross-agent notes like 'code-reviewer found a recurring bug pattern in auth module' or general team insights.",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "The observation to record (max 1000 chars)" },
+          target_agent: { type: "string", description: "Optional: the agent this observation is about" },
+        },
+        required: ["content"],
       },
     },
   },
@@ -6321,6 +6507,75 @@ const TOOL_CATALOG: ToolDefinition[] = [
           user_id: { type: "string", description: "User identifier (auto-detected from channel if omitted)" },
         },
         required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "retrieve-result",
+      description: "Retrieve the full content of a previously truncated tool result. Use when a tool result was too large and was persisted to storage with a reference key.",
+      parameters: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "The storage key provided in the truncated result message" },
+        },
+        required: ["key"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "send-message",
+      description: "Send a message to another agent session (parent or sibling). Only available during delegated runs.",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Target session ID (parent_session_id or sibling session)" },
+          message: { type: "string", description: "Message content to send" },
+        },
+        required: ["to", "message"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "scratch-write",
+      description: "Write a value to the shared scratch space. Available during delegated runs for cross-agent communication.",
+      parameters: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "Key name for the scratch entry" },
+          value: { type: "string", description: "Value to store" },
+        },
+        required: ["key", "value"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "scratch-read",
+      description: "Read a value from the shared scratch space written by another agent in the same delegation chain.",
+      parameters: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "Key name to read" },
+        },
+        required: ["key"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "scratch-list",
+      description: "List all keys in the shared scratch space for the current delegation chain.",
+      parameters: {
+        type: "object",
+        properties: {},
       },
     },
   },

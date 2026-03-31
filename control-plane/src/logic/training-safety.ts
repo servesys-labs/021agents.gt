@@ -8,6 +8,7 @@ import type { Sql } from "../db/client";
 import type { Env } from "../env";
 import { evaluateInput, DEFAULT_GUARDRAIL_POLICY } from "./guardrail-engine";
 import { applyDeployPolicyToConfigJson } from "./deploy-policy-contract";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -74,7 +75,7 @@ export async function runPreflightChecks(
 
   let config: Record<string, unknown>;
   try {
-    config = JSON.parse(String(agentRows[0].config_json || "{}"));
+    config = parseJsonColumn(agentRows[0].config_json);
   } catch {
     return { passed: false, checks: [{ name: "config_parse", passed: false, detail: "Invalid config_json" }], failed_tools: [], warnings: [] };
   }
@@ -193,7 +194,9 @@ export async function runPreflightChecks(
     checks.push({ name: "deploy_policy", passed: true, detail: "Skipped (no policy)" });
   }
 
-  const criticalFailures = checks.filter((c) => !c.passed && !c.name.startsWith("tool:"));
+  // runtime_reachable is a warning, not a blocker — the eval will still try to call the runtime
+  const NON_CRITICAL = new Set(["runtime_reachable"]);
+  const criticalFailures = checks.filter((c) => !c.passed && !c.name.startsWith("tool:") && !NON_CRITICAL.has(c.name));
   const passed = criticalFailures.length === 0 && failedTools.length === 0;
 
   return { passed, checks, failed_tools: failedTools, warnings };
@@ -495,7 +498,7 @@ export async function revertToPreviousResource(
         SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId}
       `;
       if (agentRows.length > 0) {
-        const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+        const config = parseJsonColumn(agentRows[0].config_json);
         config.system_prompt = prevContent;
         await sql`
           UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()

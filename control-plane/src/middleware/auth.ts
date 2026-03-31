@@ -14,7 +14,7 @@ import { logSecurityEvent } from "../auth/security-events";
 
 // In-memory TTL cache (bounded, same as Python's _auth_cache)
 const AUTH_CACHE_MAX = 2048;
-const AUTH_CACHE_TTL = 300_000; // 5 min in ms
+const AUTH_CACHE_TTL = 60_000; // 1 min in ms (safety backstop)
 const authCache = new Map<string, { ts: number; user: CurrentUser }>();
 
 function cacheGet(key: string): CurrentUser | null {
@@ -35,6 +35,50 @@ function cachePut(key: string, user: CurrentUser): void {
     const toRemove = Math.floor(entries.length / 4);
     for (let i = 0; i < toRemove; i++) authCache.delete(entries[i][0]);
   }
+}
+
+// ── Cross-isolate cache invalidation via KV version key ──────────
+// When API keys are revoked, the version key is bumped. Each isolate
+// checks the version every 30s and flushes its cache on change.
+// This reduces stale-token window from 5 minutes to ~30 seconds.
+let _lastVersionCheck = 0;
+const VERSION_CHECK_INTERVAL = 30_000; // 30s
+const _versionCache = new Map<string, number>();
+
+async function checkCacheVersion(env: any): Promise<void> {
+  if (Date.now() - _lastVersionCheck < VERSION_CHECK_INTERVAL) return;
+  _lastVersionCheck = Date.now();
+
+  const kv = env?.AGENT_PROGRESS_KV;
+  if (!kv) return;
+
+  try {
+    const globalVersion = await kv.get("auth-cache-version");
+    const remote = globalVersion ? Number(globalVersion) : 0;
+    const local = _versionCache.get("global") ?? -1;
+    if (remote !== local) {
+      // Version changed — flush entire auth cache
+      authCache.clear();
+      _versionCache.set("global", remote);
+    }
+  } catch {}
+}
+
+/**
+ * Bump the auth cache version. Call this when API keys are revoked/rotated.
+ * All isolates will flush their caches within 30 seconds.
+ */
+export async function invalidateAuthCache(env: any): Promise<void> {
+  const kv = env?.AGENT_PROGRESS_KV;
+  if (!kv) return;
+  try {
+    const raw = await kv.get("auth-cache-version");
+    const version = (raw ? Number(raw) : 0) + 1;
+    await kv.put("auth-cache-version", String(version));
+    // Also flush local cache immediately
+    authCache.clear();
+    _versionCache.set("global", version);
+  } catch {}
 }
 
 async function hashForCache(token: string): Promise<string> {
@@ -66,7 +110,7 @@ async function checkSessionTimeout(
   try {
     const rows = await sql`
       SELECT last_activity_at FROM user_sessions
-      WHERE user_id = ${claims.sub} AND is_active = true
+      WHERE user_id = ${claims.sub} AND revoked = false
       ORDER BY last_activity_at DESC LIMIT 1
     `;
     if (rows.length > 0) {
@@ -91,7 +135,7 @@ function touchSessionActivity(sql: any, userId: string): void {
   sql`
     UPDATE user_sessions
     SET last_activity_at = NOW()
-    WHERE user_id = ${userId} AND is_active = true
+    WHERE user_id = ${userId} AND revoked = false
   `.catch(() => {
     // Fire-and-forget
   });
@@ -131,6 +175,7 @@ function isPublicExternalWebhook(path: string, method: string): boolean {
   if (method !== "POST") return false;
   if (path === "/api/v1/chat/telegram/webhook") return true;
   if (path === "/api/v1/stripe/webhook") return true;
+  if (path === "/api/v1/github/webhooks/receive") return true;
   return false;
 }
 
@@ -178,11 +223,13 @@ export const authMiddleware = createMiddleware<{
     isPublicExternalWebhook(c.req.path, c.req.method)
   ) {
     // Set default user — service token gets full access, public routes get viewer
+    // Service token can pass X-Org-Id header to scope operations to an org
+    const serviceOrgId = isServiceAuth ? (c.req.header("X-Org-Id") || "") : "";
     c.set("user", {
       user_id: isServiceAuth ? "service" : "",
       email: "",
       name: isServiceAuth ? "Service Token" : "",
-      org_id: "",
+      org_id: serviceOrgId,
       project_id: "",
       env: "",
       role: isServiceAuth ? "owner" : "viewer",
@@ -191,6 +238,9 @@ export const authMiddleware = createMiddleware<{
     });
     return next();
   }
+
+  // Check KV version for cross-isolate cache invalidation
+  await checkCacheVersion(c.env);
 
   const authHeader = c.req.header("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) {
@@ -449,10 +499,10 @@ async function resolveEndUserToken(claims: TokenClaims, env: Env): Promise<Curre
   // Look up the token in the DB to verify it's not revoked
   const sql = await getDb(env.HYPERDRIVE);
   const rows = await sql`
-    SELECT token_id, allowed_agents, rate_limit_rpm, rate_limit_rpd, is_revoked, expires_at
+    SELECT token_id, allowed_agents, rate_limit_rpm, rate_limit_rpd, revoked, expires_at
     FROM end_user_tokens
     WHERE org_id = ${orgId} AND end_user_id = ${endUserId} AND api_key_id = ${apiKeyId}
-      AND is_revoked = false AND expires_at > now()
+      AND revoked = false AND expires_at > now()
     ORDER BY created_at DESC LIMIT 1
   `;
 

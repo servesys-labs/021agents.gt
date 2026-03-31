@@ -14,6 +14,7 @@ import { buildFromDescription, recommendTools, expandEvalConfig, generateEvoluti
 import { runMetaChat, type MetaChatMessage } from "../logic/meta-agent-chat";
 import { AGENT_TEMPLATES, getTemplateById } from "../logic/agent-templates";
 import { applyDeployPolicyToConfigJson } from "../logic/deploy-policy-contract";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const agentRoutes = createOpenAPIRouter();
 
@@ -199,7 +200,7 @@ async function resolveAgentName(
   const cleanId = identifier.replace(/^agt_/, "");
   if (/^[a-f0-9]{8,32}$/i.test(cleanId) || identifier.startsWith("agt_")) {
     const rows = await sql`
-      SELECT name FROM agents WHERE (agent_id = ${identifier} OR agent_id = ${cleanId}) AND org_id = ${orgId} AND is_active = 1 LIMIT 1
+      SELECT name FROM agents WHERE (agent_id = ${identifier} OR agent_id = ${cleanId}) AND org_id = ${orgId} AND is_active = true LIMIT 1
     `;
     if (rows.length > 0) return String(rows[0].name);
   }
@@ -246,7 +247,7 @@ agentRoutes.openapi(listAgentsRoute, async (c): Promise<any> => {
   const rows = await sql`
     SELECT agent_id, name, description, config_json, is_active, created_at, updated_at
     FROM agents
-    WHERE org_id = ${user.org_id} AND is_active = 1
+    WHERE org_id = ${user.org_id} AND is_active = true
     ORDER BY created_at DESC
   `;
 
@@ -381,38 +382,41 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
       );
     }
 
-    // Insert into DB
+    // Insert agent + snapshot version + package in a single transaction
     const newAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-    await sql`
-      INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
-      VALUES (
-        ${newAgentId},
-        ${req.name},
-        ${user.org_id},
-        ${user.project_id || ""},
-        ${JSON.stringify(configJson)},
-        ${req.description},
-        1,
-        now(),
-        now()
-      )
-    `;
-
-    // Snapshot version
-    await snapshotVersion(sql, req.name, "0.1.0", configJson, user.user_id);
-
-    // Persist full package if provided
     let packageErrors: string[] = [];
-    const hasPackage = req.sub_agents || req.skills || req.codemode_snippets || req.guardrails || req.release_strategy;
-    if (hasPackage) {
-      packageErrors = await persistAgentPackage(sql, req.name, user.org_id, user.project_id || "", user.user_id, {
-        sub_agents: req.sub_agents,
-        skills: req.skills,
-        codemode_snippets: req.codemode_snippets,
-        guardrails: req.guardrails,
-        release_strategy: req.release_strategy,
-      });
-    }
+
+    await sql.begin(async (tx: any) => {
+      await tx`
+        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+        VALUES (
+          ${newAgentId},
+          ${req.name},
+          ${user.org_id},
+          ${user.project_id || ""},
+          ${JSON.stringify(configJson)},
+          ${req.description},
+          1,
+          now(),
+          now()
+        )
+      `;
+
+      // Snapshot version
+      await snapshotVersion(tx, req.name, "0.1.0", configJson, user.user_id);
+
+      // Persist full package if provided
+      const hasPackage = req.sub_agents || req.skills || req.codemode_snippets || req.guardrails || req.release_strategy;
+      if (hasPackage) {
+        packageErrors = await persistAgentPackage(tx, req.name, user.org_id, user.project_id || "", user.user_id, {
+          sub_agents: req.sub_agents,
+          skills: req.skills,
+          codemode_snippets: req.codemode_snippets,
+          guardrails: req.guardrails,
+          release_strategy: req.release_strategy,
+        });
+      }
+    });
 
     const response: Record<string, unknown> = {
       agent_id: newAgentId,
@@ -582,64 +586,46 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
     const counts: Record<string, number> = {};
 
     if (hardDelete) {
-      // Hard delete — cascading removal of all associated records
+      // Hard delete — cascading removal of all associated records in a transaction
       // Explicit per-table parameterized DELETEs (no dynamic table names)
-      try {
-        const r = await sql`DELETE FROM turns WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.turns = r.count ?? 0;
-      } catch { counts.turns = 0; }
+      await sql.begin(async (tx: any) => {
+        const r1 = await tx`DELETE FROM turns WHERE session_id IN (SELECT session_id FROM sessions WHERE agent_name = ${name} AND org_id = ${user.org_id})`;
+        counts.turns = r1.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM sessions WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.sessions = r.count ?? 0;
-      } catch { counts.sessions = 0; }
+        const r2 = await tx`DELETE FROM sessions WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.sessions = r2.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM billing_records WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.billing_records = r.count ?? 0;
-      } catch { counts.billing_records = 0; }
+        const r3 = await tx`DELETE FROM billing_records WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.billing_records = r3.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM eval_runs WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.eval_runs = r.count ?? 0;
-      } catch { counts.eval_runs = 0; }
+        const r4 = await tx`DELETE FROM eval_runs WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.eval_runs = r4.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM eval_results WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.eval_results = r.count ?? 0;
-      } catch { counts.eval_results = 0; }
+        const r5 = await tx`DELETE FROM eval_results WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.eval_results = r5.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM issues WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.issues = r.count ?? 0;
-      } catch { counts.issues = 0; }
+        const r6 = await tx`DELETE FROM issues WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.issues = r6.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM compliance_checks WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.compliance_checks = r.count ?? 0;
-      } catch { counts.compliance_checks = 0; }
+        const r7 = await tx`DELETE FROM compliance_checks WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.compliance_checks = r7.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM schedules WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.schedules = r.count ?? 0;
-      } catch { counts.schedules = 0; }
+        const r8 = await tx`DELETE FROM schedules WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.schedules = r8.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM webhooks WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.webhooks = r.count ?? 0;
-      } catch { counts.webhooks = 0; }
+        const r9 = await tx`DELETE FROM webhooks WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.webhooks = r9.count ?? 0;
 
-      try {
-        const r = await sql`DELETE FROM agent_versions WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
-        counts.agent_versions = r.count ?? 0;
-      } catch { counts.agent_versions = 0; }
+        const r10 = await tx`DELETE FROM agent_versions WHERE agent_name = ${name} AND org_id = ${user.org_id}`;
+        counts.agent_versions = r10.count ?? 0;
 
-      await sql`DELETE FROM agents WHERE name = ${name} AND org_id = ${user.org_id}`;
-      counts.agent = 1;
+        await tx`DELETE FROM agents WHERE name = ${name} AND org_id = ${user.org_id}`;
+        counts.agent = 1;
+      });
     } else {
       // Soft delete
       await sql`
-        UPDATE agents SET is_active = 0, updated_at = now()
+        UPDATE agents SET is_active = false, updated_at = now()
         WHERE name = ${name} AND org_id = ${user.org_id}
       `;
       counts.agent = 1;
@@ -647,12 +633,10 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
 
     // Audit log (fire-and-forget)
     sql`
-      INSERT INTO config_audit (agent_name, action, details_json, created_at)
-      VALUES (${name}, 'delete', ${JSON.stringify({
-        user: user.user_id,
-        org: user.org_id,
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+      VALUES (${user.org_id}, ${user.user_id}, 'delete', 'agent', ${name}, ${JSON.stringify({
         hard_delete: hardDelete,
-      })}, now())
+      })}::jsonb, now())
     `.catch(() => {});
 
     const totalRecords = Object.values(counts).reduce((a, b) => a + b, 0);
@@ -994,10 +978,10 @@ async function persistAgentPackage(
     try {
       const s = sk as Record<string, unknown>;
       await sql`
-        INSERT INTO skills (name, description, category, content, assigned_agents, org_id, enabled, created_at)
-        VALUES (${String(s.name)}, ${String(s.description || "")}, ${String(s.category || "prompt")},
-                ${String(s.content || "")}, ${JSON.stringify([agentName])}, ${orgId}, true, now())
-        ON CONFLICT DO NOTHING
+        INSERT INTO skills (name, description, category, prompt, prompt_template, agent_name, org_id, enabled, created_at)
+        VALUES (${String(s.name)}, ${String(s.description || "")}, ${String(s.category || "general")},
+                ${String(s.content || "")}, ${String(s.content || "")}, ${agentName}, ${orgId}, true, now())
+        ON CONFLICT (org_id, name) DO NOTHING
       `;
     } catch (e) {
       errors.push(`skill ${(sk as Record<string, unknown>).name}: ${(e as Error).message}`);
@@ -1086,7 +1070,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
         SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
       `;
       if (settingsRows.length > 0) {
-        orgProfile = JSON.parse(String(settingsRows[0].settings_json || "{}"));
+        orgProfile = parseJsonColumn(settingsRows[0].settings_json);
       }
     } catch { /* ignore — preferences are optional */ }
 
@@ -1246,43 +1230,46 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       );
     }
 
-    // Save agent
+    // Save agent + snapshot version + package in a single transaction
     const generatedAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-    await sql`
-      INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
-      VALUES (
-        ${generatedAgentId},
-        ${String(config.name)},
-        ${user.org_id},
-        ${user.project_id || ""},
-        ${JSON.stringify(cfgRecord)},
-        ${String(config.description || "")},
-        1,
-        now(),
-        now()
-      )
-      ON CONFLICT (name, org_id) DO UPDATE
-      SET config_json = ${JSON.stringify(cfgRecord)}, updated_at = now()
-    `;
-
-    // Retrieve the actual agent_id (may differ on conflict/update)
     let agentId = generatedAgentId;
-    try {
-      const idRows = await sql`SELECT agent_id FROM agents WHERE name = ${String(config.name)} AND org_id = ${user.org_id} LIMIT 1`;
-      if (idRows.length > 0) agentId = String(idRows[0].agent_id);
-    } catch {}
-
-    await snapshotVersion(sql, String(config.name), String(config.version), cfgRecord, user.user_id);
-
-    // Persist the full agent package (sub-agents, skills, codemode, guardrails, releases)
     let packageErrors: string[] = [];
-    if (pkg) {
-      // Clean _package from config before using it
-      delete (config as Record<string, unknown>)._package;
-      packageErrors = await persistAgentPackage(
-        sql, String(config.name), user.org_id, user.project_id || "", user.user_id, pkg,
-      );
-    }
+
+    await sql.begin(async (tx: any) => {
+      await tx`
+        INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+        VALUES (
+          ${generatedAgentId},
+          ${String(config.name)},
+          ${user.org_id},
+          ${user.project_id || ""},
+          ${JSON.stringify(cfgRecord)},
+          ${String(config.description || "")},
+          1,
+          now(),
+          now()
+        )
+        ON CONFLICT (name, org_id) DO UPDATE
+        SET config_json = ${JSON.stringify(cfgRecord)}, updated_at = now()
+      `;
+
+      // Retrieve the actual agent_id (may differ on conflict/update)
+      try {
+        const idRows = await tx`SELECT agent_id FROM agents WHERE name = ${String(config.name)} AND org_id = ${user.org_id} LIMIT 1`;
+        if (idRows.length > 0) agentId = String(idRows[0].agent_id);
+      } catch {}
+
+      await snapshotVersion(tx, String(config.name), String(config.version), cfgRecord, user.user_id);
+
+      // Persist the full agent package (sub-agents, skills, codemode, guardrails, releases)
+      if (pkg) {
+        // Clean _package from config before using it
+        delete (config as Record<string, unknown>)._package;
+        packageErrors = await persistAgentPackage(
+          tx, String(config.name), user.org_id, user.project_id || "", user.user_id, pkg,
+        );
+      }
+    });
 
     // Notify runtime of new agent (fire-and-forget)
     notifyRuntimeOfConfigChange(c.env, String(config.name), String(config.version)).catch(() => {});
@@ -1406,7 +1393,7 @@ agentRoutes.openapi(evolveRoute, async (c): Promise<any> => {
   // Load agent config
   const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${user.org_id} LIMIT 1`;
   if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
-  const agentConfig = JSON.parse(String(agentRows[0].config_json || "{}"));
+  const agentConfig = parseJsonColumn(agentRows[0].config_json);
 
   // Load eval results (latest run or specific run)
   let evalRows: any[];
@@ -1645,7 +1632,7 @@ agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
 
     let configJson: string;
     try {
-      const restoredCfg = JSON.parse(String(rows[0].config_json || "{}")) as Record<string, unknown>;
+      const restoredCfg = parseJsonColumn<Record<string, unknown>>(rows[0].config_json);
       const restoredPolicy = applyDeployPolicyToConfigJson(restoredCfg, { fallbackStripOverlay: true });
       if (!restoredPolicy.ok) {
         return c.json(
@@ -1668,7 +1655,7 @@ agentRoutes.openapi(restoreVersionRoute, async (c): Promise<any> => {
     `;
     if (current.length > 0) {
       await snapshotVersion(sql, agentName, `pre-restore-${Date.now()}`,
-        JSON.parse(String(current[0].config_json || "{}")), user.user_id);
+        parseJsonColumn(current[0].config_json), user.user_id);
     }
 
     await sql`UPDATE agents SET config_json = ${configJson}, updated_at = now() WHERE name = ${agentName} AND org_id = ${user.org_id}`;
@@ -1706,7 +1693,7 @@ agentRoutes.openapi(listTrashRoute, async (c): Promise<any> => {
     const rows = await sql`
       SELECT agent_id, name, config_json, updated_at, created_by
       FROM agents
-      WHERE name LIKE ${agentName + '-deleted-%'} AND org_id = ${user.org_id} AND is_active = 0
+      WHERE name LIKE ${agentName + '-deleted-%'} AND org_id = ${user.org_id} AND is_active = false
       ORDER BY updated_at DESC LIMIT 20
     `;
 
@@ -1741,8 +1728,8 @@ agentRoutes.openapi(restoreTrashRoute, async (c): Promise<any> => {
     const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
     await sql`
-      UPDATE agents SET is_active = 1, name = ${agentName}, updated_at = now()
-      WHERE agent_id = ${trashId} AND org_id = ${user.org_id} AND is_active = 0
+      UPDATE agents SET is_active = true, name = ${agentName}, updated_at = now()
+      WHERE agent_id = ${trashId} AND org_id = ${user.org_id} AND is_active = false
     `;
 
     return c.json({ restored: true } as any);

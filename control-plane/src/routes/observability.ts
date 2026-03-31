@@ -8,6 +8,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 import {
   applyDedupeWindow,
   buildCircuitIncident,
@@ -513,7 +514,7 @@ observabilityRoutes.openapi(getTraceRoute, async (c): Promise<any> => {
   if (Number(check[0]?.cnt) === 0) return c.json({ error: "Trace not found" }, 404);
 
   const sessions = await sql`
-    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at
+    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at LIMIT 100
   `;
 
   const events = await sql`
@@ -568,31 +569,28 @@ observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
   const billingCounts = new Map<string, number>();
   const lifecycleCounts = new Map<string, { turn_start: number; turn_end: number; session_end: number }>();
 
-  for (const sid of sessionIds) {
-    const [turnRow] = await sql`
-      SELECT COUNT(*) as cnt FROM turns WHERE session_id = ${sid}
-    `.catch(() => [{ cnt: 0 }]);
-    const [eventRow] = await sql`
-      SELECT COUNT(*) as cnt FROM runtime_events WHERE session_id = ${sid} AND org_id = ${user.org_id}
-    `.catch(() => [{ cnt: 0 }]);
-    const [billingRow] = await sql`
-      SELECT COUNT(*) as cnt FROM billing_records WHERE session_id = ${sid} AND org_id = ${user.org_id}
-    `.catch(() => [{ cnt: 0 }]);
-    const [lifecycleRow] = await sql`
-      SELECT
+  // Batch queries instead of N+1 per session
+  const [turnRows, eventRows, billingRows, lifecycleRows] = await Promise.all([
+    sql`SELECT session_id, COUNT(*) as cnt FROM turns WHERE session_id = ANY(${sessionIds}) GROUP BY session_id`.catch(() => []),
+    sql`SELECT session_id, COUNT(*) as cnt FROM runtime_events WHERE session_id = ANY(${sessionIds}) AND org_id = ${user.org_id} GROUP BY session_id`.catch(() => []),
+    sql`SELECT session_id, COUNT(*) as cnt FROM billing_records WHERE session_id = ANY(${sessionIds}) AND org_id = ${user.org_id} GROUP BY session_id`.catch(() => []),
+    sql`SELECT session_id,
         SUM(CASE WHEN event_type = 'turn_start' THEN 1 ELSE 0 END) AS turn_start,
         SUM(CASE WHEN event_type = 'turn_end' THEN 1 ELSE 0 END) AS turn_end,
         SUM(CASE WHEN event_type = 'session_end' THEN 1 ELSE 0 END) AS session_end
       FROM runtime_events
-      WHERE session_id = ${sid} AND org_id = ${user.org_id}
-    `.catch(() => [{ turn_start: 0, turn_end: 0, session_end: 0 }]);
-    turnCounts.set(sid, Number(turnRow?.cnt || 0));
-    eventCounts.set(sid, Number(eventRow?.cnt || 0));
-    billingCounts.set(sid, Number(billingRow?.cnt || 0));
-    lifecycleCounts.set(sid, {
-      turn_start: Number(lifecycleRow?.turn_start || 0),
-      turn_end: Number(lifecycleRow?.turn_end || 0),
-      session_end: Number(lifecycleRow?.session_end || 0),
+      WHERE session_id = ANY(${sessionIds}) AND org_id = ${user.org_id}
+      GROUP BY session_id`.catch(() => []),
+  ]);
+
+  for (const row of turnRows) turnCounts.set(String(row.session_id), Number(row.cnt || 0));
+  for (const row of eventRows) eventCounts.set(String(row.session_id), Number(row.cnt || 0));
+  for (const row of billingRows) billingCounts.set(String(row.session_id), Number(row.cnt || 0));
+  for (const row of lifecycleRows) {
+    lifecycleCounts.set(String(row.session_id), {
+      turn_start: Number(row.turn_start || 0),
+      turn_end: Number(row.turn_end || 0),
+      session_end: Number(row.session_end || 0),
     });
   }
 
@@ -624,7 +622,7 @@ observabilityRoutes.openapi(traceIntegrityRoute, async (c): Promise<any> => {
   if (!complete && alertOnBreach) {
     try {
       await sql`
-        INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+        INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
         VALUES (
           ${user.org_id},
           ${user.user_id},
@@ -1712,10 +1710,10 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
     );
 
     let attributes: Record<string, unknown> = {};
-    try { attributes = JSON.parse(String(event.attributes_json || "{}")); } catch {}
+    attributes = parseJsonColumn(event.attributes_json);
 
     let resource: Record<string, unknown> = {};
-    try { resource = JSON.parse(String(event.resource_json || "{}")); } catch {}
+    resource = parseJsonColumn(event.resource_json);
 
     const spanId = String(event.span_id || genId() + genId()).padEnd(16, "0").slice(0, 16);
     const parentSpanId = event.parent_span_id ? String(event.parent_span_id).padEnd(16, "0").slice(0, 16) : "";
@@ -1806,7 +1804,7 @@ observabilityRoutes.get("/export/otlp", requireScope("observability:read"), asyn
         }
 
         let toolCalls: any[] = [];
-        try { toolCalls = JSON.parse(String(turn.tool_calls_json || "[]")); } catch {}
+        toolCalls = parseJsonColumn(turn.tool_calls_json, []);
         if (toolCalls.length > 0) {
           turnAttrs.push({ key: "agentos.tool_call_count", value: { intValue: String(toolCalls.length) } });
           turnAttrs.push({ key: "agentos.tool_names", value: { stringValue: toolCalls.map((tc: any) => tc.name || tc.tool || "").join(",") } });

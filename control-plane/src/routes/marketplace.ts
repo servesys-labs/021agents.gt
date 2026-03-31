@@ -123,7 +123,7 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
 
   // Verify agent exists
   const agentRows = await sql`
-    SELECT name FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} AND is_active = 1 LIMIT 1
+    SELECT name FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} AND is_active = true LIMIT 1
   `;
   if (agentRows.length === 0) return c.json({ error: "Agent not found or inactive" }, 404);
 

@@ -143,13 +143,13 @@ a2aRoutes.openapi(agentCardRoute, async (c): Promise<any> => {
     ? await sql`
         SELECT name, description, config_json
         FROM agents
-        WHERE name = ${agentParam} AND org_id = ${orgParam} AND is_active = 1
+        WHERE name = ${agentParam} AND org_id = ${orgParam} AND is_active = true
         LIMIT 1
       `
     : await sql`
         SELECT name, description, config_json
         FROM agents
-        WHERE org_id = ${orgParam} AND is_active = 1
+        WHERE org_id = ${orgParam} AND is_active = true
         ORDER BY created_at DESC
         LIMIT 1
       `;
@@ -196,7 +196,7 @@ a2aRoutes.openapi(agentCardsRoute, async (c): Promise<any> => {
   const rows = await sql`
     SELECT name, description, config_json
     FROM agents
-    WHERE org_id = ${user.org_id} AND is_active = 1
+    WHERE org_id = ${user.org_id} AND is_active = true
     ORDER BY created_at DESC
   `;
 
@@ -333,7 +333,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         if (!targetAgentName) {
           const rows = await sql`
             SELECT name FROM agents
-            WHERE org_id = ${user.org_id} AND is_active = 1
+            WHERE org_id = ${user.org_id} AND is_active = true
             ORDER BY created_at DESC
             LIMIT 1
           `;
@@ -350,7 +350,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         const targetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
         const agentOwnerRows = await sql`
           SELECT org_id, config_json FROM agents
-          WHERE name = ${targetAgentName} AND is_active = 1
+          WHERE name = ${targetAgentName} AND is_active = true
           ${targetOrgFromUrl ? sql`AND org_id = ${targetOrgFromUrl}` : sql``}
           LIMIT 1
         `.catch(() => []);
@@ -382,7 +382,44 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
           }
         }
 
-        // Forward to runtime via service binding
+        // ── Cost ceiling for A2A tasks ──────────────────────────
+        // Resolve pricing model to enforce cost cap during execution.
+        // The runtime's budget_limit_usd is overridden to the escrow ceiling
+        // so the agent CANNOT spend more than what the caller pre-authorized.
+        let pricingModel = "fixed";
+        let costCeiling = 10.0; // default fallback
+        let costPlusMarginPct = 0;
+        try {
+          const [mktListing] = await sql`
+            SELECT pricing_model, cost_plus_margin_pct, price_per_task_usd,
+                   price_per_1k_input_tokens_usd, price_per_1k_output_tokens_usd
+            FROM marketplace_listings
+            WHERE agent_name = ${targetAgentName} AND is_published = true LIMIT 1
+          `.catch(() => []);
+          if (mktListing) {
+            pricingModel = mktListing.pricing_model || "fixed";
+            costPlusMarginPct = Number(mktListing.cost_plus_margin_pct) || 0;
+            if (pricingModel === "fixed") {
+              // Fixed: ceiling = task price (agent won't spend more than they earn)
+              costCeiling = Number(mktListing.price_per_task_usd) || 10.0;
+            } else if (pricingModel === "cost_plus") {
+              // Cost-plus: ceiling = agent's budget_limit_usd (max possible cost)
+              // The actual charge is settled post-task based on real LLM spend
+              const cfg = typeof agentOwnerRows[0]?.config_json === "string"
+                ? JSON.parse(agentOwnerRows[0].config_json)
+                : agentOwnerRows[0]?.config_json || {};
+              costCeiling = Number(cfg.governance?.budget_limit_usd) || 10.0;
+            } else if (pricingModel === "per_token") {
+              // Per-token: ceiling based on reasonable max (200k tokens)
+              const maxTokens = 200_000;
+              const inputRate = Number(mktListing.price_per_1k_input_tokens_usd) || 0;
+              const outputRate = Number(mktListing.price_per_1k_output_tokens_usd) || 0;
+              costCeiling = (maxTokens / 1000) * Math.max(inputRate, outputRate);
+            }
+          }
+        } catch {} // non-blocking — falls back to default ceiling
+
+        // Forward to runtime via service binding with cost ceiling override
         const resp = await c.env.RUNTIME.fetch(
           new Request("https://runtime/run", {
             method: "POST",
@@ -396,6 +433,8 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
               org_id: targetOrgId,
               project_id: user.project_id,
               channel: "a2a",
+              // Cost ceiling: overrides agent's own budget for this task
+              budget_limit_usd_override: costCeiling,
             }),
           }),
         );
@@ -409,9 +448,15 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         const result = (await resp.json()) as {
           output?: string;
           llm_response?: { content?: string };
+          cost_usd?: number;
+          input_tokens?: number;
+          output_tokens?: number;
         };
 
         const output = result.output || result.llm_response?.content || "";
+        const actualCostUsd = result.cost_usd || 0;
+        const actualInputTokens = result.input_tokens || 0;
+        const actualOutputTokens = result.output_tokens || 0;
 
         const responseMessage: A2AMessage = {
           id: generateId(),
@@ -424,26 +469,92 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         task.messages.push(responseMessage);
         task.artifacts.push({ id: generateId(), name: "response", parts: [{ text: output }] });
 
-        // Persist to DB for audit (use actual target org, not caller's)
+        // ── Post-task settlement (cost_plus / per_token) ────────
+        // For non-fixed pricing, calculate actual charge and refund overage
         const paymentReceipt = params.payment_receipt as { transfer_id?: string } | undefined;
         const transferId = paymentReceipt?.transfer_id || "";
-        const transferAmount = transferId
-          ? await (async () => {
-              try {
-                const [t] = await sql`SELECT amount_usd FROM a2a_tasks WHERE transfer_id = ${transferId} LIMIT 1`;
-                return Number(t?.amount_usd) || 0;
-              } catch { return 0; }
-            })()
-          : 0;
-        persistA2ATask(c.env, task, user.org_id, targetOrgId, paymentReceipt?.transfer_id);
+        let transferAmount = 0;
+        let settledAmount = 0;
 
-        // Write billing record for A2A transaction (caller pays)
-        if (transferAmount > 0) {
+        if (transferId) {
+          try {
+            const [t] = await sql`
+              SELECT ABS(amount_usd) as amount FROM credit_transactions
+              WHERE reference_id = ${transferId} AND type = 'transfer_out' LIMIT 1
+            `;
+            transferAmount = Number(t?.amount) || 0;
+          } catch {}
+        }
+
+        if (pricingModel === "cost_plus" && actualCostUsd > 0 && transferAmount > 0) {
+          // Charge: actual LLM cost + margin percentage
+          settledAmount = actualCostUsd * (1 + costPlusMarginPct / 100);
+          const overage = transferAmount - settledAmount;
+          if (overage > 0.001) {
+            // Refund overage to caller
+            try {
+              const { refundTransfer } = await import("../logic/agent-payments");
+              await refundTransfer(sql, transferId, user.org_id, targetOrgId, overage,
+                `Cost-plus settlement: actual $${actualCostUsd.toFixed(4)} + ${costPlusMarginPct}% = $${settledAmount.toFixed(4)}, refund $${overage.toFixed(4)}`
+              );
+            } catch {} // best-effort
+          }
+        } else if (pricingModel === "per_token" && (actualInputTokens > 0 || actualOutputTokens > 0) && transferAmount > 0) {
+          // Charge: actual tokens * rates
+          try {
+            const [mktListing] = await sql`
+              SELECT price_per_1k_input_tokens_usd, price_per_1k_output_tokens_usd
+              FROM marketplace_listings WHERE agent_name = ${targetAgentName} AND is_published = true LIMIT 1
+            `.catch(() => []);
+            if (mktListing) {
+              const inputCost = (actualInputTokens / 1000) * Number(mktListing.price_per_1k_input_tokens_usd || 0);
+              const outputCost = (actualOutputTokens / 1000) * Number(mktListing.price_per_1k_output_tokens_usd || 0);
+              settledAmount = inputCost + outputCost;
+              const overage = transferAmount - settledAmount;
+              if (overage > 0.001) {
+                const { refundTransfer } = await import("../logic/agent-payments");
+                await refundTransfer(sql, transferId, user.org_id, targetOrgId, overage,
+                  `Per-token settlement: ${actualInputTokens} in + ${actualOutputTokens} out = $${settledAmount.toFixed(4)}, refund $${overage.toFixed(4)}`
+                );
+              }
+            }
+          } catch {} // best-effort
+        } else {
+          settledAmount = transferAmount; // fixed pricing — no settlement needed
+        }
+
+        // Persist to DB for audit (use actual target org, not caller's)
+        // Include cost metrics for transparency
+        persistA2ATask(c.env, task, user.org_id, targetOrgId, paymentReceipt?.transfer_id);
+        // Update a2a_tasks with actual cost data
+        try {
+          await sql`
+            UPDATE a2a_tasks SET
+              llm_cost_usd = ${actualCostUsd},
+              input_tokens = ${actualInputTokens},
+              output_tokens = ${actualOutputTokens},
+              pricing_model = ${pricingModel},
+              settled_amount_usd = ${settledAmount},
+              amount_usd = ${settledAmount}
+            WHERE task_id = ${taskId}
+          `.catch(() => {});
+        } catch {}
+
+        // Write billing record for A2A transaction (caller pays settled amount)
+        if (settledAmount > 0) {
           try {
             await sql`
-              INSERT INTO billing_records (org_id, agent_name, cost_type, model, total_cost_usd, inference_cost_usd, session_id, trace_id, description, created_at)
-              VALUES (${user.org_id}, ${targetAgentName}, 'a2a_task', 'a2a', ${transferAmount}, ${transferAmount}, ${taskId}, ${taskId}, ${'A2A task to ' + targetAgentName}, now())
-              ON CONFLICT DO NOTHING
+              INSERT INTO billing_records (
+                org_id, agent_name, cost_type, model, total_cost_usd, inference_cost_usd,
+                input_tokens, output_tokens, session_id, trace_id, description, created_at
+              ) VALUES (
+                ${user.org_id}, ${targetAgentName}, 'a2a_task', 'a2a',
+                ${settledAmount}, ${actualCostUsd},
+                ${actualInputTokens}, ${actualOutputTokens},
+                ${taskId}, ${taskId},
+                ${'A2A task (' + pricingModel + '): ' + targetAgentName + ' — LLM $' + actualCostUsd.toFixed(4) + ', settled $' + settledAmount.toFixed(4)},
+                now()
+              ) ON CONFLICT DO NOTHING
             `;
           } catch (err) {
             console.error("[a2a] Billing record write failed:", err);
@@ -528,7 +639,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
       if (!targetAgentName) {
         const rows = await sql`
           SELECT name FROM agents
-          WHERE org_id = ${user.org_id} AND is_active = 1
+          WHERE org_id = ${user.org_id} AND is_active = true
           ORDER BY created_at DESC
           LIMIT 1
         `;
@@ -544,7 +655,7 @@ a2aRoutes.openapi(jsonrpcRoute, async (c): Promise<any> => {
         const streamTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
         const streamAgentOwnerRows = await sql`
           SELECT org_id, config_json FROM agents
-          WHERE name = ${targetAgentName} AND is_active = 1
+          WHERE name = ${targetAgentName} AND is_active = true
           ${streamTargetOrgFromUrl ? sql`AND org_id = ${streamTargetOrgFromUrl}` : sql``}
           LIMIT 1
         `.catch(() => []);
@@ -753,7 +864,7 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
     if (!targetAgentName) {
       const rows = await sql`
         SELECT name FROM agents
-        WHERE org_id = ${user.org_id} AND is_active = 1
+        WHERE org_id = ${user.org_id} AND is_active = true
         ORDER BY created_at DESC
         LIMIT 1
       `;
@@ -768,7 +879,7 @@ a2aRoutes.openapi(taskSendRoute, async (c): Promise<any> => {
     const restTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
     const restAgentOwnerRows = await sql`
       SELECT org_id, config_json FROM agents
-      WHERE name = ${targetAgentName} AND is_active = 1
+      WHERE name = ${targetAgentName} AND is_active = true
       ${restTargetOrgFromUrl ? sql`AND org_id = ${restTargetOrgFromUrl}` : sql``}
       LIMIT 1
     `.catch(() => []);
@@ -901,7 +1012,7 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
   if (!targetAgentName) {
     const rows = await sql`
       SELECT name FROM agents
-      WHERE org_id = ${user.org_id} AND is_active = 1
+      WHERE org_id = ${user.org_id} AND is_active = true
       ORDER BY created_at DESC
       LIMIT 1
     `;
@@ -917,7 +1028,7 @@ a2aRoutes.openapi(taskSendSubscribeRoute, async (c): Promise<any> => {
     const subTargetOrgFromUrl = new URL(c.req.url).searchParams.get("org") || "";
     const subAgentOwnerRows = await sql`
       SELECT org_id, config_json FROM agents
-      WHERE name = ${targetAgentName} AND is_active = 1
+      WHERE name = ${targetAgentName} AND is_active = true
       ${subTargetOrgFromUrl ? sql`AND org_id = ${subTargetOrgFromUrl}` : sql``}
       LIMIT 1
     `.catch(() => []);

@@ -13,6 +13,7 @@ import type { CurrentUser } from "../auth/types";
 import { getDbForOrg } from "../db/client";
 import { normalizeSteps, validateWorkflow, deriveRunMetadata } from "../logic/workflow-validator";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const workflowRoutes = createOpenAPIRouter();
 
@@ -142,23 +143,11 @@ async function dispatchApprovalWorkflow(
 
 function decodeRunRow(row: any): any {
   const item = { ...row };
-  try {
-    item.steps = JSON.parse(item.steps_status_json || "{}");
-  } catch {
-    item.steps = {};
-  }
+  item.steps = parseJsonColumn(item.steps_status_json);
   delete item.steps_status_json;
-  try {
-    item.dag = JSON.parse(item.dag_json || "{}");
-  } catch {
-    item.dag = {};
-  }
+  item.dag = parseJsonColumn(item.dag_json);
   delete item.dag_json;
-  try {
-    item.reflection = JSON.parse(item.reflection_json || "{}");
-  } catch {
-    item.reflection = {};
-  }
+  item.reflection = parseJsonColumn(item.reflection_json);
   delete item.reflection_json;
   item.run_metadata = deriveRunMetadata(item.dag || {}, item.reflection || {});
   return item;
@@ -473,11 +462,7 @@ workflowRoutes.openapi(listWorkflowsRoute, async (c): Promise<any> => {
   `;
   const result = rows.map((r: any) => {
     const d = { ...r };
-    try {
-      d.steps = JSON.parse(d.steps_json || "[]");
-    } catch {
-      d.steps = [];
-    }
+    d.steps = parseJsonColumn(d.steps_json, []);
     delete d.steps_json;
     return d;
   });
