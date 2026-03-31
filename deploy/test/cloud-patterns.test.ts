@@ -222,3 +222,147 @@ describe("isSessionLimitReached", () => {
     expect(result.active).toBe(0);
   });
 });
+
+// ── C2.1+C4.2: Snapshot Hydration + Cost Recovery (integration) ──
+
+import { hydrateFromSnapshot, backupCostState, recoverCostState } from "../src/runtime/do-lifecycle";
+
+describe("snapshot hydration + cost recovery", () => {
+  it("hydrateFromSnapshot returns null when KV unavailable", async () => {
+    expect(await hydrateFromSnapshot({} as any, "sess-1")).toBeNull();
+  });
+
+  it("recoverCostState returns null when no snapshot exists", async () => {
+    expect(await recoverCostState({} as any, "nonexistent")).toBeNull();
+  });
+
+  it("backupCostState does not throw when KV unavailable", async () => {
+    await expect(backupCostState({} as any, "s1", 1.5, 10)).resolves.toBeUndefined();
+  });
+
+  it("round-trips cost state through mock KV", async () => {
+    const store = new Map<string, string>();
+    const mockEnv = {
+      AGENT_PROGRESS_KV: {
+        put: async (k: string, v: string) => { store.set(k, v); },
+        get: async (k: string) => store.get(k) ?? null,
+      },
+    };
+    await backupCostState(mockEnv as any, "sess-rt", 2.5, 7, "org-1", "assistant");
+    const snapshot = await hydrateFromSnapshot(mockEnv as any, "sess-rt");
+    expect(snapshot).not.toBeNull();
+    expect(snapshot!.totalCostUsd).toBe(2.5);
+    expect(snapshot!.turnCount).toBe(7);
+
+    const recovered = await recoverCostState(mockEnv as any, "sess-rt");
+    expect(recovered!.costUsd).toBe(2.5);
+  });
+
+  it("rejects stale snapshots beyond maxAge", async () => {
+    const store = new Map<string, string>();
+    store.set("session-state/stale", JSON.stringify({
+      totalCostUsd: 1.0, turnCount: 3, orgId: "org", agentName: "a",
+      savedAt: Date.now() - 7200_000,
+    }));
+    const mockEnv = {
+      AGENT_PROGRESS_KV: { get: async (k: string) => store.get(k) ?? null, put: async () => {} },
+    };
+    expect(await hydrateFromSnapshot(mockEnv as any, "stale", 3600_000)).toBeNull();
+  });
+});
+
+// ── C3.3: Event Compaction (integration) ──────────────────────────
+
+import { compactProgressEvents } from "../src/runtime/ws-dedup";
+
+describe("compactProgressEvents", () => {
+  it("returns zero counts when KV unavailable", async () => {
+    const result = await compactProgressEvents(null, "key");
+    expect(result).toEqual({ before: 0, after: 0 });
+  });
+
+  it("removes intermediate events from mock KV", async () => {
+    const events = [
+      { type: "session_start" }, { type: "turn_start" },
+      { type: "tool_progress" }, { type: "tool_progress" }, { type: "heartbeat" },
+      { type: "tool_call" }, { type: "tool_result" },
+      { type: "turn_end" }, { type: "done" },
+    ];
+    const store = new Map<string, string>();
+    store.set("pk", JSON.stringify(events));
+    const mockKv = {
+      get: async (k: string) => store.get(k) ?? null,
+      put: async (k: string, v: string) => { store.set(k, v); },
+    };
+    const result = await compactProgressEvents(mockKv, "pk");
+    expect(result.before).toBe(9);
+    expect(result.after).toBe(6);
+  });
+});
+
+// ── C2.2: Version-based cache invalidation ────────────────────────
+
+import { isEnabled, setFlag, listFlags } from "../src/runtime/features";
+
+describe("feature flags version cache", () => {
+  it("returns defaults when KV unavailable", async () => {
+    expect(await isEnabled({} as any, "concurrent_tools", "org-1")).toBe(true);
+  });
+
+  it("returns false for unknown flags", async () => {
+    expect(await isEnabled({} as any, "nonexistent", "org-1")).toBe(false);
+  });
+
+  it("setFlag bumps version key", async () => {
+    const store = new Map<string, string>();
+    const mockEnv = {
+      AGENT_PROGRESS_KV: {
+        put: async (k: string, v: string) => { store.set(k, v); },
+        get: async (k: string) => store.get(k) ?? null,
+      },
+    };
+    await setFlag(mockEnv as any, "test_flag", "org-v", true);
+    const v1 = Number(store.get("features-version/org-v"));
+    expect(v1).toBeGreaterThan(0);
+
+    await setFlag(mockEnv as any, "test_flag", "org-v", false);
+    expect(Number(store.get("features-version/org-v"))).toBe(v1 + 1);
+  });
+});
+
+// ── C3.1: R2 result persistence (mock R2) ─────────────────────────
+
+describe("processToolResult with mock R2", () => {
+  it("persists large results and supports retrieval", async () => {
+    const r2 = new Map<string, { body: string; meta: any }>();
+    const mockEnv = {
+      STORAGE: {
+        put: async (key: string, body: string, opts: any) => { r2.set(key, { body, meta: opts?.customMetadata }); },
+        get: async (key: string) => { const e = r2.get(key); return e ? { text: async () => e.body } : null; },
+      },
+    };
+    const big = "x".repeat(50_000);
+    const result = await processToolResult(mockEnv as any, big, { sessionId: "s1", toolCallId: "tc1", toolName: "grep" });
+    expect(result.persisted).toBe(true);
+    expect(result.content).toContain("retrieve-result");
+    expect(result.content.length).toBeLessThan(big.length);
+
+    const full = await retrieveToolResult(mockEnv as any, result.r2Key!);
+    expect(full).toBe(big);
+  });
+});
+
+// ── C1.2: Write dedup lifecycle ───────────────────────────────────
+
+import { clearSessionDedup } from "../src/runtime/idempotency";
+
+describe("write dedup lifecycle", () => {
+  it("clears dedup set on session end", () => {
+    const sid = "cleanup-" + Date.now();
+    const uuid = "uuid-" + Date.now();
+    isDuplicateWrite(uuid, sid);
+    expect(isDuplicateWrite(uuid, sid)).toBe(true);
+    clearSessionDedup(sid);
+    expect(isDuplicateWrite(uuid, sid)).toBe(false);
+  });
+});

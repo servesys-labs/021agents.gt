@@ -25,9 +25,18 @@ import {
   WorkflowEntrypoint,
   WorkflowStep,
   WorkflowEvent,
-  NonRetryableError,
 } from "cloudflare:workers";
+import type { Env } from "./index";
+
+// NonRetryableError may not be in all CF worker type versions — define locally if missing
+class NonRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonRetryableError";
+  }
+}
 import { sanitizeUnicode, sanitizeDeep } from "./runtime/sanitize";
+import { calculateDetailedCost } from "./runtime/cost";
 import { validateUrl } from "./runtime/ssrf";
 import { shouldCompact, compactMessages } from "./runtime/compact";
 import { repairConversation } from "./runtime/conversation-repair";
@@ -35,10 +44,13 @@ import { migrateConfig } from "./runtime/config-migrations";
 import { logger } from "./runtime/logger";
 import { readMailbox } from "./runtime/mailbox";
 import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID, clearSessionDedup } from "./runtime/idempotency";
-import { backupCostState, hydrateFromSnapshot, recoverCostState } from "./runtime/do-lifecycle";
+import { backupCostState, hydrateFromSnapshot } from "./runtime/do-lifecycle";
 import { compactProgressEvents } from "./runtime/ws-dedup";
-import { processToolResult } from "./runtime/result-storage";
+
+import { processToolResult, cleanupSessionResults } from "./runtime/result-storage";
 import { registerSession, unregisterSession, isSessionLimitReached, refreshHeartbeat } from "./runtime/session-counter";
+import { BudgetError, AgentOSError, SSRFError } from "./runtime/errors";
+import { createChildAbortController } from "./runtime/abort";
 
 // ── Cloud C4.3: Memoized module imports ──────────────────────────
 // Workflow step functions run in isolated contexts. Dynamic imports are
@@ -122,6 +134,13 @@ interface LLMResult {
   cost_usd: number;
   input_tokens: number;
   output_tokens: number;
+  // Observability enrichment (migration 026)
+  llm_latency_ms: number;
+  stop_reason?: string;
+  refusal?: boolean;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  gateway_log_id?: string;
 }
 
 // ── Workflow ─────────────────────────────────────────────────
@@ -193,6 +212,25 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         config.reasoning_strategy as string | undefined, p.input, 1,
       ) || autoSelectStrategy(p.input, toolDefs.length);
 
+      // Check feature flags for this org
+      const { isEnabled: checkFlag } = await memo("features", () => import("./runtime/features"));
+      const featureFlags = {
+        concurrent_tools: await checkFlag(this.env as any, "concurrent_tools", p.org_id),
+        context_compression: await checkFlag(this.env as any, "context_compression", p.org_id),
+        deferred_tool_loading: await checkFlag(this.env as any, "deferred_tool_loading", p.org_id),
+      };
+
+      // Coordinator mode: auto-detect complex multi-part tasks
+      const { shouldCoordinate, buildCoordinatorPrompt } = await memo("coordinator", () => import("./runtime/coordinator"));
+      let coordinatorPrompt = "";
+      if ((config.reasoning_strategy as string) === "coordinator" || shouldCoordinate(p.input, toolDefs.length)) {
+        try {
+          const { loadAgentList } = await memo("db", () => import("./runtime/db"));
+          const agents = await loadAgentList(this.env.HYPERDRIVE, p.org_id);
+          coordinatorPrompt = buildCoordinatorPrompt(p.agent_name, agents.map((a: any) => a.name).filter((n: string) => n !== p.agent_name));
+        } catch {}
+      }
+
       return {
         config: {
           system_prompt: config.system_prompt,
@@ -210,7 +248,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           routing: config.routing,
         },
         reasoning_prompt: reasoningPrompt,
+        coordinator_prompt: coordinatorPrompt,
         tool_count: toolDefs.length,
+        featureFlags,
       };
     });
 
@@ -290,29 +330,32 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     }
 
     // Phase 2.5: Prompt Cache Optimization
-    // Static content (system prompt + behavioral rules) goes first and is
-    // cacheable across turns. Dynamic content (memory, reasoning, tool index)
-    // comes after and changes per turn. For Anthropic models, the API caches
-    // everything up to the last cache_control marker.
-    // ── STATIC SECTION (cacheable) ──
+    // Static content (system prompt + behavioral rules) is concatenated into ONE
+    // system message so the Anthropic API can cache the entire prefix. The llm.ts
+    // cache_control marker on the last system message caches everything up to this
+    // point. Dynamic content (memory, env, reasoning) comes in separate messages
+    // after this block and changes per turn.
+    // ── STATIC SECTION (single cacheable message) ──
+    const staticParts: string[] = [];
     if (effectiveSystemPrompt) {
-      messages.push({ role: "system", content: effectiveSystemPrompt });
+      staticParts.push(effectiveSystemPrompt);
     }
 
-    // ── Phase 4.1: Anti-hallucination behavioral guardrails ──
-    // These instructions improve agent reliability by preventing common failure modes.
-    // Inspired by Claude Code's system prompt patterns that enforce disciplined behavior.
-    messages.push({ role: "system", content: `## Behavioral Rules
+    // Phase 4.1: Anti-hallucination behavioral guardrails
+    staticParts.push(`## Behavioral Rules
 
 ### Reliability
 - Read before modifying. Never propose changes to files, records, or resources you haven't read. Understand existing state before making changes.
 - Report outcomes faithfully. If a tool fails, say so with the error output. If you did not verify something, say that rather than implying it succeeded. Never claim "done" when output shows failures. When something did succeed, state it plainly — don't hedge confirmed results.
 - If an approach fails, diagnose why before switching tactics. Read the error, check your assumptions, try a focused fix. Don't retry the identical action blindly, but don't abandon a viable approach after a single failure either.
+- Verify your work. Reading output is not verification — run it. After making changes, confirm they work by testing, not by re-reading your own edits. If you cannot verify, say so explicitly.
+- Write down important information from tool results in your response text. Earlier tool results may be compressed in long conversations — if a result contains data you'll need later, include it in your answer.
 
 ### Scope Discipline
 - Do not add features, refactoring, or improvements beyond what was asked. A fix doesn't need surrounding cleanup. A simple task doesn't need extra configurability.
 - Do not add error handling or validation for scenarios that can't happen. Trust tool guarantees. Only validate at system boundaries (user input, external APIs).
 - If a tool returns empty output, acknowledge it rather than fabricating content.
+- Three similar lines of code is better than a premature abstraction. Don't create helpers, utilities, or wrapper functions for one-time operations.
 
 ### Tool Usage
 - When multiple tools are needed and they're independent, call them in parallel (in the same response). Only use sequential execution when one tool depends on another's output.
@@ -326,7 +369,19 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 ### Communication
 - Be concise. Lead with the answer or action, not the reasoning. Skip filler words and preamble.
 - When referencing files or code, include the file path so the user can navigate to it.
-- If you notice the user's request is based on a misconception, or spot an issue adjacent to what they asked about, mention it. You're a collaborator, not just an executor.` });
+- If you notice the user's request is based on a misconception, or spot an issue adjacent to what they asked about, mention it. You're a collaborator, not just an executor.`);
+
+    // Push the entire static block as ONE system message for optimal prompt caching
+    messages.push({ role: "system", content: staticParts.join("\n\n") });
+
+    // ── Team Memory: inject shared org knowledge ──
+    try {
+      const { buildTeamMemoryContext } = await memo("team-memory", () => import("./runtime/team-memory"));
+      const teamContext = await buildTeamMemoryContext(this.env as any, p.org_id, p.agent_name, 1500);
+      if (teamContext) {
+        messages.push({ role: "system", content: teamContext });
+      }
+    } catch {}
 
     // ── DYNAMIC SECTION (changes per turn — not cached) ──
 
@@ -338,11 +393,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 - Channel: ${p.channel || "web"}
 - Session: ${sessionId}
 - Tools available: ${bootstrap.tool_count}
-- Budget remaining: $${(config.budget_limit_usd - 0).toFixed(2)}
+- Budget remaining: $${(config.budget_limit_usd - recoveredCost).toFixed(2)}
 - Date: ${new Date().toISOString().slice(0, 10)}` });
 
     if (bootstrap.reasoning_prompt) {
       messages.push({ role: "system", content: bootstrap.reasoning_prompt });
+    }
+    if (bootstrap.coordinator_prompt) {
+      messages.push({ role: "system", content: bootstrap.coordinator_prompt });
     }
     for (const msg of safeHistory) {
       messages.push({ role: msg.role, content: msg.content });
@@ -353,7 +411,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       for (const url of p.media_urls) {
         const check = validateUrl(url);
         if (!check.valid) {
-          throw new NonRetryableError(`Blocked media URL: ${check.reason}`);
+          const ssrfErr = new SSRFError(url, check.reason || "blocked");
+          throw new NonRetryableError(ssrfErr.userMessage || `Blocked media URL: ${check.reason}`);
         }
       }
     }
@@ -406,13 +465,21 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     let totalToolCalls = 0;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
+    let totalCacheReadTokens = 0;
+    let totalCacheWriteTokens = 0;
+    let repairCount = 0;
+    let compactionCount = 0;
     let finalOutput = "";
     const startTime = Date.now();
     const turnRecords: Array<{
       turn: number; model: string; content: string;
       input_tokens: number; output_tokens: number; cost_usd: number;
-      latency_ms: number; tool_calls: string[]; tool_results: Array<{ name: string; latency_ms: number; error?: string }>;
+      latency_ms: number; tool_calls: Array<{ name: string; arguments: Record<string, unknown> }>; tool_results: Array<{ name: string; latency_ms: number; error?: string; result?: string; cost_usd?: number }>;
       errors: string[];
+      // Observability enrichment
+      llm_latency_ms?: number; stop_reason?: string; refusal?: boolean;
+      cache_read_tokens?: number; cache_write_tokens?: number;
+      gateway_log_id?: string;
     }> = [];
 
     // ── Phase 1.4: Loop detection state ──
@@ -426,7 +493,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 
       // ── Budget check (no step needed — pure logic) ──
       if (totalCost >= config.budget_limit_usd) {
-        await this.emit(p.progress_key, { type: "error", message: "Budget exhausted", code: "BUDGET_EXHAUSTED" });
+        const budgetErr = new BudgetError(totalCost, config.budget_limit_usd);
+        await this.emit(p.progress_key, { type: "error", message: budgetErr.userMessage || "Budget exhausted", code: budgetErr.code });
         break;
       }
 
@@ -443,20 +511,23 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // ── Phase 9.1: Conversation repair — fix orphaned tool calls before LLM sees them ──
       {
         const { messages: repaired, repairs } = repairConversation(messages);
-        if (repairs.orphanedUses + repairs.orphanedResults + repairs.duplicateIds + repairs.emptyResults > 0) {
+        const totalRepairs = repairs.orphanedUses + repairs.orphanedResults + repairs.duplicateIds + repairs.emptyResults;
+        if (totalRepairs > 0) {
           messages = repaired;
+          repairCount += totalRepairs;
           logger.info("conversation_repair", { orphaned_uses: repairs.orphanedUses, orphaned_results: repairs.orphanedResults, duplicate_ids: repairs.duplicateIds, empty_results: repairs.emptyResults });
         }
       }
 
       // ── Phase 2.4: Context compression — auto-compact when approaching token limit ──
-      if (shouldCompact(messages)) {
+      if (bootstrap.featureFlags?.context_compression !== false && shouldCompact(messages)) {
         const compacted = await compactMessages(
           messages,
           6, // keep last 6 messages
         );
         const dropped = messages.length - compacted.length;
         messages = compacted;
+        compactionCount++;
         await this.emit(p.progress_key, {
           type: "system",
           content: `Context compressed: ${dropped} messages summarized to stay within token limits.`,
@@ -515,15 +586,23 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           cost_usd: response.cost_usd || 0,
           input_tokens: response.usage?.input_tokens || 0,
           output_tokens: response.usage?.output_tokens || 0,
+          llm_latency_ms: response.latency_ms || 0,
+          stop_reason: response.stop_reason,
+          refusal: response.refusal,
+          cache_read_tokens: response.usage?.cache_read_tokens || 0,
+          cache_write_tokens: response.usage?.cache_write_tokens || 0,
+          gateway_log_id: response.gateway_log_id,
         } as LLMResult;
       });
 
       totalCost += llm.cost_usd;
       totalInputTokens += llm.input_tokens;
       totalOutputTokens += llm.output_tokens;
+      totalCacheReadTokens += llm.cache_read_tokens;
+      totalCacheWriteTokens += llm.cache_write_tokens;
 
       // ── Phase 9.3: Handle model refusal ──
-      if ((llm as any).refusal) {
+      if (llm.refusal) {
         await this.emit(p.progress_key, {
           type: "warning",
           message: "Model declined this request due to usage policies.",
@@ -558,8 +637,11 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         turnRecords.push({
           turn, model: llm.model, content: llm.content,
           input_tokens: llm.input_tokens, output_tokens: llm.output_tokens,
-          cost_usd: llm.cost_usd, latency_ms: 0,
+          cost_usd: llm.cost_usd, latency_ms: llm.llm_latency_ms,
           tool_calls: [], tool_results: [], errors: [],
+          stop_reason: llm.stop_reason, refusal: llm.refusal,
+          cache_read_tokens: llm.cache_read_tokens, cache_write_tokens: llm.cache_write_tokens,
+          gateway_log_id: llm.gateway_log_id,
         });
         break;
       }
@@ -634,8 +716,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         }
       }
 
-      const toolResultEntries = await Promise.all(
-        executableCalls.map((tc, i) =>
+      const toolStepFn = (tc: typeof executableCalls[0], i: number) =>
           step.do(`tool-${turn}-${i}-${tc.name}`, {
             retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
             timeout: "5 minutes",
@@ -695,9 +776,19 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             await cacheStepResult(this.env as any, idemKey, JSON.stringify(entry));
 
             return entry;
-          })
-        )
-      );
+          });
+
+      // Feature-gated: concurrent tool execution vs serial
+      const useConcurrent = bootstrap.featureFlags?.concurrent_tools !== false && config.parallel_tool_calls;
+      let toolResultEntries: Array<{ name: string; tool_call_id: string; result: string; error?: string; latency_ms: number; cost_usd: number }>;
+      if (useConcurrent) {
+        toolResultEntries = await Promise.all(executableCalls.map((tc, i) => toolStepFn(tc, i)));
+      } else {
+        toolResultEntries = [];
+        for (let i = 0; i < executableCalls.length; i++) {
+          toolResultEntries.push(await toolStepFn(executableCalls[i], i));
+        }
+      }
 
       totalToolCalls += executableCalls.length + discoverCalls.length;
 
@@ -746,7 +837,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             const tcArgs = JSON.parse(tc?.arguments || "{}");
             const filePath = tcArgs.path || "";
             const ext = filePath.split(".").pop()?.toLowerCase() || "";
-            const lang = { ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", py: "python", json: "json", html: "html", css: "css", md: "markdown", sql: "sql", sh: "bash", yaml: "yaml", yml: "yaml" }[ext] || ext;
+            const langMap: Record<string, string> = { ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", py: "python", json: "json", html: "html", css: "css", md: "markdown", sql: "sql", sh: "bash", yaml: "yaml", yml: "yaml" };
+            const lang = langMap[ext] || ext;
 
             if (tr.name === "write-file") {
               const content = tcArgs.content || "";
@@ -782,10 +874,15 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         tool_calls: executableCalls,
       });
       for (const tr of toolResultEntries) {
+        // Phase 0 Security: Deep-sanitize tool results before injecting into message history.
+        // Tool results can contain user-controlled content (web pages, file contents, API responses)
+        // that may include Unicode attacks or hidden prompt injection.
+        const rawContent = tr.error ? `Error: ${tr.error}` : tr.result;
+        const safeContent = String(sanitizeDeep(rawContent));
         messages.push({
           role: "tool", tool_call_id: tr.tool_call_id,
           name: tr.name,
-          content: tr.error ? `Error: ${tr.error}` : tr.result,
+          content: safeContent,
         });
       }
 
@@ -803,7 +900,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         input_tokens: llm.input_tokens,
         output_tokens: llm.output_tokens,
         cost_usd: llm.cost_usd + toolResultEntries.reduce((s, t) => s + (t.cost_usd || 0), 0),
-        latency_ms: 0,
+        latency_ms: llm.llm_latency_ms,
+        stop_reason: llm.stop_reason,
+        refusal: llm.refusal,
+        cache_read_tokens: llm.cache_read_tokens,
+        cache_write_tokens: llm.cache_write_tokens,
+        gateway_log_id: llm.gateway_log_id,
         tool_calls: executableCalls.map(tc => {
           let args: Record<string, unknown> = {};
           try { args = JSON.parse(tc.arguments || "{}"); } catch {}
@@ -829,6 +931,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       }
 
       // ── Phase 6.1: Mailbox IPC — check for messages from parent/siblings ──
+      let shutdownRequested = false;
       if (p.parent_session_id) {
         try {
           const mailMessages = readMailbox(
@@ -839,7 +942,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             if (mm.message_type === "shutdown") {
               await this.emit(p.progress_key, { type: "system", content: "Received shutdown signal from parent agent." });
               finalOutput = finalOutput || "Shutdown requested by parent agent.";
-              // Use a flag to break from the outer loop
+              shutdownRequested = true;
               break;
             }
             if (mm.message_type === "text") {
@@ -848,6 +951,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             }
           }
         } catch { /* DO_SQL may not be available in workflow steps */ }
+        if (shutdownRequested) break;
       }
 
       // ── Phase 1.4: Loop detection ──
@@ -879,6 +983,19 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         }
       }
 
+      // Also detect alternating failure patterns: A:ERR, B:ERR, A:ERR, B:ERR
+      const errorCount = recentToolSignatures.filter(s => s.endsWith(":ERR")).length;
+      if (errorCount >= LOOP_DETECTION_WINDOW - 1) {
+        // 4 out of 5 recent tool calls failed — this is a stuck pattern
+        const failingTools = [...new Set(recentToolSignatures.filter(s => s.endsWith(":ERR")).map(s => s.split(":")[0]))];
+        await this.emit(p.progress_key, {
+          type: "warning",
+          message: `Stuck pattern detected: ${failingTools.join(", ")} failing repeatedly (${errorCount}/${LOOP_DETECTION_WINDOW} errors). Stopping.`,
+        });
+        finalOutput = `Multiple tools are failing repeatedly (${failingTools.join(", ")}). Stopped to avoid wasting resources.`;
+        break;
+      }
+
       // Keep messages under 1 MiB (Workflow step return limit)
       if (JSON.stringify(messages).length > 800_000) {
         // Trim old messages, keep system + last 10
@@ -893,14 +1010,17 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 
      } catch (turnErr: any) {
        // Phase 1.4: Catch unexpected errors within a turn
-       const errMsg = turnErr?.message || String(turnErr);
-       logger.error("turn_error", { turn, error: errMsg.slice(0, 500) });
+       // Use structured error classification for telemetry-safe reporting
+       const isStructured = turnErr instanceof AgentOSError;
+       const errMsg = isStructured ? turnErr.userMessage || turnErr.message : (turnErr?.message || String(turnErr));
+       const errCode = isStructured ? turnErr.code : (turnErr?.name === "NonRetryableError" ? "NON_RETRYABLE" : "TURN_ERROR");
+       logger.error("turn_error", { turn, error: errMsg.slice(0, 500), code: errCode, retryable: isStructured ? turnErr.retryable : undefined });
        await this.emit(p.progress_key, {
          type: "error", message: `Turn ${turn} failed: ${errMsg.slice(0, 200)}`,
-         code: turnErr?.name === "NonRetryableError" ? "NON_RETRYABLE" : "TURN_ERROR",
+         code: errCode,
        });
-       // NonRetryableErrors should stop the loop; transient errors can be retried by Workflow
-       if (turnErr instanceof NonRetryableError) {
+       // NonRetryableErrors and non-retryable AgentOSErrors should stop the loop
+       if (turnErr instanceof NonRetryableError || (isStructured && !turnErr.retryable)) {
          finalOutput = `Error: ${errMsg.slice(0, 500)}`;
          break;
        }
@@ -926,15 +1046,22 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           [], // no tools — force text response
           { model: config.model, provider: config.provider },
         );
-        return { content: response.content || "", cost_usd: response.cost_usd || 0 };
+        return {
+          content: response.content || "",
+          cost_usd: response.cost_usd || 0,
+          input_tokens: response.usage?.input_tokens || 0,
+          output_tokens: response.usage?.output_tokens || 0,
+        };
       });
       finalOutput = recovery.content;
       totalCost += recovery.cost_usd;
+      totalInputTokens += recovery.input_tokens;
+      totalOutputTokens += recovery.output_tokens;
     }
 
     const result: RunOutput = {
       output: finalOutput,
-      turns: totalToolCalls > 0 ? Math.ceil(totalToolCalls) : 1,
+      turns: turnRecords.length || 1,
       tool_calls: totalToolCalls,
       cost_usd: Math.round(totalCost * 1_000_000) / 1_000_000,
       input_tokens: totalInputTokens,
@@ -981,6 +1108,23 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           action_count: result.tool_calls,
           wall_clock_seconds: Math.round((Date.now() - startTime) / 1000),
           cost_total_usd: result.cost_usd,
+          detailed_cost: calculateDetailedCost(config.model, {
+            input_tokens: totalInputTokens,
+            output_tokens: totalOutputTokens,
+            cache_creation_input_tokens: totalCacheWriteTokens,
+            cache_read_input_tokens: totalCacheReadTokens,
+          }),
+          detailed_cost_json: JSON.stringify(calculateDetailedCost(config.model, {
+            input_tokens: totalInputTokens,
+            output_tokens: totalOutputTokens,
+            cache_creation_input_tokens: totalCacheWriteTokens,
+            cache_read_input_tokens: totalCacheReadTokens,
+          })),
+          total_cache_read_tokens: totalCacheReadTokens,
+          total_cache_write_tokens: totalCacheWriteTokens,
+          feature_flags_json: JSON.stringify(bootstrap.featureFlags || {}),
+          repair_count: repairCount,
+          compaction_count: compactionCount,
           trace_id: traceId,
           channel: p.channel || "workflow",
         },
@@ -998,8 +1142,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             input_tokens: turnData.input_tokens,
             output_tokens: turnData.output_tokens,
             latency_ms: turnData.latency_ms,
+            llm_latency_ms: turnData.llm_latency_ms || turnData.latency_ms,
             llm_content: (turnData.content || "").slice(0, 5000),
             cost_total_usd: turnData.cost_usd,
+            stop_reason: turnData.stop_reason || null,
+            refusal: turnData.refusal || false,
+            cache_read_tokens: turnData.cache_read_tokens || 0,
+            cache_write_tokens: turnData.cache_write_tokens || 0,
+            gateway_log_id: turnData.gateway_log_id || null,
             tool_calls_json: JSON.stringify(turnData.tool_calls || []),
             tool_results_json: JSON.stringify(turnData.tool_results || []),
             errors_json: JSON.stringify(turnData.errors || []),
@@ -1009,9 +1159,16 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     });
 
     // ── Cloud C4.1+C4.2: Session cleanup + cost backup + dedup cleanup ──
-    await unregisterSession(this.env as any, p.org_id, sessionId);
-    await backupCostState(this.env as any, sessionId, result.cost_usd, result.turns);
-    clearSessionDedup(sessionId);
+    // Wrap in a Workflow step so cleanup is retried on crash (prevents ghost sessions).
+    await step.do("session-cleanup", {
+      retries: { limit: 3, delay: "2 seconds", backoff: "exponential" },
+      timeout: "30 seconds",
+    }, async () => {
+      await unregisterSession(this.env as any, p.org_id, sessionId);
+      await backupCostState(this.env as any, sessionId, result.cost_usd, result.turns);
+      clearSessionDedup(sessionId);
+      await cleanupSessionResults(this.env as any, sessionId).catch(() => {});
+    });
 
     // Flush logger before returning
     await logger.flush();
@@ -1024,9 +1181,15 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
   private async emit(key: string, event: Record<string, unknown>) {
     if (!this.env.AGENT_PROGRESS_KV) return;
     try {
+      // Phase C1.1: Deduplicate KV writes — each event gets a UUID to prevent
+      // duplicate entries from parallel tool executions racing on read-modify-write.
+      const eventId = crypto.randomUUID().slice(0, 12);
+      const dedupKey = `${key}:${eventId}`;
+      if (isDuplicateWrite(dedupKey, key)) return;
+
       const raw = await this.env.AGENT_PROGRESS_KV.get(key);
       const events: any[] = raw ? JSON.parse(raw) : [];
-      events.push({ ...event, ts: Date.now() });
+      events.push({ ...event, ts: Date.now(), _eid: eventId, _seq: events.length + 1 });
       // Keep last 200 events, expire after 1 hour
       await this.env.AGENT_PROGRESS_KV.put(key, JSON.stringify(events.slice(-200)), { expirationTtl: 3600 });
     } catch {}

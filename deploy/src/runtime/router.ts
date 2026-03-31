@@ -332,6 +332,7 @@ export async function selectModel(
         complexity,
         category,
         role,
+        routing_cost_usd: 0,
       };
     }
   }
@@ -348,6 +349,7 @@ export async function selectModel(
         complexity,
         category,
         role,
+        routing_cost_usd: 0,
       };
     }
   }
@@ -360,5 +362,6 @@ export async function selectModel(
     complexity,
     category,
     role,
+    routing_cost_usd: 0,
   };
 }

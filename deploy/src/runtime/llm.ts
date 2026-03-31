@@ -16,6 +16,7 @@
  */
 
 import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv } from "./types";
+import { LLMError, RefusalError, classifyFetchError } from "./errors";
 // Pricing imported dynamically in callLLM to avoid circular deps
 
 /**
@@ -84,7 +85,9 @@ export async function callLLM(
   const gatewayId = env.AI_GATEWAY_ID || "";
 
   if (!accountId || !gatewayId) {
-    throw new Error("AI Gateway not configured — set CLOUDFLARE_ACCOUNT_ID and AI_GATEWAY_ID");
+    throw new LLMError(opts.model, "AI Gateway not configured — set CLOUDFLARE_ACCOUNT_ID and AI_GATEWAY_ID", {
+      retryable: false,
+    });
   }
 
   const model = normalizeModelId(opts.model);
@@ -108,6 +111,22 @@ export async function callLLM(
 
   if (tools.length > 0) {
     payload.tools = tools.map(fixToolSchema);
+  }
+
+  // Phase 2.5: Prompt cache optimization for Anthropic models
+  // Mark the last system message as cacheable. The API caches everything
+  // up to this point, giving ~90% cost savings on repeated prefixes.
+  if (model.includes("anthropic/") || model.includes("claude")) {
+    const systemMsgs = payload.messages.filter((m: any) => m.role === "system");
+    if (systemMsgs.length > 0) {
+      const lastSystem = systemMsgs[systemMsgs.length - 1];
+      // Anthropic cache_control on content blocks
+      if (typeof lastSystem.content === "string") {
+        lastSystem.content = [
+          { type: "text", text: lastSystem.content, cache_control: { type: "ephemeral" } }
+        ];
+      }
+    }
   }
 
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`;
@@ -146,11 +165,19 @@ export async function callLLM(
 
   for (let attempt = 0; attempt < MAX_LLM_RETRIES; attempt++) {
     try {
-      resp = await fetch(endpoint, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-      });
+      // Phase 9.2: Idle watchdog — abort if no response within 90s
+      const idleController = new AbortController();
+      const idleTimeout = setTimeout(() => idleController.abort(), 90_000);
+      try {
+        resp = await fetch(endpoint, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(payload),
+          signal: idleController.signal,
+        });
+      } finally {
+        clearTimeout(idleTimeout);
+      }
 
       if (resp.ok) break; // Success
 
@@ -159,7 +186,10 @@ export async function callLLM(
       if (NON_RETRYABLE_STATUS.has(status)) {
         // Permanent error — don't retry
         const errBody = await resp.text();
-        throw new Error(`LLM ${status}: ${errBody.slice(0, 300)}`);
+        throw new LLMError(model, errBody.slice(0, 300), {
+          statusCode: status,
+          retryable: false,
+        });
       }
 
       if (RETRYABLE_STATUS.has(status) && attempt < MAX_LLM_RETRIES - 1) {
@@ -176,7 +206,10 @@ export async function callLLM(
 
       // Non-retryable status or final attempt
       const errBody = await resp.text();
-      throw new Error(`LLM ${status}: ${errBody.slice(0, 300)}`);
+      throw new LLMError(model, errBody.slice(0, 300), {
+        statusCode: status,
+        retryable: RETRYABLE_STATUS.has(status),
+      });
     } catch (e: any) {
       lastError = e;
       // Network errors (ECONNRESET, EPIPE, fetch failures) are retryable
@@ -193,7 +226,7 @@ export async function callLLM(
   }
 
   if (!resp || !resp.ok) {
-    throw lastError || new Error("LLM request failed after retries");
+    throw lastError || new LLMError(model, "LLM request failed after retries", { retryable: false });
   }
 
   // Capture gateway correlation IDs from response headers
@@ -209,12 +242,20 @@ export async function callLLM(
   let outputTokens = data.usage?.completion_tokens || data.usage?.output_tokens || 0;
   let providerCost = Number(data.usage?.total_cost) || 0;
 
+  // Anthropic cache token metrics — enables cache savings calculation in cost.ts
+  const cacheReadTokens = data.usage?.cache_read_input_tokens || data.usage?.prompt_tokens_details?.cached_tokens || 0;
+  const cacheWriteTokens = data.usage?.cache_creation_input_tokens || 0;
+
   // If provider didn't return tokens, query AI Gateway Logs API for exact data
   if ((inputTokens === 0 || outputTokens === 0) && gatewayLogId && accountId && gatewayId) {
     try {
+      const logHeaders: Record<string, string> = {
+        Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN || ""}`,
+      };
+      if (opts.metadata?.trace_id) logHeaders["X-Trace-Id"] = opts.metadata.trace_id;
       const logResp = await fetch(
         `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai-gateway/gateways/${gatewayId}/logs?id=${gatewayLogId}`,
-        { headers: { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN || ""}` } },
+        { headers: logHeaders },
       );
       if (logResp.ok) {
         const logData = await logResp.json() as { result?: Array<{ tokens_in?: number; tokens_out?: number; cost?: number }> };
@@ -235,20 +276,30 @@ export async function callLLM(
   const stopReason = choice.finish_reason || data.stop_reason || "";
   const isRefusal = stopReason === "refusal" || stopReason === "content_filter";
 
+  // Use structured RefusalError for telemetry-safe refusal tracking
+  const refusalError = isRefusal ? new RefusalError(data.model || model) : undefined;
+
   const content = isRefusal
-    ? "I'm unable to help with that request due to usage policies. Try rephrasing your request or adjusting the task."
+    ? (refusalError?.userMessage || "I'm unable to help with that request due to usage policies. Try rephrasing your request or adjusting the task.")
     : (msg.content || msg.reasoning || (choice as any).text || "");
 
   return {
     content,
     model: data.model || model,
     tool_calls: isRefusal ? [] : parseToolCalls(msg.tool_calls || []),
-    usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+    usage: {
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+      cache_read_tokens: cacheReadTokens,
+      cache_write_tokens: cacheWriteTokens,
+    },
     cost_usd: costUsd,
     latency_ms: latencyMs,
     gateway_log_id: gatewayLogId,
     gateway_event_id: gatewayEventId,
     refusal: isRefusal,
+    stop_reason: stopReason || undefined,
+    retry_count: 0, // Updated below if retries occurred
   };
 }
 

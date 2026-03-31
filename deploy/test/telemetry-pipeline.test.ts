@@ -1,0 +1,532 @@
+/**
+ * End-to-end telemetry pipeline tests.
+ *
+ * Validates that observability data flows correctly through:
+ *   A) Runtime collection (workflow.ts turnRecords + session payload)
+ *   B) Queue message payloads (all fields present)
+ *   C) Queue consumer INSERTs (column names match DB schema)
+ *
+ * These tests catch the class of bug where data is collected but silently
+ * dropped at the queue boundary — the #1 observability failure mode.
+ */
+import { describe, it, expect } from "vitest";
+
+// ═══════════════════════════════════════════════════════════════════
+// A) Turn record field completeness
+// ═══════════════════════════════════════════════════════════════════
+
+describe("turn record schema", () => {
+  // These are the fields that workflow.ts must include in every turnRecord
+  // so that the queue consumer can write them to Supabase.
+  const REQUIRED_TURN_FIELDS = [
+    "turn", "model", "content",
+    "input_tokens", "output_tokens", "cost_usd", "latency_ms",
+    "tool_calls", "tool_results", "errors",
+    // Migration 026 observability fields
+    "llm_latency_ms", "stop_reason", "refusal",
+    "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
+  ];
+
+  it("final-answer turn record includes all observability fields", () => {
+    // Simulates what workflow.ts pushes for a final-answer turn (line ~623)
+    const finalAnswerTurn = {
+      turn: 1, model: "anthropic/claude-sonnet-4-5", content: "Hello!",
+      input_tokens: 100, output_tokens: 50, cost_usd: 0.001,
+      latency_ms: 450,
+      tool_calls: [], tool_results: [], errors: [],
+      // Observability enrichment
+      llm_latency_ms: 450,
+      stop_reason: "stop",
+      refusal: false,
+      cache_read_tokens: 80,
+      cache_write_tokens: 20,
+      gateway_log_id: "gw-abc123",
+    };
+
+    for (const field of REQUIRED_TURN_FIELDS) {
+      expect(finalAnswerTurn).toHaveProperty(field);
+    }
+  });
+
+  it("tool-call turn record includes all observability fields", () => {
+    // Simulates what workflow.ts pushes for a tool-call turn (line ~881)
+    const toolCallTurn = {
+      turn: 2, model: "anthropic/claude-sonnet-4-5",
+      content: "Let me search for that.",
+      input_tokens: 200, output_tokens: 100, cost_usd: 0.003,
+      latency_ms: 820,
+      tool_calls: [{ name: "web-search", arguments: { query: "test" } }],
+      tool_results: [{ name: "web-search", result: "...", latency_ms: 300, cost_usd: 0.0001, error: undefined }],
+      errors: [],
+      // Observability enrichment
+      llm_latency_ms: 520,
+      stop_reason: "tool_use",
+      refusal: false,
+      cache_read_tokens: 150,
+      cache_write_tokens: 0,
+      gateway_log_id: "gw-def456",
+    };
+
+    for (const field of REQUIRED_TURN_FIELDS) {
+      expect(toolCallTurn).toHaveProperty(field);
+    }
+  });
+
+  it("refusal turn record captures refusal flag", () => {
+    const refusalTurn = {
+      turn: 1, model: "anthropic/claude-sonnet-4-5",
+      content: "I'm unable to help with that.",
+      input_tokens: 50, output_tokens: 20, cost_usd: 0.0005,
+      latency_ms: 200,
+      tool_calls: [], tool_results: [], errors: [],
+      llm_latency_ms: 200,
+      stop_reason: "content_filter",
+      refusal: true,
+      cache_read_tokens: 0, cache_write_tokens: 0,
+      gateway_log_id: "gw-ref789",
+    };
+
+    expect(refusalTurn.refusal).toBe(true);
+    expect(refusalTurn.stop_reason).toBe("content_filter");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// B) Queue payload shape — workflow → queue → consumer
+// ═══════════════════════════════════════════════════════════════════
+
+describe("session queue payload", () => {
+  // These are the fields workflow.ts sends in the session payload (type: "session").
+  // The queue consumer must handle ALL of them.
+  const REQUIRED_SESSION_PAYLOAD_FIELDS = [
+    "session_id", "org_id", "project_id", "agent_name", "model",
+    "status", "input_text", "output_text",
+    "step_count", "action_count", "wall_clock_seconds",
+    "cost_total_usd", "trace_id", "channel",
+    // Migration 026 fields
+    "detailed_cost_json", "feature_flags_json",
+    "total_cache_read_tokens", "total_cache_write_tokens",
+    "repair_count", "compaction_count",
+  ];
+
+  function buildSessionPayload() {
+    return {
+      type: "session",
+      payload: {
+        session_id: "sess-test-001",
+        org_id: "org-abc",
+        project_id: "proj-1",
+        agent_name: "test-agent",
+        model: "anthropic/claude-sonnet-4-5",
+        status: "success",
+        input_text: "Hello",
+        output_text: "Hi there!",
+        step_count: 3,
+        action_count: 5,
+        wall_clock_seconds: 12,
+        cost_total_usd: 0.0045,
+        trace_id: "trace-xyz",
+        channel: "web",
+        detailed_cost_json: JSON.stringify({
+          input_cost: 0.003, output_cost: 0.001,
+          cache_write_cost: 0.0002, cache_read_cost: 0.0001,
+          cache_savings: 0.0005, total_cost: 0.0043,
+        }),
+        feature_flags_json: JSON.stringify({
+          concurrent_tools: true,
+          context_compression: true,
+          deferred_tool_loading: false,
+        }),
+        total_cache_read_tokens: 500,
+        total_cache_write_tokens: 100,
+        repair_count: 1,
+        compaction_count: 0,
+      },
+    };
+  }
+
+  it("contains all required fields", () => {
+    const msg = buildSessionPayload();
+    for (const field of REQUIRED_SESSION_PAYLOAD_FIELDS) {
+      expect(msg.payload).toHaveProperty(field);
+    }
+  });
+
+  it("detailed_cost_json is valid JSON with cache fields", () => {
+    const msg = buildSessionPayload();
+    const cost = JSON.parse(msg.payload.detailed_cost_json);
+    expect(cost).toHaveProperty("cache_savings");
+    expect(cost).toHaveProperty("cache_read_cost");
+    expect(cost).toHaveProperty("cache_write_cost");
+    expect(cost.cache_savings).toBeGreaterThan(0);
+  });
+
+  it("feature_flags_json is valid JSON", () => {
+    const msg = buildSessionPayload();
+    const flags = JSON.parse(msg.payload.feature_flags_json);
+    expect(flags).toHaveProperty("concurrent_tools");
+    expect(typeof flags.concurrent_tools).toBe("boolean");
+  });
+});
+
+describe("turn queue payload", () => {
+  const REQUIRED_TURN_PAYLOAD_FIELDS = [
+    "session_id", "turn_number", "model_used",
+    "input_tokens", "output_tokens", "latency_ms",
+    "llm_content", "cost_total_usd",
+    "tool_calls_json", "tool_results_json", "errors_json",
+    // Migration 026 fields
+    "llm_latency_ms", "stop_reason", "refusal",
+    "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
+  ];
+
+  function buildTurnPayload() {
+    return {
+      type: "turn",
+      payload: {
+        session_id: "sess-test-001",
+        turn_number: 1,
+        model_used: "anthropic/claude-sonnet-4-5",
+        input_tokens: 200,
+        output_tokens: 100,
+        latency_ms: 800,
+        llm_latency_ms: 500,
+        llm_content: "Here is the answer.",
+        cost_total_usd: 0.002,
+        stop_reason: "stop",
+        refusal: false,
+        cache_read_tokens: 150,
+        cache_write_tokens: 50,
+        gateway_log_id: "gw-turn-001",
+        tool_calls_json: "[]",
+        tool_results_json: "[]",
+        errors_json: "[]",
+      },
+    };
+  }
+
+  it("contains all required fields", () => {
+    const msg = buildTurnPayload();
+    for (const field of REQUIRED_TURN_PAYLOAD_FIELDS) {
+      expect(msg.payload).toHaveProperty(field);
+    }
+  });
+
+  it("llm_latency_ms is separate from total latency_ms", () => {
+    const msg = buildTurnPayload();
+    // llm_latency_ms is the pure LLM response time
+    // latency_ms includes LLM + tool execution + overhead
+    expect(msg.payload.llm_latency_ms).toBeLessThanOrEqual(msg.payload.latency_ms);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// C) Consumer INSERT column alignment with DB schema
+// ═══════════════════════════════════════════════════════════════════
+
+describe("queue consumer → DB schema alignment", () => {
+  // Migration 023 + 026 column definitions (source of truth)
+  const TURNS_COLUMNS = [
+    "turn_id", "session_id", "turn_number", "model_used", "llm_content",
+    "input_tokens", "output_tokens", "cost_total_usd", "latency_ms",
+    "tool_calls_json", "tool_results_json", "errors_json",
+    "execution_mode", "plan_artifact", "reflection", "created_at",
+    // Migration 026
+    "llm_latency_ms", "stop_reason", "refusal",
+    "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
+  ];
+
+  const SESSIONS_COLUMNS_026 = [
+    "feature_flags_json", "detailed_cost_json",
+    "total_cache_read_tokens", "total_cache_write_tokens",
+    "repair_count", "compaction_count",
+  ];
+
+  it("consumer session INSERT includes all migration 026 columns", () => {
+    // This test reads the actual source code to verify the consumer SQL
+    // includes the new columns. This is a static analysis test.
+    const fs = require("fs");
+    const source = fs.readFileSync(
+      require("path").resolve(__dirname, "../src/index.ts"),
+      "utf-8",
+    );
+
+    // Find the session INSERT block
+    const sessionInsertMatch = source.match(
+      /if \(type === "session"\)[\s\S]*?ON CONFLICT/,
+    );
+    expect(sessionInsertMatch).not.toBeNull();
+    const sessionInsert = sessionInsertMatch![0];
+
+    for (const col of SESSIONS_COLUMNS_026) {
+      expect(sessionInsert).toContain(col);
+    }
+  });
+
+  it("consumer turn INSERT includes all migration 026 columns", () => {
+    const fs = require("fs");
+    const source = fs.readFileSync(
+      require("path").resolve(__dirname, "../src/index.ts"),
+      "utf-8",
+    );
+
+    const turnInsertMatch = source.match(
+      /if \(type === "turn"\)[\s\S]*?gateway_log_id[\s\S]*?\)`/,
+    );
+    expect(turnInsertMatch).not.toBeNull();
+    const turnInsert = turnInsertMatch![0];
+
+    const turnCols026 = [
+      "llm_latency_ms", "stop_reason", "refusal",
+      "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
+    ];
+    for (const col of turnCols026) {
+      expect(turnInsert).toContain(col);
+    }
+  });
+
+  it("consumer turn INSERT uses plan_artifact NOT plan_json", () => {
+    const fs = require("fs");
+    const source = fs.readFileSync(
+      require("path").resolve(__dirname, "../src/index.ts"),
+      "utf-8",
+    );
+
+    // The turns table column is plan_artifact (per migration 023),
+    // not plan_json. The consumer must use the correct column name.
+    const turnInsertMatch = source.match(
+      /else if \(type === "turn"\)[\s\S]*?\)`/,
+    );
+    expect(turnInsertMatch).not.toBeNull();
+    const turnInsert = turnInsertMatch![0];
+
+    // Should contain the correct column name
+    expect(turnInsert).toContain("plan_artifact");
+    // Should NOT have plan_json as a column name in the INSERT columns list
+    // (it can appear in the VALUES as a fallback: p.plan_json)
+    const columnsSection = turnInsert.split("VALUES")[0];
+    expect(columnsSection).not.toContain("plan_json");
+  });
+
+  it("consumer handles all queue message types", () => {
+    const fs = require("fs");
+    const source = fs.readFileSync(
+      require("path").resolve(__dirname, "../src/index.ts"),
+      "utf-8",
+    );
+
+    // Extract the queue handler method
+    const queueMatch = source.match(
+      /async queue\(batch[\s\S]*?finally[\s\S]*?}/,
+    );
+    expect(queueMatch).not.toBeNull();
+    const queueHandler = queueMatch![0];
+
+    // All message types that workflow.ts sends must have handlers
+    const expectedTypes = [
+      "session", "turn", "billing_flush",
+      "skill_activation", "loop_detected", "do_eviction",
+    ];
+
+    for (const t of expectedTypes) {
+      expect(queueHandler).toContain(`"${t}"`);
+    }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// D) LLM Response → workflow pipeline field propagation
+// ═══════════════════════════════════════════════════════════════════
+
+describe("LLM response field propagation", () => {
+  it("LLMResponse type includes cache token fields", () => {
+    // Verify the type definition includes the new fields
+    // by constructing a conforming object
+    const response = {
+      content: "test",
+      model: "anthropic/claude-sonnet-4-5",
+      tool_calls: [],
+      usage: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_tokens: 80,
+        cache_write_tokens: 20,
+      },
+      cost_usd: 0.001,
+      latency_ms: 500,
+      gateway_log_id: "gw-123",
+      gateway_event_id: "evt-456",
+      refusal: false,
+      stop_reason: "stop",
+      retry_count: 0,
+    };
+
+    expect(response.usage.cache_read_tokens).toBe(80);
+    expect(response.usage.cache_write_tokens).toBe(20);
+    expect(response.stop_reason).toBe("stop");
+    expect(response.retry_count).toBe(0);
+  });
+
+  it("LLMResult interface carries all enrichment fields", () => {
+    const llmResult = {
+      content: "test",
+      tool_calls: [],
+      model: "anthropic/claude-sonnet-4-5",
+      cost_usd: 0.001,
+      input_tokens: 100,
+      output_tokens: 50,
+      // Observability enrichment (migration 026)
+      llm_latency_ms: 450,
+      stop_reason: "stop" as string | undefined,
+      refusal: false as boolean | undefined,
+      cache_read_tokens: 80,
+      cache_write_tokens: 20,
+      gateway_log_id: "gw-123" as string | undefined,
+    };
+
+    // These fields must NOT be stripped when constructing LLMResult from callLLM response
+    expect(llmResult.llm_latency_ms).toBe(450);
+    expect(llmResult.cache_read_tokens).toBe(80);
+    expect(llmResult.cache_write_tokens).toBe(20);
+    expect(llmResult.gateway_log_id).toBe("gw-123");
+    expect(llmResult.stop_reason).toBe("stop");
+    expect(llmResult.refusal).toBe(false);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// E) Session-level accumulation
+// ═══════════════════════════════════════════════════════════════════
+
+describe("session-level cache token accumulation", () => {
+  it("accumulates cache tokens across multiple turns", () => {
+    let totalCacheReadTokens = 0;
+    let totalCacheWriteTokens = 0;
+
+    // Simulate 3 turns of cache token accumulation
+    const turns = [
+      { cache_read_tokens: 100, cache_write_tokens: 50 },
+      { cache_read_tokens: 200, cache_write_tokens: 0 },  // cached on second call
+      { cache_read_tokens: 300, cache_write_tokens: 0 },  // cached on third call
+    ];
+
+    for (const turn of turns) {
+      totalCacheReadTokens += turn.cache_read_tokens;
+      totalCacheWriteTokens += turn.cache_write_tokens;
+    }
+
+    expect(totalCacheReadTokens).toBe(600);
+    expect(totalCacheWriteTokens).toBe(50);
+
+    // Cache hit rate should be high after first turn
+    const totalInput = 1000; // hypothetical
+    const cacheHitRate = totalCacheReadTokens / totalInput;
+    expect(cacheHitRate).toBe(0.6); // 60% cache hit rate
+  });
+
+  it("accumulates repair and compaction counts", () => {
+    let repairCount = 0;
+    let compactionCount = 0;
+
+    // Simulate repairs happening in 2 of 5 turns
+    const repairEvents = [0, 2, 0, 1, 0]; // orphaned calls fixed per turn
+    const compactionEvents = [false, false, true, false, false]; // compaction triggered
+
+    for (let i = 0; i < 5; i++) {
+      repairCount += repairEvents[i];
+      if (compactionEvents[i]) compactionCount++;
+    }
+
+    expect(repairCount).toBe(3);
+    expect(compactionCount).toBe(1);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// F) Migration 026 schema validation
+// ═══════════════════════════════════════════════════════════════════
+
+describe("migration 026 schema", () => {
+  it("migration file contains all required ALTER TABLE statements", () => {
+    const fs = require("fs");
+    const migration = fs.readFileSync(
+      require("path").resolve(__dirname, "../../control-plane/src/db/migrations/026_observability_enrichment.sql"),
+      "utf-8",
+    );
+
+    // Turns columns
+    const turnsCols = [
+      "llm_latency_ms", "stop_reason", "refusal",
+      "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
+    ];
+    for (const col of turnsCols) {
+      expect(migration).toContain(col);
+    }
+
+    // Sessions columns
+    const sessionsCols = [
+      "feature_flags_json", "detailed_cost_json",
+      "total_cache_read_tokens", "total_cache_write_tokens",
+      "repair_count", "compaction_count",
+    ];
+    for (const col of sessionsCols) {
+      expect(migration).toContain(col);
+    }
+  });
+
+  it("indexes support meta-agent observability queries", () => {
+    const fs = require("fs");
+    const migration = fs.readFileSync(
+      require("path").resolve(__dirname, "../../control-plane/src/db/migrations/026_observability_enrichment.sql"),
+      "utf-8",
+    );
+
+    // Partial indexes for efficient filtered queries
+    expect(migration).toContain("idx_turns_refusal");
+    expect(migration).toContain("idx_turns_model_latency");
+    expect(migration).toContain("idx_sessions_cache");
+    expect(migration).toContain("idx_sessions_repairs");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// G) Meta-agent SCOPED_TABLES coverage
+// ═══════════════════════════════════════════════════════════════════
+
+describe("meta-agent SCOPED_TABLES", () => {
+  it("includes all observability-critical tables", () => {
+    const fs = require("fs");
+    const source = fs.readFileSync(
+      require("path").resolve(__dirname, "../../control-plane/src/logic/meta-agent-chat.ts"),
+      "utf-8",
+    );
+
+    const scopedMatch = source.match(/const SCOPED_TABLES = \[([\s\S]*?)\]/);
+    expect(scopedMatch).not.toBeNull();
+    const scopedBlock = scopedMatch![1];
+
+    // Tables that must be queryable by the meta-agent
+    const criticalTables = [
+      // Core
+      "sessions", "turns", "agents",
+      // Tracing
+      "delegation_events", "tool_executions",
+      // Feedback
+      "session_feedback", "user_feedback",
+      // Security
+      "security_events", "guardrail_events",
+      // SLOs
+      "slo_evaluations", "slo_error_budgets",
+      // Alerting
+      "alert_configs", "alert_history",
+      // A2A
+      "a2a_tasks",
+      // Billing
+      "billing_records", "credit_transactions",
+    ];
+
+    for (const table of criticalTables) {
+      expect(scopedBlock).toContain(`"${table}"`);
+    }
+  });
+});

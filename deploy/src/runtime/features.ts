@@ -1,93 +1,145 @@
 /**
- * Phase 7.3: Feature Flags with Runtime Toggle
+ * Phase 7.3 + Cloud C2.2: Feature Flags with Version-Based Cache
  *
- * NOTE: This module is infrastructure for feature-gating new capabilities.
- * Wire into workflow.ts turn loop as features are enabled per-org:
- *   if (await isEnabled(env, 'concurrent_tools', orgId)) { ... }
- *
- * KV-backed per-org feature flags. Enable new features for one org,
- * emergency-disable broken ones, A/B test without redeploy.
- *
- * Flags cached in-memory for 60s to avoid KV reads on every request.
+ * Read feature flags from KV with in-memory caching.
+ * Cache is invalidated immediately when the version key changes
+ * (bumped on every flag write), eliminating the 60s stale window.
+ * Orphan cleanup: flags older than 30 days auto-expire via KV TTL.
  */
 
 import type { RuntimeEnv } from "./types";
 
-const FEATURES_PREFIX = "features";
-const CACHE_TTL_MS = 60_000; // 60 seconds
+interface FeatureCache {
+  flags: Record<string, boolean>;
+  version: number;
+  expiresAt: number;
+  lastUsed: number;
+}
 
-// In-memory cache: orgId → { flags, fetchedAt }
-const flagCache = new Map<string, { flags: Record<string, boolean>; fetchedAt: number }>();
+const cache = new Map<string, FeatureCache>();
+const CACHE_TTL_MS = 300_000; // 5 min max TTL — version check is the real invalidator
+const VERSION_CHECK_MS = 5_000; // Check version key every 5s (cheap KV get)
+const FLAGS_TTL_SECONDS = 86400 * 30; // 30-day KV TTL for orphan cleanup
 
-/**
- * Built-in feature flags with defaults.
- * New features gate behind flags before enabling globally.
- */
-const DEFAULT_FLAGS: Record<string, boolean> = {
-  concurrent_tools: true,           // Phase 3.1
-  deferred_tool_loading: false,     // Phase 2.2 (not yet implemented)
-  context_compression: true,        // Phase 2.4
-  scratchpad: true,                 // Phase 6.2
-  detailed_cost_tracking: false,    // Phase 7.2
-  conversation_repair: true,        // Phase 9.1
-  anti_hallucination_prompts: true, // Phase 4.1
-  loop_detection: true,             // Phase 1.4
+let lastVersionCheck = 0;
+const versionCache = new Map<string, number>();
+
+/** Default flag values — new features start enabled */
+const DEFAULTS: Record<string, boolean> = {
+  concurrent_tools: true,
+  deferred_tool_loading: true,
+  context_compression: true,
+  scratchpad: true,
+  detailed_cost_tracking: true,
+  mailbox_ipc: true,
+  idle_watchdog: true,
+  prompt_caching: true,
 };
 
 /**
- * Check if a feature is enabled for an org.
- * Falls back to default if no org-specific override exists.
+ * Check if a feature flag is enabled for an org.
+ * Uses version-based invalidation: cheap version key check (~5s),
+ * full flag reload only when version changes.
  */
 export async function isEnabled(
   env: RuntimeEnv,
   flag: string,
   orgId: string,
 ): Promise<boolean> {
-  const flags = await getFlags(env, orgId);
-  return flags[flag] ?? DEFAULT_FLAGS[flag] ?? false;
-}
-
-/**
- * Get all feature flags for an org.
- */
-async function getFlags(env: RuntimeEnv, orgId: string): Promise<Record<string, boolean>> {
-  // Check in-memory cache
-  const cached = flagCache.get(orgId);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-    return cached.flags;
-  }
-
-  // Read from KV
+  const cacheKey = orgId || "global";
   const kv = (env as any).AGENT_PROGRESS_KV;
-  if (!kv) return DEFAULT_FLAGS;
+  if (!kv) return DEFAULTS[flag] ?? false;
 
+  // Check version key periodically (every 5s, very cheap)
+  const now = Date.now();
+  if (now - lastVersionCheck > VERSION_CHECK_MS) {
+    lastVersionCheck = now;
+    try {
+      const vRaw = await kv.get(`features-version/${cacheKey}`);
+      const remoteVersion = vRaw ? Number(vRaw) : 0;
+      const localVersion = versionCache.get(cacheKey) ?? -1;
+      if (remoteVersion !== localVersion) {
+        // Version changed — invalidate cache, force reload
+        cache.delete(cacheKey);
+        versionCache.set(cacheKey, remoteVersion);
+      }
+    } catch { /* best-effort version check */ }
+  }
+
+  // Return from cache if valid
+  const cached = cache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    cached.lastUsed = Date.now();
+    return cached.flags[flag] ?? DEFAULTS[flag] ?? false;
+  }
+
+  // Reload from KV
   try {
-    const raw = await kv.get(`${FEATURES_PREFIX}/${orgId}`);
+    const raw = await kv.get(`features/${cacheKey}`);
     const flags = raw ? JSON.parse(raw) : {};
-    const merged = { ...DEFAULT_FLAGS, ...flags };
-    flagCache.set(orgId, { flags: merged, fetchedAt: Date.now() });
-    return merged;
+    const vRaw = await kv.get(`features-version/${cacheKey}`);
+    const version = vRaw ? Number(vRaw) : 0;
+
+    cache.set(cacheKey, { flags, version, expiresAt: now + CACHE_TTL_MS, lastUsed: now });
+    versionCache.set(cacheKey, version);
+
+    // Evict least-recently-used entries
+    if (cache.size > 10_000) {
+      const oldest = [...cache.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+      for (let i = 0; i < 250; i++) cache.delete(oldest[i][0]);
+    }
+
+    return flags[flag] ?? DEFAULTS[flag] ?? false;
   } catch {
-    return DEFAULT_FLAGS;
+    return DEFAULTS[flag] ?? false;
   }
 }
 
 /**
- * Set a feature flag for an org. Used by control-plane /features endpoint.
+ * Set a feature flag for an org.
+ * Bumps the version key to invalidate caches across all isolates.
  */
 export async function setFlag(
   env: RuntimeEnv,
-  orgId: string,
   flag: string,
+  orgId: string,
   value: boolean,
 ): Promise<void> {
   const kv = (env as any).AGENT_PROGRESS_KV;
   if (!kv) return;
 
-  const flags = await getFlags(env, orgId);
+  const cacheKey = orgId || "global";
+  const raw = await kv.get(`features/${cacheKey}`);
+  const flags = raw ? JSON.parse(raw) : {};
   flags[flag] = value;
-  await kv.put(`${FEATURES_PREFIX}/${orgId}`, JSON.stringify(flags));
+  await kv.put(`features/${cacheKey}`, JSON.stringify(flags), { expirationTtl: FLAGS_TTL_SECONDS });
 
-  // Invalidate cache
-  flagCache.delete(orgId);
+  // Bump version key — invalidates all caches
+  const vRaw = await kv.get(`features-version/${cacheKey}`);
+  const version = (vRaw ? Number(vRaw) : 0) + 1;
+  await kv.put(`features-version/${cacheKey}`, String(version));
+
+  // Invalidate local cache immediately
+  cache.delete(cacheKey);
+  versionCache.set(cacheKey, version);
+}
+
+/**
+ * List all feature flags for an org.
+ */
+export async function listFlags(
+  env: RuntimeEnv,
+  orgId: string,
+): Promise<Record<string, boolean>> {
+  const kv = (env as any).AGENT_PROGRESS_KV;
+  if (!kv) return { ...DEFAULTS };
+
+  const cacheKey = orgId || "global";
+  try {
+    const raw = await kv.get(`features/${cacheKey}`);
+    const flags = raw ? JSON.parse(raw) : {};
+    return { ...DEFAULTS, ...flags };
+  } catch {
+    return { ...DEFAULTS };
+  }
 }

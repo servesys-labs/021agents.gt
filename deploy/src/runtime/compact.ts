@@ -65,21 +65,82 @@ export async function compactMessages(
   const toSummarize = conversation.slice(0, -keepRecent);
   const toKeep = conversation.slice(-keepRecent);
 
-  // Build summary from old messages (without LLM call — fast extraction)
-  const summaryParts: string[] = [];
+  // Build structured summary from old messages.
+  // Inspired by Claude Code's 9-section compaction that preserves critical context
+  // even when old messages are removed. Key insight: categorize by PURPOSE not by
+  // message order, so the model retains the "why" even when "what" is compressed.
+
+  // Extract structured sections from old messages
+  const userRequests: string[] = [];
+  const filesAndCode: string[] = [];
+  const toolActions: string[] = [];
+  const errors: string[] = [];
+  const decisions: string[] = [];
+
   for (const msg of toSummarize) {
+    const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content || "");
     if (msg.role === "user") {
-      const text = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
-      summaryParts.push(`User: ${text.slice(0, 200)}`);
-    } else if (msg.role === "assistant" && !msg.tool_calls?.length) {
-      summaryParts.push(`Assistant: ${(msg.content || "").slice(0, 200)}`);
+      userRequests.push(content.slice(0, 300));
+    } else if (msg.role === "assistant") {
+      if (msg.tool_calls?.length) {
+        // Track tool call decisions (what the agent decided to do)
+        for (const tc of msg.tool_calls) {
+          const name = tc.function?.name || tc.name || "unknown";
+          let args = "";
+          try {
+            const parsed = JSON.parse(tc.function?.arguments || tc.arguments || "{}");
+            args = parsed.path || parsed.query || parsed.command?.slice(0, 80) || parsed.file_path || "";
+          } catch {}
+          toolActions.push(`${name}${args ? `: ${args}` : ""}`);
+        }
+      }
+      if (content && !msg.tool_calls?.length) {
+        decisions.push(content.slice(0, 200));
+      }
     } else if (msg.role === "tool") {
-      const result = (msg.content || "").slice(0, 100);
-      summaryParts.push(`Tool(${msg.name || "unknown"}): ${result}`);
+      const result = content.slice(0, 150);
+      const toolName = msg.name || "unknown";
+      // Capture errors separately — they're high-value context
+      if (result.toLowerCase().includes("error") || result.toLowerCase().includes("failed")) {
+        errors.push(`${toolName}: ${result}`);
+      }
+      // Track file paths mentioned in tool results
+      const pathMatch = result.match(/\/[\w./-]+\.\w+/);
+      if (pathMatch) filesAndCode.push(pathMatch[0]);
     }
   }
 
-  const summaryText = `[Conversation summary — ${toSummarize.length} messages compressed]\n${summaryParts.join("\n")}`;
+  // Deduplicate file paths
+  const uniqueFiles = [...new Set(filesAndCode)].slice(0, 15);
+
+  // Build the structured summary
+  const sections: string[] = [];
+
+  sections.push(`[Conversation summary — ${toSummarize.length} messages compressed]`);
+
+  if (userRequests.length > 0) {
+    sections.push(`\n**User requests:**\n${userRequests.map(r => `- ${r}`).join("\n")}`);
+  }
+
+  if (uniqueFiles.length > 0) {
+    sections.push(`\n**Files referenced:** ${uniqueFiles.join(", ")}`);
+  }
+
+  if (toolActions.length > 0) {
+    // Show unique tool actions (deduplicated), max 20
+    const uniqueActions = [...new Set(toolActions)].slice(0, 20);
+    sections.push(`\n**Actions taken:** ${uniqueActions.join("; ")}`);
+  }
+
+  if (errors.length > 0) {
+    sections.push(`\n**Errors encountered:**\n${errors.slice(0, 5).map(e => `- ${e}`).join("\n")}`);
+  }
+
+  if (decisions.length > 0) {
+    sections.push(`\n**Key decisions:**\n${decisions.slice(0, 3).map(d => `- ${d}`).join("\n")}`);
+  }
+
+  const summaryText = sections.join("\n");
 
   return [
     ...system,

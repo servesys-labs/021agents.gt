@@ -61,10 +61,21 @@ export function createBackpressureController(
   underlyingSend: (data: string) => boolean | void,
   options: BackpressureOptions = {}
 ): BackpressureController {
+  // P3 Fix: Adaptive buffer sizing — start small, grow only for fast clients.
+  // At 40K concurrent clients with 10% slow, this prevents 4GB fleet memory bloat.
+  // Old default: every client gets 1MB buffer = 40K × 1MB = 40GB worst case.
+  // New default: start at 100KB, grow to 1MB only if client keeps up.
+  const INITIAL_BUFFER = 100 * 1024;  // 100KB starting buffer
+  const MAX_BUFFER = 1024 * 1024;      // 1MB max for fast clients
+  const GROWTH_FACTOR = 1.5;           // Grow 50% each time we need more
+  const SHRINK_THRESHOLD = 0.2;        // Shrink if buffer <20% utilized for 10s
+
+  let adaptiveMaxBytes = options.maxBufferBytes ?? INITIAL_BUFFER;
+  let lastShrinkCheck = Date.now();
+
   const {
-    maxBufferBytes = 1024 * 1024, // 1MB default
-    highWatermarkBytes = maxBufferBytes * 0.8, // 80%
-    lowWatermarkBytes = maxBufferBytes * 0.3, // 30%
+    highWatermarkBytes = adaptiveMaxBytes * 0.8,
+    lowWatermarkBytes = adaptiveMaxBytes * 0.3,
     maxMessages = 1000,
     sendTimeoutMs = 30000,
     dropOldOnOverflow = true,
@@ -120,15 +131,43 @@ export function createBackpressureController(
     
     const size = new TextEncoder().encode(data).length;
     
+    // Adaptive growth: if buffer is consistently full but client is consuming, grow it
+    if (bufferedBytes + size > adaptiveMaxBytes && queue.length < maxMessages * 0.5) {
+      // Client is consuming (queue not backed up) but needs more buffer space
+      const newMax = Math.min(MAX_BUFFER, Math.ceil(adaptiveMaxBytes * GROWTH_FACTOR));
+      if (newMax > adaptiveMaxBytes) {
+        adaptiveMaxBytes = newMax;
+      }
+    }
+
+    // Adaptive shrink: if buffer is mostly empty for 10s, reclaim memory
+    const now = Date.now();
+    if (now - lastShrinkCheck > 10_000) {
+      lastShrinkCheck = now;
+      if (bufferedBytes < adaptiveMaxBytes * SHRINK_THRESHOLD && adaptiveMaxBytes > INITIAL_BUFFER) {
+        adaptiveMaxBytes = Math.max(INITIAL_BUFFER, Math.ceil(adaptiveMaxBytes * 0.5));
+      }
+    }
+
     // Check if we need to drop old messages
-    if (bufferedBytes + size > maxBufferBytes || queue.length >= maxMessages) {
+    if (bufferedBytes + size > adaptiveMaxBytes || queue.length >= maxMessages) {
       if (dropOldOnOverflow && queue.length > 0) {
         // Drop oldest messages until we have room
-        while ((bufferedBytes + size > maxBufferBytes || queue.length >= maxMessages) && queue.length > 0) {
+        while ((bufferedBytes + size > adaptiveMaxBytes || queue.length >= maxMessages) && queue.length > 0) {
           const dropped = queue.shift()!;
           bufferedBytes -= dropped.size;
           dropped.reject(new Error("Message dropped due to backpressure"));
           droppedMessages++;
+        }
+        // Notify client that messages were dropped
+        if (droppedMessages > 0 && droppedMessages % 10 === 0) {
+          try {
+            underlyingSend(JSON.stringify({
+              type: "warning",
+              message: `${droppedMessages} events dropped due to slow connection. Some tool progress may be missing.`,
+              ts: Date.now(),
+            }));
+          } catch {}
         }
       } else {
         throw new Error("Buffer overflow - message rejected");
@@ -166,8 +205,8 @@ export function createBackpressureController(
       
       bufferedBytes += size;
       
-      // Check for backpressure
-      if (bufferedBytes > highWatermarkBytes && !isPaused) {
+      // Check for backpressure (use adaptive max, not fixed highWatermark)
+      if (bufferedBytes > adaptiveMaxBytes * 0.8 && !isPaused) {
         isPaused = true;
         pauseStartTime = Date.now();
       }

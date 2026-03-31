@@ -29,7 +29,14 @@ export interface LLMResponse {
   content: string;
   model: string;
   tool_calls: ToolCall[];
-  usage: { input_tokens: number; output_tokens: number };
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    /** Anthropic: tokens read from prompt cache (cost savings) */
+    cache_read_tokens?: number;
+    /** Anthropic: tokens written to prompt cache (one-time cost) */
+    cache_write_tokens?: number;
+  };
   cost_usd: number;
   latency_ms: number;
   // AI Gateway correlation IDs — used to look up exact cost from gateway logs API
@@ -37,6 +44,10 @@ export interface LLMResponse {
   gateway_event_id?: string;
   /** Set to true when model refuses the request (stop_reason=refusal/content_filter) */
   refusal?: boolean;
+  /** LLM finish reason: stop, length, tool_use, content_filter, refusal */
+  stop_reason?: string;
+  /** Number of retries before success (0 = first attempt succeeded) */
+  retry_count?: number;
 }
 
 // ── Tools ──────────────────────────────────────────────────────
@@ -180,7 +191,7 @@ export interface RuntimeEnv {
   HYPERDRIVE: Hyperdrive;
   VECTORIZE: VectorizeIndex;
   STORAGE: R2Bucket;
-  SANDBOX: DurableObjectNamespace<Sandbox<any>>;
+  SANDBOX: DurableObjectNamespace<any>;
   LOADER: any;
   TELEMETRY_QUEUE: Queue;
   BROWSER: Fetcher;

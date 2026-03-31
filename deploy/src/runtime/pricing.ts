@@ -112,7 +112,7 @@ export function estimateTokenCost(model: string, inputTokens: number, outputToke
   if (!pricing) {
     // Prefix match for versioned model names (e.g., "openai/gpt-5.4-20260305" → "openai/gpt-5.4")
     const key = Object.keys(MODEL_PRICING).find((k) => model.startsWith(k) || k.startsWith(model));
-    pricing = key ? MODEL_PRICING[key] : undefined;
+    if (key) pricing = MODEL_PRICING[key];
     if (!pricing) {
       console.warn(`[pricing] Unknown model '${model}' — REJECTING. All models must route through AI Gateway for accurate cost tracking.`);
       // Charge at a high rate to flag the issue ($5/$15 per 1M = expensive enough to notice)
