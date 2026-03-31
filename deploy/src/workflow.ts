@@ -29,6 +29,8 @@ import {
 } from "cloudflare:workers";
 import { sanitizeUnicode, sanitizeDeep } from "./runtime/sanitize";
 import { validateUrl } from "./runtime/ssrf";
+import { shouldCompact, compactMessages } from "./runtime/compact";
+import { repairConversation } from "./runtime/conversation-repair";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -277,6 +279,30 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         break;
       }
 
+      // ── Phase 9.1: Conversation repair — fix orphaned tool calls before LLM sees them ──
+      {
+        const { messages: repaired, repairs } = repairConversation(messages);
+        if (repairs.orphanedUses + repairs.orphanedResults + repairs.duplicateIds + repairs.emptyResults > 0) {
+          messages = repaired;
+          console.log(`[conversation-repair] Fixed: ${repairs.orphanedUses} orphaned uses, ${repairs.orphanedResults} orphaned results, ${repairs.duplicateIds} duplicate IDs, ${repairs.emptyResults} empty results`);
+        }
+      }
+
+      // ── Phase 2.4: Context compression — auto-compact when approaching token limit ──
+      if (shouldCompact(messages)) {
+        const compacted = await compactMessages(
+          this.env as any,
+          messages,
+          6, // keep last 6 messages
+        );
+        const dropped = messages.length - compacted.length;
+        messages = compacted;
+        await this.emit(p.progress_key, {
+          type: "system",
+          content: `Context compressed: ${dropped} messages summarized to stay within token limits.`,
+        });
+      }
+
       // ── LLM call — retryable, checkpointed ──
       await this.emit(p.progress_key, { type: "turn_start", turn, model: config.model });
 
@@ -480,6 +506,26 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // Accumulate tool costs (was missing — caused silent zero billing for tools)
       for (const tr of toolResultEntries) {
         totalCost += tr.cost_usd || 0;
+      }
+
+      // ── Phase 2.1: Tool result size management ──
+      // Per-tool cap: 30K chars. Per-turn aggregate cap: 200K chars.
+      const MAX_RESULT_CHARS = 30_000;
+      const MAX_TURN_RESULT_CHARS = 200_000;
+      let turnResultChars = 0;
+      for (const tr of toolResultEntries) {
+        if (tr.result && tr.result.length > MAX_RESULT_CHARS) {
+          tr.result = tr.result.slice(0, MAX_RESULT_CHARS) + `\n[truncated — ${tr.result.length} chars total]`;
+        }
+        turnResultChars += (tr.result || "").length;
+        if (turnResultChars > MAX_TURN_RESULT_CHARS) {
+          const remaining = MAX_TURN_RESULT_CHARS - (turnResultChars - (tr.result || "").length);
+          if (remaining > 0) {
+            tr.result = (tr.result || "").slice(0, remaining) + "\n[truncated — aggregate turn result limit reached]";
+          } else {
+            tr.result = "[result omitted — aggregate turn result limit reached]";
+          }
+        }
       }
 
       // Emit tool results + file_change events for write-file/edit-file
