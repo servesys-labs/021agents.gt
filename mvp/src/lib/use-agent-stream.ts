@@ -461,7 +461,7 @@ export function useAgentStream() {
       const orgId = localStorage.getItem("agentos_org_id") || "default";
       const userId = localStorage.getItem("agentos_user_id") || "web";
       const doName = `${orgId}-${agentName}-${userId}`;
-      const wsUrl = `${WS_BASE}/agents/agentos-agent/${encodeURIComponent(doName)}`;
+      const wsUrl = `${WS_BASE}/agents/agentos-agent/${encodeURIComponent(doName)}?token=${encodeURIComponent(token)}`;
 
       const ws = new WebSocket(wsUrl);
       let resolved = false;

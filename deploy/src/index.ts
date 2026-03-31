@@ -691,25 +691,28 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         connection.send(JSON.stringify({ type: "error", message: "auth: token required" }));
         return;
       }
-      // Validate JWT or API key via control-plane service binding
-      try {
-        const authResp = await this.env.CONTROL_PLANE?.fetch?.("https://api/api/v1/auth/verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        });
-        if (!authResp || !authResp.ok) {
+      // Validate JWT locally using shared AUTH_JWT_SECRET
+      const jwtSecret = String(this.env.AUTH_JWT_SECRET || "").trim();
+      if (jwtSecret) {
+        const valid = await verifyHs256Jwt(token, jwtSecret);
+        if (valid) {
+          // Decode payload to extract org_id/user_id
+          try {
+            const payload = JSON.parse(atob(token.split(".")[1]));
+            (connection as any).__authenticated = true;
+            (connection as any).__orgId = payload.org_id || "";
+            (connection as any).__userId = payload.sub || "";
+            connection.send(JSON.stringify({ type: "auth_ok", org_id: payload.org_id }));
+          } catch {
+            (connection as any).__authenticated = true;
+            connection.send(JSON.stringify({ type: "auth_ok" }));
+          }
+        } else {
           connection.send(JSON.stringify({ type: "error", message: "auth: invalid token", code: "AUTH_FAILED" }));
           connection.close(4001, "Unauthorized");
-          return;
         }
-        const authData = await authResp.json() as { org_id?: string; user_id?: string };
-        (connection as any).__authenticated = true;
-        (connection as any).__orgId = authData.org_id || "";
-        (connection as any).__userId = authData.user_id || "";
-        connection.send(JSON.stringify({ type: "auth_ok", org_id: authData.org_id }));
-      } catch {
-        // If control-plane unavailable, validate locally via JWT
-        // For now, accept token if it looks like a JWT (has 3 dot-separated parts)
+      } else {
+        // No JWT secret configured — accept valid-shaped JWTs (dev mode)
         const isJwtShape = token.split(".").length === 3;
         if (isJwtShape) {
           (connection as any).__authenticated = true;
