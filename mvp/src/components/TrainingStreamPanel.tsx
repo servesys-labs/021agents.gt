@@ -253,21 +253,21 @@ function EventLine({ event: e }: { event: TrainingEvent }) {
             {Boolean(e.is_best) && <span className="text-yellow-400 text-[10px]">NEW BEST</span>}
           </div>
           {/* Phase 7.6: Multi-dimension optimization indicators */}
-          {e.multi_dimension && (
+          {e.multi_dimension ? (
             <div className="flex items-center gap-2 text-[#58a6ff] text-[10px] ml-[72px]">
               <FlaskConical size={9} />
               <span>Optimizing: {String(e.multi_dimension)}</span>
               {e.temperature_candidate !== undefined && <span>temp={n(e.temperature_candidate)}</span>}
-              {e.reasoning_strategy_candidate && <span>strategy={String(e.reasoning_strategy_candidate)}</span>}
+              {e.reasoning_strategy_candidate ? <span>strategy={String(e.reasoning_strategy_candidate)}</span> : null}
             </div>
-          )}
+          ) : null}
           {/* Phase 7.6: Convergence detection */}
-          {e.converged && (
+          {e.converged ? (
             <div className="flex items-center gap-2 text-yellow-400 text-[10px] ml-[72px]">
               <AlertTriangle size={9} />
               <span>Converged — improvement &lt;1% for 3 iterations. Auto-stopping.</span>
             </div>
-          )}
+          ) : null}
         </div>
       );
 

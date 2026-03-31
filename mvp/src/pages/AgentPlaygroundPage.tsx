@@ -21,6 +21,7 @@ interface AgentDetail {
   config_json: Record<string, any>;
   is_active: boolean;
   version: number;
+  tools?: string[];
 }
 
 export default function AgentPlaygroundPage() {

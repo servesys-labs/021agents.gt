@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Send, Square, Brain, Wrench, AlertTriangle, Info, ChevronDown, ChevronRight,
-  Clock, Zap, Bot, Copy, Check, RefreshCw, Image as ImageIcon, Paperclip,
+  Clock, Zap, Bot, Copy, Check, RefreshCw, Paperclip,
   X, FileText, FolderOpen, Plus, FolderClosed,
   DollarSign, Layers, ShieldAlert, ShieldOff, Users,
-  ThumbsUp, ThumbsDown, Download, Slash,
+  ThumbsUp, ThumbsDown, Download,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -477,6 +477,7 @@ export function ChatInterface({
     if ((!text && attachments.length === 0) || isActive) return;
     setInput("");
     const atts = attachments.length > 0 ? attachments.map(a => ({ url: a.url, type: a.type })) : undefined;
+    attachments.forEach(a => URL.revokeObjectURL(a.url));
     setAttachments([]);
     onSend(text || "Analyze this file", atts);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
@@ -578,7 +579,7 @@ export function ChatInterface({
             )}
           </div>
         )}
-        {(messages as ChatMessage[]).map((msg) => {
+        {(messages as ChatMessage[]).map((msg, idx) => {
           // User message
           if (msg.role === "user") {
             return (
@@ -660,14 +661,7 @@ export function ChatInterface({
             return (
               <div key={msg.id} className="flex justify-start animate-[fadeInUp_150ms_ease-out]">
                 <div className="px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-danger-light text-danger border border-danger/30">
-                  {msg.content.includes("[") ? (
-                    <span dangerouslySetInnerHTML={{
-                      __html: msg.content.replace(
-                        /\[([^\]]+)\]\(([^)]+)\)/g,
-                        '<a href="$2" class="underline font-medium">$1</a>'
-                      )
-                    }} />
-                  ) : msg.content}
+                  {msg.content}
                 </div>
               </div>
             );

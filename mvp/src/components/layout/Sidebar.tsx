@@ -23,6 +23,8 @@ function topNavClass(active: boolean, collapsed: boolean) {
 interface ListedAgent {
   agent_id?: string;
   name: string;
+  is_active?: boolean;
+  error_rate_pct?: number;
 }
 
 function ThemeToggle() {
@@ -124,11 +126,11 @@ export function Sidebar() {
               {/* Phase UI5: Health status — green=healthy, amber=degraded, red=error, gray=draft */}
               <span className={`ml-auto w-2 h-2 rounded-full shrink-0 ${
                 agent.is_active
-                  ? (agent as any).error_rate_pct > 20 ? "bg-danger"
-                    : (agent as any).error_rate_pct > 5 ? "bg-warning"
+                  ? (agent.error_rate_pct ?? 0) > 20 ? "bg-danger"
+                    : (agent.error_rate_pct ?? 0) > 5 ? "bg-warning"
                     : "bg-success"
                   : "bg-text-muted/30"
-              }`} title={agent.is_active ? `Live${(agent as any).error_rate_pct ? ` · ${Number((agent as any).error_rate_pct).toFixed(0)}% errors` : ""}` : "Draft"} />
+              }`} title={agent.is_active ? `Live${agent.error_rate_pct ? ` · ${agent.error_rate_pct.toFixed(0)}% errors` : ""}` : "Draft"} />
             </NavLink>
           ))}
         </div>
