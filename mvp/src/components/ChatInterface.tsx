@@ -63,61 +63,97 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-// ── Tool Call Card ──────────────────────────────────────────
+// ── Tool Call Card (TUI-inspired) ──────────────────────────
+
+// Claude Code-style action verbs for loading personality
+const ACTION_VERBS = [
+  "Analyzing", "Processing", "Searching", "Computing", "Fetching",
+  "Executing", "Querying", "Scanning", "Resolving", "Building",
+  "Rendering", "Compiling", "Parsing", "Evaluating", "Inspecting",
+];
 
 function ToolCallCard({ msg }: { msg: ChatMessage }) {
   const [expanded, setExpanded] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const [verb] = useState(() => ACTION_VERBS[Math.floor(Math.random() * ACTION_VERBS.length)]);
   const isRunning = msg.toolStatus === "running";
   const isError = msg.toolStatus === "error";
   const isDone = msg.toolStatus === "done";
-  // Handle missing toolName from old cached sessions
   const toolName = msg.toolName || msg.content || "tool";
 
+  // Live elapsed timer for running tools
+  useEffect(() => {
+    if (!isRunning) return;
+    const start = Date.now();
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [isRunning]);
+
+  // Stall detection: >10s = slow, >30s = stalled
+  const stallLevel = elapsed > 30 ? "stalled" : elapsed > 10 ? "slow" : "normal";
+
   return (
-    <div className={`border rounded-xl overflow-hidden text-xs transition-colors ${
-      isError ? "border-danger/30 bg-danger-light/30" :
-      isRunning ? "border-primary/20 bg-primary/[0.03]" :
-      "border-border/60 bg-surface-alt/20"
-    }`}>
+    <div className={`border rounded-xl overflow-hidden text-xs transition-all duration-200 ${
+      isError ? "border-danger/40 bg-danger/[0.04]" :
+      isRunning ? `border-primary/30 bg-primary/[0.04] tool-running stall-indicator` :
+      "border-border/50 bg-surface-alt/30 hover:border-border"
+    }`} data-stall={stallLevel}>
       <button
         onClick={() => !isRunning && setExpanded(!expanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors"
+        className="w-full flex items-center gap-2.5 px-3 py-2.5 transition-colors"
       >
+        {/* Status indicator — Claude Code ⏺ pattern */}
         {isRunning ? (
-          <div className="w-4 h-4 rounded-full border-2 border-primary border-t-transparent animate-spin shrink-0" />
+          <span className={`w-2.5 h-2.5 rounded-full shrink-0 status-dot-pulse ${
+            stallLevel === "stalled" ? "bg-danger" : stallLevel === "slow" ? "bg-warning" : "bg-primary"
+          }`} />
         ) : isError ? (
-          <AlertTriangle size={13} className="text-danger shrink-0" />
+          <span className="text-danger shrink-0 text-sm">✗</span>
         ) : (
-          <div className="w-4 h-4 rounded-full bg-success-light flex items-center justify-center shrink-0">
-            <Check size={9} className="text-success" />
-          </div>
+          <span className="text-success shrink-0 text-sm">✓</span>
         )}
-        <span className={`font-medium ${isRunning ? "text-primary" : "text-text"}`}>{toolName}</span>
+
+        {/* Tool name + context */}
+        <span className={`font-semibold ${isRunning ? "text-primary" : isError ? "text-danger" : "text-text"}`}>{toolName}</span>
         {msg.toolArgsPreview && (
-          <span className="text-text-muted truncate max-w-[280px] font-normal" title={msg.toolArgsPreview}>
+          <span className="text-text-muted truncate max-w-[300px] font-normal" title={msg.toolArgsPreview}>
             {msg.toolArgsPreview}
           </span>
         )}
-        {isRunning && !msg.toolArgsPreview && <span className="text-primary/60 animate-pulse ml-1">running...</span>}
-        <span className="flex items-center gap-2 ml-auto shrink-0">
+
+        {/* Running state — shimmer verb + elapsed */}
+        {isRunning && (
+          <span className="shimmer-text font-medium ml-1">
+            {verb}... {elapsed > 0 ? `${elapsed}s` : ""}
+          </span>
+        )}
+
+        {/* Metadata — right side */}
+        <span className="flex items-center gap-2.5 ml-auto shrink-0 text-text-muted">
           {msg.toolCostUsd != null && msg.toolCostUsd > 0 && isDone && (
-            <span className="text-text-muted">${msg.toolCostUsd.toFixed(4)}</span>
+            <span className="tabular-nums">${msg.toolCostUsd.toFixed(4)}</span>
           )}
-          {msg.toolLatencyMs && isDone && (
-            <span className="text-text-muted flex items-center gap-0.5">
+          {msg.toolLatencyMs != null && isDone && (
+            <span className="flex items-center gap-0.5 tabular-nums">
               <Clock size={9} /> {msg.toolLatencyMs < 1000 ? `${msg.toolLatencyMs}ms` : `${(msg.toolLatencyMs / 1000).toFixed(1)}s`}
             </span>
           )}
-          {!isRunning && (expanded ? <ChevronDown size={11} className="text-text-muted" /> : <ChevronRight size={11} className="text-text-muted" />)}
+          {!isRunning && (expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />)}
         </span>
       </button>
-      {expanded && (msg.toolResult || msg.toolError) && (
-        <div className="border-t border-border/30 px-3 py-2 max-h-60 overflow-y-auto bg-[#1e1e2e] rounded-b-xl relative group">
-          <CopyButton text={msg.toolError || msg.toolResult || ""} />
-          {msg.toolError && <pre className="text-red-400 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">{msg.toolError}</pre>}
-          {msg.toolResult && <pre className="text-[#cdd6f4] whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">{msg.toolResult}</pre>}
+
+      {/* Expandable output — terminal card styling */}
+      <div className="accordion-content" data-open={expanded && !!(msg.toolResult || msg.toolError)}>
+        <div>
+          {(msg.toolResult || msg.toolError) && (
+            <div className="terminal-card border-t border-white/5 px-3 py-2.5 max-h-80 overflow-y-auto relative group">
+              <div className="code-copy-btn"><CopyButton text={msg.toolError || msg.toolResult || ""} /></div>
+              {msg.toolError && <pre className="terminal-stderr whitespace-pre-wrap break-words">{msg.toolError}</pre>}
+              {msg.toolResult && <pre className="terminal-stdout whitespace-pre-wrap break-words">{msg.toolResult}</pre>}
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -147,35 +183,36 @@ function FileChangeCard({ change }: { change: FileChange }) {
         {change.size != null && <span className="text-text-muted text-[10px] ml-auto">{change.size > 1024 ? `${(change.size / 1024).toFixed(1)}KB` : `${change.size}B`}</span>}
         {expanded ? <ChevronDown size={11} className="text-text-muted" /> : <ChevronRight size={11} className="text-text-muted" />}
       </button>
-      {expanded && (
-        <div className="border-t border-border/30 max-h-80 overflow-y-auto bg-[#1e1e2e] rounded-b-xl relative">
-          <div className="absolute top-1 right-1 z-10">
-            <CopyButton text={isCreate ? (change.content || "") : (change.newText || "")} />
+      {/* Smooth accordion + terminal card */}
+      <div className="accordion-content" data-open={expanded}>
+        <div>
+          <div className="terminal-card border-t border-white/5 max-h-80 overflow-y-auto relative">
+            <div className="code-copy-btn"><CopyButton text={isCreate ? (change.content || "") : (change.newText || "")} /></div>
+            {isCreate && change.content && (
+              <pre className="px-3 py-2.5 terminal-stdout whitespace-pre-wrap break-words">
+                {change.content}
+              </pre>
+            )}
+            {!isCreate && (change.oldText || change.newText) && (
+              <pre className="px-3 py-2.5 whitespace-pre-wrap break-words">
+                <div className="diff-header text-[10px] mb-1">--- a/{change.path}</div>
+                <div className="diff-header text-[10px] mb-2">+++ b/{change.path}</div>
+                {change.oldText?.split("\n").map((line, i) => (
+                  <div key={`old-${i}`} className="diff-removed"><span className="diff-gutter">{i + 1}</span>- {line}</div>
+                ))}
+                {change.newText?.split("\n").map((line, i) => (
+                  <div key={`new-${i}`} className="diff-added"><span className="diff-gutter">{i + 1}</span>+ {line}</div>
+                ))}
+              </pre>
+            )}
           </div>
-          {isCreate && change.content && (
-            <pre className="px-3 py-2 text-[#cdd6f4] whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed">
-              {change.content}
-            </pre>
-          )}
-          {!isCreate && (change.oldText || change.newText) && (
-            <pre className="px-3 py-2 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-words">
-              <div className="text-[10px] text-[#8b949e] mb-1">--- a/{change.path}</div>
-              <div className="text-[10px] text-[#8b949e] mb-2">+++ b/{change.path}</div>
-              {change.oldText?.split("\n").map((line, i) => (
-                <div key={`old-${i}`} className="text-red-400 bg-red-500/5">- {line}</div>
-              ))}
-              {change.newText?.split("\n").map((line, i) => (
-                <div key={`new-${i}`} className="text-green-400 bg-green-500/5">+ {line}</div>
-              ))}
-            </pre>
-          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
-// ── Thinking Block ──────────────────────────────────────────
+// ── Thinking Block (TUI-inspired) ──────────────────────────
 
 function ThinkingBlock({ content }: { content: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -186,18 +223,24 @@ function ThinkingBlock({ content }: { content: string }) {
       <div className="max-w-[85%]">
         <button
           onClick={() => setExpanded(!expanded)}
-          className="flex items-center gap-1.5 text-xs font-medium text-purple-600 dark:text-purple-400 hover:text-purple-800 dark:hover:text-purple-300 transition-colors mb-0.5"
+          className="flex items-center gap-1.5 text-xs font-medium text-purple-600 dark:text-purple-400 hover:text-purple-800 dark:hover:text-purple-300 transition-colors"
         >
-          <Brain size={12} />
+          <span className="text-purple-400 dark:text-purple-500">∴</span>
           <span>Thinking</span>
           {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+          {!expanded && <span className="text-[10px] text-text-muted font-normal ml-1">(click to expand)</span>}
         </button>
-        {expanded ? (
-          <div className="px-3 py-2 rounded-lg border border-purple-200 dark:border-purple-800 bg-purple-50/50 dark:bg-purple-950/30 text-xs leading-relaxed text-purple-800 dark:text-purple-300 whitespace-pre-wrap">
-            {content}
+        {/* Smooth accordion */}
+        <div className="accordion-content" data-open={expanded}>
+          <div>
+            <div className="mt-1 px-3 py-2.5 rounded-lg border border-purple-200/60 dark:border-purple-800/40 bg-purple-50/30 dark:bg-purple-950/20 text-xs leading-relaxed text-purple-800 dark:text-purple-300 relative group">
+              <div className="code-copy-btn"><CopyButton text={content} /></div>
+              <pre className="whitespace-pre-wrap break-words">{content}</pre>
+            </div>
           </div>
-        ) : (
-          <p className="px-3 py-1 text-[11px] text-purple-400 dark:text-purple-500 italic truncate max-w-md">
+        </div>
+        {!expanded && (
+          <p className="px-3 py-0.5 text-[11px] text-purple-400/60 dark:text-purple-500/60 italic truncate max-w-lg">
             {preview}
           </p>
         )}
@@ -476,10 +519,12 @@ export function ChatInterface({
           }
 
           // Assistant message
+          const isLastMsg = idx === messages.length - 1;
+          const isStreaming = isLastMsg && streaming && msg.role === "assistant";
           return (
             <div key={msg.id} className="animate-[fadeInUp_200ms_ease-out] group">
               <div className="min-w-0">
-                <div className={`px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-surface border border-border/40 text-text ${PROSE_CLASSES}`}>
+                <div className={`px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-surface border border-border/40 text-text ${PROSE_CLASSES} ${isStreaming ? "streaming-cursor" : ""}`}>
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                 </div>
                 <div className="flex items-center gap-2 mt-1 px-1">
@@ -497,15 +542,13 @@ export function ChatInterface({
           );
         })}
 
-        {/* Streaming indicator — always visible when active */}
+        {/* Streaming indicator — Claude Code shimmer style */}
         {(streaming || loading) && (
-          <div className="flex items-center gap-2 text-xs text-text-muted px-1 py-1">
-            <div className="flex gap-1">
-              <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-              <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-              <span className="w-1.5 h-1.5 bg-primary/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
-            </div>
-            <span className="animate-pulse">Working...</span>
+          <div className="flex items-center gap-2.5 text-xs px-1 py-1.5">
+            <span className="w-2 h-2 rounded-full bg-primary status-dot-pulse" />
+            <span className="shimmer-text font-medium">
+              {ACTION_VERBS[Math.floor(Date.now() / 3000) % ACTION_VERBS.length]}...
+            </span>
           </div>
         )}
 
