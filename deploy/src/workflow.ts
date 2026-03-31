@@ -441,9 +441,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             type: "warning",
             message: `Budget guard: estimated tool cost $${estimatedBatchCost.toFixed(4)} would exceed remaining budget $${(config.budget_limit_usd - totalCost).toFixed(4)}. Skipping tool execution.`,
           });
-          // Inject a synthetic tool result so the LLM knows tools were skipped
+          // Inject one assistant message with all tool_calls, then individual results
+          // (LLM expects one assistant with all tool_calls, not N separate messages)
+          messages.push({ role: "assistant", content: llm.content || "", tool_calls: executableCalls });
           for (const tc of executableCalls) {
-            messages.push({ role: "assistant", content: llm.content || "", tool_calls: [tc] });
             messages.push({
               role: "tool", tool_call_id: tc.id, name: tc.name,
               content: "[Tool execution skipped — budget limit would be exceeded]",
