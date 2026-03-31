@@ -252,8 +252,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     // Partial migration = corrupted schema. BEGIN/COMMIT prevents this.
 
     if (schemaVersion < 1) {
-      this.sql`BEGIN`;
-      try {
+      this.ctx.storage.transactionSync(() => {
         this.sql`CREATE TABLE IF NOT EXISTS conversation_messages (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           role TEXT NOT NULL,
@@ -264,28 +263,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         this.sql`CREATE INDEX IF NOT EXISTS idx_conv_created_at ON conversation_messages(created_at)`;
         this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role ON conversation_messages(role)`;
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (1)`;
-        this.sql`COMMIT`;
-      } catch (e) {
-        this.sql`ROLLBACK`;
-        throw e;
-      }
+      });
     }
 
     if (schemaVersion < 2) {
-      this.sql`BEGIN`;
-      try {
+      this.ctx.storage.transactionSync(() => {
         this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role_id ON conversation_messages(role, id)`;
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (2)`;
-        this.sql`COMMIT`;
-      } catch (e) {
-        this.sql`ROLLBACK`;
-        throw e;
-      }
+      });
     }
 
     if (schemaVersion < 3) {
-      this.sql`BEGIN`;
-      try {
+      this.ctx.storage.transactionSync(() => {
         // v3: Circuit breaker state — persists across DO restarts so flaky
         // tools stay blocked after redeploy (Phase 1.1 hardening)
         this.sql`CREATE TABLE IF NOT EXISTS circuit_breaker_state (
@@ -297,25 +286,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           updated_at REAL NOT NULL DEFAULT (unixepoch('now'))
         )`;
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (3)`;
-        this.sql`COMMIT`;
-      } catch (e) {
-        this.sql`ROLLBACK`;
-        throw e;
-      }
+      });
     }
 
     if (schemaVersion < 4) {
-      this.sql`BEGIN`;
-      try {
-        // v4: Agent-to-agent mailbox for inter-agent IPC (Phase 6.1)
-        const { createMailboxTable } = await import("./runtime/mailbox");
+      // v4: Agent-to-agent mailbox for inter-agent IPC (Phase 6.1)
+      const { createMailboxTable } = await import("./runtime/mailbox");
+      this.ctx.storage.transactionSync(() => {
         createMailboxTable(this.sql.bind(this));
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (4)`;
-        this.sql`COMMIT`;
-      } catch (e) {
-        this.sql`ROLLBACK`;
-        throw e;
-      }
+      });
     }
 
     // Phase 1.1: Wire DO SQLite for persistent circuit breaker state
