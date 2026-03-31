@@ -160,8 +160,9 @@ export async function callLLM(
       if (RETRYABLE_STATUS.has(status) && attempt < MAX_LLM_RETRIES - 1) {
         // Transient error — respect Retry-After header or use backoff
         const retryAfter = resp.headers.get("Retry-After");
-        const delayMs = retryAfter
-          ? Math.min(Number(retryAfter) * 1000, 30_000) // Cap at 30s
+        const retryAfterSec = retryAfter ? Number(retryAfter) : NaN;
+        const delayMs = !isNaN(retryAfterSec) && retryAfterSec > 0
+          ? Math.min(retryAfterSec * 1000, 30_000) // Cap at 30s
           : BACKOFF_MS[attempt] || 8000;
         console.warn(`[llm] ${status} on attempt ${attempt + 1}, retrying in ${delayMs}ms`);
         await new Promise(r => setTimeout(r, delayMs));
