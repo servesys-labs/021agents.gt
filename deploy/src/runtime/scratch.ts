@@ -1,6 +1,9 @@
 /**
  * Phase 6.2: Shared Scratch Directory
  *
+ * NOTE: Wire into workflow.ts for delegated runs by adding scratch-read/write
+ * tools when parent_depth > 0. See IMPLEMENTATION_PLAN.md Phase 6.2.
+ *
  * KV-backed shared state per trace. Sibling agents in a delegation chain
  * can exchange intermediate results without polluting their conversation context.
  *

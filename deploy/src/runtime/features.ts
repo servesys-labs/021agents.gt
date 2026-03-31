@@ -1,6 +1,10 @@
 /**
  * Phase 7.3: Feature Flags with Runtime Toggle
  *
+ * NOTE: This module is infrastructure for feature-gating new capabilities.
+ * Wire into workflow.ts turn loop as features are enabled per-org:
+ *   if (await isEnabled(env, 'concurrent_tools', orgId)) { ... }
+ *
  * KV-backed per-org feature flags. Enable new features for one org,
  * emergency-disable broken ones, A/B test without redeploy.
  *

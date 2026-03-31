@@ -35,6 +35,7 @@ export async function callLLM(
     metadata?: {
       agent_name?: string;
       session_id?: string;
+      trace_id?: string;
       org_id?: string;
       turn?: number;
       channel?: string;
