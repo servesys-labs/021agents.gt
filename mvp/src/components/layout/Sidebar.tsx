@@ -1,5 +1,6 @@
 import { NavLink, Link, useNavigate, useLocation } from "react-router-dom";
-import { Home, Bot, Settings, LogOut, Menu, X, Plus, Loader2, User, Store, Rss, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Home, Bot, Settings, LogOut, Menu, X, Plus, Loader2, User, Store, Rss, PanelLeftClose, PanelLeftOpen, Sun, Moon } from "lucide-react";
+import { useTheme } from "../../lib/theme-context";
 import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../../lib/auth";
 import { useSidebar } from "../../lib/sidebar-context";
@@ -22,6 +23,19 @@ function topNavClass(active: boolean, collapsed: boolean) {
 interface ListedAgent {
   agent_id?: string;
   name: string;
+}
+
+function ThemeToggle() {
+  const { resolved, toggle } = useTheme();
+  return (
+    <button
+      onClick={toggle}
+      className="p-2 rounded-lg hover:bg-surface-alt transition-colors"
+      title={`Switch to ${resolved === "dark" ? "light" : "dark"} mode`}
+    >
+      {resolved === "dark" ? <Sun size={16} className="text-text-muted" /> : <Moon size={16} className="text-text-muted" />}
+    </button>
+  );
 }
 
 export function Sidebar() {
@@ -120,9 +134,12 @@ export function Sidebar() {
         </div>
 
         <div className="pt-3 mt-3 border-t border-border">
-          <NavLink to="/settings" onClick={() => setMobileOpen(false)} className={({ isActive }) => topNavClass(isActive, false)}>
-            <Settings size={18} /> Settings
-          </NavLink>
+          <div className="flex items-center gap-1">
+            <NavLink to="/settings" onClick={() => setMobileOpen(false)} className={({ isActive }) => `flex-1 ${topNavClass(isActive, false)}`}>
+              <Settings size={18} /> Settings
+            </NavLink>
+            <ThemeToggle />
+          </div>
           <div className="mt-2 pt-2 border-t border-border/50">
             <p className="px-3 py-1 text-[10px] font-medium text-text-muted uppercase tracking-wider">Explore</p>
             <NavLink to="/marketplace" onClick={() => setMobileOpen(false)} className={({ isActive }) => topNavClass(isActive, false)}>
