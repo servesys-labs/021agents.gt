@@ -84,26 +84,50 @@ export function hashArgs(args: string): string {
 /**
  * UUID-based write dedup for session/turn telemetry writes.
  * Tracks recently written UUIDs to prevent duplicate DB inserts on retry.
+ *
+ * Review fix: Scoped per session (not global per-isolate) to prevent
+ * cross-session eviction in shared Workers isolates.
  */
-const WRITE_DEDUP_TTL = 300; // 5 minutes
-const MAX_DEDUP_ENTRIES = 500;
+const MAX_DEDUP_PER_SESSION = 200;
+const MAX_SESSIONS = 50;
 
-// In-memory dedup set (per-isolate, bounded)
-const writtenUUIDs = new Set<string>();
+// Per-session dedup sets (isolate-scoped, bounded)
+const sessionDedupSets = new Map<string, Set<string>>();
+
+function getDedupSet(sessionId: string): Set<string> {
+  let set = sessionDedupSets.get(sessionId);
+  if (!set) {
+    set = new Set();
+    sessionDedupSets.set(sessionId, set);
+    // Evict oldest session if too many tracked
+    if (sessionDedupSets.size > MAX_SESSIONS) {
+      const oldest = sessionDedupSets.keys().next().value;
+      if (oldest !== undefined) sessionDedupSets.delete(oldest);
+    }
+  }
+  return set;
+}
 
 /**
- * Check if this write UUID was already processed.
+ * Check if this write UUID was already processed for a session.
  * Returns true if duplicate (should skip), false if new.
  */
-export function isDuplicateWrite(writeUUID: string): boolean {
-  if (writtenUUIDs.has(writeUUID)) return true;
-  writtenUUIDs.add(writeUUID);
-  // Evict oldest when over limit
-  if (writtenUUIDs.size > MAX_DEDUP_ENTRIES) {
-    const first = writtenUUIDs.values().next().value;
-    if (first !== undefined) writtenUUIDs.delete(first);
+export function isDuplicateWrite(sessionWriteUUID: string, sessionId: string = "default"): boolean {
+  const set = getDedupSet(sessionId);
+  if (set.has(sessionWriteUUID)) return true;
+  set.add(sessionWriteUUID);
+  if (set.size > MAX_DEDUP_PER_SESSION) {
+    const first = set.values().next().value;
+    if (first !== undefined) set.delete(first);
   }
   return false;
+}
+
+/**
+ * Clean up dedup set for a completed session.
+ */
+export function clearSessionDedup(sessionId: string): void {
+  sessionDedupSets.delete(sessionId);
 }
 
 /**

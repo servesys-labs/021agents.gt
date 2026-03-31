@@ -37,7 +37,7 @@ import { readMailbox } from "./runtime/mailbox";
 import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID } from "./runtime/idempotency";
 import { backupCostState } from "./runtime/do-lifecycle";
 import { processToolResult } from "./runtime/result-storage";
-import { registerSession, unregisterSession, isSessionLimitReached, startSessionHeartbeat } from "./runtime/session-counter";
+import { registerSession, unregisterSession, isSessionLimitReached, refreshHeartbeat } from "./runtime/session-counter";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -105,12 +105,11 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       };
     }
 
-    // Register this session + start heartbeat for cross-DO counting
+    // Register this session for cross-DO counting
+    // Review fix: use per-turn refreshHeartbeat instead of setInterval
+    // (setInterval doesn't survive Workflow step boundaries)
     await registerSession(this.env as any, p.org_id, sessionId, {
       agentName: p.agent_name, channel: p.channel,
-    });
-    const stopHeartbeat = startSessionHeartbeat(this.env as any, p.org_id, sessionId, {
-      agentName: p.agent_name,
     });
 
     // ═══════════════════════════════════════════════════════════
@@ -719,7 +718,11 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         errors: toolResultEntries.filter(tr => tr.error).map(tr => `${tr.name}: ${tr.error}`),
       });
 
-      // ── Cloud C4.2: Backup cost state every 5 turns (survives DO eviction) ──
+      // ── Cloud C4.1+C4.2: Heartbeat + cost backup ──
+      // Refresh session registration every turn (replaces setInterval pattern
+      // which doesn't survive Workflow step boundaries)
+      refreshHeartbeat(this.env as any, p.org_id, sessionId, { agentName: p.agent_name }).catch(() => {});
+      // Backup cost every 5 turns
       if (turn % 5 === 0) {
         backupCostState(this.env as any, sessionId, totalCost, turn).catch(() => {});
       }
@@ -899,7 +902,6 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     });
 
     // ── Cloud C4.1+C4.2: Session cleanup + cost backup ──
-    stopHeartbeat();
     await unregisterSession(this.env as any, p.org_id, sessionId);
     await backupCostState(this.env as any, sessionId, result.cost_usd, result.turns);
 

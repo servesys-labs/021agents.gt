@@ -82,9 +82,17 @@ export class EventSequencer {
   /**
    * Get all events after a given sequence number.
    * Used for client reconnect: client sends `from_seq`, gets only new events.
+   *
+   * Returns { events, resyncRequired }. If the requested seq is below our
+   * minimum retained seq, a full resync is needed (events were evicted).
    */
-  getAfter(fromSeq: number): SeqEvent[] {
-    return this.events.filter(e => e.seq > fromSeq);
+  getAfter(fromSeq: number): { events: SeqEvent[]; resyncRequired: boolean } {
+    const minSeq = this.events.length > 0 ? this.events[0].seq : 0;
+    if (fromSeq > 0 && fromSeq < minSeq) {
+      // Requested events were evicted — client needs full resync
+      return { events: this.events, resyncRequired: true };
+    }
+    return { events: this.events.filter(e => e.seq > fromSeq), resyncRequired: false };
   }
 
   /**

@@ -91,6 +91,12 @@ export async function countActiveSessions(
 /**
  * Check if org has reached concurrent session limit.
  * Default limit: 10 concurrent sessions per org.
+ *
+ * NOTE: This is ADVISORY, not hard enforcement. KV list() is eventually
+ * consistent (~60s propagation), so two DOs starting simultaneously may
+ * both pass the check. For hard enforcement, use a dedicated DO as
+ * serialization point. Advisory limiting is sufficient for preventing
+ * runaway parallel sessions from misconfigured integrations.
  */
 export async function isSessionLimitReached(
   env: RuntimeEnv,
@@ -106,18 +112,17 @@ export async function isSessionLimitReached(
 }
 
 /**
- * Create a heartbeat interval that keeps the session registered.
- * Returns a cleanup function to stop the heartbeat.
+ * Refresh the session heartbeat. Call once per turn inside the workflow
+ * loop instead of using setInterval (which doesn't survive Workflow step
+ * boundaries — the isolate may be evicted between steps).
+ *
+ * Review fix: setInterval replaced with explicit per-turn call pattern.
  */
-export function startSessionHeartbeat(
+export async function refreshHeartbeat(
   env: RuntimeEnv,
   orgId: string,
   sessionId: string,
   metadata?: { agentName?: string; channel?: string },
-): () => void {
-  const timer = setInterval(() => {
-    registerSession(env, orgId, sessionId, metadata).catch(() => {});
-  }, HEARTBEAT_INTERVAL_MS);
-
-  return () => clearInterval(timer);
+): Promise<void> {
+  await registerSession(env, orgId, sessionId, metadata);
 }

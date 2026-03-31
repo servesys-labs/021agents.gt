@@ -189,27 +189,36 @@ export async function hydrateFromSnapshot(
 }
 
 // ── C4.2: Cost State Backup ─────────────────────────────────────────
+// Review fix: Consolidated with session-state/ (was duplicated under cost-state/).
+// hydrateFromSnapshot() already reads from session-state/ which includes cost.
+// backupCostState now writes to the SAME key so there's one source of truth.
 
 /**
  * Backup current cost state to KV. Called periodically during long sessions
- * (every 5 turns) and at session end.
- *
- * This ensures cost data survives DO eviction. Without this, a DO restart
- * loses accumulated cost and the session appears free.
+ * (every 5 turns) and at session end. Uses the same session-state/ key as
+ * hydrateFromSnapshot to avoid dual-key consistency issues.
  */
 export async function backupCostState(
   env: RuntimeEnv,
   sessionId: string,
   costUsd: number,
   turnCount: number,
+  orgId?: string,
+  agentName?: string,
 ): Promise<void> {
   const kv = (env as any).AGENT_PROGRESS_KV;
   if (!kv) return;
   try {
     await kv.put(
-      `cost-state/${sessionId}`,
-      JSON.stringify({ costUsd, turnCount, updatedAt: Date.now() }),
-      { expirationTtl: 86400 },
+      `session-state/${sessionId}`,
+      JSON.stringify({
+        totalCostUsd: costUsd,
+        turnCount,
+        orgId: orgId || "",
+        agentName: agentName || "",
+        savedAt: Date.now(),
+      }),
+      { expirationTtl: 86400 }, // 24h
     );
   } catch {
     // Best-effort
@@ -218,18 +227,13 @@ export async function backupCostState(
 
 /**
  * Recover cost state from KV after DO restart.
+ * Reads from the unified session-state/ key.
  */
 export async function recoverCostState(
   env: RuntimeEnv,
   sessionId: string,
 ): Promise<{ costUsd: number; turnCount: number } | null> {
-  const kv = (env as any).AGENT_PROGRESS_KV;
-  if (!kv) return null;
-  try {
-    const raw = await kv.get(`cost-state/${sessionId}`);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
+  const snapshot = await hydrateFromSnapshot(env, sessionId);
+  if (!snapshot) return null;
+  return { costUsd: snapshot.totalCostUsd, turnCount: snapshot.turnCount };
 }
