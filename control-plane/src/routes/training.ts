@@ -29,6 +29,23 @@ import type {
 
 export const trainingRoutes = createOpenAPIRouter();
 
+/** Emit a training-phase event to KV for real-time streaming. */
+async function emitTrainingEvent(
+  env: any, jobId: string, agentName: string,
+  event: Record<string, unknown>,
+): Promise<void> {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return;
+  try {
+    const key = `training:${jobId}`;
+    const raw = await kv.get(key);
+    const events: any[] = raw ? JSON.parse(raw) : [];
+    events.push({ ...event, job_id: jobId, agent_name: agentName, ts: Date.now() });
+    // Keep last 500 events, expire after 2 hours
+    await kv.put(key, JSON.stringify(events.slice(-500)), { expirationTtl: 7200 });
+  } catch { /* non-critical */ }
+}
+
 /** Fire-and-forget audit log for training events. */
 async function auditTraining(
   sql: any, orgId: string, userId: string,
@@ -132,7 +149,7 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
       ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
       ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
       ${body.max_iterations}, ${body.auto_activate},
-      ${user.user_id}, ${body.tags}
+      ${user.user_id}, ${body.tags && body.tags.length > 0 ? body.tags : sql`'{}'::text[]`}
     )
   `;
 
@@ -374,6 +391,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     await sql`UPDATE training_jobs SET status = 'running', started_at = now() WHERE job_id = ${job_id}`;
   }
 
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: "iteration_start",
+    iteration: iterationNumber,
+    max_iterations: job.max_iterations,
+    algorithm: job.algorithm,
+  });
+
   // ── Pre-flight: verify agent tools and config before eval ─────
   // Only on first iteration — subsequent iterations reuse the result
   if (iterationNumber === 1) {
@@ -467,27 +491,64 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       let totalCost = 0;
       let totalLatency = 0;
 
-      for (const task of evalTasks) {
+      // CF Workers have a 30s CPU time limit. Each eval task takes ~15-25s wall clock.
+      // Run tasks with per-task timeout and a total loop budget to avoid Worker kill.
+      const TASK_TIMEOUT_MS = 60_000; // 60s per task (wall clock, not CPU)
+      const LOOP_BUDGET_MS = 25_000;  // 25s total loop budget (leaves 5s for optimization step)
+      const loopStart = Date.now();
+
+      for (let taskIdx = 0; taskIdx < evalTasks.length; taskIdx++) {
+        // Check loop time budget — if running low, stop and use partial results
+        if (Date.now() - loopStart > LOOP_BUDGET_MS) {
+          await emitTrainingEvent(c.env, job_id, job.agent_name, {
+            type: "eval_budget_exceeded",
+            iteration: iterationNumber,
+            tasks_completed: taskIdx,
+            tasks_total: evalTasks.length,
+            elapsed_ms: Date.now() - loopStart,
+          });
+          break;
+        }
+
+        const task = evalTasks[taskIdx];
         const taskInput = String(task.input || "");
         const taskExpected = String(task.expected || "");
         const grader = String(task.grader || "contains");
         const taskStart = Date.now();
 
+        await emitTrainingEvent(c.env, job_id, job.agent_name, {
+          type: "eval_task_start",
+          iteration: iterationNumber,
+          task_index: taskIdx,
+          task_total: evalTasks.length,
+          task_name: task.name || `task_${taskIdx + 1}`,
+          input_preview: taskInput.slice(0, 120),
+        });
+
         try {
-          // Call RUNTIME /run which routes to DO → Workflow
-          const runResp = await c.env.RUNTIME.fetch("https://runtime/run", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
-            },
-            body: JSON.stringify({
-              input: taskInput,
-              agent_name: job.agent_name,
-              org_id: user.org_id,
-              ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
-            }),
-          });
+          // Call RUNTIME /run with per-task timeout
+          const taskAbort = new AbortController();
+          const taskTimeout = setTimeout(() => taskAbort.abort(), TASK_TIMEOUT_MS);
+
+          let runResp: Response;
+          try {
+            runResp = await c.env.RUNTIME.fetch("https://runtime/run", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+              },
+              body: JSON.stringify({
+                input: taskInput,
+                agent_name: job.agent_name,
+                org_id: user.org_id,
+                ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
+              }),
+              signal: taskAbort.signal,
+            });
+          } finally {
+            clearTimeout(taskTimeout);
+          }
 
           const runResult = await runResp.json() as Record<string, unknown>;
           const output = String(runResult.output || "");
@@ -501,21 +562,47 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
           } else if (grader === "exact" && taskExpected) {
             passed = output.trim() === taskExpected.trim();
           } else if (!taskExpected) {
-            // No expected value — pass if we got a non-empty response
             passed = output.length > 0;
           }
 
           taskResults.push({ passed, output, cost_usd: costUsd, latency_ms: latencyMs });
           totalCost += costUsd;
           totalLatency += latencyMs;
-        } catch (taskErr) {
-          taskResults.push({ passed: false, output: String(taskErr), cost_usd: 0, latency_ms: Date.now() - taskStart });
+
+          await emitTrainingEvent(c.env, job_id, job.agent_name, {
+            type: "eval_task_complete",
+            iteration: iterationNumber,
+            task_index: taskIdx,
+            task_name: task.name || `task_${taskIdx + 1}`,
+            passed,
+            latency_ms: latencyMs,
+            cost_usd: costUsd,
+            output_preview: output.slice(0, 200),
+          });
+        } catch (taskErr: any) {
+          const isTimeout = taskErr?.name === "AbortError";
+          taskResults.push({
+            passed: false,
+            output: isTimeout ? "[Eval task timed out]" : String(taskErr),
+            cost_usd: 0,
+            latency_ms: Date.now() - taskStart,
+          });
+
+          await emitTrainingEvent(c.env, job_id, job.agent_name, {
+            type: "eval_task_error",
+            iteration: iterationNumber,
+            task_index: taskIdx,
+            task_name: task.name || `task_${taskIdx + 1}`,
+            error: isTimeout ? "Task timed out" : String(taskErr).slice(0, 300),
+            latency_ms: Date.now() - taskStart,
+          });
         }
       }
 
-      // Aggregate results
+      // Aggregate results (based on tasks actually run, not total configured)
       const passCount = taskResults.filter((r) => r.passed).length;
-      const passRate = evalTasks.length > 0 ? passCount / evalTasks.length : 0;
+      const tasksRun = taskResults.length;
+      const passRate = tasksRun > 0 ? passCount / tasksRun : 0;
       const avgLatency = taskResults.length > 0 ? totalLatency / taskResults.length : 0;
 
       evalResult = {
@@ -525,6 +612,17 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         avg_latency_ms: avgLatency,
         total_cost_usd: totalCost,
       };
+
+      await emitTrainingEvent(c.env, job_id, job.agent_name, {
+        type: "eval_complete",
+        iteration: iterationNumber,
+        pass_rate: passRate,
+        passed: passCount,
+        total: tasksRun,
+        total_configured: evalTasks.length,
+        total_cost_usd: totalCost,
+        avg_latency_ms: avgLatency,
+      });
 
       // Collect KV progress events if available
       if (c.env.AGENT_PROGRESS_KV) {
@@ -550,7 +648,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         const evalRunId = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
         await sql`
           INSERT INTO eval_runs (org_id, agent_name, pass_rate, avg_score, avg_latency_ms, total_cost_usd, total_tasks, total_trials, created_at)
-          VALUES (${user.org_id}, ${job.agent_name}, ${passRate}, ${passRate}, ${avgLatency}, ${totalCost}, ${evalTasks.length}, ${1}, now())
+          VALUES (${user.org_id}, ${job.agent_name}, ${passRate}, ${passRate}, ${avgLatency}, ${totalCost}, ${tasksRun}, ${1}, now())
           RETURNING id
         `.then((rows: any) => {
           if (rows.length > 0) evalResult.eval_run_id = rows[0].id;
@@ -635,6 +733,14 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   `;
 
   // ── Step 5: Run optimization algorithm ────────────────────────
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: "optimizing",
+    iteration: iterationNumber,
+    algorithm: job.algorithm,
+    reward_score: rewardScore,
+    reward_breakdown: rewardBreakdown,
+  });
+
   const historyRows = await sql`
     SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output_json
     FROM training_iterations
@@ -686,6 +792,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       });
       const newPrompt = editResult.content ?? "";
 
+      await emitTrainingEvent(c.env, job_id, job.agent_name, {
+        type: "apo_gradient",
+        iteration: iterationNumber,
+        gradient_preview: gradient.slice(0, 300),
+        new_prompt_length: newPrompt.length,
+      });
+
       if (newPrompt.trim()) {
         optimizationResult = {
           updatedResources: [{
@@ -709,6 +822,12 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   }
 
   // ── Step 5.5: Safety gate — veto unsafe prompts ────────────────
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: "safety_check",
+    iteration: iterationNumber,
+    resources_to_check: optimizationResult.updatedResources.length,
+  });
+
   const safetyResults: Record<string, unknown>[] = [];
   for (const update of optimizationResult.updatedResources) {
     if (update.resourceType === "system_prompt" && update.contentText) {
@@ -830,7 +949,20 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     history: freshHistory,
   };
 
-  const shouldContinue = algorithm.shouldContinue(freshCtx);
+  // Phase 7.6: Convergence detection — auto-stop if improvement < 1% for 3 iterations
+  let converged = false;
+  if (freshHistory.length >= 3) {
+    const last3 = freshHistory.slice(-3).map(h => h.reward_score || 0);
+    const maxScore = Math.max(...last3);
+    const minScore = Math.min(...last3);
+    const improvement = maxScore > 0 ? (maxScore - minScore) / maxScore : 0;
+    if (improvement < 0.01) {
+      converged = true;
+      console.log(`[training] Job ${job_id}: converged after ${iterationNumber} iterations (improvement ${(improvement * 100).toFixed(2)}% < 1%)`);
+    }
+  }
+
+  const shouldContinue = converged ? false : algorithm.shouldContinue(freshCtx);
   const newStatus = shouldContinue ? "running" : "completed";
 
   // Fix #1: current_iteration already incremented atomically at the start;
@@ -915,6 +1047,21 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     }
   }
 
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: newStatus === "completed" ? "training_complete" : "iteration_complete",
+    iteration: iterationNumber,
+    reward_score: rewardScore,
+    pass_rate: evalResult.pass_rate,
+    is_best: isBest,
+    should_continue: shouldContinue,
+    status: newStatus,
+    ...(newStatus === "completed" ? {
+      best_score: isBest ? rewardScore : job.best_score,
+      best_iteration: isBest ? iterationNumber : job.best_iteration,
+      total_iterations: iterationNumber,
+    } : {}),
+  });
+
   auditTraining(sql, user.org_id, user.user_id,
     newStatus === "completed" ? "training.completed" : "training.step",
     job_id, { iteration: iterationNumber, reward: rewardScore, status: newStatus },
@@ -994,6 +1141,151 @@ trainingRoutes.openapi(progressRoute, async (c): Promise<any> => {
     source: c.env.AGENT_PROGRESS_KV ? "kv" : "unavailable",
   });
 });
+
+// ── GET /jobs/{job_id}/stream — SSE real-time training stream ────────
+
+const streamRoute = createRoute({
+  method: "get",
+  path: "/jobs/{job_id}/stream",
+  tags: ["Training"],
+  summary: "SSE stream of real-time training progress",
+  description: "Long-lived Server-Sent Events stream that pushes training phase events in real-time. Connect like Claude Code output — events flow as they happen.",
+  middleware: [requireScope("training:read")],
+  request: {
+    params: z.object({ job_id: z.string() }),
+    query: z.object({
+      /** Resume from this timestamp (ms). Only events after this are sent. */
+      since: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "SSE event stream" },
+    ...errorResponses(404),
+  },
+});
+
+trainingRoutes.openapi(streamRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { job_id } = c.req.valid("param");
+  const { since } = c.req.valid("query");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify job exists
+  const jobs = await sql`
+    SELECT agent_name, status FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+  `;
+  if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
+
+  const agentName = String(jobs[0].agent_name);
+  const initialStatus = String(jobs[0].status);
+
+  const sseHeaders = {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  };
+
+  // If job already finished, send the full event log and close
+  if (initialStatus === "completed" || initialStatus === "cancelled" || initialStatus === "failed") {
+    const events = await getTrainingEvents(c.env, job_id, since);
+    const stream = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const evt of events) {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(evt)}\n\n`));
+        }
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_end", status: initialStatus, ts: Date.now() })}\n\n`));
+        controller.close();
+      },
+    });
+    return new Response(stream, { headers: sseHeaders });
+  }
+
+  // Live stream — iterative poll loop (no recursion), max 5 min duration
+  let lastTs = since ?? 0;
+  let closed = false;
+  const MAX_POLLS = 200; // ~5 minutes at 1.5s intervals
+  const MAX_CONSECUTIVE_ERRORS = 3;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+      let consecutiveErrors = 0;
+
+      // Send any events that already exist
+      try {
+        const existing = await getTrainingEvents(c.env, job_id, lastTs);
+        for (const evt of existing) {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(evt)}\n\n`));
+          if (typeof evt.ts === "number" && evt.ts > lastTs) lastTs = evt.ts;
+        }
+      } catch { /* continue even if initial read fails */ }
+
+      // Iterative poll loop (NOT recursive — no stack overflow risk)
+      for (let i = 0; i < MAX_POLLS && !closed; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (closed) break;
+
+        try {
+          const events = await getTrainingEvents(c.env, job_id, lastTs);
+          for (const evt of events) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(evt)}\n\n`));
+            if (typeof evt.ts === "number" && evt.ts > lastTs) lastTs = evt.ts;
+          }
+          consecutiveErrors = 0;
+
+          // Check if job finished
+          const statusRows = await sql`SELECT status FROM training_jobs WHERE job_id = ${job_id}`;
+          const status = statusRows.length > 0 ? String(statusRows[0].status) : "unknown";
+
+          if (status === "completed" || status === "cancelled" || status === "failed") {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_end", status, ts: Date.now() })}\n\n`));
+            closed = true;
+            break;
+          }
+
+          // Heartbeat
+          controller.enqueue(enc.encode(`: heartbeat ${Date.now()}\n\n`));
+        } catch {
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_error", reason: "kv_unavailable", ts: Date.now() })}\n\n`));
+            closed = true;
+            break;
+          }
+        }
+      }
+
+      // If we hit max polls, tell client to reconnect with ?since=
+      if (!closed) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_timeout", last_ts: lastTs, ts: Date.now() })}\n\n`));
+      }
+      try { controller.close(); } catch { /* already closed */ }
+    },
+    cancel() {
+      closed = true;
+    },
+  });
+
+  return new Response(stream, { headers: sseHeaders });
+});
+
+/** Read training events from KV, optionally filtering by timestamp. */
+async function getTrainingEvents(
+  env: any, jobId: string, since?: number,
+): Promise<Record<string, unknown>[]> {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return [];
+  try {
+    const raw = await kv.get(`training:${jobId}`);
+    if (!raw) return [];
+    const events = JSON.parse(raw) as Record<string, unknown>[];
+    if (since) return events.filter((e) => typeof e.ts === "number" && e.ts > since);
+    return events;
+  } catch {
+    return [];
+  }
+}
 
 // ── POST /jobs/{job_id}/cancel — cancel job ─────────────────────────
 

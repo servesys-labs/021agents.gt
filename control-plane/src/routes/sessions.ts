@@ -259,9 +259,11 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
   return c.json(
     rows.map((r: any) => {
       let toolCalls: any[] = [];
+      let toolResults: any[] = [];
       let planArtifact: any = {};
       let reflection: any = {};
       try { toolCalls = JSON.parse(r.tool_calls_json || "[]"); } catch {}
+      try { toolResults = JSON.parse(r.tool_results_json || "[]"); } catch {}
       try { planArtifact = JSON.parse(r.plan_json || "{}"); } catch {}
       try { reflection = JSON.parse(r.reflection_json || "{}"); } catch {}
 
@@ -274,6 +276,7 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
         content: r.llm_content || "",
         cost_total_usd: Number(r.cost_total_usd || 0),
         tool_calls: toolCalls,
+        tool_results: toolResults,
         execution_mode: r.execution_mode || "sequential",
         plan_artifact: planArtifact,
         reflection,
@@ -491,4 +494,96 @@ sessionRoutes.openapi(deleteSessionsRoute, async (c): Promise<any> => {
   const result = await sql`DELETE FROM sessions WHERE created_at < ${cutoff} AND org_id = ${user.org_id}`;
 
   return c.json({ deleted: result.count, before_days: beforeDays });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 8.1: Session Search & Export
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /search — Full-text search across sessions with filters
+ */
+sessionRoutes.get("/search", requireScope("sessions:read"), async (c) => {
+  const user = c.get("user") as CurrentUser;
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const q = c.req.query("q") || "";
+  const agentName = c.req.query("agent") || "";
+  const status = c.req.query("status") || "";
+  const minCost = Number(c.req.query("min_cost") || 0);
+  const limit = Math.min(Number(c.req.query("limit") || 20), 50);
+  const offset = Number(c.req.query("offset") || 0);
+
+  try {
+    let rows: any[];
+    if (q) {
+      rows = await sql`
+        SELECT session_id, agent_name, status, cost_total_usd,
+               LEFT(input_text, 100) as input_preview,
+               created_at
+        FROM sessions
+        WHERE org_id = ${user.org_id}
+          AND (LOWER(input_text) LIKE ${`%${q.toLowerCase()}%`} OR LOWER(output_text) LIKE ${`%${q.toLowerCase()}%`})
+          ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
+          ${status ? sql`AND status = ${status}` : sql``}
+          ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else {
+      rows = await sql`
+        SELECT session_id, agent_name, status, cost_total_usd,
+               LEFT(input_text, 100) as input_preview,
+               created_at
+        FROM sessions
+        WHERE org_id = ${user.org_id}
+          ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
+          ${status ? sql`AND status = ${status}` : sql``}
+          ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    }
+    return c.json({ results: rows, query: q, limit, offset });
+  } catch (err) {
+    return c.json({ results: [], error: String(err) }, 500);
+  }
+});
+
+/**
+ * GET /:session_id/export — Export session as JSON or CSV
+ */
+sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c) => {
+  const user = c.get("user") as CurrentUser;
+  const sessionId = c.req.param("session_id");
+  const format = c.req.query("format") || "json";
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  try {
+    const session = await sql`
+      SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}
+    `;
+    if (session.length === 0) return c.json({ error: "Session not found" }, 404);
+
+    const turns = await sql`
+      SELECT turn_number, model_used, content, input_tokens, output_tokens,
+             cost_total_usd, latency_ms, tool_calls, tool_results
+      FROM turns WHERE session_id = ${sessionId}
+      ORDER BY turn_number ASC
+    `;
+
+    if (format === "csv") {
+      const header = "turn_number,model,input_tokens,output_tokens,cost_usd,latency_ms,content\n";
+      const rows = turns.map((t: any) =>
+        `${t.turn_number},"${t.model_used}",${t.input_tokens},${t.output_tokens},${t.cost_total_usd},${t.latency_ms},"${(t.content || "").replace(/"/g, '""').slice(0, 500)}"`
+      ).join("\n");
+      return new Response(header + rows, {
+        headers: { "Content-Type": "text/csv", "Content-Disposition": `attachment; filename="session-${sessionId}.csv"` },
+      });
+    }
+
+    return c.json({ session: session[0], turns });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
 });
