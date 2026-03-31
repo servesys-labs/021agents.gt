@@ -27,7 +27,11 @@ export type EventType =
   | "system"
   | "thinking"
   | "reasoning"
-  | "reset";
+  | "reset"
+  // Phase 5.2: New event types for protocol completeness
+  | "heartbeat"
+  | "loop_detected"
+  | "file_change";
 
 export interface BaseEvent {
   type: EventType;
@@ -68,6 +72,7 @@ export interface ToolCallEvent extends BaseEvent {
   name: string;
   tool_call_id: string;
   arguments?: string; // JSON string of args (optional for streaming display)
+  args_preview?: string; // Human-readable preview of key argument (query, path, url)
 }
 
 export interface ToolResultEvent extends BaseEvent {
@@ -77,6 +82,37 @@ export interface ToolResultEvent extends BaseEvent {
   result?: string;
   error?: string;
   latency_ms?: number;
+  cost_usd?: number;       // Phase 5.2: Per-tool cost for frontend display
+  duration_ms?: number;    // Phase 5.2: Wall-clock execution time
+}
+
+export interface ToolProgressEvent extends BaseEvent {
+  type: "tool_progress";
+  name: string;
+  tool_call_id: string;
+  progress?: Record<string, unknown>; // Structured progress data
+}
+
+export interface HeartbeatEvent extends BaseEvent {
+  type: "heartbeat";
+}
+
+export interface LoopDetectedEvent extends BaseEvent {
+  type: "loop_detected";
+  tool_name: string;
+  repeat_count: number;
+}
+
+export interface FileChangeEvent extends BaseEvent {
+  type: "file_change";
+  change_type: "create" | "edit" | "delete";
+  path: string;
+  language?: string;
+  content?: string;
+  old_text?: string;
+  new_text?: string;
+  size?: number;
+  tool_call_id?: string;
 }
 
 export interface TurnEndEvent extends BaseEvent {
@@ -99,6 +135,8 @@ export interface DoneEvent extends BaseEvent {
   turns: number;
   tool_calls: number;
   cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
   latency_ms: number;
 }
 
@@ -137,12 +175,16 @@ export type RuntimeEvent =
   | TokenEvent
   | ToolCallEvent
   | ToolResultEvent
+  | ToolProgressEvent
   | TurnEndEvent
   | DoneEvent
   | ErrorEvent
   | WarningEvent
   | SystemEvent
-  | ResetEvent;
+  | ResetEvent
+  | HeartbeatEvent
+  | LoopDetectedEvent
+  | FileChangeEvent;
 
 // ── Client → Server Messages (WebSocket only) ────────────────────────
 
@@ -183,8 +225,9 @@ export function validateEvent(event: unknown): { valid: boolean; error?: string 
   
   const validTypes: EventType[] = [
     "connected", "session_start", "turn_start", "token",
-    "tool_call", "tool_result", "turn_end", "done",
-    "error", "warning", "system", "reset"
+    "tool_call", "tool_result", "tool_progress", "turn_end", "done",
+    "error", "warning", "system", "thinking", "reasoning", "reset",
+    "heartbeat", "loop_detected", "file_change"
   ];
   
   if (!validTypes.includes(e.type as EventType)) {

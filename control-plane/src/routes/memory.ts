@@ -7,6 +7,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const memoryRoutes = createOpenAPIRouter();
 
@@ -55,15 +56,15 @@ memoryRoutes.openapi(listEpisodesRoute, async (c): Promise<any> => {
   let rows;
   if (query) {
     rows = await sql`
-      SELECT * FROM episodes
+      SELECT * FROM episodic_memories
       WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
-        AND (input ILIKE ${"%" + query + "%"} OR output ILIKE ${"%" + query + "%"})
-      ORDER BY timestamp DESC LIMIT ${limit}
+        AND content ILIKE ${"%" + query + "%"}
+      ORDER BY created_at DESC LIMIT ${limit}
     `;
   } else {
     rows = await sql`
-      SELECT * FROM episodes WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
-      ORDER BY timestamp DESC LIMIT ${limit}
+      SELECT * FROM episodic_memories WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
+      ORDER BY created_at DESC LIMIT ${limit}
     `;
   }
   return c.json({ episodes: rows, total: rows.length });
@@ -114,11 +115,12 @@ memoryRoutes.openapi(createEpisodeRoute, async (c): Promise<any> => {
   `;
   if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  const metadata = JSON.stringify({ agent: agentName, source: "api" });
+  const content = [inputText, outputText, outcome].filter(Boolean).join("\n");
+  const metadata = JSON.stringify({ agent: agentName, source: "api", input: inputText, output: outputText, outcome });
 
   await sql`
-    INSERT INTO episodes (id, agent_name, org_id, input, output, outcome, metadata_json, timestamp)
-    VALUES (${episodeId}, ${agentName}, ${user.org_id}, ${inputText}, ${outputText}, ${outcome}, ${metadata}, ${now})
+    INSERT INTO episodic_memories (id, agent_name, org_id, content, source, metadata_json, created_at)
+    VALUES (${episodeId}, ${agentName}, ${user.org_id}, ${content}, ${"api"}, ${metadata}, ${now})
   `;
 
   return c.json({ id: episodeId, created: true });
@@ -151,7 +153,7 @@ memoryRoutes.openapi(clearEpisodesRoute, async (c): Promise<any> => {
   `;
   if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  await sql`DELETE FROM episodes WHERE agent_name = ${agentName} AND org_id = ${user.org_id}`;
+  await sql`DELETE FROM episodic_memories WHERE agent_name = ${agentName} AND org_id = ${user.org_id}`;
   return c.json({ cleared: true });
 });
 
@@ -194,21 +196,19 @@ memoryRoutes.openapi(listFactsRoute, async (c): Promise<any> => {
   let rows;
   if (query) {
     rows = await sql`
-      SELECT key, value_json FROM facts
+      SELECT key, value, category FROM semantic_facts
       WHERE agent_name = ${agentName} AND org_id = ${user.org_id}
-        AND (key ILIKE ${"%" + query + "%"} OR value_json ILIKE ${"%" + query + "%"})
+        AND (key ILIKE ${"%" + query + "%"} OR value ILIKE ${"%" + query + "%"})
       LIMIT ${limit}
     `;
   } else {
     rows = await sql`
-      SELECT key, value_json FROM facts WHERE agent_name = ${agentName} AND org_id = ${user.org_id} LIMIT ${limit}
+      SELECT key, value, category FROM semantic_facts WHERE agent_name = ${agentName} AND org_id = ${user.org_id} LIMIT ${limit}
     `;
   }
 
   const facts = rows.map((r: any) => {
-    let value: any;
-    try { value = JSON.parse(r.value_json); } catch { value = r.value_json; }
-    return { key: r.key, value };
+    return { key: r.key, value: r.value, category: r.category };
   });
   return c.json({ facts, total: facts.length });
 });
@@ -255,12 +255,10 @@ memoryRoutes.openapi(createFactRoute, async (c): Promise<any> => {
   `;
   if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  const valueJson = JSON.stringify(value);
-
   await sql`
-    INSERT INTO facts (agent_name, org_id, key, value_json)
-    VALUES (${agentName}, ${user.org_id}, ${key}, ${valueJson})
-    ON CONFLICT (agent_name, key) DO UPDATE SET value_json = EXCLUDED.value_json
+    INSERT INTO semantic_facts (id, agent_name, org_id, key, value, category, created_at)
+    VALUES (${genId()}, ${agentName}, ${user.org_id}, ${key}, ${value}, ${"general"}, ${new Date().toISOString()})
+    ON CONFLICT (agent_name, org_id, key) DO UPDATE SET value = EXCLUDED.value
   `;
   return c.json({ key, stored: true });
 });
@@ -292,7 +290,7 @@ memoryRoutes.openapi(deleteFactRoute, async (c): Promise<any> => {
   `;
   if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  await sql`DELETE FROM facts WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND key = ${key}`;
+  await sql`DELETE FROM semantic_facts WHERE agent_name = ${agentName} AND org_id = ${user.org_id} AND key = ${key}`;
   return c.json({ deleted: key });
 });
 
@@ -323,7 +321,7 @@ memoryRoutes.openapi(clearFactsRoute, async (c): Promise<any> => {
   `;
   if (agentCheck.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  await sql`DELETE FROM facts WHERE agent_name = ${agentName} AND org_id = ${user.org_id}`;
+  await sql`DELETE FROM semantic_facts WHERE agent_name = ${agentName} AND org_id = ${user.org_id}`;
   return c.json({ cleared: true });
 });
 
@@ -368,7 +366,7 @@ memoryRoutes.openapi(listProceduresRoute, async (c): Promise<any> => {
 
   const procedures = rows.map((r: any) => {
     let steps: any[] = [];
-    try { steps = JSON.parse(r.steps_json || "[]"); } catch {}
+    steps = parseJsonColumn(r.steps_json, []);
     const total = (Number(r.success_count) || 0) + (Number(r.failure_count) || 0);
     return {
       ...r,
@@ -458,7 +456,7 @@ memoryRoutes.openapi(getWorkingMemoryRoute, async (c): Promise<any> => {
 
   const sessionId = String(sessions[0].session_id || "");
   const turns = await sql`
-    SELECT turn_number, llm_content, tool_calls_json, reflection_json, plan_json
+    SELECT turn_number, llm_content, tool_calls_json, reflection, plan_artifact
     FROM turns
     WHERE session_id = ${sessionId}
     ORDER BY turn_number DESC
@@ -470,13 +468,13 @@ memoryRoutes.openapi(getWorkingMemoryRoute, async (c): Promise<any> => {
       turn_number: Number(t.turn_number || 0),
       content_preview: String(t.llm_content || "").slice(0, 280),
       tool_calls: (() => {
-        try { return JSON.parse(t.tool_calls_json || "[]"); } catch { return []; }
+        return parseJsonColumn(t.tool_calls_json, []);
       })(),
       reflection: (() => {
-        try { return JSON.parse(t.reflection_json || "{}"); } catch { return {}; }
+        return parseJsonColumn(t.reflection);
       })(),
       plan: (() => {
-        try { return JSON.parse(t.plan_json || "{}"); } catch { return {}; }
+        return parseJsonColumn(t.plan_artifact);
       })(),
     }))
     .sort((a, b) => a.turn_number - b.turn_number);
@@ -490,4 +488,48 @@ memoryRoutes.openapi(getWorkingMemoryRoute, async (c): Promise<any> => {
     },
     note: "Derived snapshot from persisted session turns. For live in-flight state, query runtime directly.",
   });
+});
+
+// ── Team Memory Endpoints ────────────────────────────────────
+
+memoryRoutes.get("/team/facts", async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const rows = await sql`
+    SELECT id, author_agent, content, category, score, created_at
+    FROM team_facts WHERE org_id = ${user.org_id}
+    ORDER BY score DESC LIMIT 50
+  `;
+  return c.json({ facts: rows });
+});
+
+memoryRoutes.post("/team/facts", async (c) => {
+  const user = c.get("user");
+  const body = await c.req.json() as { content: string; category?: string };
+  if (!body.content) return c.json({ error: "content required" }, 400);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  await sql`
+    INSERT INTO team_facts (org_id, author_agent, content, category, score, created_at)
+    VALUES (${user.org_id}, ${"portal-user"}, ${body.content.slice(0, 1000)}, ${body.category || "general"}, ${0.7}, NOW())
+    ON CONFLICT (org_id, content) DO UPDATE SET score = team_facts.score + 0.1, updated_at = NOW()
+  `;
+  return c.json({ saved: true });
+});
+
+memoryRoutes.delete("/team/facts/:id", async (c) => {
+  const user = c.get("user");
+  const id = c.req.param("id");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  await sql`DELETE FROM team_facts WHERE id = ${id} AND org_id = ${user.org_id}`;
+  return c.json({ deleted: true });
+});
+
+memoryRoutes.get("/team/observations", async (c) => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const agentName = c.req.query("agent") || "";
+  const rows = agentName
+    ? await sql`SELECT * FROM team_observations WHERE org_id = ${user.org_id} AND (target_agent = ${agentName} OR target_agent IS NULL) ORDER BY created_at DESC LIMIT 50`
+    : await sql`SELECT * FROM team_observations WHERE org_id = ${user.org_id} ORDER BY created_at DESC LIMIT 50`;
+  return c.json({ observations: rows });
 });

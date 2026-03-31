@@ -18,6 +18,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 import {
   getToolRegistry,
   ToolRegistry,
@@ -133,7 +134,7 @@ toolRoutes.openapi(listToolsRoute, async (c): Promise<any> => {
       dbTools = rows.map((r: any) => ({
         name: r.name,
         description: r.description || "",
-        input_schema: r.schema_json ? JSON.parse(r.schema_json) : { type: "object" },
+        input_schema: parseJsonColumn(r.schema_json, { type: "object" }),
         handler: r.has_handler ? undefined : undefined, // Handlers are loaded separately
         source_path: r.source,
       }));
@@ -544,7 +545,7 @@ toolRoutes.openapi(getToolRoute, async (c): Promise<any> => {
         tool = {
           name: r.name,
           description: r.description || "",
-          input_schema: r.schema_json ? JSON.parse(r.schema_json) : { type: "object" },
+          input_schema: parseJsonColumn(r.schema_json, { type: "object" }),
           source_path: r.source,
         };
       }
@@ -860,8 +861,8 @@ toolRoutes.openapi(executionHistoryRoute, async (c): Promise<any> => {
       tool: name,
       executions: rows.map((r: any) => ({
         id: r.execution_id,
-        arguments: r.arguments_json ? JSON.parse(r.arguments_json) : {},
-        result: r.result_json ? JSON.parse(r.result_json) : null,
+        arguments: parseJsonColumn(r.arguments_json),
+        result: parseJsonColumn(r.result_json, null),
         duration_ms: r.duration_ms,
         trace_id: r.trace_id,
         session_id: r.session_id,

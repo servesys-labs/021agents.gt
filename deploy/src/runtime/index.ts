@@ -35,6 +35,7 @@ export {
   writeConversationMessage,
   loadConversationHistory,
   queryUsage,
+  loadAgentList,
 } from "./db";
 export type { TraceReplayAtCursor, UsagePage, UsageSummary, UsageSessionEntry, ConversationMessage } from "./db";
 
@@ -96,10 +97,24 @@ export type {
 export { createHarnessCodeTool, getHarnessToolDefs } from "./codemode";
 export { buildSandboxModules, HARNESS_MODULE_SOURCE, HARNESS_TYPE_DEFS } from "./harness-modules";
 
-// Stream — legacy, no longer imported (Workflow is the execution engine)
+// Stream — streamRun is legacy (Workflow is the execution engine), but utility
+// functions (withProgress, backpressureSend) are re-used by DO WebSocket handlers.
 // export { streamRun } from "./stream";
+export { withProgress, backpressureSend, createStreamBackpressure } from "./stream";
+export type { StreamBackpressure } from "./stream";
 export type { RuntimeEvent as ProtocolRuntimeEvent, TurnEndEvent, DoneEvent, ErrorEvent, ToolCallEvent, ToolResultEvent } from "./protocol";
 export { validateEvent, serializeForSSE, serializeForWebSocket } from "./protocol";
+
+// Structured errors — telemetry-safe error hierarchy for the entire runtime
+export {
+  AgentOSError, ToolError, LLMError, BudgetError,
+  CircuitBreakerError, SSRFError, RefusalError,
+  classifyFetchError,
+} from "./errors";
+export type { FetchErrorKind, ClassifiedFetchError } from "./errors";
+
+// Abort controller hierarchy — parent→child propagation with sibling isolation
+export { createChildAbortController, createSiblingGroup } from "./abort";
 
 // Workspace
 export { syncFileToR2, hydrateWorkspace, loadManifest, listWorkspaceFiles, readFileFromR2 } from "./workspace";

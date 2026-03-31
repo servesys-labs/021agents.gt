@@ -23,7 +23,7 @@ interface AgentDetail { name: string; description: string; config_json: Record<s
 interface EvalTask { id: string; name?: string; input: string; expected: string; grader: string; rubric?: string; auto_generated?: boolean }
 interface EvalTrial { input: string; expected: string; actual: string; passed: boolean; latency_ms?: number; reasoning?: string }
 interface EvalRun { id: string; agent_name: string; created_at: string; status: string; pass_count: number; fail_count: number; total_count: number; trials?: EvalTrial[] }
-interface TrainingJob { id: string; status: string; algorithm: string; current_iteration: number; max_iterations: number; best_score: number; auto_activate: boolean; created_at: string; iterations?: TrainingIteration[] }
+interface TrainingJob { id: string; job_id?: string; status: string; algorithm: string; current_iteration: number; max_iterations: number; best_score: number; auto_activate: boolean; created_at: string; iterations?: TrainingIteration[] }
 interface TrainingIteration { iteration: number; eval_pass_rate: number; reward_score: number; changes: Record<string, unknown>; created_at: string }
 interface CircuitBreakerStatus { armed: boolean; minutes_since_activation: number; error_rate_pct: number; rollback_threshold_pct: number; would_rollback: boolean; sessions_since_activation: number }
 interface EvolutionSuggestion { area: string; severity: string; suggestion: string; auto_applicable: boolean }
@@ -212,8 +212,9 @@ export default function AgentTestsPage() {
         max_iterations: 10,
         auto_activate: true,
       });
-      if (job.id) {
-        await api.post(`/training/jobs/${job.id}/auto-step`, {}).catch(() => {});
+      const jobId = job.job_id || job.id;
+      if (jobId) {
+        await api.post(`/training/jobs/${jobId}/auto-step`, {}).catch(() => {});
       }
       setTrainingJob({ ...job, status: "running" });
       toast("Training started. Your agent will improve automatically.");

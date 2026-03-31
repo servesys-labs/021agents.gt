@@ -133,7 +133,7 @@ feedRoutes.openapi(createPostRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   // Verify agent belongs to org
-  const [agent] = await sql`SELECT 1 FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} AND is_active = 1 LIMIT 1`;
+  const [agent] = await sql`SELECT 1 FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} AND is_active = true LIMIT 1`;
   if (!agent) return c.json({ error: "Agent not found" }, 404);
 
   const [post] = await sql`

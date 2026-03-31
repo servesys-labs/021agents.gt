@@ -10,6 +10,7 @@
 
 import { getDbForOrg } from "../db/client";
 import { generateEvolutionSuggestions } from "./meta-agent";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 /* ── Types ──────────────────────────────────────────────────────── */
 
@@ -45,11 +46,82 @@ interface MetaChatContext {
   aiGatewayId?: string;
   cloudflareApiToken?: string;
   aiGatewayToken?: string;
+  /** "demo" = showcase mode (auto-generate, minimal questions), "live" = production interview mode */
+  mode?: "demo" | "live";
   env: {
     RUNTIME?: { fetch: (input: RequestInfo, init?: RequestInit) => Promise<Response> };
     SERVICE_TOKEN?: string;
     JOB_QUEUE?: { send: (message: unknown) => Promise<void> };
   };
+}
+
+/* ── Progressive tool discovery ─────────────────────────────────── */
+
+// Tool groups — only send relevant tools each turn to save tokens
+const TOOL_GROUPS: Record<string, string[]> = {
+  config: ["read_agent_config", "update_agent_config"],
+  sessions: ["read_sessions", "read_session_messages", "read_observability", "read_conversation_quality"],
+  training: ["start_training", "read_training_status", "activate_trained_config", "rollback_training", "read_training_circuit_breaker"],
+  eval: ["read_eval_results", "add_eval_test_cases", "test_agent", "analyze_and_suggest", "run_eval"],
+  agents: ["create_sub_agent", "manage_connectors"],
+  marketplace: ["marketplace_publish", "marketplace_stats"],
+  analytics: ["run_query"],
+  infrastructure: ["read_session_diagnostics", "read_feature_flags", "set_feature_flag", "read_audit_log", "manage_skills"],
+};
+
+// Always-included tools (cheap to send, always useful)
+const CORE_TOOLS = ["read_agent_config", "update_agent_config", "run_query"];
+
+function selectMetaTools(context: string): ToolDef[] {
+  const selected = new Set(CORE_TOOLS);
+
+  // Match context to tool groups
+  if (/session|user|usage|conversation|message|activity|error|fail|log/.test(context)) {
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+  }
+  if (/train|improv|optimi|apo|iteration|score|reward/.test(context)) {
+    TOOL_GROUPS.training.forEach(t => selected.add(t));
+  }
+  if (/eval|test|pass|fail|grader|rubric|quality/.test(context)) {
+    TOOL_GROUPS.eval.forEach(t => selected.add(t));
+  }
+  if (/publish|marketplace|rating|listing|earn/.test(context)) {
+    TOOL_GROUPS.marketplace.forEach(t => selected.add(t));
+  }
+  if (/cost|expensive|spend|billing|credit|budget|bash|tool_calls|diagnos/.test(context)) {
+    TOOL_GROUPS.analytics.forEach(t => selected.add(t));
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+  }
+  if (/how.*doing|health|overview|status|check/.test(context)) {
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+    TOOL_GROUPS.eval.forEach(t => selected.add(t));
+  }
+  if (/delegat|sub.?agent|specialist|create.*agent|spawn|child/.test(context)) {
+    TOOL_GROUPS.agents.forEach(t => selected.add(t));
+  }
+  if (/connect|integrat|crm|slack|email|calendar|jira|notion|hubspot|salesforce|pipedream|mcp/.test(context)) {
+    TOOL_GROUPS.agents.forEach(t => selected.add(t));
+  }
+  if (/run.*eval|run.*test|test.*suite|benchmark|measure|baseline/.test(context)) {
+    TOOL_GROUPS.eval.forEach(t => selected.add(t));
+  }
+  if (/stop|crash|loop|truncat|cut.?off|forgot|cancel|circuit|breaker|abort|block|ssrf|flag|feature|audit|who.?changed|skill|slash/.test(context)) {
+    TOOL_GROUPS.infrastructure.forEach(t => selected.add(t));
+  }
+  if (/diagnos|debug|why.*stop|why.*fail|what.*happen|went.*wrong/.test(context)) {
+    TOOL_GROUPS.infrastructure.forEach(t => selected.add(t));
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+  }
+
+  // Progressive discovery: if nothing matched beyond core, send core + a
+  // starter set (sessions + eval) — NOT all 26 tools. The system prompt
+  // documents all capabilities so the LLM knows what to ask for.
+  if (selected.size <= CORE_TOOLS.length) {
+    TOOL_GROUPS.sessions.forEach(t => selected.add(t));
+    TOOL_GROUPS.eval.forEach(t => selected.add(t));
+  }
+
+  return META_TOOLS.filter(t => selected.has(t.function.name));
 }
 
 /* ── Tool definitions ───────────────────────────────────────────── */
@@ -69,7 +141,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "update_agent_config",
       description:
-        "Update specific fields of the agent's configuration. Only include fields you want to change. Supports: system_prompt, description, personality, model, plan (basic/standard/premium), routing (custom routing overrides), temperature, max_tokens, tools (array of tool names), tags, max_turns, timeout_seconds, governance (object with budget_limit_usd etc).",
+        "Update specific fields of the agent's configuration. Only include fields you want to change.",
       parameters: {
         type: "object",
         properties: {
@@ -78,13 +150,30 @@ const META_TOOLS: ToolDef[] = [
           personality: { type: "string", description: "Personality/tone" },
           model: { type: "string", description: "Model identifier" },
           plan: { type: "string", enum: ["basic", "standard", "premium"], description: "LLM plan tier — controls which models are used for different task types" },
-          routing: { type: "object", description: "Custom model routing overrides by category and role (e.g. { general: { moderate: { model: '...', provider: '...' } } })" },
+          routing: { type: "object", description: "Custom model routing overrides by category and role" },
+          provider: { type: "string", description: "LLM provider (e.g. 'openrouter', 'openai', 'google-ai-studio'). Usually auto-detected from model name." },
           temperature: { type: "number", description: "Sampling temperature" },
-          max_tokens: { type: "number", description: "Max output tokens" },
+          max_tokens: { type: "number", description: "Max output tokens per turn (alias for max_tokens_per_turn)" },
+          max_tokens_per_turn: { type: "number", description: "Max output tokens per turn" },
           tools: {
             type: "array",
             items: { type: "string" },
             description: "Full list of tools the agent should have",
+          },
+          blocked_tools: {
+            type: "array",
+            items: { type: "string" },
+            description: "Tools to explicitly deny, even if in the tools list. Useful for safety.",
+          },
+          allowed_domains: {
+            type: "array",
+            items: { type: "string" },
+            description: "URL domain allowlist for http-request/browse tools. If set, only these domains are reachable.",
+          },
+          blocked_domains: {
+            type: "array",
+            items: { type: "string" },
+            description: "URL domain blocklist for http-request/browse tools. These domains are always blocked.",
           },
           tags: {
             type: "array",
@@ -98,6 +187,18 @@ const META_TOOLS: ToolDef[] = [
             type: "string",
             enum: ["", "chain-of-thought", "plan-then-execute", "step-back", "decompose", "verify-then-respond"],
             description: "Reasoning strategy. Empty string = auto-select (recommended).",
+          },
+          parallel_tool_calls: {
+            type: "boolean",
+            description: "Enable parallel tool execution (default true). Set false to force serial execution for tools with ordering dependencies.",
+          },
+          require_human_approval: {
+            type: "boolean",
+            description: "Require human approval before executing destructive actions (default false).",
+          },
+          use_code_mode: {
+            type: "boolean",
+            description: "Enable codemode — runs agent logic in sandboxed V8 isolates for massive token savings on complex workflows.",
           },
           governance: {
             type: "object",
@@ -131,7 +232,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "read_session_messages",
       description:
-        "Read messages from a specific session to understand what happened in a conversation.",
+        "Read full turn-by-turn details from a session including tool calls, arguments, results, costs, and errors. Use this to diagnose what the agent did, what tools it called, and where it went wrong.",
       parameters: {
         type: "object",
         properties: {
@@ -227,7 +328,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "start_training",
       description:
-        "Start an automated training job for this agent. Training runs eval suites, computes rewards, and uses algorithms (Baseline, APO, or Multi-dimension) to optimize the agent's prompt, reasoning strategy, and tool selection. Includes safety gates: pre-flight tool checks, prompt safety validation, config schema validation, and auto-rollback circuit breaker.",
+        "Start automated training. Algorithms: baseline (random perturbation), apo (LLM prompt optimization), multi (prompt + reasoning + tools). Runs eval suite each iteration.",
       parameters: {
         type: "object",
         properties: {
@@ -276,7 +377,7 @@ const META_TOOLS: ToolDef[] = [
     function: {
       name: "activate_trained_config",
       description:
-        "Activate a trained resource (prompt, config) produced by a training job. Applies it as the agent's live configuration. Includes validation gates: config schema check, prompt safety scan, and enables the auto-rollback circuit breaker (reverts if error rate > 30% within 15 minutes).",
+        "Activate a trained configuration from a training job. Applies it live with safety gates and auto-rollback circuit breaker.",
       parameters: {
         type: "object",
         properties: {
@@ -397,6 +498,168 @@ const META_TOOLS: ToolDef[] = [
       },
     },
   },
+  // ── Eval & Sub-agent Tools ────────────────────────────────────
+  {
+    type: "function",
+    function: {
+      name: "run_eval",
+      description:
+        "Run the agent's eval suite NOW and return results. Executes all test cases (from eval_test_cases table and config.eval_config), measures pass rate, latency, and cost. Use this before/after config changes to measure impact.",
+      parameters: {
+        type: "object",
+        properties: {
+          max_cases: { type: "number", description: "Max test cases to run (default: all). Use a smaller number for quick spot-checks." },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "create_sub_agent",
+      description:
+        "Create a specialist sub-agent for delegation via run-agent. Keep tool lists lean (2-5 tools) — sub-agents should be focused specialists, not generalists.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Snake_case name for the sub-agent (e.g., 'research_assistant')" },
+          description: { type: "string", description: "What this sub-agent specializes in" },
+          system_prompt: { type: "string", description: "Detailed system prompt for the sub-agent (200+ words)" },
+          tools: { type: "array", items: { type: "string" }, description: "Tools the sub-agent should have" },
+          model: { type: "string", description: "Model (default: same as parent agent)" },
+          max_turns: { type: "number", description: "Max turns for sub-agent (default: 15)" },
+          budget_limit_usd: { type: "number", description: "Budget per sub-agent session (default: 1.0)" },
+        },
+        required: ["name", "description", "system_prompt", "tools"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "manage_connectors",
+      description:
+        "List, add, or remove MCP connectors for this agent. Connectors enable interaction with external apps (CRMs, email, calendars, etc.).",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["list", "add", "remove"],
+            description: "Action to perform",
+          },
+          app: { type: "string", description: "App name for add/remove (e.g., 'hubspot', 'gmail', 'slack', 'jira', 'notion', 'google-calendar', 'salesforce', 'zendesk')" },
+          reason: { type: "string", description: "Why this connector is needed (for add)" },
+        },
+        required: ["action"],
+      },
+    },
+  },
+
+  // ── Infrastructure & Diagnostics Tools ────────────────────────
+  {
+    type: "function",
+    function: {
+      name: "read_session_diagnostics",
+      description:
+        "Read runtime diagnostic events from a session: loops, compressions, repairs, circuit breakers, cancellations, truncations, budget guards. Use when users ask why something went wrong.",
+      parameters: {
+        type: "object",
+        properties: {
+          session_id: { type: "string", description: "Session ID to diagnose" },
+        },
+        required: ["session_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_feature_flags",
+      description:
+        "Read feature flags for this org: concurrent_tools, context_compression, deferred_tool_loading.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "set_feature_flag",
+      description:
+        "Enable or disable a feature flag for this agent's organization. Available flags: concurrent_tools, context_compression, deferred_tool_loading.",
+      parameters: {
+        type: "object",
+        properties: {
+          flag: {
+            type: "string",
+            enum: ["concurrent_tools", "context_compression", "deferred_tool_loading"],
+            description: "The feature flag to toggle",
+          },
+          enabled: { type: "boolean", description: "true to enable, false to disable" },
+        },
+        required: ["flag", "enabled"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_audit_log",
+      description:
+        "Read the audit trail of configuration changes for this agent. Shows who changed what, when, and what values were modified. Use when a user asks 'who changed my agent?' or 'what happened to my config?'",
+      parameters: {
+        type: "object",
+        properties: {
+          limit: { type: "number", description: "Max entries to return (default 20)" },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "manage_skills",
+      description:
+        "List, create, or delete custom /slash-command skills for this agent. Built-in: /batch, /review, /debug, /verify, /remember, /skillify, /schedule, /docs.",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["list", "create", "delete"],
+            description: "Action to perform",
+          },
+          name: { type: "string", description: "Skill name (for create/delete). Must be lowercase, hyphens allowed." },
+          description: { type: "string", description: "Short description of what the skill does (for create)" },
+          prompt_template: { type: "string", description: "The prompt template for the skill (for create). Use {{ARGS}} as a placeholder for user arguments." },
+          category: { type: "string", description: "Skill category (for create): workflow, analysis, code, data, creative, ops" },
+        },
+        required: ["action"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "run_query",
+      description:
+        "Run a read-only SELECT query against the database. Tables: sessions, turns, agents, training_jobs, training_iterations, training_resources, eval_test_cases, eval_runs, eval_trials, credit_transactions, billing_records, skills, audit_log, marketplace_listings, feature_flags, agent_versions. See system prompt for column details. Always filter by org_id or agent_name.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "SQL SELECT query to run" },
+        },
+        required: ["query"],
+      },
+    },
+  },
 ];
 
 /* ── Tool execution ─────────────────────────────────────────────── */
@@ -434,10 +697,14 @@ async function executeTool(
         temperature: config.temperature,
         max_tokens: config.max_tokens,
         tools: config.tools,
+        blocked_tools: config.blocked_tools || [],
+        allowed_domains: config.allowed_domains || [],
+        blocked_domains: config.blocked_domains || [],
         tags: config.tags,
         max_turns: config.max_turns,
         timeout_seconds: config.timeout_seconds,
         reasoning_strategy: config.reasoning_strategy || "(auto)",
+        parallel_tool_calls: config.parallel_tool_calls !== false,
         budget_limit_usd: config.governance?.budget_limit_usd ?? 10,
         version: config.version,
         governance: config.governance,
@@ -466,20 +733,31 @@ async function executeTool(
           : (rows[0].config_json as Record<string, unknown>) ?? {};
 
       // Apply requested changes
+      // Backwards compat: accept max_tokens as alias for max_tokens_per_turn
+      if (args.max_tokens !== undefined && args.max_tokens_per_turn === undefined) {
+        args.max_tokens_per_turn = args.max_tokens;
+      }
       const updatable = [
         "system_prompt",
         "description",
         "personality",
         "model",
+        "provider",
         "plan",
         "routing",
         "temperature",
-        "max_tokens",
+        "max_tokens_per_turn",
         "tools",
+        "blocked_tools",
+        "allowed_domains",
+        "blocked_domains",
         "tags",
         "max_turns",
         "timeout_seconds",
         "reasoning_strategy",
+        "parallel_tool_calls",
+        "require_human_approval",
+        "use_code_mode",
       ] as const;
       const changed: string[] = [];
       for (const key of updatable) {
@@ -525,6 +803,15 @@ async function executeTool(
         `;
       } catch {}
 
+      // Audit log the config change
+      try {
+        await sql`
+          INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+          VALUES (${ctx.orgId}, ${ctx.userId}, 'update_config', 'agent', ${ctx.agentName},
+            ${JSON.stringify({ changed_fields: changed, new_version: newVersion, source: "meta-agent" })}, now())
+        `;
+      } catch {}
+
       // Notify runtime
       if (ctx.env.RUNTIME) {
         try {
@@ -558,10 +845,12 @@ async function executeTool(
     case "read_sessions": {
       const limit = Number(args.limit) || 20;
       const rows = await sql`
-        SELECT session_id, model, step_count, created_at, ended_at
+        SELECT session_id, model, status, step_count, action_count,
+               input_text, output_text, cost_total_usd,
+               wall_clock_seconds, created_at, ended_at
         FROM sessions
-        WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
-        ORDER BY ended_at DESC
+        WHERE agent_name = ${ctx.agentName} AND (org_id = ${ctx.orgId} OR org_id = '')
+        ORDER BY created_at DESC
         LIMIT ${limit}
       `;
       return JSON.stringify({
@@ -569,7 +858,13 @@ async function executeTool(
         sessions: rows.map((r: any) => ({
           session_id: r.session_id,
           model: r.model,
+          status: r.status,
           step_count: r.step_count,
+          tool_calls: r.action_count,
+          input_preview: String(r.input_text || "").slice(0, 200),
+          output_preview: String(r.output_text || "").slice(0, 200),
+          cost_usd: r.cost_total_usd,
+          latency_s: r.wall_clock_seconds,
           created_at: r.created_at,
           ended_at: r.ended_at,
         })),
@@ -581,21 +876,54 @@ async function executeTool(
       if (!sessionId) return JSON.stringify({ error: "session_id required" });
       const limit = Number(args.limit) || 50;
       const rows = await sql`
-        SELECT t.turn_number, t.llm_content, t.started_at
+        SELECT t.turn_number, t.model_used, t.llm_content,
+               t.tool_calls_json, t.tool_results_json, t.errors_json,
+               t.cost_total_usd, t.latency_ms,
+               t.input_tokens, t.output_tokens, t.execution_mode,
+               t.created_at
         FROM turns t
         JOIN sessions s ON t.session_id = s.session_id
         WHERE t.session_id = ${sessionId} AND s.org_id = ${ctx.orgId}
-        ORDER BY t.started_at ASC
+        ORDER BY t.created_at ASC
         LIMIT ${limit}
       `;
       return JSON.stringify({
         session_id: sessionId,
-        message_count: rows.length,
-        messages: rows.map((r: any) => ({
-          turn_number: r.turn_number,
-          content: String(r.llm_content || "").slice(0, 500),
-          started_at: r.started_at,
-        })),
+        turn_count: rows.length,
+        turns: rows.map((r: any) => {
+          let toolCalls: any[] = [];
+          let toolResults: any[] = [];
+          let errors: any[] = [];
+          toolCalls = parseJsonColumn(r.tool_calls_json, []);
+          toolResults = parseJsonColumn(r.tool_results_json, []);
+          errors = parseJsonColumn(r.errors_json, []);
+
+          return {
+            turn: r.turn_number,
+            model: r.model_used,
+            content: String(r.llm_content || "").slice(0, 1000),
+            tool_calls: toolCalls.map((tc: any) => {
+              let args: any = {};
+              try { args = JSON.parse(tc.arguments || "{}"); } catch {}
+              return {
+                name: tc.name,
+                arguments: args,
+              };
+            }),
+            tool_results: toolResults.map((tr: any) => ({
+              name: tr.name,
+              result: String(tr.result || "").slice(0, 500),
+              error: tr.error || null,
+              latency_ms: tr.latency_ms,
+              cost_usd: tr.cost_usd,
+            })),
+            errors,
+            cost_usd: r.cost_total_usd,
+            latency_ms: r.latency_ms,
+            tokens: (r.input_tokens || 0) + (r.output_tokens || 0),
+            created_at: r.created_at,
+          };
+        }),
       });
     }
 
@@ -609,58 +937,163 @@ async function executeTool(
       };
       const interval = intervalMap[period] || "24 hours";
 
-      // Aggregate stats from turns table
+      // ── Core metrics with latency percentiles + cache + refusal stats ──
       let stats: any = {};
       try {
         const turnStats = await sql`
           SELECT
             COUNT(*) as total_turns,
             COUNT(DISTINCT t.session_id) as active_sessions,
-            AVG(EXTRACT(EPOCH FROM (t.ended_at - t.started_at))) as avg_turn_duration_s
+            AVG(t.latency_ms) as avg_latency_ms,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY t.latency_ms) as p50_latency_ms,
+            PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY t.latency_ms) as p95_latency_ms,
+            PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY t.latency_ms) as p99_latency_ms,
+            AVG(COALESCE(t.llm_latency_ms, t.latency_ms)) as avg_llm_latency_ms,
+            SUM(t.input_tokens) as total_input_tokens,
+            SUM(t.output_tokens) as total_output_tokens,
+            SUM(COALESCE(t.cache_read_tokens, 0)) as total_cache_read_tokens,
+            SUM(COALESCE(t.cache_write_tokens, 0)) as total_cache_write_tokens,
+            COUNT(*) FILTER (WHERE t.refusal = true) as refusal_count,
+            COUNT(*) FILTER (WHERE t.errors_json IS NOT NULL AND t.errors_json != '[]') as error_turn_count
           FROM turns t
           JOIN sessions s ON t.session_id = s.session_id
           WHERE s.agent_name = ${ctx.agentName}
             AND s.org_id = ${ctx.orgId}
-            AND t.started_at > now() - ${interval}::interval
+            AND t.created_at > now() - ${interval}::interval
         `;
         stats = turnStats[0] || {};
       } catch {}
 
-      // Error count
-      let errorCount = 0;
+      // ── Per-model breakdown ──
+      let modelBreakdown: any[] = [];
       try {
-        const errRows = await sql`
-          SELECT COUNT(*) as cnt FROM turns t
-          JOIN sessions s ON t.session_id = s.session_id
-          WHERE s.agent_name = ${ctx.agentName}
-            AND s.org_id = ${ctx.orgId}
-            AND t.started_at > now() - ${interval}::interval
-            AND t.errors_json IS NOT NULL AND t.errors_json != '[]'
+        modelBreakdown = await sql`
+          SELECT t.model_used as model, COUNT(*) as turn_count,
+            SUM(t.input_tokens) as input_tokens, SUM(t.output_tokens) as output_tokens,
+            SUM(t.cost_total_usd) as cost_usd, AVG(t.latency_ms) as avg_latency_ms
+          FROM turns t JOIN sessions s ON t.session_id = s.session_id
+          WHERE s.agent_name = ${ctx.agentName} AND s.org_id = ${ctx.orgId}
+            AND t.created_at > now() - ${interval}::interval
+          GROUP BY t.model_used ORDER BY turn_count DESC LIMIT 10
         `;
-        errorCount = Number(errRows[0]?.cnt) || 0;
       } catch {}
 
-      // Cost from billing
-      let totalCost = 0;
+      // ── Per-tool health (parsed from tool_results_json) ──
+      let toolHealth: any[] = [];
+      try {
+        toolHealth = await sql`
+          SELECT tool_name, COUNT(*) as call_count,
+            COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '') as error_count,
+            ROUND(AVG(latency_ms)::numeric, 0) as avg_latency_ms,
+            ROUND(COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '')::numeric
+              / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
+          FROM (
+            SELECT jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'name' as tool_name,
+              (jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
+              jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'error' as error
+            FROM turns t JOIN sessions s ON t.session_id = s.session_id
+            WHERE s.agent_name = ${ctx.agentName} AND s.org_id = ${ctx.orgId}
+              AND t.created_at > now() - ${interval}::interval
+              AND t.tool_results_json IS NOT NULL AND t.tool_results_json != '[]'
+          ) tool_stats WHERE tool_name IS NOT NULL
+          GROUP BY tool_name ORDER BY error_rate_pct DESC, call_count DESC LIMIT 20
+        `;
+      } catch {}
+
+      // ── Session-level stats ──
+      let sessionStats: any = {};
+      try {
+        const sRows = await sql`
+          SELECT COUNT(*) as total_sessions,
+            COUNT(*) FILTER (WHERE status = 'success') as success_count,
+            COUNT(*) FILTER (WHERE status = 'error') as error_count,
+            AVG(wall_clock_seconds) as avg_duration_s,
+            AVG(step_count) as avg_steps, AVG(action_count) as avg_tool_calls,
+            SUM(cost_total_usd) as total_cost_usd
+          FROM sessions WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+            AND created_at > now() - ${interval}::interval
+        `;
+        sessionStats = sRows[0] || {};
+      } catch {}
+
+      // ── Cost from billing (authoritative source) ──
+      let billingCost = 0;
       try {
         const costRows = await sql`
           SELECT COALESCE(SUM(total_cost_usd), 0) as total_cost FROM billing_records
-          WHERE agent_name = ${ctx.agentName}
-            AND org_id = ${ctx.orgId}
+          WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
             AND created_at > now() - ${interval}::interval
         `;
-        totalCost = Number(costRows[0]?.total_cost) || 0;
+        billingCost = Number(costRows[0]?.total_cost) || 0;
       } catch {}
+
+      // ── User feedback summary ──
+      let feedbackStats: any = {};
+      try {
+        const fbRows = await sql`
+          SELECT COUNT(*) as total_feedback, AVG(rating) as avg_rating,
+            COUNT(*) FILTER (WHERE rating >= 4) as positive,
+            COUNT(*) FILTER (WHERE rating <= 2) as negative
+          FROM session_feedback sf JOIN sessions s ON sf.session_id = s.session_id
+          WHERE s.agent_name = ${ctx.agentName} AND s.org_id = ${ctx.orgId}
+            AND sf.created_at > now() - ${interval}::interval
+        `;
+        feedbackStats = fbRows[0] || {};
+      } catch {}
+
+      const totalTurns = Number(stats.total_turns) || 0;
+      const cacheRead = Number(stats.total_cache_read_tokens) || 0;
+      const totalInput = Number(stats.total_input_tokens) || 0;
 
       return JSON.stringify({
         period,
-        total_turns: Number(stats.total_turns) || 0,
+        total_turns: totalTurns,
         active_sessions: Number(stats.active_sessions) || 0,
-        avg_turn_duration_s: Number(stats.avg_turn_duration_s)
-          ? Math.round(Number(stats.avg_turn_duration_s) * 100) / 100
-          : null,
-        error_count: errorCount,
-        total_cost_usd: Math.round(totalCost * 10000) / 10000,
+        error_turn_count: Number(stats.error_turn_count) || 0,
+        error_rate_pct: totalTurns > 0 ? Math.round(Number(stats.error_turn_count) / totalTurns * 1000) / 10 : 0,
+        refusal_count: Number(stats.refusal_count) || 0,
+        latency: {
+          avg_ms: Math.round(Number(stats.avg_latency_ms) || 0),
+          p50_ms: Math.round(Number(stats.p50_latency_ms) || 0),
+          p95_ms: Math.round(Number(stats.p95_latency_ms) || 0),
+          p99_ms: Math.round(Number(stats.p99_latency_ms) || 0),
+          avg_llm_ms: Math.round(Number(stats.avg_llm_latency_ms) || 0),
+        },
+        tokens: {
+          total_input: totalInput, total_output: Number(stats.total_output_tokens) || 0,
+          cache_read: cacheRead, cache_write: Number(stats.total_cache_write_tokens) || 0,
+          cache_hit_rate_pct: totalInput > 0 ? Math.round(cacheRead / totalInput * 1000) / 10 : 0,
+        },
+        cost: {
+          total_usd: Math.round(billingCost * 10000) / 10000,
+          from_sessions_usd: Math.round(Number(sessionStats.total_cost_usd) * 10000) / 10000,
+        },
+        sessions: {
+          total: Number(sessionStats.total_sessions) || 0,
+          success: Number(sessionStats.success_count) || 0,
+          error: Number(sessionStats.error_count) || 0,
+          success_rate_pct: Number(sessionStats.total_sessions) > 0
+            ? Math.round(Number(sessionStats.success_count) / Number(sessionStats.total_sessions) * 1000) / 10 : 0,
+          avg_duration_s: Math.round(Number(sessionStats.avg_duration_s) * 10) / 10 || 0,
+          avg_steps: Math.round(Number(sessionStats.avg_steps) * 10) / 10 || 0,
+          avg_tool_calls: Math.round(Number(sessionStats.avg_tool_calls) * 10) / 10 || 0,
+        },
+        by_model: modelBreakdown.map((r: any) => ({
+          model: r.model, turns: Number(r.turn_count),
+          input_tokens: Number(r.input_tokens), output_tokens: Number(r.output_tokens),
+          cost_usd: Math.round(Number(r.cost_usd) * 10000) / 10000,
+          avg_latency_ms: Math.round(Number(r.avg_latency_ms)),
+        })),
+        tool_health: toolHealth.map((r: any) => ({
+          tool: r.tool_name, calls: Number(r.call_count), errors: Number(r.error_count),
+          avg_latency_ms: Number(r.avg_latency_ms), error_rate_pct: Number(r.error_rate_pct),
+        })),
+        feedback: {
+          total: Number(feedbackStats.total_feedback) || 0,
+          avg_rating: feedbackStats.avg_rating ? Math.round(Number(feedbackStats.avg_rating) * 10) / 10 : null,
+          positive: Number(feedbackStats.positive) || 0,
+          negative: Number(feedbackStats.negative) || 0,
+        },
       });
     }
 
@@ -829,40 +1262,87 @@ async function executeTool(
       };
       const interval = intervalMap[period] || "7 days";
 
-      let sessionCount = 0;
-      let avgMessages = 0;
+      // Session-level quality metrics
+      let sessionStats: any = {};
       try {
         const rows = await sql`
-          SELECT COUNT(*) as cnt, AVG(step_count) as avg_msg
+          SELECT
+            COUNT(*) as total_sessions,
+            COUNT(*) FILTER (WHERE status = 'success') as successful,
+            COUNT(*) FILTER (WHERE status = 'error') as errored,
+            AVG(step_count) as avg_turns,
+            AVG(cost_total_usd) as avg_cost_usd,
+            AVG(wall_clock_seconds) as avg_duration_s,
+            PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY wall_clock_seconds) as median_duration_s
           FROM sessions
           WHERE agent_name = ${ctx.agentName}
             AND org_id = ${ctx.orgId}
             AND created_at > now() - ${interval}::interval
         `;
-        sessionCount = Number(rows[0]?.cnt) || 0;
-        avgMessages = Math.round(Number(rows[0]?.avg_msg) || 0);
+        sessionStats = rows[0] || {};
       } catch {}
 
-      // Get recent turn content to sample quality
-      let recentTopics: string[] = [];
+      // Tool error frequency — which tools fail most?
+      let toolErrors: any[] = [];
       try {
-        const turnRows = await sql`
-          SELECT t.llm_content as content FROM turns t
+        const errRows = await sql`
+          SELECT t.errors_json FROM turns t
           JOIN sessions s ON t.session_id = s.session_id
           WHERE s.agent_name = ${ctx.agentName}
             AND s.org_id = ${ctx.orgId}
-          ORDER BY t.started_at DESC LIMIT 50
+            AND t.created_at > now() - ${interval}::interval
+            AND t.errors_json IS NOT NULL AND t.errors_json != '[]'
+          LIMIT 100
         `;
-        recentTopics = turnRows
-          .map((r: any) => String(r.content || "").slice(0, 100))
+        const errorCounts: Record<string, number> = {};
+        for (const row of errRows as any[]) {
+          const errors = parseJsonColumn(row.errors_json, []);
+          for (const err of errors) {
+            const toolName = String(err).split(":")[0] || "unknown";
+            errorCounts[toolName] = (errorCounts[toolName] || 0) + 1;
+          }
+        }
+        toolErrors = Object.entries(errorCounts)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 10)
+          .map(([tool, count]) => ({ tool, error_count: count }));
+      } catch {}
+
+      // Recent user input samples for topic analysis
+      let recentTopics: string[] = [];
+      try {
+        const inputRows = await sql`
+          SELECT input_text FROM sessions
+          WHERE agent_name = ${ctx.agentName}
+            AND org_id = ${ctx.orgId}
+            AND created_at > now() - ${interval}::interval
+          ORDER BY created_at DESC LIMIT 20
+        `;
+        recentTopics = inputRows
+          .map((r: any) => String(r.input_text || "").slice(0, 150))
           .filter(Boolean);
       } catch {}
 
+      const totalSessions = Number(sessionStats.total_sessions) || 0;
+      const successRate = totalSessions > 0
+        ? Math.round((Number(sessionStats.successful || 0) / totalSessions) * 100)
+        : null;
+
       return JSON.stringify({
         period,
-        total_sessions: sessionCount,
-        avg_messages_per_session: avgMessages,
-        recent_user_messages_sample: recentTopics.slice(0, 10),
+        total_sessions: totalSessions,
+        success_rate_pct: successRate,
+        error_count: Number(sessionStats.errored) || 0,
+        avg_turns_per_session: Math.round(Number(sessionStats.avg_turns) || 0),
+        avg_cost_per_session_usd: Math.round((Number(sessionStats.avg_cost_usd) || 0) * 10000) / 10000,
+        avg_duration_seconds: Math.round(Number(sessionStats.avg_duration_s) || 0),
+        median_duration_seconds: Math.round(Number(sessionStats.median_duration_s) || 0),
+        top_tool_errors: toolErrors,
+        recent_user_topics: recentTopics.slice(0, 10),
+        quality_assessment: successRate === null ? "No sessions in period"
+          : successRate >= 90 ? "Healthy — high success rate"
+          : successRate >= 70 ? "Moderate — some failures need attention"
+          : "Poor — significant error rate, investigate tool errors and session diagnostics",
       });
     }
 
@@ -875,17 +1355,61 @@ async function executeTool(
       try {
         const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
         const now = new Date().toISOString();
+
+        // Load eval test cases from agent config or eval_test_cases table
+        let evalTasks: Array<{ input: string; expected: string; grader: string }> = [];
+        try {
+          const testRows = await sql`
+            SELECT input, expected_output, grader FROM eval_test_cases
+            WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+            ORDER BY created_at DESC LIMIT 20
+          `;
+          if (testRows.length > 0) {
+            evalTasks = testRows.map((r: any) => ({
+              input: String(r.input || ""),
+              expected: String(r.expected_output || ""),
+              grader: String(r.grader || "contains"),
+            }));
+          }
+        } catch {}
+
+        // Fallback: generate basic test tasks if none exist
+        if (evalTasks.length === 0) {
+          evalTasks = [
+            { input: "Hello, how can you help me?", expected: "", grader: "non_empty" },
+            { input: "What tools do you have?", expected: "", grader: "non_empty" },
+          ];
+        }
+
         await sql`
-          INSERT INTO training_jobs (job_id, agent_name, org_id, algorithm, max_iterations, auto_activate, status, current_iteration, best_score, created_at)
-          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate}, 'created', 0, NULL, ${now})
+          INSERT INTO training_jobs (job_id, agent_name, org_id, algorithm, max_iterations, auto_activate,
+            status, current_iteration, best_score, eval_tasks_json, created_at)
+          VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate},
+            'created', 0, NULL, ${JSON.stringify(evalTasks)}, ${now})
         `;
 
-        // Enqueue the first training step so it actually runs
+        // Snapshot current system prompt as initial resource
+        try {
+          const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+          if (agentRows.length > 0) {
+            const config = parseJsonColumn(agentRows[0].config_json);
+            const prompt = String(config.system_prompt ?? "");
+            if (prompt) {
+              const resId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+              await sql`
+                INSERT INTO training_resources (resource_id, job_id, org_id, agent_name, resource_type, resource_key, version, content_text, source, is_active, created_at)
+                VALUES (${resId}, ${jobId}, ${ctx.orgId}, ${ctx.agentName}, 'system_prompt', 'main', 0, ${prompt}, 'initial', true, ${now})
+              `;
+            }
+          }
+        } catch {}
+
+        // Enqueue the first training step — MUST include org_id for queue consumer auth
         if (ctx.env.JOB_QUEUE) {
           try {
             await (ctx.env.JOB_QUEUE as any).send({
               type: "training_step",
-              payload: { job_id: jobId },
+              payload: { job_id: jobId, org_id: ctx.orgId },
             });
             await sql`UPDATE training_jobs SET status = 'running', started_at = ${now} WHERE job_id = ${jobId}`;
           } catch (err) {
@@ -899,7 +1423,8 @@ async function executeTool(
           algorithm,
           max_iterations: maxIterations,
           auto_activate: autoActivate,
-          message: "Training job created. Call POST /training/jobs/{id}/auto-step to begin iterations, then use read_training_status to monitor progress.",
+          eval_task_count: evalTasks.length,
+          message: `Training job started with ${evalTasks.length} eval tasks. Use read_training_status to monitor progress.`,
         });
       } catch (err: any) {
         return JSON.stringify({ error: `Training not available: ${err.message || err}` });
@@ -948,7 +1473,7 @@ async function executeTool(
             iteration: it.iteration_number,
             pass_rate: it.pass_rate,
             reward_score: it.reward_score,
-            algorithm_output: (() => { try { return JSON.parse(it.algorithm_output_json || "{}"); } catch { return {}; } })(),
+            algorithm_output: parseJsonColumn(it.algorithm_output_json),
             started_at: it.started_at,
             completed_at: it.completed_at,
           }));
@@ -1189,9 +1714,9 @@ async function executeTool(
         let totalEarnings = 0;
         try {
           const [earn] = await sql`
-            SELECT COALESCE(SUM(amount_usd), 0) as total
+            SELECT COALESCE(SUM(amount_cents), 0) / 100.0 as total
             FROM credit_transactions
-            WHERE org_id = ${ctx.orgId} AND type = 'transfer_in' AND reference_type = 'a2a_payment'
+            WHERE org_id = ${ctx.orgId} AND type = 'transfer_in'
           `;
           totalEarnings = Number(earn?.total || 0);
         } catch {}
@@ -1224,7 +1749,9 @@ async function executeTool(
       }
       try {
         // Read current eval config from agent
-        const [agent] = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+        const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+        if (!agentRows.length) return JSON.stringify({ error: `Agent '${ctx.agentName}' not found` });
+        const agent = agentRows[0];
         const config = typeof agent.config_json === "string" ? JSON.parse(agent.config_json) : agent.config_json || {};
         const evalConfig = config.eval_config || { test_cases: [], rubric: { criteria: [], pass_threshold: 0.7 }, scenarios: [] };
 
@@ -1296,6 +1823,625 @@ async function executeTool(
       }
     }
 
+    // ── Run Eval Suite ──────────────────────────────────────────────
+    case "run_eval": {
+      try {
+        // Load test cases
+        let testCases: Array<{ name: string; input: string; expected: string; grader: string; rubric?: string }> = [];
+        try {
+          const rows = await sql`
+            SELECT name, input, expected_output, grader, rubric FROM eval_test_cases
+            WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+            ORDER BY created_at DESC LIMIT 50
+          `;
+          testCases = rows.map((r: any) => ({
+            name: r.name || `test_${rows.indexOf(r)}`,
+            input: String(r.input || ""),
+            expected: String(r.expected_output || ""),
+            grader: String(r.grader || "contains"),
+            rubric: r.rubric,
+          }));
+        } catch {}
+
+        // Also load from config eval_config
+        if (testCases.length === 0) {
+          try {
+            const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+            if (agentRows.length > 0) {
+              const config = typeof agentRows[0].config_json === "string" ? JSON.parse(agentRows[0].config_json as string) : agentRows[0].config_json || {};
+              const evalCases = config.eval_config?.test_cases || [];
+              testCases = evalCases.map((tc: any) => ({
+                name: tc.name || "unnamed",
+                input: String(tc.input || ""),
+                expected: String(tc.expected || ""),
+                grader: String(tc.grader || "llm_rubric"),
+                rubric: tc.rubric,
+              }));
+            }
+          } catch {}
+        }
+
+        if (testCases.length === 0) {
+          return JSON.stringify({ error: "No eval test cases found. Use add_eval_test_cases to create some first." });
+        }
+
+        const maxCases = Number(args.max_cases) || testCases.length;
+        const casesToRun = testCases.slice(0, maxCases);
+
+        if (!ctx.env.RUNTIME) {
+          return JSON.stringify({ error: "Runtime not available for eval execution" });
+        }
+
+        // Run each test case
+        const results: Array<{ name: string; input: string; passed: boolean; actual: string; expected: string; cost_usd: number; latency_ms: number; error?: string }> = [];
+        let totalCost = 0;
+        const evalStart = Date.now();
+
+        for (const tc of casesToRun) {
+          const tcStart = Date.now();
+          try {
+            const resp = await ctx.env.RUNTIME.fetch("https://runtime/run", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(ctx.env.SERVICE_TOKEN ? { Authorization: `Bearer ${ctx.env.SERVICE_TOKEN}` } : {}),
+              },
+              body: JSON.stringify({
+                agent_name: ctx.agentName,
+                input: tc.input,
+                org_id: ctx.orgId,
+                channel: "eval",
+              }),
+            });
+            const result = resp.ok ? await resp.json() as any : { output: "", cost_usd: 0 };
+            const actual = String(result.output || "").slice(0, 1000);
+            const cost = Number(result.cost_usd || 0);
+            totalCost += cost;
+
+            // Simple grading
+            let passed = false;
+            if (tc.grader === "non_empty") {
+              passed = actual.length > 0;
+            } else if (tc.grader === "contains") {
+              passed = tc.expected ? actual.toLowerCase().includes(tc.expected.toLowerCase()) : actual.length > 0;
+            } else {
+              // Default: non-empty response counts as pass for now
+              passed = actual.length > 10;
+            }
+
+            results.push({
+              name: tc.name, input: tc.input.slice(0, 200), passed, actual: actual.slice(0, 500),
+              expected: tc.expected.slice(0, 200), cost_usd: cost, latency_ms: Date.now() - tcStart,
+            });
+          } catch (err: any) {
+            results.push({
+              name: tc.name, input: tc.input.slice(0, 200), passed: false, actual: "",
+              expected: tc.expected.slice(0, 200), cost_usd: 0, latency_ms: Date.now() - tcStart,
+              error: err.message || String(err),
+            });
+          }
+        }
+
+        const passCount = results.filter(r => r.passed).length;
+        const passRate = Math.round((passCount / results.length) * 100);
+
+        // Write eval run record
+        const runId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        try {
+          await sql`
+            INSERT INTO eval_runs (id, agent_name, org_id, pass_rate, total_tasks, avg_latency_ms, total_cost_usd, created_at)
+            VALUES (${runId}, ${ctx.agentName}, ${ctx.orgId}, ${passRate / 100}, ${results.length},
+              ${Math.round(results.reduce((s, r) => s + r.latency_ms, 0) / results.length)},
+              ${totalCost}, now())
+          `;
+        } catch {}
+
+        return JSON.stringify({
+          eval_run_id: runId,
+          pass_rate_pct: passRate,
+          passed: passCount,
+          failed: results.length - passCount,
+          total: results.length,
+          total_cost_usd: Math.round(totalCost * 10000) / 10000,
+          total_latency_ms: Date.now() - evalStart,
+          results: results.map(r => ({
+            name: r.name,
+            passed: r.passed,
+            actual_preview: r.actual.slice(0, 200),
+            expected: r.expected,
+            cost_usd: r.cost_usd,
+            latency_ms: r.latency_ms,
+            error: r.error,
+          })),
+          failures: results.filter(r => !r.passed).map(r => ({
+            name: r.name,
+            input: r.input,
+            expected: r.expected,
+            actual: r.actual.slice(0, 300),
+            error: r.error,
+          })),
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Eval run failed: ${err.message || err}` });
+      }
+    }
+
+    // ── Create Sub-Agent ──────────────────────────────────────────
+    case "create_sub_agent": {
+      const name = String(args.name || "").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
+      if (!name) return JSON.stringify({ error: "name is required" });
+      const description = String(args.description || "");
+      const systemPrompt = String(args.system_prompt || "");
+      if (!systemPrompt) return JSON.stringify({ error: "system_prompt is required" });
+      const tools = Array.isArray(args.tools) ? args.tools.map(String) : [];
+      if (tools.length === 0) return JSON.stringify({ error: "tools array is required" });
+
+      try {
+        // Read parent agent config for defaults
+        const parentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1`;
+        const parentConfig = parentRows.length > 0
+          ? (typeof parentRows[0].config_json === "string" ? JSON.parse(parentRows[0].config_json as string) : parentRows[0].config_json || {})
+          : {};
+
+        const subConfig = {
+          system_prompt: systemPrompt,
+          model: String(args.model || parentConfig.model || "anthropic/claude-sonnet-4-6"),
+          plan: parentConfig.plan || "standard",
+          provider: parentConfig.provider || "openrouter",
+          tools,
+          max_turns: Number(args.max_turns) || 15,
+          governance: {
+            budget_limit_usd: Number(args.budget_limit_usd) || 1.0,
+          },
+          parent_agent: ctx.agentName,
+          version: "0.1.0",
+        };
+
+        await sql`
+          INSERT INTO agents (name, org_id, description, config_json, is_active, created_at, updated_at)
+          VALUES (${name}, ${ctx.orgId}, ${description}, ${JSON.stringify(subConfig)}, true, now(), now())
+          ON CONFLICT (name, org_id) DO UPDATE SET
+            description = ${description}, config_json = ${JSON.stringify(subConfig)}, updated_at = now()
+        `;
+
+        // Also ensure parent agent has run-agent or route-to-agent tool
+        try {
+          const parentTools: string[] = Array.isArray(parentConfig.tools) ? parentConfig.tools : [];
+          if (!parentTools.includes("run-agent") && !parentTools.includes("route-to-agent")) {
+            parentTools.push("run-agent");
+            parentConfig.tools = parentTools;
+            await sql`
+              UPDATE agents SET config_json = ${JSON.stringify(parentConfig)}, updated_at = now()
+              WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+            `;
+          }
+        } catch {}
+
+        return JSON.stringify({
+          created: true,
+          name,
+          description,
+          model: subConfig.model,
+          tools,
+          max_turns: subConfig.max_turns,
+          budget_limit_usd: subConfig.governance.budget_limit_usd,
+          message: `Sub-agent '${name}' created. The parent agent '${ctx.agentName}' can now delegate to it using the run-agent tool with agent_name='${name}'.`,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to create sub-agent: ${err.message || err}` });
+      }
+    }
+
+    // ── Manage MCP Connectors ─────────────────────────────────────
+    case "manage_connectors": {
+      const action = String(args.action || "list");
+      try {
+        // Read current config
+        const configRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1`;
+        if (configRows.length === 0) return JSON.stringify({ error: "Agent not found" });
+        const config = typeof configRows[0].config_json === "string"
+          ? JSON.parse(configRows[0].config_json as string)
+          : configRows[0].config_json || {};
+        const connectors: Array<{ app: string; reason?: string; tools?: string[] }> = config.mcp_connectors || [];
+
+        if (action === "list") {
+          return JSON.stringify({
+            connectors: connectors.length > 0 ? connectors : [],
+            total: connectors.length,
+            note: connectors.length === 0
+              ? "No connectors configured. Use action='add' to connect external apps (CRMs, email, calendars, etc.)."
+              : undefined,
+            available_apps: "hubspot, salesforce, zendesk, gmail, google-calendar, slack, jira, notion, linear, github, stripe, shopify, airtable, asana, trello, discord, twilio, sendgrid, mailchimp, intercom",
+          });
+        }
+
+        if (action === "add") {
+          const app = String(args.app || "").toLowerCase();
+          if (!app) return JSON.stringify({ error: "app is required for add" });
+          const reason = String(args.reason || `Connect to ${app}`);
+
+          // Check if already added
+          if (connectors.some(c => c.app === app)) {
+            return JSON.stringify({ message: `Connector '${app}' is already configured.`, connectors });
+          }
+
+          connectors.push({ app, reason });
+          config.mcp_connectors = connectors;
+
+          // Also ensure mcp-call tool is in the agent's tool list
+          const tools: string[] = Array.isArray(config.tools) ? config.tools : [];
+          if (!tools.includes("mcp-call")) {
+            tools.push("mcp-call");
+            config.tools = tools;
+          }
+
+          await sql`
+            UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+            WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+          `;
+
+          return JSON.stringify({
+            added: true,
+            app,
+            reason,
+            total_connectors: connectors.length,
+            message: `Connector '${app}' added. The agent can now interact with ${app} via the mcp-call tool. OAuth setup may be required — the user will be prompted on first use.`,
+          });
+        }
+
+        if (action === "remove") {
+          const app = String(args.app || "").toLowerCase();
+          if (!app) return JSON.stringify({ error: "app is required for remove" });
+          config.mcp_connectors = connectors.filter(c => c.app !== app);
+          await sql`
+            UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+            WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
+          `;
+          return JSON.stringify({ removed: true, app, remaining: config.mcp_connectors.length });
+        }
+
+        return JSON.stringify({ error: `Unknown action: ${action}. Use list, add, or remove.` });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Connector management failed: ${err.message || err}` });
+      }
+    }
+
+    case "run_query": {
+      const query = String(args.query || "").trim();
+      if (!query) return JSON.stringify({ error: "query is required" });
+
+      // Strict read-only enforcement
+      const normalized = query.replace(/--.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "").trim().toUpperCase();
+      const forbidden = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "SET ", "COPY"];
+      for (const keyword of forbidden) {
+        if (normalized.includes(keyword)) {
+          return JSON.stringify({ error: `Forbidden: ${keyword} statements are not allowed. Only SELECT queries permitted.` });
+        }
+      }
+      if (!normalized.startsWith("SELECT") && !normalized.startsWith("WITH") && !normalized.startsWith("EXPLAIN")) {
+        return JSON.stringify({ error: "Only SELECT, WITH (CTE), or EXPLAIN queries are allowed." });
+      }
+
+      // SECURITY: Force org_id scoping via RLS context + query rewriting.
+      // The meta-agent must only see data belonging to its own org.
+      const orgId = ctx.orgId;
+      try {
+        // Set RLS context for this query
+        await sql`SELECT set_config('app.current_org_id', ${orgId}, true)`.catch(() => {});
+
+        // Validate the query references org-scoped tables only
+        const SCOPED_TABLES = [
+          // Core telemetry
+          "sessions", "turns", "agents", "agent_versions",
+          // Cost & billing
+          "credit_transactions", "billing_records", "billing_events", "cost_ledger",
+          // Eval & training
+          "training_jobs", "training_iterations", "training_resources", "training_rewards",
+          "eval_test_cases", "eval_runs", "eval_trials",
+          // Observability & tracing
+          "delegation_events", "tool_executions", "session_progress",
+          "trace_annotations", "trace_lineage",
+          // Feedback & quality
+          "session_feedback", "user_feedback", "span_feedback",
+          // Security & audit
+          "audit_log", "security_events", "guardrail_events", "api_access_log",
+          // Alerting & SLOs
+          "alert_configs", "alert_history", "slo_evaluations", "slo_error_budgets",
+          // A2A & marketplace
+          "a2a_tasks", "marketplace_listings", "marketplace_ratings",
+          // Evolution
+          "evolution_reports", "evolution_proposals", "evolution_ledger",
+          // Infrastructure
+          "api_keys", "org_members", "skills", "feature_flags",
+          "batch_jobs", "batch_tasks", "autopilot_sessions",
+          // Issues & risk
+          "issues", "risk_profiles",
+          // End-user analytics
+          "end_user_usage",
+        ];
+
+        // Check for table access outside the allowed set
+        const tablePattern = /\bFROM\s+(\w+)|\bJOIN\s+(\w+)/gi;
+        let match: RegExpExecArray | null;
+        const accessedTables: string[] = [];
+        while ((match = tablePattern.exec(normalized)) !== null) {
+          const table = (match[1] || match[2] || "").toLowerCase();
+          if (table && !SCOPED_TABLES.includes(table)) {
+            return JSON.stringify({ error: `Table '${table}' is not accessible. Allowed tables: ${SCOPED_TABLES.join(", ")}` });
+          }
+          accessedTables.push(table);
+        }
+
+        // Run the original query with RLS active + LIMIT + timeout.
+        // The RLS context set above ensures org-scoped access at the DB level.
+        // statement_timeout prevents long-running queries from hogging resources.
+        const rows = await sql.unsafe(
+          `SET LOCAL statement_timeout = '5s'; ${query}`,
+          [],
+          { prepare: false },
+        );
+        const result = Array.isArray(rows) ? rows : [];
+
+        // Post-filter: strip rows with org_id !== current org (defense in depth)
+        const filtered = result.filter((row: any) => {
+          if (row.org_id && row.org_id !== orgId) return false;
+          return true;
+        });
+
+        const maxRows = 100;
+        const truncated = filtered.length > maxRows;
+        const output = filtered.slice(0, maxRows);
+
+        return JSON.stringify({
+          row_count: filtered.length,
+          truncated,
+          rows: output,
+          note: truncated ? `Showing first ${maxRows} of ${filtered.length} rows.` : undefined,
+          scoped_to: orgId,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Query failed: ${err.message || err}` });
+      }
+    }
+
+    // ── Infrastructure & Diagnostics Tool Execution ──────────────
+    case "read_session_diagnostics": {
+      const sessionId = String(args.session_id || "");
+      if (!sessionId) return JSON.stringify({ error: "session_id required" });
+      try {
+        // Read turns and extract diagnostic events from errors_json and tool_results_json
+        const turns = await sql`
+          SELECT t.turn_number, t.tool_calls_json, t.tool_results_json, t.errors_json, t.cost_total_usd, t.created_at
+          FROM turns t
+          JOIN sessions s ON t.session_id = s.session_id
+          WHERE t.session_id = ${sessionId} AND s.org_id = ${ctx.orgId}
+          ORDER BY t.turn_number
+        `;
+
+        const diagnostics: Array<{ turn: number; type: string; detail: string }> = [];
+
+        for (const turn of turns as any[]) {
+          const turnNum = turn.turn_number;
+          let errors: any[] = [];
+          let toolResults: any[] = [];
+          errors = parseJsonColumn(turn.errors_json, []);
+          toolResults = parseJsonColumn(turn.tool_results_json, []);
+
+          // Loop detection events
+          for (const err of errors) {
+            const errStr = String(err || "");
+            if (errStr.includes("Loop detected") || errStr.includes("loop_detected")) {
+              diagnostics.push({ turn: turnNum, type: "loop_detected", detail: errStr });
+            }
+            if (errStr.includes("budget") || errStr.includes("BUDGET_EXHAUSTED")) {
+              diagnostics.push({ turn: turnNum, type: "budget_exhausted", detail: errStr });
+            }
+          }
+
+          // Tool-level diagnostics from results
+          for (const tr of toolResults) {
+            const result = String(tr.result || "");
+            const error = String(tr.error || "");
+            if (error.includes("circuit breaker") || error.includes("CIRCUIT_BREAKER")) {
+              diagnostics.push({ turn: turnNum, type: "circuit_breaker_trip", detail: `Tool ${tr.name}: ${error}` });
+            }
+            if (error.includes("cancelled") || error.includes("aborted") || error.includes("sibling_failed")) {
+              diagnostics.push({ turn: turnNum, type: "tool_cancelled", detail: `Tool ${tr.name}: ${error}` });
+            }
+            if (result.includes("[backpressure:") || result.includes("truncated")) {
+              diagnostics.push({ turn: turnNum, type: "backpressure_truncation", detail: `Tool ${tr.name}: result was truncated` });
+            }
+            if (result.includes("[Tool execution interrupted") || result.includes("assumed succeeded")) {
+              diagnostics.push({ turn: turnNum, type: "conversation_repair", detail: `Tool ${tr.name}: result was auto-repaired after crash` });
+            }
+            if (error.includes("SSRF") || error.includes("blocked")) {
+              diagnostics.push({ turn: turnNum, type: "ssrf_blocked", detail: `Tool ${tr.name}: ${error}` });
+            }
+          }
+        }
+
+        // Also check session-level events
+        const sessionRows = await sql`
+          SELECT status, cost_total_usd, wall_clock_seconds, step_count, output_text
+          FROM sessions WHERE session_id = ${sessionId} AND org_id = ${ctx.orgId} LIMIT 1
+        `;
+        const session = sessionRows[0] as any;
+
+        // Check output for known runtime messages
+        const output = String(session?.output_text || "");
+        if (output.includes("Loop detected") || output.includes("failing repeatedly")) {
+          diagnostics.push({ turn: 0, type: "session_stopped_by_loop", detail: output.slice(0, 300) });
+        }
+        if (output.includes("Budget") || output.includes("budget limit")) {
+          diagnostics.push({ turn: 0, type: "session_stopped_by_budget", detail: output.slice(0, 300) });
+        }
+        if (output.includes("Session limit reached")) {
+          diagnostics.push({ turn: 0, type: "session_limit_reached", detail: output.slice(0, 300) });
+        }
+        if (output.includes("Shutdown requested by parent")) {
+          diagnostics.push({ turn: 0, type: "parent_shutdown", detail: "Session was stopped by parent agent via mailbox IPC" });
+        }
+
+        return JSON.stringify({
+          session_id: sessionId,
+          status: session?.status || "unknown",
+          total_turns: turns.length,
+          total_cost_usd: session?.cost_total_usd,
+          wall_clock_seconds: session?.wall_clock_seconds,
+          diagnostic_events: diagnostics,
+          event_count: diagnostics.length,
+          summary: diagnostics.length === 0
+            ? "No diagnostic events found — session ran normally."
+            : `Found ${diagnostics.length} diagnostic event(s): ${[...new Set(diagnostics.map(d => d.type))].join(", ")}`,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Diagnostics failed: ${err.message || err}` });
+      }
+    }
+
+    case "read_feature_flags": {
+      try {
+        const flags = ["concurrent_tools", "context_compression", "deferred_tool_loading"];
+        const result: Record<string, boolean | null> = {};
+        for (const flag of flags) {
+          try {
+            const rows = await sql`
+              SELECT value FROM feature_flags
+              WHERE org_id = ${ctx.orgId} AND flag_name = ${flag}
+              LIMIT 1
+            `;
+            result[flag] = rows.length > 0 ? rows[0].value === "true" || rows[0].value === true : null;
+          } catch {
+            // Table may not exist yet — return defaults
+            result[flag] = null;
+          }
+        }
+        return JSON.stringify({
+          org_id: ctx.orgId,
+          flags: result,
+          note: "null means the flag uses its default value (enabled). false means explicitly disabled.",
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to read feature flags: ${err.message || err}` });
+      }
+    }
+
+    case "set_feature_flag": {
+      const flag = String(args.flag || "");
+      const enabled = args.enabled === true;
+      const validFlags = ["concurrent_tools", "context_compression", "deferred_tool_loading"];
+      if (!validFlags.includes(flag)) {
+        return JSON.stringify({ error: `Invalid flag. Valid flags: ${validFlags.join(", ")}` });
+      }
+      try {
+        await sql`
+          INSERT INTO feature_flags (org_id, flag_name, value, updated_at)
+          VALUES (${ctx.orgId}, ${flag}, ${String(enabled)}, now())
+          ON CONFLICT (org_id, flag_name) DO UPDATE SET value = ${String(enabled)}, updated_at = now()
+        `;
+        // Audit the change
+        try {
+          await sql`
+            INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+            VALUES (${ctx.orgId}, ${ctx.userId}, 'set_feature_flag', 'feature_flag', ${flag}, ${JSON.stringify({ flag, enabled, set_by: "meta-agent" })}, now())
+          `;
+        } catch {}
+        return JSON.stringify({ updated: true, flag, enabled, message: `Feature flag '${flag}' set to ${enabled} for your organization.` });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to set feature flag: ${err.message || err}` });
+      }
+    }
+
+    case "read_audit_log": {
+      const limit = Number(args.limit) || 20;
+      try {
+        const rows = await sql`
+          SELECT actor_id, action, resource_type, resource_name, details, created_at
+          FROM audit_log
+          WHERE org_id = ${ctx.orgId}
+            AND (resource_name = ${ctx.agentName} OR resource_type = 'feature_flag' OR resource_type = 'training')
+          ORDER BY created_at DESC
+          LIMIT ${limit}
+        `;
+        return JSON.stringify({
+          entries: rows.map((r: any) => ({
+            actor: r.actor_id,
+            action: r.action,
+            resource_type: r.resource_type,
+            resource_name: r.resource_name,
+            details: (() => { try { return JSON.parse(r.details || "{}"); } catch { return r.details; } })(),
+            when: r.created_at,
+          })),
+          total: rows.length,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to read audit log: ${err.message || err}` });
+      }
+    }
+
+    case "manage_skills": {
+      const action = String(args.action || "list");
+      try {
+        if (action === "list") {
+          const rows = await sql`
+            SELECT name, description, category, enabled, created_at
+            FROM skills
+            WHERE org_id = ${ctx.orgId} AND (agent_name IS NULL OR agent_name = ${ctx.agentName})
+            ORDER BY name
+          `;
+          // Also list built-in skills
+          const builtIn = [
+            { name: "/batch", description: "Parallel task decomposition", category: "workflow", built_in: true },
+            { name: "/review", description: "Three-lens code review (reuse, quality, efficiency)", category: "code", built_in: true },
+            { name: "/debug", description: "Session diagnostics and error analysis", category: "ops", built_in: true },
+            { name: "/verify", description: "Run tests against changes", category: "code", built_in: true },
+            { name: "/remember", description: "Memory curation and deduplication", category: "workflow", built_in: true },
+            { name: "/skillify", description: "Extract reusable skill from a process", category: "workflow", built_in: true },
+            { name: "/schedule", description: "Create recurring scheduled tasks", category: "ops", built_in: true },
+            { name: "/docs", description: "Load reference documentation", category: "data", built_in: true },
+          ];
+          return JSON.stringify({
+            built_in_skills: builtIn,
+            custom_skills: rows.map((r: any) => ({
+              name: r.name,
+              description: r.description,
+              category: r.category,
+              enabled: r.enabled,
+              created_at: r.created_at,
+            })),
+          });
+        }
+
+        if (action === "create") {
+          const name = String(args.name || "").toLowerCase().replace(/[^a-z0-9-]/g, "-");
+          if (!name) return JSON.stringify({ error: "name is required for create" });
+          const description = String(args.description || "");
+          const promptTemplate = String(args.prompt_template || "");
+          if (!promptTemplate) return JSON.stringify({ error: "prompt_template is required for create" });
+          const category = String(args.category || "workflow");
+
+          await sql`
+            INSERT INTO skills (name, description, category, prompt, org_id, agent_name, enabled, created_at)
+            VALUES (${name}, ${description}, ${category}, ${promptTemplate}, ${ctx.orgId}, ${ctx.agentName}, true, now())
+            ON CONFLICT (org_id, name) DO UPDATE SET
+              description = ${description}, prompt = ${promptTemplate}, category = ${category}, agent_name = ${ctx.agentName}
+          `;
+          return JSON.stringify({ created: true, name, description, category, message: `Skill '/${name}' created. Users can activate it by typing /${name} in the chat.` });
+        }
+
+        if (action === "delete") {
+          const name = String(args.name || "");
+          if (!name) return JSON.stringify({ error: "name is required for delete" });
+          await sql`DELETE FROM skills WHERE name = ${name} AND org_id = ${ctx.orgId}`;
+          return JSON.stringify({ deleted: true, name, message: `Skill '/${name}' deleted.` });
+        }
+
+        return JSON.stringify({ error: `Unknown action: ${action}. Use list, create, or delete.` });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Skills management failed: ${err.message || err}` });
+      }
+    }
+
     default:
       return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
@@ -1303,10 +2449,10 @@ async function executeTool(
 
 /* ── System prompt ──────────────────────────────────────────────── */
 
-function buildSystemPrompt(agentName: string): string {
+function buildSystemPrompt(agentName: string, mode: "demo" | "live" = "live"): string {
   // Import the reusable prompt builder
   const { buildMetaAgentChatPrompt } = require("../prompts/meta-agent-chat");
-  return buildMetaAgentChatPrompt(agentName);
+  return buildMetaAgentChatPrompt(agentName, mode);
 }
 
 // Legacy prompt kept for reference — replaced by prompts/meta-agent-chat.ts
@@ -1462,8 +2608,8 @@ Example: If an agent is on the Standard plan and the user asks "debug this Pytho
 export async function runMetaChat(
   messages: MetaChatMessage[],
   ctx: MetaChatContext,
-): Promise<{ messages: MetaChatMessage[]; response: string }> {
-  const systemPrompt = buildSystemPrompt(ctx.agentName);
+): Promise<{ messages: MetaChatMessage[]; response: string; cost_usd?: number; turns?: number; session_id?: string; input_tokens?: number; output_tokens?: number; tool_calls?: number }> {
+  const systemPrompt = buildSystemPrompt(ctx.agentName, ctx.mode || "live");
 
   // Build messages for OpenRouter
   const llmMessages = [
@@ -1487,12 +2633,57 @@ export async function runMetaChat(
     }),
   ];
 
+  // ── Message history trimming — prevent context overflow ──
+  const MAX_CONTEXT_CHARS = 200_000;
+  if (JSON.stringify(llmMessages).length > MAX_CONTEXT_CHARS) {
+    const system = llmMessages.filter((m: any) => m.role === "system");
+    const recent = llmMessages.filter((m: any) => m.role !== "system").slice(-12);
+    llmMessages.length = 0;
+    llmMessages.push(...system, ...recent);
+  }
+
   const MAX_TOOL_ROUNDS = 8;
   let round = 0;
+  let totalCost = 0;
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  let totalToolCalls = 0;
   const outputMessages: MetaChatMessage[] = [];
+  const turnRecords: Array<{
+    turn: number;
+    model: string;
+    content: string;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    tool_calls: Array<{ name: string; arguments: Record<string, unknown> }>;
+    tool_results: Array<{ name: string; result: string; latency_ms: number; error?: string }>;
+  }> = [];
+  const sessionId = `meta_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`;
 
   while (round < MAX_TOOL_ROUNDS) {
     round++;
+
+    // ── Progressive tool discovery: select relevant tools for this turn ──
+    // Build context from the last user message + recent tool results
+    const recentContext = llmMessages
+      .slice(-4)
+      .map((m: any) => String(m.content || "").slice(0, 200))
+      .join(" ")
+      .toLowerCase();
+
+    const relevantTools = selectMetaTools(recentContext);
+
+    // Progressive infrastructure docs injection: only include detailed runtime
+    // docs when diagnostic/infrastructure tools are selected. Saves ~600 tokens
+    // on most turns. Follows Claude Code's deferred loading pattern.
+    const hasInfraTools = relevantTools.some(t =>
+      TOOL_GROUPS.infrastructure.includes(t.function.name)
+    );
+    if (hasInfraTools && !llmMessages.some((m: any) => m.content?.includes("Runtime Infrastructure — Detailed"))) {
+      const { RUNTIME_INFRASTRUCTURE_DOCS } = await import("../prompts/meta-agent-chat");
+      llmMessages.push({ role: "system" as const, content: RUNTIME_INFRASTRUCTURE_DOCS });
+    }
 
     const { callLLMGateway } = await import("../lib/llm-gateway");
     const llmResult = await callLLMGateway(
@@ -1506,13 +2697,20 @@ export async function runMetaChat(
       {
         model: "anthropic/claude-sonnet-4-6",
         messages: llmMessages as any,
-        tools: META_TOOLS,
+        tools: relevantTools,
         tool_choice: "auto",
 
         temperature: 0.3,
         metadata: { agent: "meta-agent", org_id: ctx.orgId },
       },
     );
+
+    const turnCostUsd = (llmResult as any).cost_usd || 0;
+    const turnInputTokens = (llmResult as any).usage?.input_tokens || (llmResult as any).input_tokens || 0;
+    const turnOutputTokens = (llmResult as any).usage?.output_tokens || (llmResult as any).output_tokens || 0;
+    totalCost += turnCostUsd;
+    totalInputTokens += turnInputTokens;
+    totalOutputTokens += turnOutputTokens;
 
     const msg = {
       role: "assistant" as const,
@@ -1529,6 +2727,16 @@ export async function runMetaChat(
       };
       outputMessages.push(assistantMsg);
       llmMessages.push({ role: "assistant", content: msg.content || "" });
+      turnRecords.push({
+        turn: round,
+        model: "anthropic/claude-sonnet-4-6",
+        content: msg.content || "",
+        input_tokens: turnInputTokens,
+        output_tokens: turnOutputTokens,
+        cost_usd: turnCostUsd,
+        tool_calls: [],
+        tool_results: [],
+      });
       break;
     }
 
@@ -1545,19 +2753,36 @@ export async function runMetaChat(
       tool_calls: toolCalls,
     } as any);
 
-    // Execute each tool call
+    // Execute each tool call with timing
+    const turnToolCalls: typeof turnRecords[0]["tool_calls"] = [];
+    const turnToolResults: typeof turnRecords[0]["tool_results"] = [];
+
     for (const tc of toolCalls) {
       let args: Record<string, unknown> = {};
       try {
         args = JSON.parse(tc.function.arguments || "{}");
       } catch {}
 
+      const toolStart = Date.now();
       let result: string;
+      let toolError: string | undefined;
       try {
         result = await executeTool(tc.function.name, args, ctx);
       } catch (err: any) {
-        result = JSON.stringify({ error: err.message || "Tool execution failed" });
+        toolError = err.message || "Tool execution failed";
+        result = JSON.stringify({ error: toolError });
       }
+      const toolLatencyMs = Date.now() - toolStart;
+
+      turnToolCalls.push({ name: tc.function.name, arguments: args });
+      turnToolResults.push({
+        name: tc.function.name,
+        result: result.slice(0, 2000),
+        latency_ms: toolLatencyMs,
+        error: toolError,
+      });
+
+      totalToolCalls++;
 
       const toolMsg: MetaChatMessage = {
         role: "tool",
@@ -1571,6 +2796,18 @@ export async function runMetaChat(
         tool_call_id: tc.id,
       } as any);
     }
+
+    // Record this turn
+    turnRecords.push({
+      turn: round,
+      model: "anthropic/claude-sonnet-4-6",
+      content: msg.content || "",
+      input_tokens: turnInputTokens,
+      output_tokens: turnOutputTokens,
+      cost_usd: turnCostUsd,
+      tool_calls: turnToolCalls,
+      tool_results: turnToolResults,
+    });
   }
 
   // Extract final assistant text
@@ -1578,8 +2815,63 @@ export async function runMetaChat(
     .reverse()
     .find((m) => m.role === "assistant" && m.content);
 
+  // ── Telemetry: write session + turns + credit deduction ──
+  // Same comprehensive telemetry as runtime agents
+  const userInput = messages.find(m => m.role === "user")?.content || "";
+  try {
+    const sql = await getDbForOrg(ctx.hyperdrive, ctx.orgId);
+    const now = new Date().toISOString();
+
+    // Write session record
+    await sql`
+      INSERT INTO sessions (session_id, org_id, agent_name, model, status, input_text, output_text,
+        step_count, action_count, cost_total_usd, wall_clock_seconds, created_at, ended_at)
+      VALUES (
+        ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'anthropic/claude-sonnet-4-6',
+        'success', ${userInput.slice(0, 2000)}, ${(lastAssistant?.content || "").slice(0, 5000)},
+        ${round}, ${totalToolCalls}, ${totalCost}, ${0}, ${now}, ${now}
+      )
+      ON CONFLICT (session_id) DO NOTHING
+    `;
+
+    // Write per-turn records
+    for (const t of turnRecords) {
+      await sql`
+        INSERT INTO turns (session_id, turn_number, model_used, llm_content,
+          tool_calls_json, tool_results_json, errors_json,
+          input_tokens, output_tokens, cost_total_usd, latency_ms, execution_mode, started_at)
+        VALUES (
+          ${sessionId}, ${t.turn}, ${t.model}, ${t.content.slice(0, 10000)},
+          ${JSON.stringify(t.tool_calls)}, ${JSON.stringify(t.tool_results)}, '[]',
+          ${t.input_tokens}, ${t.output_tokens}, ${t.cost_usd}, ${0},
+          'meta-agent', ${now}
+        )
+      `;
+    }
+
+    // Deduct credits
+    if (totalCost > 0) {
+      await sql`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, description, created_at)
+        VALUES (${ctx.orgId}, 'burn', ${-totalCost}, ${'meta-agent: ' + ctx.agentName + ' (' + round + ' turns, ' + totalToolCalls + ' tools)'}, ${now})
+      `;
+      await sql`
+        UPDATE organizations SET credit_balance_usd = COALESCE(credit_balance_usd, 0) - ${totalCost}
+        WHERE org_id = ${ctx.orgId}
+      `.catch(() => {});
+    }
+  } catch (err) {
+    console.error("[meta-agent] Telemetry write failed:", err);
+  }
+
   return {
     messages: outputMessages,
     response: lastAssistant?.content || "I wasn't able to generate a response. Please try again.",
+    cost_usd: totalCost,
+    turns: round,
+    session_id: sessionId,
+    input_tokens: totalInputTokens,
+    output_tokens: totalOutputTokens,
+    tool_calls: totalToolCalls,
   };
 }

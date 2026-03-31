@@ -8,6 +8,7 @@ import { createRoute, z } from "@hono/zod-openapi";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const configRoutes = createOpenAPIRouter();
 
@@ -42,7 +43,7 @@ configRoutes.openapi(getConfigRoute, async (c): Promise<any> => {
       SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
     if (rows.length === 0) return c.json({ config: {}, exists: false });
-    const config = JSON.parse(rows[0].config_json || "{}");
+    const config = parseJsonColumn(rows[0].config_json);
     return c.json({ config, exists: true });
   } catch {
     return c.json({ config: {}, exists: false });
@@ -89,7 +90,7 @@ configRoutes.openapi(updateConfigRoute, async (c): Promise<any> => {
     const rows = await sql`
       SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
-    if (rows.length > 0) existing = JSON.parse(rows[0].config_json || "{}");
+    if (rows.length > 0) existing = parseJsonColumn(rows[0].config_json);
   } catch {}
 
   // Merge updates
@@ -129,7 +130,7 @@ configRoutes.openapi(listA2aRemotesRoute, async (c): Promise<any> => {
       SELECT config_json FROM project_configs WHERE org_id = ${user.org_id} LIMIT 1
     `;
     if (rows.length === 0) return c.json({ remotes: [] });
-    const config = JSON.parse(rows[0].config_json || "{}");
+    const config = parseJsonColumn(rows[0].config_json);
     return c.json({ remotes: config.a2a_remotes || [] });
   } catch {
     return c.json({ remotes: [] });

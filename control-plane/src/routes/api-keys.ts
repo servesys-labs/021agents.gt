@@ -10,7 +10,7 @@ import { ErrorSchema, errorResponses, ApiKeyCreateBody, ApiKeySummary } from "..
 import type { CurrentUser } from "../auth/types";
 import { generateApiKey, hashApiKey } from "../auth/api-keys";
 import { getDbForOrg } from "../db/client";
-import { requireScope } from "../middleware/auth";
+import { requireScope, invalidateAuthCache } from "../middleware/auth";
 import { logSecurityEvent } from "../logic/security-events";
 
 export const apiKeyRoutes = createOpenAPIRouter();
@@ -155,7 +155,7 @@ apiKeyRoutes.openapi(createApiKeyRoute, async (c): Promise<any> => {
 
   // Audit log (fire-and-forget)
   sql`
-    INSERT INTO audit_log (event, user_id, org_id, resource_type, resource_id, changes, created_at)
+    INSERT INTO audit_log (action, actor_id, org_id, resource_type, resource_name, details, created_at)
     VALUES (
       ${"apikey.create"}, ${user.user_id}, ${user.org_id}, ${"api_key"}, ${keyId},
       ${JSON.stringify({ name: req.name, scopes: req.scopes, project_id: req.project_id, env: req.env })},
@@ -242,6 +242,9 @@ apiKeyRoutes.openapi(revokeApiKeyRoute, async (c): Promise<any> => {
     severity: "medium",
     details: { key_id: keyId },
   });
+
+  // Invalidate cached auth so revoked key is rejected immediately
+  await invalidateAuthCache(c.env);
 
   return c.json({ revoked: keyId });
 });

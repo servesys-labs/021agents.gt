@@ -5,16 +5,19 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "../env";
 
-const WINDOW_MS = 60_000; // 1 minute
-const MAX_PER_WINDOW = 120;
+const MAX_PER_MINUTE = 120;
 const BURST_PER_SEC = 20;
-const MAX_KEYS = 10_000;
+const MAX_KEYS = 5_000;
 
-interface WindowEntry {
-  timestamps: number[];
+interface BucketEntry {
+  minuteBucket: number;   // Math.floor(now / 60_000)
+  minuteCount: number;
+  secondBucket: number;   // Math.floor(now / 1_000)
+  secondCount: number;
+  lastUsed: number;       // raw timestamp for eviction
 }
 
-const windows = new Map<string, WindowEntry>();
+const windows = new Map<string, BucketEntry>();
 
 // Bypass paths should match Python middleware parity.
 const BYPASS = new Set([
@@ -25,6 +28,14 @@ const BYPASS = new Set([
   "/openapi.json",
   "/.well-known/agent.json",
 ]);
+
+/** Evict oldest 25% of keys. Called BEFORE insertion when at capacity. */
+function evictStaleKeys(): void {
+  const entries = [...windows.entries()];
+  entries.sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+  const toRemove = Math.floor(entries.length / 4);
+  for (let i = 0; i < toRemove; i++) windows.delete(entries[i][0]);
+}
 
 export const rateLimitMiddleware = createMiddleware<{ Bindings: Env }>(async (c, next) => {
   if (BYPASS.has(c.req.path)) return next();
@@ -41,44 +52,51 @@ export const rateLimitMiddleware = createMiddleware<{ Bindings: Env }>(async (c,
   }
 
   const now = Date.now();
+  const curMinute = Math.floor(now / 60_000);
+  const curSecond = Math.floor(now / 1_000);
+
   let entry = windows.get(key);
+
   if (!entry) {
-    entry = { timestamps: [] };
+    // Evict BEFORE insertion if at capacity
+    if (windows.size >= MAX_KEYS) evictStaleKeys();
+    entry = { minuteBucket: curMinute, minuteCount: 0, secondBucket: curSecond, secondCount: 0, lastUsed: now };
     windows.set(key, entry);
   }
 
-  // Prune old timestamps
-  entry.timestamps = entry.timestamps.filter((ts) => now - ts < WINDOW_MS);
+  // Roll minute bucket if we've moved to a new minute
+  if (entry.minuteBucket !== curMinute) {
+    entry.minuteBucket = curMinute;
+    entry.minuteCount = 0;
+  }
 
-  // Check rate limit
-  if (entry.timestamps.length >= MAX_PER_WINDOW) {
+  // Roll second bucket if we've moved to a new second
+  if (entry.secondBucket !== curSecond) {
+    entry.secondBucket = curSecond;
+    entry.secondCount = 0;
+  }
+
+  entry.lastUsed = now;
+
+  // Check minute rate limit
+  if (entry.minuteCount >= MAX_PER_MINUTE) {
     c.header("Retry-After", "5");
-    c.header("X-RateLimit-Limit", String(MAX_PER_WINDOW));
+    c.header("X-RateLimit-Limit", String(MAX_PER_MINUTE));
     c.header("X-RateLimit-Remaining", "0");
     return c.json({ error: "Rate limit exceeded" }, 429);
   }
 
-  // Check burst
-  const recentSecond = entry.timestamps.filter((ts) => now - ts < 1000);
-  if (recentSecond.length >= BURST_PER_SEC) {
+  // Check burst (per-second)
+  if (entry.secondCount >= BURST_PER_SEC) {
     c.header("Retry-After", "1");
     return c.json({ error: "Burst rate limit exceeded" }, 429);
   }
 
-  entry.timestamps.push(now);
-  c.header("X-RateLimit-Limit", String(MAX_PER_WINDOW));
-  c.header("X-RateLimit-Remaining", String(MAX_PER_WINDOW - entry.timestamps.length));
+  entry.minuteCount++;
+  entry.secondCount++;
 
-  // Evict stale keys if too many
-  if (windows.size > MAX_KEYS) {
-    const entries = [...windows.entries()];
-    entries.sort((a, b) => {
-      const aLast = a[1].timestamps[a[1].timestamps.length - 1] ?? 0;
-      const bLast = b[1].timestamps[b[1].timestamps.length - 1] ?? 0;
-      return aLast - bLast;
-    });
-    for (let i = 0; i < entries.length / 4; i++) windows.delete(entries[i][0]);
-  }
+  c.header("X-RateLimit-Limit", String(MAX_PER_MINUTE));
+  c.header("X-RateLimit-Remaining", String(MAX_PER_MINUTE - entry.minuteCount));
 
   return next();
 });

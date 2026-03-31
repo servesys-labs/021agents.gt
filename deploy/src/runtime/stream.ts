@@ -32,6 +32,7 @@ import { attachToolPolicyEnvelope } from "./policy-envelope";
 import { selectReasoningStrategy, autoSelectStrategy } from "./reasoning-strategies";
 import { loadSkills, formatSkillsPrompt } from "./skills";
 import { loadStartupContext } from "./progress";
+import { EventSequencer, BoundedUUIDSet } from "./ws-dedup";
 
 type WsSend = (data: string) => void;
 
@@ -39,9 +40,15 @@ type WsSend = (data: string) => void;
 
 /**
  * Helper for progress reporting on long-running tools.
- * Sends periodic "tool_progress" events over the WebSocket while awaiting a tool result.
+ * Sends periodic "tool_progress" events AND heartbeats over the WebSocket
+ * while awaiting a tool result.
+ *
+ * Phase 3.4: Heartbeat events every 15s prevent client-side timeouts
+ * during long-running tools (>30s with no output).
+ *
+ * Exported for use by DO WebSocket handlers and workflow progress emission.
  */
-function withProgress(
+export function withProgress(
   toolName: string,
   promise: Promise<string>,
   send?: WsSend,
@@ -50,8 +57,12 @@ function withProgress(
   if (!send) return promise;
 
   let elapsed = 0;
+  const HEARTBEAT_INTERVAL = 15_000;
+  let lastHeartbeat = Date.now();
+
   const timer = setInterval(() => {
     elapsed += intervalMs;
+    // Tool progress event
     send(JSON.stringify({
       type: "tool_progress",
       tool: toolName,
@@ -59,9 +70,55 @@ function withProgress(
       elapsed_ms: elapsed,
       message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
     }));
+    // Phase 3.4: Heartbeat every 15s
+    if (Date.now() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+      send(JSON.stringify({ type: "heartbeat", timestamp: Date.now() }));
+      lastHeartbeat = Date.now();
+    }
   }, intervalMs);
 
   return promise.finally(() => clearInterval(timer));
+}
+
+// ── Phase 3.2: Backpressure state for WebSocket streaming ──
+const HIGH_WATERMARK = 1000;  // messages — pause reading from LLM
+const LOW_WATERMARK = 200;    // messages — resume reading
+const SEND_TIMEOUT_MS = 30_000;
+
+export interface StreamBackpressure {
+  pendingCount: number;
+  paused: boolean;
+  dropped: number;
+}
+
+export function createStreamBackpressure(): StreamBackpressure {
+  return { pendingCount: 0, paused: false, dropped: 0 };
+}
+
+/**
+ * Backpressure-aware send. Tracks pending messages and drops if
+ * client is too slow (prevents OOM from unbounded buffer growth).
+ * Exported for use by DO WebSocket handlers.
+ */
+export function backpressureSend(
+  rawSend: WsSend,
+  bp: StreamBackpressure,
+  data: string,
+): void {
+  if (bp.pendingCount > HIGH_WATERMARK) {
+    bp.dropped++;
+    bp.paused = true;
+    return; // Drop message — client can't keep up
+  }
+  bp.pendingCount++;
+  try {
+    rawSend(data);
+  } finally {
+    bp.pendingCount--;
+    if (bp.paused && bp.pendingCount < LOW_WATERMARK) {
+      bp.paused = false;
+    }
+  }
 }
 
 /**
@@ -72,12 +129,13 @@ async function streamLLM(
   env: RuntimeEnv,
   messages: LLMMessage[],
   tools: ToolDefinition[],
-  opts: { model: string; provider?: string; max_tokens?: number; temperature?: number },
+  opts: { model: string; provider?: string; max_tokens?: number; temperature?: number; signal?: AbortSignal },
   send: WsSend,
 ): Promise<LLMResponse> {
   const model = opts.model;
   const isWorkersAI = model.startsWith("@cf/");
   const started = Date.now();
+  const bp = createStreamBackpressure();
 
   // All models go through AI Gateway /compat/ — single endpoint, single token
   const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
@@ -127,6 +185,7 @@ async function streamLLM(
     method: "POST",
     headers,
     body: JSON.stringify(payload),
+    signal: opts.signal,
   });
 
   if (!resp.ok) {
@@ -201,7 +260,8 @@ async function streamLLM(
       // Token content
       if (delta.content) {
         content += delta.content;
-        send(JSON.stringify({ type: "token", content: delta.content }));
+        // High-volume path: apply best-effort backpressure to avoid client OOM.
+        backpressureSend(send, bp, JSON.stringify({ type: "token", content: delta.content }));
       }
 
       // Tool call chunks (streamed incrementally)
@@ -296,11 +356,29 @@ export async function streamRun(
     delegation?: DelegationContextInput;
     /** Called between turns — allows the DO to yield the run lock so queued requests can proceed. */
     yieldBetweenTurns?: () => Promise<void>;
+    /** Abort signal tied to WebSocket disconnect/cancellation (provided by DO). */
+    signal?: AbortSignal;
   },
 ): Promise<void> {
   const started = Date.now();
   const sessionId = crypto.randomUUID().slice(0, 16);
   const traceId = crypto.randomUUID().slice(0, 16);
+
+  // Cloud C3.2: WebSocket dedup — assign seq-nums to events for reconnect
+  const sequencer = new EventSequencer(500);
+  const seenUUIDs = new BoundedUUIDSet(1000);
+  const bp = createStreamBackpressure();
+  const rawSend = send;
+  send = ((data: string) => {
+    // Assign seq-num for reconnect support
+    try {
+      const parsed = JSON.parse(data);
+      const seqEvent = sequencer.push(parsed.type || "unknown", parsed);
+      parsed._seq = seqEvent.seq;
+      data = JSON.stringify(parsed);
+    } catch { /* non-JSON data, pass through */ }
+    backpressureSend(rawSend, bp, data);
+  }) as WsSend;
 
   try {
     // Load config
@@ -359,13 +437,25 @@ export async function streamRun(
       sysPromptParts.push(config.system_prompt);
     }
 
-    // 4b. Skills (loaded from DB, cached 1min) — agent-specific capabilities
+    // 4b. Skills (loaded from DB, cached 1min) + marketplace delegation guidance
     if (!isVoiceChannel) {
       try {
         const skills = await loadSkills(hyperdrive, config.org_id || "", config.agent_name || agentName);
         const skillsBlock = formatSkillsPrompt(skills);
         if (skillsBlock) sysPromptParts.push(skillsBlock);
       } catch {}
+
+      // Marketplace delegation — always available to all agents
+      sysPromptParts.push(
+        `## Marketplace Delegation\n` +
+        `You can delegate specialized tasks to skill agents in the OneShots marketplace.\n` +
+        `1. Use \`marketplace-search\` to find specialist agents (e.g., "flight search", "legal review")\n` +
+        `2. Review pricing, ratings, and capabilities in the results\n` +
+        `3. Use \`a2a-send\` to delegate the task — payments are handled automatically via x-402\n` +
+        `4. If the skill agent returns artifacts (files, code), they'll be included in the response\n` +
+        `5. Use \`share-artifact\` to send files/code back to a caller if you are being delegated to\n` +
+        `For paid tasks > $0.10, confirm with the user before delegating.`
+      );
     }
 
     // 4c. Startup context (prior session progress) — cross-session awareness
@@ -423,6 +513,28 @@ export async function streamRun(
           strategy: config.reasoning_strategy || "auto",
           prompt: strategyPrompt.slice(0, 200),
         } as any));
+      }
+    }
+
+    // ── 7b. COORDINATOR MODE (auto-detect complex multi-part tasks) ──
+    if (!isVoiceChannel) {
+      try {
+        const { shouldCoordinate, buildCoordinatorPrompt } = await import("./coordinator");
+        if ((config as any).reasoning_strategy === "coordinator" || shouldCoordinate(input, activeTools.length)) {
+          // Fetch available agents for delegation
+          let agentNames: string[] = [];
+          try {
+            const { loadAgentList } = await import("./db");
+            const agents = await loadAgentList((env as any).HYPERDRIVE, (opts as any)?.org_id || "");
+            agentNames = agents.map((a: any) => a.name);
+          } catch {}
+          const coordinatorPrompt = buildCoordinatorPrompt(config.agent_name, agentNames);
+          if (coordinatorPrompt) {
+            messages.push({ role: "system", content: coordinatorPrompt });
+          }
+        }
+      } catch {
+        // Coordinator module not available — skip
       }
     }
 
@@ -523,6 +635,7 @@ export async function streamRun(
             model: route.model,
             provider: route.provider,
             max_tokens: route.max_tokens,
+            signal: opts?.signal,
           }, send),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error(`Turn ${turn} timed out after ${PER_TURN_TIMEOUT_MS / 1000}s`)), PER_TURN_TIMEOUT_MS),
@@ -580,23 +693,25 @@ export async function streamRun(
       messages.push({ role: "assistant", content: llmResponse.content, tool_calls: llmResponse.tool_calls });
 
       for (const tc of llmResponse.tool_calls) {
-        send(serializeForWebSocket({ type: "tool_call", name: tc.name, tool_call_id: tc.id }));
+        let argsPreview = "";
+        try {
+          const parsed = JSON.parse(tc.arguments || "{}");
+          argsPreview = parsed.query || parsed.code?.slice(0, 120) || parsed.url || parsed.path || parsed.input?.slice(0, 120) || "";
+        } catch {}
+        send(serializeForWebSocket({ type: "tool_call", name: tc.name, tool_call_id: tc.id, args_preview: argsPreview }));
       }
 
       // P0 Fix: Report progress for ALL long-running tools, not just the first
       const LONG_RUNNING_TOOLS = new Set(["python-exec", "bash", "web-crawl", "browser-render"]);
-      const longRunningNames = llmResponse.tool_calls
-        .filter((tc) => LONG_RUNNING_TOOLS.has(tc.name))
-        .map((tc) => tc.name);
+      const longRunningToolCalls = llmResponse.tool_calls.filter((tc) => LONG_RUNNING_TOOLS.has(tc.name));
 
       // Send initial "Executing..." for each long-running tool
-      for (const name of longRunningNames) {
-        send(JSON.stringify({
+      for (const tc of longRunningToolCalls) {
+        send(serializeForWebSocket({
           type: "tool_progress",
-          tool: name,
-          status: "running",
-          elapsed_ms: 0,
-          message: "Executing...",
+          name: tc.name,
+          tool_call_id: tc.id,
+          progress: { status: "running", elapsed_ms: 0, message: "Executing..." },
         }));
       }
 
@@ -609,22 +724,33 @@ export async function streamRun(
         config.tools,
       );
       let toolProgressTimer: ReturnType<typeof setInterval> | null = null;
-      if (longRunningNames.length > 0) {
+      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+      if (longRunningToolCalls.length > 0) {
         let elapsed = 0;
         toolProgressTimer = setInterval(() => {
           elapsed += 5000;
-          for (const name of longRunningNames) {
+          for (const tc of longRunningToolCalls) {
             try {
-              send(JSON.stringify({
+              send(serializeForWebSocket({
                 type: "tool_progress",
-                tool: name,
-                status: "running",
-                elapsed_ms: elapsed,
-                message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
+                name: tc.name,
+                tool_call_id: tc.id,
+                progress: {
+                  status: "running",
+                  elapsed_ms: elapsed,
+                  message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
+                },
               }));
             } catch { /* WebSocket may be closed */ }
           }
         }, 5000);
+
+        // Heartbeat during long-running tool execution (client keepalive)
+        heartbeatTimer = setInterval(() => {
+          try {
+            send(serializeForWebSocket({ type: "heartbeat" }));
+          } catch { /* WebSocket may be closed */ }
+        }, 15000);
       }
 
       let toolResults: ToolResult[];
@@ -632,6 +758,7 @@ export async function streamRun(
         toolResults = await toolResultsPromise;
       } finally {
         if (toolProgressTimer) clearInterval(toolProgressTimer);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
       }
       totalToolCalls += toolResults.length;
       // Accumulate tool execution costs (search, crawl, etc.)
@@ -649,7 +776,32 @@ export async function streamRun(
           result: (tr.error || tr.result || "").slice(0, 500),
           error: tr.error || undefined,
           latency_ms: tr.latency_ms,
+          cost_usd: tr.cost_usd || 0,
         }));
+
+        // Emit file_change for write-file/edit-file so UI shows code diffs
+        if (!tr.error && (tc.name === "write-file" || tc.name === "edit-file")) {
+          try {
+            const tcArgs = JSON.parse(tc.arguments || "{}");
+            const filePath = tcArgs.path || "";
+            const ext = filePath.split(".").pop()?.toLowerCase() || "";
+            const lang = ({ ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", py: "python", json: "json", html: "html", css: "css", md: "markdown" } as Record<string, string>)[ext] || ext;
+            if (tc.name === "write-file") {
+              send(serializeForWebSocket({
+                type: "file_change", change_type: "create", path: filePath, language: lang,
+                content: (tcArgs.content || "").slice(0, 10000), size: (tcArgs.content || "").length,
+                tool_call_id: tc.id,
+              } as any));
+            } else {
+              send(serializeForWebSocket({
+                type: "file_change", change_type: "edit", path: filePath, language: lang,
+                old_text: (tcArgs.old_text || tcArgs.old_string || "").slice(0, 5000),
+                new_text: (tcArgs.new_text || tcArgs.new_string || "").slice(0, 5000),
+                tool_call_id: tc.id,
+              } as any));
+            }
+          } catch {}
+        }
       }
 
       const turnTokens = llmResponse.usage.input_tokens + llmResponse.usage.output_tokens;
@@ -744,6 +896,8 @@ export async function streamRun(
       turns: totalToolCalls > 0 ? Math.ceil(totalToolCalls) : 1,
       tool_calls: totalToolCalls,
       cost_usd: Math.round(cumulativeCost * 1_000_000) / 1_000_000,
+      input_tokens: totalInputTokens,
+      output_tokens: totalOutputTokens,
       latency_ms: elapsedMs,
     };
     send(serializeForWebSocket(doneEvent));

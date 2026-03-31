@@ -50,7 +50,7 @@ async function resolveChannelAgent(sql: any, orgId: string, channel: string): Pr
   // Fallback: first active agent in the org
   try {
     const rows = await sql`
-      SELECT name FROM agents WHERE org_id = ${orgId} AND is_active = 1 ORDER BY created_at ASC LIMIT 1
+      SELECT name FROM agents WHERE org_id = ${orgId} AND is_active = true ORDER BY created_at ASC LIMIT 1
     `;
     if (rows.length > 0) return String(rows[0].name);
   } catch {}

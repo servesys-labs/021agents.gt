@@ -10,6 +10,7 @@ import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
 import { createOpenAPIRouter } from "../lib/openapi";
 import { EvalRunSummary, ErrorSchema, errorResponses } from "../schemas/openapi";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const evalRoutes = createOpenAPIRouter();
 
@@ -97,16 +98,12 @@ evalRoutes.openapi(getRunRoute, async (c): Promise<any> => {
   if (rows.length === 0) return c.json({ error: "Eval run not found" }, 404);
   const data: any = { ...rows[0] };
 
-  try {
-    data.eval_conditions = JSON.parse(data.eval_conditions_json || "{}");
-  } catch {
-    data.eval_conditions = {};
-  }
+  data.eval_conditions = parseJsonColumn(data.eval_conditions_json);
   delete data.eval_conditions_json;
 
   // Get trials
   try {
-    const trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} ORDER BY trial_number`;
+    const trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} AND run_id IN (SELECT id FROM eval_runs WHERE org_id = ${user.org_id}) ORDER BY trial_number`;
     data.trials = trials;
   } catch {
     data.trials = [];
@@ -138,7 +135,7 @@ evalRoutes.openapi(getTrialsRoute, async (c): Promise<any> => {
 
   let trials: any[] = [];
   try {
-    trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} ORDER BY trial_number`;
+    trials = await sql`SELECT * FROM eval_trials WHERE run_id = ${runId} AND run_id IN (SELECT id FROM eval_runs WHERE org_id = ${orgId}) ORDER BY trial_number`;
   } catch {
     trials = [];
   }

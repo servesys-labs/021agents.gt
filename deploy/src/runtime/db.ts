@@ -63,7 +63,7 @@ export async function loadAgentConfig(
     rows = await sql`
       SELECT name, org_id, project_id, config_json, description
       FROM agents
-      WHERE name = ${agentName} AND is_active = 1
+      WHERE name = ${agentName} AND is_active = true
       LIMIT 1
     `;
   } catch (err) {
@@ -1910,4 +1910,20 @@ export async function queryUsage(
   const lastId = page.length > 0 ? page[page.length - 1].session_id : cursor;
 
   return { summary, sessions, has_more: hasMore, next_cursor: String(lastId) };
+}
+
+/**
+ * Load list of agents for an org (used by coordinator mode to discover available workers).
+ */
+export async function loadAgentList(
+  hyperdrive: Hyperdrive,
+  orgId: string,
+): Promise<Array<{ name: string; description?: string }>> {
+  const sql = await getDb(hyperdrive);
+  const rows = await sql`
+    SELECT agent_name as name, description FROM agents
+    WHERE org_id = ${orgId} AND is_active = true
+    ORDER BY agent_name ASC LIMIT 50
+  `;
+  return rows.map((r: any) => ({ name: r.name, description: r.description || undefined }));
 }

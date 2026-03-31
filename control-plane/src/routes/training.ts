@@ -26,8 +26,26 @@ import type {
   IterationHistory,
   OptimizationContext,
 } from "../logic/training-algorithms";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const trainingRoutes = createOpenAPIRouter();
+
+/** Emit a training-phase event to KV for real-time streaming. */
+async function emitTrainingEvent(
+  env: any, jobId: string, agentName: string,
+  event: Record<string, unknown>,
+): Promise<void> {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return;
+  try {
+    const key = `training:${jobId}`;
+    const raw = await kv.get(key);
+    const events: any[] = raw ? JSON.parse(raw) : [];
+    events.push({ ...event, job_id: jobId, agent_name: agentName, ts: Date.now() });
+    // Keep last 500 events, expire after 2 hours
+    await kv.put(key, JSON.stringify(events.slice(-500)), { expirationTtl: 7200 });
+  } catch { /* non-critical */ }
+}
 
 /** Fire-and-forget audit log for training events. */
 async function auditTraining(
@@ -36,8 +54,8 @@ async function auditTraining(
 ): Promise<void> {
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
-      VALUES (${orgId}, ${userId}, ${action}, 'training', ${resourceId}, ${JSON.stringify(details)}, now())
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
+      VALUES (${orgId}, ${userId}, ${action}, 'training', ${resourceId}, ${JSON.stringify(details)}::jsonb, now())
     `;
   } catch { /* non-critical */ }
 }
@@ -122,45 +140,48 @@ trainingRoutes.openapi(createJobRoute, async (c): Promise<any> => {
 
   const jobId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 
-  await sql`
-    INSERT INTO training_jobs (
-      job_id, org_id, agent_name, algorithm, status, config_json,
-      dataset_name, eval_tasks_json, max_iterations, auto_activate,
-      created_by, tags
-    ) VALUES (
-      ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
-      ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
-      ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
-      ${body.max_iterations}, ${body.auto_activate},
-      ${user.user_id}, ${body.tags}
-    )
-  `;
+  // Wrap job creation + initial resource snapshot in a transaction
+  await sql.begin(async (tx: any) => {
+    await tx`
+      INSERT INTO training_jobs (
+        job_id, org_id, agent_name, algorithm, status, config_json,
+        dataset_name, eval_tasks_json, max_iterations, auto_activate,
+        created_by, tags
+      ) VALUES (
+        ${jobId}, ${user.org_id}, ${body.agent_name}, ${body.algorithm}, 'created',
+        ${JSON.stringify(body.config)}, ${body.dataset_name ?? null},
+        ${body.eval_tasks ? JSON.stringify(body.eval_tasks) : null},
+        ${body.max_iterations}, ${body.auto_activate},
+        ${user.user_id}, ${body.tags && body.tags.length > 0 ? body.tags : sql`'{}'::text[]`}
+      )
+    `;
 
-  // Snapshot current system prompt as initial resource (version 0)
-  const agentRows = await sql`
-    SELECT config_json FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
-  `;
-  if (agentRows.length > 0) {
-    let config: Record<string, unknown> = {};
-    try { config = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
-    const systemPrompt = String(config.system_prompt ?? "");
+    // Snapshot current system prompt as initial resource (version 0)
+    const agentRows = await tx`
+      SELECT config_json FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id}
+    `;
+    if (agentRows.length > 0) {
+      let config: Record<string, unknown> = {};
+      config = parseJsonColumn(agentRows[0].config_json);
+      const systemPrompt = String(config.system_prompt ?? "");
 
-    if (systemPrompt) {
-      await sql`
-        INSERT INTO training_resources (
-          resource_id, org_id, agent_name, job_id,
-          resource_type, resource_key, version,
-          content_text, source, is_active
-        ) VALUES (
-          ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
-          ${user.org_id}, ${body.agent_name}, ${jobId},
-          'system_prompt', 'main', 0,
-          ${systemPrompt}, 'initial', true
-        )
-        ON CONFLICT (org_id, agent_name, resource_type, resource_key, version) DO NOTHING
-      `;
+      if (systemPrompt) {
+        await tx`
+          INSERT INTO training_resources (
+            resource_id, org_id, agent_name, job_id,
+            resource_type, resource_key, version,
+            content_text, source, is_active
+          ) VALUES (
+            ${crypto.randomUUID().replace(/-/g, "").slice(0, 16)},
+            ${user.org_id}, ${body.agent_name}, ${jobId},
+            'system_prompt', 'main', 0,
+            ${systemPrompt}, 'initial', true
+          )
+          ON CONFLICT (org_id, agent_name, resource_type, resource_key, version) DO NOTHING
+        `;
+      }
     }
-  }
+  });
 
   auditTraining(sql, user.org_id, user.user_id, "training.created", jobId, {
     agent_name: body.agent_name, algorithm: body.algorithm, max_iterations: body.max_iterations,
@@ -284,7 +305,7 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
   const job = jobs[0] as any;
   return c.json({
     ...job,
-    config: JSON.parse(job.config_json || "{}"),
+    config: parseJsonColumn(job.config_json),
     iterations: iterations.map((i: any) => ({
       iteration_id: i.iteration_id,
       iteration_number: i.iteration_number,
@@ -292,9 +313,9 @@ trainingRoutes.openapi(getJobRoute, async (c): Promise<any> => {
       pass_rate: i.pass_rate,
       avg_score: i.avg_score,
       reward_score: i.reward_score,
-      reward_breakdown: JSON.parse(i.reward_breakdown_json || "{}"),
+      reward_breakdown: parseJsonColumn(i.reward_breakdown_json),
       resource_version: i.resource_version,
-      algorithm_output: JSON.parse(i.algorithm_output_json || "{}"),
+      algorithm_output: parseJsonColumn(i.algorithm_output_json),
       started_at: i.started_at,
       completed_at: i.completed_at,
     })),
@@ -362,7 +383,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     org_id: jobRow.org_id,
     agent_name: jobRow.agent_name,
     algorithm: jobRow.algorithm,
-    config_json: JSON.parse(jobRow.config_json || "{}"),
+    config_json: parseJsonColumn(jobRow.config_json),
     current_iteration: iterationNumber,
     max_iterations: jobRow.max_iterations,
     best_score: jobRow.best_score,
@@ -373,6 +394,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   if (jobRow.status === "created") {
     await sql`UPDATE training_jobs SET status = 'running', started_at = now() WHERE job_id = ${job_id}`;
   }
+
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: "iteration_start",
+    iteration: iterationNumber,
+    max_iterations: job.max_iterations,
+    algorithm: job.algorithm,
+  });
 
   // ── Pre-flight: verify agent tools and config before eval ─────
   // Only on first iteration — subsequent iterations reuse the result
@@ -417,7 +445,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     resource_key: r.resource_key,
     version: r.version,
     content_text: r.content_text,
-    content_json: r.content_json ? JSON.parse(r.content_json) : null,
+    content_json: parseJsonColumn(r.content_json, null),
     is_active: r.is_active,
     eval_score: r.eval_score,
   }));
@@ -437,7 +465,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
     `;
     if (agentRows.length > 0) {
-      const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+      const config = parseJsonColumn(agentRows[0].config_json);
       originalPrompt = config.system_prompt ?? null;
     }
   }
@@ -454,9 +482,26 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   const progressEvents: Record<string, unknown>[] = [];
 
   try {
-    const evalTasks = jobRow.eval_tasks_json
-      ? JSON.parse(jobRow.eval_tasks_json)
-      : [];
+    const evalTasks = parseJsonColumn<any[]>(jobRow.eval_tasks_json, []);
+
+    if (evalTasks.length === 0) {
+      // FAIL: No eval tasks configured. Training cannot optimize without evaluation signal.
+      await sql`
+        UPDATE training_iterations SET status = 'failed', error = 'no_eval_tasks', completed_at = NOW()
+        WHERE job_id = ${job_id} AND iteration_number = ${iterationNumber}
+      `.catch(() => {});
+      await emitTrainingEvent(c.env, job_id, job.agent_name, {
+        type: "eval_failed",
+        iteration: iterationNumber,
+        error: "No eval tasks configured. Add test cases before training.",
+      });
+      return c.json({
+        iteration_number: iterationNumber,
+        status: "failed",
+        error: "No eval tasks configured. Training requires at least one test case.",
+        should_continue: false,
+      });
+    }
 
     if (evalTasks.length > 0) {
       // Run each eval task through the Workflow-backed agent.run() path.
@@ -467,27 +512,64 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       let totalCost = 0;
       let totalLatency = 0;
 
-      for (const task of evalTasks) {
+      // CF Workers have a 30s CPU time limit. Each eval task takes ~15-25s wall clock.
+      // Run tasks with per-task timeout and a total loop budget to avoid Worker kill.
+      const TASK_TIMEOUT_MS = 60_000; // 60s per task (wall clock, not CPU)
+      const LOOP_BUDGET_MS = 25_000;  // 25s total loop budget (leaves 5s for optimization step)
+      const loopStart = Date.now();
+
+      for (let taskIdx = 0; taskIdx < evalTasks.length; taskIdx++) {
+        // Check loop time budget — if running low, stop and use partial results
+        if (Date.now() - loopStart > LOOP_BUDGET_MS) {
+          await emitTrainingEvent(c.env, job_id, job.agent_name, {
+            type: "eval_budget_exceeded",
+            iteration: iterationNumber,
+            tasks_completed: taskIdx,
+            tasks_total: evalTasks.length,
+            elapsed_ms: Date.now() - loopStart,
+          });
+          break;
+        }
+
+        const task = evalTasks[taskIdx];
         const taskInput = String(task.input || "");
         const taskExpected = String(task.expected || "");
         const grader = String(task.grader || "contains");
         const taskStart = Date.now();
 
+        await emitTrainingEvent(c.env, job_id, job.agent_name, {
+          type: "eval_task_start",
+          iteration: iterationNumber,
+          task_index: taskIdx,
+          task_total: evalTasks.length,
+          task_name: task.name || `task_${taskIdx + 1}`,
+          input_preview: taskInput.slice(0, 120),
+        });
+
         try {
-          // Call RUNTIME /run which routes to DO → Workflow
-          const runResp = await c.env.RUNTIME.fetch("https://runtime/run", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
-            },
-            body: JSON.stringify({
-              input: taskInput,
-              agent_name: job.agent_name,
-              org_id: user.org_id,
-              ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
-            }),
-          });
+          // Call RUNTIME /run with per-task timeout
+          const taskAbort = new AbortController();
+          const taskTimeout = setTimeout(() => taskAbort.abort(), TASK_TIMEOUT_MS);
+
+          let runResp: Response;
+          try {
+            runResp = await c.env.RUNTIME.fetch("https://runtime/run", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+              },
+              body: JSON.stringify({
+                input: taskInput,
+                agent_name: job.agent_name,
+                org_id: user.org_id,
+                ...(systemPromptOverride ? { system_prompt_override: systemPromptOverride } : {}),
+              }),
+              signal: taskAbort.signal,
+            });
+          } finally {
+            clearTimeout(taskTimeout);
+          }
 
           const runResult = await runResp.json() as Record<string, unknown>;
           const output = String(runResult.output || "");
@@ -501,21 +583,47 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
           } else if (grader === "exact" && taskExpected) {
             passed = output.trim() === taskExpected.trim();
           } else if (!taskExpected) {
-            // No expected value — pass if we got a non-empty response
             passed = output.length > 0;
           }
 
           taskResults.push({ passed, output, cost_usd: costUsd, latency_ms: latencyMs });
           totalCost += costUsd;
           totalLatency += latencyMs;
-        } catch (taskErr) {
-          taskResults.push({ passed: false, output: String(taskErr), cost_usd: 0, latency_ms: Date.now() - taskStart });
+
+          await emitTrainingEvent(c.env, job_id, job.agent_name, {
+            type: "eval_task_complete",
+            iteration: iterationNumber,
+            task_index: taskIdx,
+            task_name: task.name || `task_${taskIdx + 1}`,
+            passed,
+            latency_ms: latencyMs,
+            cost_usd: costUsd,
+            output_preview: output.slice(0, 200),
+          });
+        } catch (taskErr: any) {
+          const isTimeout = taskErr?.name === "AbortError";
+          taskResults.push({
+            passed: false,
+            output: isTimeout ? "[Eval task timed out]" : String(taskErr),
+            cost_usd: 0,
+            latency_ms: Date.now() - taskStart,
+          });
+
+          await emitTrainingEvent(c.env, job_id, job.agent_name, {
+            type: "eval_task_error",
+            iteration: iterationNumber,
+            task_index: taskIdx,
+            task_name: task.name || `task_${taskIdx + 1}`,
+            error: isTimeout ? "Task timed out" : String(taskErr).slice(0, 300),
+            latency_ms: Date.now() - taskStart,
+          });
         }
       }
 
-      // Aggregate results
+      // Aggregate results (based on tasks actually run, not total configured)
       const passCount = taskResults.filter((r) => r.passed).length;
-      const passRate = evalTasks.length > 0 ? passCount / evalTasks.length : 0;
+      const tasksRun = taskResults.length;
+      const passRate = tasksRun > 0 ? passCount / tasksRun : 0;
       const avgLatency = taskResults.length > 0 ? totalLatency / taskResults.length : 0;
 
       evalResult = {
@@ -525,6 +633,17 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         avg_latency_ms: avgLatency,
         total_cost_usd: totalCost,
       };
+
+      await emitTrainingEvent(c.env, job_id, job.agent_name, {
+        type: "eval_complete",
+        iteration: iterationNumber,
+        pass_rate: passRate,
+        passed: passCount,
+        total: tasksRun,
+        total_configured: evalTasks.length,
+        total_cost_usd: totalCost,
+        avg_latency_ms: avgLatency,
+      });
 
       // Collect KV progress events if available
       if (c.env.AGENT_PROGRESS_KV) {
@@ -550,7 +669,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
         const evalRunId = crypto.randomUUID().replace(/-/g, "").slice(0, 12);
         await sql`
           INSERT INTO eval_runs (org_id, agent_name, pass_rate, avg_score, avg_latency_ms, total_cost_usd, total_tasks, total_trials, created_at)
-          VALUES (${user.org_id}, ${job.agent_name}, ${passRate}, ${passRate}, ${avgLatency}, ${totalCost}, ${evalTasks.length}, ${1}, now())
+          VALUES (${user.org_id}, ${job.agent_name}, ${passRate}, ${passRate}, ${avgLatency}, ${totalCost}, ${tasksRun}, ${1}, now())
           RETURNING id
         `.then((rows: any) => {
           if (rows.length > 0) evalResult.eval_run_id = rows[0].id;
@@ -635,6 +754,14 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   `;
 
   // ── Step 5: Run optimization algorithm ────────────────────────
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: "optimizing",
+    iteration: iterationNumber,
+    algorithm: job.algorithm,
+    reward_score: rewardScore,
+    reward_breakdown: rewardBreakdown,
+  });
+
   const historyRows = await sql`
     SELECT iteration_number, reward_score, pass_rate, resource_version, algorithm_output_json
     FROM training_iterations
@@ -646,7 +773,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
     resource_version: h.resource_version,
-    algorithm_output_json: JSON.parse(h.algorithm_output_json || "{}"),
+    algorithm_output_json: parseJsonColumn(h.algorithm_output_json),
   }));
 
   const algorithm = getAlgorithm(job.algorithm, job.config_json);
@@ -660,6 +787,44 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   };
 
   let optimizationResult = await algorithm.optimize(ctx);
+
+  // Phase 7.6: Multi-dimension optimization
+  // After 3+ iterations, if prompt optimization has converged but score is below
+  // target, try optimizing temperature and reasoning strategy instead.
+  if (iterationNumber >= 3 && history.length >= 2) {
+    const last2 = history.slice(-2).map(h => h.reward_score || 0);
+    const promptImprovement = Math.abs(last2[1] - last2[0]) / Math.max(last2[0], 0.01);
+    if (promptImprovement < 0.02) {
+      // Prompt converged — try temperature grid search
+      let currentConfig: any = {};
+      try { currentConfig = JSON.parse(currentResources.find((r: any) => r.resource_type === "system_prompt")?.content_text || "{}"); } catch {}
+      const currentTemp = Number(currentConfig.temperature || 0.7);
+      const tempCandidates = [0.1, 0.3, 0.5, 0.7, 0.9].filter(t => Math.abs(t - currentTemp) > 0.05);
+      if (tempCandidates.length > 0) {
+        const nextTemp = tempCandidates[iterationNumber % tempCandidates.length];
+        optimizationResult.metadata.multi_dimension = "temperature";
+        optimizationResult.metadata.temperature_candidate = nextTemp;
+        // The training eval will use this temperature on the next iteration
+        for (const update of optimizationResult.updatedResources) {
+          if (update.resourceType === "system_prompt") {
+            try {
+              const parsed = JSON.parse(update.contentText || "{}");
+              parsed.temperature = nextTemp;
+              update.contentText = JSON.stringify(parsed);
+            } catch { /* keep original */ }
+          }
+        }
+      }
+
+      // Also try rotating reasoning strategies
+      const strategies = ["auto", "chain-of-thought", "plan-then-execute", "step-back", "verify-then-respond"];
+      const currentStrategy = (currentConfig as any).reasoning_strategy || "auto";
+      const nextStrategy = strategies[(strategies.indexOf(currentStrategy) + 1) % strategies.length];
+      if (nextStrategy !== currentStrategy) {
+        optimizationResult.metadata.reasoning_strategy_candidate = nextStrategy;
+      }
+    }
+  }
 
   // If APO needs LLM calls, execute them here (where we have env.AI)
   if (optimizationResult.metadata.requires_llm_calls) {
@@ -686,6 +851,13 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       });
       const newPrompt = editResult.content ?? "";
 
+      await emitTrainingEvent(c.env, job_id, job.agent_name, {
+        type: "apo_gradient",
+        iteration: iterationNumber,
+        gradient_preview: gradient.slice(0, 300),
+        new_prompt_length: newPrompt.length,
+      });
+
       if (newPrompt.trim()) {
         optimizationResult = {
           updatedResources: [{
@@ -709,6 +881,12 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
   }
 
   // ── Step 5.5: Safety gate — veto unsafe prompts ────────────────
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: "safety_check",
+    iteration: iterationNumber,
+    resources_to_check: optimizationResult.updatedResources.length,
+  });
+
   const safetyResults: Record<string, unknown>[] = [];
   for (const update of optimizationResult.updatedResources) {
     if (update.resourceType === "system_prompt" && update.contentText) {
@@ -785,7 +963,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
     `;
     if (agentRows.length > 0) {
-      const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+      const config = parseJsonColumn(agentRows[0].config_json);
       config.system_prompt = newPromptResource.contentText;
       await sql`
         UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
@@ -818,7 +996,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     reward_score: h.reward_score,
     pass_rate: h.pass_rate,
     resource_version: h.resource_version,
-    algorithm_output_json: JSON.parse(h.algorithm_output_json || "{}"),
+    algorithm_output_json: parseJsonColumn(h.algorithm_output_json),
   }));
 
   const freshCtx: OptimizationContext = {
@@ -830,7 +1008,20 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
     history: freshHistory,
   };
 
-  const shouldContinue = algorithm.shouldContinue(freshCtx);
+  // Phase 7.6: Convergence detection — auto-stop if improvement < 1% for 3 iterations
+  let converged = false;
+  if (freshHistory.length >= 3) {
+    const last3 = freshHistory.slice(-3).map(h => h.reward_score || 0);
+    const maxScore = Math.max(...last3);
+    const minScore = Math.min(...last3);
+    const improvement = maxScore > 0 ? (maxScore - minScore) / maxScore : 0;
+    if (improvement < 0.01) {
+      converged = true;
+      console.log(`[training] Job ${job_id}: converged after ${iterationNumber} iterations (improvement ${(improvement * 100).toFixed(2)}% < 1%)`);
+    }
+  }
+
+  const shouldContinue = converged ? false : algorithm.shouldContinue(freshCtx);
   const newStatus = shouldContinue ? "running" : "completed";
 
   // Fix #1: current_iteration already incremented atomically at the start;
@@ -863,7 +1054,7 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
             SELECT config_json FROM agents WHERE name = ${job.agent_name} AND org_id = ${user.org_id}
           `;
           if (agentRows.length > 0) {
-            const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+            const config = parseJsonColumn(agentRows[0].config_json);
             config.system_prompt = bestResourceRows[0].content_text;
             await sql`
               UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
@@ -914,6 +1105,21 @@ trainingRoutes.openapi(stepJobRoute, async (c): Promise<any> => {
       } catch { /* Non-critical — release_channels may not exist */ }
     }
   }
+
+  await emitTrainingEvent(c.env, job_id, job.agent_name, {
+    type: newStatus === "completed" ? "training_complete" : "iteration_complete",
+    iteration: iterationNumber,
+    reward_score: rewardScore,
+    pass_rate: evalResult.pass_rate,
+    is_best: isBest,
+    should_continue: shouldContinue,
+    status: newStatus,
+    ...(newStatus === "completed" ? {
+      best_score: isBest ? rewardScore : job.best_score,
+      best_iteration: isBest ? iterationNumber : job.best_iteration,
+      total_iterations: iterationNumber,
+    } : {}),
+  });
 
   auditTraining(sql, user.org_id, user.user_id,
     newStatus === "completed" ? "training.completed" : "training.step",
@@ -994,6 +1200,151 @@ trainingRoutes.openapi(progressRoute, async (c): Promise<any> => {
     source: c.env.AGENT_PROGRESS_KV ? "kv" : "unavailable",
   });
 });
+
+// ── GET /jobs/{job_id}/stream — SSE real-time training stream ────────
+
+const streamRoute = createRoute({
+  method: "get",
+  path: "/jobs/{job_id}/stream",
+  tags: ["Training"],
+  summary: "SSE stream of real-time training progress",
+  description: "Long-lived Server-Sent Events stream that pushes training phase events in real-time. Connect like Claude Code output — events flow as they happen.",
+  middleware: [requireScope("training:read")],
+  request: {
+    params: z.object({ job_id: z.string() }),
+    query: z.object({
+      /** Resume from this timestamp (ms). Only events after this are sent. */
+      since: z.coerce.number().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "SSE event stream" },
+    ...errorResponses(404),
+  },
+});
+
+trainingRoutes.openapi(streamRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { job_id } = c.req.valid("param");
+  const { since } = c.req.valid("query");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Verify job exists
+  const jobs = await sql`
+    SELECT agent_name, status FROM training_jobs WHERE job_id = ${job_id} AND org_id = ${user.org_id}
+  `;
+  if (jobs.length === 0) return c.json({ error: "Training job not found" }, 404);
+
+  const agentName = String(jobs[0].agent_name);
+  const initialStatus = String(jobs[0].status);
+
+  const sseHeaders = {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+  };
+
+  // If job already finished, send the full event log and close
+  if (initialStatus === "completed" || initialStatus === "cancelled" || initialStatus === "failed") {
+    const events = await getTrainingEvents(c.env, job_id, since);
+    const stream = new ReadableStream({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const evt of events) {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(evt)}\n\n`));
+        }
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_end", status: initialStatus, ts: Date.now() })}\n\n`));
+        controller.close();
+      },
+    });
+    return new Response(stream, { headers: sseHeaders });
+  }
+
+  // Live stream — iterative poll loop (no recursion), max 5 min duration
+  let lastTs = since ?? 0;
+  let closed = false;
+  const MAX_POLLS = 200; // ~5 minutes at 1.5s intervals
+  const MAX_CONSECUTIVE_ERRORS = 3;
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const enc = new TextEncoder();
+      let consecutiveErrors = 0;
+
+      // Send any events that already exist
+      try {
+        const existing = await getTrainingEvents(c.env, job_id, lastTs);
+        for (const evt of existing) {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(evt)}\n\n`));
+          if (typeof evt.ts === "number" && evt.ts > lastTs) lastTs = evt.ts;
+        }
+      } catch { /* continue even if initial read fails */ }
+
+      // Iterative poll loop (NOT recursive — no stack overflow risk)
+      for (let i = 0; i < MAX_POLLS && !closed; i++) {
+        await new Promise((r) => setTimeout(r, 1500));
+        if (closed) break;
+
+        try {
+          const events = await getTrainingEvents(c.env, job_id, lastTs);
+          for (const evt of events) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify(evt)}\n\n`));
+            if (typeof evt.ts === "number" && evt.ts > lastTs) lastTs = evt.ts;
+          }
+          consecutiveErrors = 0;
+
+          // Check if job finished
+          const statusRows = await sql`SELECT status FROM training_jobs WHERE job_id = ${job_id}`;
+          const status = statusRows.length > 0 ? String(statusRows[0].status) : "unknown";
+
+          if (status === "completed" || status === "cancelled" || status === "failed") {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_end", status, ts: Date.now() })}\n\n`));
+            closed = true;
+            break;
+          }
+
+          // Heartbeat
+          controller.enqueue(enc.encode(`: heartbeat ${Date.now()}\n\n`));
+        } catch {
+          consecutiveErrors++;
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_error", reason: "kv_unavailable", ts: Date.now() })}\n\n`));
+            closed = true;
+            break;
+          }
+        }
+      }
+
+      // If we hit max polls, tell client to reconnect with ?since=
+      if (!closed) {
+        controller.enqueue(enc.encode(`data: ${JSON.stringify({ type: "stream_timeout", last_ts: lastTs, ts: Date.now() })}\n\n`));
+      }
+      try { controller.close(); } catch { /* already closed */ }
+    },
+    cancel() {
+      closed = true;
+    },
+  });
+
+  return new Response(stream, { headers: sseHeaders });
+});
+
+/** Read training events from KV, optionally filtering by timestamp. */
+async function getTrainingEvents(
+  env: any, jobId: string, since?: number,
+): Promise<Record<string, unknown>[]> {
+  const kv = env.AGENT_PROGRESS_KV;
+  if (!kv) return [];
+  try {
+    const raw = await kv.get(`training:${jobId}`);
+    if (!raw) return [];
+    const events = JSON.parse(raw) as Record<string, unknown>[];
+    if (since) return events.filter((e) => typeof e.ts === "number" && e.ts > since);
+    return events;
+  } catch {
+    return [];
+  }
+}
 
 // ── POST /jobs/{job_id}/cancel — cancel job ─────────────────────────
 
@@ -1251,7 +1602,7 @@ trainingRoutes.openapi(activateResourceRoute, async (c): Promise<any> => {
         SELECT config_json FROM agents WHERE name = ${agent_name} AND org_id = ${user.org_id}
       `;
       if (agentRows.length > 0) {
-        const config = JSON.parse(String(agentRows[0].config_json || "{}"));
+        const config = parseJsonColumn(agentRows[0].config_json);
         config.system_prompt = resourceRows[0].content_text;
         await sql`
           UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()

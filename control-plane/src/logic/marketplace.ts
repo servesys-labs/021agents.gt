@@ -181,7 +181,7 @@ export async function submitRating(
   listingId: string,
   raterOrgId: string,
   rating: number,
-  opts: { rater_agent_name?: string; task_id?: string; review_text?: string; response_time_ms?: number } = {},
+  opts: { rater_agent_name?: string; task_id?: string; review_text?: string; response_time_ms?: number; credibility_weight?: number; raw_rating?: number } = {},
 ): Promise<void> {
   rating = Math.max(1, Math.min(5, Math.round(rating)));
 

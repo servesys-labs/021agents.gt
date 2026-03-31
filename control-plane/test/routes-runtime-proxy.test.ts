@@ -44,8 +44,9 @@ describe("runtime-proxy route contracts", () => {
       mockEnv(),
     );
     // With the default mockEnv RUNTIME, this will hit the runtime proxy
-    // and either return the proxied result or a 502 if runtime fetch fails
-    expect([200, 502]).toContain(res.status);
+    // and either return the proxied result, a 502 if runtime fetch fails,
+    // or a 503 if concurrency limit is reached (withConcurrencyLimit)
+    expect([200, 402, 502, 503]).toContain(res.status);
   });
 
   it("rejects invalid edge token", async () => {

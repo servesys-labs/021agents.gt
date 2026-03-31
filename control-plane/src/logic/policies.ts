@@ -4,6 +4,7 @@
  */
 
 import { getDb } from "../db/client";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export interface Thresholds {
   eval_pass_rate: number;
@@ -43,7 +44,7 @@ export async function getThresholds(
         LIMIT 1
       `;
       if (agentRows.length > 0) {
-        return { ...PLATFORM_DEFAULTS, ...JSON.parse(String(agentRows[0].config_json)) };
+        return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(agentRows[0].config_json) };
       }
     }
 
@@ -54,7 +55,7 @@ export async function getThresholds(
       LIMIT 1
     `;
     if (orgRows.length > 0) {
-      return { ...PLATFORM_DEFAULTS, ...JSON.parse(String(orgRows[0].config_json)) };
+      return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(orgRows[0].config_json) };
     }
   } catch {
     // DB error — use platform defaults

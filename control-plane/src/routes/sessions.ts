@@ -8,6 +8,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const sessionRoutes = createOpenAPIRouter();
 
@@ -253,17 +254,21 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
   if (ownerCheck.length === 0) return c.json({ error: "Session not found" }, 404);
 
   const rows = await sql`
-    SELECT * FROM turns WHERE session_id = ${sessionId} ORDER BY turn_number
+    SELECT * FROM turns WHERE session_id = ${sessionId}
+      AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
+    ORDER BY turn_number
   `;
 
   return c.json(
     rows.map((r: any) => {
       let toolCalls: any[] = [];
+      let toolResults: any[] = [];
       let planArtifact: any = {};
       let reflection: any = {};
-      try { toolCalls = JSON.parse(r.tool_calls_json || "[]"); } catch {}
-      try { planArtifact = JSON.parse(r.plan_json || "{}"); } catch {}
-      try { reflection = JSON.parse(r.reflection_json || "{}"); } catch {}
+      toolCalls = parseJsonColumn(r.tool_calls_json, []);
+      toolResults = parseJsonColumn(r.tool_results_json, []);
+      try { planArtifact = JSON.parse(r.plan_artifact || "{}"); } catch {}
+      try { reflection = JSON.parse(r.reflection || "{}"); } catch {}
 
       return {
         turn_number: Number(r.turn_number || 0),
@@ -274,11 +279,11 @@ sessionRoutes.openapi(getSessionTurnsRoute, async (c): Promise<any> => {
         content: r.llm_content || "",
         cost_total_usd: Number(r.cost_total_usd || 0),
         tool_calls: toolCalls,
+        tool_results: toolResults,
         execution_mode: r.execution_mode || "sequential",
         plan_artifact: planArtifact,
         reflection,
-        started_at: Number(r.started_at || 0),
-        ended_at: Number(r.ended_at || 0),
+        created_at: r.created_at || null,
       };
     }),
   );
@@ -309,8 +314,10 @@ sessionRoutes.openapi(getSessionRuntimeRoute, async (c): Promise<any> => {
 
   // Build runtime profile from turns
   const turns = await sql`
-    SELECT turn_number, execution_mode, plan_json, reflection_json, latency_ms, cost_total_usd
-    FROM turns WHERE session_id = ${sessionId} ORDER BY turn_number
+    SELECT turn_number, execution_mode, plan_artifact, reflection, latency_ms, cost_total_usd
+    FROM turns WHERE session_id = ${sessionId}
+      AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
+    ORDER BY turn_number
   `;
 
   return c.json({
@@ -318,8 +325,8 @@ sessionRoutes.openapi(getSessionRuntimeRoute, async (c): Promise<any> => {
     turns: turns.map((t: any) => ({
       turn_number: Number(t.turn_number),
       execution_mode: t.execution_mode || "sequential",
-      plan: (() => { try { return JSON.parse(t.plan_json || "{}"); } catch { return {}; } })(),
-      reflection: (() => { try { return JSON.parse(t.reflection_json || "{}"); } catch { return {}; } })(),
+      plan: parseJsonColumn(t.plan_artifact),
+      reflection: parseJsonColumn(t.reflection),
       latency_ms: Number(t.latency_ms || 0),
       cost_total_usd: Number(t.cost_total_usd || 0),
     })),
@@ -354,7 +361,7 @@ sessionRoutes.openapi(getSessionTraceRoute, async (c): Promise<any> => {
   const traceId = sessionRows[0].trace_id;
 
   const sessions = await sql`
-    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at
+    SELECT * FROM sessions WHERE trace_id = ${traceId} AND org_id = ${user.org_id} ORDER BY created_at LIMIT 100
   `;
 
   // Cost rollup — scope to org via trace_id already validated above, but also filter by org_id
@@ -491,4 +498,112 @@ sessionRoutes.openapi(deleteSessionsRoute, async (c): Promise<any> => {
   const result = await sql`DELETE FROM sessions WHERE created_at < ${cutoff} AND org_id = ${user.org_id}`;
 
   return c.json({ deleted: result.count, before_days: beforeDays });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Phase 8.1: Session Search & Export
+// ══════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /search — Full-text search across sessions with filters
+ */
+sessionRoutes.get("/search", requireScope("sessions:read"), async (c) => {
+  const user = c.get("user") as CurrentUser;
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const q = c.req.query("q") || "";
+  const agentName = c.req.query("agent") || "";
+  const status = c.req.query("status") || "";
+  const minCost = Number(c.req.query("min_cost") || 0);
+  const limit = Math.min(Number(c.req.query("limit") || 20), 50);
+  const offset = Number(c.req.query("offset") || 0);
+
+  try {
+    // Escape LIKE wildcards (% and _) in search query to prevent unintended patterns
+    const escapedQ = q.toLowerCase().replace(/%/g, "\\%").replace(/_/g, "\\_");
+    let rows: any[];
+    if (q) {
+      rows = await sql`
+        SELECT session_id, agent_name, status, cost_total_usd,
+               LEFT(input_text, 100) as input_preview,
+               created_at
+        FROM sessions
+        WHERE org_id = ${user.org_id}
+          AND (LOWER(input_text) LIKE ${`%${escapedQ}%`} OR LOWER(output_text) LIKE ${`%${escapedQ}%`})
+          ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
+          ${status ? sql`AND status = ${status}` : sql``}
+          ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else {
+      rows = await sql`
+        SELECT session_id, agent_name, status, cost_total_usd,
+               LEFT(input_text, 100) as input_preview,
+               created_at
+        FROM sessions
+        WHERE org_id = ${user.org_id}
+          ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
+          ${status ? sql`AND status = ${status}` : sql``}
+          ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
+        ORDER BY created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    }
+    return c.json({ results: rows, query: q, limit, offset });
+  } catch (err) {
+    return c.json({ results: [], error: String(err) }, 500);
+  }
+});
+
+/**
+ * GET /:session_id/export — Export session as JSON or CSV
+ */
+sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c) => {
+  const user = c.get("user") as CurrentUser;
+  const sessionId = c.req.param("session_id");
+  const format = c.req.query("format") || "json";
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  try {
+    const session = await sql`
+      SELECT * FROM sessions WHERE session_id = ${sessionId} AND org_id = ${user.org_id}
+    `;
+    if (session.length === 0) return c.json({ error: "Session not found" }, 404);
+
+    const turns = await sql`
+      SELECT turn_number, model_used, llm_content, input_tokens, output_tokens,
+             cost_total_usd, latency_ms, tool_calls_json, tool_results_json
+      FROM turns WHERE session_id = ${sessionId}
+        AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${user.org_id})
+      ORDER BY turn_number ASC
+    `;
+
+    if (format === "csv") {
+      const header = "turn_number,model,input_tokens,output_tokens,cost_usd,latency_ms,content\n";
+      const rows = turns.map((t: any) =>
+        `${t.turn_number},"${t.model_used}",${t.input_tokens},${t.output_tokens},${t.cost_total_usd},${t.latency_ms},"${(t.llm_content || "").replace(/"/g, '""').slice(0, 500)}"`
+      ).join("\n");
+      return new Response(header + rows, {
+        headers: { "Content-Type": "text/csv", "Content-Disposition": `attachment; filename="session-${sessionId}.csv"` },
+      });
+    }
+
+    const parsedTurns = (turns as any[]).map((t) => {
+      let tool_calls: unknown[] = [];
+      let tool_results: unknown[] = [];
+      tool_calls = parseJsonColumn(t.tool_calls_json, []);
+      tool_results = parseJsonColumn(t.tool_results_json, []);
+      return {
+        ...t,
+        content: t.llm_content,
+        tool_calls,
+        tool_results,
+      };
+    });
+
+    return c.json({ session: session[0], turns: parsedTurns });
+  } catch (err) {
+    return c.json({ error: String(err) }, 500);
+  }
 });

@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, Sparkles, History, ChevronDown, X } from "lucide-react";
+import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, Sparkles, History, ChevronDown, X, FolderOpen } from "lucide-react";
 import { MetaAgentPanel } from "../components/MetaAgentPanel";
-import { ChatInterface } from "../components/ChatInterface";
+import { ChatInterface, type WorkspaceProject } from "../components/ChatInterface";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { api } from "../lib/api";
-import { useAgentStream, loadSessionList, deleteSession, type StoredSession } from "../lib/use-agent-stream";
+import { useAgentStream, loadSessionList, deleteSession, fetchServerSessions, type StoredSession } from "../lib/use-agent-stream";
 import { useNavigate } from "react-router-dom";
+import { timeAgo } from "../lib/time-ago";
 
 const AGENT_NAME = "my-assistant";
 
@@ -20,17 +21,32 @@ export default function MyAssistantPage() {
   const navigate = useNavigate();
   const [agent, setAgent] = useState<AgentInfo | null>(null);
   const [loading, setLoading] = useState(true);
-  const { messages, streaming, sessionMeta, send, stop, clear, loadHistory } = useAgentStream();
+  const { messages, streaming, sessionMeta, send, stop, clear, loadHistory, retry, setPlan } = useAgentStream();
   const [metaOpen, setMetaOpen] = useState(false);
+  const [activePlan, setActivePlan] = useState("standard");
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [sessions, setSessions] = useState<StoredSession[]>([]);
+  const [projects, setProjects] = useState<WorkspaceProject[]>([]);
+  const [activeProject, setActiveProject] = useState<string | null>(null);
 
   useEffect(() => {
     api.get<AgentInfo>(`/agents/${AGENT_NAME}`)
       .then((a) => {
         setAgent(a);
+        // Instant paint from cache, then server is source of truth
+        const cached = loadSessionList(AGENT_NAME);
+        if (cached.length > 0) setSessions(cached);
         loadHistory(AGENT_NAME);
-        setSessions(loadSessionList(AGENT_NAME));
+        // Server sessions replace cache — DB is authoritative
+        fetchServerSessions(AGENT_NAME, 30).then(serverSessions => {
+          setSessions(serverSessions.length > 0 ? serverSessions : cached);
+        });
+        // Load projects
+        api.get<{ projects?: Array<{ name: string; last_sync?: string; file_count?: number }> }>(
+          `/workspace/projects?agent_name=${encodeURIComponent(AGENT_NAME)}`,
+        ).then(res => {
+          if (res.projects) setProjects(res.projects.map(p => ({ name: p.name, lastSync: p.last_sync, fileCount: p.file_count })));
+        }).catch(() => {});
       })
       .catch(() => setAgent(null))
       .finally(() => setLoading(false));
@@ -40,6 +56,26 @@ export default function MyAssistantPage() {
     (text: string) => {
       if (!agent) return;
       send(agent.name, text);
+    },
+    [agent, send],
+  );
+
+  const handleSelectProject = useCallback(
+    (projectName: string) => {
+      setActiveProject(projectName || null);
+      if (projectName && agent) {
+        send(agent.name, `Load my project "${projectName}" — run load-project with project_name="${projectName}" and tell me what files are available.`);
+      }
+    },
+    [agent, send],
+  );
+
+  const handleCreateProject = useCallback(
+    (projectName: string) => {
+      if (!agent) return;
+      setActiveProject(projectName);
+      setProjects(prev => [...prev, { name: projectName }]);
+      send(agent.name, `Save our current workspace as project "${projectName}" using save-project.`);
     },
     [agent, send],
   );
@@ -68,7 +104,7 @@ export default function MyAssistantPage() {
     );
   }
 
-  const toolCount = (agent.config_json?.tools || []).length;
+  const toolCount = (agent as any).tools?.length || (agent.config_json?.tools || []).length;
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
@@ -108,7 +144,12 @@ export default function MyAssistantPage() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => { setSessions(loadSessionList(AGENT_NAME)); setSessionsOpen(!sessionsOpen); }}
+              onClick={() => {
+                setSessions(loadSessionList(AGENT_NAME));
+                setSessionsOpen(!sessionsOpen);
+                // Refresh from server in background
+                if (!sessionsOpen) fetchServerSessions(AGENT_NAME).then(s => { if (s.length > 0) setSessions(s); });
+              }}
               title="Session history"
             >
               <History size={14} />
@@ -129,7 +170,7 @@ export default function MyAssistantPage() {
                   >
                     <p className="text-xs font-medium text-text truncate">{s.title}</p>
                     <p className="text-[10px] text-text-muted mt-0.5">
-                      {s.messageCount} messages · {new Date(s.updatedAt).toLocaleDateString()}
+                      {s.messageCount} messages · {timeAgo(s.updatedAt)}
                     </p>
                   </button>
                 ))}
@@ -155,26 +196,40 @@ export default function MyAssistantPage() {
         </div>
       </div>
 
-      {/* Chat */}
-      <div className="flex-1 min-h-0">
-        <ChatInterface
-          messages={messages}
-          onSend={handleSend}
-          onStop={stop}
-          streaming={streaming}
-          sessionMeta={sessionMeta}
-          placeholder="Ask anything — search the web, run code, analyze data, hire specialists..."
-          suggestedPrompts={[
-            "Search the web for today's top AI news",
-            "Write a Python script to analyze my CSV data",
-            "Find the best deals on a laptop under $1000",
-            "Draft a professional email to a client",
-          ]}
-        />
-      </div>
+      {/* Chat + Meta panel */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
+        {/* Chat column — centered when alone, shifts left when meta is open */}
+        <div className={`flex-1 min-w-0 transition-all duration-300 ease-out ${metaOpen ? "" : "max-w-3xl mx-auto"}`}>
+          <ChatInterface
+            messages={messages}
+            onSend={handleSend}
+            onStop={stop}
+            onRetry={retry}
+            streaming={streaming}
+            sessionMeta={sessionMeta}
+            placeholder="Ask anything — search the web, run code, analyze data, hire specialists..."
+            suggestedPrompts={[
+              "Search the web for today's top AI news",
+              "Write a Python script to analyze my CSV data",
+              "Find the best deals on a laptop under $1000",
+              "Draft a professional email to a client",
+            ]}
+            projects={projects}
+            activeProject={activeProject}
+            onSelectProject={handleSelectProject}
+            onCreateProject={handleCreateProject}
+            activePlan={activePlan}
+            onChangePlan={(plan) => { setActivePlan(plan); setPlan(plan); }}
+          />
+        </div>
 
-      {/* Meta-agent panel */}
-      <MetaAgentPanel agentName={AGENT_NAME} open={metaOpen} onClose={() => setMetaOpen(false)} context="test" />
+        {/* Meta panel — sits beside chat, gets real space */}
+        {metaOpen && (
+          <div className="w-[40%] min-w-[360px] shrink-0">
+            <MetaAgentPanel agentName={AGENT_NAME} open={metaOpen} onClose={() => setMetaOpen(false)} context="test" />
+          </div>
+        )}
+      </div>
     </div>
   );
 }

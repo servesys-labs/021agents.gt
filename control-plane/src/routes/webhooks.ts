@@ -7,6 +7,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses, WebhookCreateBody } from "../schemas/openapi";
 import { getDb, getDbForOrg } from "../db/client";
 import { requireScope } from "../middleware/auth";
+import { parseJsonColumn } from "../lib/parse-json-column";
 
 export const webhookRoutes = createOpenAPIRouter();
 
@@ -346,7 +347,7 @@ webhookRoutes.openapi(replayDeliveryRoute, async (c): Promise<any> => {
   const delivery = deliveries[0] as any;
 
   let payload: any;
-  try { payload = JSON.parse(delivery.payload_json || "{}"); } catch { payload = {}; }
+  payload = parseJsonColumn(delivery.payload_json);
 
   try {
     const start = performance.now();
@@ -400,7 +401,7 @@ webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
   const sql = await getDb(c.env.HYPERDRIVE);
 
   const rows = await sql`
-    SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND is_active = 1
+    SELECT * FROM webhooks WHERE webhook_id = ${webhookId} AND is_active = true
   `;
   if (rows.length === 0) return c.json({ error: "Webhook not found or inactive" }, 404);
   const webhook = rows[0] as any;

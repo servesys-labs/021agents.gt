@@ -336,7 +336,7 @@ billingRoutes.openapi(getPricingRoute, async (c): Promise<any> => {
   const sql = await getDb(c.env.HYPERDRIVE);
 
   // Build query dynamically with filters
-  let query = "SELECT * FROM pricing_catalog WHERE is_active = 1";
+  let query = "SELECT * FROM pricing_catalog WHERE is_active = true";
   const params: (string | boolean)[] = [];
 
   if (resourceType) {
@@ -424,10 +424,10 @@ billingRoutes.openapi(upsertPricingRoute, async (c): Promise<any> => {
 
   // Deactivate existing active row for same key
   await sql`
-    UPDATE pricing_catalog SET is_active = 0
+    UPDATE pricing_catalog SET is_active = false
     WHERE provider = ${provider} AND model = ${model}
       AND resource_type = ${resourceType} AND operation = ${operation}
-      AND unit = ${unit} AND is_active = 1
+      AND unit = ${unit} AND is_active = true
   `;
 
   const [row] = await sql`

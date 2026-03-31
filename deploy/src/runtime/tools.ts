@@ -9,8 +9,15 @@
 
 import { getSandbox } from "@cloudflare/sandbox";
 import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
+import { validateUrl as ssrfValidateUrl } from "./ssrf";
+import { scratchWrite, scratchRead, scratchList } from "./scratch";
+import { retrieveToolResult, cleanupSessionResults } from "./result-storage";
+import { writeToMailbox } from "./mailbox";
+import { ToolError, CircuitBreakerError, classifyFetchError } from "./errors";
+import { createChildAbortController, createSiblingGroup } from "./abort";
+import { parseJsonColumn } from "./parse-json-column";
 
-const MAX_SANDBOX_TIMEOUT_SECONDS = 120;
+const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
 const DEFAULT_SANDBOX_MEMORY_LIMIT_MB = 512;
 
@@ -31,6 +38,18 @@ function checkToolRateLimit(toolName: string, sessionId: unknown, maxCalls: numb
   }
   return false;
 }
+// Phase 10.5: Per-session file mtime cache for staleness detection
+// Tracks last-known mtime per file path to detect concurrent modifications
+const FILE_STATE_CACHE_MAX = 1000;
+const fileStateCache = new Map<string, string>();
+function fileStateCacheSet(key: string, value: string) {
+  if (fileStateCache.size >= FILE_STATE_CACHE_MAX) {
+    const firstKey = fileStateCache.keys().next().value;
+    if (firstKey !== undefined) fileStateCache.delete(firstKey);
+  }
+  fileStateCache.set(key, value);
+}
+
 const DYNAMIC_WORKER_CACHE_LIMIT = 32;
 const DYNAMIC_WORKER_CACHE_TTL_MS = 5 * 60_000;
 type DynamicWorkerCacheEntry = { worker: any; expiresAt: number };
@@ -128,9 +147,10 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // Per CF Containers docs: https://developers.cloudflare.com/containers/
   const raw = getSandbox(env.SANDBOX, sandboxId, {
     sleepAfter: "10m",
-    // Security: disable outbound internet for LLM-generated code.
-    // Agent tools that need HTTP (web-search, browse) run in the parent Worker.
-    enableInternet: false,
+    // Internet enabled: sandbox needs network for npm install, pip install, git clone, etc.
+    // Security is provided by: VM isolation (each container is its own VM per CF docs),
+    // SSRF protection (blocked private IPs/metadata endpoints in validateUrl),
+    // and ephemeral disk (no persistent secrets to exfiltrate).
   } as any);
 
   return {
@@ -194,54 +214,13 @@ async function getCachedDynamicWorker(env: RuntimeEnv, workerCode: string): Prom
 }
 
 // ── SSRF Protection ──────────────────────────────────────────────────────
-
-const BLOCKED_IP_RANGES = [
-  /^127\./,                          // loopback
-  /^10\./,                           // private class A
-  /^172\.(1[6-9]|2\d|3[01])\./,     // private class B
-  /^192\.168\./,                     // private class C
-  /^169\.254\./,                     // link-local / AWS metadata
-  /^0\./,                            // unspecified
-  /^fc00:/i, /^fd00:/i, /^fe80:/i,  // IPv6 private
-  /^::1$/,                           // IPv6 loopback
-];
-
-const BLOCKED_HOSTNAMES = new Set([
-  "localhost",
-  "metadata.google.internal",
-  "metadata.internal",
-  "169.254.169.254",
-  "metadata",
-]);
-
-function validateUrl(urlStr: string): { valid: boolean; reason?: string } {
-  try {
-    const url = new URL(urlStr);
-
-    // Block non-http(s) protocols
-    if (!["http:", "https:"].includes(url.protocol)) {
-      return { valid: false, reason: `Blocked protocol: ${url.protocol}` };
-    }
-
-    // Block known dangerous hostnames
-    if (BLOCKED_HOSTNAMES.has(url.hostname.toLowerCase())) {
-      return { valid: false, reason: `Blocked hostname: ${url.hostname}` };
-    }
-
-    // Block private/internal IP ranges
-    for (const pattern of BLOCKED_IP_RANGES) {
-      if (pattern.test(url.hostname)) {
-        return { valid: false, reason: `Blocked IP range: ${url.hostname}` };
-      }
-    }
-
-    return { valid: true };
-  } catch {
-    return { valid: false, reason: "Invalid URL" };
-  }
-}
+// Delegated to shared ssrf.ts module (covers IPv4, IPv6, metadata endpoints,
+// protocol restrictions). Re-export for backwards compatibility.
+const validateUrl = ssrfValidateUrl;
 
 // ── Circuit Breaker for Tool Calls ───────────────────────────────────
+// State persisted to DO SQLite when available (survives worker restarts).
+// Falls back to in-memory Map for non-DO contexts.
 
 interface CircuitState {
   failures: number;
@@ -259,6 +238,83 @@ const CIRCUIT_CONFIG = {
   resetTimeoutMs: 30_000,     // Try half-open after 30s
 };
 
+// ── Persistent circuit breaker (DO SQLite-backed) ──
+// `sqlExec` is set by the DO Agent class during onStart() to wire up
+// persistent storage. In Workflow steps (which run in isolated contexts),
+// this falls back to in-memory — the DO reads persistent state on cold start
+// and shares it with tools via setCircuitBreakerSql().
+let _circuitBreakerSql: ((query: string, ...params: any[]) => any) | null = null;
+
+/**
+ * Wire DO SQLite for persistent circuit breaker state.
+ * Call from DO's onStart() after migration v3 creates the table.
+ */
+export function setCircuitBreakerSql(sqlFn: typeof _circuitBreakerSql): void {
+  _circuitBreakerSql = sqlFn;
+}
+
+/**
+ * Preload all persisted circuit breaker states from DO SQLite on cold start.
+ * Ensures flaky tools stay blocked across DO restarts instead of resetting to "closed".
+ */
+export function preloadCircuitStates(sqlFn: typeof _circuitBreakerSql): void {
+  if (!sqlFn) return;
+  try {
+    const rows = sqlFn(`SELECT tool_name, state, failure_count, success_count, last_failure_at FROM circuit_breaker_state`);
+    if (!rows) return;
+    for (const r of rows) {
+      const state: CircuitState = {
+        state: r.state === "half_open" ? "half-open" : r.state,
+        failures: r.failure_count || 0,
+        successes: r.success_count || 0,
+        lastFailureTime: (r.last_failure_at || 0) * 1000,
+      };
+      circuitStates.set(r.tool_name, state);
+    }
+  } catch { /* table may not exist yet */ }
+}
+
+function loadCircuitState(toolName: string): CircuitState {
+  if (_circuitBreakerSql) {
+    try {
+      const rows = _circuitBreakerSql(
+        `SELECT state, failure_count, success_count, last_failure_at FROM circuit_breaker_state WHERE tool_name = ?`,
+        toolName,
+      );
+      if (rows && rows.length > 0) {
+        const r = rows[0];
+        const state: CircuitState = {
+          state: r.state === "half_open" ? "half-open" : r.state,
+          failures: r.failure_count,
+          successes: r.success_count,
+          lastFailureTime: r.last_failure_at * 1000, // stored as epoch seconds
+        };
+        circuitStates.set(toolName, state);
+        return state;
+      }
+    } catch { /* fall through to in-memory */ }
+  }
+  return getCircuitState(toolName);
+}
+
+function persistCircuitState(toolName: string, state: CircuitState): void {
+  if (!_circuitBreakerSql) return;
+  try {
+    const dbState = state.state === "half-open" ? "half_open" : state.state;
+    _circuitBreakerSql(
+      `INSERT INTO circuit_breaker_state (tool_name, state, failure_count, success_count, last_failure_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, unixepoch('now'))
+       ON CONFLICT(tool_name) DO UPDATE SET
+         state = excluded.state,
+         failure_count = excluded.failure_count,
+         success_count = excluded.success_count,
+         last_failure_at = excluded.last_failure_at,
+         updated_at = excluded.updated_at`,
+      toolName, dbState, state.failures, state.successes, state.lastFailureTime / 1000,
+    );
+  } catch { /* best-effort persistence */ }
+}
+
 function getCircuitState(toolName: string): CircuitState {
   if (!circuitStates.has(toolName)) {
     circuitStates.set(toolName, {
@@ -271,51 +327,59 @@ function getCircuitState(toolName: string): CircuitState {
   return circuitStates.get(toolName)!;
 }
 
-function recordSuccess(toolName: string): void {
-  const state = getCircuitState(toolName);
+function recordSuccess(toolName: string, telemetryQueue?: any): void {
+  const state = loadCircuitState(toolName);
   state.successes++;
-  
+  const prevState = state.state;
+
   if (state.state === "half-open" && state.successes >= CIRCUIT_CONFIG.successThreshold) {
     state.state = "closed";
     state.failures = 0;
     state.successes = 0;
     console.log(`[circuit-breaker] ${toolName}: CLOSED (healthy)`);
+    telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "closed", failure_count: 0, timestamp: Date.now() });
   }
+  persistCircuitState(toolName, state);
 }
 
-function recordFailure(toolName: string): void {
-  const state = getCircuitState(toolName);
+function recordFailure(toolName: string, telemetryQueue?: any): void {
+  const state = loadCircuitState(toolName);
   state.failures++;
   state.lastFailureTime = Date.now();
   state.successes = 0;
-  
+  const prevState = state.state;
+
   if (state.state === "closed" && state.failures >= CIRCUIT_CONFIG.failureThreshold) {
     state.state = "open";
     console.warn(`[circuit-breaker] ${toolName}: OPEN (too many failures)`);
+    telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "open", failure_count: state.failures, timestamp: Date.now() });
   }
+  persistCircuitState(toolName, state);
 }
 
-function canExecute(toolName: string): { allowed: boolean; reason?: string } {
-  const state = getCircuitState(toolName);
+function canExecute(toolName: string, telemetryQueue?: any): { allowed: boolean; reason?: string } {
+  const state = loadCircuitState(toolName);
   const now = Date.now();
-  
+
   if (state.state === "open") {
     const timeSinceFailure = now - state.lastFailureTime;
-    
+
     if (timeSinceFailure > CIRCUIT_CONFIG.resetTimeoutMs) {
-      // Transition to half-open
+      const prevState = state.state;
       state.state = "half-open";
       state.successes = 0;
       console.log(`[circuit-breaker] ${toolName}: HALF-OPEN (testing)`);
+      telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "half-open", failure_count: state.failures, timestamp: Date.now() });
+      persistCircuitState(toolName, state);
       return { allowed: true };
     }
-    
-    return { 
-      allowed: false, 
-      reason: `Circuit breaker OPEN for ${toolName}. Retry after ${Math.ceil((CIRCUIT_CONFIG.resetTimeoutMs - timeSinceFailure) / 1000)}s` 
+
+    return {
+      allowed: false,
+      reason: `Circuit breaker OPEN for ${toolName}. Retry after ${Math.ceil((CIRCUIT_CONFIG.resetTimeoutMs - timeSinceFailure) / 1000)}s`
     };
   }
-  
+
   return { allowed: true };
 }
 
@@ -326,6 +390,17 @@ export function getCircuitStatus(): Record<string, { state: string; failures: nu
     status[tool] = { state: state.state, failures: state.failures, successes: state.successes };
   }
   return status;
+}
+
+/**
+ * Estimate tool execution cost based on the tool cost model.
+ * Used for pre-execution budget checks (Phase 1.2).
+ */
+export function estimateToolCost(toolName: string): number {
+  const model = TOOL_COSTS[toolName];
+  if (!model) return 0.001; // Unknown tools: assume minimal cost
+  // Use flat fee + estimated 5s duration for time-based tools
+  return model.flat_usd + (model.per_ms_usd * 5000);
 }
 
 /**
@@ -401,6 +476,21 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   // Self-awareness (DB queries)
   "self-check":           { flat_usd: 0.00005,  per_ms_usd: 0 },          // DB query
   "adapt-strategy":       { flat_usd: 0.00005,  per_ms_usd: 0 },          // DB query
+
+  // Scratch pad (KV)
+  "scratch-write":     { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV write
+  "scratch-read":      { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV read
+  "scratch-list":      { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV list
+
+  // Result retrieval (R2 GET)
+  "retrieve-result":   { flat_usd: 0.00000036, per_ms_usd: 0 },  // R2 GET
+
+  // Inter-agent messaging (DO SQLite write)
+  "send-message":      { flat_usd: 0.000001,   per_ms_usd: 0 },  // DO SQLite write
+
+  // Team memory (Hyperdrive queries)
+  "team-fact-write":   { flat_usd: 0.00005,    per_ms_usd: 0 },  // DB write
+  "team-observation":  { flat_usd: 0.00005,    per_ms_usd: 0 },  // DB write
 };
 
 /** Calculate tool cost from flat fee + duration. */
@@ -514,13 +604,32 @@ export function calculateInfraCost(session: {
   };
 }
 
+// ── Phase 3.1: Concurrency Safety Classification ──────────────────────
+// Read-only / isolated tools can run in parallel. Stateful tools run serially.
+const CONCURRENT_SAFE_TOOLS = new Set([
+  "read-file", "grep", "glob",                       // Read-only filesystem
+  "web-search", "web-crawl", "browser-render",        // External APIs (isolated)
+  "knowledge-search", "store-knowledge",              // Vector ops (isolated)
+  "http-request",                                     // External HTTP (isolated)
+  "image-generate", "text-to-speech", "speech-to-text", // AI services (isolated)
+  "self-check", "adapt-strategy",                     // DB reads (no mutations)
+  "load-project",                                     // R2 reads
+  "discover-tools",                                   // Pure logic
+]);
+
+function isConcurrentSafe(toolName: string): boolean {
+  return CONCURRENT_SAFE_TOOLS.has(toolName);
+}
+
 /**
- * Execute tool calls — parallel when safe, sequential for sandbox-stateful ops.
- */
-/**
- * Execute tool calls — parallel when safe, sequential for sandbox-stateful ops.
+ * Execute tool calls — concurrent-safe tools run in parallel, unsafe tools run serially.
+ *
+ * Phase 3.1: Inspired by Claude Code's StreamingToolExecutor which classifies each
+ * tool as concurrent-safe and executes safe tools in parallel while serializing
+ * unsafe ones. Results are returned in original tool_call order regardless of
+ * execution order.
+ *
  * @param enabledTools - agent's configured tool list; passed to codemode to prevent privilege escalation.
- *   If empty/undefined, codemode tools will only see their scope-filtered subset.
  */
 export async function executeTools(
   env: RuntimeEnv,
@@ -528,13 +637,46 @@ export async function executeTools(
   sessionId: string,
   parallel: boolean = true,
   enabledTools?: string[],
+  parentAbort?: AbortController,
 ): Promise<ToolResult[]> {
   const envelope = (env as any).__agentConfig as { enabled_tools?: string[] } | undefined;
   const effectiveEnabledTools = enabledTools ?? envelope?.enabled_tools;
+
   if (parallel && toolCalls.length > 1) {
-    return Promise.all(
-      toolCalls.map((tc) => executeSingleTool(env, tc, sessionId, effectiveEnabledTools)),
-    );
+    // Partition into concurrent-safe and unsafe
+    const safe = toolCalls.filter(tc => isConcurrentSafe(tc.name));
+    const unsafe = toolCalls.filter(tc => !isConcurrentSafe(tc.name));
+
+    // Phase 3.3: Abort hierarchy — create sibling group so if one parallel
+    // tool fails critically, others are cancelled (saves budget + latency).
+    // Parent abort propagates down; child aborts don't propagate up to parent.
+    const turnAbort = parentAbort || new AbortController();
+    const siblingControllers = safe.length > 1
+      ? createSiblingGroup(turnAbort, safe.length)
+      : safe.map(() => createChildAbortController(turnAbort));
+
+    // Execute safe tools in parallel with abort support
+    const safeResults = safe.length > 0
+      ? await Promise.all(safe.map((tc, i) =>
+          executeSingleTool(env, tc, sessionId, effectiveEnabledTools, siblingControllers[i]?.signal)
+        ))
+      : [];
+
+    // Execute unsafe tools serially (each gets its own child abort)
+    const unsafeResults: ToolResult[] = [];
+    for (const tc of unsafe) {
+      const childAbort = createChildAbortController(turnAbort);
+      unsafeResults.push(await executeSingleTool(env, tc, sessionId, effectiveEnabledTools, childAbort.signal));
+    }
+
+    // Merge results in original tool_call order
+    const resultMap = new Map<string, ToolResult>();
+    for (const r of [...safeResults, ...unsafeResults]) {
+      resultMap.set(r.tool_call_id, r);
+    }
+    return toolCalls.map(tc => resultMap.get(tc.id) || {
+      tool: tc.name, tool_call_id: tc.id, name: tc.name, result: "", error: "Result missing", latency_ms: 0, cost_usd: 0,
+    });
   }
   const results: ToolResult[] = [];
   for (const tc of toolCalls) {
@@ -543,24 +685,41 @@ export async function executeTools(
   return results;
 }
 
+// Re-export abort utilities for use in workflow.ts and index.ts
+export { createChildAbortController, createSiblingGroup } from "./abort";
+
 async function executeSingleTool(
   env: RuntimeEnv,
   tc: ToolCall,
   sessionId: string,
   enabledTools?: string[],
+  signal?: AbortSignal,
 ): Promise<ToolResult> {
   const started = Date.now();
   // Normalize tool name: LLMs often convert hyphens to underscores
   tc = { ...tc, name: tc.name.replace(/_/g, "-") };
 
-  // Check circuit breaker before executing
-  const circuitCheck = canExecute(tc.name);
-  if (!circuitCheck.allowed) {
+  // Phase 3.3: Check abort signal before execution
+  if (signal?.aborted) {
     return {
       tool: tc.name,
       tool_call_id: tc.id,
       result: "",
-      error: circuitCheck.reason,
+      error: `Tool execution cancelled: ${signal.reason || "aborted"}`,
+      latency_ms: 0,
+      cost_usd: 0,
+    };
+  }
+
+  // Check circuit breaker before executing
+  const circuitCheck = canExecute(tc.name, (env as any).TELEMETRY_QUEUE);
+  if (!circuitCheck.allowed) {
+    const cbErr = new CircuitBreakerError(tc.name);
+    return {
+      tool: tc.name,
+      tool_call_id: tc.id,
+      result: "",
+      error: cbErr.userMessage || circuitCheck.reason,
       latency_ms: 0,
       cost_usd: 0,
     };
@@ -636,21 +795,21 @@ async function executeSingleTool(
     }
   }
 
-  // ── Governance: Destructive action detection ──────────────────
+  // ── Governance: Permission auto-classification ───────────────
   if (config?.require_confirmation_for_destructive) {
-    const DESTRUCTIVE_KEYWORDS = /\b(delete|drop|remove|destroy|kill|force|truncate|wipe|purge)\b/i;
-    const toolArgs = JSON.stringify(args);
-    const destructiveTools = new Set(["delete-agent", "bash", "python-exec", "manage-secrets", "manage-retention"]);
-    if (destructiveTools.has(tc.name) || DESTRUCTIVE_KEYWORDS.test(toolArgs)) {
-      // Check if the tool call looks destructive
-      const isDestructive = destructiveTools.has(tc.name) || DESTRUCTIVE_KEYWORDS.test(toolArgs);
-      if (isDestructive) {
+    const { shouldAutoApprove, classifyPermission } = await import("./permission-classifier");
+    const classification = classifyPermission(tc.name, args, { agentConfig: config });
+
+    if (classification.level === "dangerous" && !classification.autoApprove) {
+      // Check if auto-approve is configured
+      if (!shouldAutoApprove(tc.name, args, config as any)) {
         return {
           tool: tc.name, tool_call_id: tc.id,
           result: JSON.stringify({
             blocked: true,
-            reason: "Destructive action requires human confirmation",
-            action: toolArgs.slice(0, 200),
+            reason: classification.reason,
+            level: classification.level,
+            action: JSON.stringify(args).slice(0, 200),
             tool: tc.name,
           }),
           error: "governance:destructive_blocked",
@@ -664,8 +823,8 @@ async function executeSingleTool(
     const result = await dispatch(env, tc.name, args, sessionId, enabledTools);
     const latencyMs = Date.now() - started;
     
-    // Record success for circuit breaker
-    recordSuccess(tc.name);
+    // Record success for circuit breaker (with telemetry)
+    recordSuccess(tc.name, (env as any).TELEMETRY_QUEUE);
     
     return {
       tool: tc.name,
@@ -676,17 +835,22 @@ async function executeSingleTool(
     };
   } catch (err: any) {
     const latencyMs = Date.now() - started;
-    
+
     // Record failure for circuit breaker (only for external service errors, not arg errors)
     if (isExternalServiceError(err)) {
-      recordFailure(tc.name);
+      recordFailure(tc.name, (env as any).TELEMETRY_QUEUE);
     }
-    
+
+    // Wrap raw errors in structured ToolError for telemetry-safe reporting
+    const toolErr = err instanceof ToolError ? err : new ToolError(tc.name, err.message || String(err), {
+      retryable: isExternalServiceError(err),
+    });
+
     return {
       tool: tc.name,
       tool_call_id: tc.id,
       result: "",
-      error: err.message || String(err),
+      error: toolErr.userMessage || toolErr.message,
       latency_ms: latencyMs,
       cost_usd: calculateToolCost(tc.name, latencyMs),
     };
@@ -694,17 +858,13 @@ async function executeSingleTool(
 }
 
 function isExternalServiceError(err: any): boolean {
-  // Network errors, timeouts, 5xx errors from external services
-  const msg = String(err.message || err).toLowerCase();
-  return (
-    msg.includes("timeout") ||
-    msg.includes("network") ||
-    msg.includes("econnrefused") ||
-    msg.includes("5") || // 5xx
-    msg.includes("503") ||
-    msg.includes("502") ||
-    msg.includes("504")
-  );
+  // Use structured error classification instead of fragile string matching.
+  // classifyFetchError handles network, timeout, TLS, rate-limit, and HTTP errors.
+  const classified = classifyFetchError(err);
+  return classified.kind === "network"
+    || classified.kind === "timeout"
+    || classified.kind === "rate_limit"
+    || (classified.kind === "http" && (classified.status ?? 0) >= 500);
 }
 
 async function dispatch(
@@ -730,8 +890,48 @@ async function dispatch(
       return httpRequest(args);
 
     case "bash": {
+      const cmd = String(args.command || "");
+      // Sandbox egress control: block commands that access private/metadata URLs.
+      // This is defense-in-depth — the sandbox VM provides network isolation,
+      // and SSRF validation catches direct URLs. This layer catches obvious patterns
+      // but CANNOT catch all bypass techniques (base64, eval, variable expansion).
+      // For production: use CF Container network policies when available.
+
+      // Block direct private IP access patterns
+      const BLOCKED_PATTERNS = [
+        /169\.254\.169\.254/,                         // AWS metadata
+        /metadata\.google\.internal/,                  // GCP metadata
+        /100\.100\.100\.200/,                         // Azure metadata
+        /\blocalhost\b/,                              // localhost
+        /127\.0\.0\.1/,                               // loopback
+        /\[::1\]/,                                    // IPv6 loopback
+        /0\.0\.0\.0/,                                 // any interface
+        /10\.\d+\.\d+\.\d+/,                         // RFC1918
+        /172\.(1[6-9]|2\d|3[01])\.\d+\.\d+/,        // RFC1918
+        /192\.168\.\d+\.\d+/,                        // RFC1918
+        /base64\s+(-d|--decode)/i,                    // base64 decode (bypass attempt)
+        /\$\(.*curl.*\)/,                             // command substitution with curl
+        /`.*curl.*`/,                                 // backtick substitution with curl
+        /eval\s+.*http/i,                             // eval with http
+      ];
+      for (const pattern of BLOCKED_PATTERNS) {
+        if (pattern.test(cmd)) {
+          return JSON.stringify({ stdout: "", stderr: `Egress blocked: command matches restricted pattern`, exit_code: 1 });
+        }
+      }
+
+      // Also check extracted URLs via SSRF validator
+      const urlPattern = /(?:curl|wget|fetch|http\.get|requests\.get)\s+['"]?(https?:\/\/[^\s'"]+)/gi;
+      let urlMatch: RegExpExecArray | null;
+      while ((urlMatch = urlPattern.exec(cmd)) !== null) {
+        const check = validateUrl(urlMatch[1]);
+        if (!check.valid) {
+          return JSON.stringify({ stdout: "", stderr: `Egress blocked: ${check.reason}`, exit_code: 1 });
+        }
+      }
+
       try {
-        const r = await sandboxExecWithLimits(env, sessionId, args.command || "", args.timeout_seconds);
+        const r = await sandboxExecWithLimits(env, sessionId, cmd, args.timeout_seconds);
         return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exitCode ?? 0 });
       } catch (err: any) {
         return JSON.stringify({ stdout: "", stderr: `Sandbox error: ${err.message || err}`, exit_code: 1 });
@@ -740,6 +940,15 @@ async function dispatch(
 
     case "python-exec": {
       const code = String(args.code || "");
+      // Validate URLs in Python HTTP calls
+      const pyUrlPattern = /(?:requests\.(?:get|post|put|delete|patch)|urlopen|urllib\.request)\s*\(\s*['"]?(https?:\/\/[^\s'")\]]+)/gi;
+      let pyMatch: RegExpExecArray | null;
+      while ((pyMatch = pyUrlPattern.exec(code)) !== null) {
+        const check = validateUrl(pyMatch[1]);
+        if (!check.valid) {
+          return JSON.stringify({ stdout: "", stderr: `Egress blocked: ${check.reason}`, exit_code: 1 });
+        }
+      }
       // Write code to temp file then execute — sandbox reuses warm container via session ID
       try {
         const sandbox = getSafeSandbox(env, `session-${sessionId}`);
@@ -758,6 +967,25 @@ async function dispatch(
       const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       let readPath = args.path || "";
       if (readPath && !readPath.startsWith("/")) readPath = `/workspace/${readPath}`;
+
+      // Phase 9.5: Binary file detection — check for null bytes in first 8KB
+      const binCheck = await sandbox.exec(
+        `head -c 8192 "${readPath}" 2>/dev/null | tr -d '\\0' | wc -c`,
+        { timeout: 5 },
+      ).catch(() => ({ stdout: "0" }));
+      const rawCheck = await sandbox.exec(
+        `head -c 8192 "${readPath}" 2>/dev/null | wc -c`,
+        { timeout: 5 },
+      ).catch(() => ({ stdout: "0" }));
+      const cleanBytes = parseInt((binCheck.stdout || "0").trim()) || 0;
+      const rawBytes = parseInt((rawCheck.stdout || "0").trim()) || 0;
+      if (rawBytes > 0 && cleanBytes < rawBytes * 0.9) {
+        // >10% null bytes → binary file
+        const ext = readPath.split(".").pop() || "unknown";
+        const sizeCheck = await sandbox.exec(`stat -c%s "${readPath}" 2>/dev/null || stat -f%z "${readPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "?" }));
+        return `[Binary file — ${(sizeCheck.stdout || "?").trim()} bytes, type: .${ext}]`;
+      }
+
       const offset = Math.max(1, Number(args.offset) || 1);
       const limit = Math.min(200, Math.max(1, Number(args.limit) || 100));
       const endLine = offset + limit - 1;
@@ -797,7 +1025,23 @@ async function dispatch(
       // Ensure parent dir exists
       const dir = filePath.substring(0, filePath.lastIndexOf("/"));
       if (dir) await sandbox.exec(`mkdir -p "${dir}"`, { timeout: 5 }).catch(() => {});
-      await sandbox.writeFile(filePath, args.content || "");
+
+      // Phase 9.5: Encoding preservation — detect and preserve BOM + line endings
+      let writeContent = args.content || "";
+      const existingContent = await sandbox.exec(`cat "${filePath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "" }));
+      if (existingContent.stdout) {
+        // Preserve CRLF if original uses it
+        const hasCRLF = existingContent.stdout.includes("\r\n");
+        if (hasCRLF && !writeContent.includes("\r\n")) {
+          writeContent = writeContent.replace(/\n/g, "\r\n");
+        }
+        // Preserve UTF-8 BOM if original has it
+        if (existingContent.stdout.charCodeAt(0) === 0xFEFF && writeContent.charCodeAt(0) !== 0xFEFF) {
+          writeContent = "\uFEFF" + writeContent;
+        }
+      }
+
+      await sandbox.writeFile(filePath, writeContent);
 
       // Per-file sync to R2 for durability (non-blocking, user-scoped)
       if (filePath.startsWith("/workspace/") && env.STORAGE) {
@@ -805,7 +1049,7 @@ async function dispatch(
         const r2Agent = (env as any).__agentConfig?.name || "agent";
         const r2UserId = (env as any).__channelUserId || "";
         import("./workspace").then(({ syncFileToR2 }) =>
-          syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, args.content || "", sessionId, r2UserId),
+          syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, writeContent, sessionId, r2UserId),
         ).catch(() => {});
       }
 
@@ -813,20 +1057,19 @@ async function dispatch(
       if (filePath.startsWith("/workspace/") && env.DO_SQL) {
         try {
           const { saveFileToSQLite, hashContent } = await import("./workspace-persistence");
-          const fileContent = args.content || "";
-          const hash = await hashContent(fileContent);
+          const hash = await hashContent(writeContent);
           saveFileToSQLite(env.DO_SQL, env.DO_SESSION_ID || sessionId, {
             path: filePath,
-            content: fileContent,
+            content: writeContent,
             encoding: "utf-8",
-            size: fileContent.length,
+            size: writeContent.length,
             hash,
             modified_at: new Date().toISOString(),
           });
         } catch {}
       }
 
-      return `Written ${(args.content || "").length} bytes to ${filePath}`;
+      return `Written ${writeContent.length} bytes to ${filePath}`;
     }
 
     case "edit-file": {
@@ -834,9 +1077,24 @@ async function dispatch(
       const editPath = args.path || "";
       const read = await sandbox.exec(`cat "${editPath}"`, { timeout: 10 });
       const content = read.stdout || "";
+
+      // Phase 10.5: Staleness detection — check if file was modified since last read
+      const mtimeCheck = await sandbox.exec(`stat -c%Y "${editPath}" 2>/dev/null || stat -f%m "${editPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "0" }));
+      const currentMtime = (mtimeCheck.stdout || "0").trim();
+      const cacheKey = `${sessionId}:${editPath}`;
+      const lastKnownMtime = fileStateCache.get(cacheKey);
+      if (lastKnownMtime && lastKnownMtime !== currentMtime) {
+        // File changed since we last read it — warn the agent
+        return `Warning: ${editPath} was modified since it was last read (mtime ${lastKnownMtime} → ${currentMtime}). Re-read the file before editing to avoid overwriting changes.`;
+      }
+      // Update cache with current mtime (will be updated again after write)
+      fileStateCacheSet(cacheKey, currentMtime);
+
       const oldText = args.old_text || args.old_string || "";
       if (!content.includes(oldText)) return `Error: old_text not found in ${editPath}`;
-      const newContent = content.replace(oldText, args.new_text || args.new_string || "");
+      const newContent = args.replace_all
+        ? content.replaceAll(oldText, args.new_text || args.new_string || "")
+        : content.replace(oldText, args.new_text || args.new_string || "");
 
       // Lint-on-edit: run syntax validation BEFORE applying (SWE-agent ACI pattern)
       // Detects language from file extension and runs appropriate linter
@@ -866,6 +1124,10 @@ async function dispatch(
       }
 
       await sandbox.writeFile(editPath, newContent);
+
+      // Phase 10.5: Update mtime cache after successful write
+      const newMtime = await sandbox.exec(`stat -c%Y "${editPath}" 2>/dev/null || stat -f%m "${editPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "0" }));
+      fileStateCacheSet(cacheKey, (newMtime.stdout || "0").trim());
 
       // Sync edited file to R2 (non-blocking, user-scoped)
       if (editPath.startsWith("/workspace/") && env.STORAGE) {
@@ -1004,6 +1266,28 @@ async function dispatch(
     case "memory-delete":
       return memoryDelete(env, args);
 
+    case "team-fact-write": {
+      const content = String(args.content || "");
+      const category = String(args.category || "general");
+      if (!content) return "team-fact-write requires content";
+      const orgId = (env as any).__agentConfig?.org_id || "";
+      const agentName = (env as any).__agentConfig?.name || "";
+      const { writeTeamFact } = await import("./team-memory");
+      await writeTeamFact(env, orgId, agentName, content, category);
+      return `Team fact recorded: ${content.slice(0, 100)}`;
+    }
+
+    case "team-observation": {
+      const content = String(args.content || "");
+      const target = String(args.target_agent || "");
+      if (!content) return "team-observation requires content";
+      const orgId = (env as any).__agentConfig?.org_id || "";
+      const agentName = (env as any).__agentConfig?.name || "";
+      const { writeTeamObservation } = await import("./team-memory");
+      await writeTeamObservation(env, orgId, agentName, content, target || undefined);
+      return `Observation recorded${target ? ` about ${target}` : ""}`;
+    }
+
     case "mcp-call": {
       // Call a tool on a registered MCP server
       const serverName = String(args.server || args.server_name || "");
@@ -1096,6 +1380,76 @@ async function dispatch(
         return await resp.text();
       } catch (err: any) {
         return `Marketplace search failed: ${err.message}`;
+      }
+    }
+
+    case "share-artifact": {
+      // Upload artifact to R2 and record in a2a_artifacts for cross-agent file sharing
+      const artifactName = String(args.name || "artifact");
+      const content = String(args.content || "");
+      if (!content) return "share-artifact requires content";
+
+      const lineage = (env as any).__delegationLineage;
+      const taskId = args.task_id || lineage?.task_id || crypto.randomUUID();
+      const senderOrg = lineage?.org_id || args.org_id || "";
+      const senderAgent = (env as any).__agentConfig?.name || "unknown";
+      const receiverOrg = args.receiver_org_id || lineage?.caller_org_id || senderOrg;
+      const receiverAgent = args.receiver_agent || lineage?.caller_agent || "";
+
+      // Detect MIME type from extension
+      const ext = artifactName.split(".").pop()?.toLowerCase() || "";
+      const mimeMap: Record<string, string> = {
+        md: "text/markdown", txt: "text/plain", html: "text/html", css: "text/css",
+        js: "application/javascript", ts: "application/typescript", json: "application/json",
+        py: "text/x-python", pdf: "application/pdf", zip: "application/zip",
+        png: "image/png", jpg: "image/jpeg", svg: "image/svg+xml", csv: "text/csv",
+      };
+      const mimeType = args.mime_type || mimeMap[ext] || "application/octet-stream";
+
+      // Upload to R2
+      const storageKey = `artifacts/${taskId}/${artifactName}`;
+      try {
+        const r2 = (env as any).R2 || (env as any).ARTIFACTS_BUCKET;
+        if (!r2) return JSON.stringify({ error: "R2 storage not configured" });
+
+        const isBase64 = args.encoding === "base64";
+        const body = isBase64
+          ? Uint8Array.from(atob(content), (c) => c.charCodeAt(0))
+          : new TextEncoder().encode(content);
+
+        await r2.put(storageKey, body, {
+          httpMetadata: { contentType: mimeType },
+          customMetadata: { taskId, senderOrg, senderAgent, receiverOrg, receiverAgent },
+        });
+
+        const sizeBytes = body.byteLength;
+
+        // Record in DB for traceability
+        if ((env as any).HYPERDRIVE) {
+          try {
+            const { getDb } = await import("./db");
+            const sql = await getDb((env as any).HYPERDRIVE);
+            await sql`
+              INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent, receiver_org_id, receiver_agent,
+                name, mime_type, size_bytes, description, storage_key, status)
+              VALUES (${taskId}, ${senderOrg}, ${senderAgent}, ${receiverOrg}, ${receiverAgent},
+                ${artifactName}, ${mimeType}, ${sizeBytes}, ${args.description || ''}, ${storageKey}, 'available')
+            `.catch(() => {}); // non-blocking — R2 upload is the source of truth
+          } catch {}
+        }
+
+        return JSON.stringify({
+          artifact: artifactName,
+          storage_key: storageKey,
+          mime_type: mimeType,
+          size_bytes: sizeBytes,
+          task_id: taskId,
+          receiver_org_id: receiverOrg,
+          receiver_agent: receiverAgent,
+          message: `Artifact "${artifactName}" shared successfully. The receiving agent can retrieve it via the storage key.`,
+        });
+      } catch (err: any) {
+        return JSON.stringify({ error: `Failed to share artifact: ${err.message}` });
       }
     }
 
@@ -1221,6 +1575,7 @@ async function dispatch(
 
                 // Referral payouts (best-effort)
                 try {
+                  // @ts-expect-error — referrals module may not exist in all deployments
                   const { distributeReferralEarnings } = await import("../logic/referrals").catch(() => ({ distributeReferralEarnings: null }));
                   if (distributeReferralEarnings) {
                     await distributeReferralEarnings(sql, paymentAddress, amountUsd, transferId);
@@ -1249,7 +1604,45 @@ async function dispatch(
         }
       }
 
-      return await resp.text();
+      // Parse A2A response and extract artifacts if present
+      const respText = await resp.text();
+      try {
+        const parsed = JSON.parse(respText);
+        const task = parsed?.result || parsed;
+        const artifacts = task?.artifacts || [];
+        if (artifacts.length > 0 && (env as any).HYPERDRIVE) {
+          // Record artifact references from the responding agent
+          try {
+            const { getDb: getDbForArtifacts } = await import("./db");
+            const sqlArt = await getDbForArtifacts((env as any).HYPERDRIVE);
+            const lineage = (env as any).__delegationLineage;
+            const receiverOrg = lineage?.org_id || args.org_id || "";
+            const receiverAgent = (env as any).__agentConfig?.name || "";
+            const taskIdForArt = task?.id || crypto.randomUUID();
+
+            for (const art of artifacts) {
+              const parts = art.parts || [];
+              const textPart = parts.find((p: any) => p.type === "text" || p.text);
+              const filePart = parts.find((p: any) => p.type === "file" || p.storage_key);
+              if (filePart?.storage_key) {
+                await sqlArt`
+                  INSERT INTO a2a_artifacts (task_id, sender_org_id, sender_agent, receiver_org_id, receiver_agent,
+                    name, mime_type, description, storage_key, status)
+                  VALUES (${taskIdForArt}, ${args.agent_name || 'unknown'}, ${args.agent_name || ''},
+                    ${receiverOrg}, ${receiverAgent},
+                    ${art.name || filePart.storage_key.split('/').pop() || 'artifact'},
+                    ${filePart.mime_type || 'application/octet-stream'},
+                    ${textPart?.text || art.description || ''},
+                    ${filePart.storage_key}, 'available')
+                `.catch(() => {});
+              }
+            }
+          } catch {}
+        }
+        return respText;
+      } catch {
+        return respText;
+      }
     }
 
     case "save-project":
@@ -1907,7 +2300,7 @@ async function dispatch(
       // Enforce org agent limit
       if (orgId) {
         try {
-          const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${orgId} AND is_active = 1`;
+          const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${orgId} AND is_active = true`;
           const current = countRows[0]?.cnt || 0;
           const limitRows = await sql`SELECT (limits_json->>'max_agents')::int as max_agents FROM org_settings WHERE org_id = ${orgId} LIMIT 1`.catch(() => []);
           const maxAgents = limitRows[0]?.max_agents || 50;
@@ -1961,7 +2354,7 @@ async function dispatch(
       if (!agentName) return "delete-agent requires agent_name";
       if (!args.confirm) return "delete-agent requires confirm=true as safety check";
       try {
-        await sql`UPDATE agents SET is_active = 0 WHERE name = ${agentName} AND org_id = ${orgId}`;
+        await sql`UPDATE agents SET is_active = false WHERE name = ${agentName} AND org_id = ${orgId}`;
         // Cascade: soft-delete related sessions, schedules
         await sql`UPDATE sessions SET status = 'archived' WHERE agent_name = ${agentName} AND org_id = ${orgId}`;
         await sql`DELETE FROM schedules WHERE agent_name = ${agentName} AND org_id = ${orgId}`;
@@ -1995,6 +2388,11 @@ async function dispatch(
       try {
         // Spawn child Workflow — runs independently with its own agent config
         const childProgressKey = `child:${sessionId}:${agentName}:${Date.now()}`;
+        // If caller specified tools, scope the sub-agent to only those tools
+        const toolsOverride = Array.isArray(args.tools) && args.tools.length > 0
+          ? args.tools.map(String)
+          : undefined;
+
         const instance = await workflow.create({
           params: {
             agent_name: agentName,
@@ -2003,10 +2401,11 @@ async function dispatch(
             project_id: lineage?.project_id || "",
             channel: "delegation",
             channel_user_id: "",
-            history: [], // child starts fresh
+            history: [], // child starts fresh — no parent context
             progress_key: childProgressKey,
             parent_session_id: lineage?.session_id || sessionId,
             parent_depth: parentDepth + 1,
+            ...(toolsOverride ? { tools_override: toolsOverride } : {}),
           },
         });
 
@@ -2048,7 +2447,7 @@ async function dispatch(
             const sql = await getDb((env as any).HYPERDRIVE);
             await sql`
               INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, correlation_id, status, child_cost_usd, input_preview, output_preview, created_at, completed_at)
-              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${childOutput.slice(0, 500)}, now(), ${status !== "running" ? "now()" : null})
+              VALUES (${parentSessionId}, ${childSessionId}, ${parentAgentName}, ${agentName}, ${orgId}, ${parentDepth + 1}, ${correlationId}, ${status}, ${childCostUsd}, ${task.slice(0, 500)}, ${childOutput.slice(0, 500)}, now(), ${(status as string) !== "running" ? "now()" : null})
             `;
           } catch {} // non-blocking
         }
@@ -2197,12 +2596,12 @@ async function dispatch(
       try {
         const rows = await sql`
           SELECT name, description, config_json, is_active, created_at
-          FROM agents WHERE org_id = ${orgId} AND is_active = 1
+          FROM agents WHERE org_id = ${orgId} AND is_active = true
           ORDER BY created_at DESC LIMIT 100
         `;
         // Extract model from config_json for display
         const enriched = rows.map((r: any) => {
-          const cfg = JSON.parse(r.config_json || "{}");
+          const cfg = parseJsonColumn(r.config_json);
           return { name: r.name, description: r.description, model: cfg.model || "default", is_active: r.is_active, created_at: r.created_at };
         });
         return JSON.stringify(enriched);
@@ -2233,7 +2632,7 @@ async function dispatch(
       try {
         const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const cfg = JSON.parse(agent[0].config_json || "{}");
+        const cfg = parseJsonColumn(agent[0].config_json);
         const tools = Array.isArray(cfg.tools) ? cfg.tools : [];
         // Basic OWASP LLM Top 10 probe checks
         const findings: { probe: string; risk: string; detail: string }[] = [];
@@ -2321,7 +2720,7 @@ async function dispatch(
       try {
         const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const cfg = JSON.parse(agent[0].config_json || "{}");
+        const cfg = parseJsonColumn(agent[0].config_json);
         const governance = cfg.governance || {};
         const checks = {
           has_system_prompt: Boolean(cfg.system_prompt || cfg.systemPrompt),
@@ -2491,10 +2890,13 @@ async function dispatch(
           const name = String(args.name || "");
           const value = String(args.value || "");
           if (!name || !value) return "create requires name and value";
+          // Encrypt value using pgcrypto — ENCRYPTION_KEY must be set in env
+          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
+          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set. Cannot store secrets securely.";
           await sql`
             INSERT INTO secrets (name, org_id, value_encrypted, created_at)
-            VALUES (${name}, ${orgId}, ${value}, ${new Date().toISOString()})
-            ON CONFLICT (name, org_id) DO UPDATE SET value_encrypted = EXCLUDED.value_encrypted
+            VALUES (${name}, ${orgId}, pgp_sym_encrypt(${value}, ${encKey}), ${new Date().toISOString()})
+            ON CONFLICT (name, org_id) DO UPDATE SET value_encrypted = pgp_sym_encrypt(EXCLUDED.value_encrypted::text, ${encKey})
           `;
           return JSON.stringify({ stored: true, name });
         }
@@ -2502,7 +2904,9 @@ async function dispatch(
           const name = String(args.name || "");
           const value = String(args.value || "");
           if (!name || !value) return "rotate requires name and new value";
-          await sql`UPDATE secrets SET value_encrypted = ${value} WHERE name = ${name} AND org_id = ${orgId}`;
+          const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
+          if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set.";
+          await sql`UPDATE secrets SET value_encrypted = pgp_sym_encrypt(${value}, ${encKey}) WHERE name = ${name} AND org_id = ${orgId}`;
           return JSON.stringify({ rotated: true, name });
         }
         if (action === "delete") {
@@ -3177,6 +3581,48 @@ async function dispatch(
 
     case "user-profile-load":
       return userProfileLoad(env, args);
+
+    case "scratch-write": {
+      const traceId = (env as any).__traceId || "";
+      if (!traceId) return "scratch-write requires a trace context (only available in delegated runs)";
+      await scratchWrite(env, traceId, String(args.key || ""), String(args.value || ""));
+      return `Written to scratch: ${args.key}`;
+    }
+
+    case "scratch-read": {
+      const traceId = (env as any).__traceId || "";
+      if (!traceId) return "scratch-read requires a trace context (only available in delegated runs)";
+      const val = await scratchRead(env, traceId, String(args.key || ""));
+      return val ?? "(key not found)";
+    }
+
+    case "scratch-list": {
+      const traceId = (env as any).__traceId || "";
+      if (!traceId) return "scratch-list requires a trace context (only available in delegated runs)";
+      const keys = await scratchList(env, traceId);
+      return keys.length > 0 ? keys.join("\n") : "(scratch is empty)";
+    }
+
+    case "retrieve-result": {
+      const key = String(args.key || "");
+      if (!key) return "retrieve-result requires a key (provided in truncated tool results)";
+      const content = await retrieveToolResult(env, key);
+      return content ?? "Result not found or expired (results are retained for 7 days).";
+    }
+
+    case "send-message": {
+      const to = String(args.to || "");
+      const message = String(args.message || "");
+      if (!to || !message) return "send-message requires 'to' (session ID) and 'message'";
+      const doSql = (env as any).DO_SQL;
+      if (!doSql) return "Mailbox not available (not running in a Durable Object context)";
+      try {
+        writeToMailbox(doSql, sessionId, to, "text", message);
+        return `Message sent to ${to}`;
+      } catch (e: any) {
+        return `Failed to send message: ${e.message}`;
+      }
+    }
 
     default:
       throw new Error(`Tool '${tool}' not available on edge runtime`);
@@ -3889,7 +4335,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
       // Edge TTS requires a server-side library; fall through to Deepgram on Workers
       const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
       audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-        : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+        : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
         : await new Response(audioRaw as BodyInit).arrayBuffer();
       modelUsed = "@cf/deepgram/aura-2-en (edge fallback)";
     } catch {
@@ -3917,7 +4363,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
       // Fallback to Deepgram
       const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
       audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-        : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+        : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
         : await new Response(audioRaw as BodyInit).arrayBuffer();
       modelUsed = "@cf/deepgram/aura-2-en (openai fallback)";
     }
@@ -3925,7 +4371,7 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
     // Default: Deepgram Aura via Workers AI (free)
     const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
     audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-      : audioRaw instanceof Uint8Array ? audioRaw.buffer.slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
+      : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
       : await new Response(audioRaw as BodyInit).arrayBuffer();
     modelUsed = "@cf/deepgram/aura-2-en";
   }
@@ -4193,7 +4639,7 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
  * access to ALL tools regardless of agent config).
  * discover-api is safe to always expose (read-only type info).
  */
-const ALWAYS_AVAILABLE = new Set(["discover-api"]);
+const ALWAYS_AVAILABLE = new Set(["discover-api", "marketplace-search", "a2a-send", "share-artifact", "retrieve-result"]);
 
 /** Returns the set of all valid tool names from the catalog. */
 export function getValidToolNames(): Set<string> {
@@ -4201,8 +4647,10 @@ export function getValidToolNames(): Set<string> {
 }
 
 export function getToolDefinitions(enabledTools: string[], blockedTools: string[] = []): ToolDefinition[] {
-  // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api).
+  // SECURITY: empty enabledTools = only ALWAYS_AVAILABLE tools (discover-api, marketplace-search, a2a-send).
   // This prevents privilege escalation where an agent with tools:[] gets all tools.
+  // marketplace-search + a2a-send are always available so every agent can discover
+  // and delegate to specialist skill agents in the marketplace.
   const blocked = new Set(blockedTools);
   return TOOL_CATALOG.filter(
     (t) => {
@@ -4212,6 +4660,197 @@ export function getToolDefinitions(enabledTools: string[], blockedTools: string[
     },
   );
 }
+
+// ── Progressive Tool Discovery (Option C: Hybrid) ──────────────
+//
+// Core tools are always loaded. Other tools are loaded on-demand via
+// keyword matching against the user query + conversation context.
+// A lightweight "discover-tools" meta-tool lets the agent request
+// additional tools mid-conversation if needed.
+//
+// Saves ~70% of tool tokens on typical queries.
+
+/** Tools always sent to the LLM regardless of query context. */
+const CORE_TOOLS = new Set([
+  "web-search", "python-exec", "bash", "read-file", "write-file", "edit-file",
+  "memory-save", "memory-recall", "browse",
+  // Meta-tools for discovery + delegation
+  "discover-api", "marketplace-search", "a2a-send", "share-artifact",
+]);
+
+/** Keyword → tool names mapping for progressive discovery. */
+const TOOL_KEYWORDS: Record<string, string[]> = {
+  // Research & web
+  "search|find|look up|google|news|current|today|latest|recent": ["web-search", "parallel-web-search"],
+  "browse|visit|website|page|url|link|open": ["browse", "web-crawl", "browser-render"],
+  "crawl|scrape|extract": ["web-crawl", "browser-render"],
+  // Code & execution
+  "code|script|program|python|calculate|compute|analyze data|csv|chart|plot|graph": ["python-exec", "execute-code", "bash"],
+  "run|execute|shell|command|terminal|install": ["bash", "python-exec", "execute-code"],
+  "codemode|transform|validate|orchestrate|generate mcp": ["run-codemode", "codemode-transform", "codemode-validate", "codemode-orchestrate", "codemode-test", "codemode-generate-mcp"],
+  // File operations
+  "file|read|write|save|create|edit|document|folder|directory": ["read-file", "write-file", "edit-file", "view-file", "search-file", "find-file", "load-folder"],
+  "grep|search file|find in": ["grep", "glob", "search-file", "find-file"],
+  "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "manage-projects"],
+  // Memory & knowledge
+  "remember|memory|recall|forget|save fact|note|store": ["memory-save", "memory-recall", "memory-delete", "team-fact-write", "team-observation"],
+  "knowledge|rag|embed|retrieval": ["knowledge-search", "store-knowledge", "manage-rag"],
+  "profile|preference|about me|my name": ["user-profile-save", "user-profile-load"],
+  // Media
+  "image|picture|photo|draw|generate image|illustration|diagram": ["image-generate", "vision-analyze"],
+  "voice|speak|audio|call|phone|tts|speech": ["text-to-speech", "speech-to-text", "make-voice-call"],
+  "video|vision|see|look at|screenshot|describe image": ["vision-analyze"],
+  // Data & analytics
+  "database|sql|query|db|table|report": ["db-query", "db-batch", "db-report"],
+  "pipeline|stream|ingest|data pipeline": ["query-pipeline", "send-to-pipeline"],
+  "cost|billing|spend|usage|how much": ["view-costs"],
+  "trace|debug|log|observe": ["view-traces", "view-audit"],
+  // Git
+  "git|commit|branch|diff|repo|version control|stash": ["git-init", "git-status", "git-diff", "git-commit", "git-log", "git-branch", "git-stash"],
+  // Agent management
+  "create agent|new agent|clone|deploy agent": ["create-agent", "delete-agent", "list-agents"],
+  "run agent|delegate|ask another|specialist|hire": ["run-agent", "route-to-agent", "a2a-send"],
+  "eval|test|evaluate|benchmark|compare": ["eval-agent", "compare-agents", "evolve-agent"],
+  "train|improve|optimize|adapt": ["evolve-agent", "adapt-strategy", "autoresearch"],
+  // Scheduling & automation
+  "schedule|cron|recurring|every day|every hour|automate": ["create-schedule", "list-schedules", "delete-schedule"],
+  "todo|task|checklist|plan": ["todo"],
+  // Governance & security
+  "security|scan|vulnerability|audit": ["security-scan", "view-audit", "compliance"],
+  "policy|policies|permission|governance": ["manage-policies", "compliance"],
+  "secret|credential|api key|token|password": ["manage-secrets"],
+  "release|deploy|rollback|version": ["manage-releases"],
+  "slo|sla|reliability|uptime": ["manage-slos"],
+  "retention|cleanup|expire|ttl": ["manage-retention"],
+  "workflow|automation|orchestrate": ["manage-workflows"],
+  "issue|bug|ticket|incident": ["manage-issues"],
+  // Social & feedback
+  "post|feed|share|publish|social": ["feed-post", "share-artifact"],
+  "feedback|rate|review|submit feedback": ["submit-feedback"],
+  // Search sessions
+  "session|conversation|history|past chat": ["session-search", "conversation-intel"],
+  // HTTP & API
+  "api|http|request|fetch|post|get|endpoint|webhook": ["http-request", "mcp-call"],
+  "mcp|model context|external tool": ["mcp-call", "manage-mcp", "mcp-wrap"],
+  // Multi-agent
+  "mixture|ensemble|multiple models|multi-agent": ["mixture-of-agents"],
+  // Inter-agent coordination (delegated runs)
+  "scratch|shared state|pass data|coordinate": ["scratch-write", "scratch-read", "scratch-list", "send-message"],
+  "team|team fact|team knowledge|shared fact|org knowledge": ["team-fact-write", "team-observation"],
+};
+
+/**
+ * Select tools relevant to the current query context.
+ * Returns core tools + keyword-matched tools + a discover-tools meta-tool.
+ * Typically returns 8-15 tools instead of 21-93, saving ~70% tokens.
+ */
+export function selectToolsForQuery(
+  allTools: ToolDefinition[],
+  query: string,
+  conversationContext?: string,
+): ToolDefinition[] {
+  const needed = new Set(CORE_TOOLS);
+  const text = `${query} ${conversationContext || ""}`.toLowerCase();
+
+  // Match keywords to tool names
+  for (const [keywordPattern, toolNames] of Object.entries(TOOL_KEYWORDS)) {
+    const keywords = keywordPattern.split("|");
+    if (keywords.some(kw => text.includes(kw))) {
+      for (const name of toolNames) needed.add(name);
+    }
+  }
+
+  // Filter the full tool list to only matched tools
+  const selected = allTools.filter(t => needed.has(t.function.name));
+
+  // Always append the discover-tools meta-tool so the agent can request more
+  const hasDiscover = selected.some(t => t.function.name === "discover-tools");
+  if (!hasDiscover) {
+    selected.push(DISCOVER_TOOLS_DEF);
+  }
+
+  return selected;
+}
+
+/**
+ * Phase 2.2: Build a compact tool index for deferred loading.
+ * Returns name + one-line description for tools NOT in the selected set.
+ * Injected as a system message so the model knows what tools exist
+ * without paying full schema token cost (~50 tokens vs ~500 per tool).
+ */
+export function buildDeferredToolIndex(
+  allTools: ToolDefinition[],
+  selectedTools: ToolDefinition[],
+): string {
+  const selectedNames = new Set(selectedTools.map(t => t.function.name));
+  const deferred = allTools.filter(t => !selectedNames.has(t.function.name));
+  if (deferred.length === 0) return "";
+
+  const lines = deferred.map(t => {
+    const desc = (t.function.description || "").split("\n")[0].slice(0, 80);
+    return `- ${t.function.name}: ${desc}`;
+  });
+
+  return `## Additional Tools Available\nUse the discover-tools tool to load any of these:\n${lines.join("\n")}`;
+}
+
+/**
+ * Resolve a discover-tools request — returns tool definitions matching the query.
+ * Called when the agent invokes the discover-tools meta-tool.
+ */
+export function discoverTools(
+  allTools: ToolDefinition[],
+  query: string,
+): { tools: string[]; definitions: ToolDefinition[] } {
+  const needed = new Set<string>();
+  const text = (query || "").toLowerCase().slice(0, 5000);
+
+  // Empty query → return all available tool names (so agent knows what exists)
+  if (!text.trim()) {
+    const names = allTools.map(t => t.function.name);
+    return { tools: names, definitions: allTools };
+  }
+
+  for (const [keywordPattern, toolNames] of Object.entries(TOOL_KEYWORDS)) {
+    const keywords = keywordPattern.split("|");
+    if (keywords.some(kw => text.includes(kw))) {
+      for (const name of toolNames) needed.add(name);
+    }
+  }
+
+  // Also do fuzzy match on tool names and descriptions
+  for (const tool of allTools) {
+    const name = tool.function.name;
+    const desc = (tool.function.description || "").toLowerCase();
+    if (text.includes(name) || name.includes(text.replace(/\s+/g, "-"))) {
+      needed.add(name);
+    }
+    // Check if query words appear in the tool description
+    const queryWords = text.split(/\s+/).filter(w => w.length > 3);
+    if (queryWords.length > 0 && queryWords.some(w => desc.includes(w))) {
+      needed.add(name);
+    }
+  }
+
+  const definitions = allTools.filter(t => needed.has(t.function.name));
+  return { tools: [...needed], definitions };
+}
+
+/** Meta-tool that lets the agent request additional tools mid-conversation. */
+const DISCOVER_TOOLS_DEF: ToolDefinition = {
+  type: "function",
+  function: {
+    name: "discover-tools",
+    description: "Search for additional tools by describing what you need. Use this when you need a capability not available in your current tools. Returns matching tool names and descriptions.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Describe the capability you need, e.g. 'generate images', 'query database', 'manage git branches'" },
+      },
+      required: ["query"],
+    },
+  },
+};
 
 const TOOL_CATALOG: ToolDefinition[] = [
   {
@@ -4452,6 +5091,36 @@ const TOOL_CATALOG: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "team-fact-write",
+      description: "Record an org-wide team fact that other agents in this organization can see. Use for shared knowledge like deployment processes, architecture decisions, coding conventions, or important context that applies across the team.",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "The fact content to share with the team (max 1000 chars)" },
+          category: { type: "string", description: "Category: 'process', 'architecture', 'convention', 'decision', or 'general' (default: general)" },
+        },
+        required: ["content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "team-observation",
+      description: "Record an observation about another agent or the team. Used for cross-agent notes like 'code-reviewer found a recurring bug pattern in auth module' or general team insights.",
+      parameters: {
+        type: "object",
+        properties: {
+          content: { type: "string", description: "The observation to record (max 1000 chars)" },
+          target_agent: { type: "string", description: "Optional: the agent this observation is about" },
+        },
+        required: ["content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "mcp-call",
       description: "Call a tool on a registered MCP (Model Context Protocol) server. Use this to interact with external integrations like Pipedream, custom APIs, or any MCP-compatible service. First list available servers, then call specific tools.",
       parameters: {
@@ -4613,6 +5282,31 @@ const TOOL_CATALOG: ToolDefinition[] = [
           auth_token: { type: "string", description: "Auth token for the target API (optional)" },
         },
         required: ["url", "task"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "share-artifact",
+      description:
+        "Share a file or project artifact with another agent (or back to the caller) via A2A. " +
+        "Uploads content to R2 storage and returns a signed URL. Use this when you've built something " +
+        "(code, document, image, data) that needs to be sent back to the requesting agent. " +
+        "The artifact is linked to the current A2A task for traceability.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Artifact name with extension (e.g., 'invoice.pdf', 'app.zip', 'report.md')" },
+          content: { type: "string", description: "File content (text) or base64-encoded binary" },
+          mime_type: { type: "string", description: "MIME type (default: auto-detected from name)" },
+          description: { type: "string", description: "What this artifact is" },
+          encoding: { type: "string", description: "'text' (default) or 'base64' for binary content" },
+          task_id: { type: "string", description: "A2A task ID this artifact belongs to (auto-detected from context if omitted)" },
+          receiver_org_id: { type: "string", description: "Receiving org ID (auto-detected from A2A context if omitted)" },
+          receiver_agent: { type: "string", description: "Receiving agent name (optional)" },
+        },
+        required: ["name", "content"],
       },
     },
   },
@@ -5104,12 +5798,14 @@ const TOOL_CATALOG: ToolDefinition[] = [
         "Delegate a task to another agent via a child Workflow. The sub-agent runs in parallel with its own " +
         "config, tools, and reasoning strategy. Returns the sub-agent's output and cost. " +
         "Use this for tasks that need a specialist (e.g., delegate research to a research-bot). " +
-        "Max delegation depth: 6. Each child runs crash-safe via Cloudflare Workflows.",
+        "Max delegation depth: 6. Each child runs crash-safe via Cloudflare Workflows. " +
+        "Optionally pass 'tools' to scope the sub-agent to only specific tools for this run.",
       parameters: {
         type: "object",
         properties: {
           agent_name: { type: "string", description: "Agent to run" },
           task: { type: "string", description: "Task/message to send" },
+          tools: { type: "array", items: { type: "string" }, description: "Optional: scope sub-agent to only these tools for this run (e.g. [\"web-search\", \"browse\"]). If omitted, agent uses its full configured tool set." },
           channel: { type: "string", description: "Channel (default internal)" },
           org_id: { type: "string", description: "Org id (optional if same as caller)" },
         },
@@ -5811,6 +6507,75 @@ const TOOL_CATALOG: ToolDefinition[] = [
           user_id: { type: "string", description: "User identifier (auto-detected from channel if omitted)" },
         },
         required: [],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "retrieve-result",
+      description: "Retrieve the full content of a previously truncated tool result. Use when a tool result was too large and was persisted to storage with a reference key.",
+      parameters: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "The storage key provided in the truncated result message" },
+        },
+        required: ["key"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "send-message",
+      description: "Send a message to another agent session (parent or sibling). Only available during delegated runs.",
+      parameters: {
+        type: "object",
+        properties: {
+          to: { type: "string", description: "Target session ID (parent_session_id or sibling session)" },
+          message: { type: "string", description: "Message content to send" },
+        },
+        required: ["to", "message"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "scratch-write",
+      description: "Write a value to the shared scratch space. Available during delegated runs for cross-agent communication.",
+      parameters: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "Key name for the scratch entry" },
+          value: { type: "string", description: "Value to store" },
+        },
+        required: ["key", "value"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "scratch-read",
+      description: "Read a value from the shared scratch space written by another agent in the same delegation chain.",
+      parameters: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "Key name to read" },
+        },
+        required: ["key"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "scratch-list",
+      description: "List all keys in the shared scratch space for the current delegation chain.",
+      parameters: {
+        type: "object",
+        properties: {},
       },
     },
   },

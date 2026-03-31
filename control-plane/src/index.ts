@@ -11,6 +11,7 @@ import { errorHandler } from "./middleware/error-handler";
 import { authMiddleware } from "./middleware/auth";
 import { rateLimitMiddleware } from "./middleware/rate-limit";
 import { createApp } from "./lib/openapi";
+import { parseJsonColumn } from "./lib/parse-json-column";
 
 // Route imports (added as phases are implemented)
 import { authRoutes } from "./routes/auth";
@@ -32,6 +33,7 @@ import { opsObservabilityRoutes } from "./routes/ops-observability";
 import { memoryRoutes } from "./routes/memory";
 import { ragRoutes } from "./routes/rag";
 import { projectRoutes } from "./routes/projects";
+import { workspaceRoutes } from "./routes/workspace";
 import { orgRoutes } from "./routes/orgs";
 import { releaseRoutes } from "./routes/releases";
 import { goldImageRoutes } from "./routes/gold-images";
@@ -69,6 +71,8 @@ import { pipelineRoutes } from "./routes/pipelines";
 import { feedbackRoutes } from "./routes/feedback";
 import { codemodeRoutes } from "./routes/codemode";
 import { a2aRoutes } from "./routes/a2a";
+import { githubWebhookRoutes } from "./routes/github-webhooks";
+import { featuresRoutes } from "./routes/features";
 import { dashboardRoutes } from "./routes/dashboard";
 import { trainingRoutes } from "./routes/training";
 import { domainRoutes } from "./routes/domains";
@@ -86,6 +90,7 @@ import { alertRoutes } from "./routes/alerts";
 import { sessionMgmtRoutes } from "./routes/session-mgmt";
 import { securityEventRoutes } from "./routes/security-events";
 import { secretsRotationRoutes } from "./routes/secrets-rotation";
+import { autopilotRoutes, tickAutopilotSessions } from "./routes/autopilot";
 import { mfaEnforcementMiddleware } from "./middleware/mfa-enforcement";
 
 const app = createApp();
@@ -133,6 +138,29 @@ app.get("/health", (c) =>
 );
 app.get("/api/v1/health", (c) =>
   c.json({ status: "ok", version: "0.2.0", service: "control-plane", timestamp: Date.now() }),
+);
+
+// ── A2A Agent Card Discovery ───────────────────────────────────────────
+app.get("/.well-known/agent.json", (c) =>
+  c.json({
+    name: "AgentOS",
+    description: "Multi-agent platform with A2A protocol support",
+    url: "https://api.oneshots.co",
+    version: "0.2.0",
+    protocol: "a2a",
+    capabilities: {
+      streaming: true,
+      push_notifications: false,
+      state_transition_history: true,
+    },
+    skills: [
+      { id: "agent-run", name: "Run Agent", description: "Execute an agent with a task" },
+      { id: "marketplace-search", name: "Search Marketplace", description: "Find agents in the marketplace" },
+    ],
+    authentication: {
+      schemes: ["bearer"],
+    },
+  })
 );
 
 // Detailed health — checks DB, billing system, runtime connectivity
@@ -223,8 +251,9 @@ app.route("/api/v1/ops", opsObservabilityRoutes);
 app.route("/api/v1/memory", memoryRoutes);
 app.route("/api/v1/rag", ragRoutes);
 
-// Projects + orgs
+// Projects + orgs + workspace
 app.route("/api/v1/projects", projectRoutes);
+app.route("/api/v1/workspace", workspaceRoutes);
 app.route("/api/v1/orgs", orgRoutes);
 // Backward-compatible alias used by some portal flows.
 app.route("/api/v1/org", orgRoutes);
@@ -325,11 +354,20 @@ app.route("/api/v1/session-management", sessionMgmtRoutes);
 app.route("/api/v1/security-events", securityEventRoutes);
 app.route("/api/v1/secrets-rotation", secretsRotationRoutes);
 
+// Autopilot — always-on autonomous agent sessions
+app.route("/api/v1/autopilot", autopilotRoutes);
+
+// Feature flags
+app.route("/api/v1/features", featuresRoutes);
+
 // Widget script serving (public, no auth)
 app.route("/", widgetServeRoutes);
 
 // A2A (Agent-to-Agent) protocol endpoints
 app.route("/", a2aRoutes);
+
+// GitHub webhook subscriptions (signature-verified receive endpoint is public)
+app.route("/api/v1/github/webhooks", githubWebhookRoutes);
 
 // ── Auto-generated OpenAPI spec + Scalar docs ────────────────────────────
 app.doc("/api/v1/_openapi-raw.json", {
@@ -520,7 +558,7 @@ export default {
     const { getDb, getDbForOrg } = await import("./db/client");
     const { hasCredits: hasCreditsCheck, deductCredits: deductCreditsForOrg } = await import("./logic/credits");
 
-    for (const msg of batch.messages) {
+    await Promise.allSettled(batch.messages.map(async (msg) => {
       const job = msg.body as { type: string; payload: Record<string, unknown> };
       try {
         const sql = await getDb(env.HYPERDRIVE);
@@ -557,7 +595,7 @@ export default {
           if (!delivered) {
             // Retry via queue (msg.retry())
             msg.retry();
-            continue;
+            return;
           }
         } else if (job.type === "batch_run") {
           // Process a batch of agent runs
@@ -658,7 +696,7 @@ export default {
           `;
           if (agentRows.length > 0) {
             let config: Record<string, unknown> = {};
-            try { config = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
+            config = parseJsonColumn(agentRows[0].config_json);
             const scanResult = scanAgentConfig(String(agent_name), config, crypto.randomUUID().slice(0, 12));
             await sql`
               INSERT INTO security_scans (scan_id, org_id, agent_name, scan_type, risk_score, risk_level, total_probes, passed, failed, created_at)
@@ -690,11 +728,11 @@ export default {
           const { analyzeSessionRecords: analyze, generateProposals: genProposals } = await import("./logic/evolution-analyzer");
 
           const agentRows = await sql`
-            SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = 1 LIMIT 1
+            SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
           `;
           if (agentRows.length > 0) {
             let agentConfig: Record<string, unknown> = {};
-            try { agentConfig = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
+            agentConfig = parseJsonColumn(agentRows[0].config_json);
 
             const since = Date.now() / 1000 - days * 86400;
             const sessions = await sql`
@@ -731,11 +769,23 @@ export default {
 
             console.log(`[queue] Evolution analysis for ${agentName}: ${records.length} sessions, ${proposals.length} proposals`);
           }
+        } else if (job.type === "memory_consolidation") {
+          // Dream memory: background consolidation for idle agents
+          const resp = await env.RUNTIME.fetch("https://runtime/api/v1/memory/consolidate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(job.payload),
+          });
+          await resp.json();
+        } else if (job.type === "autopilot_tick") {
+          // Process a single autopilot tick (fan-out from cron)
+          const { processAutopilotTick } = await import("./routes/autopilot");
+          await processAutopilotTick(env, job.payload as any);
         } else if (job.type === "training_step") {
           // Advance one training iteration — called by cron or auto-step
           const jobId = String(job.payload.job_id || "");
           const orgId = String(job.payload.org_id || "");
-          if (!jobId || !orgId) { msg.ack(); continue; }
+          if (!jobId || !orgId) { msg.ack(); return; }
 
           // Check job is still running
           const jobRows = await sql`
@@ -744,7 +794,7 @@ export default {
           `;
           if (jobRows.length === 0 || jobRows[0].status !== "running") {
             msg.ack();
-            continue;
+            return;
           }
 
           // Call the training step endpoint internally
@@ -755,6 +805,7 @@ export default {
                 headers: {
                   "Content-Type": "application/json",
                   Authorization: `Bearer ${env.SERVICE_TOKEN}`,
+                  "X-Org-Id": orgId,
                 },
               }),
               env,
@@ -793,11 +844,14 @@ export default {
         } catch {}
         msg.retry();
       }
-    }
+    }));
   },
 
   // Cron Triggers — scheduled agent runs + data retention
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Autopilot: tick active sessions
+    ctx.waitUntil(tickAutopilotSessions(env));
+
     const { getDb } = await import("./db/client");
     const sql = await getDb(env.HYPERDRIVE);
     const now = new Date().toISOString();
@@ -884,7 +938,7 @@ export default {
           if (agentRows.length === 0) continue;
 
           let agentConfig: Record<string, unknown> = {};
-          try { agentConfig = JSON.parse(String(agentRows[0].config_json || "{}")); } catch {}
+          agentConfig = parseJsonColumn(agentRows[0].config_json);
 
           // Fetch session records
           const sessions = await sql`
@@ -892,7 +946,7 @@ export default {
                    step_count, action_count, created_at
             FROM sessions
             WHERE agent_name = ${agentName} AND org_id = ${orgId} AND created_at > ${since}
-            ORDER BY created_at DESC LIMIT 500
+            ORDER BY created_at DESC LIMIT 50
           `;
 
           const records: Array<{
@@ -906,12 +960,24 @@ export default {
             }>; quality_score?: number; sentiment?: string; task_completed?: boolean;
           }> = [];
 
+          // Batch-fetch turns for ALL sessions in one query (not N+1)
+          const sessionIds = sessions.map((s: any) => s.session_id);
+          const allTurns = sessionIds.length > 0 ? await sql`
+            SELECT session_id, turn_number, tool_calls_json, tool_results_json, error
+            FROM turns WHERE session_id = ANY(${sessionIds})
+            ORDER BY session_id, turn_number ASC
+          `.catch(() => []) : [];
+
+          // Group turns by session_id
+          const turnsBySession = new Map<string, any[]>();
+          for (const turn of allTurns) {
+            const sid = String(turn.session_id);
+            if (!turnsBySession.has(sid)) turnsBySession.set(sid, []);
+            turnsBySession.get(sid)!.push(turn);
+          }
+
           for (const session of sessions) {
-            const turns = await sql`
-              SELECT turn_number, tool_calls_json, tool_results_json, error
-              FROM turns WHERE session_id = ${session.session_id}
-              ORDER BY turn_number ASC LIMIT 100
-            `.catch(() => []);
+            const turns = turnsBySession.get(String(session.session_id)) || [];
 
             const toolCalls: Array<{ tool_name: string; success: boolean; error?: string; latency_ms: number; turn_number: number }> = [];
             const errors: Array<{ source: "llm" | "tool" | "governance" | "timeout" | "unknown"; message: string; tool_name?: string; turn_number: number; recoverable: boolean }> = [];
@@ -919,8 +985,8 @@ export default {
             for (const turn of turns) {
               let tcList: any[] = [];
               let trList: any[] = [];
-              try { tcList = JSON.parse(String(turn.tool_calls_json || "[]")); } catch {}
-              try { trList = JSON.parse(String(turn.tool_results_json || "[]")); } catch {}
+              tcList = parseJsonColumn(turn.tool_calls_json, []);
+              trList = parseJsonColumn(turn.tool_results_json, []);
 
               for (let i = 0; i < tcList.length; i++) {
                 const tc = tcList[i];
@@ -1112,7 +1178,7 @@ export default {
           total_transactions_all_time, total_volume_all_time_usd, total_feed_posts, trending_categories, updated_at)
         VALUES (
           'current',
-          COALESCE((SELECT COUNT(*)::int FROM agents WHERE is_active = 1), 0),
+          COALESCE((SELECT COUNT(*)::int FROM agents WHERE is_active = true), 0),
           COALESCE((SELECT COUNT(*)::int FROM orgs), 0),
           COALESCE((SELECT COUNT(*)::int FROM credit_transactions WHERE created_at > now() - interval '24 hours'), 0),
           COALESCE((SELECT ABS(SUM(amount_usd)) FROM credit_transactions WHERE created_at > now() - interval '24 hours' AND type = 'burn'), 0),
@@ -1334,7 +1400,7 @@ export default {
           // High error rate — auto-rollback canary
           await sql`UPDATE canary_splits SET is_active = false WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
           await sql`
-            INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+            INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
             VALUES (${orgId}, 'system', 'canary.auto_rollback', 'agent', ${agentName},
                     ${JSON.stringify({ error_rate: errorRate, threshold: 0.15, canary_version: canary.canary_version })}, now())
           `.catch(() => {});
@@ -1348,7 +1414,7 @@ export default {
           `.catch(() => {});
           await sql`UPDATE canary_splits SET is_active = false WHERE org_id = ${orgId} AND agent_name = ${agentName}`;
           await sql`
-            INSERT INTO audit_log (org_id, user_id, action, resource_type, resource_id, changes_json, created_at)
+            INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
             VALUES (${orgId}, 'system', 'canary.auto_promote', 'agent', ${agentName},
                     ${JSON.stringify({ error_rate: errorRate, canary_version: canary.canary_version })}, now())
           `.catch(() => {});

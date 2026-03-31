@@ -98,6 +98,11 @@ const publishRoute = createRoute({
             price_per_task_usd: z.number().min(0).max(1000).default(0),
             price_per_1k_tokens_usd: z.number().min(0).max(100).default(0),
             free_tier_tasks: z.number().int().min(0).max(1000).default(0),
+            pricing_model: z.enum(["fixed", "cost_plus", "per_token"]).default("fixed"),
+            cost_plus_margin_pct: z.number().min(0).max(500).default(0),
+            price_per_1k_input_tokens_usd: z.number().min(0).max(100).default(0),
+            price_per_1k_output_tokens_usd: z.number().min(0).max(100).default(0),
+            agent_type: z.enum(["agent", "skill"]).default("agent"),
             sla_response_time_ms: z.number().int().optional(),
             sla_uptime_pct: z.number().min(0).max(100).optional(),
           }),
@@ -118,7 +123,7 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
 
   // Verify agent exists
   const agentRows = await sql`
-    SELECT name FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} AND is_active = 1 LIMIT 1
+    SELECT name FROM agents WHERE name = ${body.agent_name} AND org_id = ${user.org_id} AND is_active = true LIMIT 1
   `;
   if (agentRows.length === 0) return c.json({ error: "Agent not found or inactive" }, 404);
 
@@ -129,13 +134,17 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
       INSERT INTO marketplace_listings (
         agent_name, org_id, display_name, short_description, long_description,
         category, subcategory, tags, price_per_task_usd, price_per_1k_tokens_usd,
-        free_tier_tasks, sla_response_time_ms, sla_uptime_pct,
+        free_tier_tasks, pricing_model, cost_plus_margin_pct,
+        price_per_1k_input_tokens_usd, price_per_1k_output_tokens_usd,
+        agent_type, sla_response_time_ms, sla_uptime_pct,
         agent_card_url, a2a_endpoint_url, is_published
       ) VALUES (
         ${body.agent_name}, ${user.org_id}, ${body.display_name}, ${body.short_description},
         ${body.long_description || ''}, ${body.category}, ${body.subcategory || ''},
         ${body.tags}, ${body.price_per_task_usd}, ${body.price_per_1k_tokens_usd},
-        ${body.free_tier_tasks}, ${body.sla_response_time_ms || null}, ${body.sla_uptime_pct || null},
+        ${body.free_tier_tasks}, ${body.pricing_model}, ${body.cost_plus_margin_pct},
+        ${body.price_per_1k_input_tokens_usd}, ${body.price_per_1k_output_tokens_usd},
+        ${body.agent_type}, ${body.sla_response_time_ms || null}, ${body.sla_uptime_pct || null},
         ${baseUrl + '/.well-known/agent.json?agent=' + body.agent_name},
         ${baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name},
         true
@@ -145,7 +154,11 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
         long_description = ${body.long_description || ''}, category = ${body.category},
         tags = ${body.tags}, price_per_task_usd = ${body.price_per_task_usd},
         price_per_1k_tokens_usd = ${body.price_per_1k_tokens_usd},
-        free_tier_tasks = ${body.free_tier_tasks}, is_published = true, updated_at = now()
+        free_tier_tasks = ${body.free_tier_tasks}, pricing_model = ${body.pricing_model},
+        cost_plus_margin_pct = ${body.cost_plus_margin_pct},
+        price_per_1k_input_tokens_usd = ${body.price_per_1k_input_tokens_usd},
+        price_per_1k_output_tokens_usd = ${body.price_per_1k_output_tokens_usd},
+        agent_type = ${body.agent_type}, is_published = true, updated_at = now()
       RETURNING id
     `;
 
@@ -168,7 +181,10 @@ marketplaceRoutes.openapi(publishRoute, async (c): Promise<any> => {
       agent_name: body.agent_name,
       org_id: user.org_id,
       category: body.category,
+      agent_type: body.agent_type,
+      pricing_model: body.pricing_model,
       price_per_task_usd: body.price_per_task_usd,
+      cost_plus_margin_pct: body.cost_plus_margin_pct,
       agent_card_url: baseUrl + '/.well-known/agent.json?agent=' + body.agent_name,
       a2a_endpoint_url: baseUrl + '/a2a?org=' + user.org_id + '&agent=' + body.agent_name,
     });
@@ -217,13 +233,57 @@ marketplaceRoutes.openapi(rateRoute, async (c): Promise<any> => {
     return c.json({ error: "Cannot rate your own agent" }, 403);
   }
 
-  await submitRating(sql, body.listing_id, user.org_id, body.rating, {
+  // Phase 10.2: Anti-fraud — velocity checks
+  const recentRatings = await sql`
+    SELECT COUNT(*) as cnt FROM marketplace_ratings
+    WHERE listing_id = ${body.listing_id} AND rater_org_id = ${user.org_id}
+      AND created_at > NOW() - INTERVAL '24 hours'
+  `;
+  if (Number(recentRatings[0]?.cnt || 0) >= 3) {
+    return c.json({ error: "Rating limit: max 3 ratings per listing per 24h" }, 429);
+  }
+  const hourlyRatings = await sql`
+    SELECT COUNT(*) as cnt FROM marketplace_ratings
+    WHERE listing_id = ${body.listing_id}
+      AND created_at > NOW() - INTERVAL '1 hour'
+  `;
+  if (Number(hourlyRatings[0]?.cnt || 0) >= 10) {
+    return c.json({ error: "This listing has reached its hourly rating limit" }, 429);
+  }
+
+  // Phase 10.2: Rating credibility weight based on account age + spend
+  let credibilityWeight = 1.0;
+  try {
+    const orgAge = await sql`
+      SELECT EXTRACT(EPOCH FROM (NOW() - created_at)) / 86400 as age_days
+      FROM organizations WHERE org_id = ${user.org_id} LIMIT 1
+    `;
+    const ageDays = Number(orgAge[0]?.age_days || 0);
+    if (ageDays < 7) credibilityWeight = 0.1;
+    else if (ageDays < 30) credibilityWeight = 0.5;
+    // Spend check: weight by total spend
+    const spend = await sql`
+      SELECT COALESCE(SUM(amount_usd), 0) as total FROM credit_transactions
+      WHERE org_id = ${user.org_id} AND type = 'burn'
+    `;
+    const totalSpend = Number(spend[0]?.total || 0);
+    if (totalSpend < 1) credibilityWeight *= 0.2;
+    else if (totalSpend < 10) credibilityWeight *= 0.7;
+  } catch { /* best-effort — default full weight */ }
+
+  // Apply credibility weight: weighted_rating = raw_rating * weight
+  // Low-credibility ratings contribute less to the average
+  const weightedRating = Math.round(body.rating * credibilityWeight * 100) / 100;
+
+  await submitRating(sql, body.listing_id, user.org_id, weightedRating, {
     task_id: body.task_id,
     review_text: body.review_text,
     response_time_ms: body.response_time_ms,
+    credibility_weight: credibilityWeight,
+    raw_rating: body.rating,
   });
 
-  return c.json({ rated: true, listing_id: body.listing_id, rating: body.rating });
+  return c.json({ rated: true, listing_id: body.listing_id, rating: body.rating, credibility_weight: credibilityWeight });
 });
 
 // ── POST /feature — Purchase featured placement ──────────────

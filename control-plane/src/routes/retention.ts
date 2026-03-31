@@ -159,14 +159,14 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
     },
     turns: async (sql, cutoff, orgId) => {
       const r = orgId
-        ? await sql`DELETE FROM turns WHERE created_at < ${cutoff} AND org_id = ${orgId}`
+        ? await sql`DELETE FROM turns WHERE created_at < ${cutoff} AND session_id IN (SELECT session_id FROM sessions WHERE org_id = ${orgId})`
         : await sql`DELETE FROM turns WHERE created_at < ${cutoff}`;
       return r.count ?? 0;
     },
     episodes: async (sql, cutoff, orgId) => {
       const r = orgId
-        ? await sql`DELETE FROM episodes WHERE created_at < ${cutoff} AND org_id = ${orgId}`
-        : await sql`DELETE FROM episodes WHERE created_at < ${cutoff}`;
+        ? await sql`DELETE FROM episodic_memories WHERE created_at < ${cutoff} AND org_id = ${orgId}`
+        : await sql`DELETE FROM episodic_memories WHERE created_at < ${cutoff}`;
       return r.count ?? 0;
     },
     billing_records: async (sql, cutoff, orgId) => {
@@ -256,7 +256,7 @@ retentionRoutes.openapi(applyRetentionRoute, async (c): Promise<any> => {
   // Audit the retention application
   try {
     await sql`
-      INSERT INTO audit_log (org_id, user_id, action, resource_type, changes_json, created_at)
+      INSERT INTO audit_log (org_id, actor_id, action, resource_type, details, created_at)
       VALUES (${user.org_id}, ${user.user_id}, 'retention.applied', 'retention', ${JSON.stringify(results)}, ${new Date().toISOString()})
     `;
   } catch {}
