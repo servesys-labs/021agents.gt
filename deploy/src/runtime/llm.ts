@@ -42,6 +42,43 @@ export async function callLLM(
   },
 ): Promise<LLMResponse> {
   const started = Date.now();
+  const isWorkersAI = opts.model.startsWith("@cf/") || opts.model.startsWith("@hf/");
+
+  // ── Workers AI: use env.AI binding directly (zero latency, no external hop) ──
+  if (isWorkersAI && env.AI) {
+    const aiMessages = messages.map(formatMessage);
+    const aiOpts: Record<string, any> = {};
+    if (opts.max_tokens) aiOpts.max_tokens = opts.max_tokens;
+    if (opts.temperature !== undefined && opts.temperature > 0) aiOpts.temperature = opts.temperature;
+    if (tools.length > 0) aiOpts.tools = tools.map(fixToolSchema);
+
+    const result = await env.AI.run(opts.model as any, {
+      messages: aiMessages,
+      ...aiOpts,
+    }) as any;
+
+    const latencyMs = Date.now() - started;
+    const content = typeof result === "string" ? result
+      : result?.response || result?.content || result?.choices?.[0]?.message?.content || "";
+    const rawToolCalls = result?.tool_calls || result?.choices?.[0]?.message?.tool_calls || [];
+    const inputTokens = result?.usage?.prompt_tokens || 0;
+    const outputTokens = result?.usage?.completion_tokens || 0;
+
+    const { calculateCustomerCost } = await import("./pricing");
+
+    return {
+      content,
+      model: opts.model,
+      tool_calls: parseToolCalls(rawToolCalls),
+      usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      cost_usd: calculateCustomerCost(opts.model, inputTokens, outputTokens, 0),
+      latency_ms: latencyMs,
+      gateway_log_id: "",
+      gateway_event_id: "",
+    };
+  }
+
+  // ── All other models: OpenRouter via AI Gateway ──
   const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
   const gatewayId = env.AI_GATEWAY_ID || "";
 
@@ -49,23 +86,19 @@ export async function callLLM(
     throw new Error("AI Gateway not configured — set CLOUDFLARE_ACCOUNT_ID and AI_GATEWAY_ID");
   }
 
-  // Normalize model name for the gateway /compat/ endpoint
   const model = normalizeModelId(opts.model);
 
-  // Build OpenAI-compatible payload
   const payload: Record<string, any> = {
     model,
     messages: messages.map(formatMessage),
   };
 
-  // Only set temperature if explicitly provided (some models like gpt-5-mini reject temperature=0)
   if (opts.temperature !== undefined && opts.temperature > 0) {
     payload.temperature = opts.temperature;
   }
 
-  // Only set max_tokens if explicitly provided — let models decide output length by default
   if (opts.max_tokens) {
-    if (model.includes("openai/") || model.includes("gpt-") ) {
+    if (model.includes("openai/") || model.includes("gpt-")) {
       payload.max_completion_tokens = opts.max_tokens;
     } else {
       payload.max_tokens = opts.max_tokens;
@@ -76,35 +109,85 @@ export async function callLLM(
     payload.tools = tools.map(fixToolSchema);
   }
 
-  // Use /compat/ for direct provider access (no OpenRouter middleman)
-  // Falls back to /openrouter/ for models not configured on direct providers
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
-  // Attach metadata for per-agent/session cost tracking in gateway logs
   if (opts.metadata) {
     headers["cf-aig-metadata"] = JSON.stringify(opts.metadata);
   }
 
-  // CF gateway auth — gateway routes to OpenRouter (paid models) or Workers AI (@cf/)
-  // OpenRouter API key is configured on the AI Gateway, not passed from code
-  const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
-  if (cfToken) {
-    headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+  // OpenRouter auth
+  const orKey = (env as any).OPENROUTER_API_KEY;
+  if (orKey) {
+    headers["cf-aig-authorization"] = `Bearer ${orKey}`;
+  } else {
+    const cfToken = env.AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN;
+    if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
   }
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
+  // ── Phase 1.3: Retry logic with backoff ──
+  // Retries on transient errors (429, 529, 502, 503, network errors).
+  // Does NOT retry on 400, 401, 403, 404 (permanent failures).
+  const MAX_LLM_RETRIES = 3;
+  const BACKOFF_MS = [500, 2000, 8000];
+  const RETRYABLE_STATUS = new Set([429, 502, 503, 529]);
+  const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404]);
 
-  if (!resp.ok) {
-    const errBody = await resp.text();
-    throw new Error(`LLM ${resp.status}: ${errBody.slice(0, 300)}`);
+  let resp: Response | undefined;
+  let lastError: Error | undefined;
+
+  for (let attempt = 0; attempt < MAX_LLM_RETRIES; attempt++) {
+    try {
+      resp = await fetch(endpoint, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      if (resp.ok) break; // Success
+
+      const status = resp.status;
+
+      if (NON_RETRYABLE_STATUS.has(status)) {
+        // Permanent error — don't retry
+        const errBody = await resp.text();
+        throw new Error(`LLM ${status}: ${errBody.slice(0, 300)}`);
+      }
+
+      if (RETRYABLE_STATUS.has(status) && attempt < MAX_LLM_RETRIES - 1) {
+        // Transient error — respect Retry-After header or use backoff
+        const retryAfter = resp.headers.get("Retry-After");
+        const delayMs = retryAfter
+          ? Math.min(Number(retryAfter) * 1000, 30_000) // Cap at 30s
+          : BACKOFF_MS[attempt] || 8000;
+        console.warn(`[llm] ${status} on attempt ${attempt + 1}, retrying in ${delayMs}ms`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+
+      // Non-retryable status or final attempt
+      const errBody = await resp.text();
+      throw new Error(`LLM ${status}: ${errBody.slice(0, 300)}`);
+    } catch (e: any) {
+      lastError = e;
+      // Network errors (ECONNRESET, EPIPE, fetch failures) are retryable
+      if (e.message?.includes("LLM ") || NON_RETRYABLE_STATUS.has(e.status)) {
+        throw e; // Re-throw non-retryable errors
+      }
+      if (attempt < MAX_LLM_RETRIES - 1) {
+        console.warn(`[llm] Network error on attempt ${attempt + 1}: ${e.message?.slice(0, 100)}`);
+        await new Promise(r => setTimeout(r, BACKOFF_MS[attempt] || 8000));
+        continue;
+      }
+      throw e; // Final attempt failed
+    }
+  }
+
+  if (!resp || !resp.ok) {
+    throw lastError || new Error("LLM request failed after retries");
   }
 
   // Capture gateway correlation IDs from response headers
@@ -166,9 +249,10 @@ export async function callLLM(
 //   dynamic/my-route                → dynamic/my-route (gateway dynamic routing)
 
 function normalizeModelId(model: string): string {
-  // Workers AI models need workers-ai/ prefix
+  // Workers AI models: keep @cf/ prefix as-is (gateway URL path handles routing)
+  // The /workers-ai/v1/chat/completions endpoint expects bare @cf/ model IDs
   if (model.startsWith("@cf/")) {
-    return `workers-ai/${model}`;
+    return model;
   }
   // All other models: anthropic/, openai/, google/, deepseek/ — pass through
   // OpenRouter accepts these prefixes natively

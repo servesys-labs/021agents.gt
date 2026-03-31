@@ -201,6 +201,8 @@ async function getCachedDynamicWorker(env: RuntimeEnv, workerCode: string): Prom
 const validateUrl = ssrfValidateUrl;
 
 // ── Circuit Breaker for Tool Calls ───────────────────────────────────
+// State persisted to DO SQLite when available (survives worker restarts).
+// Falls back to in-memory Map for non-DO contexts.
 
 interface CircuitState {
   failures: number;
@@ -218,6 +220,56 @@ const CIRCUIT_CONFIG = {
   resetTimeoutMs: 30_000,     // Try half-open after 30s
 };
 
+// ── Persistent circuit breaker (DO SQLite-backed) ──
+// `sqlExec` is set by the caller (executeTools) when running inside a DO.
+// Falls back to in-memory when null (non-DO contexts like tests).
+let _circuitBreakerSql: ((query: string, ...params: any[]) => any) | null = null;
+
+export function setCircuitBreakerSql(sqlFn: typeof _circuitBreakerSql): void {
+  _circuitBreakerSql = sqlFn;
+}
+
+function loadCircuitState(toolName: string): CircuitState {
+  if (_circuitBreakerSql) {
+    try {
+      const rows = _circuitBreakerSql(
+        `SELECT state, failure_count, success_count, last_failure_at FROM circuit_breaker_state WHERE tool_name = ?`,
+        toolName,
+      );
+      if (rows && rows.length > 0) {
+        const r = rows[0];
+        const state: CircuitState = {
+          state: r.state === "half_open" ? "half-open" : r.state,
+          failures: r.failure_count,
+          successes: r.success_count,
+          lastFailureTime: r.last_failure_at * 1000, // stored as epoch seconds
+        };
+        circuitStates.set(toolName, state);
+        return state;
+      }
+    } catch { /* fall through to in-memory */ }
+  }
+  return getCircuitState(toolName);
+}
+
+function persistCircuitState(toolName: string, state: CircuitState): void {
+  if (!_circuitBreakerSql) return;
+  try {
+    const dbState = state.state === "half-open" ? "half_open" : state.state;
+    _circuitBreakerSql(
+      `INSERT INTO circuit_breaker_state (tool_name, state, failure_count, success_count, last_failure_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, unixepoch('now'))
+       ON CONFLICT(tool_name) DO UPDATE SET
+         state = excluded.state,
+         failure_count = excluded.failure_count,
+         success_count = excluded.success_count,
+         last_failure_at = excluded.last_failure_at,
+         updated_at = excluded.updated_at`,
+      toolName, dbState, state.failures, state.successes, state.lastFailureTime / 1000,
+    );
+  } catch { /* best-effort persistence */ }
+}
+
 function getCircuitState(toolName: string): CircuitState {
   if (!circuitStates.has(toolName)) {
     circuitStates.set(toolName, {
@@ -230,51 +282,59 @@ function getCircuitState(toolName: string): CircuitState {
   return circuitStates.get(toolName)!;
 }
 
-function recordSuccess(toolName: string): void {
-  const state = getCircuitState(toolName);
+function recordSuccess(toolName: string, telemetryQueue?: any): void {
+  const state = loadCircuitState(toolName);
   state.successes++;
-  
+  const prevState = state.state;
+
   if (state.state === "half-open" && state.successes >= CIRCUIT_CONFIG.successThreshold) {
     state.state = "closed";
     state.failures = 0;
     state.successes = 0;
     console.log(`[circuit-breaker] ${toolName}: CLOSED (healthy)`);
+    telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "closed", failure_count: 0, timestamp: Date.now() });
   }
+  persistCircuitState(toolName, state);
 }
 
-function recordFailure(toolName: string): void {
-  const state = getCircuitState(toolName);
+function recordFailure(toolName: string, telemetryQueue?: any): void {
+  const state = loadCircuitState(toolName);
   state.failures++;
   state.lastFailureTime = Date.now();
   state.successes = 0;
-  
+  const prevState = state.state;
+
   if (state.state === "closed" && state.failures >= CIRCUIT_CONFIG.failureThreshold) {
     state.state = "open";
     console.warn(`[circuit-breaker] ${toolName}: OPEN (too many failures)`);
+    telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "open", failure_count: state.failures, timestamp: Date.now() });
   }
+  persistCircuitState(toolName, state);
 }
 
-function canExecute(toolName: string): { allowed: boolean; reason?: string } {
-  const state = getCircuitState(toolName);
+function canExecute(toolName: string, telemetryQueue?: any): { allowed: boolean; reason?: string } {
+  const state = loadCircuitState(toolName);
   const now = Date.now();
-  
+
   if (state.state === "open") {
     const timeSinceFailure = now - state.lastFailureTime;
-    
+
     if (timeSinceFailure > CIRCUIT_CONFIG.resetTimeoutMs) {
-      // Transition to half-open
+      const prevState = state.state;
       state.state = "half-open";
       state.successes = 0;
       console.log(`[circuit-breaker] ${toolName}: HALF-OPEN (testing)`);
+      telemetryQueue?.send?.({ type: "circuit_breaker", tool_name: toolName, from_state: prevState, to_state: "half-open", failure_count: state.failures, timestamp: Date.now() });
+      persistCircuitState(toolName, state);
       return { allowed: true };
     }
-    
-    return { 
-      allowed: false, 
-      reason: `Circuit breaker OPEN for ${toolName}. Retry after ${Math.ceil((CIRCUIT_CONFIG.resetTimeoutMs - timeSinceFailure) / 1000)}s` 
+
+    return {
+      allowed: false,
+      reason: `Circuit breaker OPEN for ${toolName}. Retry after ${Math.ceil((CIRCUIT_CONFIG.resetTimeoutMs - timeSinceFailure) / 1000)}s`
     };
   }
-  
+
   return { allowed: true };
 }
 
@@ -285,6 +345,17 @@ export function getCircuitStatus(): Record<string, { state: string; failures: nu
     status[tool] = { state: state.state, failures: state.failures, successes: state.successes };
   }
   return status;
+}
+
+/**
+ * Estimate tool execution cost based on the tool cost model.
+ * Used for pre-execution budget checks (Phase 1.2).
+ */
+export function estimateToolCost(toolName: string): number {
+  const model = TOOL_COSTS[toolName];
+  if (!model) return 0.001; // Unknown tools: assume minimal cost
+  // Use flat fee + estimated 5s duration for time-based tools
+  return model.flat_usd + (model.per_ms_usd * 5000);
 }
 
 /**

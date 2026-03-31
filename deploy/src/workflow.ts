@@ -260,7 +260,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       errors: string[];
     }> = [];
 
+    // ── Phase 1.4: Loop detection state ──
+    // Track recent tool calls to detect stuck loops (same tool + same args + same error 3x)
+    const recentToolSignatures: string[] = []; // ring buffer of last 5 signatures
+    const LOOP_DETECTION_WINDOW = 5;
+    const LOOP_THRESHOLD = 3;
+
     for (let turn = 1; turn <= config.max_turns; turn++) {
+     try { // Phase 1.4: wrap turn body in try-catch for resilient error handling
 
       // ── Budget check (no step needed — pure logic) ──
       if (totalCost >= config.budget_limit_usd) {
@@ -392,6 +399,32 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 
       // Filter out discover-tools from actual execution
       const executableCalls = llm.tool_calls.filter(tc => tc.name !== "discover-tools");
+
+      // ── Phase 1.2: Pre-execution budget check ──
+      // Estimate total tool cost before executing. Prevents overspend when
+      // budget is nearly exhausted but an expensive tool batch is queued.
+      {
+        const { estimateToolCost } = await import("./runtime/tools");
+        const estimatedBatchCost = executableCalls.reduce(
+          (sum, tc) => sum + estimateToolCost(tc.name), 0
+        );
+        if (totalCost + estimatedBatchCost > config.budget_limit_usd) {
+          await this.emit(p.progress_key, {
+            type: "warning",
+            message: `Budget guard: estimated tool cost $${estimatedBatchCost.toFixed(4)} would exceed remaining budget $${(config.budget_limit_usd - totalCost).toFixed(4)}. Skipping tool execution.`,
+          });
+          // Inject a synthetic tool result so the LLM knows tools were skipped
+          for (const tc of executableCalls) {
+            messages.push({ role: "assistant", content: llm.content || "", tool_calls: [tc] });
+            messages.push({
+              role: "tool", tool_call_id: tc.id, name: tc.name,
+              content: "[Tool execution skipped — budget limit would be exceeded]",
+            });
+          }
+          finalOutput = llm.content || "Budget limit reached. Tool execution was skipped.";
+          break;
+        }
+      }
 
       const toolResultEntries = await Promise.all(
         executableCalls.map((tc, i) =>
@@ -537,15 +570,30 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         errors: toolResultEntries.filter(tr => tr.error).map(tr => `${tr.name}: ${tr.error}`),
       });
 
-      // ── Loop detection (simple: same tool call 3x in a row) ──
-      if (turn >= 3) {
-        const recentTools = [];
-        for (let t = turn; t >= Math.max(1, turn - 2); t--) {
-          const stepName = `llm-${t}`;
-          // We can check the tool_calls from this turn's LLM result
-          // For simplicity, check if ALL recent turns called the same tools
+      // ── Phase 1.4: Loop detection ──
+      // Track tool call signatures (name + args hash + error presence).
+      // If the same signature appears 3+ times in the last 5 calls, break.
+      for (const tr of toolResultEntries) {
+        const sig = `${tr.name}:${tr.error ? "ERR" : "OK"}`;
+        recentToolSignatures.push(sig);
+        if (recentToolSignatures.length > LOOP_DETECTION_WINDOW) {
+          recentToolSignatures.shift();
         }
-        // TODO: implement proper loop detection by comparing tool signatures
+      }
+
+      // Check for repeated failure pattern
+      if (recentToolSignatures.length >= LOOP_THRESHOLD) {
+        const lastSig = recentToolSignatures[recentToolSignatures.length - 1];
+        const repeatCount = recentToolSignatures.filter(s => s === lastSig).length;
+        if (repeatCount >= LOOP_THRESHOLD && lastSig.endsWith(":ERR")) {
+          const loopTool = lastSig.split(":")[0];
+          await this.emit(p.progress_key, {
+            type: "warning",
+            message: `Loop detected: ${loopTool} failed ${repeatCount} times in last ${LOOP_DETECTION_WINDOW} calls. Stopping to prevent budget waste.`,
+          });
+          finalOutput = `I encountered a repeated failure with the ${loopTool} tool and stopped to avoid wasting resources. Please check the tool configuration or try a different approach.`;
+          break;
+        }
       }
 
       // Keep messages under 1 MiB (Workflow step return limit)
@@ -553,8 +601,29 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         // Trim old messages, keep system + last 10
         const system = messages.filter(m => m.role === "system");
         const recent = messages.filter(m => m.role !== "system").slice(-10);
+        await this.emit(p.progress_key, {
+          type: "warning",
+          message: `Context exceeded 800KB — oldest ${messages.length - system.length - 10} messages compressed. Consider starting a new session for complex tasks.`,
+        });
         messages = [...system, ...recent];
       }
+
+     } catch (turnErr: any) {
+       // Phase 1.4: Catch unexpected errors within a turn
+       const errMsg = turnErr?.message || String(turnErr);
+       console.error(`[workflow] Turn ${turn} error: ${errMsg}`);
+       await this.emit(p.progress_key, {
+         type: "error", message: `Turn ${turn} failed: ${errMsg.slice(0, 200)}`,
+         code: turnErr?.name === "NonRetryableError" ? "NON_RETRYABLE" : "TURN_ERROR",
+       });
+       // NonRetryableErrors should stop the loop; transient errors can be retried by Workflow
+       if (turnErr instanceof NonRetryableError) {
+         finalOutput = `Error: ${errMsg.slice(0, 500)}`;
+         break;
+       }
+       // For other errors, let the Workflow retry mechanism handle it
+       throw turnErr;
+     }
     }
 
     // ═══════════════════════════════════════════════════════════

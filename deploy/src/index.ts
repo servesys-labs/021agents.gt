@@ -246,26 +246,60 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       SELECT COALESCE(MAX(id), 0) as version FROM _sql_schema_migrations
     `[0]?.version || 0;
 
+    // Phase 1.5: All migrations wrapped in transactions for atomicity.
+    // Partial migration = corrupted schema. BEGIN/COMMIT prevents this.
+
     if (schemaVersion < 1) {
-      // v1: Initial conversation_messages table with indexes
-      this.sql`CREATE TABLE IF NOT EXISTS conversation_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        channel TEXT NOT NULL DEFAULT '',
-        created_at REAL NOT NULL DEFAULT (unixepoch('now'))
-      )`;
-      // Index for time-based queries (recent messages, pruning)
-      this.sql`CREATE INDEX IF NOT EXISTS idx_conv_created_at ON conversation_messages(created_at)`;
-      // Index for role filtering (load user/assistant only)
-      this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role ON conversation_messages(role)`;
-      this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (1)`;
+      this.sql`BEGIN`;
+      try {
+        this.sql`CREATE TABLE IF NOT EXISTS conversation_messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          role TEXT NOT NULL,
+          content TEXT NOT NULL,
+          channel TEXT NOT NULL DEFAULT '',
+          created_at REAL NOT NULL DEFAULT (unixepoch('now'))
+        )`;
+        this.sql`CREATE INDEX IF NOT EXISTS idx_conv_created_at ON conversation_messages(created_at)`;
+        this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role ON conversation_messages(role)`;
+        this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (1)`;
+        this.sql`COMMIT`;
+      } catch (e) {
+        this.sql`ROLLBACK`;
+        throw e;
+      }
     }
 
     if (schemaVersion < 2) {
-      // v2: Composite index for the most common query pattern (role + id DESC)
-      this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role_id ON conversation_messages(role, id)`;
-      this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (2)`;
+      this.sql`BEGIN`;
+      try {
+        this.sql`CREATE INDEX IF NOT EXISTS idx_conv_role_id ON conversation_messages(role, id)`;
+        this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (2)`;
+        this.sql`COMMIT`;
+      } catch (e) {
+        this.sql`ROLLBACK`;
+        throw e;
+      }
+    }
+
+    if (schemaVersion < 3) {
+      this.sql`BEGIN`;
+      try {
+        // v3: Circuit breaker state — persists across DO restarts so flaky
+        // tools stay blocked after redeploy (Phase 1.1 hardening)
+        this.sql`CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+          tool_name TEXT PRIMARY KEY,
+          state TEXT NOT NULL DEFAULT 'closed' CHECK(state IN ('closed','open','half_open')),
+          failure_count INTEGER NOT NULL DEFAULT 0,
+          success_count INTEGER NOT NULL DEFAULT 0,
+          last_failure_at REAL NOT NULL DEFAULT 0,
+          updated_at REAL NOT NULL DEFAULT (unixepoch('now'))
+        )`;
+        this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (3)`;
+        this.sql`COMMIT`;
+      } catch (e) {
+        this.sql`ROLLBACK`;
+        throw e;
+      }
     }
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
@@ -943,6 +977,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: progressKey,
               ...(data.system_prompt_override ? { system_prompt_override: data.system_prompt_override } : {}),
+              ...(data.budget_limit_usd_override ? { budget_limit_usd_override: data.budget_limit_usd_override } : {}),
               ...(data.media_urls?.length ? { media_urls: data.media_urls, media_types: data.media_types } : {}),
             },
           });
@@ -1052,6 +1087,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               channel_user_id: data.channel_user_id || "",
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: progressKey,
+              ...(data.plan ? { plan_override: data.plan } : {}),
             },
           });
 
@@ -1066,8 +1102,15 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               const start = Date.now();
               let done = false;
 
+              let lastActivity = Date.now();
               while (!done && Date.now() - start < maxWait) {
                 await new Promise(r => setTimeout(r, 500));
+
+                // Heartbeat every 15s to keep connection alive
+                if (Date.now() - lastActivity > 15000) {
+                  controller.enqueue(encoder.encode(`: heartbeat\n\n`));
+                  lastActivity = Date.now();
+                }
 
                 // Read events from KV
                 try {
@@ -1079,6 +1122,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   for (let i = lastEventIndex; i < events.length; i++) {
                     const evt = events[i];
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify(evt)}\n\n`));
+                    lastActivity = Date.now();
 
                     if (evt.type === "done") {
                       done = true;
@@ -2037,6 +2081,60 @@ export default {
       }, { status: degraded ? 503 : 200 });
     }
     
+    // ── Workspace file browser (R2-backed) ────────────────────
+    if (url.pathname === "/workspace/list" && request.method === "POST") {
+      try {
+        const body = await request.json() as Record<string, string>;
+        const { listWorkspaceFiles } = await import("./runtime/workspace");
+        const files = await listWorkspaceFiles(
+          env.STORAGE, body.org_id || "default", body.agent_name || "agent", body.user_id,
+        );
+        return Response.json({ files });
+      } catch (err: any) {
+        return Response.json({ files: [], error: err.message }, { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/workspace/read" && request.method === "POST") {
+      try {
+        const body = await request.json() as Record<string, string>;
+        const { readFileFromR2 } = await import("./runtime/workspace");
+        const content = await readFileFromR2(
+          env.STORAGE, body.org_id || "default", body.agent_name || "agent",
+          body.path || "", body.user_id,
+        );
+        if (content === null) return Response.json({ error: "File not found" }, { status: 404 });
+        return Response.json({ path: body.path, content, size: content.length });
+      } catch (err: any) {
+        return Response.json({ error: err.message }, { status: 500 });
+      }
+    }
+
+    if (url.pathname === "/workspace/projects" && request.method === "POST") {
+      try {
+        const body = await request.json() as Record<string, string>;
+        const org = body.org_id || "default";
+        const agent = body.agent_name || "agent";
+        const prefix = `workspaces/${org}/${agent}/projects/`;
+        const listed = await env.STORAGE.list({ prefix, limit: 100, delimiter: "/" });
+        // Extract project names from common prefixes (directories)
+        const projects: Array<{ name: string; last_sync?: string; file_count?: number }> = [];
+        for (const p of listed.delimitedPrefixes || []) {
+          const name = p.replace(prefix, "").replace(/\/$/, "");
+          if (!name) continue;
+          // Try to get file count from manifest or latest.tar.gz metadata
+          const latest = await env.STORAGE.head(`${prefix}${name}/latest.tar.gz`);
+          projects.push({
+            name,
+            last_sync: latest?.uploaded?.toISOString() || undefined,
+          });
+        }
+        return Response.json({ projects });
+      } catch (err: any) {
+        return Response.json({ projects: [], error: err.message }, { status: 500 });
+      }
+    }
+
     // ── Voice: ConversationRelay WebSocket with ctx.waitUntil for async ──
     if (url.pathname === "/voice/relay") {
       const upgradeHeader = request.headers.get("Upgrade") || "";
@@ -2629,7 +2727,7 @@ export default {
         const body = await request.json() as {
           agent_name?: string; task?: string; input?: unknown;
           org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
-          api_key_id?: string; session_id?: string;
+          api_key_id?: string; session_id?: string; plan?: string;
         };
 
         const agentName = body.agent_name || "agentos";
@@ -2664,6 +2762,7 @@ export default {
             channel: body.channel || "sse",
             channel_user_id: userId,
             api_key_id: body.api_key_id || "",
+            ...(body.plan ? { plan: body.plan } : {}),
           }),
         }));
 
