@@ -879,6 +879,9 @@ export function useAgentStream() {
           if (currentAgentRef.current) storeMessages(currentAgentRef.current, prev, currentSessionIdRef.current);
           return prev;
         });
+
+        // Mark streaming as complete so UI exits "Computing..." state
+        setStreaming(false);
         break;
       }
 
