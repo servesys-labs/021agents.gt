@@ -138,7 +138,7 @@ export function CodeBlock({ children, className, inline }: CodeBlockProps) {
   return (
     <div className="code-block-wrapper my-3 rounded-xl overflow-hidden border border-white/[0.06]">
       {/* Header bar — language label + copy button */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-[#161b22] border-b border-white/[0.06]">
+      <div className="flex items-center justify-between px-3 py-1.5 bg-black/30 border-b border-white/[0.06]">
         <div className="flex items-center gap-2">
           {displayLang && (
             <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${getLangColor(lang)}`}>
@@ -176,7 +176,7 @@ export function CodeBlock({ children, className, inline }: CodeBlockProps) {
       {shouldCollapse && (
         <button
           onClick={() => setExpanded(!expanded)}
-          className="w-full flex items-center justify-center gap-1 py-1.5 bg-[#161b22] border-t border-white/[0.06] text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
+          className="w-full flex items-center justify-center gap-1 py-1.5 bg-black/30 border-t border-white/[0.06] text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
         >
           {expanded ? <><ChevronUp size={10} /> Show less</> : <><ChevronDown size={10} /> Show all {lineCount} lines</>}
         </button>

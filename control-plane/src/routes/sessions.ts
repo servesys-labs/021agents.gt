@@ -515,6 +515,8 @@ sessionRoutes.get("/search", requireScope("sessions:read"), async (c) => {
   const offset = Number(c.req.query("offset") || 0);
 
   try {
+    // Escape LIKE wildcards (% and _) in search query to prevent unintended patterns
+    const escapedQ = q.toLowerCase().replace(/%/g, "\\%").replace(/_/g, "\\_");
     let rows: any[];
     if (q) {
       rows = await sql`
@@ -523,7 +525,7 @@ sessionRoutes.get("/search", requireScope("sessions:read"), async (c) => {
                created_at
         FROM sessions
         WHERE org_id = ${user.org_id}
-          AND (LOWER(input_text) LIKE ${`%${q.toLowerCase()}%`} OR LOWER(output_text) LIKE ${`%${q.toLowerCase()}%`})
+          AND (LOWER(input_text) LIKE ${`%${escapedQ}%`} OR LOWER(output_text) LIKE ${`%${escapedQ}%`})
           ${agentName ? sql`AND agent_name = ${agentName}` : sql``}
           ${status ? sql`AND status = ${status}` : sql``}
           ${minCost > 0 ? sql`AND COALESCE(cost_total_usd, 0) >= ${minCost}` : sql``}
@@ -566,8 +568,8 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
     if (session.length === 0) return c.json({ error: "Session not found" }, 404);
 
     const turns = await sql`
-      SELECT turn_number, model_used, content, input_tokens, output_tokens,
-             cost_total_usd, latency_ms, tool_calls, tool_results
+      SELECT turn_number, model_used, llm_content, input_tokens, output_tokens,
+             cost_total_usd, latency_ms, tool_calls_json, tool_results_json
       FROM turns WHERE session_id = ${sessionId}
       ORDER BY turn_number ASC
     `;
@@ -575,14 +577,27 @@ sessionRoutes.get("/:session_id/export", requireScope("sessions:read"), async (c
     if (format === "csv") {
       const header = "turn_number,model,input_tokens,output_tokens,cost_usd,latency_ms,content\n";
       const rows = turns.map((t: any) =>
-        `${t.turn_number},"${t.model_used}",${t.input_tokens},${t.output_tokens},${t.cost_total_usd},${t.latency_ms},"${(t.content || "").replace(/"/g, '""').slice(0, 500)}"`
+        `${t.turn_number},"${t.model_used}",${t.input_tokens},${t.output_tokens},${t.cost_total_usd},${t.latency_ms},"${(t.llm_content || "").replace(/"/g, '""').slice(0, 500)}"`
       ).join("\n");
       return new Response(header + rows, {
         headers: { "Content-Type": "text/csv", "Content-Disposition": `attachment; filename="session-${sessionId}.csv"` },
       });
     }
 
-    return c.json({ session: session[0], turns });
+    const parsedTurns = (turns as any[]).map((t) => {
+      let tool_calls: unknown[] = [];
+      let tool_results: unknown[] = [];
+      try { tool_calls = JSON.parse(t.tool_calls_json || "[]"); } catch {}
+      try { tool_results = JSON.parse(t.tool_results_json || "[]"); } catch {}
+      return {
+        ...t,
+        content: t.llm_content,
+        tool_calls,
+        tool_results,
+      };
+    });
+
+    return c.json({ session: session[0], turns: parsedTurns });
   } catch (err) {
     return c.json({ error: String(err) }, 500);
   }
