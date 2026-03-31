@@ -43,11 +43,43 @@ const BLOCKED_HOSTNAMES = new Set([
   "[::1]",
   "ip6-localhost",
   "ip6-loopback",
+  "0.0.0.0",
 ]);
 
 // ── Allowed protocols ───────────────────────────────────────────────
 
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
+
+// ── Decimal/Octal IP detection ──────────────────────────────────────
+// Catches SSRF bypasses like http://2130706433 (decimal 127.0.0.1)
+// and http://0177.0.0.1 (octal 127.0.0.1)
+
+function isDecimalIp(hostname: string): boolean {
+  // Pure numeric hostname = decimal IP encoding
+  if (/^\d+$/.test(hostname)) {
+    const num = Number(hostname);
+    if (num >= 0 && num <= 0xFFFFFFFF) return true;
+  }
+  return false;
+}
+
+function isOctalIp(hostname: string): boolean {
+  // Octal encoding: segments starting with 0 followed by digits (e.g., 0177.0.0.1)
+  const parts = hostname.split(".");
+  if (parts.length === 4) {
+    return parts.some(p => /^0\d+$/.test(p));
+  }
+  return false;
+}
+
+function decimalToIp(decimal: number): string {
+  return [
+    (decimal >>> 24) & 0xFF,
+    (decimal >>> 16) & 0xFF,
+    (decimal >>> 8) & 0xFF,
+    decimal & 0xFF,
+  ].join(".");
+}
 
 // ── Public API ──────────────────────────────────────────────────────
 
@@ -76,6 +108,22 @@ export function validateUrl(urlStr: string): UrlValidationResult {
     // Block known dangerous hostnames
     if (BLOCKED_HOSTNAMES.has(hostname)) {
       return { valid: false, reason: `Blocked hostname: ${hostname}` };
+    }
+
+    // Block decimal IP encoding (e.g., 2130706433 = 127.0.0.1)
+    if (isDecimalIp(hostname)) {
+      const resolved = decimalToIp(Number(hostname));
+      // Re-validate the resolved dotted-decimal form
+      for (const pattern of BLOCKED_IP_RANGES) {
+        if (pattern.test(resolved)) {
+          return { valid: false, reason: `Blocked decimal IP: ${hostname} → ${resolved}` };
+        }
+      }
+    }
+
+    // Block octal IP encoding (e.g., 0177.0.0.1 = 127.0.0.1)
+    if (isOctalIp(hostname)) {
+      return { valid: false, reason: `Blocked octal IP encoding: ${hostname}` };
     }
 
     // Block private/internal IP ranges

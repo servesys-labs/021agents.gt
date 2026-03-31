@@ -22,8 +22,12 @@ const DANGEROUS_RANGES = /[\u200B-\u200F\u202A-\u202E\u2060-\u2069\uFEFF\uFFF9-\
 // U+E0000 = \uDB40\uDC00, U+E007F = \uDB40\uDC7F
 const TAG_CHARS = /[\uDB40][\uDC00-\uDC7F]/g;
 
-// Private Use Area: U+E000–U+F8FF (BMP) + Supplementary (U+F0000–U+FFFFF, U+100000–U+10FFFF)
-const PRIVATE_USE = /[\uE000-\uF8FF]/g;
+// Private Use Area: U+E000–U+F8FF (BMP)
+const PRIVATE_USE_BMP = /[\uE000-\uF8FF]/g;
+// Supplementary PUA-A (U+F0000–U+FFFFF) and PUA-B (U+100000–U+10FFFF)
+// In JS, these are surrogate pairs: PUA-A = \uDB80[\uDC00-\uDFFF] to \uDBBF[\uDC00-\uDFFF]
+// PUA-B = \uDBC0[\uDC00-\uDFFF] to \uDBFF[\uDC00-\uDFFF]
+const PRIVATE_USE_SUPP = /[\uDB80-\uDBFF][\uDC00-\uDFFF]/g;
 
 // Format control characters (Cf category subset — the invisible ones)
 const FORMAT_CONTROLS = /[\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180E\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFE00-\uFE0F\uFEFF\uFFF0-\uFFF8]/g;
@@ -45,7 +49,8 @@ export function sanitizeUnicode(text: string): string {
     // Step 2: Strip dangerous ranges
     next = next.replace(DANGEROUS_RANGES, "");
     next = next.replace(TAG_CHARS, "");
-    next = next.replace(PRIVATE_USE, "");
+    next = next.replace(PRIVATE_USE_BMP, "");
+    next = next.replace(PRIVATE_USE_SUPP, "");
     next = next.replace(FORMAT_CONTROLS, "");
 
     // Stable — no more changes

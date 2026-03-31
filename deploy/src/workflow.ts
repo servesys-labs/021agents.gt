@@ -193,15 +193,17 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     }));
 
     // ── Phase 0 Security: Validate system prompt override ──
+    // Size check runs AFTER sanitization so zero-width padding can't bypass the limit
     const MAX_SYSTEM_PROMPT_OVERRIDE_CHARS = 50_000;
     let effectiveSystemPrompt = config.system_prompt;
     if (p.system_prompt_override) {
-      if (p.system_prompt_override.length > MAX_SYSTEM_PROMPT_OVERRIDE_CHARS) {
+      const sanitizedOverride = sanitizeUnicode(p.system_prompt_override);
+      if (sanitizedOverride.length > MAX_SYSTEM_PROMPT_OVERRIDE_CHARS) {
         throw new NonRetryableError(
-          `system_prompt_override exceeds ${MAX_SYSTEM_PROMPT_OVERRIDE_CHARS} char limit (got ${p.system_prompt_override.length})`
+          `system_prompt_override exceeds ${MAX_SYSTEM_PROMPT_OVERRIDE_CHARS} char limit (got ${sanitizedOverride.length} after sanitization)`
         );
       }
-      effectiveSystemPrompt = sanitizeUnicode(p.system_prompt_override);
+      effectiveSystemPrompt = sanitizedOverride;
     }
 
     if (effectiveSystemPrompt) {
