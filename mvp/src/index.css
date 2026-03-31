@@ -103,3 +103,132 @@ body {
 .animate-in {
   animation: fadeIn 0.4s ease-out;
 }
+
+/* Staggered entrance for lists/grids — use with style={{ animationDelay }} */
+@keyframes cardEnter {
+  from { opacity: 0; transform: translateY(12px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.animate-card-enter {
+  animation: cardEnter 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Animated count-up shimmer for stat values */
+@keyframes countPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.animate-count-pulse {
+  animation: countPulse 0.6s ease-out;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Claude Code TUI patterns ported to web
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* Terminal card — consistent dark theme for code/tool output (works in both light and dark mode) */
+.terminal-card {
+  background: #1a1b26;
+  color: #c0caf5;
+  border-radius: 0.75rem;
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", ui-monospace, monospace;
+  font-size: 0.6875rem; /* 11px */
+  line-height: 1.6;
+}
+.terminal-card .terminal-stdout { color: #c0caf5; }
+.terminal-card .terminal-stderr { color: #f7768e; }
+.terminal-card .terminal-success { color: #9ece6a; }
+.terminal-card .terminal-dim { color: #565f89; }
+.terminal-card .terminal-info { color: #7aa2f7; }
+
+/* Diff colors (work inside terminal-card) */
+.diff-added { background: rgba(158, 206, 106, 0.12); color: #9ece6a; }
+.diff-removed { background: rgba(247, 118, 142, 0.12); color: #f7768e; }
+.diff-added-word { background: rgba(158, 206, 106, 0.3); }
+.diff-removed-word { background: rgba(247, 118, 142, 0.3); }
+.diff-header { color: #565f89; }
+.diff-gutter { color: #565f89; user-select: none; min-width: 3ch; display: inline-block; text-align: right; margin-right: 1ch; }
+
+/* Shimmer loading effect — text-level highlight that sweeps left to right */
+@keyframes shimmer {
+  0% { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--color-text-muted) 0%,
+    var(--color-primary) 50%,
+    var(--color-text-muted) 100%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+/* Stall color transition — tool cards gradually shift from blue to amber to red */
+.stall-indicator {
+  transition: color 2s ease-in-out, border-color 2s ease-in-out, background-color 2s ease-in-out;
+}
+.stall-indicator[data-stall="normal"] { --stall-color: var(--color-primary); }
+.stall-indicator[data-stall="slow"] { --stall-color: var(--color-warning); }
+.stall-indicator[data-stall="stalled"] { --stall-color: var(--color-danger); }
+
+/* Typing cursor for streaming text */
+@keyframes blink-cursor {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+.streaming-cursor::after {
+  content: "▋";
+  color: var(--color-primary);
+  animation: blink-cursor 1s step-end infinite;
+  margin-left: 1px;
+}
+
+/* Tool card glow effect for running state */
+@keyframes tool-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+  50% { box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+}
+.tool-running {
+  animation: tool-pulse 2s ease-in-out infinite;
+}
+.dark .tool-running {
+  animation: tool-pulse 2s ease-in-out infinite;
+}
+
+/* Code block copy button — appears on hover */
+.code-block-wrapper { position: relative; }
+.code-block-wrapper .code-copy-btn {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  opacity: 0; transition: opacity 0.15s;
+}
+.code-block-wrapper:hover .code-copy-btn { opacity: 1; }
+@media (hover: none) { .code-block-wrapper .code-copy-btn { opacity: 0.6; } }
+
+/* Status dot animations */
+@keyframes dot-pulse {
+  0%, 80%, 100% { transform: scale(1); opacity: 0.6; }
+  40% { transform: scale(1.4); opacity: 1; }
+}
+.status-dot-pulse {
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+
+/* Smooth accordion for thinking blocks and tool output */
+.accordion-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease-out;
+}
+.accordion-content[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+.accordion-content > div {
+  overflow: hidden;
+}
