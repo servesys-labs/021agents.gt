@@ -808,9 +808,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         },
       });
 
-      // Write individual turn records from accumulated data
-      for (const turnData of turnRecords) {
-        await queue.send({
+      // Write individual turn records — batched concurrently (not sequential)
+      // Sprint audit: sequential queue.send in a loop risks 30s timeout on 10+ turns
+      await Promise.all(turnRecords.map(turnData =>
+        queue.send({
           type: "turn",
           payload: {
             session_id: sessionId,
@@ -825,8 +826,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             tool_results_json: JSON.stringify(turnData.tool_results || []),
             errors_json: JSON.stringify(turnData.errors || []),
           },
-        });
-      }
+        })
+      ));
     });
 
     return result;
