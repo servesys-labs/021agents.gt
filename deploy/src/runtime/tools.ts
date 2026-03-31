@@ -834,6 +834,25 @@ async function dispatch(
       const sandbox = getSafeSandbox(env, `session-${sessionId}`);
       let readPath = args.path || "";
       if (readPath && !readPath.startsWith("/")) readPath = `/workspace/${readPath}`;
+
+      // Phase 9.5: Binary file detection — check for null bytes in first 8KB
+      const binCheck = await sandbox.exec(
+        `head -c 8192 "${readPath}" 2>/dev/null | tr -d '\\0' | wc -c`,
+        { timeout: 5 },
+      ).catch(() => ({ stdout: "0" }));
+      const rawCheck = await sandbox.exec(
+        `head -c 8192 "${readPath}" 2>/dev/null | wc -c`,
+        { timeout: 5 },
+      ).catch(() => ({ stdout: "0" }));
+      const cleanBytes = parseInt((binCheck.stdout || "0").trim()) || 0;
+      const rawBytes = parseInt((rawCheck.stdout || "0").trim()) || 0;
+      if (rawBytes > 0 && cleanBytes < rawBytes * 0.9) {
+        // >10% null bytes → binary file
+        const ext = readPath.split(".").pop() || "unknown";
+        const sizeCheck = await sandbox.exec(`stat -c%s "${readPath}" 2>/dev/null || stat -f%z "${readPath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "?" }));
+        return `[Binary file — ${(sizeCheck.stdout || "?").trim()} bytes, type: .${ext}]`;
+      }
+
       const offset = Math.max(1, Number(args.offset) || 1);
       const limit = Math.min(200, Math.max(1, Number(args.limit) || 100));
       const endLine = offset + limit - 1;
@@ -4511,6 +4530,28 @@ export function selectToolsForQuery(
   }
 
   return selected;
+}
+
+/**
+ * Phase 2.2: Build a compact tool index for deferred loading.
+ * Returns name + one-line description for tools NOT in the selected set.
+ * Injected as a system message so the model knows what tools exist
+ * without paying full schema token cost (~50 tokens vs ~500 per tool).
+ */
+export function buildDeferredToolIndex(
+  allTools: ToolDefinition[],
+  selectedTools: ToolDefinition[],
+): string {
+  const selectedNames = new Set(selectedTools.map(t => t.function.name));
+  const deferred = allTools.filter(t => !selectedNames.has(t.function.name));
+  if (deferred.length === 0) return "";
+
+  const lines = deferred.map(t => {
+    const desc = (t.function.description || "").split("\n")[0].slice(0, 80);
+    return `- ${t.function.name}: ${desc}`;
+  });
+
+  return `## Additional Tools Available\nUse the discover-tools tool to load any of these:\n${lines.join("\n")}`;
 }
 
 /**

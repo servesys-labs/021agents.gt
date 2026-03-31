@@ -219,6 +219,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       effectiveSystemPrompt = sanitizedOverride;
     }
 
+    // Phase 2.5: Prompt Cache Optimization
+    // Static content (system prompt + behavioral rules) goes first and is
+    // cacheable across turns. Dynamic content (memory, reasoning, tool index)
+    // comes after and changes per turn. For Anthropic models, the API caches
+    // everything up to the last cache_control marker.
+    // ── STATIC SECTION (cacheable) ──
     if (effectiveSystemPrompt) {
       messages.push({ role: "system", content: effectiveSystemPrompt });
     }
@@ -235,6 +241,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 - Prefer dedicated tools over bash equivalents: use grep tool instead of bash grep, read-file instead of bash cat.
 - If a tool returns empty output, acknowledge it rather than fabricating content.` });
 
+    // ── DYNAMIC SECTION (changes per turn — not cached) ──
     if (bootstrap.reasoning_prompt) {
       messages.push({ role: "system", content: bootstrap.reasoning_prompt });
     }
@@ -303,6 +310,16 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         break;
       }
 
+      // ── Phase 9.4: Strip thinking blocks from history ──
+      // Thinking content is only useful for the turn it was generated. Keeping it
+      // in history wastes tokens and can confuse the model on subsequent turns.
+      for (const msg of messages) {
+        if (msg.role === "assistant" && typeof msg.content === "string") {
+          // Strip <thinking>...</thinking> blocks from previous turns
+          msg.content = msg.content.replace(/<thinking>[\s\S]*?<\/thinking>/g, "").trim();
+        }
+      }
+
       // ── Phase 9.1: Conversation repair — fix orphaned tool calls before LLM sees them ──
       {
         const { messages: repaired, repairs } = repairConversation(messages);
@@ -347,13 +364,22 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN || "",
         } as any);
 
-        const { selectToolsForQuery } = await import("./runtime/tools");
+        const { selectToolsForQuery, buildDeferredToolIndex } = await import("./runtime/tools");
         const allToolDefs = getToolDefinitions(config.tools, config.blocked_tools);
 
         // Progressive tool discovery: only send relevant tools per turn
-        // Build context from last 3 messages + current input
         const recentContext = messages.slice(-3).map(m => m.content || "").join(" ");
         const toolDefs = selectToolsForQuery(allToolDefs, p.input, recentContext);
+
+        // Phase 2.2: Inject deferred tool index on first turn so model knows
+        // what else exists without paying full schema cost
+        if (turn === 1) {
+          const deferredIndex = buildDeferredToolIndex(allToolDefs, toolDefs);
+          if (deferredIndex) {
+            const hasIndex = messages.some(m => m.role === "system" && (m.content || "").includes("Additional Tools"));
+            if (!hasIndex) messages.push({ role: "system", content: deferredIndex });
+          }
+        }
 
         const response = await callLLM(
           { AI: this.env.AI, CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID, AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN, CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN } as any,

@@ -39,7 +39,11 @@ type WsSend = (data: string) => void;
 
 /**
  * Helper for progress reporting on long-running tools.
- * Sends periodic "tool_progress" events over the WebSocket while awaiting a tool result.
+ * Sends periodic "tool_progress" events AND heartbeats over the WebSocket
+ * while awaiting a tool result.
+ *
+ * Phase 3.4: Heartbeat events every 15s prevent client-side timeouts
+ * during long-running tools (>30s with no output).
  */
 function withProgress(
   toolName: string,
@@ -50,8 +54,12 @@ function withProgress(
   if (!send) return promise;
 
   let elapsed = 0;
+  const HEARTBEAT_INTERVAL = 15_000;
+  let lastHeartbeat = Date.now();
+
   const timer = setInterval(() => {
     elapsed += intervalMs;
+    // Tool progress event
     send(JSON.stringify({
       type: "tool_progress",
       tool: toolName,
@@ -59,9 +67,54 @@ function withProgress(
       elapsed_ms: elapsed,
       message: `Still running... (${Math.round(elapsed / 1000)}s elapsed)`,
     }));
+    // Phase 3.4: Heartbeat every 15s
+    if (Date.now() - lastHeartbeat >= HEARTBEAT_INTERVAL) {
+      send(JSON.stringify({ type: "heartbeat", timestamp: Date.now() }));
+      lastHeartbeat = Date.now();
+    }
   }, intervalMs);
 
   return promise.finally(() => clearInterval(timer));
+}
+
+// ── Phase 3.2: Backpressure state for WebSocket streaming ──
+const HIGH_WATERMARK = 1000;  // messages — pause reading from LLM
+const LOW_WATERMARK = 200;    // messages — resume reading
+const SEND_TIMEOUT_MS = 30_000;
+
+interface StreamBackpressure {
+  pendingCount: number;
+  paused: boolean;
+  dropped: number;
+}
+
+function createStreamBackpressure(): StreamBackpressure {
+  return { pendingCount: 0, paused: false, dropped: 0 };
+}
+
+/**
+ * Backpressure-aware send. Tracks pending messages and drops if
+ * client is too slow (prevents OOM from unbounded buffer growth).
+ */
+function backpressureSend(
+  rawSend: WsSend,
+  bp: StreamBackpressure,
+  data: string,
+): void {
+  if (bp.pendingCount > HIGH_WATERMARK) {
+    bp.dropped++;
+    bp.paused = true;
+    return; // Drop message — client can't keep up
+  }
+  bp.pendingCount++;
+  try {
+    rawSend(data);
+  } finally {
+    bp.pendingCount--;
+    if (bp.paused && bp.pendingCount < LOW_WATERMARK) {
+      bp.paused = false;
+    }
+  }
 }
 
 /**
@@ -359,13 +412,25 @@ export async function streamRun(
       sysPromptParts.push(config.system_prompt);
     }
 
-    // 4b. Skills (loaded from DB, cached 1min) — agent-specific capabilities
+    // 4b. Skills (loaded from DB, cached 1min) + marketplace delegation guidance
     if (!isVoiceChannel) {
       try {
         const skills = await loadSkills(hyperdrive, config.org_id || "", config.agent_name || agentName);
         const skillsBlock = formatSkillsPrompt(skills);
         if (skillsBlock) sysPromptParts.push(skillsBlock);
       } catch {}
+
+      // Marketplace delegation — always available to all agents
+      sysPromptParts.push(
+        `## Marketplace Delegation\n` +
+        `You can delegate specialized tasks to skill agents in the OneShots marketplace.\n` +
+        `1. Use \`marketplace-search\` to find specialist agents (e.g., "flight search", "legal review")\n` +
+        `2. Review pricing, ratings, and capabilities in the results\n` +
+        `3. Use \`a2a-send\` to delegate the task — payments are handled automatically via x-402\n` +
+        `4. If the skill agent returns artifacts (files, code), they'll be included in the response\n` +
+        `5. Use \`share-artifact\` to send files/code back to a caller if you are being delegated to\n` +
+        `For paid tasks > $0.10, confirm with the user before delegating.`
+      );
     }
 
     // 4c. Startup context (prior session progress) — cross-session awareness
@@ -580,7 +645,12 @@ export async function streamRun(
       messages.push({ role: "assistant", content: llmResponse.content, tool_calls: llmResponse.tool_calls });
 
       for (const tc of llmResponse.tool_calls) {
-        send(serializeForWebSocket({ type: "tool_call", name: tc.name, tool_call_id: tc.id }));
+        let argsPreview = "";
+        try {
+          const parsed = JSON.parse(tc.arguments || "{}");
+          argsPreview = parsed.query || parsed.code?.slice(0, 120) || parsed.url || parsed.path || parsed.input?.slice(0, 120) || "";
+        } catch {}
+        send(serializeForWebSocket({ type: "tool_call", name: tc.name, tool_call_id: tc.id, args_preview: argsPreview }));
       }
 
       // P0 Fix: Report progress for ALL long-running tools, not just the first
@@ -649,7 +719,32 @@ export async function streamRun(
           result: (tr.error || tr.result || "").slice(0, 500),
           error: tr.error || undefined,
           latency_ms: tr.latency_ms,
+          cost_usd: tr.cost_usd || 0,
         }));
+
+        // Emit file_change for write-file/edit-file so UI shows code diffs
+        if (!tr.error && (tc.name === "write-file" || tc.name === "edit-file")) {
+          try {
+            const tcArgs = JSON.parse(tc.arguments || "{}");
+            const filePath = tcArgs.path || "";
+            const ext = filePath.split(".").pop()?.toLowerCase() || "";
+            const lang = ({ ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", py: "python", json: "json", html: "html", css: "css", md: "markdown" } as Record<string, string>)[ext] || ext;
+            if (tc.name === "write-file") {
+              send(serializeForWebSocket({
+                type: "file_change", change_type: "create", path: filePath, language: lang,
+                content: (tcArgs.content || "").slice(0, 10000), size: (tcArgs.content || "").length,
+                tool_call_id: tc.id,
+              } as any));
+            } else {
+              send(serializeForWebSocket({
+                type: "file_change", change_type: "edit", path: filePath, language: lang,
+                old_text: (tcArgs.old_text || tcArgs.old_string || "").slice(0, 5000),
+                new_text: (tcArgs.new_text || tcArgs.new_string || "").slice(0, 5000),
+                tool_call_id: tc.id,
+              } as any));
+            }
+          } catch {}
+        }
       }
 
       const turnTokens = llmResponse.usage.input_tokens + llmResponse.usage.output_tokens;
@@ -744,6 +839,8 @@ export async function streamRun(
       turns: totalToolCalls > 0 ? Math.ceil(totalToolCalls) : 1,
       tool_calls: totalToolCalls,
       cost_usd: Math.round(cumulativeCost * 1_000_000) / 1_000_000,
+      input_tokens: totalInputTokens,
+      output_tokens: totalOutputTokens,
       latency_ms: elapsedMs,
     };
     send(serializeForWebSocket(doneEvent));
