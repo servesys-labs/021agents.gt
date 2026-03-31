@@ -33,6 +33,11 @@ import { shouldCompact, compactMessages } from "./runtime/compact";
 import { repairConversation } from "./runtime/conversation-repair";
 import { migrateConfig } from "./runtime/config-migrations";
 import { logger } from "./runtime/logger";
+import { readMailbox } from "./runtime/mailbox";
+import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID } from "./runtime/idempotency";
+import { backupCostState } from "./runtime/do-lifecycle";
+import { processToolResult } from "./runtime/result-storage";
+import { registerSession, unregisterSession, isSessionLimitReached, startSessionHeartbeat } from "./runtime/session-counter";
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -89,6 +94,24 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     const p = event.payload;
     const sessionId = event.instanceId.slice(0, 16);
     const traceId = crypto.randomUUID().slice(0, 16);
+
+    // ── Cloud C4.1: Check concurrent session limit before starting ──
+    const sessionLimit = await isSessionLimitReached(this.env as any, p.org_id);
+    if (sessionLimit.limited) {
+      return {
+        output: `Session limit reached: ${sessionLimit.active}/${sessionLimit.max} concurrent sessions for your organization. Please wait for an active session to complete.`,
+        turns: 0, tool_calls: 0, cost_usd: 0, input_tokens: 0, output_tokens: 0,
+        session_id: sessionId, trace_id: traceId,
+      };
+    }
+
+    // Register this session + start heartbeat for cross-DO counting
+    await registerSession(this.env as any, p.org_id, sessionId, {
+      agentName: p.agent_name, channel: p.channel,
+    });
+    const stopHeartbeat = startSessionHeartbeat(this.env as any, p.org_id, sessionId, {
+      agentName: p.agent_name,
+    });
 
     // ═══════════════════════════════════════════════════════════
     // STEP 1: BOOTSTRAP — load config, skills, reasoning strategy
@@ -148,7 +171,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     const { config: migratedConfig, migrated: configMigrated, from: migratedFrom, to: migratedTo } = migrateConfig(bootstrap.config);
     const config = migratedConfig;
     if (configMigrated) {
-      console.log(`[config-migration] ${p.agent_name}: ${migratedFrom} → ${migratedTo}`);
+      logger.info("config_migration", { agent: p.agent_name, from: migratedFrom, to: migratedTo });
     }
 
     // Phase 7.4: Initialize structured logger
@@ -325,7 +348,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         const { messages: repaired, repairs } = repairConversation(messages);
         if (repairs.orphanedUses + repairs.orphanedResults + repairs.duplicateIds + repairs.emptyResults > 0) {
           messages = repaired;
-          console.log(`[conversation-repair] Fixed: ${repairs.orphanedUses} orphaned uses, ${repairs.orphanedResults} orphaned results, ${repairs.duplicateIds} duplicate IDs, ${repairs.emptyResults} empty results`);
+          logger.info("conversation_repair", { orphaned_uses: repairs.orphanedUses, orphaned_results: repairs.orphanedResults, duplicate_ids: repairs.duplicateIds, empty_results: repairs.emptyResults });
         }
       }
 
@@ -520,6 +543,13 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
             timeout: "5 minutes",
           }, async () => {
+            // Cloud C1.1: Idempotency — check for cached result from prior attempt
+            const idemKey = stepIdempotencyKey(sessionId, turn, tc.name, hashArgs(tc.arguments || ""));
+            const cachedResult = await getStepResult(this.env as any, idemKey);
+            if (cachedResult) {
+              try { return JSON.parse(cachedResult); } catch {}
+            }
+
             const { executeTools } = await import("./runtime/tools");
             const results = await executeTools(
               {
@@ -531,32 +561,43 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
                 CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
                 AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
                 AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-                // Workflow + KV bindings for sub-agent delegation
                 AGENT_RUN_WORKFLOW: this.env.AGENT_RUN_WORKFLOW,
                 AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
-                // Auth + API bindings for marketplace/feed/memory/mcp tools
                 SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
                 CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
                 OPENROUTER_API_KEY: (this.env as any).OPENROUTER_API_KEY,
-                // Agent config for plan-aware tool routing (vision model, etc.)
                 __agentConfig: config,
-                // User ID for per-user workspace scoping in R2
                 __channelUserId: p.channel_user_id || "",
               } as any,
               [{ id: tc.id, name: tc.name, arguments: tc.arguments }],
               sessionId,
-              false, // single tool per step
+              false,
               config.tools,
             );
             const r = results[0];
-            return {
+            let resultStr = typeof r?.result === "string" ? r.result : JSON.stringify(r?.result || "");
+
+            // Cloud C3.1: Persist large results to R2 with preview + reference
+            if (resultStr.length > 30_000 && !r?.error) {
+              const processed = await processToolResult(this.env as any, resultStr, {
+                sessionId, toolCallId: tc.id, toolName: tc.name,
+              });
+              resultStr = processed.content;
+            }
+
+            const entry = {
               tool_call_id: tc.id,
               name: tc.name,
-              result: typeof r?.result === "string" ? r.result : JSON.stringify(r?.result || ""),
+              result: resultStr,
               error: r?.error || undefined,
               latency_ms: r?.latency_ms || 0,
               cost_usd: r?.cost_usd || 0,
             };
+
+            // Cloud C1.1: Cache result for idempotent retries
+            await cacheStepResult(this.env as any, idemKey, JSON.stringify(entry));
+
+            return entry;
           })
         )
       );
@@ -678,6 +719,33 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         errors: toolResultEntries.filter(tr => tr.error).map(tr => `${tr.name}: ${tr.error}`),
       });
 
+      // ── Cloud C4.2: Backup cost state every 5 turns (survives DO eviction) ──
+      if (turn % 5 === 0) {
+        backupCostState(this.env as any, sessionId, totalCost, turn).catch(() => {});
+      }
+
+      // ── Phase 6.1: Mailbox IPC — check for messages from parent/siblings ──
+      if (p.parent_session_id) {
+        try {
+          const mailMessages = readMailbox(
+            (this.env as any).DO_SQL,
+            sessionId,
+          );
+          for (const mm of mailMessages) {
+            if (mm.message_type === "shutdown") {
+              await this.emit(p.progress_key, { type: "system", content: "Received shutdown signal from parent agent." });
+              finalOutput = finalOutput || "Shutdown requested by parent agent.";
+              // Use a flag to break from the outer loop
+              break;
+            }
+            if (mm.message_type === "text") {
+              // Inject parent message into conversation
+              messages.push({ role: "system", content: `[Message from parent agent]: ${mm.payload}` });
+            }
+          }
+        } catch { /* DO_SQL may not be available in workflow steps */ }
+      }
+
       // ── Phase 1.4: Loop detection ──
       // Track tool call signatures (name + args hash + error presence).
       // If the same signature appears 3+ times in the last 5 calls, break.
@@ -719,7 +787,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
      } catch (turnErr: any) {
        // Phase 1.4: Catch unexpected errors within a turn
        const errMsg = turnErr?.message || String(turnErr);
-       console.error(`[workflow] Turn ${turn} error: ${errMsg}`);
+       logger.error("turn_error", { turn, error: errMsg.slice(0, 500) });
        await this.emit(p.progress_key, {
          type: "error", message: `Turn ${turn} failed: ${errMsg.slice(0, 200)}`,
          code: turnErr?.name === "NonRetryableError" ? "NON_RETRYABLE" : "TURN_ERROR",
@@ -829,6 +897,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         })
       ));
     });
+
+    // ── Cloud C4.1+C4.2: Session cleanup + cost backup ──
+    stopHeartbeat();
+    await unregisterSession(this.env as any, p.org_id, sessionId);
+    await backupCostState(this.env as any, sessionId, result.cost_usd, result.turns);
+
+    // Flush logger before returning
+    await logger.flush();
 
     return result;
   }
