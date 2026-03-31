@@ -1517,6 +1517,7 @@ const metaChatRoute = createRoute({
                 tool_calls: z.array(z.record(z.unknown())).optional(),
               }),
             ),
+            mode: z.enum(["demo", "live"]).optional(),
           }),
         },
       },
@@ -1539,7 +1540,7 @@ const metaChatRoute = createRoute({
 });
 agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
   const { name: identifier } = c.req.valid("param");
-  const { messages } = c.req.valid("json");
+  const { messages, mode } = c.req.valid("json");
   const user = c.get("user");
 
   // Resolve agent identifier (supports both agent_id and name)
@@ -1564,6 +1565,7 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
       aiGatewayId: c.env.AI_GATEWAY_ID,
       cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
       aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
+      mode: mode || "live",
       env: {
         RUNTIME: c.env.RUNTIME,
         SERVICE_TOKEN: c.env.SERVICE_TOKEN,

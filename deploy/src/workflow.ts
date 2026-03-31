@@ -34,7 +34,7 @@ import { repairConversation } from "./runtime/conversation-repair";
 import { migrateConfig } from "./runtime/config-migrations";
 import { logger } from "./runtime/logger";
 import { readMailbox } from "./runtime/mailbox";
-import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID } from "./runtime/idempotency";
+import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID, clearSessionDedup } from "./runtime/idempotency";
 import { backupCostState, hydrateFromSnapshot, recoverCostState } from "./runtime/do-lifecycle";
 import { compactProgressEvents } from "./runtime/ws-dedup";
 import { processToolResult } from "./runtime/result-storage";
@@ -380,7 +380,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // ── Skill activation — detect /skill-name in user input ──
     // If user starts with /batch, /review, /debug, etc., inject the skill prompt
     // as a system message guiding the agent through the skill workflow.
-    const skillMatch = safeInput.match(/^\/([a-z][\w-]*)\s*(.*)?$/);
+    const skillMatch = safeInput.trim().match(/^\/([a-z][\w-]*)\s*(.*)?$/);
     if (skillMatch) {
       const [, skillName, skillArgs] = skillMatch;
       const { getSkillPrompt, loadSkills: loadDbSkills } = await import("./runtime/skills");
@@ -1003,9 +1003,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       ));
     });
 
-    // ── Cloud C4.1+C4.2: Session cleanup + cost backup ──
+    // ── Cloud C4.1+C4.2: Session cleanup + cost backup + dedup cleanup ──
     await unregisterSession(this.env as any, p.org_id, sessionId);
     await backupCostState(this.env as any, sessionId, result.cost_usd, result.turns);
+    clearSessionDedup(sessionId);
 
     // Flush logger before returning
     await logger.flush();

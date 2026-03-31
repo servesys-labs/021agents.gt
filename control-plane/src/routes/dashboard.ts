@@ -276,7 +276,7 @@ dashboardRoutes.openapi(activityRoute, async (c): Promise<any> => {
  */
 dashboardRoutes.get("/stats/by-agent", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c, orgId);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
   try {
     const rows = await sql`
       SELECT
@@ -304,7 +304,7 @@ dashboardRoutes.get("/stats/by-agent", requireScope("observability:read"), async
  */
 dashboardRoutes.get("/stats/by-model", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c, orgId);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
   try {
     const rows = await sql`
       SELECT
@@ -332,7 +332,7 @@ dashboardRoutes.get("/stats/by-model", requireScope("observability:read"), async
  */
 dashboardRoutes.get("/stats/tool-health", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c, orgId);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
   try {
     // Parse tool_calls JSON from turns to get per-tool stats
     const rows = await sql`
@@ -369,7 +369,7 @@ dashboardRoutes.get("/stats/tool-health", requireScope("observability:read"), as
  */
 dashboardRoutes.get("/stats/routing", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
-  const sql = await getDbForOrg(c, orgId);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
   try {
     // Find sessions where user started with one agent but the conversation
     // was short (1-2 turns) and low-rated — suggests misroute
@@ -400,7 +400,7 @@ dashboardRoutes.get("/stats/routing", requireScope("observability:read"), async 
 dashboardRoutes.get("/stats/trends", requireScope("observability:read"), async (c) => {
   const orgId = c.get("user").org_id;
   const period = Number(c.req.query("period_days") || 7);
-  const sql = await getDbForOrg(c, orgId);
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
   try {
     const rows = await sql`
       SELECT

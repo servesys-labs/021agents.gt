@@ -271,13 +271,19 @@ marketplaceRoutes.openapi(rateRoute, async (c): Promise<any> => {
     else if (totalSpend < 10) credibilityWeight *= 0.7;
   } catch { /* best-effort — default full weight */ }
 
-  await submitRating(sql, body.listing_id, user.org_id, body.rating, {
+  // Apply credibility weight: weighted_rating = raw_rating * weight
+  // Low-credibility ratings contribute less to the average
+  const weightedRating = Math.round(body.rating * credibilityWeight * 100) / 100;
+
+  await submitRating(sql, body.listing_id, user.org_id, weightedRating, {
     task_id: body.task_id,
     review_text: body.review_text,
     response_time_ms: body.response_time_ms,
+    credibility_weight: credibilityWeight,
+    raw_rating: body.rating,
   });
 
-  return c.json({ rated: true, listing_id: body.listing_id, rating: body.rating });
+  return c.json({ rated: true, listing_id: body.listing_id, rating: body.rating, credibility_weight: credibilityWeight });
 });
 
 // ── POST /feature — Purchase featured placement ──────────────
