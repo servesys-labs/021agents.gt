@@ -49,7 +49,7 @@ export const apiKeyRateLimitMiddleware = createMiddleware<{
   Variables: { user: CurrentUser };
 }>(async (c, next) => {
   // Only rate-limit public API routes
-  if (!c.req.path.startsWith("/v1/")) return next();
+  if (!c.req.path.startsWith("/v1/") && !c.req.path.startsWith("/api/v1/")) return next();
 
   const user = c.get("user");
   if (!user || !user.user_id) return next();

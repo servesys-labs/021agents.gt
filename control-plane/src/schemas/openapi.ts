@@ -568,6 +568,10 @@ export const commonErrorResponses = {
     description: "Conflict — resource already exists",
     content: { "application/json": { schema: ErrorSchema } },
   },
+  413: {
+    description: "Payload too large",
+    content: { "application/json": { schema: ErrorSchema } },
+  },
   422: {
     description: "Validation failed",
     content: { "application/json": { schema: ValidationErrorSchema } },

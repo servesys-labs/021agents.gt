@@ -134,17 +134,34 @@ workspaceRoutes.openapi(listProjectsRoute, async (c): Promise<any> => {
 // Phase 8.2: Workspace Write Endpoints
 // ══════════════════════════════════════════════════════════════════════
 
-/**
- * POST /files/create — Create a file in the workspace
- */
-workspaceRoutes.post("/files/create", async (c) => {
-  const user = c.get("user");
-  const body = await c.req.json() as { agent_name: string; path: string; content: string };
+const createFileRoute = createRoute({
+  method: "post",
+  path: "/files/create",
+  tags: ["Workspace"],
+  summary: "Create a file in the workspace",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1),
+            path: z.string().min(1),
+            content: z.string(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Create file result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 413, 500),
+  },
+});
 
-  // Validation
-  if (!body.agent_name || !body.path || body.content === undefined) {
-    return c.json({ error: "agent_name, path, and content are required" }, 400);
-  }
+workspaceRoutes.openapi(createFileRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const body = c.req.valid("json");
 
   // Path traversal prevention
   if (body.path.includes("..") || body.path.startsWith("/")) {
@@ -178,14 +195,27 @@ workspaceRoutes.post("/files/create", async (c) => {
 /**
  * DELETE /files — Delete a file from the workspace
  */
-workspaceRoutes.delete("/files", async (c) => {
-  const user = c.get("user");
-  const agentName = c.req.query("agent_name") || "";
-  const path = c.req.query("path") || "";
+const deleteFileRoute = createRoute({
+  method: "delete",
+  path: "/files",
+  tags: ["Workspace"],
+  summary: "Delete a file from the workspace",
+  middleware: [requireScope("agents:write")],
+  request: {
+    query: z.object({
+      agent_name: z.string().min(1),
+      path: z.string().min(1),
+    }),
+  },
+  responses: {
+    200: { description: "Delete file result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 500),
+  },
+});
 
-  if (!agentName || !path) {
-    return c.json({ error: "agent_name and path query params required" }, 400);
-  }
+workspaceRoutes.openapi(deleteFileRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name: agentName, path } = c.req.valid("query");
 
   if (path.includes("..") || path.startsWith("/")) {
     return c.json({ error: "Invalid path" }, 400);

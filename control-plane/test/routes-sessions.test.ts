@@ -177,4 +177,40 @@ describe("sessions route authz and input contracts", () => {
     expect(payload.submitted).toBe(true);
     expect(payload.session_id).toBe("sess-1");
   });
+
+  it("export returns turns with parsed tool calls/results", async () => {
+    const mockSql = (async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("SELECT * FROM sessions WHERE session_id")) {
+        return [{ session_id: "sess-1", org_id: "org-a", agent_name: "a", status: "completed" }];
+      }
+      if (query.includes("FROM turns WHERE session_id")) {
+        return [
+          {
+            turn_number: 1,
+            model_used: "m",
+            llm_content: "hello",
+            input_tokens: 1,
+            output_tokens: 2,
+            cost_total_usd: 0.01,
+            latency_ms: 10,
+            tool_calls_json: "[{\"id\":\"t1\",\"name\":\"grep\"}]",
+            tool_results_json: "[{\"tool_call_id\":\"t1\",\"result\":\"ok\"}]",
+          },
+        ];
+      }
+      return [];
+    }) as any;
+    vi.mocked(getDb).mockResolvedValue(mockSql);
+    vi.mocked(getDbForOrg).mockResolvedValue(mockSql);
+
+    const app = buildApp("org-a");
+    const res = await app.request("/sess-1/export?format=json", { method: "GET" }, mockEnv());
+    expect(res.status).toBe(200);
+    const payload = await res.json() as { session?: any; turns?: any[] };
+    expect(payload.session?.session_id).toBe("sess-1");
+    expect(payload.turns?.[0]?.content).toBe("hello");
+    expect(Array.isArray(payload.turns?.[0]?.tool_calls)).toBe(true);
+    expect(Array.isArray(payload.turns?.[0]?.tool_results)).toBe(true);
+  });
 });

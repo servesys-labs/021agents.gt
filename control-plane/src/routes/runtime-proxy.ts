@@ -9,6 +9,7 @@ import { createOpenAPIRouter } from "../lib/openapi";
 import { ErrorSchema, errorResponses } from "../schemas/openapi";
 import { hasCredits, deductCredits } from "../logic/credits";
 import { getDbForOrg } from "../db/client";
+import { requireScope } from "../middleware/auth";
 
 export const runtimeProxyRoutes = createOpenAPIRouter();
 
@@ -23,6 +24,36 @@ const runtimeHealth = {
 const HEALTH_CHECK_INTERVAL_MS = 30_000; // 30 seconds
 const MAX_CONSECUTIVE_FAILURES = 3;
 const CIRCUIT_BREAKER_TIMEOUT_MS = 60_000; // 1 minute cooldown
+
+// ── Concurrency Management ─────────────────────────────────────────
+// Track in-flight requests to runtime. If too many are pending,
+// queue new requests with exponential backoff instead of immediate 503.
+const MAX_CONCURRENT_RUNTIME_REQUESTS = 40; // Leave headroom below the 50 limit
+const MAX_QUEUE_WAIT_MS = 15_000; // Max time to wait in queue
+let inFlightCount = 0;
+
+async function withConcurrencyLimit<T>(operation: () => Promise<T>): Promise<T> {
+  if (inFlightCount >= MAX_CONCURRENT_RUNTIME_REQUESTS) {
+    // Backoff: wait up to 15s for a slot to open
+    const start = Date.now();
+    while (inFlightCount >= MAX_CONCURRENT_RUNTIME_REQUESTS) {
+      if (Date.now() - start > MAX_QUEUE_WAIT_MS) {
+        throw Object.assign(
+          new Error("Runtime is at capacity. Please retry in a moment."),
+          { status: 503 },
+        );
+      }
+      await new Promise(r => setTimeout(r, 200 + Math.random() * 300)); // 200-500ms jitter
+    }
+  }
+
+  inFlightCount++;
+  try {
+    return await operation();
+  } finally {
+    inFlightCount--;
+  }
+}
 
 /**
  * Check runtime health with caching to avoid hammering the service
@@ -207,12 +238,13 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
         balance_cents: 0,
       }, 402);
     }
-  } catch {
-    // If credit check fails (e.g. table not yet migrated), allow the run
+  } catch (err) {
+    console.error("Credit check failed, denying run as precaution:", err);
+    return c.json({ error: "Credit check unavailable. Please try again.", code: "credit_check_error" }, 503);
   }
 
   try {
-    const resp = await c.env.RUNTIME.fetch(
+    const resp = await withConcurrencyLimit(() => c.env.RUNTIME.fetch(
       new Request("https://runtime/run", {
         method: "POST",
         headers: {
@@ -230,7 +262,7 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
           history: body.history,
         }),
       }),
-    );
+    ));
 
     const result = (await resp.json().catch(() => ({ error: "Invalid response from runtime" }))) as Record<string, unknown>;
 
@@ -338,7 +370,7 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
       chunk.map(async (input: string) => {
         const { result, error, fromFallback } = await executeWithRetry(
           async () => {
-            const resp = await c.env.RUNTIME.fetch(
+            const resp = await withConcurrencyLimit(() => c.env.RUNTIME.fetch(
               new Request("https://runtime/api/v1/run", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -352,7 +384,7 @@ runtimeProxyRoutes.openapi(batchRoute, async (c): Promise<any> => {
                   api_key_id: user.apiKeyId ?? "",
                 }),
               }),
-            );
+            ));
             if (resp.status >= 400) {
               const text = await resp.text().catch(() => resp.statusText);
               throw new Error(`HTTP ${resp.status}: ${text.slice(0, 500)}`);
@@ -458,11 +490,11 @@ runtimeProxyRoutes.openapi(toolCallRoute, async (c): Promise<any> => {
 
   // Forward to RUNTIME service binding
   try {
-    const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/tool/call", {
+    const resp = await withConcurrencyLimit(() => c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/tool/call", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }));
 
     if (resp.status >= 400) {
       const text = await resp.text();
@@ -491,6 +523,11 @@ const streamRoute = createRoute({
             input: z.string().optional(),
             task: z.string().optional(),
             plan: z.enum(["basic", "standard", "premium"]).optional(),
+            session_id: z.string().optional(),
+            history: z.array(z.object({
+              role: z.enum(["user", "assistant", "system"]),
+              content: z.string(),
+            })).optional(),
           }),
         },
       },
@@ -526,8 +563,9 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
         balance_cents: 0,
       }, 402);
     }
-  } catch {
-    // If credit check fails, allow the run
+  } catch (err) {
+    console.error("Credit check failed, denying stream as precaution:", err);
+    return c.json({ error: "Credit check unavailable. Please try again.", code: "credit_check_error" }, 503);
   }
 
   // Check runtime health first
@@ -572,7 +610,7 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s connection timeout
 
-    const resp = await c.env.RUNTIME.fetch(
+    const resp = await withConcurrencyLimit(() => c.env.RUNTIME.fetch(
       "https://runtime/api/v1/runtime-proxy/runnable/stream",
       {
         method: "POST",
@@ -584,7 +622,7 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
         // @ts-ignore - Cloudflare fetch supports signal
         signal: controller.signal,
       },
-    );
+    ));
     clearTimeout(timeoutId);
 
     if (resp.status >= 400) {
@@ -730,7 +768,7 @@ runtimeProxyRoutes.openapi(resetRoute, async (c): Promise<any> => {
   const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
 
   try {
-    const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/stream", {
+    const resp = await withConcurrencyLimit(() => c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/runnable/stream", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -739,7 +777,7 @@ runtimeProxyRoutes.openapi(resetRoute, async (c): Promise<any> => {
       // Send a special __reset command through the same path as normal runs
       // The DO handles POST /reset directly
       body: JSON.stringify({ __reset: true, agent_name: agentName, org_id: orgId, channel_user_id: userId }),
-    });
+    }));
     // Alternative: forward directly to the DO reset endpoint
   } catch {}
 
@@ -752,22 +790,65 @@ runtimeProxyRoutes.openapi(resetRoute, async (c): Promise<any> => {
 
 // In-memory queue per org (bounded)
 const requestQueues = new Map<string, Array<{
+  body: Record<string, unknown>;
   resolve: (v: any) => void;
   reject: (e: any) => void;
   enqueuedAt: number;
 }>>();
 const MAX_QUEUE_SIZE = 100;
 const QUEUE_TIMEOUT_MS = 30_000;
+const DRAIN_INTERVAL_MS = 1_000;
+
+/** Drain queued requests — called per-request since setInterval doesn't survive CF Worker request boundaries. */
+async function drainQueue(runtime: Fetcher) {
+  const health = await checkRuntimeHealth(runtime);
+  if (!health.healthy) return;
+
+  for (const [orgId, queue] of requestQueues.entries()) {
+    if (queue.length === 0) continue;
+
+    // Drain sequentially to avoid stampeding the runtime.
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+
+      // Drop timed-out items.
+      if (Date.now() - item.enqueuedAt > QUEUE_TIMEOUT_MS) {
+        item.resolve({ error: "Queue timeout" });
+        continue;
+      }
+
+      try {
+        const resp = await withConcurrencyLimit(() => runtime.fetch("https://runtime/api/v1/runtime-proxy/agent/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...item.body, org_id: orgId }),
+        }));
+        const data = await resp.json().catch(() => ({ error: "Invalid response from runtime" }));
+        item.resolve(data);
+      } catch (err: any) {
+        item.resolve({ error: err?.message || String(err) });
+        // Stop draining this org on first failure; remaining items retry on next request.
+        break;
+      }
+    }
+
+    if (queue.length === 0) requestQueues.delete(orgId);
+    else requestQueues.set(orgId, queue);
+  }
+}
 
 /**
  * POST /agent/run/queued — Run with automatic queuing when circuit is open
  * Instead of returning 503 immediately, queues the request and drains
  * when the runtime recovers.
  */
-runtimeProxyRoutes.post("/agent/run/queued", async (c) => {
+runtimeProxyRoutes.post("/agent/run/queued", requireScope("agents:write"), async (c) => {
   const user = c.get("user");
-  const body = await c.req.json();
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
   const orgId = user.org_id;
+
+  // Drain any pending queued requests before processing new ones
+  drainQueue(c.env.RUNTIME).catch(() => {});
 
   // Check circuit breaker state
   const health = await checkRuntimeHealth(c.env.RUNTIME);
@@ -775,11 +856,14 @@ runtimeProxyRoutes.post("/agent/run/queued", async (c) => {
   if (health.healthy) {
     // Runtime healthy — execute directly (same as /agent/run)
     try {
-      const resp = await c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/agent/run", {
+      const resp = await withConcurrencyLimit(() => c.env.RUNTIME.fetch("https://runtime/api/v1/runtime-proxy/agent/run", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(c.env.SERVICE_TOKEN ? { Authorization: `Bearer ${c.env.SERVICE_TOKEN}` } : {}),
+        },
         body: JSON.stringify({ ...body, org_id: orgId }),
-      });
+      }));
       const data = await resp.json();
       return c.json(data, resp.status as any);
     } catch (err: any) {
@@ -801,7 +885,7 @@ runtimeProxyRoutes.post("/agent/run/queued", async (c) => {
   const position = queue.length + 1;
   const result = await Promise.race([
     new Promise((resolve, reject) => {
-      queue.push({ resolve, reject, enqueuedAt: Date.now() });
+      queue.push({ body, resolve, reject, enqueuedAt: Date.now() });
       requestQueues.set(orgId, queue);
     }),
     new Promise((_, reject) =>
