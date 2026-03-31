@@ -35,9 +35,46 @@ import { migrateConfig } from "./runtime/config-migrations";
 import { logger } from "./runtime/logger";
 import { readMailbox } from "./runtime/mailbox";
 import { stepIdempotencyKey, hashArgs, getStepResult, cacheStepResult, isDuplicateWrite, writeUUID } from "./runtime/idempotency";
-import { backupCostState } from "./runtime/do-lifecycle";
+import { backupCostState, hydrateFromSnapshot, recoverCostState } from "./runtime/do-lifecycle";
+import { compactProgressEvents } from "./runtime/ws-dedup";
 import { processToolResult } from "./runtime/result-storage";
 import { registerSession, unregisterSession, isSessionLimitReached, refreshHeartbeat } from "./runtime/session-counter";
+
+// ── Cloud C4.3: Memoized module imports ──────────────────────────
+// Workflow step functions run in isolated contexts. Dynamic imports are
+// re-evaluated per step. Module-level cache avoids re-parsing the same
+// modules across steps within a single isolate lifetime.
+const _importCache = new Map<string, any>();
+async function memo<T>(key: string, loader: () => Promise<T>): Promise<T> {
+  if (_importCache.has(key)) return _importCache.get(key) as T;
+  const mod = await loader();
+  _importCache.set(key, mod);
+  return mod;
+}
+
+// ── Cloud C3.4: Inter-component backpressure ─────────────────────
+// Prevents unbounded message growth when many tools return large results
+// simultaneously. Caps aggregate pending result bytes and applies
+// progressive truncation when the budget is exceeded.
+const MAX_PENDING_RESULT_BYTES = 500_000; // 500KB aggregate cap
+
+function applyResultBackpressure(
+  results: Array<{ result?: string; error?: string; [key: string]: any }>,
+): void {
+  let totalBytes = 0;
+  for (const r of results) {
+    const size = (r.result || "").length + (r.error || "").length;
+    totalBytes += size;
+    if (totalBytes > MAX_PENDING_RESULT_BYTES) {
+      // Progressive truncation: later results get more aggressively truncated
+      const overage = totalBytes - MAX_PENDING_RESULT_BYTES;
+      const maxForThis = Math.max(500, size - overage);
+      if (r.result && r.result.length > maxForThis) {
+        r.result = r.result.slice(0, maxForThis) + `\n[backpressure: truncated from ${size} to ${maxForThis} chars — aggregate result budget exceeded]`;
+      }
+    }
+  }
+}
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -112,6 +149,17 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       agentName: p.agent_name, channel: p.channel,
     });
 
+    // ── Cloud C2.1: Snapshot hydration — recover cost state from KV on restart ──
+    // If this is a resumed session (e.g., DO restarted mid-run), recover the
+    // accumulated cost so budget enforcement stays accurate.
+    let recoveredCost = 0;
+    let recoveredTurns = 0;
+    const snapshot = await hydrateFromSnapshot(this.env as any, sessionId);
+    if (snapshot) {
+      recoveredCost = snapshot.totalCostUsd || 0;
+      recoveredTurns = snapshot.turnCount || 0;
+    }
+
     // ═══════════════════════════════════════════════════════════
     // STEP 1: BOOTSTRAP — load config, skills, reasoning strategy
     // ═══════════════════════════════════════════════════════════
@@ -120,7 +168,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       retries: { limit: 3, delay: "2 seconds", backoff: "exponential" },
       timeout: "30 seconds",
     }, async () => {
-      const { loadAgentConfig } = await import("./runtime/db");
+      const { loadAgentConfig } = await memo("db", () => import("./runtime/db"));
       const config = await loadAgentConfig(this.env.HYPERDRIVE, p.agent_name, {
         provider: this.env.DEFAULT_PROVIDER || "openrouter",
         model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
@@ -138,8 +186,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       }
 
       // Reasoning strategy
-      const { selectReasoningStrategy, autoSelectStrategy } = await import("./runtime/reasoning-strategies");
-      const { getToolDefinitions } = await import("./runtime/tools");
+      const { selectReasoningStrategy, autoSelectStrategy } = await memo("reasoning", () => import("./runtime/reasoning-strategies"));
+      const { getToolDefinitions } = await memo("tools", () => import("./runtime/tools"));
       const toolDefs = getToolDefinitions(config.tools, config.blocked_tools);
       const reasoningPrompt = selectReasoningStrategy(
         config.reasoning_strategy as string | undefined, p.input, 1,
@@ -201,7 +249,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         timeout: "60 seconds",
       }, async () => {
         const { getSandbox } = await import("@cloudflare/sandbox");
-        const { hydrateWorkspace } = await import("./runtime/workspace");
+        const { hydrateWorkspace } = await memo("workspace", () => import("./runtime/workspace"));
         const sandbox = getSandbox(this.env.SANDBOX, `session-${sessionId}`, {
           sleepAfter: "10m",
           enableInternet: false,
@@ -300,11 +348,30 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       messages.push({ role: "user", content: safeInput });
     }
 
+    // ── Skill activation — detect /skill-name in user input ──
+    // If user starts with /batch, /review, /debug, etc., inject the skill prompt
+    // as a system message guiding the agent through the skill workflow.
+    const skillMatch = safeInput.match(/^\/([a-z][\w-]*)\s*(.*)?$/);
+    if (skillMatch) {
+      const [, skillName, skillArgs] = skillMatch;
+      const { getSkillPrompt, loadSkills: loadDbSkills } = await import("./runtime/skills");
+      let dbSkills: any[] = [];
+      try { dbSkills = await loadDbSkills(this.env.HYPERDRIVE, p.org_id, p.agent_name); } catch {}
+      const skillPrompt = getSkillPrompt(skillName, skillArgs || "", dbSkills);
+      if (skillPrompt) {
+        messages.push({
+          role: "system",
+          content: `## Active Skill: /${skillName}\n\n${skillPrompt}`,
+        });
+        logger.info("skill_activated", { skill: skillName, args_length: (skillArgs || "").length });
+      }
+    }
+
     // ═══════════════════════════════════════════════════════════
     // STEP 3: AGENTIC TURN LOOP
     // ═══════════════════════════════════════════════════════════
 
-    let totalCost = 0;
+    let totalCost = recoveredCost;
     let totalToolCalls = 0;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
@@ -372,10 +439,10 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         retries: { limit: 3, delay: "5 seconds", backoff: "exponential" },
         timeout: "2 minutes",
       }, async () => {
-        const { callLLM } = await import("./runtime/llm");
-        const { getToolDefinitions } = await import("./runtime/tools");
-        const { resolvePlanRouting } = await import("./runtime/db");
-        const routerMod = await import("./runtime/router");
+        const { callLLM } = await memo("llm", () => import("./runtime/llm"));
+        const { getToolDefinitions } = await memo("tools", () => import("./runtime/tools"));
+        const { resolvePlanRouting } = await memo("db", () => import("./runtime/db"));
+        const routerMod = await memo("router", () => import("./runtime/router"));
 
         const planRouting = resolvePlanRouting(config.plan, config.routing as any);
         const route = await routerMod.selectModel(p.input, planRouting as any, config.model, config.provider, {
@@ -386,7 +453,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN || "",
         } as any);
 
-        const { selectToolsForQuery, buildDeferredToolIndex } = await import("./runtime/tools");
+        const { selectToolsForQuery, buildDeferredToolIndex } = await memo("tools", () => import("./runtime/tools"));
         const allToolDefs = getToolDefinitions(config.tools, config.blocked_tools);
 
         // Progressive tool discovery: only send relevant tools per turn
@@ -484,7 +551,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // Handle discover-tools calls locally (no need for external execution)
       const discoverCalls = llm.tool_calls.filter(tc => tc.name === "discover-tools");
       if (discoverCalls.length > 0) {
-        const { discoverTools, getToolDefinitions: gtd } = await import("./runtime/tools");
+        const { discoverTools, getToolDefinitions: gtd } = await memo("tools", () => import("./runtime/tools"));
         const allTools = gtd(config.tools, config.blocked_tools);
         for (const dc of discoverCalls) {
           const query = JSON.parse(dc.arguments || "{}").query || "";
@@ -513,7 +580,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // Estimate total tool cost before executing. Prevents overspend when
       // budget is nearly exhausted but an expensive tool batch is queued.
       {
-        const { estimateToolCost } = await import("./runtime/tools");
+        const { estimateToolCost } = await memo("tools", () => import("./runtime/tools"));
         const estimatedBatchCost = executableCalls.reduce(
           (sum, tc) => sum + estimateToolCost(tc.name), 0
         );
@@ -549,7 +616,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
               try { return JSON.parse(cachedResult); } catch {}
             }
 
-            const { executeTools } = await import("./runtime/tools");
+            const { executeTools } = await memo("tools", () => import("./runtime/tools"));
             const results = await executeTools(
               {
                 AI: this.env.AI, HYPERDRIVE: this.env.HYPERDRIVE,
@@ -607,6 +674,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       for (const tr of toolResultEntries) {
         totalCost += tr.cost_usd || 0;
       }
+
+      // ── Cloud C3.4: Inter-component backpressure ──
+      applyResultBackpressure(toolResultEntries);
 
       // ── Phase 2.1: Tool result size management ──
       // Per-tool cap: 30K chars. Per-turn aggregate cap: 200K chars.
@@ -815,7 +885,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         retries: { limit: 2, delay: "3 seconds", backoff: "exponential" },
         timeout: "2 minutes",
       }, async () => {
-        const { callLLM } = await import("./runtime/llm");
+        const { callLLM } = await memo("llm", () => import("./runtime/llm"));
         const response = await callLLM(
           { AI: this.env.AI, CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID, AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN, CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN } as any,
           messages.map(m => ({ role: m.role as any, content: m.content || "", tool_calls: m.tool_calls, tool_call_id: m.tool_call_id, name: m.name })),
@@ -843,6 +913,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     await step.do("finalize", async () => {
       await this.emit(p.progress_key, { type: "done", ...result });
     });
+
+    // Cloud C3.3: Compact KV progress events — remove intermediate events
+    await compactProgressEvents(this.env.AGENT_PROGRESS_KV, p.progress_key);
 
     // ═══════════════════════════════════════════════════════════
     // STEP 5: WRITE TELEMETRY — persist everything for meta-agent
