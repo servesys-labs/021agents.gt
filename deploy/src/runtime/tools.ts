@@ -10,6 +10,7 @@
 import { getSandbox } from "@cloudflare/sandbox";
 import type { ToolCall, ToolResult, ToolDefinition, RuntimeEnv } from "./types";
 import { validateUrl as ssrfValidateUrl } from "./ssrf";
+import { scratchWrite, scratchRead, scratchList } from "./scratch";
 
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
@@ -239,6 +240,27 @@ export function setCircuitBreakerSql(sqlFn: typeof _circuitBreakerSql): void {
   _circuitBreakerSql = sqlFn;
 }
 
+/**
+ * Preload all persisted circuit breaker states from DO SQLite on cold start.
+ * Ensures flaky tools stay blocked across DO restarts instead of resetting to "closed".
+ */
+export function preloadCircuitStates(sqlFn: typeof _circuitBreakerSql): void {
+  if (!sqlFn) return;
+  try {
+    const rows = sqlFn(`SELECT tool_name, state, failure_count, success_count, last_failure_at FROM circuit_breaker_state`);
+    if (!rows) return;
+    for (const r of rows) {
+      const state: CircuitState = {
+        state: r.state === "half_open" ? "half-open" : r.state,
+        failures: r.failure_count || 0,
+        successes: r.success_count || 0,
+        lastFailureTime: (r.last_failure_at || 0) * 1000,
+      };
+      circuitStates.set(r.tool_name, state);
+    }
+  } catch { /* table may not exist yet */ }
+}
+
 function loadCircuitState(toolName: string): CircuitState {
   if (_circuitBreakerSql) {
     try {
@@ -441,6 +463,11 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   // Self-awareness (DB queries)
   "self-check":           { flat_usd: 0.00005,  per_ms_usd: 0 },          // DB query
   "adapt-strategy":       { flat_usd: 0.00005,  per_ms_usd: 0 },          // DB query
+
+  // Scratch pad (KV)
+  "scratch-write":     { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV write
+  "scratch-read":      { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV read
+  "scratch-list":      { flat_usd: 0.0000004, per_ms_usd: 0 },     // KV list
 };
 
 /** Calculate tool cost from flat fee + duration. */
@@ -634,7 +661,7 @@ async function executeSingleTool(
   tc = { ...tc, name: tc.name.replace(/_/g, "-") };
 
   // Check circuit breaker before executing
-  const circuitCheck = canExecute(tc.name);
+  const circuitCheck = canExecute(tc.name, (env as any).TELEMETRY_QUEUE);
   if (!circuitCheck.allowed) {
     return {
       tool: tc.name,
@@ -744,8 +771,8 @@ async function executeSingleTool(
     const result = await dispatch(env, tc.name, args, sessionId, enabledTools);
     const latencyMs = Date.now() - started;
     
-    // Record success for circuit breaker
-    recordSuccess(tc.name);
+    // Record success for circuit breaker (with telemetry)
+    recordSuccess(tc.name, (env as any).TELEMETRY_QUEUE);
     
     return {
       tool: tc.name,
@@ -759,7 +786,7 @@ async function executeSingleTool(
     
     // Record failure for circuit breaker (only for external service errors, not arg errors)
     if (isExternalServiceError(err)) {
-      recordFailure(tc.name);
+      recordFailure(tc.name, (env as any).TELEMETRY_QUEUE);
     }
     
     return {
@@ -896,7 +923,23 @@ async function dispatch(
       // Ensure parent dir exists
       const dir = filePath.substring(0, filePath.lastIndexOf("/"));
       if (dir) await sandbox.exec(`mkdir -p "${dir}"`, { timeout: 5 }).catch(() => {});
-      await sandbox.writeFile(filePath, args.content || "");
+
+      // Phase 9.5: Encoding preservation — detect and preserve BOM + line endings
+      let writeContent = args.content || "";
+      const existingContent = await sandbox.exec(`cat "${filePath}" 2>/dev/null`, { timeout: 5 }).catch(() => ({ stdout: "" }));
+      if (existingContent.stdout) {
+        // Preserve CRLF if original uses it
+        const hasCRLF = existingContent.stdout.includes("\r\n");
+        if (hasCRLF && !writeContent.includes("\r\n")) {
+          writeContent = writeContent.replace(/\n/g, "\r\n");
+        }
+        // Preserve UTF-8 BOM if original has it
+        if (existingContent.stdout.charCodeAt(0) === 0xFEFF && writeContent.charCodeAt(0) !== 0xFEFF) {
+          writeContent = "\uFEFF" + writeContent;
+        }
+      }
+
+      await sandbox.writeFile(filePath, writeContent);
 
       // Per-file sync to R2 for durability (non-blocking, user-scoped)
       if (filePath.startsWith("/workspace/") && env.STORAGE) {
@@ -904,7 +947,7 @@ async function dispatch(
         const r2Agent = (env as any).__agentConfig?.name || "agent";
         const r2UserId = (env as any).__channelUserId || "";
         import("./workspace").then(({ syncFileToR2 }) =>
-          syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, args.content || "", sessionId, r2UserId),
+          syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, writeContent, sessionId, r2UserId),
         ).catch(() => {});
       }
 
@@ -912,20 +955,19 @@ async function dispatch(
       if (filePath.startsWith("/workspace/") && env.DO_SQL) {
         try {
           const { saveFileToSQLite, hashContent } = await import("./workspace-persistence");
-          const fileContent = args.content || "";
-          const hash = await hashContent(fileContent);
+          const hash = await hashContent(writeContent);
           saveFileToSQLite(env.DO_SQL, env.DO_SESSION_ID || sessionId, {
             path: filePath,
-            content: fileContent,
+            content: writeContent,
             encoding: "utf-8",
-            size: fileContent.length,
+            size: writeContent.length,
             hash,
             modified_at: new Date().toISOString(),
           });
         } catch {}
       }
 
-      return `Written ${(args.content || "").length} bytes to ${filePath}`;
+      return `Written ${writeContent.length} bytes to ${filePath}`;
     }
 
     case "edit-file": {
@@ -3407,6 +3449,27 @@ async function dispatch(
 
     case "user-profile-load":
       return userProfileLoad(env, args);
+
+    case "scratch-write": {
+      const traceId = (env as any).__traceId || "";
+      if (!traceId) return "scratch-write requires a trace context (only available in delegated runs)";
+      await scratchWrite(env, traceId, String(args.key || ""), String(args.value || ""));
+      return `Written to scratch: ${args.key}`;
+    }
+
+    case "scratch-read": {
+      const traceId = (env as any).__traceId || "";
+      if (!traceId) return "scratch-read requires a trace context (only available in delegated runs)";
+      const val = await scratchRead(env, traceId, String(args.key || ""));
+      return val ?? "(key not found)";
+    }
+
+    case "scratch-list": {
+      const traceId = (env as any).__traceId || "";
+      if (!traceId) return "scratch-list requires a trace context (only available in delegated runs)";
+      const keys = await scratchList(env, traceId);
+      return keys.length > 0 ? keys.join("\n") : "(scratch is empty)";
+    }
 
     default:
       throw new Error(`Tool '${tool}' not available on edge runtime`);

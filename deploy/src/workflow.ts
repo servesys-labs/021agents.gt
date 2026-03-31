@@ -393,6 +393,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           content: `## Active Skill: /${skillName}\n\n${skillPrompt}`,
         });
         logger.info("skill_activated", { skill: skillName, args_length: (skillArgs || "").length });
+        // Telemetry: skill activation event for observability
+        (this.env as any).TELEMETRY_QUEUE?.send?.({ type: "skill_activation", payload: { session_id: sessionId, skill: skillName, agent_name: p.agent_name, org_id: p.org_id } }).catch(() => {});
       }
     }
 
@@ -869,6 +871,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
             type: "warning",
             message: `Loop detected: ${loopTool} failed ${repeatCount} times in last ${LOOP_DETECTION_WINDOW} calls. Stopping to prevent budget waste.`,
           });
+          // Telemetry: loop detection for observability dashboards
+          logger.warn("loop_detected", { tool: loopTool, repeat_count: repeatCount, turn });
+          (this.env as any).TELEMETRY_QUEUE?.send?.({ type: "loop_detected", payload: { session_id: sessionId, tool: loopTool, repeat_count: repeatCount, turn, org_id: p.org_id, agent_name: p.agent_name } }).catch(() => {});
           finalOutput = `I encountered a repeated failure with the ${loopTool} tool and stopped to avoid wasting resources. Please check the tool configuration or try a different approach.`;
           break;
         }
