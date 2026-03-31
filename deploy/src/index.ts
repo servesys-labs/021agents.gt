@@ -2733,8 +2733,9 @@ export default {
         }).catch(() => {}),
       );
 
-      // DO name for WebSocket connection
-      const doName = userId ? `${agentName}-u-${userId}` : agentName;
+      // DO name for WebSocket connection — must include org_id for tenant isolation
+      const orgPrefix = body.org_id ? `${body.org_id}-` : "";
+      const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
 
       return Response.json({
         status: "running",
@@ -2801,7 +2802,8 @@ export default {
           // No session_id — start run via DO (async), return WebSocket URL
           const agentName = body.agent_name || "agentos";
           const userId = body.channel_user_id || "";
-          const doName = userId ? `${agentName}-u-${userId}` : agentName;
+          const seOrgPrefix = body.org_id ? `${body.org_id}-` : "";
+          const doName = userId ? `${seOrgPrefix}${agentName}-u-${userId}` : `${seOrgPrefix}${agentName}`;
           ctx.waitUntil(
             runViaAgent(env, agentName, runnableInputToTask(body.input, body.task), {
               org_id: body.org_id,
@@ -3163,7 +3165,8 @@ export default {
 
       const agentName = body.agent_name || "agentos";
       const userId = body.channel_user_id || "";
-      const doName = userId ? `${agentName}-u-${userId}` : agentName;
+      const runOrgPrefix = body.org_id ? `${body.org_id}-` : "";
+      const doName = userId ? `${runOrgPrefix}${agentName}-u-${userId}` : `${runOrgPrefix}${agentName}`;
 
       ctx.waitUntil(
         runViaAgent(env, agentName, body.task || "", {
@@ -3336,7 +3339,8 @@ export default {
       // No session_id — kick off a run and return WebSocket URL for results
       const agentName = body.agent_name || "agentos";
       const userId = body.channel_user_id || "";
-      const doName = userId ? `${agentName}-u-${userId}` : agentName;
+      const bdOrgPrefix = body.org_id ? `${body.org_id}-` : "";
+      const doName = userId ? `${bdOrgPrefix}${agentName}-u-${userId}` : `${bdOrgPrefix}${agentName}`;
 
       ctx.waitUntil(
         runViaAgent(env, agentName, runnableInputToTask(body.input, body.task), {
