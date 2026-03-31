@@ -209,6 +209,11 @@ function buildMIMEString(opts: { from: string; to: string; subject: string; body
 // ---------------------------------------------------------------------------
 
 export class AgentOSAgent extends Agent<Env, AgentState> {
+  // Disable hibernation so WebSocket messages are delivered immediately.
+  // With hibernate: true (the default), message event handlers are not attached
+  // and messages sent before hibernation are silently dropped.
+  static options = { hibernate: false };
+
   // Concurrency guard: prevent overlapping runs from corrupting conversation state.
   // DOs are single-threaded but async yields allow interleaving.
   initialState: AgentState = {
