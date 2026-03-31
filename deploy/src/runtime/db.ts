@@ -1627,7 +1627,7 @@ export async function writeConversationMessage(
   const sql = await getDb(hyperdrive);
   try {
     await sql`
-      INSERT INTO conversation_messages (
+      INSERT INTO do_conversation_messages (
         agent_name, instance_id, role, content, channel, created_at
       ) VALUES (
         ${msg.agent_name}, ${msg.instance_id}, ${msg.role},
@@ -1638,22 +1638,22 @@ export async function writeConversationMessage(
     // Table may not exist — create it
     try {
       await sql`
-        CREATE TABLE IF NOT EXISTS conversation_messages (
+        CREATE TABLE IF NOT EXISTS do_conversation_messages (
           id BIGSERIAL PRIMARY KEY,
           agent_name TEXT NOT NULL DEFAULT '',
           instance_id TEXT NOT NULL DEFAULT '',
           role TEXT NOT NULL,
           content TEXT NOT NULL,
           channel TEXT NOT NULL DEFAULT '',
-          created_at REAL NOT NULL DEFAULT 0
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `;
       await sql`
-        CREATE INDEX IF NOT EXISTS idx_conv_instance ON conversation_messages(instance_id, id)
+        CREATE INDEX IF NOT EXISTS idx_do_conv_instance ON do_conversation_messages(instance_id, id)
       `;
       // Retry insert
       await sql`
-        INSERT INTO conversation_messages (
+        INSERT INTO do_conversation_messages (
           agent_name, instance_id, role, content, channel, created_at
         ) VALUES (
           ${msg.agent_name}, ${msg.instance_id}, ${msg.role},
@@ -1677,7 +1677,7 @@ export async function loadConversationHistory(
   try {
     const rows = await sql`
       SELECT role, content, channel, created_at
-      FROM conversation_messages
+      FROM do_conversation_messages
       WHERE instance_id = ${instanceId}
         AND role IN ('user', 'assistant')
       ORDER BY id DESC
