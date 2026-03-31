@@ -77,7 +77,27 @@ const program = new Command();
 program
   .name("oneshots")
   .description("OneShots — Build, run, and deploy AI agents")
-  .version(getVersion(), "-v, --version", "Display version number");
+  .version(getVersion(), "-v, --version", "Display version number")
+  .argument("[agent]", "Agent name for interactive mode")
+  .option("-s, --system <prompt>", "Override system prompt")
+  .option("--autopilot", "Start in autonomous autopilot mode")
+  .action(async (agent?: string, options?: { system?: string; autopilot?: boolean }) => {
+    // Default action: launch interactive TUI (like 'claude' with no args)
+    const agentName = agent || "personal-assistant";
+    try {
+      const { launchTUI } = await import("./tui/index.js");
+      await launchTUI(agentName, options);
+    } catch (e: any) {
+      // Fallback to basic chat if Ink fails (e.g., non-interactive terminal)
+      if (e.message?.includes("render") || e.message?.includes("ink")) {
+        console.log(chalk.yellow("Interactive mode unavailable. Falling back to basic chat."));
+        const { chatCommand: basicChat } = await import("./commands/chat.js");
+        await basicChat(agentName, options || {});
+      } else {
+        throw e;
+      }
+    }
+  });
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Core Commands
@@ -107,8 +127,10 @@ program
 program
   .command("run <agent> <task>")
   .description("Run an agent on a task")
-  .option("-s, --stream", "Stream output (default: false)", false)
-  .option("-v, --verbose", "Verbose output")
+  .option("-s, --stream", "Stream with tree rendering (default)", true)
+  .option("--no-stream", "Non-streaming mode")
+  .option("-v, --verbose", "Show live cost/token status bar")
+  .option("--json", "Output raw JSON result")
   .action(runCommand);
 
 program
@@ -129,7 +151,20 @@ program
   .command("chat <agent>")
   .description("Interactive chat session with an agent")
   .option("-s, --system <prompt>", "Override system prompt")
-  .action(chatCommand);
+  .option("-v, --verbose", "Show per-turn cost/token info")
+  .option("--basic", "Use basic readline mode instead of TUI")
+  .action(async (agent: string, options: any) => {
+    if (options.basic) {
+      chatCommand(agent, options);
+    } else {
+      try {
+        const { launchTUI } = await import("./tui/index.js");
+        await launchTUI(agent, options);
+      } catch {
+        chatCommand(agent, options);
+      }
+    }
+  });
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Eval Commands
