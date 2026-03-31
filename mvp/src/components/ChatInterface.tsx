@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { CodeBlock, MarkdownTable, MarkdownThead, MarkdownTr, MarkdownTh, MarkdownTd } from "./CodeBlock";
 import type { ChatMessage, SessionMeta, FileChange } from "../lib/use-agent-stream";
 import { useScrollAnchor } from "../lib/use-pretext";
 
@@ -44,6 +45,12 @@ interface ChatInterfaceProps {
   activePlan?: string;
   /** Called when user changes the plan mid-session */
   onChangePlan?: (plan: string) => void;
+  /** Agent description for empty state */
+  agentDescription?: string;
+  /** Agent name for empty state */
+  agentName?: string;
+  /** Number of tools available */
+  toolCount?: number;
 }
 
 // ── Copy Button ─────────────────────────────────────────────
@@ -292,14 +299,11 @@ const PROSE_CLASSES = `prose prose-sm prose-neutral dark:prose-invert max-w-none
   [&_ul]:my-2 [&_ul]:pl-5 [&_ul]:space-y-1 [&_ul]:list-disc
   [&_ol]:my-2 [&_ol]:pl-5 [&_ol]:space-y-1 [&_ol]:list-decimal
   [&_li]:leading-relaxed [&_li]:pl-1
-  [&_pre]:bg-[#1e1e2e] [&_pre]:text-[#cdd6f4] [&_pre]:rounded-xl [&_pre]:p-4 [&_pre]:my-3 [&_pre]:text-xs [&_pre]:overflow-x-auto [&_pre]:leading-relaxed [&_pre]:relative
-  [&_code]:bg-surface-alt [&_code]:text-primary [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded-md [&_code]:text-xs [&_code]:font-mono
-  [&_pre_code]:bg-transparent [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:rounded-none
+  [&_pre]:my-0 [&_pre]:p-0 [&_pre]:bg-transparent
+  [&_code]:font-mono
   [&_blockquote]:border-l-2 [&_blockquote]:border-primary/30 [&_blockquote]:pl-3 [&_blockquote]:my-3 [&_blockquote]:text-text-secondary [&_blockquote]:italic
   [&_hr]:my-4 [&_hr]:border-border
-  [&_table]:my-3 [&_table]:text-xs [&_table]:w-full [&_table]:border-collapse
-  [&_th]:px-3 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:border-b [&_th]:border-border [&_th]:bg-surface-alt
-  [&_td]:px-3 [&_td]:py-1.5 [&_td]:border-b [&_td]:border-border/50
+  [&_table]:my-0
   [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 [&_a]:decoration-primary/30 hover:[&_a]:decoration-primary
   [&_strong]:font-semibold [&_strong]:text-text
   [&_em]:italic
@@ -311,6 +315,7 @@ const PROSE_CLASSES = `prose prose-sm prose-neutral dark:prose-invert max-w-none
 export function ChatInterface({
   messages, onSend, onStop, onRetry, loading, streaming, sessionMeta, placeholder, suggestedPrompts,
   projects, activeProject, onSelectProject, onCreateProject, activePlan, onChangePlan,
+  agentDescription, agentName, toolCount,
 }: ChatInterfaceProps) {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<{ url: string; type: string; name: string }[]>([]);
@@ -376,6 +381,32 @@ export function ChatInterface({
     }
   };
 
+  // Clipboard paste handler for images (Cmd+V / Ctrl+V)
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of Array.from(items)) {
+      if (item.type.startsWith("image/")) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
+        const url = URL.createObjectURL(file);
+        setAttachments(prev => [...prev, { url, type: file.type, name: file.name || "pasted-image.png" }]);
+      }
+    }
+  };
+
+  // Drag-and-drop handler
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const files = e.dataTransfer?.files;
+    if (!files) return;
+    for (const file of Array.from(files)) {
+      const url = URL.createObjectURL(file);
+      setAttachments(prev => [...prev, { url, type: file.type, name: file.name }]);
+    }
+  };
+
   const handleInput = () => {
     const el = textareaRef.current;
     if (el) {
@@ -403,18 +434,34 @@ export function ChatInterface({
       {/* Messages */}
       <div ref={scrollAreaRef} className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
         {messages.length === 0 && (
-          <div className="flex flex-col items-center justify-center py-16 px-4">
-            <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center mb-4">
-              <Bot size={24} className="text-primary" />
+          <div className="flex flex-col items-center justify-center py-16 px-4 max-w-xl mx-auto">
+            {/* Agent identity */}
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-primary/20 to-primary/5 flex items-center justify-center mb-4 border border-primary/10">
+              <Bot size={28} className="text-primary" />
             </div>
-            <p className="text-sm text-text-secondary mb-6">What can I help you with?</p>
+            {agentName && (
+              <h2 className="text-base font-semibold text-text mb-1">{agentName}</h2>
+            )}
+            {agentDescription ? (
+              <p className="text-sm text-text-secondary mb-1 text-center leading-relaxed max-w-md">{agentDescription}</p>
+            ) : (
+              <p className="text-sm text-text-secondary mb-1">What can I help you with?</p>
+            )}
+            {toolCount != null && toolCount > 0 && (
+              <p className="text-[11px] text-text-muted mb-6 flex items-center gap-1">
+                <Wrench size={10} /> {toolCount} tools available
+              </p>
+            )}
+            {!agentDescription && !toolCount && <div className="mb-6" />}
+
+            {/* Suggested prompts — larger, more discoverable */}
             {suggestedPrompts && suggestedPrompts.length > 0 && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-w-lg w-full">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full">
                 {suggestedPrompts.map((prompt, i) => (
                   <button
                     key={i}
                     onClick={() => onSend(prompt)}
-                    className="px-3.5 py-2.5 text-xs text-text-secondary bg-surface border border-border rounded-xl hover:border-primary/30 hover:bg-surface-alt hover:text-text transition-all text-left leading-relaxed"
+                    className="px-4 py-3 text-sm text-text-secondary bg-surface border border-border rounded-xl hover:border-primary/30 hover:bg-surface-alt hover:text-text transition-all text-left leading-relaxed group"
                   >
                     {prompt}
                   </button>
@@ -525,7 +572,21 @@ export function ChatInterface({
             <div key={msg.id} className="animate-[fadeInUp_200ms_ease-out] group">
               <div className="min-w-0">
                 <div className={`px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-surface border border-border/40 text-text ${PROSE_CLASSES} ${isStreaming ? "streaming-cursor" : ""}`}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    components={{
+                      code: ({ className, children, ...props }) => {
+                        const isInline = !className;
+                        return <CodeBlock className={className} inline={isInline} {...props}>{children}</CodeBlock>;
+                      },
+                      pre: ({ children }) => <>{children}</>,
+                      table: MarkdownTable,
+                      thead: MarkdownThead,
+                      tr: MarkdownTr,
+                      th: MarkdownTh,
+                      td: MarkdownTd,
+                    }}
+                  >{msg.content}</ReactMarkdown>
                 </div>
                 <div className="flex items-center gap-2 mt-1 px-1">
                   <MessageActions msg={msg} onRetry={onRetry} />
@@ -583,14 +644,17 @@ export function ChatInterface({
             </div>
           )}
 
-          {/* Textarea — borderless inside the card */}
+          {/* Textarea — borderless, supports paste images + drag-drop */}
           <textarea
             ref={textareaRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
             onInput={handleInput}
-            placeholder={placeholder || "How can I help you today?"}
+            placeholder={placeholder || "Message this agent... (paste images with ⌘V, drop files here)"}
             rows={1}
             className="w-full resize-none bg-transparent px-4 pt-3 pb-2 text-sm text-text placeholder:text-text-muted/60 focus:outline-none"
           />
