@@ -35,6 +35,8 @@ export interface LLMResponse {
   // AI Gateway correlation IDs — used to look up exact cost from gateway logs API
   gateway_log_id?: string;
   gateway_event_id?: string;
+  /** Set to true when model refuses the request (stop_reason=refusal/content_filter) */
+  refusal?: boolean;
 }
 
 // ── Tools ──────────────────────────────────────────────────────

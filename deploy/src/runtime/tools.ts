@@ -221,10 +221,16 @@ const CIRCUIT_CONFIG = {
 };
 
 // ── Persistent circuit breaker (DO SQLite-backed) ──
-// `sqlExec` is set by the caller (executeTools) when running inside a DO.
-// Falls back to in-memory when null (non-DO contexts like tests).
+// `sqlExec` is set by the DO Agent class during onStart() to wire up
+// persistent storage. In Workflow steps (which run in isolated contexts),
+// this falls back to in-memory — the DO reads persistent state on cold start
+// and shares it with tools via setCircuitBreakerSql().
 let _circuitBreakerSql: ((query: string, ...params: any[]) => any) | null = null;
 
+/**
+ * Wire DO SQLite for persistent circuit breaker state.
+ * Call from DO's onStart() after migration v3 creates the table.
+ */
 export function setCircuitBreakerSql(sqlFn: typeof _circuitBreakerSql): void {
   _circuitBreakerSql = sqlFn;
 }

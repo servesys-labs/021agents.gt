@@ -72,6 +72,7 @@ export interface ToolCallEvent extends BaseEvent {
   name: string;
   tool_call_id: string;
   arguments?: string; // JSON string of args (optional for streaming display)
+  args_preview?: string; // Human-readable preview of key argument (query, path, url)
 }
 
 export interface ToolResultEvent extends BaseEvent {

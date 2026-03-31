@@ -324,6 +324,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
     }
 
+    // Phase 1.1: Wire DO SQLite for persistent circuit breaker state
+    {
+      const sqlRef = this.sql.bind(this);
+      const { setCircuitBreakerSql } = await import("./runtime/tools");
+      setCircuitBreakerSql((query: string, ...params: any[]) => {
+        // DO SQLite uses tagged templates but we need parameterized queries.
+        // Use raw exec for circuit breaker (simple queries only).
+        return this.sql.exec(query, ...params).toArray();
+      });
+    }
+
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
     // Load 100 to match the local retention cap — not just 24 (the per-request window)
     const localCount = this.sql<{ cnt: number }>`SELECT COUNT(*) as cnt FROM conversation_messages`;

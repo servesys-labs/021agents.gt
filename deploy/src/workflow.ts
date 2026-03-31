@@ -315,7 +315,6 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       // ── Phase 2.4: Context compression — auto-compact when approaching token limit ──
       if (shouldCompact(messages)) {
         const compacted = await compactMessages(
-          this.env as any,
           messages,
           6, // keep last 6 messages
         );
@@ -376,6 +375,16 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       totalCost += llm.cost_usd;
       totalInputTokens += llm.input_tokens;
       totalOutputTokens += llm.output_tokens;
+
+      // ── Phase 9.3: Handle model refusal ──
+      if ((llm as any).refusal) {
+        await this.emit(p.progress_key, {
+          type: "warning",
+          message: "Model declined this request due to usage policies.",
+        });
+        finalOutput = llm.content;
+        break;
+      }
 
       // ── Thinking trace (only when LLM is reasoning before tool calls) ──
       if (llm.content && llm.tool_calls.length > 0) {

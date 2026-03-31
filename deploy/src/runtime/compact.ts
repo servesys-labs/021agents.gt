@@ -9,7 +9,7 @@
  * This implements the auto-compact layer for AgentOS Workflows.
  */
 
-import type { LLMMessage, RuntimeEnv } from "./types";
+// Types used for token estimation only — no runtime deps needed
 
 // Token estimation: ~4 chars per token for English text, ~2 for JSON/code
 function estimateTokens(text: string): number {
@@ -49,7 +49,6 @@ export function shouldCompact(
  * Middle section is summarized into a single "conversation summary" message.
  */
 export async function compactMessages(
-  env: RuntimeEnv,
   messages: Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string; name?: string }>,
   keepRecent: number = 6,
 ): Promise<Array<{ role: string; content: string; tool_calls?: any[]; tool_call_id?: string; name?: string }>> {
