@@ -45,6 +45,8 @@ interface MetaChatContext {
   aiGatewayId?: string;
   cloudflareApiToken?: string;
   aiGatewayToken?: string;
+  /** "demo" = showcase mode (auto-generate, minimal questions), "live" = production interview mode */
+  mode?: "demo" | "live";
   env: {
     RUNTIME?: { fetch: (input: RequestInfo, init?: RequestInit) => Promise<Response> };
     SERVICE_TOKEN?: string;
@@ -1503,10 +1505,10 @@ async function executeTool(
 
 /* ── System prompt ──────────────────────────────────────────────── */
 
-function buildSystemPrompt(agentName: string): string {
+function buildSystemPrompt(agentName: string, mode: "demo" | "live" = "live"): string {
   // Import the reusable prompt builder
   const { buildMetaAgentChatPrompt } = require("../prompts/meta-agent-chat");
-  return buildMetaAgentChatPrompt(agentName);
+  return buildMetaAgentChatPrompt(agentName, mode);
 }
 
 // Legacy prompt kept for reference — replaced by prompts/meta-agent-chat.ts
@@ -1663,7 +1665,7 @@ export async function runMetaChat(
   messages: MetaChatMessage[],
   ctx: MetaChatContext,
 ): Promise<{ messages: MetaChatMessage[]; response: string }> {
-  const systemPrompt = buildSystemPrompt(ctx.agentName);
+  const systemPrompt = buildSystemPrompt(ctx.agentName, ctx.mode || "live");
 
   // Build messages for OpenRouter
   const llmMessages = [
