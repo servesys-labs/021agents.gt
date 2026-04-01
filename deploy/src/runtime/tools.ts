@@ -19,6 +19,14 @@ import { parseJsonColumn } from "./parse-json-column";
 
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
+const TOOL_FETCH_TIMEOUT_MS = 30_000; // 30s max for external API calls (must complete before 90s Workflow idle limit)
+
+/** Fetch with AbortSignal timeout — prevents tool calls from hanging indefinitely */
+function fetchWithTimeout(url: string | URL, init?: RequestInit, timeoutMs = TOOL_FETCH_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
 const DEFAULT_SANDBOX_MEMORY_LIMIT_MB = 512;
 
 /* ── Per-session tool rate limiter (bounded, LRU eviction) ────── */
@@ -1301,7 +1309,7 @@ async function dispatch(
 
       try {
         // 1. Look up MCP server URL from control-plane
-        const serversResp = await fetch(`${apiBase}/mcp/servers`, { headers });
+        const serversResp = await fetchWithTimeout(`${apiBase}/mcp/servers`, { headers });
         if (!serversResp.ok) return `MCP server lookup failed: ${serversResp.status}`;
         const { servers } = (await serversResp.json()) as { servers: any[] };
         const server = servers.find((s: any) => s.name === serverName || s.server_id === serverName);
@@ -1311,7 +1319,7 @@ async function dispatch(
         const mcpHeaders: Record<string, string> = { "Content-Type": "application/json" };
         if (server.auth_token) mcpHeaders.Authorization = `Bearer ${server.auth_token}`;
 
-        const mcpResp = await fetch(server.url.replace(/\/+$/, "") + "/tools/call", {
+        const mcpResp = await fetchWithTimeout(server.url.replace(/\/+$/, "") + "/tools/call", {
           method: "POST",
           headers: mcpHeaders,
           body: JSON.stringify({
@@ -1371,7 +1379,7 @@ async function dispatch(
         if (args.category) params.set("category", String(args.category));
         if (args.max_price) params.set("max_price", String(args.max_price));
         const serviceToken = (env as any).SERVICE_TOKEN || "";
-        const resp = await fetch(`${apiBase}/marketplace/search?${params}`, {
+        const resp = await fetchWithTimeout(`${apiBase}/marketplace/search?${params}`, {
           headers: {
             "Content-Type": "application/json",
             ...(serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {}),
@@ -3653,7 +3661,7 @@ async function perplexitySearch(env: RuntimeEnv, args: Record<string, any>): Pro
   }
 
   try {
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`,
       {
         method: "POST",
@@ -3707,7 +3715,7 @@ async function braveSearch(env: RuntimeEnv, args: Record<string, any>): Promise<
   };
 
   try {
-    const resp = await fetch(
+    const resp = await fetchWithTimeout(
       `${baseUrl}/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`,
       { headers },
     );
@@ -3734,7 +3742,7 @@ async function braveSearch(env: RuntimeEnv, args: Record<string, any>): Promise<
 
 // DuckDuckGo fallback (no API key needed)
 async function duckDuckGoSearch(query: string, maxResults: number): Promise<string> {
-  const resp = await fetch("https://html.duckduckgo.com/html/", {
+  const resp = await fetchWithTimeout("https://html.duckduckgo.com/html/", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "AgentOS/0.2.0" },
     body: `q=${encodeURIComponent(query)}`,
@@ -3979,7 +3987,7 @@ async function userProfileLoad(env: RuntimeEnv, args: Record<string, any>): Prom
 async function browse(args: Record<string, any>): Promise<string> {
   const urlCheck = validateUrl(args.url || "");
   if (!urlCheck.valid) return `Error: ${urlCheck.reason}`;
-  const resp = await fetch(args.url || "", {
+  const resp = await fetchWithTimeout(args.url || "", {
     headers: { "User-Agent": "AgentOS/0.2.0" },
     redirect: "follow",
   });
