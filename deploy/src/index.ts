@@ -750,6 +750,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           channel_user_id: "",
           history: history.map((m: any) => ({ role: m.role, content: m.content })),
           progress_key: progressKey,
+          do_session_id: this.name,
           parent_session_id: opts?.delegation?.parent_session_id,
           parent_depth: opts?.delegation?.parent_depth,
           ...(config.systemPrompt && config.systemPrompt.length > 100 && !config.systemPrompt.startsWith("You are a helpful AI assistant") ? {
@@ -1087,8 +1088,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             params: {
               agent_name: config.agentName || "agentos", input: userText,
               org_id: config.orgId || "", project_id: config.projectId || "",
-              channel: "voice", channel_user_id: "", history: history.map((m: any) => ({ role: m.role, content: m.content })),
+              channel: "voice", channel_user_id: "",
+              history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: `voice:${this.name}:${Date.now()}`,
+              do_session_id: this.name,
             },
           });
           // Poll for completion (voice needs faster response — 30s max)
@@ -1735,21 +1738,25 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               channel_user_id: data.channel_user_id || "",
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: progressKey,
+              do_session_id: this.name,
+              ...(data.plan ? { plan_override: data.plan } : {}),
               ...(data.system_prompt_override ? { system_prompt_override: data.system_prompt_override } : {}),
               ...(data.budget_limit_usd_override ? { budget_limit_usd_override: data.budget_limit_usd_override } : {}),
               ...(data.media_urls?.length ? { media_urls: data.media_urls, media_types: data.media_types } : {}),
-              preloaded_config: {
-                system_prompt: restConfig.systemPrompt,
-                model: restConfig.model,
-                provider: restConfig.provider || this.env.DEFAULT_PROVIDER || "openrouter",
-                plan: restConfig.plan,
-                tools: restConfig.tools,
-                blocked_tools: restConfig.blockedTools || [],
-                max_turns: restConfig.maxTurns || 50,
-                budget_limit_usd: restConfig.budgetLimitUsd || 10,
-                parallel_tool_calls: true,
-                enable_workspace_checkpoints: restConfig.enableWorkspaceCheckpoints !== false,
-              },
+              ...(restConfig.systemPrompt && restConfig.systemPrompt.length > 100 && !restConfig.systemPrompt.startsWith("You are a helpful AI assistant") ? {
+                preloaded_config: {
+                  system_prompt: restConfig.systemPrompt,
+                  model: restConfig.model,
+                  provider: restConfig.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+                  plan: data.plan || restConfig.plan,
+                  tools: restConfig.tools,
+                  blocked_tools: restConfig.blockedTools || [],
+                  max_turns: restConfig.maxTurns || 50,
+                  budget_limit_usd: restConfig.budgetLimitUsd || 10,
+                  parallel_tool_calls: true,
+                  enable_workspace_checkpoints: restConfig.enableWorkspaceCheckpoints !== false,
+                },
+              } : {}),
             },
           });
 
@@ -1865,19 +1872,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               channel_user_id: data.channel_user_id || "",
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: progressKey,
+              do_session_id: this.name,
               ...(data.plan ? { plan_override: data.plan } : {}),
-              preloaded_config: {
-                system_prompt: sseConfig.systemPrompt,
-                model: sseConfig.model,
-                provider: sseConfig.provider || this.env.DEFAULT_PROVIDER || "openrouter",
-                plan: sseConfig.plan,
-                tools: sseConfig.tools,
-                blocked_tools: sseConfig.blockedTools || [],
-                max_turns: sseConfig.maxTurns || 50,
-                budget_limit_usd: sseConfig.budgetLimitUsd || 10,
-                parallel_tool_calls: true,
-                enable_workspace_checkpoints: sseConfig.enableWorkspaceCheckpoints !== false,
-              },
+              ...(sseConfig.systemPrompt && sseConfig.systemPrompt.length > 100 && !sseConfig.systemPrompt.startsWith("You are a helpful AI assistant") ? {
+                preloaded_config: {
+                  system_prompt: sseConfig.systemPrompt,
+                  model: sseConfig.model,
+                  provider: sseConfig.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+                  plan: data.plan || sseConfig.plan,
+                  tools: sseConfig.tools,
+                  blocked_tools: sseConfig.blockedTools || [],
+                  max_turns: sseConfig.maxTurns || 50,
+                  budget_limit_usd: sseConfig.budgetLimitUsd || 10,
+                  parallel_tool_calls: true,
+                  enable_workspace_checkpoints: sseConfig.enableWorkspaceCheckpoints !== false,
+                },
+              } : {}),
             },
           });
 
@@ -2090,8 +2100,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             params: {
               agent_name: agentName, input: userText,
               org_id: orgId, project_id: config.projectId || "",
-              channel: "voice", channel_user_id: "", history: voiceHistory.map((m: any) => ({ role: m.role, content: m.content })),
+              channel: "voice", channel_user_id: "",
+              history: voiceHistory.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: `voice:${this.name}:${Date.now()}`,
+              do_session_id: this.name,
             },
           });
           let lastStatus: any = { status: "unknown" };
