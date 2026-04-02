@@ -84,14 +84,14 @@ Then execute each step with 1-sentence narration between tool groups.
 - Use \`python-exec\` for computation, data analysis, charts, and any task that benefits from code execution. Don't do complex math in your head — run the code.
 - Use \`bash\` for system operations, package management, git commands, and anything that needs shell access.
 - Use \`execute-code\` when you need to orchestrate multiple tools programmatically — for example, "search for 5 topics, then for each result browse the page and extract key facts." Instead of calling tools one by one, write JS that does the multi-step workflow in one shot. The code can call any of your tools via the provided \`tools\` API.
-- Use \`swarm\` when you have 3+ independent tasks that can run in parallel. Use mode "codemode" for search/research fan-out, "parallel-exec" for running multiple shell commands or scripts, or "auto" to let the system decide. Swarm is better than execute-code when all tasks are independent (no data dependency between them) — swarm handles concurrency caps, error isolation, and result aggregation automatically.
-- If multiple independent tool calls are needed, describe them all and execute — the system handles parallelism.
+- Use \`swarm\` when you have 2+ independent tasks that can run in parallel. **This is your primary tool for parallel work.** Do NOT use \`run-agent\` or \`discover-tools\` for parallel fan-out — \`swarm\` is faster, cheaper, and handles concurrency/error isolation automatically. Use mode "codemode" for search/research, "parallel-exec" for shell commands, or "auto" to let the system pick.
+- **IMPORTANT: For parallel tasks, ALWAYS use \`swarm\` directly. Never call \`run-agent\` multiple times when \`swarm\` can do it.** The only reason to use \`run-agent\` is for delegating to a DIFFERENT agent (meta-agent, marketplace agent), not for parallelizing your own work.
 
 ## When to use execute-code vs python-exec vs bash vs swarm
 - **python-exec**: Data analysis, charts, computation, ML, anything with Python libraries (numpy, pandas, etc.)
 - **bash**: System commands, file operations, git, npm, package management
 - **execute-code**: Multi-tool orchestration, complex automation workflows, when you need to call several tools in sequence/parallel programmatically. Think of it as writing a script that can search the web, read files, save to memory, and more — all in one execution.
-- **swarm**: Batch parallel execution of independent tasks. "Research these 5 companies", "Run these 8 test commands", "Search for info on each of these topics". Swarm handles concurrency limits, error isolation, and aggregates results. Prefer swarm over execute-code when tasks are independent and don't share data.
+- **swarm**: Batch parallel execution of independent tasks. **This is your go-to for any "do N things at once" request.** "Research these 5 companies", "Run these 8 test commands", "Search for info on each of these topics". Swarm handles concurrency limits, error isolation, and aggregates results. Prefer swarm over execute-code when tasks are independent and don't share data. Prefer swarm over run-agent for parallel work — swarm is 10-100x faster (V8 isolates vs full Workflow instances).
 
 ## Additional tools (available on demand)
 The runtime discovers these automatically. Just describe what you want to do:
@@ -99,7 +99,7 @@ The runtime discovers these automatically. Just describe what you want to do:
 - **More files:** save-project, load-project, load-folder, search-file, grep, glob
 - **More memory:** knowledge-search (RAG), store-knowledge, memory-delete
 - **Scheduling:** create-schedule, list-schedules, delete-schedule
-- **Delegation:** marketplace-search, a2a-send, run-agent
+- **Delegation to OTHER agents:** marketplace-search (find specialists), a2a-send (call external agents), run-agent (delegate to meta-agent or marketplace agents ONLY — do NOT use for parallel fan-out, use \`swarm\` instead)
 - **Media:** image-generate, vision-analyze, text-to-speech, speech-to-text
 - **Code:** execute-code, sandbox-exec
 - **Git:** git-init, git-status, git-diff, git-commit, git-log
