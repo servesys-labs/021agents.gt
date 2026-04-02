@@ -154,7 +154,7 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // Same sandboxId = same container = warm after first call.
   // Per CF Containers docs: https://developers.cloudflare.com/containers/
   const raw = getSandbox(env.SANDBOX, sandboxId, {
-    sleepAfter: "10m",
+    sleepAfter: "30m",
     // Internet enabled: sandbox needs network for npm install, pip install, git clone, etc.
     // Security is provided by: VM isolation (each container is its own VM per CF docs),
     // SSRF protection (blocked private IPs/metadata endpoints in validateUrl),
@@ -183,6 +183,16 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   };
 }
 
+/**
+ * Resolve a stable sandbox ID for container reuse.
+ * Prefers DO_SESSION_ID (the DO's name, e.g. "org-agent-user") so the same
+ * container is reused across multiple Workflow runs for the same user/agent.
+ * Falls back to session ID for non-DO contexts (e.g., eval runs).
+ */
+function stableSandboxId(env: RuntimeEnv, sessionId: string): string {
+  return (env as any).DO_SESSION_ID || `session-${sessionId}`;
+}
+
 async function sandboxExecWithLimits(
   env: RuntimeEnv,
   sessionId: string,
@@ -191,7 +201,7 @@ async function sandboxExecWithLimits(
   stdin?: string,
 ): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> {
   const timeout = clampSandboxTimeout(timeoutSeconds);
-  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
   return sandbox.exec(command, {
     timeout,
     ...(stdin !== undefined ? { stdin } : {}),
@@ -959,7 +969,7 @@ async function dispatch(
       }
       // Write code to temp file then execute — sandbox reuses warm container via session ID
       try {
-        const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+        const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
         const tmpFile = `/tmp/py_${Date.now()}.py`;
         await sandbox.writeFile(tmpFile, code);
         const timeout = clampSandboxTimeout(args.timeout_seconds);
@@ -972,7 +982,7 @@ async function dispatch(
     }
 
     case "read-file": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       let readPath = args.path || "";
       if (readPath && !readPath.startsWith("/")) readPath = `/workspace/${readPath}`;
 
@@ -1010,7 +1020,7 @@ async function dispatch(
 
     case "view-file": {
       // Stateful file viewer (SWE-agent ACI pattern) — 100-line window with cursor
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       let viewPath = args.path || "";
       if (viewPath && !viewPath.startsWith("/")) viewPath = `/workspace/${viewPath}`;
       const line = Math.max(1, Number(args.line) || 1);
@@ -1025,7 +1035,7 @@ async function dispatch(
     }
 
     case "write-file": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       // Enforce safe default path — always resolve to /workspace/
       let filePath = args.path || "output.txt";
       if (!filePath.startsWith("/")) filePath = `/workspace/${filePath}`;
@@ -1081,7 +1091,7 @@ async function dispatch(
     }
 
     case "edit-file": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const editPath = args.path || "";
       const read = await sandbox.exec(`cat "${editPath}"`, { timeout: 10 });
       const content = read.stdout || "";
@@ -1176,7 +1186,7 @@ async function dispatch(
 
     case "grep": {
       // Smart search with refinement forcing (SWE-agent ACI pattern)
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const maxResults = Math.min(50, Number(args.max_results) || 20);
       const escapedPattern = (args.pattern || "").replace(/"/g, '\\"');
       const searchPath = args.path || ".";
@@ -1203,7 +1213,7 @@ async function dispatch(
 
     case "glob": {
       // Smart file search with capping (SWE-agent ACI pattern)
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const searchPath = args.path || ".";
       const escapedPattern = (args.pattern || "*").replace(/"/g, '\\"');
       // Count total first
@@ -1228,7 +1238,7 @@ async function dispatch(
 
     case "search-file": {
       // Search within a specific file (SWE-agent ACI pattern)
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       let filePath = args.path || "";
       if (filePath && !filePath.startsWith("/")) filePath = `/workspace/${filePath}`;
       const term = (args.term || args.pattern || "").replace(/"/g, '\\"');
@@ -1243,7 +1253,7 @@ async function dispatch(
 
     case "find-file": {
       // Find a file by name (SWE-agent ACI pattern)
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const name = (args.name || args.filename || "").replace(/"/g, '\\"');
       const searchPath = args.path || "/workspace";
       const r = await sandbox.exec(
@@ -1348,14 +1358,14 @@ async function dispatch(
 
     case "sandbox_file_write":
     case "sandbox-file-write": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       await sandbox.writeFile(args.path || "/tmp/file", args.content || "");
       return `Written to ${args.path}`;
     }
 
     case "sandbox_file_read":
     case "sandbox-file-read": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const r = await sandbox.exec(`cat "${args.path || "/tmp/file"}"`, { timeout: 10 });
       return r.stdout || "";
     }
@@ -3229,7 +3239,7 @@ async function dispatch(
     // All git tools check for git availability first and return a helpful error if not installed.
 
     case "git-init": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const gitCheck = await sandbox.exec("which git 2>/dev/null", { timeout: 5 }).catch(() => ({ stdout: "" }));
       if (!gitCheck.stdout?.trim()) return "Error: git is not installed in this sandbox. Ask your admin to add git to the sandbox base image.";
       const workDir = args.path || "/workspace";
@@ -3241,14 +3251,14 @@ async function dispatch(
     }
 
     case "git-status": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const workDir = args.path || "/workspace";
       const r = await sandbox.exec(`cd "${workDir}" && git status 2>&1`, { timeout: 10 });
       return r.stdout || r.stderr || "Not a git repository";
     }
 
     case "git-diff": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const workDir = args.path || "/workspace";
       const target = args.target || "";
       const r = await sandbox.exec(
@@ -3262,7 +3272,7 @@ async function dispatch(
     }
 
     case "git-commit": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const workDir = args.path || "/workspace";
       const message = args.message || "checkpoint";
       const r = await sandbox.exec(
@@ -3273,7 +3283,7 @@ async function dispatch(
     }
 
     case "git-log": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const workDir = args.path || "/workspace";
       const count = Math.min(30, Number(args.count) || 10);
       const r = await sandbox.exec(
@@ -3284,7 +3294,7 @@ async function dispatch(
     }
 
     case "git-branch": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const workDir = args.path || "/workspace";
       const action = args.action || "list";
       const name = args.name || "";
@@ -3301,7 +3311,7 @@ async function dispatch(
     }
 
     case "git-stash": {
-      const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+      const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
       const workDir = args.path || "/workspace";
       const action = args.action || "push";
       const r = await sandbox.exec(`cd "${workDir}" && git stash ${action} 2>&1`, { timeout: 10 });
@@ -4416,7 +4426,7 @@ async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionI
       return `Audio download failed: ${err.message}`;
     }
   } else {
-    const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+    const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
     const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
     if (catResult.exitCode !== 0) return `Could not read audio file: ${catResult.stderr}`;
     audioBytes = Uint8Array.from(atob(catResult.stdout.trim()), (c) => c.charCodeAt(0));
@@ -4490,7 +4500,7 @@ async function dynamicExec(env: RuntimeEnv, args: Record<string, any>, sessionId
         missing_modules: missing,
       });
     }
-    const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+    const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
     const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
     await sandbox.writeFile(tmpFile, code);
     try {
@@ -4564,7 +4574,7 @@ async function saveProject(env: RuntimeEnv, args: Record<string, any>, sessionId
   const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
   const agentName = (env as any).__agentConfig?.name || "agent";
   const projectName = args.project_name || args.project_id || args.name || "default";
-  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
   const tarResult = await sandbox.exec(`cd ${workspace} 2>/dev/null && tar czf /tmp/workspace.tar.gz . 2>/dev/null || echo "__EMPTY__"`, { timeout: 30 });
   if (tarResult.stdout?.includes("__EMPTY__")) return `No files found in ${workspace}`;
   const b64Result = await sandbox.exec(`base64 /tmp/workspace.tar.gz`, { timeout: 30 });
@@ -4589,7 +4599,7 @@ async function loadProject(env: RuntimeEnv, args: Record<string, any>, sessionId
   const r2Key = version === "latest"
     ? `workspaces/${orgId}/${agentName}/projects/${projectName}/latest.tar.gz`
     : `workspaces/${orgId}/${agentName}/projects/${projectName}/${version}.tar.gz`;
-  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
   const obj = await env.STORAGE.get(r2Key);
   if (!obj) return JSON.stringify({ loaded: false, reason: `No project "${projectName}" found. Use save-project to create one.` });
   const buf = await obj.arrayBuffer();
@@ -4616,7 +4626,7 @@ async function listProjectVersions(env: RuntimeEnv, args: Record<string, any>): 
 
 async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const action = args.action || "list";
-  const sandbox = getSafeSandbox(env, `session-${sessionId}`);
+  const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
   const todoFile = "/tmp/todos.json";
   let todos: any[] = [];
   try {

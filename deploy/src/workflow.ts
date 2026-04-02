@@ -825,7 +825,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         const tr = toolResultEntries[i];
         await this.emit(p.progress_key, {
           type: "tool_result", name: tr.name, tool_call_id: tr.tool_call_id,
-          result: (tr.result || "").slice(0, 3000),
+          result: (tr.result || "").slice(0, 10000),
           error: tr.error, latency_ms: tr.latency_ms,
           cost_usd: tr.cost_usd || 0,
         });
