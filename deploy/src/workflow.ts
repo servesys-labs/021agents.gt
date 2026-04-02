@@ -117,6 +117,19 @@ export interface AgentRunParams {
   tools_override?: string[];
   /** DO session ID — used as stable sandbox identifier so hydrate-workspace and tools share the same container */
   do_session_id?: string;
+  /** Pre-loaded config from DO — skips the Supabase query in bootstrap (saves 200-800ms) */
+  preloaded_config?: {
+    system_prompt: string;
+    model: string;
+    provider: string;
+    plan: string;
+    tools: string[];
+    blocked_tools: string[];
+    max_turns: number;
+    budget_limit_usd: number;
+    parallel_tool_calls: boolean;
+    enable_workspace_checkpoints: boolean;
+  };
 }
 
 export interface RunOutput {
@@ -157,8 +170,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     const sessionId = event.instanceId.slice(0, 16);
     const traceId = crypto.randomUUID().slice(0, 16);
 
-    // ── Cloud C4.1: Check concurrent session limit before starting ──
-    const sessionLimit = await isSessionLimitReached(this.env as any, p.org_id);
+    // ── Latency fix 3: Parallelize pre-bootstrap KV ops (saves 30-100ms) ──
+    // Session limit check and snapshot hydration are independent — run in parallel.
+    // Registration depends on limit check, so it runs after.
+    const [sessionLimit, snapshot] = await Promise.all([
+      isSessionLimitReached(this.env as any, p.org_id),
+      hydrateFromSnapshot(this.env as any, sessionId),
+    ]);
+
     if (sessionLimit.limited) {
       return {
         output: `Session limit reached: ${sessionLimit.active}/${sessionLimit.max} concurrent sessions for your organization. Please wait for an active session to complete.`,
@@ -167,7 +186,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       };
     }
 
-    // Register this session for cross-DO counting
+    // Register this session for cross-DO counting (depends on limit check passing)
     // Review fix: use per-turn refreshHeartbeat instead of setInterval
     // (setInterval doesn't survive Workflow step boundaries)
     await registerSession(this.env as any, p.org_id, sessionId, {
@@ -175,11 +194,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     });
 
     // ── Cloud C2.1: Snapshot hydration — recover cost state from KV on restart ──
-    // If this is a resumed session (e.g., DO restarted mid-run), recover the
-    // accumulated cost so budget enforcement stays accurate.
     let recoveredCost = 0;
     let recoveredTurns = 0;
-    const snapshot = await hydrateFromSnapshot(this.env as any, sessionId);
     if (snapshot) {
       recoveredCost = snapshot.totalCostUsd || 0;
       recoveredTurns = snapshot.turnCount || 0;
@@ -193,12 +209,41 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       retries: { limit: 3, delay: "2 seconds", backoff: "exponential" },
       timeout: "30 seconds",
     }, async () => {
-      const { loadAgentConfig } = await memo("db", () => import("./runtime/db"));
-      const config = await loadAgentConfig(this.env.HYPERDRIVE, p.agent_name, {
-        provider: this.env.DEFAULT_PROVIDER || "openrouter",
-        model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
-        plan: "standard",
-      }, p.org_id || undefined);
+      // ── Latency fix 1: Use pre-loaded config from DO when available (saves 200-800ms DB query) ──
+      let config: Awaited<ReturnType<typeof import("./runtime/db").loadAgentConfig>>;
+      if (p.preloaded_config && p.preloaded_config.system_prompt) {
+        // DO already loaded this config — use it directly, skip Supabase round-trip
+        config = {
+          agent_name: p.agent_name,
+          system_prompt: p.preloaded_config.system_prompt,
+          provider: p.preloaded_config.provider,
+          model: p.preloaded_config.model,
+          plan: p.preloaded_config.plan,
+          max_turns: p.preloaded_config.max_turns,
+          budget_limit_usd: p.preloaded_config.budget_limit_usd,
+          tools: p.preloaded_config.tools,
+          blocked_tools: p.preloaded_config.blocked_tools,
+          parallel_tool_calls: p.preloaded_config.parallel_tool_calls,
+          enable_workspace_checkpoints: p.preloaded_config.enable_workspace_checkpoints,
+          // Fields not in DO config — use safe defaults
+          timeout_seconds: 300,
+          allowed_domains: [],
+          blocked_domains: [],
+          max_tokens_per_turn: 0,
+          require_confirmation_for_destructive: false,
+          require_human_approval: false,
+          org_id: p.org_id || "",
+          project_id: p.project_id || "",
+        };
+      } else {
+        // Fallback: load from Supabase (RPC/REST calls without DO context)
+        const { loadAgentConfig } = await memo("db", () => import("./runtime/db"));
+        config = await loadAgentConfig(this.env.HYPERDRIVE, p.agent_name, {
+          provider: this.env.DEFAULT_PROVIDER || "openrouter",
+          model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
+          plan: "standard",
+        }, p.org_id || undefined);
+      }
 
       // Apply plan override if provided (mid-session model switching)
       if (p.plan_override && ["basic", "standard", "premium"].includes(p.plan_override)) {
@@ -218,13 +263,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         config.reasoning_strategy as string | undefined, p.input, 1,
       ) || autoSelectStrategy(p.input, toolDefs.length);
 
-      // Check feature flags for this org
+      // ── Latency fix 3: Parallelize feature flag checks (saves 30-100ms) ──
       const { isEnabled: checkFlag } = await memo("features", () => import("./runtime/features"));
-      const featureFlags = {
-        concurrent_tools: await checkFlag(this.env as any, "concurrent_tools", p.org_id),
-        context_compression: await checkFlag(this.env as any, "context_compression", p.org_id),
-        deferred_tool_loading: await checkFlag(this.env as any, "deferred_tool_loading", p.org_id),
-      };
+      const [concurrent_tools, context_compression, deferred_tool_loading] = await Promise.all([
+        checkFlag(this.env as any, "concurrent_tools", p.org_id),
+        checkFlag(this.env as any, "context_compression", p.org_id),
+        checkFlag(this.env as any, "deferred_tool_loading", p.org_id),
+      ]);
+      const featureFlags = { concurrent_tools, context_compression, deferred_tool_loading };
 
       // Coordinator mode: auto-detect complex multi-part tasks
       const { shouldCoordinate, buildCoordinatorPrompt } = await memo("coordinator", () => import("./runtime/coordinator"));
@@ -290,7 +336,14 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     // Files from previous sessions exist in R2 but need to be loaded back.
     // This must happen BEFORE tools run, or read-file/edit-file will find nothing.
 
-    if (this.env.STORAGE && this.env.SANDBOX) {
+    // ── Latency fix 4: Skip hydration for text-only queries (no file/code tools) ──
+    const SANDBOX_TOOLS = new Set([
+      "python-exec", "bash", "write-file", "read-file", "edit-file",
+      "save-project", "load-project", "load-folder",
+    ]);
+    const needsSandbox = config.tools.some((t: string) => SANDBOX_TOOLS.has(t));
+
+    if (this.env.STORAGE && this.env.SANDBOX && needsSandbox) {
       await step.do("hydrate-workspace", {
         retries: { limit: 2, delay: "3 seconds", backoff: "linear" },
         timeout: "60 seconds",

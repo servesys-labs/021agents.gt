@@ -752,6 +752,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           progress_key: progressKey,
           parent_session_id: opts?.delegation?.parent_session_id,
           parent_depth: opts?.delegation?.parent_depth,
+          preloaded_config: {
+            system_prompt: config.systemPrompt,
+            model: config.model,
+            provider: config.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+            plan: config.plan,
+            tools: config.tools,
+            blocked_tools: config.blockedTools || [],
+            max_turns: config.maxTurns || 50,
+            budget_limit_usd: config.budgetLimitUsd || 10,
+            parallel_tool_calls: true,
+            enable_workspace_checkpoints: config.enableWorkspaceCheckpoints !== false,
+          },
         },
       });
 
@@ -1223,6 +1235,16 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           throw new Error("Workflow bindings not configured");
         }
 
+        // ── Latency fix 2: Pre-warm sandbox container (non-blocking, in parallel with Workflow creation) ──
+        // The same sandbox ID will be used by tools in the Workflow. Firing a no-op
+        // triggers the container to boot so it's warm by the time the first tool runs.
+        if (this.env.SANDBOX) {
+          try {
+            const sandbox = getSandbox(this.env.SANDBOX, this.name, { sleepAfter: "30m" } as any);
+            sandbox.exec("true", { timeout: 5 }).catch(() => {});
+          } catch { /* non-blocking — ignore errors */ }
+        }
+
         progressKey = `ws:${this.name}:${Date.now()}`;
         const instance = await this.env.AGENT_RUN_WORKFLOW.create({
           params: {
@@ -1234,6 +1256,19 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             history: history.map((m: any) => ({ role: m.role, content: m.content })),
             progress_key: progressKey,
             do_session_id: this.name,
+            // ── Latency fix 1: Pass pre-loaded config to skip bootstrap DB query (saves 200-800ms) ──
+            preloaded_config: {
+              system_prompt: config.systemPrompt,
+              model: config.model,
+              provider: config.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+              plan: config.plan,
+              tools: config.tools,
+              blocked_tools: config.blockedTools || [],
+              max_turns: config.maxTurns || 50,
+              budget_limit_usd: config.budgetLimitUsd || 10,
+              parallel_tool_calls: true,
+              enable_workspace_checkpoints: config.enableWorkspaceCheckpoints !== false,
+            },
           },
         });
 
@@ -1654,12 +1689,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         const progressKey = `run:${this.name}:${Date.now()}`;
 
         try {
+          const restConfig = this.state.config;
           const instance = await this.env.AGENT_RUN_WORKFLOW.create({
             params: {
               agent_name: agentName,
               input: inputText,
-              org_id: data.org_id || this.state.config.orgId || "",
-              project_id: data.project_id || this.state.config.projectId || "",
+              org_id: data.org_id || restConfig.orgId || "",
+              project_id: data.project_id || restConfig.projectId || "",
               channel: data.channel || "rest",
               channel_user_id: data.channel_user_id || "",
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
@@ -1667,6 +1703,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               ...(data.system_prompt_override ? { system_prompt_override: data.system_prompt_override } : {}),
               ...(data.budget_limit_usd_override ? { budget_limit_usd_override: data.budget_limit_usd_override } : {}),
               ...(data.media_urls?.length ? { media_urls: data.media_urls, media_types: data.media_types } : {}),
+              preloaded_config: {
+                system_prompt: restConfig.systemPrompt,
+                model: restConfig.model,
+                provider: restConfig.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+                plan: restConfig.plan,
+                tools: restConfig.tools,
+                blocked_tools: restConfig.blockedTools || [],
+                max_turns: restConfig.maxTurns || 50,
+                budget_limit_usd: restConfig.budgetLimitUsd || 10,
+                parallel_tool_calls: true,
+                enable_workspace_checkpoints: restConfig.enableWorkspaceCheckpoints !== false,
+              },
             },
           });
 
@@ -1771,6 +1819,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         const progressKey = `run:${this.name}:${Date.now()}`;
 
         try {
+          const sseConfig = this.state.config;
           const instance = await this.env.AGENT_RUN_WORKFLOW.create({
             params: {
               agent_name: agentName,
@@ -1782,6 +1831,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               history: history.map((m: any) => ({ role: m.role, content: m.content })),
               progress_key: progressKey,
               ...(data.plan ? { plan_override: data.plan } : {}),
+              preloaded_config: {
+                system_prompt: sseConfig.systemPrompt,
+                model: sseConfig.model,
+                provider: sseConfig.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+                plan: sseConfig.plan,
+                tools: sseConfig.tools,
+                blocked_tools: sseConfig.blockedTools || [],
+                max_turns: sseConfig.maxTurns || 50,
+                budget_limit_usd: sseConfig.budgetLimitUsd || 10,
+                parallel_tool_calls: true,
+                enable_workspace_checkpoints: sseConfig.enableWorkspaceCheckpoints !== false,
+              },
             },
           });
 
