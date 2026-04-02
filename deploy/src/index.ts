@@ -752,18 +752,20 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           progress_key: progressKey,
           parent_session_id: opts?.delegation?.parent_session_id,
           parent_depth: opts?.delegation?.parent_depth,
-          preloaded_config: {
-            system_prompt: config.systemPrompt,
-            model: config.model,
-            provider: config.provider || this.env.DEFAULT_PROVIDER || "openrouter",
-            plan: config.plan,
-            tools: config.tools,
-            blocked_tools: config.blockedTools || [],
-            max_turns: config.maxTurns || 50,
-            budget_limit_usd: config.budgetLimitUsd || 10,
-            parallel_tool_calls: true,
-            enable_workspace_checkpoints: config.enableWorkspaceCheckpoints !== false,
-          },
+          ...(config.systemPrompt && config.systemPrompt.length > 100 && !config.systemPrompt.startsWith("You are a helpful AI assistant") ? {
+            preloaded_config: {
+              system_prompt: config.systemPrompt,
+              model: config.model,
+              provider: config.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+              plan: config.plan,
+              tools: config.tools,
+              blocked_tools: config.blockedTools || [],
+              max_turns: config.maxTurns || 50,
+              budget_limit_usd: config.budgetLimitUsd || 10,
+              parallel_tool_calls: true,
+              enable_workspace_checkpoints: config.enableWorkspaceCheckpoints !== false,
+            },
+          } : {}),
         },
       });
 
@@ -1257,18 +1259,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             progress_key: progressKey,
             do_session_id: this.name,
             // ── Latency fix 1: Pass pre-loaded config to skip bootstrap DB query (saves 200-800ms) ──
-            preloaded_config: {
-              system_prompt: config.systemPrompt,
-              model: config.model,
-              provider: config.provider || this.env.DEFAULT_PROVIDER || "openrouter",
-              plan: config.plan,
-              tools: config.tools,
-              blocked_tools: config.blockedTools || [],
-              max_turns: config.maxTurns || 50,
-              budget_limit_usd: config.budgetLimitUsd || 10,
-              parallel_tool_calls: true,
-              enable_workspace_checkpoints: config.enableWorkspaceCheckpoints !== false,
-            },
+            // Only send if DO has loaded config from DB (non-default system prompt).
+            // Fresh DOs have the generic default — let bootstrap load from DB instead.
+            ...(config.systemPrompt && config.systemPrompt.length > 100 && !config.systemPrompt.startsWith("You are a helpful AI assistant") ? {
+              preloaded_config: {
+                system_prompt: config.systemPrompt,
+                model: config.model,
+                provider: config.provider || this.env.DEFAULT_PROVIDER || "openrouter",
+                plan: config.plan,
+                tools: config.tools,
+                blocked_tools: config.blockedTools || [],
+                max_turns: config.maxTurns || 50,
+                budget_limit_usd: config.budgetLimitUsd || 10,
+                parallel_tool_calls: true,
+                enable_workspace_checkpoints: config.enableWorkspaceCheckpoints !== false,
+              },
+            } : {}),
           },
         });
 
