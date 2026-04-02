@@ -276,23 +276,28 @@ const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string
     },
     multimodal: { vision: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" } },
   },
-  // ── Standard: Claude Sonnet 4.6 (best tool-calling, best instruction-following) ──
+  // ── Standard: Haiku for simple/tool_call (fast, cheap), Sonnet for reasoning ──
+  // Haiku 4.5: $0.80/$4.00 per M — 75% cheaper than Sonnet for tool routing.
+  // Tool calls are routing decisions that don't need Sonnet-level reasoning.
+  // Simple questions also get Haiku (fast) — user upgrades to Premium for all-Sonnet.
   standard: {
     general: {
-      simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+      simple: { model: "anthropic/claude-haiku-4-5-20251001", provider: "openrouter" },
       moderate: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
       complex: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
-      tool_call: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+      tool_call: { model: "anthropic/claude-haiku-4-5-20251001", provider: "openrouter" },
     },
     multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
   },
-  // ── Premium: Opus for deep reasoning, Sonnet for speed ──
+  // ── Premium: Haiku for tool routing, Sonnet for moderate, Opus for complex ──
+  // Tool calls still use Haiku — speed matters more than reasoning for routing.
+  // Users pay for Opus reasoning on complex tasks, not on tool dispatch.
   premium: {
     general: {
       simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
       moderate: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
       complex: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
-      tool_call: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+      tool_call: { model: "anthropic/claude-haiku-4-5-20251001", provider: "openrouter" },
     },
     multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
   },
