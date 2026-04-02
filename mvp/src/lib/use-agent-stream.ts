@@ -70,6 +70,8 @@ export interface ChatMessage {
   toolLatencyMs?: number;
   toolArgsPreview?: string;
   toolCostUsd?: number;
+  /** Turn number — used to group parallel tool calls */
+  toolTurn?: number;
   // File change metadata (role=file_change)
   fileChange?: FileChange;
   // Turn metadata (role=assistant)
@@ -731,6 +733,7 @@ export function useAgentStream() {
           toolName: String(event.name || ""),
           toolStatus: "running",
           toolArgsPreview: event.args_preview ? String(event.args_preview) : undefined,
+          toolTurn: event.turn != null ? Number(event.turn) : undefined,
         };
         setMessages(prev => [...prev, toolMsg]);
         // Reset assistant buffer for next text after tools

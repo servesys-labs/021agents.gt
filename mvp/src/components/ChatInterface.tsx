@@ -71,6 +71,102 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+// ── Tool Result Renderer (smart dispatch by tool name) ────
+
+interface BashResult {
+  stdout?: string;
+  stderr?: string;
+  exit_code?: number;
+}
+
+function tryParseBashResult(result: string): BashResult | null {
+  try {
+    const parsed = JSON.parse(result);
+    if (typeof parsed === "object" && parsed !== null && ("stdout" in parsed || "stderr" in parsed || "exit_code" in parsed)) {
+      return parsed as BashResult;
+    }
+  } catch {
+    // Not JSON — that's fine
+  }
+  return null;
+}
+
+function BashResultView({ result }: { result: BashResult }) {
+  return (
+    <div className="space-y-1.5">
+      {/* Exit code badge */}
+      <div className="flex items-center gap-2 mb-1.5">
+        <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+          result.exit_code === 0
+            ? "bg-[rgba(158,206,106,0.15)] text-[#9ece6a]"
+            : "bg-[rgba(247,118,142,0.15)] text-[#f7768e]"
+        }`}>
+          exit {result.exit_code ?? 0}
+        </span>
+      </div>
+      {/* stdout */}
+      {result.stdout && result.stdout.trim() && (
+        <pre className="terminal-stdout whitespace-pre-wrap break-words">{result.stdout}</pre>
+      )}
+      {/* stderr */}
+      {result.stderr && result.stderr.trim() && (
+        <pre className="terminal-stderr whitespace-pre-wrap break-words">{result.stderr}</pre>
+      )}
+      {/* Empty output */}
+      {!result.stdout?.trim() && !result.stderr?.trim() && (
+        <span className="terminal-dim italic">(no output)</span>
+      )}
+    </div>
+  );
+}
+
+function ToolResultRenderer({ toolName, result }: { toolName: string; result: string }) {
+  const name = toolName.toLowerCase();
+
+  // Bash / python-exec: parse JSON with stdout/stderr/exit_code
+  if (name === "bash" || name === "python-exec" || name === "python_exec" || name === "shell" || name === "execute") {
+    const parsed = tryParseBashResult(result);
+    if (parsed) return <BashResultView result={parsed} />;
+  }
+
+  // Memory recall: show as a styled card
+  if (name === "memory-recall" || name === "memory_recall" || name === "recall") {
+    return (
+      <div className="space-y-1">
+        <div className="flex items-center gap-1.5 mb-1">
+          <span className="terminal-info text-[10px] font-medium">MEMORY</span>
+        </div>
+        <pre className="terminal-stdout whitespace-pre-wrap break-words leading-relaxed">{result}</pre>
+      </div>
+    );
+  }
+
+  // Web search: try to parse structured results
+  if (name === "web-search" || name === "web_search" || name === "search") {
+    try {
+      const parsed = JSON.parse(result);
+      if (Array.isArray(parsed)) {
+        return (
+          <div className="space-y-2">
+            {parsed.slice(0, 8).map((item: { title?: string; url?: string; snippet?: string }, i: number) => (
+              <div key={i} className="space-y-0.5">
+                {item.title && <div className="terminal-info font-medium">{item.title}</div>}
+                {item.url && <div className="terminal-dim text-[10px] break-all">{item.url}</div>}
+                {item.snippet && <div className="terminal-stdout text-[10.5px] leading-relaxed">{item.snippet}</div>}
+              </div>
+            ))}
+          </div>
+        );
+      }
+    } catch {
+      // Not structured JSON
+    }
+  }
+
+  // Default: plain text
+  return <pre className="terminal-stdout whitespace-pre-wrap break-words">{result}</pre>;
+}
+
 // ── Tool Call Card (TUI-inspired) ──────────────────────────
 
 // Claude Code-style action verbs for loading personality
@@ -80,7 +176,7 @@ const ACTION_VERBS = [
   "Rendering", "Compiling", "Parsing", "Evaluating", "Inspecting",
 ];
 
-function ToolCallCard({ msg }: { msg: ChatMessage }) {
+function ToolCallCard({ msg, compact }: { msg: ChatMessage; compact?: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [verb] = useState(() => ACTION_VERBS[Math.floor(Math.random() * ACTION_VERBS.length)]);
@@ -101,7 +197,10 @@ function ToolCallCard({ msg }: { msg: ChatMessage }) {
   const stallLevel = elapsed > 30 ? "stalled" : elapsed > 10 ? "slow" : "normal";
 
   return (
-    <div className={`border rounded-xl overflow-hidden text-xs transition-all duration-200 ${
+    <div className={`overflow-hidden text-xs transition-all duration-200 ${
+      compact ? "" : "border rounded-xl"
+    } ${
+      compact ? (isRunning ? "bg-primary/[0.02]" : "") :
       isError ? "border-danger/40 bg-danger/[0.04]" :
       isRunning ? `border-primary/30 bg-primary/[0.04] tool-running stall-indicator` :
       "border-border/50 bg-surface-alt/30 hover:border-border"
@@ -150,14 +249,14 @@ function ToolCallCard({ msg }: { msg: ChatMessage }) {
         </span>
       </button>
 
-      {/* Expandable output — terminal card styling */}
+      {/* Expandable output — terminal card styling with smart rendering */}
       <div className="accordion-content" data-open={expanded && !!(msg.toolResult || msg.toolError)}>
         <div>
           {(msg.toolResult || msg.toolError) && (
             <div className="terminal-card border-t border-white/5 px-3 py-2.5 max-h-80 overflow-y-auto relative group">
               <div className="code-copy-btn"><CopyButton text={msg.toolError || msg.toolResult || ""} /></div>
               {msg.toolError && <pre className="terminal-stderr whitespace-pre-wrap break-words">{msg.toolError}</pre>}
-              {msg.toolResult && <pre className="terminal-stdout whitespace-pre-wrap break-words">{msg.toolResult}</pre>}
+              {msg.toolResult && <ToolResultRenderer toolName={toolName} result={msg.toolResult} />}
             </div>
           )}
         </div>
@@ -166,12 +265,103 @@ function ToolCallCard({ msg }: { msg: ChatMessage }) {
   );
 }
 
+// ── Unified Diff Computation ──────────────────────────────
+
+interface DiffLine {
+  type: "context" | "added" | "removed" | "separator";
+  oldLineNum?: number;
+  newLineNum?: number;
+  content: string;
+}
+
+/**
+ * Compute a unified diff between old and new text.
+ * Uses a simple approach: find common prefix/suffix lines, mark the rest as removed/added.
+ * Groups changes with context lines and separators for gaps.
+ */
+function computeUnifiedDiff(oldText: string, newText: string, contextLines = 3): DiffLine[] {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const result: DiffLine[] = [];
+
+  // Find common prefix length
+  let prefixLen = 0;
+  while (prefixLen < oldLines.length && prefixLen < newLines.length && oldLines[prefixLen] === newLines[prefixLen]) {
+    prefixLen++;
+  }
+
+  // Find common suffix length (don't overlap with prefix)
+  let suffixLen = 0;
+  while (
+    suffixLen < oldLines.length - prefixLen &&
+    suffixLen < newLines.length - prefixLen &&
+    oldLines[oldLines.length - 1 - suffixLen] === newLines[newLines.length - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const oldChangeStart = prefixLen;
+  const oldChangeEnd = oldLines.length - suffixLen;
+  const newChangeStart = prefixLen;
+  const newChangeEnd = newLines.length - suffixLen;
+
+  // If no changes, show nothing
+  if (oldChangeStart === oldChangeEnd && newChangeStart === newChangeEnd) {
+    return [{ type: "context", content: "(no changes)", oldLineNum: undefined, newLineNum: undefined }];
+  }
+
+  // Context before the change
+  const contextStart = Math.max(0, oldChangeStart - contextLines);
+  if (contextStart > 0) {
+    result.push({ type: "separator", content: `@@ -${contextStart + 1},${oldChangeEnd - contextStart + Math.min(suffixLen, contextLines)} +${contextStart + 1},${newChangeEnd - contextStart + Math.min(suffixLen, contextLines)} @@` });
+  }
+
+  for (let i = contextStart; i < oldChangeStart; i++) {
+    result.push({ type: "context", oldLineNum: i + 1, newLineNum: i + 1, content: oldLines[i] });
+  }
+
+  // Removed lines
+  for (let i = oldChangeStart; i < oldChangeEnd; i++) {
+    result.push({ type: "removed", oldLineNum: i + 1, content: oldLines[i] });
+  }
+
+  // Added lines
+  let newLineCounter = newChangeStart;
+  for (let i = newChangeStart; i < newChangeEnd; i++) {
+    result.push({ type: "added", newLineNum: i + 1, content: newLines[i] });
+    newLineCounter = i + 1;
+  }
+
+  // Context after the change
+  const contextEnd = Math.min(oldLines.length, oldChangeEnd + contextLines);
+  const suffixStart = oldLines.length - suffixLen;
+  for (let i = oldChangeEnd; i < Math.min(contextEnd, oldLines.length); i++) {
+    const newIdx = newChangeEnd + (i - oldChangeEnd);
+    result.push({ type: "context", oldLineNum: i + 1, newLineNum: newIdx + 1, content: oldLines[i] });
+  }
+
+  if (contextEnd < oldLines.length) {
+    result.push({ type: "separator", content: `... ${oldLines.length - contextEnd} more lines` });
+  }
+
+  return result;
+}
+
 // ── File Change Card ───────────────────────────────────────
 
 function FileChangeCard({ change }: { change: FileChange }) {
   const [expanded, setExpanded] = useState(false);
   const fileName = change.path.split("/").pop() || change.path;
   const isCreate = change.changeType === "create";
+
+  // Pre-compute diff for edits
+  const diffLines = (!isCreate && change.oldText && change.newText)
+    ? computeUnifiedDiff(change.oldText, change.newText)
+    : null;
+
+  // Count additions/removals for the summary badge
+  const addedCount = diffLines?.filter(l => l.type === "added").length ?? 0;
+  const removedCount = diffLines?.filter(l => l.type === "removed").length ?? 0;
 
   return (
     <div className="border rounded-xl overflow-hidden text-xs border-border/60 bg-surface-alt/20">
@@ -187,6 +377,12 @@ function FileChangeCard({ change }: { change: FileChange }) {
         }`}>
           {isCreate ? "NEW" : "EDIT"}
         </span>
+        {!isCreate && diffLines && (
+          <span className="flex items-center gap-1.5 text-[10px] ml-1">
+            {addedCount > 0 && <span className="text-[#9ece6a]">+{addedCount}</span>}
+            {removedCount > 0 && <span className="text-[#f7768e]">-{removedCount}</span>}
+          </span>
+        )}
         {change.language && <span className="text-text-muted text-[10px]">{change.language}</span>}
         {change.size != null && <span className="text-text-muted text-[10px] ml-auto">{change.size > 1024 ? `${(change.size / 1024).toFixed(1)}KB` : `${change.size}B`}</span>}
         {expanded ? <ChevronDown size={11} className="text-text-muted" /> : <ChevronRight size={11} className="text-text-muted" />}
@@ -201,17 +397,33 @@ function FileChangeCard({ change }: { change: FileChange }) {
                 {change.content}
               </pre>
             )}
-            {!isCreate && (change.oldText || change.newText) && (
-              <pre className="px-3 py-2.5 whitespace-pre-wrap break-words">
-                <div className="diff-header text-[10px] mb-1">--- a/{change.path}</div>
-                <div className="diff-header text-[10px] mb-2">+++ b/{change.path}</div>
-                {change.oldText?.split("\n").map((line, i) => (
-                  <div key={`old-${i}`} className="diff-removed"><span className="diff-gutter">{i + 1}</span>- {line}</div>
-                ))}
-                {change.newText?.split("\n").map((line, i) => (
-                  <div key={`new-${i}`} className="diff-added"><span className="diff-gutter">{i + 1}</span>+ {line}</div>
-                ))}
-              </pre>
+            {!isCreate && diffLines && (
+              <div className="py-1.5">
+                <div className="diff-header text-[10px] px-3 mb-0.5">--- a/{change.path}</div>
+                <div className="diff-header text-[10px] px-3 mb-1">+++ b/{change.path}</div>
+                {diffLines.map((line, i) => {
+                  if (line.type === "separator") {
+                    return (
+                      <div key={i} className="diff-header text-[10px] px-3 py-0.5 select-none">
+                        {line.content}
+                      </div>
+                    );
+                  }
+                  const gutterOld = line.oldLineNum != null ? String(line.oldLineNum) : "";
+                  const gutterNew = line.newLineNum != null ? String(line.newLineNum) : "";
+                  const prefix = line.type === "added" ? "+" : line.type === "removed" ? "-" : " ";
+                  const lineClass = line.type === "added" ? "diff-added" : line.type === "removed" ? "diff-removed" : "";
+
+                  return (
+                    <div key={i} className={`flex ${lineClass}`}>
+                      <span className="diff-gutter shrink-0 w-[3.5ch] text-right pr-1 select-none">{gutterOld}</span>
+                      <span className="diff-gutter shrink-0 w-[3.5ch] text-right pr-1 select-none">{gutterNew}</span>
+                      <span className="shrink-0 w-[2ch] text-center select-none">{prefix}</span>
+                      <span className="flex-1 whitespace-pre-wrap break-words pr-3">{line.content}</span>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
@@ -579,7 +791,12 @@ export function ChatInterface({
             )}
           </div>
         )}
-        {(messages as ChatMessage[]).map((msg, idx) => {
+        {(() => {
+          // Pre-compute parallel tool groups for P1b
+          const typedMessages = messages as ChatMessage[];
+          const renderedGroupIds = new Set<string>();
+
+          return typedMessages.map((msg, idx) => {
           // User message
           if (msg.role === "user") {
             return (
@@ -599,12 +816,78 @@ export function ChatInterface({
           // Thinking
           if (msg.role === "thinking") return <ThinkingBlock key={msg.id} content={msg.content} />;
 
-          // Tool call
+          // Tool call — with parallel grouping
           if (msg.role === "tool") {
+            // Skip if already rendered as part of a group
+            if (renderedGroupIds.has(msg.id)) return null;
+
+            // Collect consecutive tool messages with the same toolTurn
+            const hasTurn = msg.toolTurn != null;
+            const groupMessages: ChatMessage[] = [msg];
+
+            if (hasTurn) {
+              for (let j = idx + 1; j < typedMessages.length; j++) {
+                const next = typedMessages[j];
+                if (next.role === "tool" && next.toolTurn === msg.toolTurn) {
+                  groupMessages.push(next);
+                  renderedGroupIds.add(next.id);
+                } else {
+                  break;
+                }
+              }
+            }
+
+            // Single tool — render normally
+            if (groupMessages.length === 1) {
+              return (
+                <div key={msg.id} className="animate-[fadeInUp_150ms_ease-out]">
+                  <div className="w-full">
+                    <ToolCallCard msg={msg} />
+                  </div>
+                </div>
+              );
+            }
+
+            // Parallel group — render with shared container
+            const allDone = groupMessages.every(m => m.toolStatus === "done" || m.toolStatus === "error");
+            const anyError = groupMessages.some(m => m.toolStatus === "error");
+            const runningCount = groupMessages.filter(m => m.toolStatus === "running").length;
+
             return (
-              <div key={msg.id} className="animate-[fadeInUp_150ms_ease-out]">
-                <div className="w-full">
-                  <ToolCallCard msg={msg} />
+              <div key={`group-${msg.id}`} className="animate-[fadeInUp_150ms_ease-out]">
+                <div className={`w-full border rounded-xl overflow-hidden transition-all duration-200 ${
+                  anyError ? "border-danger/30 bg-danger/[0.02]" :
+                  !allDone ? "border-primary/20 bg-primary/[0.02]" :
+                  "border-border/50 bg-surface-alt/20"
+                }`}>
+                  {/* Group header */}
+                  <div className="flex items-center gap-2 px-3 py-2 border-b border-border/30">
+                    {!allDone ? (
+                      <span className="w-2 h-2 rounded-full bg-primary status-dot-pulse shrink-0" />
+                    ) : anyError ? (
+                      <span className="text-danger text-xs shrink-0">!</span>
+                    ) : (
+                      <Layers size={12} className="text-text-muted shrink-0" />
+                    )}
+                    <span className="text-[11px] font-medium text-text-secondary">
+                      {!allDone
+                        ? `Running ${groupMessages.length} tools in parallel${runningCount > 0 ? ` (${runningCount} active)` : ""}`
+                        : `${groupMessages.length} tools ran in parallel`}
+                    </span>
+                    {allDone && (
+                      <span className="ml-auto text-[10px] text-text-muted">
+                        {anyError ? "completed with errors" : "all succeeded"}
+                      </span>
+                    )}
+                  </div>
+                  {/* Individual tool cards inside */}
+                  <div className="space-y-0 divide-y divide-border/20">
+                    {groupMessages.map(gMsg => (
+                      <div key={gMsg.id} className="px-0">
+                        <ToolCallCard msg={gMsg} compact />
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
             );
@@ -707,7 +990,8 @@ export function ChatInterface({
               </div>
             </div>
           );
-        })}
+        });
+        })()}
 
         {/* Streaming indicator — Claude Code shimmer style */}
         {(streaming || loading) && (
