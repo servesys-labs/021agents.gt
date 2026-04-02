@@ -12,6 +12,26 @@ import { CodeBlock, MarkdownTable, MarkdownThead, MarkdownTr, MarkdownTh, Markdo
 import type { ChatMessage, SessionMeta, FileChange } from "../lib/use-agent-stream";
 import { useScrollAnchor } from "../lib/use-pretext";
 
+// ── Model name formatter ────────────────────────────────────
+function formatModelName(raw: string): string {
+  // Strip provider prefix (e.g. "anthropic/claude-3-5-haiku" → "claude-3-5-haiku")
+  const base = raw.includes("/") ? raw.split("/").pop()! : raw;
+  // Map known model patterns to friendly names
+  if (/claude.*opus.*4/i.test(base)) return "Opus 4.6";
+  if (/claude.*sonnet.*4/i.test(base)) return "Sonnet 4.6";
+  if (/claude.*haiku.*4/i.test(base)) return "Haiku 4.5";
+  if (/claude.*opus/i.test(base)) return "Opus";
+  if (/claude.*sonnet/i.test(base)) return "Sonnet";
+  if (/claude.*haiku/i.test(base)) return "Haiku";
+  if (/deepseek.*v3/i.test(base)) return "DeepSeek V3.2";
+  if (/deepseek/i.test(base)) return "DeepSeek";
+  if (/gpt-4o/i.test(base)) return "GPT-4o";
+  if (/gpt-4/i.test(base)) return "GPT-4";
+  if (/o[134]-/i.test(base)) return base.split("-")[0].toUpperCase();
+  // Fallback: capitalize and clean up
+  return base.replace(/^claude-/, "").replace(/-/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+}
+
 // ── Legacy type ─────────────────────────────────────────────
 interface LegacyMessage { id: string; role: "user" | "assistant"; content: string; timestamp: string; }
 export type Message = LegacyMessage;
@@ -981,7 +1001,7 @@ export function ChatInterface({
                   <MessageActions msg={msg} onRetry={onRetry} />
                   {msg.turnInfo && (
                     <span className="text-[10px] text-text-muted ml-auto flex items-center gap-2">
-                      <span>{msg.turnInfo.model.split("/").pop()}</span>
+                      <span className="px-1.5 py-0.5 rounded-full bg-surface-alt border border-border/40 font-medium">{formatModelName(msg.turnInfo.model)}</span>
                       <span>${msg.turnInfo.cost_usd.toFixed(4)}</span>
                       <span>{msg.turnInfo.tokens.toLocaleString()} tok</span>
                     </span>
