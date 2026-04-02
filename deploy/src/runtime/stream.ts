@@ -21,7 +21,7 @@ import type { LLMMessage, LLMResponse, ToolCall, ToolDefinition, RuntimeEnv, Too
 import type { RuntimeEvent, TurnEndEvent, DoneEvent } from "./protocol";
 import { executeTools, getToolDefinitions } from "./tools";
 import { loadAgentConfig, resolvePlanRouting, writeSession, writeTurn, writeBillingRecord } from "./db";
-import { createWorkingMemory, buildMemoryContext, queueFactExtraction } from "./memory";
+import { createWorkingMemory, buildMemoryContext, queueFactExtraction, queueSessionEpisodicNote } from "./memory";
 import { selectModel, type PlanRouting } from "./router";
 import { createLoopState, detectLoop, maybeSummarize } from "./middleware";
 import { serializeForWebSocket } from "./protocol";
@@ -386,7 +386,7 @@ export async function streamRun(
       provider: env.DEFAULT_PROVIDER,
       model: env.DEFAULT_MODEL,
       plan: "standard",
-    });
+    }, opts?.org_id || undefined);
     if (opts?.org_id) config.org_id = opts.org_id;
     if (opts?.project_id) config.project_id = opts.project_id;
     attachToolPolicyEnvelope(env, config);
@@ -406,7 +406,31 @@ export async function streamRun(
     if (env.STORAGE && env.SANDBOX) {
       try {
         const { hydrateWorkspace } = await import("./workspace");
-        const sandbox = (await import("@cloudflare/sandbox")).getSandbox(env.SANDBOX, `session-${sessionId}`);
+        const { getSandbox: _getSandbox } = await import("@cloudflare/sandbox");
+        const sandboxId = `session-${sessionId}`;
+        const rawSandbox = _getSandbox(env.SANDBOX, sandboxId);
+        // Wrap with 30s timeout so workspace hydration doesn't hang if capacity is exhausted
+        const sandbox = new Proxy(rawSandbox, {
+          get: (target, prop) => {
+            const val = (target as any)[prop];
+            if (typeof val !== "function") return val;
+            return (...args: any[]) => {
+              const result = val.apply(target, args);
+              if (result && typeof result.then === "function") {
+                return Promise.race([
+                  result,
+                  new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error(
+                      `Sandbox unavailable — no container could be allocated within 30 seconds. ` +
+                      `Please try again in a moment. (sandbox: ${sandboxId})`
+                    )), 30_000)
+                  ),
+                ]);
+              }
+              return result;
+            };
+          },
+        });
         const { restored } = await hydrateWorkspace(
           env.STORAGE, sandbox, config.org_id || "default", config.agent_name || agentName,
         );
@@ -441,7 +465,7 @@ export async function streamRun(
     if (!isVoiceChannel) {
       try {
         const skills = await loadSkills(hyperdrive, config.org_id || "", config.agent_name || agentName);
-        const skillsBlock = formatSkillsPrompt(skills);
+        const skillsBlock = formatSkillsPrompt(skills, config.plan);
         if (skillsBlock) sysPromptParts.push(skillsBlock);
       } catch {}
 
@@ -571,10 +595,13 @@ export async function streamRun(
     let totalOutputTokens = 0;
     let output = "";
     let lastModel = config.model;
+    let lastTurnUsed = 0;
+    const sessionToolNames: string[] = [];
 
     // Checkpointing handled by Workflow steps — no manual DO SQLite checkpoints needed.
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
+      lastTurnUsed = turn;
       const lineage = (env as any).__delegationLineage;
       if (lineage && typeof lineage === "object") {
         lineage.turn = turn;
@@ -764,6 +791,10 @@ export async function streamRun(
       // Accumulate tool execution costs (search, crawl, etc.)
       cumulativeCost += toolResults.reduce((sum: number, tr: ToolResult) => sum + (tr.cost_usd || 0), 0);
 
+      for (const tc of llmResponse.tool_calls) {
+        sessionToolNames.push(tc.name);
+      }
+
       for (let i = 0; i < llmResponse.tool_calls.length; i++) {
         const tc = llmResponse.tool_calls[i];
         const tr = toolResults[i] || { result: "No result", tool: tc.name, tool_call_id: tc.id, latency_ms: 0 };
@@ -878,7 +909,18 @@ export async function streamRun(
       depth: lineage.depth,
     }).catch(() => {});
 
-    // Billing write (fire-and-forget)
+    queueSessionEpisodicNote(hyperdrive, {
+      sessionId,
+      agentName: config.agent_name,
+      orgId: config.org_id || "",
+      userInput: input,
+      assistantOutput: output,
+      toolNames: sessionToolNames,
+      turnsUsed: lastTurnUsed,
+      toolCallCount: totalToolCalls,
+    });
+
+    // Billing write (fire-and-forget, with KV dead-letter on failure)
     writeBillingRecord(hyperdrive, {
       session_id: sessionId, org_id: config.org_id, agent_name: config.agent_name,
       model: lastModel, input_tokens: totalInputTokens, output_tokens: totalOutputTokens,
@@ -886,7 +928,7 @@ export async function streamRun(
       trace_id: traceId,
       billing_user_id: opts?.channel_user_id,
       api_key_id: opts?.api_key_id,
-    }).catch(() => {});
+    }, env.AGENT_PROGRESS_KV).catch(() => {});
 
     const doneEvent: DoneEvent = {
       type: "done",
