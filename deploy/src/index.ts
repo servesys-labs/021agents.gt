@@ -1247,6 +1247,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           } catch { /* non-blocking — ignore errors */ }
         }
 
+        // UI plan selection overrides DB config (user picked basic/standard/premium in the UI)
+        const effectivePlan = data.plan || config.plan;
+
         progressKey = `ws:${this.name}:${Date.now()}`;
         const instance = await this.env.AGENT_RUN_WORKFLOW.create({
           params: {
@@ -1258,6 +1261,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             history: history.map((m: any) => ({ role: m.role, content: m.content })),
             progress_key: progressKey,
             do_session_id: this.name,
+            // UI plan override — user can switch plans per-message
+            ...(data.plan ? { plan_override: data.plan } : {}),
             // ── Latency fix 1: Pass pre-loaded config to skip bootstrap DB query (saves 200-800ms) ──
             // Only send if DO has loaded config from DB (non-default system prompt).
             // Fresh DOs have the generic default — let bootstrap load from DB instead.
@@ -1266,7 +1271,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 system_prompt: config.systemPrompt,
                 model: config.model,
                 provider: config.provider || this.env.DEFAULT_PROVIDER || "openrouter",
-                plan: config.plan,
+                plan: effectivePlan,
                 tools: config.tools,
                 blocked_tools: config.blockedTools || [],
                 max_turns: config.maxTurns || 50,
@@ -1358,6 +1363,30 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               if (events[i].type === "error") done = true;
             }
             lastIdx = events.length;
+
+            // If KV has data but no new events for a while, check Workflow status
+            // directly. KV eventual consistency can delay the done event by 1-60s.
+            if (!done && pollCount % 10 === 0) {
+              try {
+                const st = await instance.status();
+                if (st.status === "complete" && !doneSent) {
+                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                  const doneEvt = {
+                    type: "done", output: out?.output || "", session_id: out?.session_id || "",
+                    trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
+                    tool_calls: out?.tool_calls || 0, ts: Date.now(),
+                  };
+                  try { connection.send(JSON.stringify(doneEvt)); } catch {}
+                  this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                  this._storeLastResult(doneEvt);
+                  doneSent = true;
+                  done = true;
+                } else if (st.status === "errored" || st.status === "terminated") {
+                  try { connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" })); } catch {}
+                  done = true;
+                }
+              } catch {}
+            }
           } catch (kvErr) {
             kvConsecutiveFailures++;
             console.error("[ws-poll] KV read failed:", kvErr instanceof Error ? kvErr.message : kvErr);
@@ -1942,11 +1971,23 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   }
                 }
 
-                // Also check Workflow status
+                // Also check Workflow status — handles KV eventual consistency lag
                 try {
                   const status = await instance.status();
+                  if (status.status === "complete" && !done) {
+                    const out = (status as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                    const doneEvt = {
+                      type: "done", output: out?.output || "", session_id: out?.session_id || "",
+                      trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
+                      tool_calls: out?.tool_calls || 0, ts: Date.now(),
+                    };
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify(doneEvt)}\n\n`));
+                    self._appendConversationMessage("user", inputText, data.channel || "sse");
+                    self._appendConversationMessage("assistant", doneEvt.output, data.channel || "sse");
+                    done = true;
+                  }
                   if (status.status === "errored") {
-                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: status.error?.message || "Run failed" })}\n\n`));
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "error", message: (status as any).error?.message || "Run failed" })}\n\n`));
                     done = true;
                   }
                   if (status.status === "terminated") {
