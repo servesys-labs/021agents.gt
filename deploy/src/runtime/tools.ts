@@ -5199,18 +5199,18 @@ const CORE_TOOLS = new Set([
 const TOOL_KEYWORDS: Record<string, string[]> = {
   // Research & web
   "search|find|look up|google|news|current|today|latest|recent": ["web-search", "parallel-web-search"],
-  "browse|visit|website|page|url|link|open": ["browse", "web-crawl", "browser-render"],
+  "browse|visit|website|page|url|link|open page|open site|open url": ["browse", "web-crawl", "browser-render"],
   "crawl|scrape|extract": ["web-crawl", "browser-render"],
   // Code & execution
   "code|script|program|python|calculate|compute|analyze data|csv|chart|plot|graph": ["python-exec", "execute-code", "bash"],
-  "run|execute|shell|command|terminal|install": ["bash", "python-exec", "execute-code"],
+  "run code|run script|run command|execute|shell|command line|terminal|install|npm|pip": ["bash", "python-exec", "execute-code"],
   "codemode|transform|validate|orchestrate|generate mcp": ["run-codemode", "codemode-transform", "codemode-validate", "codemode-orchestrate", "codemode-test", "codemode-generate-mcp"],
   // File operations
   "file|read|write|save|create|edit|document|folder|directory": ["read-file", "write-file", "edit-file", "view-file", "search-file", "find-file", "load-folder"],
   "grep|search file|find in": ["grep", "glob", "search-file", "find-file"],
   "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "manage-projects"],
   // Memory & knowledge
-  "remember|memory|recall|forget|save fact|note|store|MEMORY\\.md|sync memory": [
+  "remember|memory|recall|forget|save fact|take note|store fact|store this|MEMORY\\.md|sync memory": [
     "memory-save",
     "memory-recall",
     "memory-delete",
@@ -5232,9 +5232,9 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   // Git
   "git|commit|branch|diff|repo|version control|stash": ["git-init", "git-status", "git-diff", "git-commit", "git-log", "git-branch", "git-stash"],
   // Agent management
-  "create agent|new agent|clone|deploy agent": ["create-agent", "delete-agent", "list-agents"],
+  "create agent|new agent|clone agent|deploy agent|deploy my agent|list agent|manage agent": ["create-agent", "delete-agent", "list-agents"],
   "run agent|delegate|ask another|specialist|hire": ["run-agent", "route-to-agent", "a2a-send"],
-  "eval|test|evaluate|benchmark|compare": ["eval-agent", "compare-agents", "evolve-agent"],
+  "eval agent|test agent|evaluate|benchmark|compare agent|run eval": ["eval-agent", "compare-agents", "evolve-agent"],
   "train|improve|optimize|adapt": ["evolve-agent", "adapt-strategy", "autoresearch"],
   // Scheduling & automation
   "schedule|cron|recurring|every day|every hour|automate": ["create-schedule", "list-schedules", "delete-schedule"],
