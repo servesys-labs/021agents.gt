@@ -262,17 +262,19 @@ export async function loadAgentConfig(
 // No per-task classification needed — the model handles everything.
 // Agent can override with config_json.model.
 const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
-  // ── Basic: Free Workers AI (edge, 0 cost) ──
-  // Llama 3.3 70B fp8-fast: proven tool calling, speculative decoding for speed (~2-4s TTFT)
-  // Kimi K2.5 for vision (supports multimodal inputs, 256k context)
+  // ── Basic: DeepSeek V3.2 via OpenRouter ($0.26/$0.38 per M tokens) ──
+  // ~90% of GPT-5.4 quality at 1/50th the cost of Sonnet.
+  // Uses agentic task synthesis pipeline for strong tool calling.
+  // Handles our full 17K system prompt (128K context).
+  // Cost per interaction: ~$0.005 (vs $0.15 for Sonnet standard plan).
   basic: {
     general: {
-      simple: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
-      moderate: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
-      complex: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
-      tool_call: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
+      simple: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
+      moderate: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
+      complex: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
+      tool_call: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
     },
-    multimodal: { vision: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
+    multimodal: { vision: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" } },
   },
   // ── Standard: Claude Sonnet 4.6 (best tool-calling, best instruction-following) ──
   standard: {
