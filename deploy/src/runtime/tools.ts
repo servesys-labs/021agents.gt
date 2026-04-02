@@ -5156,7 +5156,10 @@ async function todoTool(env: RuntimeEnv, args: Record<string, any>, sessionId: s
  * access to ALL tools regardless of agent config).
  * discover-api is safe to always expose (read-only type info).
  */
-const ALWAYS_AVAILABLE = new Set(["discover-api", "marketplace-search", "a2a-send", "share-artifact", "retrieve-result"]);
+// Tools always included in the enabled set (regardless of agent config).
+// marketplace-search and a2a-send moved to keyword-triggered discovery to prevent
+// the LLM from defaulting to marketplace delegation instead of using its own tools.
+const ALWAYS_AVAILABLE = new Set(["discover-api", "share-artifact", "retrieve-result"]);
 
 /** Returns the set of all valid tool names from the catalog. */
 export function getValidToolNames(): Set<string> {
@@ -5191,8 +5194,10 @@ export function getToolDefinitions(enabledTools: string[], blockedTools: string[
 const CORE_TOOLS = new Set([
   "web-search", "python-exec", "bash", "read-file", "write-file", "edit-file",
   "memory-save", "memory-recall", "browse",
-  // Meta-tools for discovery + delegation
-  "discover-api", "marketplace-search", "a2a-send", "share-artifact",
+  "execute-code", "swarm",
+  // Meta-tools for discovery + delegation (marketplace-search removed from core
+  // to prevent the LLM from defaulting to marketplace delegation instead of using its own tools)
+  "discover-api",
 ]);
 
 /** Keyword → tool names mapping for progressive discovery. */
@@ -5315,7 +5320,7 @@ export function buildDeferredToolIndex(
     return `- ${t.function.name}: ${desc}`;
   });
 
-  return `## Additional Tools Available\nUse the discover-tools tool to load any of these:\n${lines.join("\n")}`;
+  return `## Additional Tools (only if core tools are insufficient)\nThese are available via discover-tools but you should rarely need them. Your core tools (web-search, python-exec, bash, read-file, write-file, edit-file, browse, memory-save, memory-recall, execute-code, swarm) handle most tasks.\n${lines.join("\n")}`;
 }
 
 /**
@@ -5365,7 +5370,7 @@ const DISCOVER_TOOLS_DEF: ToolDefinition = {
   type: "function",
   function: {
     name: "discover-tools",
-    description: "Search for additional tools by describing what you need. Use this when you need a capability not available in your current tools. Returns matching tool names and descriptions.",
+    description: "Search for additional tools NOT already in your tool list. Only call this if you are certain none of your existing tools can accomplish the task. Do NOT call this for web search, code execution, file operations, or memory — those tools are already available to you.",
     parameters: {
       type: "object",
       properties: {
