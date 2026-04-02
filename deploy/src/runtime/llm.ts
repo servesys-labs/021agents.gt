@@ -109,6 +109,11 @@ export async function callLLM(
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // AI Gateway-level caching: identical requests within TTL are served from cache.
+    // 300s (5 min) is aggressive but safe — same user asking the same question within
+    // 5 minutes gets a cached response (instant, zero cost). Different questions miss cache.
+    // This primarily helps: repeated tool calls, retry logic, and identical system prompts.
+    "cf-aig-cache-ttl": "300",
   };
 
   if (opts.metadata) {

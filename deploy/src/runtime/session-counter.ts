@@ -85,14 +85,21 @@ export async function countActiveSessions(
 
 /**
  * Check if org has reached concurrent session limit.
- * O(1) operation (single KV get instead of list()).
+ * If the counter says limit is hit, auto-reconcile against heartbeat keys
+ * to fix drift from crashed sessions (O(N) but only when at limit).
  */
 export async function isSessionLimitReached(
   env: RuntimeEnv,
   orgId: string,
   maxConcurrent: number = 10,
 ): Promise<{ limited: boolean; active: number; max: number }> {
-  const active = await countActiveSessions(env, orgId);
+  let active = await countActiveSessions(env, orgId);
+
+  // If at limit, reconcile to fix drift from orphaned sessions
+  if (active >= maxConcurrent) {
+    active = await reconcileSessionCounter(env, orgId);
+  }
+
   return { limited: active >= maxConcurrent, active, max: maxConcurrent };
 }
 
@@ -116,4 +123,38 @@ export async function refreshHeartbeat(
       { expirationTtl: SESSION_HEARTBEAT_TTL },
     );
   } catch {}
+}
+
+/**
+ * Reconcile the session counter against actual heartbeat keys.
+ * The counter can drift when sessions crash without unregistering.
+ * This function counts live heartbeat keys (TTL hasn't expired) and
+ * resets the counter to match reality.
+ *
+ * Call from: cron handler, or before rejecting a session for limit.
+ */
+export async function reconcileSessionCounter(
+  env: RuntimeEnv,
+  orgId: string,
+): Promise<number> {
+  const kv = (env as any).AGENT_PROGRESS_KV;
+  if (!kv) return 0;
+
+  try {
+    // List all heartbeat keys for this org (these have TTL — expired ones are already gone)
+    const prefix = `${HEARTBEAT_KEY_PREFIX}/${orgId}/`;
+    const list = await kv.list({ prefix, limit: 100 });
+    const liveCount = list.keys?.length || 0;
+
+    // Reset counter to match reality
+    if (liveCount === 0) {
+      await kv.delete(`${COUNTER_KEY_PREFIX}/${orgId}`);
+    } else {
+      await kv.put(`${COUNTER_KEY_PREFIX}/${orgId}`, String(liveCount), { expirationTtl: 86400 });
+    }
+
+    return liveCount;
+  } catch {
+    return 0;
+  }
 }
