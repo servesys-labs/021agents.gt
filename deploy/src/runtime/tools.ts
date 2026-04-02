@@ -3661,6 +3661,196 @@ async function dispatch(
       // Alias for dynamic-exec
       return dispatch(env, "dynamic-exec", args, sessionId, enabledTools);
 
+    // ── Swarm / Batch Orchestration ─────────────────────────────
+    case "swarm": {
+      const swarmMode = String(args.mode || "auto");
+      const swarmTasks = args.tasks as Array<{ input: string; tools?: string[] }>;
+      const swarmStrategy = String(args.strategy || "parallel");
+
+      if (!Array.isArray(swarmTasks) || swarmTasks.length === 0) {
+        return JSON.stringify({ error: "swarm requires a non-empty 'tasks' array" });
+      }
+      if (swarmTasks.length > 20) {
+        return JSON.stringify({ error: `swarm supports max 20 tasks, got ${swarmTasks.length}` });
+      }
+
+      // Auto-detect mode based on task characteristics
+      const resolvedMode = (() => {
+        if (swarmMode !== "auto") return swarmMode;
+        const allBashLike = swarmTasks.every(t => {
+          const tools = t.tools || [];
+          return tools.includes("bash") || tools.includes("python-exec") ||
+            /^(run|exec|sh |bash |python |pip |npm |git |ls |cat |grep |find )/.test(t.input.trim().toLowerCase());
+        });
+        if (allBashLike) return "parallel-exec";
+        // Default to codemode — cheapest, fastest
+        return "codemode";
+      })();
+
+      const swarmStarted = Date.now();
+
+      if (resolvedMode === "codemode") {
+        // V8 isolate fan-out: generate a single JS script that parallelizes tool calls
+        const { executeScopedCode } = await import("./codemode");
+        const allToolsForSwarm = effectiveToolDefs();
+
+        const CODEMODE_CONCURRENCY = 10;
+        // Build a JS script that fans out all tasks using Promise.all with concurrency cap
+        const taskEntries = swarmTasks.map((t, i) => {
+          const toolHint = (t.tools && t.tools.length > 0) ? t.tools[0] : "web-search";
+          // Escape backticks and backslashes in input for template literal safety
+          const safeInput = t.input.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$/g, "\\$");
+          return `  { index: ${i}, input: \`${safeInput}\`, tool: "${toolHint}" }`;
+        });
+
+        const generatedCode = `
+// Swarm fan-out: ${swarmTasks.length} tasks, concurrency cap ${CODEMODE_CONCURRENCY}
+const tasks = [
+${taskEntries.join(",\n")}
+];
+
+async function runWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let idx = 0;
+  async function worker() {
+    while (idx < items.length) {
+      const i = idx++;
+      results[i] = await fn(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+const results = await runWithConcurrency(tasks, ${CODEMODE_CONCURRENCY}, async (task, i) => {
+  const start = Date.now();
+  try {
+    let output;
+    if (task.tool === "web-search") {
+      output = await tools.webSearch({ query: task.input });
+    } else if (task.tool === "browse") {
+      output = await tools.browse({ url: task.input });
+    } else if (task.tool === "http-request") {
+      output = await tools.httpRequest({ url: task.input });
+    } else if (task.tool === "knowledge-search") {
+      output = await tools.knowledgeSearch({ query: task.input });
+    } else {
+      // Default: web-search for any unrecognized tool hint
+      output = await tools.webSearch({ query: task.input });
+    }
+    return { index: i, status: "pass", output: typeof output === "string" ? output : JSON.stringify(output), latency_ms: Date.now() - start };
+  } catch (err) {
+    return { index: i, status: "fail", output: "", error: String(err), latency_ms: Date.now() - start };
+  }
+});
+
+return { mode: "codemode", total_tasks: tasks.length, results };
+`;
+
+        const cmResult = await executeScopedCode(env, generatedCode, allToolsForSwarm, sessionId, {
+          scope: "orchestrator",
+          scopeOverrides: { maxToolCalls: 100, timeoutMs: 60_000 },
+          input: { tasks: swarmTasks },
+        });
+
+        if (!cmResult.success) {
+          return JSON.stringify({
+            mode: "codemode",
+            error: cmResult.error,
+            logs: cmResult.logs,
+            latency_ms: Date.now() - swarmStarted,
+          });
+        }
+
+        return JSON.stringify({
+          mode: "codemode",
+          ...(cmResult.result as object),
+          latency_ms: Date.now() - swarmStarted,
+          cost_usd: cmResult.costUsd,
+          tool_calls_total: cmResult.toolCallCount,
+        });
+      }
+
+      if (resolvedMode === "parallel-exec") {
+        // Same container, multiple exec() calls in parallel
+        const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
+        const EXEC_CONCURRENCY = 5;
+
+        // Execute tasks with concurrency cap
+        const taskResults: Array<{ index: number; status: string; output: string; error?: string; latency_ms: number }> = [];
+        let idx = 0;
+
+        async function execWorker() {
+          while (idx < swarmTasks.length) {
+            const i = idx++;
+            if (i >= swarmTasks.length) break;
+            const task = swarmTasks[i];
+            const taskStart = Date.now();
+            try {
+              const command = task.input;
+              const timeout = 30; // 30s per task
+              const result = await sandbox.exec(command, { timeout });
+              taskResults.push({
+                index: i,
+                status: (result as any).exitCode === 0 ? "pass" : "fail",
+                output: ((result as any).stdout || "").slice(0, 4000),
+                error: (result as any).stderr || undefined,
+                latency_ms: Date.now() - taskStart,
+              });
+            } catch (err) {
+              taskResults.push({
+                index: i,
+                status: "fail",
+                output: "",
+                error: String(err),
+                latency_ms: Date.now() - taskStart,
+              });
+            }
+          }
+        }
+
+        if (swarmStrategy === "sequential") {
+          for (let i = 0; i < swarmTasks.length; i++) {
+            idx = i;
+            await execWorker();
+          }
+        } else {
+          const workers = Array.from(
+            { length: Math.min(EXEC_CONCURRENCY, swarmTasks.length) },
+            () => execWorker(),
+          );
+          await Promise.all(workers);
+        }
+
+        // Sort results by index for consistent ordering
+        taskResults.sort((a, b) => a.index - b.index);
+
+        return JSON.stringify({
+          mode: "parallel-exec",
+          total_tasks: swarmTasks.length,
+          results: taskResults,
+          latency_ms: Date.now() - swarmStarted,
+        });
+      }
+
+      if (resolvedMode === "agent") {
+        // Agent mode: delegate to run-agent for each task
+        // Instead of implementing full Workflow fan-out here, we tell the LLM
+        // to use run-agent multiple times. This keeps the implementation lean.
+        return JSON.stringify({
+          mode: "agent",
+          note: "For full agent reasoning per task, call run-agent individually for each task. The swarm tool does not spawn Workflow instances directly — use run-agent with different agent_name/task pairs for parallel agent delegation.",
+          tasks: swarmTasks.map((t, i) => ({
+            index: i,
+            suggested_call: { tool: "run-agent", args: { agent_name: "personal-assistant", task: t.input } },
+          })),
+        });
+      }
+
+      return JSON.stringify({ error: `Unknown swarm mode: ${resolvedMode}. Use auto, codemode, parallel-exec, or agent.` });
+    }
+
     case "mixture-of-agents":
       return mixtureOfAgents(env, args);
 
@@ -6749,6 +6939,55 @@ const TOOL_CATALOG: ToolDefinition[] = [
       parameters: {
         type: "object",
         properties: {},
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "swarm",
+      description:
+        "Fan out multiple independent tasks in parallel. Uses V8 isolates for research/tool work, " +
+        "shared container for scripts, or full agent instances for complex reasoning. " +
+        "Much faster than executing tasks one at a time.",
+      parameters: {
+        type: "object",
+        properties: {
+          tasks: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                input: {
+                  type: "string",
+                  description: "The task description or command to execute",
+                },
+                tools: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Optional: specific tools to use (e.g. ['web-search'], ['bash'])",
+                },
+              },
+              required: ["input"],
+            },
+            description: "Array of independent tasks to execute in parallel",
+          },
+          mode: {
+            type: "string",
+            enum: ["auto", "codemode", "parallel-exec", "agent"],
+            description:
+              "Execution mode. auto = smart selection (default). " +
+              "codemode = V8 isolates with tool access (fastest, cheapest — best for research/search). " +
+              "parallel-exec = same container bash/python (best for scripts, tests, file processing). " +
+              "agent = full LLM reasoning per task (slowest, most capable — returns guidance to use run-agent).",
+          },
+          strategy: {
+            type: "string",
+            enum: ["parallel", "sequential"],
+            description: "Execution strategy. Default: parallel.",
+          },
+        },
+        required: ["tasks"],
       },
     },
   },

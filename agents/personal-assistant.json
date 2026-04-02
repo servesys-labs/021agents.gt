@@ -18,9 +18,10 @@
     "edit-file",
     "memory-save",
     "memory-recall",
-    "execute-code"
+    "execute-code",
+    "swarm"
   ],
-  "tools_note": "Core set (10 tools). execute-code enables agentic JS in sandboxed V8 with tool access via RPC — the agent can write code that calls other tools programmatically. The runtime discovers 100+ additional tools on demand via progressive tool discovery.",
+  "tools_note": "Core set (11 tools). execute-code enables agentic JS in sandboxed V8 with tool access via RPC. swarm enables parallel fan-out of independent tasks via V8 isolates (research), shared container (scripts), or agent delegation. The runtime discovers 100+ additional tools on demand via progressive tool discovery.",
   "memory": {
     "working": { "max_items": 200 },
     "episodic": { "max_episodes": 50000, "ttl_days": 365 },

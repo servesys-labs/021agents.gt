@@ -73,6 +73,7 @@ Then execute each step with 1-sentence narration between tool groups.
 - \`write-file\` — Create or overwrite a file in /workspace/.
 - \`edit-file\` — Make targeted edits to an existing file (preferred over full rewrite).
 - \`execute-code\` — Run JavaScript in a sandboxed V8 isolate with access to all your other tools via RPC. Use this for complex multi-step automations, data pipelines, or when you need to orchestrate several tools programmatically. The code runs in isolation (no network, no secrets) but can call any tool you have access to.
+- \`swarm\` — Fan out multiple independent tasks in parallel. Three modes: **codemode** (V8 isolates — fastest, cheapest, best for research/search fan-out), **parallel-exec** (same container — best for running multiple scripts/tests/commands), **agent** (full LLM reasoning per task — slowest, delegates via run-agent). Use \`mode: "auto"\` to let the system pick. Example: research 5 topics simultaneously, run a test suite across 4 configs, or process 10 files in parallel. Much faster than calling tools one at a time.
 - \`memory-save\` — Save facts, preferences, project context, or observations for future sessions.
 - \`memory-recall\` — Recall saved memories by keyword.
 
@@ -83,12 +84,14 @@ Then execute each step with 1-sentence narration between tool groups.
 - Use \`python-exec\` for computation, data analysis, charts, and any task that benefits from code execution. Don't do complex math in your head — run the code.
 - Use \`bash\` for system operations, package management, git commands, and anything that needs shell access.
 - Use \`execute-code\` when you need to orchestrate multiple tools programmatically — for example, "search for 5 topics, then for each result browse the page and extract key facts." Instead of calling tools one by one, write JS that does the multi-step workflow in one shot. The code can call any of your tools via the provided \`tools\` API.
+- Use \`swarm\` when you have 3+ independent tasks that can run in parallel. Use mode "codemode" for search/research fan-out, "parallel-exec" for running multiple shell commands or scripts, or "auto" to let the system decide. Swarm is better than execute-code when all tasks are independent (no data dependency between them) — swarm handles concurrency caps, error isolation, and result aggregation automatically.
 - If multiple independent tool calls are needed, describe them all and execute — the system handles parallelism.
 
-## When to use execute-code vs python-exec vs bash
+## When to use execute-code vs python-exec vs bash vs swarm
 - **python-exec**: Data analysis, charts, computation, ML, anything with Python libraries (numpy, pandas, etc.)
 - **bash**: System commands, file operations, git, npm, package management
 - **execute-code**: Multi-tool orchestration, complex automation workflows, when you need to call several tools in sequence/parallel programmatically. Think of it as writing a script that can search the web, read files, save to memory, and more — all in one execution.
+- **swarm**: Batch parallel execution of independent tasks. "Research these 5 companies", "Run these 8 test commands", "Search for info on each of these topics". Swarm handles concurrency limits, error isolation, and aggregates results. Prefer swarm over execute-code when tasks are independent and don't share data.
 
 ## Additional tools (available on demand)
 The runtime discovers these automatically. Just describe what you want to do:

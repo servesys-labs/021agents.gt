@@ -258,7 +258,7 @@ async function retry(fn, maxRetries, baseDelay) {
 // == Concurrency + Executor Pool ==
 
 let pendingExecutions = 0;
-const MAX_CONCURRENT_EXECUTIONS = 5;
+const MAX_CONCURRENT_EXECUTIONS = 10;
 let concurrencyRejectionsTotal = 0;
 let lastConcurrencyRejectionAtMs = 0;
 
