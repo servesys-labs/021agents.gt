@@ -598,30 +598,27 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         });
       }
 
+      // ── Route selection (before step.do so turn_start reports the actual model) ──
+      const { resolvePlanRouting } = await memo("db", () => import("./runtime/db"));
+      const routerMod = await memo("router", () => import("./runtime/router"));
+      const planRouting = resolvePlanRouting(config.plan, config.routing as any);
+      const route = await routerMod.selectModel(p.input, planRouting as any, config.model, config.provider, {
+        AI: this.env.AI,
+        CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID || "",
+        AI_GATEWAY_ID: this.env.AI_GATEWAY_ID || "",
+        AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN || "",
+        CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN || "",
+      } as any);
+
       // ── LLM call — retryable, checkpointed ──
-      // Note: turn_start model is the config default. The actual model used
-      // (from plan routing) is reported in turn_end after the LLM call completes.
-      await this.emit(p.progress_key, { type: "turn_start", turn, model: config.model, plan: config.plan });
+      await this.emit(p.progress_key, { type: "turn_start", turn, model: route.model, plan: config.plan });
 
       const llm = await step.do(`llm-${turn}`, {
         retries: { limit: 3, delay: "5 seconds", backoff: "exponential" },
         timeout: "2 minutes",
       }, async () => {
         const { callLLM } = await memo("llm", () => import("./runtime/llm"));
-        const { getToolDefinitions } = await memo("tools", () => import("./runtime/tools"));
-        const { resolvePlanRouting } = await memo("db", () => import("./runtime/db"));
-        const routerMod = await memo("router", () => import("./runtime/router"));
-
-        const planRouting = resolvePlanRouting(config.plan, config.routing as any);
-        const route = await routerMod.selectModel(p.input, planRouting as any, config.model, config.provider, {
-          AI: this.env.AI,
-          CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID || "",
-          AI_GATEWAY_ID: this.env.AI_GATEWAY_ID || "",
-          AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN || "",
-          CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN || "",
-        } as any);
-
-        const { selectToolsForQuery, buildDeferredToolIndex } = await memo("tools", () => import("./runtime/tools"));
+        const { getToolDefinitions, selectToolsForQuery, buildDeferredToolIndex } = await memo("tools", () => import("./runtime/tools"));
         const allToolDefs = getToolDefinitions(config.tools, config.blocked_tools);
 
         // Progressive tool discovery: only send relevant tools per turn

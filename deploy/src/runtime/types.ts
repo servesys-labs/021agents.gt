@@ -211,6 +211,8 @@ export interface RuntimeEnv {
   DO_SQL?: any;
   /** DO instance name (session affinity key) — used as session_id for workspace persistence. */
   DO_SESSION_ID?: string;
+  /** KV namespace for billing dead-letter queue fallback. */
+  AGENT_PROGRESS_KV?: KVNamespace;
 }
 
 // ── Runnable API parity envelopes ───────────────────────────────

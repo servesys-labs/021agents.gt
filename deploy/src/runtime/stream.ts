@@ -137,7 +137,7 @@ async function streamLLM(
   const started = Date.now();
   const bp = createStreamBackpressure();
 
-  // All models go through AI Gateway /compat/ — single endpoint, single token
+  // All models go through AI Gateway — Workers AI via /workers-ai/v1/, others via /openrouter/
   const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
   const gatewayId = env.AI_GATEWAY_ID || "";
 
@@ -145,11 +145,8 @@ async function streamLLM(
     throw new Error("AI Gateway not configured");
   }
 
-  // Normalize model ID for /compat/ endpoint
-  const gatewayModel = model.startsWith("@cf/") ? `workers-ai/${model}` : model;
-
   const payload: Record<string, any> = {
-    model: gatewayModel,
+    model, // bare @cf/ for Workers AI, provider-prefixed for others
     messages: messages.map(formatMessage),
     ...(opts.temperature !== undefined && opts.temperature > 0 ? { temperature: opts.temperature } : {}),
     stream: true,
@@ -168,17 +165,26 @@ async function streamLLM(
     payload.tools = tools;
   }
 
-  // Workers AI models use /compat/ (direct CF), everything else uses /openrouter/ (via OpenRouter)
-  const providerPath = isWorkersAI ? "compat" : "openrouter";
+  // Workers AI: /workers-ai/v1/ (CF account token), others: /openrouter/ (OpenRouter key)
+  const providerPath = isWorkersAI ? "workers-ai/v1" : "openrouter";
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  // CF gateway auth — gateway routes to OpenRouter (paid models) or Workers AI (@cf/)
-  // OpenRouter API key is configured on the AI Gateway, not passed from code
-  const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
-  if (cfToken) {
-    headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+  // Auth: Workers AI uses CF account token, OpenRouter uses OR API key
+  if (isWorkersAI) {
+    const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
+    if (cfToken) {
+      headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+    }
+  } else {
+    const orKey = (env as any).OPENROUTER_API_KEY;
+    if (orKey) {
+      headers["cf-aig-authorization"] = `Bearer ${orKey}`;
+    } else {
+      const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
+      if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+    }
   }
 
   const resp = await fetch(endpoint, {

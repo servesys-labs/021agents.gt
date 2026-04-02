@@ -286,6 +286,88 @@ interface MemoryFact {
   category: string;
   confidence: number;
   source: string;
+  /** Unix ms when known (DB / curated facts); Vectorize hits may omit */
+  created_at?: number;
+}
+
+/** Staleness hint for injected memories (>1 day old), Claude Code–style. */
+export function memoryFreshnessNote(createdAtMs: number): string {
+  const dayMs = 86_400_000;
+  const ageDays = Math.max(0, Math.floor((Date.now() - createdAtMs) / dayMs));
+  if (ageDays <= 1) return "";
+  return ` (memory is ~${ageDays} days old — verify against current state before treating as live fact)`;
+}
+
+/**
+ * Curated facts from `semantic_facts` (memory-save tool). These were not previously
+ * merged into prompt injection; we combine them with Vectorize/keyword facts.
+ */
+async function fetchCuratedSemanticFacts(
+  hyperdrive: Hyperdrive,
+  query: string,
+  opts: { agent_name?: string; org_id?: string; limit?: number },
+): Promise<MemoryFact[]> {
+  const { getDb } = await import("./db");
+  const sql = await getDb(hyperdrive);
+  const limit = Math.min(20, Math.max(1, opts.limit || 12));
+  const agent = opts.agent_name || "";
+  const org = opts.org_id || "";
+  const q = query.trim();
+  const kw = q
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 2)
+    .slice(0, 4);
+  try {
+    let rows: any[] = [];
+    if (kw.length > 0) {
+      const p0 = `%${kw[0]}%`;
+      rows = await sql`
+        SELECT key, value, category, created_at
+        FROM semantic_facts
+        WHERE agent_name = ${agent} AND org_id = ${org}
+          AND (LOWER(key) LIKE ${p0} OR LOWER(value) LIKE ${p0})
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `;
+    }
+    if (rows.length === 0) {
+      rows = await sql`
+        SELECT key, value, category, created_at
+        FROM semantic_facts
+        WHERE agent_name = ${agent} AND org_id = ${org}
+        ORDER BY created_at DESC
+        LIMIT ${limit}
+      `;
+    }
+    return rows.map((r: any) => {
+      const ts = r.created_at ? new Date(r.created_at).getTime() : Date.now();
+      const line = `${r.key || "fact"}: ${r.value || ""}`.trim();
+      return {
+        id: `semantic-${r.key || ts}`,
+        content: line,
+        category: r.category || "reference",
+        confidence: 0.95,
+        source: "semantic_facts",
+        created_at: ts,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function mergeMemoryFacts(primary: MemoryFact[], secondary: MemoryFact[]): MemoryFact[] {
+  const seen = new Set<string>();
+  const out: MemoryFact[] = [];
+  const norm = (f: MemoryFact) => f.content.toLowerCase().replace(/\s+/g, " ").slice(0, 120);
+  for (const f of [...primary, ...secondary]) {
+    const k = norm(f);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(f);
+  }
+  return out;
 }
 
 /**
@@ -324,6 +406,7 @@ export async function searchFacts(
           category: m.metadata?.category || "knowledge",
           confidence: m.score || 0.5,
           source: m.metadata?.source || "",
+          created_at: undefined,
         }));
       }
     } catch {
@@ -339,7 +422,7 @@ export async function searchFacts(
 
   try {
     const rows = await sql`
-      SELECT id, content, category, confidence, source
+      SELECT id, content, category, confidence, source, created_at
       FROM memory_facts
       WHERE LOWER(content) LIKE ${`%${keywords[0]}%`}
         AND confidence >= 0.7
@@ -347,11 +430,12 @@ export async function searchFacts(
       LIMIT ${limit}
     `;
     return rows.map((r: any) => ({
-      id: r.id || "",
+      id: String(r.id || ""),
       content: r.content || "",
       category: r.category || "context",
       confidence: Number(r.confidence) || 0.5,
       source: r.source || "",
+      created_at: r.created_at ? new Date(r.created_at).getTime() : undefined,
     }));
   } catch {
     return [];
@@ -483,6 +567,49 @@ export function queueFactExtraction(
   }
 }
 
+/**
+ * Deterministic session note (episodic) after substantive runs — no extra LLM.
+ * Mirrors Claude Code “session memory” in spirit: future recall can find this session.
+ */
+export function queueSessionEpisodicNote(
+  hyperdrive: Hyperdrive | undefined,
+  p: {
+    sessionId: string;
+    agentName: string;
+    orgId: string;
+    userInput: string;
+    assistantOutput: string;
+    toolNames: string[];
+    turnsUsed: number;
+    toolCallCount: number;
+  },
+): void {
+  if (!hyperdrive || !p.assistantOutput.trim()) return;
+  if (p.toolCallCount < 3 && p.turnsUsed < 3) return;
+
+  const id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+  const uniqTools = [...new Set(p.toolNames)].slice(0, 25);
+  const content =
+    `[Session summary] ${new Date().toISOString().slice(0, 10)} — ` +
+    `User request: ${p.userInput.slice(0, 280)}${p.userInput.length > 280 ? "…" : ""} | ` +
+    `Tools: ${uniqTools.join(", ") || "(none)"} | ` +
+    `Outcome: ${p.assistantOutput.slice(0, 450)}${p.assistantOutput.length > 450 ? "…" : ""}`;
+
+  void (async () => {
+    try {
+      const { getDb } = await import("./db");
+      const sql = await getDb(hyperdrive);
+      const now = new Date().toISOString();
+      await sql`
+        INSERT INTO episodic_memories (id, agent_name, org_id, content, source, metadata_json, created_at)
+        VALUES (${id}, ${p.agentName}, ${p.orgId || ""}, ${content}, 'session_auto', ${JSON.stringify({ session_id: p.sessionId })}, ${now})
+      `;
+    } catch {
+      /* non-fatal */
+    }
+  })();
+}
+
 // ── Build Memory Context (injected into system prompt) ────────
 
 /**
@@ -538,12 +665,18 @@ export async function buildMemoryContext(
     remaining -= truncated.length;
   }
 
-  // 2-4: Fetch from Supabase/Vectorize in parallel
-  const [facts, episodes, procedures] = await Promise.all([
+  // 2-4: Fetch from Supabase/Vectorize + curated semantic_facts in parallel
+  const [rawFacts, curatedFacts, episodes, procedures] = await Promise.all([
     searchFacts(env, hyperdrive, query, { agent_name: opts.agent_name, org_id: opts.org_id, limit: 5 }).catch(() => []),
+    fetchCuratedSemanticFacts(hyperdrive, query, {
+      agent_name: opts.agent_name,
+      org_id: opts.org_id,
+      limit: 12,
+    }).catch(() => []),
     searchEpisodes(hyperdrive, query, { agent_name: opts.agent_name, limit: 3 }).catch(() => []),
     findBestProcedures(hyperdrive, query, { agent_name: opts.agent_name, limit: 3 }).catch(() => []),
   ]);
+  const facts = mergeMemoryFacts(rawFacts, curatedFacts).slice(0, 8);
 
   // Redistribute remaining budget across non-empty sections
   const activeSections = [facts.length > 0, episodes.length > 0, procedures.length > 0].filter(Boolean).length;
@@ -551,16 +684,20 @@ export async function buildMemoryContext(
 
   // 2. Semantic facts
   if (facts.length > 0) {
-    const factLines = facts.map((f) => `- [${f.category}] ${f.content}`);
+    const factLines = facts.map((f) => {
+      const age = f.created_at != null ? memoryFreshnessNote(f.created_at) : "";
+      return `- [${f.category}] ${f.content}${age}`;
+    });
     const factSection = `[Known Facts]\n${factLines.join("\n")}`;
     sections.push(truncateSection(factSection, perSectionBudget));
   }
 
   // 3. Episodic memory
   if (episodes.length > 0) {
-    const epLines = episodes.map(
-      (ep) => `- User asked: "${ep.input.slice(0, 100)}..." → Agent: "${ep.output.slice(0, 150)}..."`,
-    );
+    const epLines = episodes.map((ep) => {
+      const age = memoryFreshnessNote(ep.created_at);
+      return `- User asked: "${ep.input.slice(0, 100)}..." → Agent: "${ep.output.slice(0, 150)}..."${age}`;
+    });
     const epSection = `[Past Interactions]\n${epLines.join("\n")}`;
     sections.push(truncateSection(epSection, perSectionBudget));
   }
