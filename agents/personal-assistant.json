@@ -41,7 +41,7 @@
     "enable_summarization": true,
     "enable_skills": true,
     "enable_async_memory": true,
-    "enable_checkpoints": false,
+    "enable_checkpoints": true,
     "max_context_tokens": 100000,
     "retry_on_tool_failure": true,
     "max_retries": 3
