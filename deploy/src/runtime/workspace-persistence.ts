@@ -137,9 +137,40 @@ export async function loadCheckpointFromR2(
 
 // ── Per-File Persistence: SQLite ─────────────────────────────
 
+/** Maximum SQLite DB size before we start evicting old files (100 MB). */
+const SQLITE_MAX_BYTES = 100 * 1024 * 1024;
+
+/**
+ * Return the current SQLite database size in bytes.
+ */
+function getSQLiteDbSize(sql: any): number {
+  const pages = sql`PRAGMA page_count`[0]?.page_count ?? 0;
+  const pageSize = sql`PRAGMA page_size`[0]?.page_size ?? 4096;
+  return pages * pageSize;
+}
+
+/**
+ * Evict oldest workspace files until the database is under the size limit.
+ * Deletes up to 50 files per call to avoid long blocking operations.
+ */
+function evictOldestFiles(sql: any, limit: number = 50): number {
+  const rows = sql`SELECT id FROM workspace_files ORDER BY modified_at ASC LIMIT ${limit}`;
+  if (rows.length === 0) return 0;
+  const ids = rows.map((r: any) => r.id);
+  // Delete in batches — tagged template doesn't support IN(...) with arrays,
+  // so delete one-by-one (still fast for <= 50 rows).
+  for (const id of ids) {
+    sql`DELETE FROM workspace_files WHERE id = ${id}`;
+  }
+  return ids.length;
+}
+
 /**
  * Save individual file to DO SQLite.
  * Called on every file write/edit in the workspace.
+ *
+ * Guards against unbounded growth: if the DB exceeds 100 MB, evicts oldest
+ * files first. If still over limit after eviction, skips the write.
  */
 export function saveFileToSQLite(
   sql: any,
@@ -147,6 +178,22 @@ export function saveFileToSQLite(
   file: WorkspaceFile,
 ): void {
   ensureWorkspaceTables(sql);
+
+  // Guard: check DB size before writing
+  let dbSize = getSQLiteDbSize(sql);
+  if (dbSize >= SQLITE_MAX_BYTES) {
+    const evicted = evictOldestFiles(sql);
+    console.warn(
+      `[workspace] SQLite at ${(dbSize / 1024 / 1024).toFixed(1)}MB — evicted ${evicted} old files`,
+    );
+    dbSize = getSQLiteDbSize(sql);
+    if (dbSize >= SQLITE_MAX_BYTES) {
+      console.warn(
+        `[workspace] SQLite still at ${(dbSize / 1024 / 1024).toFixed(1)}MB after eviction — skipping write for ${file.path}`,
+      );
+      return;
+    }
+  }
 
   sql`INSERT OR REPLACE INTO workspace_files (session_id, path, content, encoding, size, hash, modified_at)
     VALUES (${sessionId}, ${file.path}, ${file.content}, ${file.encoding}, ${file.size}, ${file.hash}, ${Date.now() / 1000})`;

@@ -50,7 +50,15 @@ export { selectModel, classifyTurn, classifyComplexity, classifyCategory } from 
 export type { RouteClassification } from "./router";
 
 // Memory
-export { buildMemoryContext, searchFacts, searchEpisodes, findBestProcedures, queueFactExtraction } from "./memory";
+export {
+  buildMemoryContext,
+  searchFacts,
+  searchEpisodes,
+  findBestProcedures,
+  queueFactExtraction,
+  queueSessionEpisodicNote,
+  memoryFreshnessNote,
+} from "./memory";
 
 // Middleware
 export { detectLoop, maybeSummarize } from "./middleware";

@@ -12,6 +12,48 @@ import type postgres from "postgres";
 
 type Sql = ReturnType<typeof postgres>;
 
+// ── Circuit Breaker for Non-Critical DB Writes ──────────────
+// When the connection pool is exhausted under high concurrency,
+// non-critical ops (telemetry, events, turns) are shed so that
+// critical ops (config loads, billing, credit checks) still succeed.
+
+const BREAKER_THRESHOLD = 5;       // consecutive failures before opening
+const BREAKER_COOLDOWN_MS = 30_000; // 30s cooldown before retrying
+
+let _breakerFailures = 0;
+let _breakerOpenedAt = 0;
+
+function recordDbSuccess(): void {
+  _breakerFailures = 0;
+  _breakerOpenedAt = 0;
+}
+
+function recordDbFailure(): void {
+  _breakerFailures++;
+  if (_breakerFailures >= BREAKER_THRESHOLD && _breakerOpenedAt === 0) {
+    _breakerOpenedAt = Date.now();
+    console.warn(`[DB:breaker] OPEN after ${_breakerFailures} consecutive failures — shedding non-critical ops for ${BREAKER_COOLDOWN_MS / 1000}s`);
+  }
+}
+
+/** Returns breaker state for health/debug endpoints. */
+export function getCircuitBreakerState(): { failures: number; open: boolean; openedAt: number } {
+  return { failures: _breakerFailures, open: isBreakerOpen(), openedAt: _breakerOpenedAt };
+}
+
+/** Returns true if non-critical DB ops should be skipped. */
+function isBreakerOpen(): boolean {
+  if (_breakerFailures < BREAKER_THRESHOLD) return false;
+  if (_breakerOpenedAt > 0 && Date.now() - _breakerOpenedAt > BREAKER_COOLDOWN_MS) {
+    // Half-open: allow one attempt through
+    console.info("[DB:breaker] HALF-OPEN — allowing next non-critical op through");
+    _breakerFailures = BREAKER_THRESHOLD - 1; // one more failure re-opens
+    _breakerOpenedAt = 0;
+    return false;
+  }
+  return true;
+}
+
 /**
  * Get a Postgres connection via Hyperdrive.
  * Creates a fresh connection per call — Hyperdrive handles pooling server-side.
@@ -40,6 +82,7 @@ export async function loadAgentConfig(
   hyperdrive: Hyperdrive,
   agentName: string,
   defaults: { provider: string; model: string; plan: string },
+  orgId?: string,
 ): Promise<AgentConfig> {
   // Default core tools when none are configured — must match TOOL_CATALOG names
   const DEFAULT_TOOLS = [
@@ -60,12 +103,19 @@ export async function loadAgentConfig(
   let dbFailed = false;
   try {
     const sql = await getDb(hyperdrive);
-    rows = await sql`
-      SELECT name, org_id, project_id, config_json, description
-      FROM agents
-      WHERE name = ${agentName} AND is_active = true
-      LIMIT 1
-    `;
+    rows = orgId
+      ? await sql`
+          SELECT name, org_id, project_id, config_json, description
+          FROM agents
+          WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true
+          LIMIT 1
+        `
+      : await sql`
+          SELECT name, org_id, project_id, config_json, description
+          FROM agents
+          WHERE name = ${agentName} AND is_active = true
+          LIMIT 1
+        `;
   } catch (err) {
     dbFailed = true;
     console.error(`[DB] loadAgentConfig failed for ${agentName}: ${err instanceof Error ? err.message : err}`);
@@ -198,14 +248,13 @@ export async function loadAgentConfig(
 // Embedded from config/default.json — the edge runtime doesn't read JSON files.
 // If the agent has a plan but no routing overrides, resolve the plan to a routing table.
 
-// Model IDs use AI Gateway /compat/ format:
-//   Workers AI:  @cf/provider/model  (normalizeModelId adds workers-ai/ prefix)
-//   Anthropic:   anthropic/model-name (native Anthropic IDs, hyphens not dots)
-//   OpenAI:      openai/model-name
-//   Google:      google-ai-studio/model-name
-//   DeepSeek:    deepseek/model-name
-// All paid models route through AI Gateway → OpenRouter (single OPENROUTER key).
-// Workers AI models (@cf/) route through AI Gateway directly (CF account token).
+// Model IDs — bare provider-prefixed format:
+//   Workers AI:  @cf/provider/model  → AI Gateway /workers-ai/v1/ (CF account token)
+//   Anthropic:   anthropic/model-name → AI Gateway /openrouter/ (OpenRouter key)
+//   OpenAI:      openai/model-name    → AI Gateway /openrouter/
+//   Google:      google-ai-studio/model-name → AI Gateway /openrouter/
+//   DeepSeek:    deepseek/model-name  → AI Gateway /openrouter/
+// All models route through AI Gateway for logging, caching, cost tracking.
 // No max_tokens — let models decide their output length.
 
 // Plan routing: 3 tiers, best model per price point.
@@ -285,28 +334,38 @@ export async function writeSession(
     depth?: number;
   },
 ): Promise<void> {
-  const sql = await getDb(hyperdrive);
-  await sql`
-    INSERT INTO sessions (
-      session_id, org_id, project_id, agent_name, status,
-      input_text, output_text, model, trace_id, parent_session_id,
-      depth, step_count, action_count, wall_clock_seconds,
-      cost_total_usd, created_at
-    ) VALUES (
-      ${session.session_id}, ${session.org_id}, ${session.project_id},
-      ${session.agent_name}, ${session.status},
-      ${session.input_text}, ${session.output_text},
-      ${session.model}, ${session.trace_id}, ${session.parent_session_id || ""},
-      ${Number(session.depth) || 0}, ${session.step_count}, ${session.action_count},
-      ${session.wall_clock_seconds}, ${session.cost_total_usd},
-      ${new Date().toISOString()}
-    ) ON CONFLICT (session_id) DO UPDATE SET
-      status = EXCLUDED.status,
-      output_text = EXCLUDED.output_text,
-      cost_total_usd = EXCLUDED.cost_total_usd,
-      step_count = EXCLUDED.step_count,
-      wall_clock_seconds = EXCLUDED.wall_clock_seconds
-  `;
+  if (isBreakerOpen()) {
+    console.warn(`[DB:breaker] Skipping writeSession for ${session.session_id}`);
+    return;
+  }
+  try {
+    const sql = await getDb(hyperdrive);
+    await sql`
+      INSERT INTO sessions (
+        session_id, org_id, project_id, agent_name, status,
+        input_text, output_text, model, trace_id, parent_session_id,
+        depth, step_count, action_count, wall_clock_seconds,
+        cost_total_usd, created_at
+      ) VALUES (
+        ${session.session_id}, ${session.org_id}, ${session.project_id},
+        ${session.agent_name}, ${session.status},
+        ${session.input_text}, ${session.output_text},
+        ${session.model}, ${session.trace_id}, ${session.parent_session_id || ""},
+        ${Number(session.depth) || 0}, ${session.step_count}, ${session.action_count},
+        ${session.wall_clock_seconds}, ${session.cost_total_usd},
+        ${new Date().toISOString()}
+      ) ON CONFLICT (session_id) DO UPDATE SET
+        status = EXCLUDED.status,
+        output_text = EXCLUDED.output_text,
+        cost_total_usd = EXCLUDED.cost_total_usd,
+        step_count = EXCLUDED.step_count,
+        wall_clock_seconds = EXCLUDED.wall_clock_seconds
+    `;
+    recordDbSuccess();
+  } catch (err) {
+    recordDbFailure();
+    console.error(`[DB:breaker] writeSession failed: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 export async function writeTurn(
@@ -326,21 +385,31 @@ export async function writeTurn(
     execution_mode: string;
   },
 ): Promise<void> {
-  const sql = await getDb(hyperdrive);
-  await sql`
-    INSERT INTO turns (
-      session_id, turn_number, model_used, input_tokens, output_tokens,
-      latency_ms, llm_content, cost_total_usd,
-      tool_calls_json, tool_results_json, errors_json,
-      execution_mode, plan_json, reflection_json
-    ) VALUES (
-      ${turn.session_id}, ${turn.turn_number}, ${turn.model_used},
-      ${turn.input_tokens}, ${turn.output_tokens},
-      ${turn.latency_ms}, ${turn.llm_content}, ${turn.cost_total_usd},
-      ${turn.tool_calls_json}, ${turn.tool_results_json}, ${turn.errors_json},
-      ${turn.execution_mode}, '{}', '{}'
-    )
-  `;
+  if (isBreakerOpen()) {
+    console.warn(`[DB:breaker] Skipping writeTurn for session ${turn.session_id} turn ${turn.turn_number}`);
+    return;
+  }
+  try {
+    const sql = await getDb(hyperdrive);
+    await sql`
+      INSERT INTO turns (
+        session_id, turn_number, model_used, input_tokens, output_tokens,
+        latency_ms, llm_content, cost_total_usd,
+        tool_calls_json, tool_results_json, errors_json,
+        execution_mode, plan_json, reflection_json
+      ) VALUES (
+        ${turn.session_id}, ${turn.turn_number}, ${turn.model_used},
+        ${turn.input_tokens}, ${turn.output_tokens},
+        ${turn.latency_ms}, ${turn.llm_content}, ${turn.cost_total_usd},
+        ${turn.tool_calls_json}, ${turn.tool_results_json}, ${turn.errors_json},
+        ${turn.execution_mode}, '{}', '{}'
+      )
+    `;
+    recordDbSuccess();
+  } catch (err) {
+    recordDbFailure();
+    console.error(`[DB:breaker] writeTurn failed: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 export async function writeEvent(
@@ -363,22 +432,32 @@ export async function writeEvent(
     created_at?: number;
   },
 ): Promise<void> {
-  const sql = await getDb(hyperdrive);
-  await sql`
-    INSERT INTO otel_events (
-      session_id, turn, event_type, action, plan, tier,
-      provider, model, tool_name, status, latency_ms,
-      input_tokens, output_tokens, cost_usd, details_json, created_at
-    ) VALUES (
-      ${event.session_id}, ${event.turn}, ${event.event_type},
-      ${event.action}, ${event.plan}, '',
-      ${event.provider}, ${event.model}, ${event.tool_name},
-      ${event.status}, ${event.latency_ms},
-      ${event.input_tokens}, ${event.output_tokens}, ${event.cost_usd},
-      ${event.details_json},
-      ${event.created_at ? (typeof event.created_at === "string" && String(event.created_at).includes("T") ? event.created_at : new Date(Number(event.created_at) * 1000).toISOString()) : new Date().toISOString()}
-    )
-  `;
+  if (isBreakerOpen()) {
+    console.warn(`[DB:breaker] Skipping writeEvent for session ${event.session_id}`);
+    return;
+  }
+  try {
+    const sql = await getDb(hyperdrive);
+    await sql`
+      INSERT INTO otel_events (
+        session_id, turn, event_type, action, plan, tier,
+        provider, model, tool_name, status, latency_ms,
+        input_tokens, output_tokens, cost_usd, details_json, created_at
+      ) VALUES (
+        ${event.session_id}, ${event.turn}, ${event.event_type},
+        ${event.action}, ${event.plan}, '',
+        ${event.provider}, ${event.model}, ${event.tool_name},
+        ${event.status}, ${event.latency_ms},
+        ${event.input_tokens}, ${event.output_tokens}, ${event.cost_usd},
+        ${event.details_json},
+        ${event.created_at ? (typeof event.created_at === "string" && String(event.created_at).includes("T") ? event.created_at : new Date(Number(event.created_at) * 1000).toISOString()) : new Date().toISOString()}
+      )
+    `;
+    recordDbSuccess();
+  } catch (err) {
+    recordDbFailure();
+    console.error(`[DB:breaker] writeEvent failed: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 // ── Billing ───────────────────────────────────────────────────
@@ -400,6 +479,8 @@ export async function writeBillingRecord(
     /** API keys table key_id when the run used API key auth. */
     api_key_id?: string;
   },
+  /** Optional KV namespace for dead-letter queue on total failure. */
+  kv?: KVNamespace,
 ): Promise<void> {
   const sql = await getDb(hyperdrive);
   const sessionId = String(record.session_id ?? "").trim();
@@ -459,7 +540,16 @@ export async function writeBillingRecord(
         )
       `;
     } catch (retryErr) {
-      console.error("[writeBillingRecord] RETRY ALSO FAILED — billing record lost", retryErr);
+      console.error("[writeBillingRecord] RETRY ALSO FAILED — writing to KV dead-letter queue", retryErr);
+      if (kv) {
+        try {
+          const dlqKey = `billing-dlq:${orgId}:${sessionId || crypto.randomUUID()}:${Date.now()}`;
+          await kv.put(dlqKey, JSON.stringify(record), { expirationTtl: 7 * 86400 }); // 7-day TTL
+          console.log(`[writeBillingRecord] Stored failed record in KV: ${dlqKey}`);
+        } catch (kvErr) {
+          console.error("[writeBillingRecord] KV dead-letter write also failed — billing record lost", kvErr);
+        }
+      }
     }
   }
 
@@ -478,6 +568,41 @@ export async function writeBillingRecord(
   } catch {
     /* billing_events may be missing or different shape */
   }
+}
+
+/**
+ * Replay failed billing records from the KV dead-letter queue.
+ * Call from a cron handler or periodic alarm. Processes up to `limit` records per sweep.
+ */
+export async function replayBillingDLQ(
+  hyperdrive: Hyperdrive,
+  kv: KVNamespace,
+  limit = 50,
+): Promise<{ replayed: number; failed: number }> {
+  const list = await kv.list({ prefix: "billing-dlq:", limit });
+  let replayed = 0;
+  let failed = 0;
+
+  for (const key of list.keys) {
+    const raw = await kv.get(key.name);
+    if (!raw) { await kv.delete(key.name); continue; }
+
+    try {
+      const record = JSON.parse(raw);
+      // Replay without KV fallback to avoid infinite loop
+      await writeBillingRecord(hyperdrive, record);
+      await kv.delete(key.name);
+      replayed++;
+    } catch (err) {
+      console.error(`[replayBillingDLQ] Failed to replay ${key.name}:`, err);
+      failed++;
+    }
+  }
+
+  if (replayed > 0 || failed > 0) {
+    console.log(`[replayBillingDLQ] replayed=${replayed} failed=${failed}`);
+  }
+  return { replayed, failed };
 }
 
 // ── Eval Trials ───────────────────────────────────────────────
@@ -499,40 +624,52 @@ export async function writeEvalRun(
     eval_conditions_json: string;
   },
 ): Promise<number> {
-  const sql = await getDb(hyperdrive);
-  // Try richer schema first, then degrade to the smaller shape.
+  if (isBreakerOpen()) {
+    console.warn(`[DB:breaker] Skipping writeEvalRun for ${run.agent_name}`);
+    return 0;
+  }
   try {
-    const rows = await sql<{ id: number }[]>`
-      INSERT INTO eval_runs (
-        agent_name, benchmark_name, protocol,
-        total_tasks, total_trials, pass_count, fail_count, error_count,
-        pass_rate, avg_score, avg_latency_ms, total_cost_usd,
-        eval_conditions_json, created_at
-      ) VALUES (
-        ${run.agent_name}, ${run.eval_name}, ${"edge_runtime"},
-        ${run.total_tasks}, ${run.total_trials}, ${run.pass_count}, ${run.fail_count}, ${run.error_count},
-        ${run.pass_rate}, ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd},
-        ${run.eval_conditions_json}, ${new Date().toISOString()}
-      )
-      RETURNING id
-    `;
-    return Number(rows?.[0]?.id || 0);
-  } catch {
+    const sql = await getDb(hyperdrive);
+    // Try richer schema first, then degrade to the smaller shape.
     try {
       const rows = await sql<{ id: number }[]>`
         INSERT INTO eval_runs (
-          agent_name, total_tasks, total_trials, pass_rate,
-          avg_score, avg_latency_ms, total_cost_usd, created_at
+          agent_name, benchmark_name, protocol,
+          total_tasks, total_trials, pass_count, fail_count, error_count,
+          pass_rate, avg_score, avg_latency_ms, total_cost_usd,
+          eval_conditions_json, created_at
         ) VALUES (
-          ${run.agent_name}, ${run.total_tasks}, ${run.total_trials}, ${run.pass_rate},
-          ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd}, ${new Date().toISOString()}
+          ${run.agent_name}, ${run.eval_name}, ${"edge_runtime"},
+          ${run.total_tasks}, ${run.total_trials}, ${run.pass_count}, ${run.fail_count}, ${run.error_count},
+          ${run.pass_rate}, ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd},
+          ${run.eval_conditions_json}, ${new Date().toISOString()}
         )
         RETURNING id
       `;
+      recordDbSuccess();
       return Number(rows?.[0]?.id || 0);
     } catch {
-      return 0;
+      try {
+        const rows = await sql<{ id: number }[]>`
+          INSERT INTO eval_runs (
+            agent_name, total_tasks, total_trials, pass_rate,
+            avg_score, avg_latency_ms, total_cost_usd, created_at
+          ) VALUES (
+            ${run.agent_name}, ${run.total_tasks}, ${run.total_trials}, ${run.pass_rate},
+            ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd}, ${new Date().toISOString()}
+          )
+          RETURNING id
+        `;
+        recordDbSuccess();
+        return Number(rows?.[0]?.id || 0);
+      } catch {
+        return 0;
+      }
     }
+  } catch (err) {
+    recordDbFailure();
+    console.error(`[DB:breaker] writeEvalRun failed: ${err instanceof Error ? err.message : err}`);
+    return 0;
   }
 }
 
@@ -550,36 +687,47 @@ export async function writeEvalTrial(
     session_id: string;
   },
 ): Promise<void> {
-  const sql = await getDb(hyperdrive);
-  // Best-effort — eval_trials schema may differ across environments.
-  try {
-    await sql`
-      INSERT INTO eval_trials (
-        eval_run_id, eval_name, agent_name, trial_index, passed, score, details_json,
-        trace_id, session_id, created_at
-      ) VALUES (
-        ${Number(trial.eval_run_id) || 0}, ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
-        ${trial.passed}, ${trial.score}, ${trial.details_json},
-        ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
-      )
-    `;
+  if (isBreakerOpen()) {
+    console.warn(`[DB:breaker] Skipping writeEvalTrial for ${trial.agent_name}`);
     return;
-  } catch {
-    // Fall through to schemas without eval_run_id.
   }
   try {
-    await sql`
-      INSERT INTO eval_trials (
-        eval_name, agent_name, trial_index, passed, score, details_json,
-        trace_id, session_id, created_at
-      ) VALUES (
-        ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
-        ${trial.passed}, ${trial.score}, ${trial.details_json},
-        ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
-      )
-    `;
-  } catch {
-    // Non-fatal for runtime execution.
+    const sql = await getDb(hyperdrive);
+    // Best-effort — eval_trials schema may differ across environments.
+    try {
+      await sql`
+        INSERT INTO eval_trials (
+          eval_run_id, eval_name, agent_name, trial_index, passed, score, details_json,
+          trace_id, session_id, created_at
+        ) VALUES (
+          ${Number(trial.eval_run_id) || 0}, ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
+          ${trial.passed}, ${trial.score}, ${trial.details_json},
+          ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
+        )
+      `;
+      recordDbSuccess();
+      return;
+    } catch {
+      // Fall through to schemas without eval_run_id.
+    }
+    try {
+      await sql`
+        INSERT INTO eval_trials (
+          eval_name, agent_name, trial_index, passed, score, details_json,
+          trace_id, session_id, created_at
+        ) VALUES (
+          ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
+          ${trial.passed}, ${trial.score}, ${trial.details_json},
+          ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
+        )
+      `;
+      recordDbSuccess();
+    } catch {
+      // Non-fatal for runtime execution.
+    }
+  } catch (err) {
+    recordDbFailure();
+    console.error(`[DB:breaker] writeEvalTrial failed: ${err instanceof Error ? err.message : err}`);
   }
 }
 

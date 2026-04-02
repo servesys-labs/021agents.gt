@@ -219,10 +219,33 @@ function clampSandboxTimeout(timeoutSeconds?: number): number {
   return Math.max(1, Math.min(Math.ceil(fallback), MAX_SANDBOX_TIMEOUT_SECONDS));
 }
 
+/** Max time (ms) to wait for a container to become available before giving up. */
+const SANDBOX_ACQUIRE_TIMEOUT_MS = 30_000;
+
+/**
+ * Race a promise against a timeout. Rejects with a user-friendly capacity
+ * error if the timeout fires first.
+ */
+function withSandboxTimeout<T>(promise: Promise<T>, sandboxId: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(
+        `Sandbox unavailable — no container could be allocated within 30 seconds. ` +
+        `This usually means all sandbox capacity is in use. Please try again in a moment. ` +
+        `(sandbox: ${sandboxId})`
+      ));
+    }, SANDBOX_ACQUIRE_TIMEOUT_MS);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
 /**
  * Get a sandbox instance with a cold-start guard.
  * Wraps exec() and writeFile() so they never hang indefinitely — if the
- * container takes more than 45s to start, the call rejects instead of blocking
+ * container takes more than 30s to start, the call rejects instead of blocking
  * the entire DO request.
  */
 function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
@@ -238,24 +261,27 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   } as any);
 
   return {
-    exec: async (cmd: string, opts?: any) => {
+    exec: async (cmd: string, opts?: any): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> => {
       try {
-        return await raw.exec(cmd, opts);
+        return await withSandboxTimeout<any>(raw.exec(cmd, opts), sandboxId);
       } catch (err: any) {
         console.error(`[sandbox] exec failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
         throw err;
       }
     },
-    writeFile: async (path: string, content: string) => {
+    writeFile: async (path: string, content: string): Promise<void> => {
       try {
-        return await raw.writeFile(path, content);
+        return await withSandboxTimeout<any>(raw.writeFile(path, content), sandboxId);
       } catch (err: any) {
         console.error(`[sandbox] writeFile failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
         throw err;
       }
     },
-    readFile: (path: string) =>
-      (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || ""),
+    readFile: (path: string): Promise<string> =>
+      withSandboxTimeout<any>(
+        (raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || ""),
+        sandboxId,
+      ),
   };
 }
 
@@ -585,6 +611,9 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   // Team memory (Hyperdrive queries)
   "team-fact-write":   { flat_usd: 0.00005,    per_ms_usd: 0 },  // DB write
   "team-observation":  { flat_usd: 0.00005,    per_ms_usd: 0 },  // DB write
+
+  // Curated memory (DB + sandbox file)
+  "sync-workspace-memory": { flat_usd: 0.00001, per_ms_usd: 0.0000125 }, // Hyperdrive + container write
 };
 
 /** Calculate tool cost from flat fee + duration. */
@@ -1360,6 +1389,9 @@ async function dispatch(
 
     case "memory-delete":
       return memoryDelete(env, args);
+
+    case "sync-workspace-memory":
+      return syncWorkspaceMemory(env, sessionId);
 
     case "team-fact-write": {
       const content = String(args.content || "");
@@ -4381,9 +4413,11 @@ async function knowledgeSearch(env: RuntimeEnv, args: Record<string, any>): Prom
   if (!queryVec) return "Embedding failed";
 
   // Step 2: Retrieve top-20 candidates from Vectorize
+  const configOrgId = (env as any).__agentConfig?.org_id || "";
+  const configAgentName = (env as any).__agentConfig?.name || "";
   const filter: Record<string, string> = {};
-  if (args.agent_name) filter.agent_name = args.agent_name;
-  if (args.org_id) filter.org_id = args.org_id;
+  if (args.agent_name || configAgentName) filter.agent_name = args.agent_name || configAgentName;
+  if (args.org_id || configOrgId) filter.org_id = args.org_id || configOrgId;
   const matches = await env.VECTORIZE.query(queryVec, {
     topK: retrieveK,
     returnMetadata: "all",
@@ -4484,8 +4518,8 @@ async function storeKnowledge(env: RuntimeEnv, args: Record<string, any>): Promi
         metadata: {
           text,
           source: key,
-          agent_name: args.agent_name || "",
-          org_id: args.org_id || "",
+          agent_name: args.agent_name || (env as any).__agentConfig?.name || "",
+          org_id: args.org_id || (env as any).__agentConfig?.org_id || "",
         },
       },
     ]);
@@ -4502,7 +4536,8 @@ async function imageGenerate(env: RuntimeEnv, args: Record<string, any>): Promis
     | ArrayBuffer;
   const buf =
     aiResult instanceof ArrayBuffer ? aiResult : await new Response(aiResult).arrayBuffer();
-  const key = `images/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
+  const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
+  const key = `workspaces/${orgId}/images/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`;
   await env.STORAGE.put(key, buf, { customMetadata: { prompt } });
   return JSON.stringify({
     image_key: key,
@@ -4549,6 +4584,29 @@ async function visionAnalyze(env: RuntimeEnv, args: Record<string, any>): Promis
 }
 
 // ── Curated Persistent Memory (episodic + semantic via control-plane) ──
+// Categories align with Claude Code memory taxonomy (user / feedback / project / reference).
+
+const MEMORY_CATEGORY_PRIMARY = new Set(["user", "feedback", "project", "reference"]);
+
+function normalizeMemoryCategory(raw: unknown): string {
+  const c = String(raw || "").toLowerCase().trim();
+  if (MEMORY_CATEGORY_PRIMARY.has(c)) return c;
+  const legacy: Record<string, string> = {
+    general: "reference",
+    preferences: "user",
+    preference: "user",
+    knowledge: "user",
+    goal: "user",
+    behavior: "feedback",
+    contacts: "user",
+    process: "project",
+    architecture: "project",
+    convention: "feedback",
+    decision: "project",
+    context: "reference",
+  };
+  return legacy[c] || "reference";
+}
 
 async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const content = String(args.content || args.value || "").trim();
@@ -4562,6 +4620,8 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
 
   if (!hyperdrive) return "Memory not available (no database)";
 
+  const category = normalizeMemoryCategory(args.category);
+
   try {
     const { getDb } = await import("./db");
     const sql = await getDb(hyperdrive);
@@ -4571,20 +4631,81 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
     if (memoryType === "episodic") {
       await sql`
         INSERT INTO episodic_memories (id, agent_name, org_id, content, source, metadata_json, created_at)
-        VALUES (${id}, ${agentName}, ${orgId}, ${content}, 'agent', ${JSON.stringify(key ? { key } : {})}, ${now})
+        VALUES (${id}, ${agentName}, ${orgId}, ${content}, 'agent', ${JSON.stringify(key ? { key, category } : { category })}, ${now})
       `;
       return JSON.stringify({ saved: true, type: "episodic", id });
     } else {
       const factKey = key || content.slice(0, 50);
       await sql`
         INSERT INTO semantic_facts (id, agent_name, org_id, key, value, category, created_at)
-        VALUES (${id}, ${agentName}, ${orgId}, ${factKey}, ${content}, ${args.category || 'general'}, ${now})
-        ON CONFLICT (agent_name, org_id, key) DO UPDATE SET value = ${content}, category = ${args.category || 'general'}
+        VALUES (${id}, ${agentName}, ${orgId}, ${factKey}, ${content}, ${category}, ${now})
+        ON CONFLICT (agent_name, org_id, key) DO UPDATE SET value = ${content}, category = ${category}
       `;
-      return JSON.stringify({ saved: true, type: "semantic", id, key: factKey });
+      return JSON.stringify({ saved: true, type: "semantic", id, key: factKey, category });
     }
   } catch (err: any) {
     return `Memory save failed: ${err.message}`;
+  }
+}
+
+const MEMORY_MD_MAX_LINES = 200;
+const MEMORY_MD_MAX_BYTES = 25_000;
+
+async function syncWorkspaceMemory(env: RuntimeEnv, sessionId: string): Promise<string> {
+  const agentName = (env as any).__agentConfig?.name || "my-assistant";
+  const orgId = (env as any).__agentConfig?.org_id || (env as any).__delegationLineage?.org_id || "";
+  const hyperdrive = (env as any).HYPERDRIVE;
+  if (!hyperdrive) return JSON.stringify({ ok: false, error: "no database" });
+
+  try {
+    const { getDb } = await import("./db");
+    const sql = await getDb(hyperdrive);
+    const rows = await sql`
+      SELECT key, value, category, created_at
+      FROM semantic_facts
+      WHERE agent_name = ${agentName} AND org_id = ${orgId}
+      ORDER BY category ASC, created_at DESC
+      LIMIT 150
+    `;
+
+    const byCat: Record<string, string[]> = { user: [], feedback: [], project: [], reference: [] };
+    for (const r of rows as any[]) {
+      const cat = normalizeMemoryCategory(r.category);
+      const line = `- **${r.key || "note"}**: ${String(r.value || "").replace(/\n/g, " ")}`;
+      if (!byCat[cat]) byCat[cat] = [];
+      byCat[cat].push(line);
+    }
+
+    let body = `---\ntype: workspace-memory\nsynced: ${new Date().toISOString()}\nagent: ${agentName}\n---\n\n`;
+    body += `# MEMORY (synced from persistent store)\n\n`;
+    body += `> OneShots mirrors curated semantic facts here for Claude Code–style file workflows. `;
+    body += `Re-run sync-workspace-memory after saving new facts. Do not store secrets.\n\n`;
+
+    for (const section of ["user", "feedback", "project", "reference"] as const) {
+      const items = byCat[section] || [];
+      if (items.length === 0) continue;
+      body += `## ${section}\n\n${items.join("\n")}\n\n`;
+    }
+
+    const lines = body.split("\n");
+    if (lines.length > MEMORY_MD_MAX_LINES) {
+      body = lines.slice(0, MEMORY_MD_MAX_LINES).join("\n") + `\n\n> Truncated at ${MEMORY_MD_MAX_LINES} lines.\n`;
+    }
+    if (body.length > MEMORY_MD_MAX_BYTES) {
+      body = body.slice(0, MEMORY_MD_MAX_BYTES) + `\n\n> Truncated at ${MEMORY_MD_MAX_BYTES} bytes.\n`;
+    }
+
+    const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
+    const path = "/workspace/MEMORY.md";
+    await sandbox.writeFile(path, body);
+    return JSON.stringify({
+      ok: true,
+      path,
+      entries: (rows as any[]).length,
+      categories: Object.keys(byCat).filter((k) => (byCat[k] || []).length > 0),
+    });
+  } catch (err: any) {
+    return JSON.stringify({ ok: false, error: err.message || String(err) });
   }
 }
 
@@ -4739,7 +4860,7 @@ async function speechToText(env: RuntimeEnv, args: Record<string, any>, sessionI
     const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
     const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
     if (catResult.exitCode !== 0) return `Could not read audio file: ${catResult.stderr}`;
-    audioBytes = Uint8Array.from(atob(catResult.stdout.trim()), (c) => c.charCodeAt(0));
+    audioBytes = Uint8Array.from(atob((catResult.stdout ?? "").trim()), (c) => c.charCodeAt(0));
   }
 
   // Groq STT — fast, high quality (requires GROQ_API_KEY)
@@ -4932,12 +5053,26 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>, session
 
 // ── Save/Load Project (Sandbox <-> R2) ───────────────────────
 
+const SAVE_PROJECT_MAX_BYTES = 30 * 1024 * 1024; // 30 MB
+
 async function saveProject(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const workspace = args.workspace || "/workspace";
   const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
   const agentName = (env as any).__agentConfig?.agent_name || (env as any).__agentConfig?.agentName || (env as any).__agentConfig?.name || "agent";
   const projectName = args.project_name || args.project_id || args.name || "default";
   const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
+
+  // Pre-flight size check to avoid OOM on large workspaces
+  const sizeResult = await sandbox.exec(`du -sb ${workspace} 2>/dev/null | cut -f1`, { timeout: 10 });
+  const workspaceBytes = parseInt(sizeResult.stdout?.trim() || "0", 10);
+  if (workspaceBytes > SAVE_PROJECT_MAX_BYTES) {
+    const sizeMB = (workspaceBytes / (1024 * 1024)).toFixed(1);
+    return JSON.stringify({
+      saved: false,
+      reason: `Workspace is ${sizeMB} MB which exceeds the 30 MB save limit. Remove large files (node_modules, build artifacts, media) and try again.`,
+    });
+  }
+
   const tarResult = await sandbox.exec(`cd ${workspace} 2>/dev/null && tar czf /tmp/workspace.tar.gz . 2>/dev/null || echo "__EMPTY__"`, { timeout: 30 });
   if (tarResult.stdout?.includes("__EMPTY__")) return `No files found in ${workspace}`;
   const b64Result = await sandbox.exec(`base64 /tmp/workspace.tar.gz`, { timeout: 30 });
@@ -5075,7 +5210,14 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
   "grep|search file|find in": ["grep", "glob", "search-file", "find-file"],
   "project|workspace|load project|save project": ["save-project", "load-project", "load-folder", "manage-projects"],
   // Memory & knowledge
-  "remember|memory|recall|forget|save fact|note|store": ["memory-save", "memory-recall", "memory-delete", "team-fact-write", "team-observation"],
+  "remember|memory|recall|forget|save fact|note|store|MEMORY\\.md|sync memory": [
+    "memory-save",
+    "memory-recall",
+    "memory-delete",
+    "sync-workspace-memory",
+    "team-fact-write",
+    "team-observation",
+  ],
   "knowledge|rag|embed|retrieval": ["knowledge-search", "store-knowledge", "manage-rag"],
   "profile|preference|about me|my name": ["user-profile-save", "user-profile-load"],
   // Media
@@ -5427,14 +5569,19 @@ const TOOL_CATALOG: ToolDefinition[] = [
     type: "function",
     function: {
       name: "memory-save",
-      description: "Save a memory for later recall. Use for user preferences, important facts, project context, or observations that should persist across conversations.",
+      description:
+        "Save a memory for later recall. Prefer category: user (profile/preferences), feedback (how to work with this user), project (goals/deadlines/non-obvious context), reference (links to external systems). Do not save what is already in /workspace files or easily derivable from the repo.",
       parameters: {
         type: "object",
         properties: {
           content: { type: "string", description: "The memory content to save" },
           key: { type: "string", description: "Short label for the memory (e.g. 'user-timezone', 'project-stack')" },
           type: { type: "string", description: "Memory type: 'semantic' for facts/preferences (default), 'episodic' for events/observations" },
-          category: { type: "string", description: "Category for organization (e.g. 'preferences', 'project', 'contacts')" },
+          category: {
+            type: "string",
+            description:
+              "One of: user | feedback | project | reference (default: reference). Maps legacy labels (e.g. preferences, general) automatically.",
+          },
         },
         required: ["content"],
       },
@@ -5467,6 +5614,18 @@ const TOOL_CATALOG: ToolDefinition[] = [
           type: { type: "string", description: "Memory type: 'semantic' (default)" },
         },
         required: ["fact_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sync-workspace-memory",
+      description:
+        "Write /workspace/MEMORY.md from persisted semantic_facts (curated memory-save entries). Use for Claude Code–style file-based review, sharing context with bash/python tools, or backup. Caps size (~200 lines / 25KB) like Claude Code MEMORY.md.",
+      parameters: {
+        type: "object",
+        properties: {},
       },
     },
   },

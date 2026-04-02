@@ -1,17 +1,19 @@
 /**
  * Edge Runtime — LLM caller.
  *
- * ALL models go through CF AI Gateway /compat/ endpoint.
- * One endpoint, one token (CF_AIG_TOKEN), all providers:
+ * ALL models go through CF AI Gateway for consistent observability.
+ * Two provider paths, routed by model prefix:
  *
- *   model: "workers-ai/@cf/moonshotai/kimi-k2.5"  → Workers AI (edge)
- *   model: "anthropic/claude-sonnet-4-5"           → Anthropic (gateway credits)
- *   model: "openai/gpt-5.4"                       → OpenAI (gateway credits)
- *   model: "deepseek/deepseek-v3.2"               → DeepSeek (gateway credits)
- *   model: "google-ai-studio/gemini-3.1-pro"      → Google (gateway credits)
- *   model: "dynamic/my-route"                      → Gateway dynamic routing
+ *   @cf/ models  → /workers-ai/v1/chat/completions  (CF account token)
+ *   all others   → /openrouter/chat/completions      (OpenRouter API key)
  *
- * No BYOK keys needed. Gateway handles billing from loaded credits.
+ * Examples:
+ *   model: "@cf/moonshotai/kimi-k2.5"             → Workers AI (free, edge)
+ *   model: "anthropic/claude-sonnet-4-5"           → Anthropic via OpenRouter
+ *   model: "openai/gpt-5.4"                       → OpenAI via OpenRouter
+ *   model: "deepseek/deepseek-v3.2"               → DeepSeek via OpenRouter
+ *   model: "google-ai-studio/gemini-3.1-pro"      → Google via OpenRouter
+ *
  * Gateway provides: logging, caching, rate limiting, fallbacks, cost tracking.
  */
 
@@ -20,8 +22,9 @@ import { LLMError, RefusalError, classifyFetchError } from "./errors";
 // Pricing imported dynamically in callLLM to avoid circular deps
 
 /**
- * Call an LLM through CF AI Gateway /compat/ endpoint.
- * Model name determines provider routing at the gateway level.
+ * Call an LLM through CF AI Gateway.
+ * Workers AI (@cf/) → /workers-ai/v1/ endpoint.
+ * All others → /openrouter/ endpoint.
  */
 export async function callLLM(
   env: RuntimeEnv,
@@ -46,41 +49,9 @@ export async function callLLM(
   const started = Date.now();
   const isWorkersAI = opts.model.startsWith("@cf/") || opts.model.startsWith("@hf/");
 
-  // ── Workers AI: use env.AI binding directly (zero latency, no external hop) ──
-  if (isWorkersAI && env.AI) {
-    const aiMessages = messages.map(formatMessage);
-    const aiOpts: Record<string, any> = {};
-    if (opts.max_tokens) aiOpts.max_tokens = opts.max_tokens;
-    if (opts.temperature !== undefined && opts.temperature > 0) aiOpts.temperature = opts.temperature;
-    if (tools.length > 0) aiOpts.tools = tools.map(fixToolSchema);
-
-    const result = await env.AI.run(opts.model as any, {
-      messages: aiMessages,
-      ...aiOpts,
-    }) as any;
-
-    const latencyMs = Date.now() - started;
-    const content = typeof result === "string" ? result
-      : result?.response || result?.content || result?.choices?.[0]?.message?.content || "";
-    const rawToolCalls = result?.tool_calls || result?.choices?.[0]?.message?.tool_calls || [];
-    const inputTokens = result?.usage?.prompt_tokens || 0;
-    const outputTokens = result?.usage?.completion_tokens || 0;
-
-    const { calculateCustomerCost } = await import("./pricing");
-
-    return {
-      content,
-      model: opts.model,
-      tool_calls: parseToolCalls(rawToolCalls),
-      usage: { input_tokens: inputTokens, output_tokens: outputTokens },
-      cost_usd: calculateCustomerCost(opts.model, inputTokens, outputTokens, 0),
-      latency_ms: latencyMs,
-      gateway_log_id: "",
-      gateway_event_id: "",
-    };
-  }
-
-  // ── All other models: OpenRouter via AI Gateway ──
+  // ── All models go through AI Gateway for consistent observability ──
+  // Workers AI uses /workers-ai/v1/chat/completions (bare @cf/ model IDs)
+  // All other models use /openrouter/chat/completions (provider-prefixed IDs)
   const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
   const gatewayId = env.AI_GATEWAY_ID || "";
 
@@ -90,7 +61,9 @@ export async function callLLM(
     });
   }
 
-  const model = normalizeModelId(opts.model);
+  // Workers AI: bare @cf/ model ID on /workers-ai/ path
+  // Others: provider-prefixed model on /openrouter/ path
+  const model = isWorkersAI ? opts.model : normalizeModelId(opts.model);
 
   const payload: Record<string, any> = {
     model,
@@ -129,7 +102,10 @@ export async function callLLM(
     }
   }
 
-  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`;
+  // Workers AI: /workers-ai/v1/chat/completions (CF account token auth)
+  // Others:     /openrouter/chat/completions (OpenRouter API key auth)
+  const providerPath = isWorkersAI ? "workers-ai/v1" : "openrouter";
+  const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -143,13 +119,18 @@ export async function callLLM(
     }
   }
 
-  // OpenRouter auth
-  const orKey = (env as any).OPENROUTER_API_KEY;
-  if (orKey) {
-    headers["cf-aig-authorization"] = `Bearer ${orKey}`;
-  } else {
-    const cfToken = env.AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN;
+  // Auth: Workers AI uses CF account token, OpenRouter uses OR API key
+  if (isWorkersAI) {
+    const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
     if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+  } else {
+    const orKey = (env as any).OPENROUTER_API_KEY;
+    if (orKey) {
+      headers["cf-aig-authorization"] = `Bearer ${orKey}`;
+    } else {
+      const cfToken = env.AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN;
+      if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+    }
   }
 
   // ── Phase 1.3: Retry logic with backoff ──
@@ -305,22 +286,12 @@ export async function callLLM(
 
 // ── Model ID Normalization ────────────────────────────────────
 //
-// Our plan routing tables use shorthand IDs. The /compat/ endpoint
-// needs provider-prefixed IDs. This function normalizes:
-//
-//   @cf/moonshotai/kimi-k2.5       → workers-ai/@cf/moonshotai/kimi-k2.5
-//   anthropic/claude-sonnet-4.6     → anthropic/claude-sonnet-4.6 (already correct)
-//   openai/gpt-5.4                  → openai/gpt-5.4 (already correct)
-//   deepseek/deepseek-v3.2          → deepseek/deepseek-v3.2 (already correct)
-//   dynamic/my-route                → dynamic/my-route (gateway dynamic routing)
+// Non-Workers-AI models pass through as-is (OpenRouter accepts native prefixes).
+// Workers AI models are handled separately — they use bare @cf/ IDs on the
+// /workers-ai/v1/ endpoint and never reach this function.
 
 function normalizeModelId(model: string): string {
-  // Workers AI models: keep @cf/ prefix as-is (gateway URL path handles routing)
-  // The /workers-ai/v1/chat/completions endpoint expects bare @cf/ model IDs
-  if (model.startsWith("@cf/")) {
-    return model;
-  }
-  // All other models: anthropic/, openai/, google/, deepseek/ — pass through
+  // All models: anthropic/, openai/, google/, deepseek/ — pass through
   // OpenRouter accepts these prefixes natively
   return model;
 }

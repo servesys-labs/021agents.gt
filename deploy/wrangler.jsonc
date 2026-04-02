@@ -50,7 +50,7 @@
       "class_name": "AgentSandbox",
       "image": "./sandbox.Dockerfile",
       "instance_type": "basic",
-      "max_instances": 200,
+      "max_instances": 500,
       // Rolling deploy: 10% first, wait 5 min, then 100% — prevents killing active sandboxes
       "rollout_step_percentage": [10, 100],
       "rollout_active_grace_period": 300

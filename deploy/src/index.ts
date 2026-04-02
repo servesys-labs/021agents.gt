@@ -30,6 +30,39 @@ import {
 import { getCircuitStatus } from "./runtime/tools";
 import { parseJsonColumn } from "./runtime/parse-json-column";
 
+// ── Input size limit ──
+// Reject user messages exceeding 50 KB to avoid wasting LLM tokens.
+const MAX_INPUT_BYTES = 50_000;
+
+// ── Sandbox timeout helper ──
+// Prevents bare getSandbox().exec() calls from hanging indefinitely when all
+// container capacity is exhausted. Wraps every operation with a 30s deadline.
+const SANDBOX_ACQUIRE_TIMEOUT_MS = 30_000;
+
+function getTimedSandbox(namespace: any, sandboxId: string, opts?: any) {
+  const raw = getSandbox(namespace, sandboxId, opts);
+  const wrap = <T>(p: Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(
+          `Sandbox unavailable — no container could be allocated within 30 seconds. ` +
+          `This usually means all sandbox capacity is in use. Please try again in a moment. ` +
+          `(sandbox: ${sandboxId})`
+        ));
+      }, SANDBOX_ACQUIRE_TIMEOUT_MS);
+      p.then(
+        (v) => { clearTimeout(timer); resolve(v); },
+        (e) => { clearTimeout(timer); reject(e); },
+      );
+    });
+  return {
+    exec: (cmd: string, execOpts?: any) => wrap(raw.exec(cmd, execOpts)),
+    writeFile: (path: string, content: string) => wrap(raw.writeFile(path, content)),
+    readFile: (path: string) =>
+      wrap((raw as any).readFile?.(path) ?? raw.exec(`cat "${path}"`, { timeout: 10 }).then((r: any) => r.stdout || "")),
+  };
+}
+
 // ── AgentSandbox — Sandbox with lifecycle hooks + controlled outbound ──
 // Sandbox extends Container extends DurableObject.
 // Per CF Containers docs: https://developers.cloudflare.com/containers/
@@ -38,14 +71,64 @@ import { parseJsonColumn } from "./runtime/parse-json-column";
 // outboundByHost lets sandbox code access platform resources (R2, KV) via HTTP.
 // Internet is ENABLED because agents need npm install, pip install, git clone, curl, etc.
 // Security: each container runs in its own VM (CF isolation), SSRF blocked by parent Worker.
+// ── Sandbox org registry — maps DO ID → org_id for outbound scoping ──
+// Populated by AgentSandbox.registerOrg() at sandbox creation time and
+// by onStart() reading from DO persistent storage.  Used by outbound
+// handlers to enforce org-level isolation on R2/KV access.
+const _sandboxOrgRegistry = new Map<string, string>();
+
 export class AgentSandbox extends Sandbox<Env> {
 
-  onStart() {
+  /** Persist org_id for this sandbox so outbound handlers can scope access. */
+  static async registerOrg(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    sandboxNamespace: any,
+    sandboxId: string,
+    orgId: string,
+  ): Promise<void> {
+    // Derive the stable DO hex ID from the sandbox name and register both.
+    const doIdObj = sandboxNamespace.idFromName(sandboxId);
+    const doIdStr = doIdObj.toString();
+    _sandboxOrgRegistry.set(doIdStr, orgId);
+    _sandboxOrgRegistry.set(sandboxId, orgId); // also index by name for convenience
+    // Persist to DO storage so onStart() can recover after eviction.
+    try {
+      const stub = sandboxNamespace.get(doIdObj);
+      await stub.fetch("http://internal/__set_org", {
+        method: "POST",
+        body: orgId,
+      });
+    } catch {
+      // Best-effort — the in-memory registry is the primary path.
+    }
+  }
+
+  async onStart() {
     console.log(`[sandbox] Started: ${this.ctx.id.toString().slice(0, 16)}`);
+    // Recover org_id from persistent storage into the in-memory registry.
+    const stored = await this.ctx.storage.get<string>("__org_id");
+    if (stored) {
+      _sandboxOrgRegistry.set(this.ctx.id.toString(), stored);
+    }
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    // Handle internal org registration RPC from registerOrg().
+    const url = new URL(request.url);
+    if (url.pathname === "/__set_org" && request.method === "POST") {
+      const orgId = await request.text();
+      if (orgId) {
+        await this.ctx.storage.put("__org_id", orgId);
+        _sandboxOrgRegistry.set(this.ctx.id.toString(), orgId);
+      }
+      return new Response("OK");
+    }
+    return super.fetch(request);
   }
 
   async onStop() {
     console.log(`[sandbox] Stopped: ${this.ctx.id.toString().slice(0, 16)}`);
+    _sandboxOrgRegistry.delete(this.ctx.id.toString());
   }
 
   onError(error: unknown) {
@@ -69,9 +152,47 @@ export class AgentSandbox extends Sandbox<Env> {
 // (required by CF when using outbound handlers — see docs)
 export { ContainerProxy };
 
+// ── Org-scoped outbound helpers ──
+
+/** Resolve the org_id for an outbound request. Checks the in-memory registry
+ *  using the CF-injected container header, then falls back to a unique match. */
+function _resolveOrgForOutbound(request: Request): string | undefined {
+  // Primary: CF runtime may inject the DO id as a header.
+  const doId = request.headers.get("cf-container-id")
+    || request.headers.get("cf-do-id");
+  if (doId) return _sandboxOrgRegistry.get(doId);
+
+  // Fallback: if exactly one sandbox is registered, use it.
+  // This is safe because each isolate typically hosts one active container.
+  if (_sandboxOrgRegistry.size === 1) {
+    return _sandboxOrgRegistry.values().next().value as string;
+  }
+
+  return undefined; // ambiguous or none — fail closed
+}
+
+/** Validate that an R2/KV key belongs to the given org's namespace. */
+function _assertOrgOwnsKey(orgId: string, key: string): Response | null {
+  // R2 keys follow: workspaces/{orgId}/...
+  // Reject path traversal and keys outside the org's prefix.
+  const normalized = key.replace(/\.\.\//g, "");
+  const expectedPrefix = `workspaces/${orgId}/`;
+  if (!normalized.startsWith(expectedPrefix)) {
+    return new Response(
+      `Forbidden — sandbox may only access keys under ${expectedPrefix}`,
+      { status: 403 },
+    );
+  }
+  return null; // OK
+}
+
 // Static outbound handlers — give sandbox code controlled access to platform resources.
 // Sandbox code can call http://platform.r2/path or http://platform.kv/key
 // and the request is handled by the Worker (with full binding access), not sent to the internet.
+//
+// SECURITY: Every handler resolves the calling sandbox's org_id and validates
+// that the requested key falls within that org's namespace.  If the org cannot
+// be determined, access is denied (fail-closed).
 (AgentSandbox as any).outboundByHost = {
   // R2 storage access: sandbox code can read/write files via http://platform.r2/{path}
   "platform.r2": async (request: Request, env: Env) => {
@@ -79,6 +200,14 @@ export { ContainerProxy };
     const url = new URL(request.url);
     const key = url.pathname.slice(1); // strip leading /
     if (!key) return new Response("Key required", { status: 400 });
+
+    // ── Org scoping: resolve caller's org and validate key ──
+    const orgId = _resolveOrgForOutbound(request);
+    if (!orgId) {
+      return new Response("Forbidden — sandbox org_id could not be determined", { status: 403 });
+    }
+    const denied = _assertOrgOwnsKey(orgId, key);
+    if (denied) return denied;
 
     if (request.method === "GET") {
       const obj = await env.STORAGE.get(key);
@@ -101,6 +230,14 @@ export { ContainerProxy };
     const url = new URL(request.url);
     const key = url.pathname.slice(1);
     if (!key) return new Response("Key required", { status: 400 });
+
+    // ── Org scoping: resolve caller's org and validate key ──
+    const orgId = _resolveOrgForOutbound(request);
+    if (!orgId) {
+      return new Response("Forbidden — sandbox org_id could not be determined", { status: 403 });
+    }
+    const denied = _assertOrgOwnsKey(orgId, key);
+    if (denied) return denied;
 
     if (request.method === "GET") {
       const value = await env.AGENT_PROGRESS_KV.get(key);
@@ -211,15 +348,29 @@ function buildMIMEString(opts: { from: string; to: string; subject: string; body
 // ---------------------------------------------------------------------------
 
 export class AgentOSAgent extends Agent<Env, AgentState> {
-  // Disable hibernation so WebSocket messages are delivered immediately.
-  // With hibernate: true (the default), message event handlers are not attached
-  // and messages sent before hibernation are silently dropped.
-  static options = { hibernate: false };
+  // Enable hibernation so idle DOs are evicted from memory (cost savings at scale).
+  // Per-connection state (__authenticated, __orgId, etc.) is stored via connection.setState()
+  // which the SDK persists across hibernation. Voice relay WS state uses serializeAttachment().
+  // In-memory _activeRun/_activeWorkflow are rebuilt from SQLite active_workflows on wake.
+  static options = { hibernate: true };
 
   // Concurrency guard: prevent overlapping runs from corrupting conversation state.
   // DOs are single-threaded but async yields allow interleaving.
+  // These in-memory caches are rebuilt from SQLite active_workflows on hibernation wake.
   private _activeRun: boolean = false;
   private _activeWorkflow: { instance: any; progressKey: string; abortPoll: boolean } | null = null;
+
+  // ── Hibernation-safe connection state helpers ──────────────────────
+  // The Agents SDK persists connection.state across hibernation via
+  // serializeAttachment/deserializeAttachment. These helpers provide a
+  // typed interface over the opaque state object.
+  private _getConnState(connection: Connection): { authenticated?: boolean; orgId?: string; userId?: string; voiceMode?: boolean; voiceCallSid?: string; voiceProcessing?: boolean } {
+    return (connection.state as any) || {};
+  }
+  private _setConnState(connection: Connection, patch: Record<string, unknown>) {
+    const current = this._getConnState(connection);
+    connection.setState({ ...current, ...patch });
+  }
 
   initialState: AgentState = {
     config: {
@@ -305,6 +456,20 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       this.ctx.storage.transactionSync(() => {
         createMailboxTable(this.sql.bind(this));
         this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (4)`;
+      });
+    }
+
+    if (schemaVersion < 5) {
+      // v5: Track active Workflow instances so DO can resume polling after restart/deploy
+      this.ctx.storage.transactionSync(() => {
+        this.sql`CREATE TABLE IF NOT EXISTS active_workflows (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workflow_instance_id TEXT NOT NULL,
+          progress_key TEXT NOT NULL,
+          channel TEXT NOT NULL DEFAULT 'websocket',
+          created_at REAL NOT NULL DEFAULT (unixepoch('now'))
+        )`;
+        this.sql`INSERT INTO _sql_schema_migrations (id) VALUES (5)`;
       });
     }
 
@@ -396,6 +561,28 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
       } catch {}
     }
+
+    // ── Workflow Recovery: resume polling orphaned workflows after DO restart ──
+    // When a DO restarts (deploy, crash, hibernation wake), in-flight Workflow
+    // instances keep running but the DO loses its in-memory polling loop.
+    // Check SQLite for any active workflow records and poll them to completion
+    // so results are captured (conversation history, billing) even if the
+    // original WebSocket client has disconnected.
+    if (this.env.AGENT_RUN_WORKFLOW && this.env.AGENT_PROGRESS_KV) {
+      try {
+        const orphaned = this.sql<{ id: number; workflow_instance_id: string; progress_key: string; channel: string }>`
+          SELECT id, workflow_instance_id, progress_key, channel FROM active_workflows
+        `;
+        if (orphaned.length > 0) {
+          // Rebuild in-memory concurrency guard from persisted state
+          this._activeRun = true;
+        }
+        for (const row of orphaned) {
+          // Fire-and-forget: recover each workflow without blocking onStart
+          this._recoverOrphanedWorkflow(row.id, row.workflow_instance_id, row.progress_key, row.channel).catch(() => {});
+        }
+      } catch {}
+    }
   }
 
   // ── Hibernation Checkpoint (periodic save) ───────────────────────
@@ -410,8 +597,51 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       return;
     }
     try {
-      const { saveCheckpointToSQLite, saveCheckpointToR2 } = await import("./runtime/workspace-persistence");
+      const { saveCheckpointToSQLite, saveCheckpointToR2, saveFileToSQLite, hashContent, loadFilesFromSQLite } = await import("./runtime/workspace-persistence");
       const config = this.state.config;
+
+      // P2-17: Scan sandbox for files not yet tracked in SQLite (e.g. bash-created).
+      // This ensures `rm`, `echo >`, `mv`, python scripts, etc. are captured.
+      if (this.env.SANDBOX) {
+        try {
+          const sandbox = getTimedSandbox(this.env.SANDBOX, this.name);
+          // List all files in /workspace (limit to 500 to avoid huge scans)
+          const lsResult = await sandbox.exec(
+            `find /workspace -type f -not -path '*/node_modules/*' -not -path '*/.git/*' -not -name '*.pyc' 2>/dev/null | head -500`,
+            { timeout: 10 },
+          );
+          const sandboxPaths = new Set(
+            (lsResult.stdout || "").split("\n").map((p: string) => p.trim()).filter(Boolean),
+          );
+
+          // Get already-tracked paths from SQLite
+          const trackedFiles = loadFilesFromSQLite(this.sql, this.name);
+          const trackedPaths = new Set(trackedFiles.map((f: any) => f.path));
+
+          // Persist any untracked files (bash-created, python-created, etc.)
+          for (const filePath of sandboxPaths) {
+            if (trackedPaths.has(filePath)) continue;
+            try {
+              const catResult = await sandbox.exec(`cat "${filePath}"`, { timeout: 5 });
+              const content = catResult.stdout ?? "";
+              // Skip very large files (>512KB) to avoid blowing up SQLite
+              if (content.length > 512_000) continue;
+              const hash = await hashContent(content);
+              saveFileToSQLite(this.sql, this.name, {
+                path: filePath,
+                content,
+                encoding: "utf-8",
+                size: content.length,
+                hash,
+                modified_at: new Date().toISOString(),
+              });
+            } catch {}
+          }
+        } catch (scanErr: any) {
+          console.error(`[checkpoint] sandbox scan failed: ${scanErr.message?.slice(0, 200)}`);
+        }
+      }
+
       const checkpoint = {
         session_id: this.name,
         org_id: config.orgId || "",
@@ -448,7 +678,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   /** Load harness.enable_checkpoints from Supabase and update DO state. Cached 5 minutes. */
   private _checkpointFlagCachedAt = 0;
-  private async _syncCheckpointFlagFromDb(agentDbName: string): Promise<void> {
+  private async _syncCheckpointFlagFromDb(agentDbName: string, orgId?: string): Promise<void> {
     if (Date.now() - this._checkpointFlagCachedAt < 300_000) return; // 5-min TTL
     if (!this.env.HYPERDRIVE || !String(agentDbName || "").trim()) return;
     try {
@@ -457,7 +687,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         provider: this.env.DEFAULT_PROVIDER || "openrouter",
         model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
         plan: "standard",
-      });
+      }, orgId || this.state.config.orgId || undefined);
       const on = cfg.enable_workspace_checkpoints !== false;
       this.setState({
         ...this.state,
@@ -724,6 +954,22 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       session_affinity: true,
       history_count: this._getConversationCount(),
     }));
+
+    // ── Deliver missed run result on reconnect ──────────────────────
+    // If the user closed their tab while a run was completing, the done
+    // event was stored in KV. Send it now so the client can display it.
+    if (this.env.AGENT_PROGRESS_KV) {
+      try {
+        const lastResultKey = `last-result:${this.name}`;
+        const raw = await this.env.AGENT_PROGRESS_KV.get(lastResultKey);
+        if (raw) {
+          const missedResult = JSON.parse(raw);
+          connection.send(JSON.stringify({ ...missedResult, recovered: true }));
+          // One-time delivery — delete after sending
+          await this.env.AGENT_PROGRESS_KV.delete(lastResultKey);
+        }
+      } catch {}
+    }
   }
 
   async onMessage(connection: Connection, message: string | ArrayBuffer) {
@@ -732,8 +978,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     // ── WebSocket reconnect: replay missed events from KV ──────────
     if (data.type === "reconnect" && typeof data.from_seq === "number") {
       const kv = this.env.AGENT_PROGRESS_KV;
-      if (kv && data.progress_key) {
-        const raw = await kv.get(data.progress_key);
+      const ALLOWED_PREFIXES = ["ws:", "rpc:", "voice:", "batch:"];
+      const keyStr = typeof data.progress_key === "string" ? data.progress_key : "";
+      const prefixOk = ALLOWED_PREFIXES.some((p) => keyStr.startsWith(p));
+      const ownerOk = keyStr.includes(this.name);
+      if (kv && keyStr && prefixOk && ownerOk) {
+        const raw = await kv.get(keyStr);
         if (raw) {
           const events = JSON.parse(raw);
           const missed = events.filter((e: any) => (e._seq || 0) > data.from_seq);
@@ -761,12 +1011,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           // Decode payload to extract org_id/user_id
           try {
             const payload = JSON.parse(atob(token.split(".")[1]));
-            (connection as any).__authenticated = true;
-            (connection as any).__orgId = payload.org_id || "";
-            (connection as any).__userId = payload.sub || "";
+            this._setConnState(connection, { authenticated: true, orgId: payload.org_id || "", userId: payload.sub || "" });
             connection.send(JSON.stringify({ type: "auth_ok", org_id: payload.org_id }));
           } catch {
-            (connection as any).__authenticated = true;
+            this._setConnState(connection, { authenticated: true });
             connection.send(JSON.stringify({ type: "auth_ok" }));
           }
         } else {
@@ -774,21 +1022,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           connection.close(4001, "Unauthorized");
         }
       } else {
-        // No JWT secret configured — accept valid-shaped JWTs (dev mode)
-        const isJwtShape = token.split(".").length === 3;
-        if (isJwtShape) {
-          (connection as any).__authenticated = true;
-          connection.send(JSON.stringify({ type: "auth_ok" }));
-        } else {
-          connection.send(JSON.stringify({ type: "error", message: "auth: invalid token format" }));
-          connection.close(4001, "Unauthorized");
-        }
+        // No JWT secret configured — reject all connections.
+        // In development, set AUTH_JWT_SECRET to any value to enable auth.
+        console.error("[auth] AUTH_JWT_SECRET is not configured — rejecting connection");
+        connection.send(JSON.stringify({ type: "error", message: "auth: server misconfigured (no signing secret)", code: "AUTH_MISCONFIGURED" }));
+        connection.close(4001, "Unauthorized");
       }
       return;
     }
 
     // ── Auth gate: reject commands from unauthenticated connections ──
-    if (data.type === "run" && !(connection as any).__authenticated) {
+    if (data.type === "run" && !this._getConnState(connection).authenticated) {
       connection.send(JSON.stringify({ type: "error", message: "Send { type: 'auth', token: '...' } before running commands", code: "AUTH_REQUIRED" }));
       return;
     }
@@ -797,13 +1041,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     console.log("[onMessage] Received type:", data.type, "keys:", Object.keys(data).join(","));
 
     if (data.type === "setup" && data.callSid) {
-      // ConversationRelay connected — store call metadata on the connection
-      (connection as any).__voiceMode = true;
-      (connection as any).__voiceCallSid = data.callSid || "";
+      // ConversationRelay connected — store call metadata (hibernation-safe)
+      this._setConnState(connection, { voiceMode: true, voiceCallSid: data.callSid || "" });
       return;
     }
 
-    if (data.type === "prompt" && (connection as any).__voiceMode) {
+    if (data.type === "prompt" && this._getConnState(connection).voiceMode) {
       const userText = (data.voicePrompt || "").trim();
       if (!userText) return;
 
@@ -859,7 +1102,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       return;
     }
 
-    if (data.type === "interrupt" && (connection as any).__voiceMode) {
+    if (data.type === "interrupt" && this._getConnState(connection).voiceMode) {
       return; // Twilio interruption — no action needed
     }
 
@@ -909,12 +1152,51 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         connection.send(JSON.stringify({ type: "error", message: "A run is already in progress. Please wait for it to complete.", code: "RUN_IN_PROGRESS" }));
         return;
       }
+
+      // Input size guard
+      const rawInput = String(data.input || "");
+      if (new TextEncoder().encode(rawInput).byteLength > MAX_INPUT_BYTES) {
+        connection.send(JSON.stringify({ type: "error", message: "Message too large. Please keep your message under 50 KB.", code: "INPUT_TOO_LARGE" }));
+        return;
+      }
+
       this._activeRun = true;
 
       const config = this.state.config;
-      const inputText = String(data.input || "");
+      const inputText = rawInput;
       const wsAgentName = data.agent_name || config.agentName || "agentos";
-      await this._syncCheckpointFlagFromDb(wsAgentName);
+
+      // Pre-run credit check — reject early if org has no credits
+      const wsOrgId = data.org_id || config.orgId || "";
+      if (wsOrgId && this.env.HYPERDRIVE) {
+        try {
+          const { getDb } = await import("./runtime/db");
+          const sql = await getDb(this.env.HYPERDRIVE);
+          const [bal] = await sql`SELECT balance_usd FROM org_credit_balance WHERE org_id = ${wsOrgId}`;
+          if (!bal || Number(bal.balance_usd) <= 0) {
+            connection.send(JSON.stringify({
+              type: "error",
+              message: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+              code: "insufficient_credits",
+            }));
+            this._activeRun = false;
+            return;
+          }
+        } catch (err) {
+          console.error("[ws-run] Credit check failed, denying run:", err);
+          try {
+            connection.send(JSON.stringify({
+              type: "error",
+              message: "Unable to verify credits. Please try again shortly.",
+              code: "credit_check_failed",
+            }));
+          } catch { /* socket may be closed */ }
+          this._activeRun = false;
+          return;
+        }
+      }
+
+      await this._syncCheckpointFlagFromDb(wsAgentName, wsOrgId || undefined);
 
       // Persist user message IMMEDIATELY (before workflow starts)
       // so it survives even if the DO crashes mid-run
@@ -935,12 +1217,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         }
       }
 
+      let progressKey: string | null = null;
       try {
         if (!this.env.AGENT_RUN_WORKFLOW || !this.env.AGENT_PROGRESS_KV) {
           throw new Error("Workflow bindings not configured");
         }
 
-        const progressKey = `ws:${this.name}:${Date.now()}`;
+        progressKey = `ws:${this.name}:${Date.now()}`;
         const instance = await this.env.AGENT_RUN_WORKFLOW.create({
           params: {
             agent_name: wsAgentName, input: inputText,
@@ -957,6 +1240,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         // Track active workflow for disconnect cleanup (GAP 6)
         this._activeWorkflow = { instance, progressKey, abortPoll: false };
 
+        // Persist to SQLite so we can resume polling after DO restart/deploy
+        this._trackWorkflow(instance.id, progressKey, data.channel || "websocket");
+
         // Poll KV for progress events → push to WebSocket client in real-time
         let lastIdx = 0;
         let done = false;
@@ -964,6 +1250,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         const maxWait = 300_000;
         const pollStart = Date.now();
         let pollCount = 0;
+        let kvConsecutiveFailures = 0;
+        let kvDegradedNotified = false;
 
         while (!done && Date.now() - pollStart < maxWait && connection.readyState === 1 && !this._activeWorkflow?.abortPoll) {
           // Fast poll for first 30s (250ms), then slow down (1s)
@@ -973,6 +1261,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
           try {
             const raw = await this.env.AGENT_PROGRESS_KV.get(progressKey);
+            kvConsecutiveFailures = 0; // reset on successful read
             if (!raw) {
               // No KV data yet — check Workflow status every 5th poll to detect completion/error
               if (pollCount % 5 === 0) {
@@ -990,6 +1279,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     if (!doneSent) {
                       try { connection.send(JSON.stringify(doneEvt)); } catch {}
                       this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                      this._storeLastResult(doneEvt);
                       doneSent = true;
                     }
                     done = true;
@@ -1011,6 +1301,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 doneSent = true;
                 // User message already saved before workflow started
                 this._appendConversationMessage("assistant", events[i].output || "", data.channel || "websocket");
+                this._storeLastResult(events[i]);
                 // Billing
                 if (this.env.HYPERDRIVE && events[i].cost_usd > 0) {
                   const { writeBillingRecord } = await import("./runtime/db");
@@ -1020,13 +1311,26 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     input_tokens: 0, output_tokens: 0,
                     cost_usd: events[i].cost_usd || 0, plan: "standard",
                     trace_id: events[i].trace_id || "",
-                  }).catch(() => {});
+                  }, this.env.AGENT_PROGRESS_KV).catch(() => {});
                 }
               }
               if (events[i].type === "error") done = true;
             }
             lastIdx = events.length;
-          } catch {}
+          } catch (kvErr) {
+            kvConsecutiveFailures++;
+            console.error("[ws-poll] KV read failed:", kvErr instanceof Error ? kvErr.message : kvErr);
+            if (kvConsecutiveFailures >= 3 && !kvDegradedNotified) {
+              try {
+                connection.send(JSON.stringify({
+                  type: "status",
+                  message: "Live updates temporarily unavailable, your request is still processing",
+                  ts: Date.now(),
+                }));
+              } catch {}
+              kvDegradedNotified = true;
+            }
+          }
 
           // Check Workflow status periodically (every 10th poll when we have KV data)
           // Only synthesize done if KV didn't already deliver it (prevents double-done)
@@ -1046,6 +1350,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   };
                   try { connection.send(JSON.stringify(doneEvt)); } catch {}
                   this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                  this._storeLastResult(doneEvt);
                   doneSent = true;
                 }
                 done = true;
@@ -1065,10 +1370,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           try { await (instance as any).cancel?.(); } catch {}
         }
 
-        // Clear run state
+        // Clear run state + SQLite tracking record
+        if (progressKey) this._untrackWorkflow(progressKey);
         this._activeRun = false;
         this._activeWorkflow = null;
       } catch (err) {
+        if (progressKey) this._untrackWorkflow(progressKey);
         this._activeRun = false;
         this._activeWorkflow = null;
         try { connection.send(JSON.stringify({ type: "error", message: String(err) })); } catch {}
@@ -1086,9 +1393,102 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       this._activeWorkflow.abortPoll = true;
       try { await (this._activeWorkflow.instance as any).terminate?.(); } catch {}
       try { await (this._activeWorkflow.instance as any).cancel?.(); } catch {}
+      // Clean up SQLite record for the active workflow
+      if (this._activeWorkflow.progressKey) {
+        try { this.sql`DELETE FROM active_workflows WHERE progress_key = ${this._activeWorkflow.progressKey}`; } catch {}
+      }
       this._activeWorkflow = null;
     }
     this._activeRun = false;
+  }
+
+  // ── Workflow SQLite tracking helpers ──────────────────────────────
+  // Persist workflow instance references so they survive DO restarts.
+
+  private _trackWorkflow(workflowInstanceId: string, progressKey: string, channel: string = "websocket") {
+    try {
+      this.sql`INSERT INTO active_workflows (workflow_instance_id, progress_key, channel)
+        VALUES (${workflowInstanceId}, ${progressKey}, ${channel})`;
+    } catch {}
+  }
+
+  private _untrackWorkflow(progressKey: string) {
+    try {
+      this.sql`DELETE FROM active_workflows WHERE progress_key = ${progressKey}`;
+    } catch {}
+  }
+
+  // ── Last result persistence for tab-close recovery ────────────────
+  // Store the done event in KV so a reconnecting client can retrieve it.
+  // TTL of 1 hour — after that, the result is only in conversation history.
+  private async _storeLastResult(doneEvt: Record<string, unknown>) {
+    if (!this.env.AGENT_PROGRESS_KV) return;
+    try {
+      const key = `last-result:${this.name}`;
+      await this.env.AGENT_PROGRESS_KV.put(key, JSON.stringify(doneEvt), { expirationTtl: 3600 });
+    } catch {}
+  }
+
+  // ── Orphaned Workflow Recovery ───────────────────────────────────
+  // Called from onStart() for each workflow that was in-flight when the DO restarted.
+  // Reconnects to the Workflow instance via .get(), polls to completion, and
+  // saves the result to conversation history. No WebSocket push (client is gone).
+
+  private async _recoverOrphanedWorkflow(rowId: number, workflowInstanceId: string, progressKey: string, channel: string) {
+    try {
+      const instance = await this.env.AGENT_RUN_WORKFLOW.get(workflowInstanceId);
+      const maxWait = 300_000; // 5 min max recovery wait
+      const start = Date.now();
+
+      while (Date.now() - start < maxWait) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const st = await instance.status();
+          if (st.status === "complete") {
+            const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+            // Save assistant response to conversation history
+            if (out?.output) {
+              this._appendConversationMessage("assistant", out.output, channel);
+            }
+            // Billing
+            if (this.env.HYPERDRIVE && out?.cost_usd && out.cost_usd > 0) {
+              try {
+                const { writeBillingRecord } = await import("./runtime/db");
+                await writeBillingRecord(this.env.HYPERDRIVE, {
+                  session_id: out.session_id || "", org_id: this.state.config.orgId || "",
+                  agent_name: this.state.config.agentName || "agentos", model: "workflow",
+                  input_tokens: 0, output_tokens: 0,
+                  cost_usd: out.cost_usd, plan: "standard",
+                  trace_id: out.trace_id || "",
+                }, this.env.AGENT_PROGRESS_KV).catch(() => {});
+              } catch {}
+            }
+            // Store result for tab-close recovery
+            this._storeLastResult({
+              type: "done", output: out?.output || "", session_id: out?.session_id || "",
+              trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
+              tool_calls: out?.tool_calls || 0, ts: Date.now(),
+            });
+            console.log(`[workflow-recovery] Recovered completed workflow ${workflowInstanceId}`);
+            break;
+          }
+          if (st.status === "errored" || st.status === "terminated") {
+            console.log(`[workflow-recovery] Workflow ${workflowInstanceId} ended with status: ${st.status}`);
+            break;
+          }
+          // Still running — keep polling
+        } catch {
+          // Instance may not exist anymore — bail
+          console.log(`[workflow-recovery] Could not reach workflow ${workflowInstanceId}, giving up`);
+          break;
+        }
+      }
+    } catch {
+      console.log(`[workflow-recovery] Failed to reconnect to workflow ${workflowInstanceId}`);
+    } finally {
+      // Always clean up the SQLite record
+      try { this.sql`DELETE FROM active_workflows WHERE id = ${rowId}`; } catch {}
+    }
   }
 
   // ── Email entrypoint ─────────────────────────────────────────────
@@ -1217,6 +1617,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
       const data = await request.json() as any;
       const inputText = String(data.input || "");
+
+      // Input size guard
+      if (new TextEncoder().encode(inputText).byteLength > MAX_INPUT_BYTES) {
+        return Response.json({ error: "Message too large. Please keep your message under 50 KB.", code: "INPUT_TOO_LARGE" }, { status: 413 });
+      }
+
       const agentName = data.agent_name || this.state.config.agentName || "agentos";
       await this._syncCheckpointFlagFromDb(agentName);
 
@@ -1233,7 +1639,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               code: "insufficient_credits",
             }, { status: 402 });
           }
-        } catch {} // Don't block on credit check failure
+        } catch (err) {
+          console.error("Credit check failed, denying run:", err);
+          return Response.json({
+            error: "Unable to verify credits. Please try again shortly.",
+            code: "credit_check_failed",
+          }, { status: 503 });
+        }
       }
 
       // ── Workflow path (durable, crash-safe) ──
@@ -1300,7 +1712,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 trace_id: result.trace_id || "",
                 billing_user_id: data.channel_user_id,
                 api_key_id: data.api_key_id,
-              }).catch(() => {});
+              }, this.env.AGENT_PROGRESS_KV).catch(() => {});
               writeSession(this.env.HYPERDRIVE, {
                 session_id: result.session_id || "", org_id: data.org_id || "",
                 project_id: data.project_id || "", agent_name: agentName,
@@ -1345,6 +1757,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
       const data = await request.json() as any;
       const inputText = String(data.input || "");
+
+      // Input size guard
+      if (new TextEncoder().encode(inputText).byteLength > MAX_INPUT_BYTES) {
+        return Response.json({ error: "Message too large. Please keep your message under 50 KB.", code: "INPUT_TOO_LARGE" }, { status: 413 });
+      }
+
       const agentName = data.agent_name || this.state.config.agentName || "agentos";
 
       // ── Workflow SSE path — trigger Workflow, stream progress from KV ──
@@ -1377,6 +1795,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               const maxWait = 300_000;
               const start = Date.now();
               let done = false;
+              let sseKvConsecutiveFailures = 0;
+              let sseKvDegradedNotified = false;
 
               let lastActivity = Date.now();
               while (!done && Date.now() - start < maxWait) {
@@ -1391,6 +1811,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 // Read events from KV
                 try {
                   const raw = await self.env.AGENT_PROGRESS_KV!.get(progressKey);
+                  sseKvConsecutiveFailures = 0; // reset on successful read
                   if (!raw) continue;
                   const events = JSON.parse(raw) as any[];
 
@@ -1418,7 +1839,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                             input_tokens: 0, output_tokens: 0,
                             cost_usd: costUsd, plan: "standard",
                             trace_id: evt.trace_id || "",
-                          })
+                          }, self.env.AGENT_PROGRESS_KV)
                         ).catch((err: any) => console.error("[sse-billing] writeBillingRecord failed:", err.message));
 
                         // Write session record (for observability / meta-agent)
@@ -1441,7 +1862,18 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     if (evt.type === "error") done = true;
                   }
                   lastEventIndex = events.length;
-                } catch { /* KV read failed, retry */ }
+                } catch (kvErr) {
+                  sseKvConsecutiveFailures++;
+                  console.error("[sse-poll] KV read failed:", kvErr instanceof Error ? kvErr.message : kvErr);
+                  if (sseKvConsecutiveFailures >= 3 && !sseKvDegradedNotified) {
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+                      type: "status",
+                      message: "Live updates temporarily unavailable, your request is still processing",
+                      ts: Date.now(),
+                    })}\n\n`));
+                    sseKvDegradedNotified = true;
+                  }
+                }
 
                 // Also check Workflow status
                 try {
@@ -1511,36 +1943,35 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     const agentName = url.searchParams.get("agent") || this.state.config.agentName || "agentos";
     const orgId = url.searchParams.get("org_id") || this.state.config.orgId || "";
 
-    // Use the DO's own webSocketMessage handler for messages
-    (server as any).__voiceAgent = agentName;
-    (server as any).__voiceOrgId = orgId;
-    (server as any).__voiceCallSid = "";
-    (server as any).__voiceProcessing = false;
+    // Persist voice session state via serializeAttachment (survives hibernation)
+    server.serializeAttachment({ voiceAgent: agentName, voiceOrgId: orgId, voiceCallSid: "", voiceProcessing: false });
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string): Promise<void> {
-    // Only handle voice relay messages (tagged WebSockets)
-    if (!(ws as any).__voiceAgent) return;
+    // Read hibernation-safe voice session state from attachment
+    const att = ws.deserializeAttachment() as { voiceAgent?: string; voiceOrgId?: string; voiceCallSid?: string; voiceProcessing?: boolean; __pk?: unknown } | null;
+    // Non-voice connections: delegate to SDK/partyserver bridge → onMessage
+    if (!att?.voiceAgent) return super.webSocketMessage(ws, message);
 
     let msg: any;
     try { msg = JSON.parse(message); } catch { return; }
 
-    const agentName = (ws as any).__voiceAgent;
-    const orgId = (ws as any).__voiceOrgId;
+    const agentName = att.voiceAgent;
+    const orgId = att.voiceOrgId || "";
 
     if (msg.type === "setup") {
-      (ws as any).__voiceCallSid = msg.callSid || "";
+      ws.serializeAttachment({ ...att, voiceCallSid: msg.callSid || "" });
       return;
     }
 
     if (msg.type === "prompt") {
       const userText = (msg.voicePrompt || "").trim();
-      if (!userText || (ws as any).__voiceProcessing) return;
+      if (!userText || att.voiceProcessing) return;
 
-      (ws as any).__voiceProcessing = true;
-      const callSid = (ws as any).__voiceCallSid;
+      ws.serializeAttachment({ ...att, voiceProcessing: true });
+      const callSid = att.voiceCallSid || "";
 
       try {
         const config = this.state.config;
@@ -1579,7 +2010,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     agent_name: agentName, model: "workflow",
                     input_tokens: 0, output_tokens: 0, cost_usd: voiceCost,
                     plan: "standard", trace_id: voiceResult.trace_id || "",
-                  });
+                  }, this.env.AGENT_PROGRESS_KV);
                   // Direct WS path must deduct (no control-plane in the loop)
                   const sql = await getDb(this.env.HYPERDRIVE);
                   if (voiceSessionId) {
@@ -1629,13 +2060,30 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           ws.send(JSON.stringify({ type: "text", token: "Sorry, something went wrong.", last: true }));
         } catch {}
       } finally {
-        (ws as any).__voiceProcessing = false;
+        const cur = ws.deserializeAttachment() as Record<string, unknown> | null;
+        ws.serializeAttachment({ ...cur, voiceProcessing: false });
       }
     }
 
     if (msg.type === "interrupt") {
-      (ws as any).__voiceProcessing = false;
+      const cur = ws.deserializeAttachment() as Record<string, unknown> | null;
+      ws.serializeAttachment({ ...cur, voiceProcessing: false });
     }
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
+    const att = ws.deserializeAttachment() as { voiceAgent?: string } | null;
+    if (!att?.voiceAgent) return super.webSocketClose(ws, code, reason, wasClean);
+    // Voice relay: just close
+    ws.close(code, reason);
+  }
+
+  async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
+    const att = ws.deserializeAttachment() as { voiceAgent?: string } | null;
+    if (!att?.voiceAgent) return super.webSocketError(ws, error);
+    // Voice relay: log and close
+    console.error("[AgentOSAgent] Voice WebSocket error:", error instanceof Error ? error.message : error);
+    ws.close(1011, "WebSocket error");
   }
 }
 
@@ -1734,7 +2182,7 @@ async function checkMissingPythonModulesInSandbox(
   modules: string[],
 ): Promise<string[]> {
   if (modules.length === 0) return [];
-  const sandbox = getSandbox(env.SANDBOX, sandboxId);
+  const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
   const payload = JSON.stringify(modules);
   const command = `python3 - <<'PY'
 import importlib
@@ -1834,18 +2282,28 @@ export class AgentOSMcpServer extends Agent<Env> {
    * Load agent configuration and tool definitions from Supabase.
    * The agent name is derived from this DO's name (set via idFromName).
    */
-  private async _loadAgentConfig(): Promise<void> {
+  private _orgId: string = "";
+
+  private async _loadAgentConfig(orgId?: string): Promise<void> {
+    if (orgId) this._orgId = orgId;
     if (!this.env.HYPERDRIVE) return;
     try {
       const { getDb } = await import("./runtime/db");
       const sql = await getDb(this.env.HYPERDRIVE);
       const agentName = this.name || "default";
+      const effectiveOrgId = orgId || this._orgId;
 
-      const rows = await sql`
-        SELECT config_json, name, description FROM agents
-        WHERE name = ${agentName} AND is_active = true
-        LIMIT 1
-      `;
+      const rows = effectiveOrgId
+        ? await sql`
+            SELECT config_json, name, description FROM agents
+            WHERE name = ${agentName} AND org_id = ${effectiveOrgId} AND is_active = true
+            LIMIT 1
+          `
+        : await sql`
+            SELECT config_json, name, description FROM agents
+            WHERE name = ${agentName} AND is_active = true
+            LIMIT 1
+          `;
       if (rows.length === 0) return;
 
       let config: Record<string, unknown> = {};
@@ -1927,6 +2385,11 @@ export class AgentOSMcpServer extends Agent<Env> {
   }
 
   async onRequest(request: Request): Promise<Response> {
+    // Extract org_id from query params for scoped agent lookups
+    const url = new URL(request.url);
+    const reqOrgId = url.searchParams.get("org_id") || "";
+    if (reqOrgId && !this._orgId) this._orgId = reqOrgId;
+
     // MCP JSON-RPC handler
     if (request.method === "POST") {
       const body = await request.json() as any;
@@ -1935,7 +2398,7 @@ export class AgentOSMcpServer extends Agent<Env> {
 
       if (method === "initialize") {
         // Reload config on each initialize to pick up changes
-        await this._loadAgentConfig();
+        await this._loadAgentConfig(reqOrgId || undefined);
         return Response.json({
           jsonrpc: "2.0", id,
           result: {
@@ -4765,7 +5228,7 @@ export default {
 
         if (language === "bash" && env.SANDBOX) {
           try {
-            const sandbox = getSandbox(env.SANDBOX, `cf-exec-${crypto.randomUUID().slice(0, 8)}`);
+            const sandbox = getTimedSandbox(env.SANDBOX, `cf-exec-${crypto.randomUUID().slice(0, 8)}`);
             const result = await sandbox.exec(code, { timeout: Math.ceil(timeout / 1000) });
             return Response.json({ stdout: result.stdout || "", stderr: result.stderr || "", exit_code: result.exitCode ?? 0 });
           } catch (err: any) {
@@ -5192,7 +5655,7 @@ export default {
               const command = args.command || "";
               const timeout = clampSandboxTimeoutSeconds(args.timeout_seconds);
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const execResult = await sandbox.exec(command, sandboxExecOptions(timeout));
               result = JSON.stringify({
                 stdout: execResult.stdout || "",
@@ -5248,7 +5711,7 @@ export default {
                 });
                 break;
               }
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               // Write code to temp file and execute (handles multiline, imports, etc.)
               const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
               await sandbox.writeFile(tmpFile, code);
@@ -5269,7 +5732,7 @@ export default {
             case "read-file": {
               const path = args.path || "";
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const execResult = await sandbox.exec(`cat -n "${path}" 2>&1 | head -2000`, { timeout: 10 });
               result = execResult.stdout || execResult.stderr || "File not found or empty";
               break;
@@ -5279,7 +5742,7 @@ export default {
               const path = args.path || "";
               const content = args.content || "";
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               await sandbox.writeFile(path, content);
               result = `Written ${content.length} bytes to ${path}`;
               break;
@@ -5290,7 +5753,7 @@ export default {
               const oldText = args.old_text || args.old_string || "";
               const newText = args.new_text || args.new_string || "";
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const readResult = await sandbox.exec(`cat "${path}"`, { timeout: 10 });
               const content = readResult.stdout || "";
               if (!content.includes(oldText)) {
@@ -5308,7 +5771,7 @@ export default {
               const path = args.path || ".";
               const maxResults = args.max_results || 20;
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const execResult = await sandbox.exec(
                 `grep -rn "${pattern.replace(/"/g, '\\"')}" "${path}" | head -${maxResults}`,
                 { timeout: 15 }
@@ -5321,7 +5784,7 @@ export default {
               const pattern = args.pattern || "*";
               const path = args.path || ".";
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const execResult = await sandbox.exec(
                 `find "${path}" -name "${pattern.replace(/"/g, '\\"')}" -type f | head -50`,
                 { timeout: 10 }
@@ -5334,7 +5797,7 @@ export default {
             case "sandbox_exec": {
               const command = args.command || "";
               const sandboxId = `session-${session_id || args.sandbox_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const execResult = await sandbox.exec(command, sandboxExecOptions(args.timeout || 30));
               result = JSON.stringify({
                 sandbox_id: sandboxId,
@@ -5347,7 +5810,7 @@ export default {
 
             case "sandbox_file_write": {
               const sandboxId = `session-${session_id || args.sandbox_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               await sandbox.writeFile(args.path || "/tmp/file", args.content || "");
               result = `Written to ${args.path}`;
               break;
@@ -5355,7 +5818,7 @@ export default {
 
             case "sandbox_file_read": {
               const sandboxId = `session-${session_id || args.sandbox_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const execResult = await sandbox.exec(`cat "${args.path || "/tmp/file"}"`, { timeout: 10 });
               result = execResult.stdout || "";
               break;
@@ -5377,7 +5840,7 @@ export default {
                 break;
               }
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               try {
                 // Tar the workspace
                 const tarResult = await sandbox.exec(
@@ -5429,7 +5892,7 @@ export default {
                 break;
               }
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               try {
                 const r2Key = version === "latest"
                   ? `workspaces/${orgId}/${projectId || "default"}/${agentName}/latest.tar.gz`
@@ -5571,7 +6034,7 @@ export default {
                     });
                     break;
                   }
-                  const sandbox = getSandbox(env.SANDBOX, sandboxId);
+                  const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
                   const tmpFile = `/tmp/exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.py`;
                   await sandbox.writeFile(tmpFile, code);
                   try {
@@ -5593,7 +6056,7 @@ export default {
               } else {
                 // bash/shell — use Sandbox
                 const sandboxId = `session-${session_id || "default"}`;
-                const sandbox = getSandbox(env.SANDBOX, sandboxId);
+                const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
                 const execResult = await sandbox.exec(code, sandboxExecOptions(Math.ceil(timeout / 1000)));
                 result = JSON.stringify({ stdout: execResult.stdout || "", stderr: execResult.stderr || "", exit_code: execResult.exitCode ?? 0 });
               }
@@ -5784,7 +6247,7 @@ export default {
               }
               try {
                 const sandboxId = `session-${session_id || "default"}`;
-                const sandbox = getSandbox(env.SANDBOX, sandboxId);
+                const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
                 const catResult = await sandbox.exec(`base64 "${audioPath}"`, { timeout: 10 });
                 if (catResult.exitCode !== 0) {
                   result = `Could not read audio file: ${catResult.stderr}`;
@@ -5805,7 +6268,7 @@ export default {
             case "todo": {
               const action = args.action || "list";
               const sandboxId = `session-${session_id || "default"}`;
-              const sandbox = getSandbox(env.SANDBOX, sandboxId);
+              const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
               const todoFile = "/tmp/todos.json";
               let todos: any[] = [];
               try {
@@ -6012,13 +6475,24 @@ export default {
     // e.g., support@agents.oneshots.co → agent "support"
     const toAddress = message.to;
     const agentName = toAddress.split("@")[0].toLowerCase().replace(/[^a-z0-9-]/g, "") || "default";
-    const orgId = ""; // Email routing doesn't carry org context — agent resolves from DB
 
-    console.log(`[email] Routing email from ${message.from} to agent "${agentName}"`);
+    // Look up org_id from the agents table to ensure cross-org isolation
+    let orgId = "";
+    try {
+      const { getDb } = await import("./runtime/db");
+      const sql = await getDb(env.HYPERDRIVE);
+      const rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} LIMIT 1`;
+      orgId = rows[0]?.org_id || "";
+    } catch {}
+
+    const orgPrefix = orgId ? `${orgId}-` : "";
+
+    console.log(`[email] Routing email from ${message.from} to agent "${agentName}" org="${orgId}"`);
 
     try {
-      // Get or create the agent DO instance
-      const agentId = env.AGENTOS_AGENT.idFromName(agentName);
+      // Get or create the agent DO instance — prefix with org_id to prevent cross-org collision
+      const doName = `${orgPrefix}${agentName}`;
+      const agentId = env.AGENTOS_AGENT.idFromName(doName);
       const agent = env.AGENTOS_AGENT.get(agentId);
 
       // Forward the email to the agent's onEmail handler
@@ -6042,5 +6516,15 @@ export default {
   async scheduled(_event: ScheduledEvent, _env: Env, _ctx: ExecutionContext): Promise<void> {
     const { pruneStaleBrowserSessions } = await import("./runtime/tools");
     pruneStaleBrowserSessions();
+
+    // Replay failed billing records from KV dead-letter queue
+    if (_env.AGENT_PROGRESS_KV && _env.HYPERDRIVE) {
+      try {
+        const { replayBillingDLQ } = await import("./runtime/db");
+        await replayBillingDLQ(_env.HYPERDRIVE, _env.AGENT_PROGRESS_KV);
+      } catch (err) {
+        console.error("[scheduled] billing DLQ replay failed:", err);
+      }
+    }
   },
 } satisfies ExportedHandler<Env>;
