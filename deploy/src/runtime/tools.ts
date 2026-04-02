@@ -1044,19 +1044,7 @@ async function dispatch(
         }
       }
 
-      // If code uses agentos bridge (tool access from Python), use the bridge executor
-      if (code.includes("agentos.") || code.includes("from agentos_bridge") || args.enable_tools) {
-        try {
-          const { pythonWithTools } = await import("./python-bridge");
-          const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
-          const r = await pythonWithTools(env, code, sessionId, sandbox, enabledTools);
-          return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exit_code, tool_calls: r.tool_calls });
-        } catch (err: any) {
-          return JSON.stringify({ stdout: "", stderr: `Python bridge error: ${err.message || err}`, exit_code: 1 });
-        }
-      }
-
-      // Standard Python execution (no tool access)
+      // Standard Python execution (no in-process tool bridge — use execute-code + /workspace files, then python-exec)
       try {
         const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
         const tmpFile = `/tmp/py_${Date.now()}.py`;
