@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
-import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, Sparkles, History, ChevronDown, X, FolderOpen } from "lucide-react";
+import { Bot, Trash2, Wifi, WifiOff, Settings2, Plus, Sparkles, History, ChevronDown, X, FolderOpen, Eye, FolderClosed } from "lucide-react";
 import { MetaAgentPanel } from "../components/MetaAgentPanel";
+import { ArtifactPreview } from "../components/ArtifactPreview";
+import { WorkspaceFiles } from "../components/WorkspaceFiles";
 import { ChatInterface, type WorkspaceProject } from "../components/ChatInterface";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -22,8 +24,9 @@ export default function MyAssistantPage() {
   const [agent, setAgent] = useState<AgentInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const { messages, streaming, sessionMeta, send, stop, clear, loadHistory, retry, setPlan } = useAgentStream();
-  const [metaOpen, setMetaOpen] = useState(false);
+  const [rightPanel, setRightPanel] = useState<'closed' | 'preview' | 'files' | 'meta'>('closed');
   const [activePlan, setActivePlan] = useState("standard");
+  // previewFile state reserved for future click-to-preview from WorkspaceFiles
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [sessions, setSessions] = useState<StoredSession[]>([]);
   const [projects, setProjects] = useState<WorkspaceProject[]>([]);
@@ -177,14 +180,33 @@ export default function MyAssistantPage() {
               </div>
             )}
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => setMetaOpen(true)}
-            title="Improve this assistant"
-          >
-            <Sparkles size={14} />
-          </Button>
+          {/* Panel toggles — hidden on mobile */}
+          <div className="hidden lg:flex items-center gap-1 border-l border-border pl-2 ml-1">
+            <Button
+              variant={rightPanel === 'preview' ? 'primary' : 'ghost'}
+              size="sm"
+              onClick={() => setRightPanel(rightPanel === 'preview' ? 'closed' : 'preview')}
+              title="Preview artifacts"
+            >
+              <Eye size={14} />
+            </Button>
+            <Button
+              variant={rightPanel === 'files' ? 'primary' : 'ghost'}
+              size="sm"
+              onClick={() => setRightPanel(rightPanel === 'files' ? 'closed' : 'files')}
+              title="Workspace files"
+            >
+              <FolderClosed size={14} />
+            </Button>
+            <Button
+              variant={rightPanel === 'meta' ? 'primary' : 'ghost'}
+              size="sm"
+              onClick={() => setRightPanel(rightPanel === 'meta' ? 'closed' : 'meta')}
+              title="Improve this assistant"
+            >
+              <Sparkles size={14} />
+            </Button>
+          </div>
           <Button
             variant="ghost"
             size="sm"
@@ -196,10 +218,10 @@ export default function MyAssistantPage() {
         </div>
       </div>
 
-      {/* Chat + Meta panel */}
+      {/* Chat + Right Panel */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Chat column — centered when alone, shifts left when meta is open */}
-        <div className={`flex-1 min-w-0 transition-all duration-300 ease-out ${metaOpen ? "" : "max-w-3xl mx-auto"}`}>
+        {/* Chat column */}
+        <div className={`flex-1 min-w-0 transition-all duration-300 ease-out ${rightPanel !== 'closed' ? "" : "max-w-3xl mx-auto"}`}>
           <ChatInterface
             messages={messages}
             onSend={handleSend}
@@ -223,10 +245,23 @@ export default function MyAssistantPage() {
           />
         </div>
 
-        {/* Meta panel — sits beside chat, gets real space */}
-        {metaOpen && (
-          <div className="w-[40%] min-w-[360px] shrink-0">
-            <MetaAgentPanel agentName={AGENT_NAME} open={metaOpen} onClose={() => setMetaOpen(false)} context="test" />
+        {/* Right panel — preview / files / meta */}
+        {rightPanel !== 'closed' && (
+          <div className="hidden lg:block w-[40%] min-w-[360px] shrink-0 border-l border-border">
+            {rightPanel === 'preview' && (
+              <ArtifactPreview messages={messages} />
+            )}
+            {rightPanel === 'files' && (
+              <WorkspaceFiles
+                messages={messages}
+                onOpenFile={() => {
+                  setRightPanel('preview');
+                }}
+              />
+            )}
+            {rightPanel === 'meta' && (
+              <MetaAgentPanel agentName={AGENT_NAME} open={true} onClose={() => setRightPanel('closed')} context="test" />
+            )}
           </div>
         )}
       </div>
