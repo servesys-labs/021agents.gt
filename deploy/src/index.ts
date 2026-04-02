@@ -896,12 +896,40 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         let done = false;
         const maxWait = 300_000;
         const pollStart = Date.now();
+        let pollCount = 0;
 
         while (!done && Date.now() - pollStart < maxWait && connection.readyState === 1) {
-          await new Promise(r => setTimeout(r, 500));
+          // Fast poll for first 30s (250ms), then slow down (1s)
+          const pollInterval = Date.now() - pollStart < 30_000 ? 250 : 1000;
+          await new Promise(r => setTimeout(r, pollInterval));
+          pollCount++;
+
           try {
             const raw = await this.env.AGENT_PROGRESS_KV.get(progressKey);
-            if (!raw) continue;
+            if (!raw) {
+              // No KV data yet — check Workflow status every 5th poll to detect completion/error
+              if (pollCount % 5 === 0) {
+                try {
+                  const st = await instance.status();
+                  if (st.status === "complete") {
+                    // Workflow finished but KV didn't get the done event — synthesize one
+                    const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                    const doneEvt = {
+                      type: "done", output: out?.output || "", session_id: out?.session_id || "",
+                      trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
+                      tool_calls: out?.tool_calls || 0, ts: Date.now(),
+                    };
+                    try { connection.send(JSON.stringify(doneEvt)); } catch {}
+                    this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                    done = true;
+                  } else if (st.status === "errored" || st.status === "terminated") {
+                    connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" }));
+                    done = true;
+                  }
+                } catch {}
+              }
+              continue;
+            }
             const events = JSON.parse(raw) as any[];
             for (let i = lastIdx; i < events.length; i++) {
               try { connection.send(JSON.stringify(events[i])); } catch { done = true; break; }
@@ -925,11 +953,23 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             }
             lastIdx = events.length;
           } catch {}
-          // Check Workflow status
-          if (!done) {
+
+          // Check Workflow status periodically (every 10th poll when we have KV data)
+          if (!done && pollCount % 10 === 0) {
             try {
               const st = await instance.status();
-              if (st.status === "errored" || st.status === "terminated") {
+              if (st.status === "complete" && lastIdx > 0) {
+                // KV has events but no done — the done event was lost. Synthesize it.
+                const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                const doneEvt = {
+                  type: "done", output: out?.output || "", session_id: out?.session_id || "",
+                  trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
+                  tool_calls: out?.tool_calls || 0, ts: Date.now(),
+                };
+                try { connection.send(JSON.stringify(doneEvt)); } catch {}
+                this._appendConversationMessage("assistant", doneEvt.output, data.channel || "websocket");
+                done = true;
+              } else if (st.status === "errored" || st.status === "terminated") {
                 connection.send(JSON.stringify({ type: "error", message: (st as any).error?.message || "Run failed" }));
                 done = true;
               }
