@@ -970,17 +970,13 @@ export function ChatInterface({
             );
           }
 
-          // Assistant message — with agent avatar
+          // Assistant message — clean, no box, content flows directly
           const isLastMsg = idx === messages.length - 1;
           const isStreaming = isLastMsg && streaming && msg.role === "assistant";
           return (
-            <div key={msg.id} className="animate-[fadeInUp_200ms_ease-out] group flex gap-2.5">
-              {/* Agent avatar */}
-              <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-primary/20 to-primary/5 border border-primary/10 flex items-center justify-center shrink-0 mt-0.5">
-                <Bot size={14} className="text-primary" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className={`px-4 py-3 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-surface border border-border/40 text-text ${PROSE_CLASSES} ${isStreaming ? "streaming-cursor" : ""}`}>
+            <div key={msg.id} className="animate-[fadeInUp_200ms_ease-out] group">
+              <div className="min-w-0">
+                <div className={`text-sm leading-relaxed text-text ${PROSE_CLASSES} ${isStreaming ? "streaming-cursor" : ""}`}>
                   <ReactMarkdown
                     remarkPlugins={[remarkGfm]}
                     components={{
@@ -997,13 +993,12 @@ export function ChatInterface({
                     }}
                   >{msg.content}</ReactMarkdown>
                 </div>
-                <div className="flex items-center gap-2 mt-1 px-1">
+                <div className="flex items-center gap-2 mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
                   <MessageActions msg={msg} onRetry={onRetry} />
                   {msg.turnInfo && (
                     <span className="text-[10px] text-text-muted ml-auto flex items-center gap-2">
                       <span className="px-1.5 py-0.5 rounded-full bg-surface-alt border border-border/40 font-medium">{formatModelName(msg.turnInfo.model)}</span>
                       <span>${msg.turnInfo.cost_usd.toFixed(4)}</span>
-                      <span>{msg.turnInfo.tokens.toLocaleString()} tok</span>
                     </span>
                   )}
                 </div>
