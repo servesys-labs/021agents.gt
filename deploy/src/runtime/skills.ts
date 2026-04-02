@@ -427,5 +427,509 @@ RULES:
 - If docs conflict with the codebase, trust the codebase.
 - Show code examples that match the project's style (imports, naming conventions, etc.).`,
   },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Research & Analysis Skills (adapted from Perplexity methodology)
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    name: "research",
+    description: "Deep research with iterative evidence gathering, source verification, and structured reporting. Use for any question requiring multi-source investigation.",
+    category: "research",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["web-search", "browse", "web-crawl", "http-request", "memory-save", "memory-recall", "python-exec", "write-file"],
+    prompt_template: `You are a world-class research expert. Your output should be of the quality expected from a $200,000+ professional consulting deliverable.
+
+## Research Protocol
+
+### Phase 1: Scope & Prior Knowledge
+- Check memory-recall for any prior findings on this topic
+- Define 3-5 specific research questions that must be answered
+- Identify what "good enough" evidence looks like
+
+### Phase 2: Evidence Gathering (iterate until complete)
+For each research question:
+1. Search with **recency-focused queries** (include current year: 2026)
+2. Prefer **primary sources**: official docs, published papers, government data, company filings
+3. For any statistics or claims, find the **original source** — not a blog citing a blog
+4. Cross-reference minimum 2 independent sources for key claims
+5. Browse full pages for critical sources — snippets miss context
+
+### Phase 3: Analysis & Synthesis
+- Clean and normalize data before drawing conclusions
+- Derive insights, don't just transform data — "what does this mean?"
+- Use inline tables and structured comparisons to reduce cognitive load
+- Call out **confidence levels**: High (multiple primary sources), Medium (single primary or multiple secondary), Low (limited evidence)
+- Flag gaps: explicitly state what you could NOT find
+
+### Phase 4: Deliverable
+Topic: {{ARGS}}
+
+OUTPUT FORMAT:
+- **Executive Summary** (3-5 sentences, key findings + recommendation)
+- **Detailed Findings** (organized by research question, with inline citations)
+- **Data & Comparisons** (tables, lists, structured data)
+- **Limitations & Gaps** (what wasn't available, confidence caveats)
+- **Sources** (numbered list of URLs with descriptive titles)
+
+RULES:
+- Every factual claim must have a source. No unsourced statistics.
+- Never fabricate URLs — only cite pages you actually retrieved.
+- If you find contradictory evidence, present both sides with your assessment.
+- Prefer recent data (2025-2026) over older data unless historical context is needed.`,
+  },
+
+  {
+    name: "report",
+    description: "Generate a structured markdown research report with citations, data visualizations, and executive summary.",
+    category: "research",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["web-search", "browse", "python-exec", "write-file", "read-file", "memory-recall"],
+    prompt_template: `Generate a comprehensive research report on: {{ARGS}}
+
+## Report Structure
+
+1. **Title** (H1) — descriptive, not clickbait
+2. **Executive Summary** — 3-5 sentences, key findings + implications
+3. **Body Sections** (H2/H3) — organized by theme, not by source
+4. **Analysis** — your synthesis, not just source summaries
+5. **Conclusion** — actionable takeaways
+
+## Citation Rules
+- Inline citations as markdown links: [Source Name](https://actual-url)
+- 1-3 citations per major claim
+- All URLs must be from pages you actually retrieved — never fabricate
+- No bare URLs in text — always descriptive anchor text
+
+## Data Visualization
+When data warrants it, generate charts with python-exec (matplotlib):
+- Line charts for trends over time
+- Bar charts for comparisons (horizontal for rankings)
+- Tables for structured comparisons
+
+## Length Calibration
+- Quick summary: 5-10 paragraphs
+- Standard report: 15-25 paragraphs
+- Deep analysis: 30-50+ paragraphs
+
+## Quality Rules
+- No first-person pronouns
+- State confidence levels for contested claims
+- Include a "Limitations" section
+- Write the report to a file: report-{topic-slug}.md`,
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Design & Visualization Skills
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    name: "design",
+    description: "Apply professional design foundations — color palettes, typography, data visualization rules, accessibility standards. Use when creating any visual output.",
+    category: "design",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["python-exec", "write-file", "read-file"],
+    prompt_template: `Apply these design foundations to: {{ARGS}}
+
+## Core Principles
+1. **Restraint** — 1 accent color + neutrals, 2 fonts max, 2-3 weights
+2. **Purpose** — every visual element must earn its place
+3. **Accessibility** — WCAG AA minimum (4.5:1 text contrast, 3:1 large text)
+
+## Color System (Light / Dark)
+| Role | Light | Dark |
+|------|-------|------|
+| Background | #FFFFFF | #131416 |
+| Surface | #F7F7F8 | #1E2022 |
+| Border | #E5E5E5 | rgba(255,255,255,0.08) |
+| Text Primary | #1A1A1A | #E8E8E6 |
+| Text Secondary | #6B6B67 | #9B9B97 |
+| Primary | #5B6AF0 | #6B8AFD |
+| Error | #DC3545 | #F87171 |
+| Success | #059669 | #34D399 |
+
+## Chart Color Sequence (data visualization)
+\`["#20808D", "#A84B2F", "#3B7FC4", "#7B5EA7", "#C4853B", "#4EA87B", "#C44B6B", "#6B8A3B"]\`
+
+## Chart Selection
+- Trend over time → Line chart
+- Category comparison → Vertical bar
+- Ranking → Horizontal bar (sorted)
+- Part of whole → Stacked bar (NOT pie charts)
+- Distribution → Histogram
+- Correlation → Scatter plot
+
+## Typography Rules
+- Body: 16px, line-height 1.5-1.6, max 75 chars/line
+- Headings: Bold weight of same family, or complementary display font
+- Never use: Papyrus, Comic Sans, Lobster, Impact
+- Avoid as primary: Roboto, Arial, Helvetica, Open Sans (overused)
+
+## Data Viz Rules
+- Title states the INSIGHT, not the metric ("Revenue doubled in Q3" not "Revenue by Quarter")
+- Highlight the story: bright accent for key data, grey for context
+- Always sort bar charts by value
+- Bar charts MUST start at zero
+- Include units in axis labels
+- Use \`format_number()\` for K/M/B abbreviations`,
+  },
+
+  {
+    name: "chart",
+    description: "Generate publication-quality data visualizations with matplotlib/seaborn. Provide data and chart type.",
+    category: "visualization",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["python-exec", "write-file", "read-file"],
+    prompt_template: `Create a data visualization: {{ARGS}}
+
+## Python Setup
+\`\`\`python
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+# Professional defaults
+plt.rcParams.update({
+    "figure.figsize": (10, 6),
+    "figure.dpi": 150,
+    "font.family": "sans-serif",
+    "font.size": 11,
+    "axes.titlesize": 14,
+    "axes.titleweight": "bold",
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "legend.frameon": False,
+})
+
+PALETTE = ["#20808D", "#A84B2F", "#3B7FC4", "#7B5EA7", "#C4853B", "#4EA87B", "#C44B6B", "#6B8A3B"]
+
+def format_number(n, prefix="", suffix="", decimals=1):
+    """Format large numbers: 1200 → '1.2K', 1500000 → '1.5M'"""
+    for unit, threshold in [("B", 1e9), ("M", 1e6), ("K", 1e3)]:
+        if abs(n) >= threshold:
+            return f"{prefix}{n/threshold:.{decimals}f}{unit}{suffix}"
+    return f"{prefix}{n:.{decimals}f}{suffix}"
+\`\`\`
+
+## Design Rules
+1. Title states the INSIGHT ("Revenue doubled in Q3"), not just the metric
+2. Highlight the story: use bright accent for key data point, grey (#BBBBBB) for everything else
+3. Sort bar charts by value (largest first for horizontal)
+4. Bar charts start at zero — NEVER truncate y-axis
+5. Save as PNG: \`plt.savefig("chart.png", bbox_inches="tight", facecolor="white")\`
+6. For accessibility: use \`sns.color_palette("colorblind")\` when >3 categories
+
+## Visual QA (run BEFORE sharing any chart)
+After saving the chart, verify:
+- Text is not clipped or overlapping (check long labels, rotated text)
+- Legend doesn't overlap data
+- All axis labels are readable (font size >= 10)
+- Colors have sufficient contrast against background
+- Number formatting is consistent (all K, all M, not mixed)
+
+## Chart Type Guide
+- Time series → Line (markers optional for <15 points)
+- Category comparison → Vertical bar
+- Ranking → Horizontal bar (sorted desc)
+- Part of whole → Stacked bar (NOT pie)
+- Distribution → Histogram or KDE
+- Correlation → Scatter with optional regression line`,
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Document & Office Skills
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    name: "pdf",
+    description: "Create, read, extract, or fill PDF documents. Supports text extraction, table extraction, PDF generation, and form filling.",
+    category: "office",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["python-exec", "bash", "read-file", "write-file"],
+    prompt_template: `PDF task: {{ARGS}}
+
+## Tool Selection Matrix
+
+| Task | Library | Install |
+|------|---------|---------|
+| Create PDF | reportlab | \`pip install reportlab\` |
+| Read/merge/split | pypdf | \`pip install pypdf\` |
+| Extract text/tables | pdfplumber | \`pip install pdfplumber\` |
+| Render pages to PNG | pypdfium2 | \`pip install pypdfium2\` |
+| OCR scanned PDFs | pytesseract + pdf2image | \`pip install pytesseract pdf2image\` |
+
+## PDF Creation with ReportLab
+\`\`\`python
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import letter
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+
+doc = SimpleDocTemplate("output.pdf", pagesize=letter,
+    topMargin=0.75*inch, bottomMargin=0.75*inch,
+    leftMargin=1*inch, rightMargin=1*inch)
+styles = getSampleStyleSheet()
+story = []
+# Build content with Paragraph, Table, Spacer elements
+doc.build(story)
+\`\`\`
+
+## Text/Table Extraction with pdfplumber
+\`\`\`python
+import pdfplumber
+with pdfplumber.open("input.pdf") as pdf:
+    for page in pdf.pages:
+        text = page.extract_text()
+        tables = page.extract_tables()
+\`\`\`
+
+## Rules
+- Install libraries first: \`pip install reportlab pdfplumber pypdf\`
+- All metadata: set title, author (user's name or org)
+- Source citations: numbered footnotes with clickable URLs
+- Never use Unicode superscript chars in ReportLab (render as black boxes)
+- All hyperlinks must be clickable
+- For scanned PDFs: OCR with pytesseract at 300 DPI as fallback
+
+## Visual QA (run BEFORE sharing any PDF)
+After generating the PDF, verify:
+- Check page count matches expectation
+- Check file size is reasonable (< 10MB for text docs)
+- Extract first page text with pdfplumber to verify content rendered
+- For multi-page: spot-check a middle page for layout consistency
+- For forms: verify field names match expected values`,
+  },
+
+  {
+    name: "spreadsheet",
+    description: "Create or analyze Excel spreadsheets with formulas, formatting, charts, and data analysis.",
+    category: "office",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["python-exec", "bash", "read-file", "write-file"],
+    prompt_template: `Spreadsheet task: {{ARGS}}
+
+## Setup
+\`\`\`python
+pip install openpyxl pandas
+\`\`\`
+
+## Core Rules
+1. **Zero formula errors** — every deliverable must have zero #REF!, #DIV/0!, #NAME?, #VALUE!, #NULL!, #N/A
+2. **Formulas over hardcoded values** — every derived cell must be a formula, not a pasted number
+3. **Never use \`data_only=True\`** when reading — it destroys all formulas
+4. **openpyxl uses 1-based indexing** — row 1 / column A = (1, 1)
+
+## Layout Standards
+- Content starts at B2 (Row 1 and Column A are empty spacers)
+- Column A width = 3 (gutter)
+- Row 1 height = small (spacer)
+- Freeze panes at B2 for header row + label column
+- Use Excel Table objects (\`worksheet.add_table()\`) for structured data
+
+## Formatting
+- Headers: Bold, dark background (#2D3748), white text, center-aligned
+- Numbers: Right-aligned with appropriate format (\`#,##0\`, \`$#,##0.00\`, \`0.0%\`)
+- Dates: \`YYYY-MM-DD\` format
+- Years: Format as TEXT to prevent Excel treating them as numbers
+- Negatives: Parentheses style \`(1,234)\` for financial data
+- Zeros: Display as "—" via number format \`#,##0;(#,##0);"—"\`
+
+## Conditional Formatting
+Always use rule-based formatting, never static PatternFill:
+\`\`\`python
+from openpyxl.formatting.rule import CellIsRule
+ws.conditional_formatting.add("B2:B100",
+    CellIsRule(operator="greaterThan", formula=["0"],
+              fill=PatternFill(bgColor="C6EFCE")))
+\`\`\`
+
+## Financial Model Color Coding
+- Blue (#0000FF): Input/assumption cells
+- Black: Formula cells
+- Green (#008000): Cross-sheet references
+- Red (#FF0000): External data links`,
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Code & Data Analysis Skills
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    name: "analyze",
+    description: "Analyze data from files, APIs, or databases. Clean, transform, visualize, and derive insights.",
+    category: "data",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["python-exec", "bash", "read-file", "write-file", "web-search", "http-request"],
+    prompt_template: `Data analysis task: {{ARGS}}
+
+## Protocol
+
+### Phase 1: Data Ingestion
+- Load the data (CSV, JSON, Excel, API, database)
+- Display shape, dtypes, first 5 rows, null counts
+- Identify the grain (what does each row represent?)
+
+### Phase 2: Cleaning & Validation
+- Handle missing values (document strategy: drop, fill, interpolate)
+- Check for duplicates, outliers, inconsistent formats
+- Normalize column names (snake_case, no spaces)
+- Parse dates, standardize categories, fix data types
+
+### Phase 3: Exploration & Analysis
+- Summary statistics for numerical columns
+- Value counts for categorical columns
+- Key relationships and correlations
+- Group-by aggregations relevant to the question
+
+### Phase 4: Visualization
+- Generate 2-4 charts that tell the story (see /chart skill for standards)
+- Each chart title states the INSIGHT, not just the metric
+
+### Phase 5: Findings
+Present findings as:
+- **Key Insight** (1-2 sentences, the headline)
+- **Supporting Evidence** (data points, with exact numbers)
+- **Caveats** (sample size, missing data, assumptions)
+- **Recommendations** (actionable next steps)
+
+RULES:
+- Always show your data at each step (don't just describe — print actual values)
+- Derive insights, don't just transform — "what does this MEAN?"
+- If data quality is poor, say so explicitly before proceeding
+- Save charts as PNG files and reference them in your response`,
+  },
+
+  // ═══════════════════════════════════════════════════════════════
+  // Website & App Building Skills
+  // ═══════════════════════════════════════════════════════════════
+
+  {
+    name: "website",
+    description: "Build a complete website or web app — design, code, and test. Covers landing pages, portfolios, web apps, and browser games.",
+    category: "development",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["bash", "read-file", "write-file", "edit-file", "grep", "glob", "web-search", "python-exec"],
+    prompt_template: `Build a website: {{ARGS}}
+
+## Workflow
+
+### Step 1: Design Direction
+- Infer visual direction from the subject/purpose (don't ask — decide)
+- Choose color palette: 1 primary + 1 accent + neutrals
+- Choose typography: 1 heading font + 1 body font (Google Fonts CDN)
+- Generate an inline SVG logo (geometric, minimal, single-color)
+
+### Step 2: Setup
+\`\`\`bash
+mkdir -p project && cd project
+npm init -y
+npm install vite @vitejs/plugin-react react react-dom tailwindcss @tailwindcss/vite
+\`\`\`
+
+### Step 3: Build
+- **Stack**: Vite + React + Tailwind CSS (or plain HTML/CSS for simple sites)
+- **Type scale**: Hero 32-128px, Page Title 24-36px, Body 16px, Nav 14-16px, Meta 12-14px
+- **Responsive**: Mobile-first, test at 375px / 768px / 1440px
+- **Performance targets**: LCP < 1.5s, page weight < 800KB
+- **SEO**: Semantic HTML, one H1 per page, meta description, Open Graph tags
+- **Accessibility**: Reading order = visual order, lang attribute, alt text on images
+
+### Step 4: Multi-page Layout
+For editorial/informational sites:
+- Asymmetric two-column, feature grid, sidebar + main
+- Pull quotes, photo grids, full-bleed sections for visual rhythm
+- Mobile: stack to single column, maintain hierarchy
+
+### Step 5: Test & Polish
+- Check all links work
+- Verify responsive at 3 breakpoints
+- Run \`npx vite build\` to verify clean production build
+
+RULES:
+- Every site gets a favicon (inline SVG converted to ICO or use emoji)
+- No placeholder text — write real copy relevant to the subject
+- Images: use Unsplash/Pexels URLs for stock, generate SVG illustrations for icons
+- Dark mode: include if the site's audience expects it (tech, developer, creative)
+
+## Anti-AI-Slop Checklist (mandatory)
+Reject these patterns — they instantly mark output as AI-generated:
+- NO gradient backgrounds on shapes or sections
+- NO colored side borders on cards (the AI hallmark)
+- NO accent lines or decorative bars under headings
+- NO decorative icons unless the user explicitly asked for them
+- NO generic filler phrases ("Empowering your journey", "Unlock your potential", "Seamless experience")
+- NO more than 1 accent color — "earn every color" (each non-neutral must answer: what does this help the viewer understand?)
+- NO pure white (#fff) or pure black (#000) — use warm neutrals (e.g., #F7F6F2 bg, #28251D text)
+- NO overused fonts: Roboto, Arial, Poppins, Montserrat, Open Sans, Lato on web projects`,
+  },
+
+  {
+    name: "game",
+    description: "Build a browser game — 2D Canvas or 3D WebGL with Three.js. Covers game loop, physics, input, audio, and deployment.",
+    category: "development",
+    version: "1.0.0",
+    enabled: true,
+    allowed_tools: ["bash", "read-file", "write-file", "edit-file", "grep", "glob", "web-search", "python-exec"],
+    prompt_template: `Build a browser game: {{ARGS}}
+
+## Architecture Decision
+
+### 2D Game (Canvas API)
+- Use for: platformers, puzzle games, card games, retro-style games
+- Stack: HTML5 Canvas, vanilla JS or lightweight framework
+- Game loop: \`requestAnimationFrame\` with fixed timestep (1/60s)
+- Physics: AABB/circle collision, spatial partitioning for many entities
+
+### 3D Game (Three.js + WebGL 2)
+- Use for: 3D environments, racing, FPS, exploration games
+- Stack: Three.js, Rapier physics (via CDN), Zustand for UI state
+- Assets from CDN: Poly Pizza, Kenney, Quaternius (all CC0)
+- Performance: InstancedMesh, LOD, frustum culling, cap DPR at 2
+
+## Core Patterns (both 2D and 3D)
+\`\`\`javascript
+// Fixed timestep game loop
+const TICK_RATE = 1/60;
+let accumulator = 0;
+function gameLoop(timestamp) {
+  const dt = (timestamp - lastTime) / 1000;
+  lastTime = timestamp;
+  accumulator += dt;
+  while (accumulator >= TICK_RATE) {
+    update(TICK_RATE);
+    accumulator -= TICK_RATE;
+  }
+  render();
+  requestAnimationFrame(gameLoop);
+}
+\`\`\`
+
+## Required Features
+1. **Title screen** with start button
+2. **HUD**: Score, lives/health, timer (if applicable)
+3. **Game over screen** with score + restart
+4. **Sound effects**: Web Audio API for interactions (jump, collect, hit, win)
+5. **Music**: Background loop (royalty-free: freesound.org, opengameart.org)
+6. **Debug overlay**: FPS, frame time, entity count (toggle with backtick key)
+
+## Quality Targets
+- 55+ FPS average, 30+ FPS 1% low
+- Draw calls < 200 (3D)
+- Stable memory (no leaks in entity pools)
+- All inputs responsive (keyboard, mouse, touch)
+
+Build with \`npx vite\` for dev, \`npx vite build\` for production.`,
+  },
 ];
 
