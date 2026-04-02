@@ -15,10 +15,12 @@
     "bash",
     "read-file",
     "write-file",
+    "edit-file",
     "memory-save",
-    "memory-recall"
+    "memory-recall",
+    "execute-code"
   ],
-  "tools_note": "Lean core set (8 tools). The runtime discovers 100+ additional tools on demand via progressive tool discovery. This saves ~3000 tokens per turn vs the old 26-tool list.",
+  "tools_note": "Core set (10 tools). execute-code enables agentic JS in sandboxed V8 with tool access via RPC — the agent can write code that calls other tools programmatically. The runtime discovers 100+ additional tools on demand via progressive tool discovery.",
   "memory": {
     "working": { "max_items": 200 },
     "episodic": { "max_episodes": 50000, "ttl_days": 365 },
