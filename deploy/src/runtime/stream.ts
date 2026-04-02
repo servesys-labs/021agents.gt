@@ -170,6 +170,9 @@ async function streamLLM(
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
+    // AI Gateway caching: identical streaming requests within TTL served from cache.
+    // Note: streaming responses may not be cacheable on all providers.
+    "cf-aig-cache-ttl": "300",
   };
   // Auth: Workers AI uses CF account token, OpenRouter uses OR API key
   if (isWorkersAI) {
