@@ -13,6 +13,11 @@ export interface Skill {
   enabled: boolean;
   version: string;
   category: string;
+  /** Minimum plan required to run this skill in the main agent context.
+   *  If the user's plan is below this, auto-delegate to delegate_agent. */
+  min_plan?: "basic" | "standard" | "premium";
+  /** Skill agent to delegate to when the user's plan is below min_plan. */
+  delegate_agent?: string;
 }
 
 const skillCache = new Map<string, { skills: Skill[]; expiresAt: number }>();
@@ -72,14 +77,22 @@ export async function loadSkills(
 /**
  * Format skills as a system prompt section.
  */
-export function formatSkillsPrompt(skills: Skill[]): string {
+export function formatSkillsPrompt(skills: Skill[], plan?: string): string {
   const all = [...BUILTIN_SKILLS, ...skills];
   if (all.length === 0) return "";
+
+  const planTier = (plan || "standard").toLowerCase();
+  const planRank: Record<string, number> = { basic: 0, standard: 1, premium: 2 };
+  const userRank = planRank[planTier] ?? 1;
 
   const lines = ["", "## Available Skills", "When the user's request matches a skill trigger, activate it by following the skill's instructions.", ""];
   for (const s of all) {
     lines.push(`### /${s.name}`);
     if (s.description) lines.push(s.description);
+    // If user's plan is below the skill's minimum, add delegation note
+    if (s.min_plan && s.delegate_agent && userRank < (planRank[s.min_plan] ?? 1)) {
+      lines.push(`> **Note:** This skill requires ${s.min_plan}+ plan for best results. On your current plan, auto-delegate to the \`${s.delegate_agent}\` skill agent via \`run-agent\` for higher quality output.`);
+    }
     lines.push("");
   }
   return lines.join("\n");
@@ -438,6 +451,8 @@ RULES:
     category: "research",
     version: "1.0.0",
     enabled: true,
+    min_plan: "standard",
+    delegate_agent: "research-analyst",
     allowed_tools: ["web-search", "browse", "web-crawl", "http-request", "memory-save", "memory-recall", "python-exec", "write-file"],
     prompt_template: `You are a world-class research expert. Your output should be of the quality expected from a $200,000+ professional consulting deliverable.
 
@@ -486,6 +501,8 @@ RULES:
     category: "research",
     version: "1.0.0",
     enabled: true,
+    min_plan: "standard",
+    delegate_agent: "research-analyst",
     allowed_tools: ["web-search", "browse", "python-exec", "write-file", "read-file", "memory-recall"],
     prompt_template: `Generate a comprehensive research report on: {{ARGS}}
 
@@ -582,6 +599,8 @@ When data warrants it, generate charts with python-exec (matplotlib):
     description: "Generate publication-quality data visualizations with matplotlib/seaborn. Provide data and chart type.",
     category: "visualization",
     version: "1.0.0",
+    min_plan: "standard",
+    delegate_agent: "data-analyst",
     enabled: true,
     allowed_tools: ["python-exec", "write-file", "read-file"],
     prompt_template: `Create a data visualization: {{ARGS}}
@@ -652,6 +671,8 @@ After saving the chart, verify:
     category: "office",
     version: "1.0.0",
     enabled: true,
+    min_plan: "standard",
+    delegate_agent: "pdf-specialist",
     allowed_tools: ["python-exec", "bash", "read-file", "write-file"],
     prompt_template: `PDF task: {{ARGS}}
 
@@ -714,6 +735,8 @@ After generating the PDF, verify:
     category: "office",
     version: "1.0.0",
     enabled: true,
+    min_plan: "standard",
+    delegate_agent: "data-analyst",
     allowed_tools: ["python-exec", "bash", "read-file", "write-file"],
     prompt_template: `Spreadsheet task: {{ARGS}}
 
@@ -769,6 +792,8 @@ ws.conditional_formatting.add("B2:B100",
     category: "data",
     version: "1.0.0",
     enabled: true,
+    min_plan: "standard",
+    delegate_agent: "data-analyst",
     allowed_tools: ["python-exec", "bash", "read-file", "write-file", "web-search", "http-request"],
     prompt_template: `Data analysis task: {{ARGS}}
 
