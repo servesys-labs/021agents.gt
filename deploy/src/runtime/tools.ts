@@ -16,6 +16,7 @@ import { writeToMailbox } from "./mailbox";
 import { ToolError, CircuitBreakerError, classifyFetchError } from "./errors";
 import { createChildAbortController, createSiblingGroup } from "./abort";
 import { parseJsonColumn } from "./parse-json-column";
+import { uint8ArrayToBase64 } from "./binary-enc";
 
 const MAX_SANDBOX_TIMEOUT_SECONDS = 300; // 5 min — npm install/build on basic instance needs time
 const DEFAULT_SANDBOX_TIMEOUT_SECONDS = 30;
@@ -28,6 +29,81 @@ function fetchWithTimeout(url: string | URL, init?: RequestInit, timeoutMs = TOO
   return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer));
 }
 const DEFAULT_SANDBOX_MEMORY_LIMIT_MB = 512;
+
+// ── Browser session reuse (per Worker isolate, keyed by workflow/session id) ──
+const BROWSER_IDLE_MS = 120_000;
+const BROWSER_POOL_MAX = 32;
+type PooledBrowser = { browser: any; lastUsed: number };
+const browserPool = new Map<string, PooledBrowser>();
+const browserOpChains = new Map<string, Promise<unknown>>();
+
+function pruneBrowserPoolIfNeeded(): void {
+  if (browserPool.size <= BROWSER_POOL_MAX) return;
+  const entries = [...browserPool.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed);
+  const victim = entries[0];
+  if (victim) {
+    const [key, v] = victim;
+    browserPool.delete(key);
+    void v.browser?.close?.().catch(() => {});
+  }
+}
+
+async function getPooledBrowser(env: RuntimeEnv, sessionKey: string): Promise<any> {
+  const now = Date.now();
+  const hit = browserPool.get(sessionKey);
+  if (hit?.browser && now - hit.lastUsed < BROWSER_IDLE_MS) {
+    hit.lastUsed = now;
+    return hit.browser;
+  }
+  if (hit?.browser) {
+    try {
+      await hit.browser.close();
+    } catch {}
+    browserPool.delete(sessionKey);
+  }
+  pruneBrowserPoolIfNeeded();
+  const puppeteer = await import("@cloudflare/puppeteer");
+  const browser = await puppeteer.default.launch(env.BROWSER);
+  browserPool.set(sessionKey, { browser, lastUsed: now });
+  return browser;
+}
+
+/** Close pooled browser for a session (workflow cleanup). */
+export function evictBrowserPoolEntry(sessionKey: string): void {
+  const hit = browserPool.get(sessionKey);
+  if (!hit) return;
+  browserPool.delete(sessionKey);
+  void hit.browser?.close?.().catch(() => {});
+}
+
+/** Drop idle browsers (cron / scheduled). */
+export function pruneStaleBrowserSessions(): void {
+  const now = Date.now();
+  for (const [key, v] of [...browserPool.entries()]) {
+    if (now - v.lastUsed > BROWSER_IDLE_MS) {
+      browserPool.delete(key);
+      void v.browser?.close?.().catch(() => {});
+    }
+  }
+}
+
+/** Serialize Puppeteer use per session to avoid races on shared browser. */
+function runBrowserSerialized<T>(sessionKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = browserOpChains.get(sessionKey) || Promise.resolve();
+  const run = prev.then(() => fn());
+  browserOpChains.set(
+    sessionKey,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
+function browserSessionKey(env: RuntimeEnv | undefined, sessionId: string | undefined): string {
+  return String(env?.DO_SESSION_ID || sessionId || "anon");
+}
 
 /* ── Per-session tool rate limiter (bounded, LRU eviction) ────── */
 const RATE_LIMIT_MAX_ENTRIES = 2000;
@@ -902,7 +978,7 @@ async function dispatch(
       return perplexitySearch(env, args);
 
     case "browse":
-      return browse(args, env);
+      return browse(args, env, sessionId);
 
     case "http-request":
       return httpRequest(args);
@@ -1377,7 +1453,7 @@ async function dispatch(
       return webCrawl(env, args);
 
     case "browser-render":
-      return browserRender(env, args);
+      return browserRender(env, args, sessionId);
 
     case "marketplace-search": {
       // Search the agent marketplace for agents that can help with a task
@@ -3994,29 +4070,30 @@ async function userProfileLoad(env: RuntimeEnv, args: Record<string, any>): Prom
 
 // ── Browse (simple HTTP fetch) ────────────────────────────────
 
-async function browse(args: Record<string, any>, env?: RuntimeEnv): Promise<string> {
+async function browse(args: Record<string, any>, env?: RuntimeEnv, sessionId?: string): Promise<string> {
   const urlCheck = validateUrl(args.url || "");
   if (!urlCheck.valid) return `Error: ${urlCheck.reason}`;
 
   // Use Puppeteer Browser binding for full JS-rendered pages (headless Chrome on CF edge)
   if (env?.BROWSER) {
-    let browser: any;
+    const sk = browserSessionKey(env, sessionId);
     try {
-      const puppeteer = await import("@cloudflare/puppeteer");
-      browser = await puppeteer.default.launch(env.BROWSER);
-      const page = await browser.newPage();
-      await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
-      if (args.wait_for) {
-        try { await page.waitForSelector(args.wait_for, { timeout: 5000 }); } catch {}
-      }
-      // page.evaluate runs in browser context — use Function to avoid TS DOM type errors
-      const text = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
-      return text.trim().slice(0, 10000) || "Empty page";
+      return await runBrowserSerialized(sk, async () => {
+        const browser = await getPooledBrowser(env, sk);
+        const page = await browser.newPage();
+        try {
+          await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
+          if (args.wait_for) {
+            try { await page.waitForSelector(args.wait_for, { timeout: 5000 }); } catch {}
+          }
+          const text = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
+          return text.trim().slice(0, 10000) || "Empty page";
+        } finally {
+          try { await page.close(); } catch {}
+        }
+      });
     } catch (err: any) {
-      // Fall through to simple fetch if Puppeteer fails
       console.error(`[browse] Puppeteer failed, falling back to fetch: ${err.message?.slice(0, 100)}`);
-    } finally {
-      try { await browser?.close(); } catch {}
     }
   }
 
@@ -4544,17 +4621,23 @@ async function dynamicExec(env: RuntimeEnv, args: Record<string, any>, sessionId
 async function webCrawl(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const brBase = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/browser-rendering`;
   const brAuth = { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" };
-  const startResp = await fetch(`${brBase}/crawl`, {
-    method: "POST",
-    headers: brAuth,
-    body: JSON.stringify({
-      url: args.url || "",
-      limit: args.max_pages || 10,
-      depth: args.max_depth || 2,
-      formats: ["markdown"],
-      render: true,
-    }),
-  });
+  const crawlTimeout = Math.min(120_000, Math.max(30_000, Number(args.crawl_start_timeout_ms || 60_000)));
+  const pollTimeout = 45_000;
+  const startResp = await fetchWithTimeout(
+    `${brBase}/crawl`,
+    {
+      method: "POST",
+      headers: brAuth,
+      body: JSON.stringify({
+        url: args.url || "",
+        limit: args.max_pages || 10,
+        depth: args.max_depth || 2,
+        formats: ["markdown"],
+        render: true,
+      }),
+    },
+    crawlTimeout,
+  );
   const startData = (await startResp.json()) as any;
   const jobId = startData.result;
   if (!jobId) return JSON.stringify(startData);
@@ -4563,62 +4646,59 @@ async function webCrawl(env: RuntimeEnv, args: Record<string, any>): Promise<str
   const startedAt = Date.now();
   while (Date.now() - startedAt < maxWaitMs) {
     await new Promise((r) => setTimeout(r, pollIntervalMs));
-    const pollResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
+    const pollResp = await fetchWithTimeout(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth }, pollTimeout);
     const pollData = (await pollResp.json()) as any;
     const status = pollData.result?.status;
     if (status === "completed" || status === "errored" || status?.startsWith("cancelled")) {
       return JSON.stringify(pollData);
     }
   }
-  const finalResp = await fetch(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth });
+  const finalResp = await fetchWithTimeout(`${brBase}/crawl/${jobId}?limit=100`, { headers: brAuth }, pollTimeout);
   return JSON.stringify(await finalResp.json());
 }
 
 // ── Browser Render (CF Browser Rendering) ────────────────────
 
-async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+async function browserRender(env: RuntimeEnv, args: Record<string, any>, sessionId?: string): Promise<string> {
+  const sk = browserSessionKey(env, sessionId);
   // Use Puppeteer Browser binding (headless Chrome on CF edge) when available
   if (env.BROWSER) {
-    let browser: any;
     try {
-      const puppeteer = await import("@cloudflare/puppeteer");
-      browser = await puppeteer.default.launch(env.BROWSER);
-      const page = await browser.newPage();
-      await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
-      if (args.wait_for) {
-        try { await page.waitForSelector(args.wait_for, { timeout: 5000 }); } catch {}
-      }
-      const action = args.action || "markdown";
-      let result: string;
-      if (action === "screenshot") {
-        // Cap screenshot to 1MB to avoid stack overflow in btoa
-        const buf = await page.screenshot({ fullPage: true });
-        const bytes = new Uint8Array(buf as unknown as ArrayBuffer);
-        if (bytes.byteLength > 1_000_000) {
-          result = JSON.stringify({ error: "Screenshot too large", size: bytes.byteLength, url: args.url });
-        } else {
-          const chunks: string[] = [];
-          for (let i = 0; i < bytes.length; i += 8192) {
-            chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+      return await runBrowserSerialized(sk, async () => {
+        const browser = await getPooledBrowser(env, sk);
+        const page = await browser.newPage();
+        try {
+          await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
+          if (args.wait_for) {
+            try { await page.waitForSelector(args.wait_for, { timeout: 5000 }); } catch {}
           }
-          result = JSON.stringify({ screenshot_base64: btoa(chunks.join("")), url: args.url });
-        }
-      } else if (action === "links") {
-        const links = await page.evaluate(new Function(`
+          const action = args.action || "markdown";
+          let result: string;
+          if (action === "screenshot") {
+            const buf = await page.screenshot({ fullPage: true });
+            const bytes = new Uint8Array(buf as unknown as ArrayBuffer);
+            if (bytes.byteLength > 1_000_000) {
+              result = JSON.stringify({ error: "Screenshot too large", size: bytes.byteLength, url: args.url });
+            } else {
+              result = JSON.stringify({ screenshot_base64: uint8ArrayToBase64(bytes), url: args.url });
+            }
+          } else if (action === "links") {
+            const links = await page.evaluate(new Function(`
           return Array.from(document.querySelectorAll("a[href]")).map(function(a) {
             return { text: a.textContent?.trim() || "", href: a.href || "" };
           }).slice(0, 50);
         `) as () => Array<{ text: string; href: string }>);
-        result = JSON.stringify({ links, url: args.url });
-      } else {
-        result = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
-      }
-      // Don't truncate screenshot JSON (would break base64); cap text-only actions
-      return action === "screenshot" ? result : result.slice(0, 10000);
+            result = JSON.stringify({ links, url: args.url });
+          } else {
+            result = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
+          }
+          return action === "screenshot" ? result : result.slice(0, 10000);
+        } finally {
+          try { await page.close(); } catch {}
+        }
+      });
     } catch (err: any) {
       console.error(`[browserRender] Puppeteer failed, falling back to HTTP API: ${err.message?.slice(0, 100)}`);
-    } finally {
-      try { await browser?.close(); } catch {}
     }
   }
 
@@ -4636,11 +4716,7 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promis
     if (bytes.byteLength > 1_000_000) {
       return JSON.stringify({ error: "Screenshot too large", size: bytes.byteLength, url: args.url });
     }
-    const chunks: string[] = [];
-    for (let i = 0; i < bytes.length; i += 8192) {
-      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
-    }
-    return JSON.stringify({ screenshot_base64: btoa(chunks.join("")), url: args.url });
+    return JSON.stringify({ screenshot_base64: uint8ArrayToBase64(bytes), url: args.url });
   }
   return JSON.stringify(await resp.json());
 }
@@ -4682,11 +4758,7 @@ async function loadProject(env: RuntimeEnv, args: Record<string, any>, sessionId
   if (!obj) return JSON.stringify({ loaded: false, reason: `No project "${projectName}" found. Use save-project to create one.` });
   const buf = await obj.arrayBuffer();
   const bytes = new Uint8Array(buf);
-  const chunks: string[] = [];
-  for (let i = 0; i < bytes.length; i += 8192) {
-    chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
-  }
-  const b64 = btoa(chunks.join(""));
+  const b64 = uint8ArrayToBase64(bytes);
   await sandbox.writeFile("/tmp/workspace.tar.gz.b64", b64);
   await sandbox.exec(`mkdir -p ${workspace}`, { timeout: 5 });
   await sandbox.exec(`base64 -d /tmp/workspace.tar.gz.b64 > /tmp/workspace.tar.gz && cd ${workspace} && tar xzf /tmp/workspace.tar.gz`, { timeout: 30 });

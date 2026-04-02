@@ -94,6 +94,7 @@ export async function loadAgentConfig(
         require_human_approval: false,
         org_id: "",
         project_id: "",
+        enable_workspace_checkpoints: true,
       };
     }
     // Agent genuinely not in DB — return full defaults for development/onboarding
@@ -115,6 +116,7 @@ export async function loadAgentConfig(
       require_human_approval: false,
       org_id: "",
       project_id: "",
+      enable_workspace_checkpoints: true,
     };
   }
 
@@ -122,6 +124,8 @@ export async function loadAgentConfig(
   const cfg = parseJson(row.config_json) || {};
   const governance = parseJson(cfg.governance) || {};
   const cfgRec = cfg as Record<string, unknown>;
+  const harness = parseJson(cfg.harness) as Record<string, unknown> | null;
+  const enableWorkspaceCheckpoints = harness?.enable_checkpoints !== false;
   const policyAttach = applyDeployPolicyToConfigJson(cfgRec, { fallbackStripOverlay: true });
   if (!policyAttach.ok) {
     console.warn(
@@ -185,6 +189,8 @@ export async function loadAgentConfig(
     codemode_observability: cfg.codemode_observability || cfg.codemodeObservability || undefined,
     use_code_mode: cfg.use_code_mode === true || cfg.useCodeMode === true,
     reasoning_strategy: cfg.reasoning_strategy || cfg.reasoningStrategy || undefined,
+    harness: harness && Object.keys(harness).length > 0 ? harness : undefined,
+    enable_workspace_checkpoints: enableWorkspaceCheckpoints,
   };
 }
 

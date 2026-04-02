@@ -118,6 +118,10 @@ export interface AgentConfig {
   use_code_mode?: boolean;
   // Reasoning strategy — if not set, auto-selects based on task characteristics
   reasoning_strategy?: "step-back" | "chain-of-thought" | "plan-then-execute" | "verify-then-respond" | "decompose";
+  /** Optional harness block from config_json (e.g. enable_checkpoints). */
+  harness?: Record<string, unknown>;
+  /** Derived: false only when harness.enable_checkpoints === false. */
+  enable_workspace_checkpoints?: boolean;
 }
 
 // ── Runtime Context (flows through graph nodes) ────────────────

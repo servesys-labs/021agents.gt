@@ -248,6 +248,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           parallel_tool_calls: config.parallel_tool_calls !== false,
           reasoning_strategy: config.reasoning_strategy,
           routing: config.routing,
+          enable_workspace_checkpoints: config.enable_workspace_checkpoints !== false,
         },
         reasoning_prompt: reasoningPrompt,
         coordinator_prompt: coordinatorPrompt,
@@ -1172,6 +1173,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       await backupCostState(this.env as any, sessionId, result.cost_usd, result.turns);
       clearSessionDedup(sessionId);
       await cleanupSessionResults(this.env as any, sessionId).catch(() => {});
+      const { evictBrowserPoolEntry } = await import("./runtime/tools");
+      const browserKey = p.do_session_id || sessionId;
+      evictBrowserPoolEntry(browserKey);
+      if (p.do_session_id && p.do_session_id !== sessionId) {
+        evictBrowserPoolEntry(sessionId);
+      }
     });
 
     // Flush logger before returning

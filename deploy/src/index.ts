@@ -169,6 +169,8 @@ interface AgentConfig {
   systemPrompt: string;
   agentName: string;
   agentDescription: string;
+  /** Mirrors config_json.harness.enable_checkpoints — false disables DO workspace checkpoint chain. */
+  enableWorkspaceCheckpoints?: boolean;
 }
 
 
@@ -388,9 +390,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     // ── Initiate checkpoint schedule ────────────────────────────────
     // Kick off the self-rescheduling checkpoint chain. Without this,
     // checkpointWorkspace() is never called (it relies on being scheduled).
-    try {
-      await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-    } catch {}
+    // Skipped when harness.enable_checkpoints === false (synced from DB on first run).
+    if (this.state.config.enableWorkspaceCheckpoints !== false) {
+      try {
+        await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+      } catch {}
+    }
   }
 
   // ── Hibernation Checkpoint (periodic save) ───────────────────────
@@ -401,6 +406,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
    * Called via `this.schedule(Date.now() + 30_000, "checkpointWorkspace")`.
    */
   async checkpointWorkspace() {
+    if (this.state.config.enableWorkspaceCheckpoints === false) {
+      return;
+    }
     try {
       const { saveCheckpointToSQLite, saveCheckpointToR2 } = await import("./runtime/workspace-persistence");
       const config = this.state.config;
@@ -431,9 +439,34 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     } catch {}
 
     // Re-schedule for next checkpoint (30 seconds)
+    if (this.state.config.enableWorkspaceCheckpoints !== false) {
+      try {
+        await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+      } catch {}
+    }
+  }
+
+  /** Load harness.enable_checkpoints from Supabase and update DO state. Cached 5 minutes. */
+  private _checkpointFlagCachedAt = 0;
+  private async _syncCheckpointFlagFromDb(agentDbName: string): Promise<void> {
+    if (Date.now() - this._checkpointFlagCachedAt < 300_000) return; // 5-min TTL
+    if (!this.env.HYPERDRIVE || !String(agentDbName || "").trim()) return;
     try {
-      await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-    } catch {}
+      const { loadAgentConfig } = await import("./runtime/db");
+      const cfg = await loadAgentConfig(this.env.HYPERDRIVE, agentDbName.trim(), {
+        provider: this.env.DEFAULT_PROVIDER || "openrouter",
+        model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
+        plan: "standard",
+      });
+      const on = cfg.enable_workspace_checkpoints !== false;
+      this.setState({
+        ...this.state,
+        config: { ...this.state.config, enableWorkspaceCheckpoints: on },
+      });
+      this._checkpointFlagCachedAt = Date.now();
+    } catch {
+      /* keep existing flag */
+    }
   }
 
   // ── Callable Methods (RPC from client) ──────────────────────────
@@ -470,6 +503,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     },
   ): Promise<TurnResult[]> {
     const config = this.state.config;
+    await this._syncCheckpointFlagFromDb(config.agentName || "agentos");
     const started = Date.now();
 
     // ── Workflow path (primary) ──
@@ -880,6 +914,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const config = this.state.config;
       const inputText = String(data.input || "");
       const wsAgentName = data.agent_name || config.agentName || "agentos";
+      await this._syncCheckpointFlagFromDb(wsAgentName);
 
       // Persist user message IMMEDIATELY (before workflow starts)
       // so it survives even if the DO crashes mid-run
@@ -1048,6 +1083,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   // and replies to the sender with the agent's response.
 
   async onEmail(email: ForwardableEmailMessage) {
+    await this._syncCheckpointFlagFromDb(this.name);
     const from = email.from;
     const to = email.to;
     const subject = email.headers.get("subject") || "(no subject)";
@@ -1168,6 +1204,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const data = await request.json() as any;
       const inputText = String(data.input || "");
       const agentName = data.agent_name || this.state.config.agentName || "agentos";
+      await this._syncCheckpointFlagFromDb(agentName);
 
       // Pre-run credit check — reject early if org has no credits
       const runOrgId = data.org_id || this.state.config.orgId || "";
@@ -5985,5 +6022,11 @@ export default {
         await message.reply(new Response(errMime) as any);
       } catch {}
     }
+  },
+
+  // ── Cron: prune idle pooled Browser Rendering sessions ───────────
+  async scheduled(_event: ScheduledEvent, _env: Env, _ctx: ExecutionContext): Promise<void> {
+    const { pruneStaleBrowserSessions } = await import("./runtime/tools");
+    pruneStaleBrowserSessions();
   },
 } satisfies ExportedHandler<Env>;
