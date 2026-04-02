@@ -902,7 +902,7 @@ async function dispatch(
       return perplexitySearch(env, args);
 
     case "browse":
-      return browse(args);
+      return browse(args, env);
 
     case "http-request":
       return httpRequest(args);
@@ -3994,9 +3994,31 @@ async function userProfileLoad(env: RuntimeEnv, args: Record<string, any>): Prom
 
 // ── Browse (simple HTTP fetch) ────────────────────────────────
 
-async function browse(args: Record<string, any>): Promise<string> {
+async function browse(args: Record<string, any>, env?: RuntimeEnv): Promise<string> {
   const urlCheck = validateUrl(args.url || "");
   if (!urlCheck.valid) return `Error: ${urlCheck.reason}`;
+
+  // Use Puppeteer Browser binding for full JS-rendered pages (headless Chrome on CF edge)
+  if (env?.BROWSER) {
+    try {
+      const puppeteer = await import("@cloudflare/puppeteer");
+      const browser = await puppeteer.default.launch(env.BROWSER);
+      const page = await browser.newPage();
+      await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
+      if (args.wait_for) {
+        try { await page.waitForSelector(args.wait_for, { timeout: 5000 }); } catch {}
+      }
+      // page.evaluate runs in browser context — use Function to avoid TS DOM type errors
+      const text = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
+      await browser.close();
+      return text.trim().slice(0, 10000) || "Empty page";
+    } catch (err: any) {
+      // Fall through to simple fetch if Puppeteer fails
+      console.error(`[browse] Puppeteer failed, falling back to fetch: ${err.message?.slice(0, 100)}`);
+    }
+  }
+
+  // Fallback: simple fetch + tag stripping (no JS execution)
   const resp = await fetchWithTimeout(args.url || "", {
     headers: { "User-Agent": "AgentOS/0.2.0" },
     redirect: "follow",
@@ -4553,13 +4575,46 @@ async function webCrawl(env: RuntimeEnv, args: Record<string, any>): Promise<str
 // ── Browser Render (CF Browser Rendering) ────────────────────
 
 async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  // Use Puppeteer Browser binding (headless Chrome on CF edge) when available
+  if (env.BROWSER) {
+    try {
+      const puppeteer = await import("@cloudflare/puppeteer");
+      const browser = await puppeteer.default.launch(env.BROWSER);
+      const page = await browser.newPage();
+      await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
+      if (args.wait_for) {
+        try { await page.waitForSelector(args.wait_for, { timeout: 5000 }); } catch {}
+      }
+      const action = args.action || "markdown";
+      let result: string;
+      if (action === "screenshot") {
+        const buf = await page.screenshot({ fullPage: true });
+        result = JSON.stringify({ screenshot_base64: btoa(String.fromCharCode(...new Uint8Array(buf as unknown as ArrayBuffer))), url: args.url });
+      } else if (action === "links") {
+        const links = await page.evaluate(new Function(`
+          return Array.from(document.querySelectorAll("a[href]")).map(function(a) {
+            return { text: a.textContent?.trim() || "", href: a.href || "" };
+          }).slice(0, 50);
+        `) as () => Array<{ text: string; href: string }>);
+        result = JSON.stringify({ links, url: args.url });
+      } else {
+        result = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
+      }
+      await browser.close();
+      return result.slice(0, 10000);
+    } catch (err: any) {
+      console.error(`[browserRender] Puppeteer failed, falling back to HTTP API: ${err.message?.slice(0, 100)}`);
+    }
+  }
+
+  // Fallback: Browser Rendering HTTP API (requires account API token)
   const brBase = `https://api.cloudflare.com/client/v4/accounts/${env.CLOUDFLARE_ACCOUNT_ID}/browser-rendering`;
   const brAuth = { Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN}`, "Content-Type": "application/json" };
   const actionMap: Record<string, string> = { markdown: "markdown", text: "markdown", html: "content", links: "links", screenshot: "screenshot" };
   const endpoint = actionMap[args.action || "markdown"] || "markdown";
   const payload: Record<string, any> = { url: args.url || "" };
   if (args.wait_for) payload.waitForSelector = args.wait_for;
-  const resp = await fetch(`${brBase}/${endpoint}`, { method: "POST", headers: brAuth, body: JSON.stringify(payload) });
+  const resp = await fetchWithTimeout(`${brBase}/${endpoint}`, { method: "POST", headers: brAuth, body: JSON.stringify(payload) });
   if (endpoint === "screenshot") {
     const buf = await resp.arrayBuffer();
     return JSON.stringify({ screenshot_base64: btoa(String.fromCharCode(...new Uint8Array(buf))), url: args.url });
@@ -4572,7 +4627,7 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promis
 async function saveProject(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const workspace = args.workspace || "/workspace";
   const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
-  const agentName = (env as any).__agentConfig?.name || "agent";
+  const agentName = (env as any).__agentConfig?.agent_name || (env as any).__agentConfig?.agentName || (env as any).__agentConfig?.name || "agent";
   const projectName = args.project_name || args.project_id || args.name || "default";
   const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
   const tarResult = await sandbox.exec(`cd ${workspace} 2>/dev/null && tar czf /tmp/workspace.tar.gz . 2>/dev/null || echo "__EMPTY__"`, { timeout: 30 });
