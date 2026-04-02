@@ -4000,9 +4000,10 @@ async function browse(args: Record<string, any>, env?: RuntimeEnv): Promise<stri
 
   // Use Puppeteer Browser binding for full JS-rendered pages (headless Chrome on CF edge)
   if (env?.BROWSER) {
+    let browser: any;
     try {
       const puppeteer = await import("@cloudflare/puppeteer");
-      const browser = await puppeteer.default.launch(env.BROWSER);
+      browser = await puppeteer.default.launch(env.BROWSER);
       const page = await browser.newPage();
       await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
       if (args.wait_for) {
@@ -4010,11 +4011,12 @@ async function browse(args: Record<string, any>, env?: RuntimeEnv): Promise<stri
       }
       // page.evaluate runs in browser context — use Function to avoid TS DOM type errors
       const text = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
-      await browser.close();
       return text.trim().slice(0, 10000) || "Empty page";
     } catch (err: any) {
       // Fall through to simple fetch if Puppeteer fails
       console.error(`[browse] Puppeteer failed, falling back to fetch: ${err.message?.slice(0, 100)}`);
+    } finally {
+      try { await browser?.close(); } catch {}
     }
   }
 
@@ -4577,9 +4579,10 @@ async function webCrawl(env: RuntimeEnv, args: Record<string, any>): Promise<str
 async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   // Use Puppeteer Browser binding (headless Chrome on CF edge) when available
   if (env.BROWSER) {
+    let browser: any;
     try {
       const puppeteer = await import("@cloudflare/puppeteer");
-      const browser = await puppeteer.default.launch(env.BROWSER);
+      browser = await puppeteer.default.launch(env.BROWSER);
       const page = await browser.newPage();
       await page.goto(args.url || "", { waitUntil: "networkidle0", timeout: 20000 });
       if (args.wait_for) {
@@ -4588,8 +4591,18 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promis
       const action = args.action || "markdown";
       let result: string;
       if (action === "screenshot") {
+        // Cap screenshot to 1MB to avoid stack overflow in btoa
         const buf = await page.screenshot({ fullPage: true });
-        result = JSON.stringify({ screenshot_base64: btoa(String.fromCharCode(...new Uint8Array(buf as unknown as ArrayBuffer))), url: args.url });
+        const bytes = new Uint8Array(buf as unknown as ArrayBuffer);
+        if (bytes.byteLength > 1_000_000) {
+          result = JSON.stringify({ error: "Screenshot too large", size: bytes.byteLength, url: args.url });
+        } else {
+          const chunks: string[] = [];
+          for (let i = 0; i < bytes.length; i += 8192) {
+            chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+          }
+          result = JSON.stringify({ screenshot_base64: btoa(chunks.join("")), url: args.url });
+        }
       } else if (action === "links") {
         const links = await page.evaluate(new Function(`
           return Array.from(document.querySelectorAll("a[href]")).map(function(a) {
@@ -4600,10 +4613,12 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promis
       } else {
         result = await page.evaluate(new Function("return document.body?.innerText || ''") as () => string);
       }
-      await browser.close();
-      return result.slice(0, 10000);
+      // Don't truncate screenshot JSON (would break base64); cap text-only actions
+      return action === "screenshot" ? result : result.slice(0, 10000);
     } catch (err: any) {
       console.error(`[browserRender] Puppeteer failed, falling back to HTTP API: ${err.message?.slice(0, 100)}`);
+    } finally {
+      try { await browser?.close(); } catch {}
     }
   }
 
@@ -4617,7 +4632,15 @@ async function browserRender(env: RuntimeEnv, args: Record<string, any>): Promis
   const resp = await fetchWithTimeout(`${brBase}/${endpoint}`, { method: "POST", headers: brAuth, body: JSON.stringify(payload) });
   if (endpoint === "screenshot") {
     const buf = await resp.arrayBuffer();
-    return JSON.stringify({ screenshot_base64: btoa(String.fromCharCode(...new Uint8Array(buf))), url: args.url });
+    const bytes = new Uint8Array(buf);
+    if (bytes.byteLength > 1_000_000) {
+      return JSON.stringify({ error: "Screenshot too large", size: bytes.byteLength, url: args.url });
+    }
+    const chunks: string[] = [];
+    for (let i = 0; i < bytes.length; i += 8192) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+    }
+    return JSON.stringify({ screenshot_base64: btoa(chunks.join("")), url: args.url });
   }
   return JSON.stringify(await resp.json());
 }
@@ -4648,7 +4671,7 @@ async function saveProject(env: RuntimeEnv, args: Record<string, any>, sessionId
 async function loadProject(env: RuntimeEnv, args: Record<string, any>, sessionId: string): Promise<string> {
   const workspace = args.workspace || "/workspace";
   const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
-  const agentName = (env as any).__agentConfig?.name || "agent";
+  const agentName = (env as any).__agentConfig?.agent_name || (env as any).__agentConfig?.agentName || (env as any).__agentConfig?.name || "agent";
   const projectName = args.project_name || args.project_id || args.name || "default";
   const version = args.version || "latest";
   const r2Key = version === "latest"
@@ -4658,7 +4681,12 @@ async function loadProject(env: RuntimeEnv, args: Record<string, any>, sessionId
   const obj = await env.STORAGE.get(r2Key);
   if (!obj) return JSON.stringify({ loaded: false, reason: `No project "${projectName}" found. Use save-project to create one.` });
   const buf = await obj.arrayBuffer();
-  const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const bytes = new Uint8Array(buf);
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += 8192) {
+    chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+  }
+  const b64 = btoa(chunks.join(""));
   await sandbox.writeFile("/tmp/workspace.tar.gz.b64", b64);
   await sandbox.exec(`mkdir -p ${workspace}`, { timeout: 5 });
   await sandbox.exec(`base64 -d /tmp/workspace.tar.gz.b64 > /tmp/workspace.tar.gz && cd ${workspace} && tar xzf /tmp/workspace.tar.gz`, { timeout: 30 });
@@ -4668,7 +4696,7 @@ async function loadProject(env: RuntimeEnv, args: Record<string, any>, sessionId
 
 async function listProjectVersions(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const orgId = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "";
-  const agentName = (env as any).__agentConfig?.name || "";
+  const agentName = (env as any).__agentConfig?.agent_name || (env as any).__agentConfig?.agentName || (env as any).__agentConfig?.name || "";
   if (!orgId || !agentName) return "Could not determine org/agent context";
   const projectName = args.project_name || args.project_id || args.name || "default";
   const prefix = `workspaces/${orgId}/${agentName}/projects/${projectName}/`;
