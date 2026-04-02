@@ -216,64 +216,53 @@ function ToolCallCard({ msg, compact }: { msg: ChatMessage; compact?: boolean })
   // Stall detection: >10s = slow, >30s = stalled
   const stallLevel = elapsed > 30 ? "stalled" : elapsed > 10 ? "slow" : "normal";
 
+  // Friendly tool display names (like Claude's "Searched the web")
+  const TOOL_DISPLAY: Record<string, string> = {
+    "web-search": "Searched the web", "browse": "Read webpage", "python-exec": "Ran Python",
+    "bash": "Ran command", "read-file": "Read file", "write-file": "Created file",
+    "edit-file": "Edited file", "memory-save": "Saved to memory", "memory-recall": "Checked memory",
+    "execute-code": "Executed code", "swarm": "Ran parallel tasks", "save-project": "Saved project",
+    "load-project": "Loaded project",
+  };
+  const displayName = isRunning
+    ? (TOOL_DISPLAY[toolName]?.replace(/^(Searched|Read|Ran|Created|Edited|Saved|Checked|Executed|Loaded)/, (m) =>
+        m.endsWith("ed") ? m.slice(0, -2) + "ing" : m.endsWith("d") ? m.slice(0, -1) + "ing" : m + "ing"
+      ) || toolName)
+    : (TOOL_DISPLAY[toolName] || toolName);
+
   return (
-    <div className={`overflow-hidden text-xs transition-all duration-200 ${
-      compact ? "" : "border rounded-xl"
-    } ${
-      compact ? (isRunning ? "bg-primary/[0.02]" : "") :
-      isError ? "border-danger/40 bg-danger/[0.04]" :
-      isRunning ? `border-primary/30 bg-primary/[0.04] tool-running stall-indicator` :
-      "border-border/50 bg-surface-alt/30 hover:border-border"
-    }`} data-stall={stallLevel}>
+    <div className="text-xs text-text-muted">
       <button
         onClick={() => !isRunning && setExpanded(!expanded)}
-        className="w-full flex items-center gap-2.5 px-3 py-2.5 transition-colors"
+        className="flex items-center gap-2 py-1.5 transition-colors hover:text-text"
       >
-        {/* Status indicator — Claude Code ⏺ pattern */}
+        {/* Minimal status — Claude.ai style */}
         {isRunning ? (
-          <span className={`w-2.5 h-2.5 rounded-full shrink-0 status-dot-pulse ${
-            stallLevel === "stalled" ? "bg-danger" : stallLevel === "slow" ? "bg-warning" : "bg-primary"
+          <span className={`w-1.5 h-1.5 rounded-full shrink-0 animate-pulse ${
+            stallLevel === "stalled" ? "bg-danger" : stallLevel === "slow" ? "bg-warning" : "bg-text-muted"
           }`} />
         ) : isError ? (
-          <span className="text-danger shrink-0 text-sm">✗</span>
+          <span className="text-danger shrink-0">✗</span>
         ) : (
-          <span className="text-success shrink-0 text-sm">✓</span>
+          <span className="text-text-muted shrink-0">✓</span>
         )}
 
-        {/* Tool name + context */}
-        <span className={`font-semibold ${isRunning ? "text-primary" : isError ? "text-danger" : "text-text"}`}>{toolName}</span>
-        {msg.toolArgsPreview && (
-          <span className="text-text-muted truncate max-w-[300px] font-normal" title={msg.toolArgsPreview}>
+        <span className={isRunning ? "text-text-secondary" : "text-text-muted"}>{displayName}</span>
+
+        {msg.toolArgsPreview && !isRunning && (
+          <span className="text-text-muted/60 truncate max-w-[200px]" title={msg.toolArgsPreview}>
             {msg.toolArgsPreview}
           </span>
         )}
 
-        {/* Running state — shimmer verb + elapsed */}
-        {isRunning && (
-          <span className="shimmer-text font-medium ml-1">
-            {verb}... {elapsed > 0 ? `${elapsed}s` : ""}
-          </span>
-        )}
-
-        {/* Metadata — right side */}
-        <span className="flex items-center gap-2.5 ml-auto shrink-0 text-text-muted">
-          {msg.toolCostUsd != null && msg.toolCostUsd > 0 && isDone && (
-            <span className="tabular-nums">${msg.toolCostUsd.toFixed(4)}</span>
-          )}
-          {msg.toolLatencyMs != null && isDone && (
-            <span className="flex items-center gap-0.5 tabular-nums">
-              <Clock size={9} /> {msg.toolLatencyMs < 1000 ? `${msg.toolLatencyMs}ms` : `${(msg.toolLatencyMs / 1000).toFixed(1)}s`}
-            </span>
-          )}
-          {!isRunning && (expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />)}
-        </span>
+        {!isRunning && <ChevronRight size={10} className={`transition-transform ${expanded ? "rotate-90" : ""}`} />}
       </button>
 
-      {/* Expandable output — terminal card styling with smart rendering */}
+      {/* Expandable output — minimal, only when clicked */}
       <div className="accordion-content" data-open={expanded && !!(msg.toolResult || msg.toolError)}>
         <div>
           {(msg.toolResult || msg.toolError) && (
-            <div className="terminal-card border-t border-white/5 px-3 py-2.5 max-h-80 overflow-y-auto relative group">
+            <div className="terminal-card ml-4 mt-1 px-3 py-2 max-h-60 overflow-y-auto rounded-lg relative group text-[11px]">
               <div className="code-copy-btn"><CopyButton text={msg.toolError || msg.toolResult || ""} /></div>
               {msg.toolError && <pre className="terminal-stderr whitespace-pre-wrap break-words">{msg.toolError}</pre>}
               {msg.toolResult && <ToolResultRenderer toolName={toolName} result={msg.toolResult} />}
