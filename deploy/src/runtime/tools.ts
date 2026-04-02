@@ -1043,7 +1043,20 @@ async function dispatch(
           return JSON.stringify({ stdout: "", stderr: `Egress blocked: ${check.reason}`, exit_code: 1 });
         }
       }
-      // Write code to temp file then execute — sandbox reuses warm container via session ID
+
+      // If code uses agentos bridge (tool access from Python), use the bridge executor
+      if (code.includes("agentos.") || code.includes("from agentos_bridge") || args.enable_tools) {
+        try {
+          const { pythonWithTools } = await import("./python-bridge");
+          const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
+          const r = await pythonWithTools(env, code, sessionId, sandbox, enabledTools);
+          return JSON.stringify({ stdout: r.stdout || "", stderr: r.stderr || "", exit_code: r.exit_code, tool_calls: r.tool_calls });
+        } catch (err: any) {
+          return JSON.stringify({ stdout: "", stderr: `Python bridge error: ${err.message || err}`, exit_code: 1 });
+        }
+      }
+
+      // Standard Python execution (no tool access)
       try {
         const sandbox = getSafeSandbox(env, stableSandboxId(env, sessionId));
         const tmpFile = `/tmp/py_${Date.now()}.py`;
@@ -3728,16 +3741,16 @@ const results = await runWithConcurrency(tasks, ${CODEMODE_CONCURRENCY}, async (
   try {
     let output;
     if (task.tool === "web-search") {
-      output = await tools.webSearch({ query: task.input });
+      output = await codemode.web_search({ query: task.input });
     } else if (task.tool === "browse") {
-      output = await tools.browse({ url: task.input });
+      output = await codemode.browse({ url: task.input });
     } else if (task.tool === "http-request") {
-      output = await tools.httpRequest({ url: task.input });
+      output = await codemode.http_request({ url: task.input });
     } else if (task.tool === "knowledge-search") {
-      output = await tools.knowledgeSearch({ query: task.input });
+      output = await codemode.knowledge_search({ query: task.input });
     } else {
       // Default: web-search for any unrecognized tool hint
-      output = await tools.webSearch({ query: task.input });
+      output = await codemode.web_search({ query: task.input });
     }
     return { index: i, status: "pass", output: typeof output === "string" ? output : JSON.stringify(output), latency_ms: Date.now() - start };
   } catch (err) {
@@ -3812,8 +3825,26 @@ return { mode: "codemode", total_tasks: tasks.length, results };
 
         if (swarmStrategy === "sequential") {
           for (let i = 0; i < swarmTasks.length; i++) {
-            idx = i;
-            await execWorker();
+            const task = swarmTasks[i];
+            const taskStart = Date.now();
+            try {
+              const result = await sandbox.exec(task.input, { timeout: 30 });
+              taskResults.push({
+                index: i,
+                status: (result as any).exitCode === 0 ? "pass" : "fail",
+                output: ((result as any).stdout || "").slice(0, 4000),
+                error: (result as any).stderr || undefined,
+                latency_ms: Date.now() - taskStart,
+              });
+            } catch (err) {
+              taskResults.push({
+                index: i,
+                status: "fail",
+                output: "",
+                error: String(err),
+                latency_ms: Date.now() - taskStart,
+              });
+            }
           }
         } else {
           const workers = Array.from(
