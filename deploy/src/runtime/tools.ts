@@ -1064,7 +1064,7 @@ async function dispatch(
       // Per-file sync to R2 for durability (non-blocking, user-scoped)
       if (filePath.startsWith("/workspace/") && env.STORAGE) {
         const r2Org = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
-        const r2Agent = (env as any).__agentConfig?.name || "agent";
+        const r2Agent = (env as any).__agentConfig?.agent_name || (env as any).__agentConfig?.agentName || (env as any).__agentConfig?.name || "agent";
         const r2UserId = (env as any).__channelUserId || "";
         import("./workspace").then(({ syncFileToR2 }) =>
           syncFileToR2(env.STORAGE, r2Org, r2Agent, filePath, writeContent, sessionId, r2UserId),
@@ -1150,7 +1150,7 @@ async function dispatch(
       // Sync edited file to R2 (non-blocking, user-scoped)
       if (editPath.startsWith("/workspace/") && env.STORAGE) {
         const r2Org = (env as any).__agentConfig?.orgId || (env as any).__agentConfig?.org_id || "default";
-        const r2Agent = (env as any).__agentConfig?.name || "agent";
+        const r2Agent = (env as any).__agentConfig?.agent_name || (env as any).__agentConfig?.agentName || (env as any).__agentConfig?.name || "agent";
         const r2UserId = (env as any).__channelUserId || "";
         import("./workspace").then(({ syncFileToR2 }) =>
           syncFileToR2(env.STORAGE, r2Org, r2Agent, editPath, newContent, sessionId, r2UserId),

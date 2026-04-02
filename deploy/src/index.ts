@@ -216,6 +216,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   // Concurrency guard: prevent overlapping runs from corrupting conversation state.
   // DOs are single-threaded but async yields allow interleaving.
+  private _activeRun: boolean = false;
+  private _activeWorkflow: { instance: any; progressKey: string; abortPoll: boolean } | null = null;
+
   initialState: AgentState = {
     config: {
       plan: "standard",
@@ -341,13 +344,30 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     // Restore workspace files and working memory from DO SQLite checkpoint.
     // SQLite survives hibernation; R2 is the fallback if DO was fully evicted.
     try {
-      const { loadCheckpointFromSQLite, loadFilesFromSQLite, ensureWorkspaceTables } = await import("./runtime/workspace-persistence");
+      const { loadCheckpointFromSQLite, loadFilesFromSQLite, saveFileToSQLite, ensureWorkspaceTables } = await import("./runtime/workspace-persistence");
       ensureWorkspaceTables(this.sql);
 
       // Restore workspace files from SQLite
       const files = loadFilesFromSQLite(this.sql, this.name);
       if (files.length > 0) {
         console.log(`[workspace] Restored ${files.length} files from SQLite checkpoint`);
+      }
+
+      // R2 fallback: if SQLite has no files (DO was fully evicted), try R2
+      if (files.length === 0 && this.env.STORAGE) {
+        try {
+          const { loadCheckpointFromR2 } = await import("./runtime/workspace-persistence");
+          const r2Checkpoint = await Promise.race([
+            loadCheckpointFromR2(this.env.STORAGE, this.state.config.orgId || "default", this.state.config.agentName || "agent", this.name),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
+          ]);
+          if (r2Checkpoint?.files?.length) {
+            console.log(`[workspace] Restored ${r2Checkpoint.files.length} files from R2 fallback`);
+            for (const f of r2Checkpoint.files) {
+              saveFileToSQLite(this.sql, this.name, f);
+            }
+          }
+        } catch {}
       }
 
       // Restore working memory, cost accumulator, and turn count from checkpoint
@@ -850,6 +870,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     }
 
     if (data.type === "run") {
+      // Concurrency guard: only one run at a time per session
+      if (this._activeRun) {
+        connection.send(JSON.stringify({ type: "error", message: "A run is already in progress. Please wait for it to complete.", code: "RUN_IN_PROGRESS" }));
+        return;
+      }
+      this._activeRun = true;
+
       const config = this.state.config;
       const inputText = String(data.input || "");
       const wsAgentName = data.agent_name || config.agentName || "agentos";
@@ -888,8 +915,12 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             channel_user_id: data.channel_user_id || "",
             history: history.map((m: any) => ({ role: m.role, content: m.content })),
             progress_key: progressKey,
+            do_session_id: this.name,
           },
         });
+
+        // Track active workflow for disconnect cleanup (GAP 6)
+        this._activeWorkflow = { instance, progressKey, abortPoll: false };
 
         // Poll KV for progress events → push to WebSocket client in real-time
         let lastIdx = 0;
@@ -898,7 +929,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         const pollStart = Date.now();
         let pollCount = 0;
 
-        while (!done && Date.now() - pollStart < maxWait && connection.readyState === 1) {
+        while (!done && Date.now() - pollStart < maxWait && connection.readyState === 1 && !this._activeWorkflow?.abortPoll) {
           // Fast poll for first 30s (250ms), then slow down (1s)
           const pollInterval = Date.now() - pollStart < 30_000 ? 250 : 1000;
           await new Promise(r => setTimeout(r, pollInterval));
@@ -984,12 +1015,31 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           try { await (instance as any).terminate?.(); } catch {}
           try { await (instance as any).cancel?.(); } catch {}
         }
+
+        // Clear run state
+        this._activeRun = false;
+        this._activeWorkflow = null;
       } catch (err) {
+        this._activeRun = false;
+        this._activeWorkflow = null;
         try { connection.send(JSON.stringify({ type: "error", message: String(err) })); } catch {}
         this._appendConversationMessage("user", inputText, data.channel || "websocket");
         this._appendConversationMessage("assistant", "[Error]", data.channel || "websocket");
       }
     }
+  }
+
+  // ── WebSocket disconnect cleanup ──────────────────────────────
+  // Stop polling loop and attempt to terminate the active workflow
+  // to avoid wasting tokens when the client disconnects.
+  async onClose(connection: Connection, code: number, reason: string, wasClean: boolean) {
+    if (this._activeWorkflow) {
+      this._activeWorkflow.abortPoll = true;
+      try { await (this._activeWorkflow.instance as any).terminate?.(); } catch {}
+      try { await (this._activeWorkflow.instance as any).cancel?.(); } catch {}
+      this._activeWorkflow = null;
+    }
+    this._activeRun = false;
   }
 
   // ── Email entrypoint ─────────────────────────────────────────────

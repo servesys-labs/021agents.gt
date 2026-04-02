@@ -114,6 +114,8 @@ export interface AgentRunParams {
   plan_override?: string;
   /** Override the agent's tool list for this run — scopes a sub-agent to only these tools */
   tools_override?: string[];
+  /** DO session ID — used as stable sandbox identifier so hydrate-workspace and tools share the same container */
+  do_session_id?: string;
 }
 
 export interface RunOutput {
@@ -290,7 +292,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       }, async () => {
         const { getSandbox } = await import("@cloudflare/sandbox");
         const { hydrateWorkspace } = await memo("workspace", () => import("./runtime/workspace"));
-        const sandbox = getSandbox(this.env.SANDBOX, `session-${sessionId}`, {
+        const sandboxId = p.do_session_id || `session-${sessionId}`;
+        const sandbox = getSandbox(this.env.SANDBOX, sandboxId, {
           sleepAfter: "10m",
           enableInternet: false,
         } as any);
@@ -744,6 +747,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
                 SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
                 CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
                 OPENROUTER_API_KEY: (this.env as any).OPENROUTER_API_KEY,
+                DO_SESSION_ID: p.do_session_id,
                 __agentConfig: config,
                 __channelUserId: p.channel_user_id || "",
               } as any,
