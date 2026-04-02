@@ -51,6 +51,7 @@ import { processToolResult, cleanupSessionResults } from "./runtime/result-stora
 import { registerSession, unregisterSession, isSessionLimitReached, refreshHeartbeat } from "./runtime/session-counter";
 import { BudgetError, AgentOSError, SSRFError } from "./runtime/errors";
 import { createChildAbortController } from "./runtime/abort";
+import { queueSessionEpisodicNote } from "./runtime/memory";
 
 // ── Cloud C4.3: Memoized module imports ──────────────────────────
 // Workflow step functions run in isolated contexts. Dynamic imports are
@@ -148,6 +149,9 @@ interface LLMResult {
 // ── Workflow ─────────────────────────────────────────────────
 
 export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
+  /** In-memory event buffer — eliminates KV read-modify-write race in emit(). */
+  private _progressBuffer: any[] = [];
+
   async run(event: WorkflowEvent<AgentRunParams>, step: WorkflowStep): Promise<RunOutput> {
     const p = event.payload;
     const sessionId = event.instanceId.slice(0, 16);
@@ -194,7 +198,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         provider: this.env.DEFAULT_PROVIDER || "openrouter",
         model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
         plan: "standard",
-      });
+      }, p.org_id || undefined);
 
       // Apply plan override if provided (mid-session model switching)
       if (p.plan_override && ["basic", "standard", "premium"].includes(p.plan_override)) {
@@ -292,14 +296,40 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         timeout: "60 seconds",
       }, async () => {
         const { getSandbox } = await import("@cloudflare/sandbox");
+        const { AgentSandbox } = await import("./index");
         const { hydrateWorkspace } = await memo("workspace", () => import("./runtime/workspace"));
         const sandboxId = p.do_session_id || `session-${sessionId}`;
-        const sandbox = getSandbox(this.env.SANDBOX, sandboxId, {
+        const orgId = p.org_id || "default";
+        // Register org_id so outbound handlers can scope R2/KV access
+        await AgentSandbox.registerOrg(this.env.SANDBOX, sandboxId, orgId);
+        const rawSandbox = getSandbox(this.env.SANDBOX, sandboxId, {
           sleepAfter: "10m",
           enableInternet: false,
         } as any);
+        // Wrap with 30s acquire timeout so users get feedback instead of hanging
+        const sandbox = new Proxy(rawSandbox, {
+          get: (target, prop) => {
+            const val = (target as any)[prop];
+            if (typeof val !== "function") return val;
+            return (...args: any[]) => {
+              const result = val.apply(target, args);
+              if (result && typeof result.then === "function") {
+                return Promise.race([
+                  result,
+                  new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error(
+                      `Sandbox unavailable — no container could be allocated within 30 seconds. ` +
+                      `Please try again in a moment. (sandbox: ${sandboxId})`
+                    )), 30_000)
+                  ),
+                ]);
+              }
+              return result;
+            };
+          },
+        });
         const { restored, skipped } = await hydrateWorkspace(
-          this.env.STORAGE, sandbox, p.org_id || "default", p.agent_name, p.channel_user_id || "",
+          this.env.STORAGE, sandbox, orgId, p.agent_name, p.channel_user_id || "",
         );
         return { restored, skipped };
       });
@@ -474,6 +504,13 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     let repairCount = 0;
     let compactionCount = 0;
     let finalOutput = "";
+    const sessionWorkflowToolNames: string[] = [];
+    let lastWorkflowTurn = 0;
+    // ── Workflow step limit guard ──
+    // Cloudflare Workflows have a hard 1000-step limit. We track every step.do()
+    // call and force-exit at 900 to leave headroom for finalization steps.
+    const WORKFLOW_STEP_LIMIT = 900;
+    let workflowStepCount = 2; // bootstrap + hydrate-workspace already consumed
     const startTime = Date.now();
     const turnRecords: Array<{
       turn: number; model: string; content: string;
@@ -494,11 +531,34 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 
     for (let turn = 1; turn <= config.max_turns; turn++) {
      try { // Phase 1.4: wrap turn body in try-catch for resilient error handling
+      lastWorkflowTurn = turn;
+
+      // ── Wall-clock guard (4.5 min cap — 30s buffer before CF 5-min limit) ──
+      if (Date.now() - startTime > 270_000) {
+        logger.warn("wall_clock_limit", { elapsed_ms: Date.now() - startTime, turn });
+        await this.emit(p.progress_key, { type: "error", message: "This task is taking longer than expected. I've saved my progress — please send a follow-up message to continue." });
+        finalOutput = "I ran out of time on this turn (hit the 4.5-minute wall-clock limit). My progress so far has been saved. Please send a follow-up message and I'll pick up where I left off.";
+        break;
+      }
 
       // ── Budget check (no step needed — pure logic) ──
       if (totalCost >= config.budget_limit_usd) {
         const budgetErr = new BudgetError(totalCost, config.budget_limit_usd);
         await this.emit(p.progress_key, { type: "error", message: budgetErr.userMessage || "Budget exhausted", code: budgetErr.code });
+        break;
+      }
+
+      // ── Workflow step limit check ──
+      // Each turn uses at minimum 1 step (LLM call) + N steps (tool calls).
+      // Exit early to leave room for finalization steps (recovery-llm, finalize, write-telemetry).
+      if (workflowStepCount >= WORKFLOW_STEP_LIMIT) {
+        logger.warn("workflow_step_limit", { steps: workflowStepCount, turn, limit: WORKFLOW_STEP_LIMIT });
+        await this.emit(p.progress_key, {
+          type: "error",
+          message: `This run was stopped because it reached the platform's complexity limit (${workflowStepCount} workflow steps). This typically happens with very long multi-step tasks. Try breaking your request into smaller pieces, or start a new session.`,
+          code: "WORKFLOW_STEP_LIMIT",
+        });
+        finalOutput = `I had to stop this run because it reached the platform complexity limit (${workflowStepCount} workflow steps used out of 1000 maximum). This happens with very long multi-step tasks. Please try breaking your request into smaller pieces or starting a new session.`;
         break;
       }
 
@@ -539,7 +599,9 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       }
 
       // ── LLM call — retryable, checkpointed ──
-      await this.emit(p.progress_key, { type: "turn_start", turn, model: config.model });
+      // Note: turn_start model is the config default. The actual model used
+      // (from plan routing) is reported in turn_end after the LLM call completes.
+      await this.emit(p.progress_key, { type: "turn_start", turn, model: config.model, plan: config.plan });
 
       const llm = await step.do(`llm-${turn}`, {
         retries: { limit: 3, delay: "5 seconds", backoff: "exponential" },
@@ -598,6 +660,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           gateway_log_id: response.gateway_log_id,
         } as LLMResult;
       });
+
+      workflowStepCount++; // count llm step
 
       totalCost += llm.cost_usd;
       totalInputTokens += llm.input_tokens;
@@ -686,6 +750,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         // If discover-tools was the only call, continue to next turn
         if (llm.tool_calls.every(tc => tc.name === "discover-tools")) {
           totalToolCalls += discoverCalls.length;
+          for (const tc of discoverCalls) sessionWorkflowToolNames.push(tc.name);
           continue;
         }
       }
@@ -795,7 +860,11 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         }
       }
 
+      workflowStepCount += executableCalls.length; // count each tool step
+
       totalToolCalls += executableCalls.length + discoverCalls.length;
+      for (const tc of discoverCalls) sessionWorkflowToolNames.push(tc.name);
+      for (const tc of executableCalls) sessionWorkflowToolNames.push(tc.name);
 
       // Accumulate tool costs (was missing — caused silent zero billing for tools)
       for (const tr of toolResultEntries) {
@@ -1064,6 +1133,17 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       totalOutputTokens += recovery.output_tokens;
     }
 
+    queueSessionEpisodicNote((this.env as any).HYPERDRIVE, {
+      sessionId,
+      agentName: p.agent_name,
+      orgId: p.org_id || "",
+      userInput: p.input,
+      assistantOutput: finalOutput,
+      toolNames: sessionWorkflowToolNames,
+      turnsUsed: lastWorkflowTurn,
+      toolCallCount: totalToolCalls,
+    });
+
     const result: RunOutput = {
       output: finalOutput,
       turns: turnRecords.length || 1,
@@ -1188,21 +1268,27 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
   }
 
   // ── Progress emission to KV ────────────────────────────────
+  // Fix: Use in-memory buffer so each emit() is a single KV put (no get).
+  // The old get→append→put pattern was not atomic — under KV eventual
+  // consistency or workflow step retries, concurrent reads could return
+  // stale data and a subsequent put would silently drop events.
+  // Since Workflow.run() is sequential, the in-memory buffer is always
+  // authoritative and we never need to read from KV.
 
   private async emit(key: string, event: Record<string, unknown>) {
     if (!this.env.AGENT_PROGRESS_KV) return;
     try {
-      // Phase C1.1: Deduplicate KV writes — each event gets a UUID to prevent
-      // duplicate entries from parallel tool executions racing on read-modify-write.
       const eventId = crypto.randomUUID().slice(0, 12);
       const dedupKey = `${key}:${eventId}`;
       if (isDuplicateWrite(dedupKey, key)) return;
 
-      const raw = await this.env.AGENT_PROGRESS_KV.get(key);
-      const events: any[] = raw ? JSON.parse(raw) : [];
-      events.push({ ...event, ts: Date.now(), _eid: eventId, _seq: events.length + 1 });
+      this._progressBuffer.push({ ...event, ts: Date.now(), _eid: eventId, _seq: this._progressBuffer.length + 1 });
       // Keep last 200 events, expire after 1 hour
-      await this.env.AGENT_PROGRESS_KV.put(key, JSON.stringify(events.slice(-200)), { expirationTtl: 3600 });
+      const toWrite = this._progressBuffer.slice(-200);
+      if (toWrite.length < this._progressBuffer.length) {
+        this._progressBuffer = toWrite;
+      }
+      await this.env.AGENT_PROGRESS_KV.put(key, JSON.stringify(toWrite), { expirationTtl: 3600 });
     } catch {}
   }
 }
