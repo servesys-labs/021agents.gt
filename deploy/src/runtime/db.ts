@@ -263,15 +263,14 @@ export async function loadAgentConfig(
 // Agent can override with config_json.model.
 const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
   // ── Basic: Free Workers AI (edge, 0 cost) ──
-  // Hermes 2 Pro 7B for simple/tool_call (fast, ~300ms TTFT, trained for function calling)
-  // Llama 3.3 70B fp8-fast for moderate/complex (better reasoning, ~2-4s TTFT)
-  // Kimi K2.5 for vision (supports multimodal inputs)
+  // Llama 3.3 70B fp8-fast: proven tool calling, speculative decoding for speed (~2-4s TTFT)
+  // Kimi K2.5 for vision (supports multimodal inputs, 256k context)
   basic: {
     general: {
-      simple: { model: "@cf/nousresearch/hermes-2-pro-mistral-7b", provider: "workers-ai" },
+      simple: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
       moderate: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
       complex: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
-      tool_call: { model: "@cf/nousresearch/hermes-2-pro-mistral-7b", provider: "workers-ai" },
+      tool_call: { model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", provider: "workers-ai" },
     },
     multimodal: { vision: { model: "@cf/moonshotai/kimi-k2.5", provider: "workers-ai" } },
   },
