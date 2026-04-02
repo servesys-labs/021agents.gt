@@ -463,8 +463,21 @@ export async function streamRun(
     const sysPromptParts: string[] = [];
 
     // 4a. Base system prompt
+    // For Workers AI models (basic plan), use a compact prompt to reduce latency.
+    // Large models like Llama 70B struggle with 17K+ system prompts — they timeout
+    // or loop on tool calls. Cap at ~2000 chars for @cf/ models.
     if (config.system_prompt) {
-      sysPromptParts.push(config.system_prompt);
+      const isWorkersAI = (config.model || "").startsWith("@cf/") || (config.model || "").startsWith("@hf/");
+      if (isWorkersAI && config.system_prompt.length > 2500) {
+        sysPromptParts.push(
+          `You are a helpful AI assistant with tools. Answer simple questions directly without tools. ` +
+          `Use web-search for current information. Use python-exec for computation. Use bash for system commands. ` +
+          `Use read-file/write-file for files. Use memory-save/memory-recall for persistence across sessions. ` +
+          `Be concise. Lead with the answer.`
+        );
+      } else {
+        sysPromptParts.push(config.system_prompt);
+      }
     }
 
     // 4b. Skills (loaded from DB, cached 1min) + marketplace delegation guidance
