@@ -6478,7 +6478,8 @@ export default {
               ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
               ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
               ${p.channel || ""},
-              ${p.detailed_cost_json || null}, ${p.feature_flags_json || null},
+              ${p.detailed_cost_json ? (typeof p.detailed_cost_json === 'string' ? JSON.parse(p.detailed_cost_json) : p.detailed_cost_json) : null},
+              ${p.feature_flags_json ? (typeof p.feature_flags_json === 'string' ? JSON.parse(p.feature_flags_json) : p.feature_flags_json) : null},
               ${p.total_cache_read_tokens || 0}, ${p.total_cache_write_tokens || 0},
               ${p.repair_count || 0}, ${p.compaction_count || 0},
               ${createdAt}
@@ -6503,9 +6504,12 @@ export default {
               ${p.input_tokens || 0}, ${p.output_tokens || 0},
               ${p.latency_ms || 0}, ${p.llm_latency_ms || p.latency_ms || 0},
               ${p.llm_content || ""}, ${p.cost_total_usd || 0},
-              ${p.tool_calls_json || "[]"}, ${p.tool_results_json || "[]"},
-              ${p.errors_json || "[]"}, ${p.execution_mode || "sequential"},
-              ${p.plan_artifact || p.plan_json || null}, ${p.reflection || p.reflection_json || null},
+              ${typeof p.tool_calls_json === 'string' ? JSON.parse(p.tool_calls_json || '[]') : (p.tool_calls_json || [])},
+              ${typeof p.tool_results_json === 'string' ? JSON.parse(p.tool_results_json || '[]') : (p.tool_results_json || [])},
+              ${typeof p.errors_json === 'string' ? JSON.parse(p.errors_json || '[]') : (p.errors_json || [])},
+              ${p.execution_mode || "sequential"},
+              ${p.plan_artifact || p.plan_json ? (typeof (p.plan_artifact || p.plan_json) === 'string' ? JSON.parse(p.plan_artifact || p.plan_json) : (p.plan_artifact || p.plan_json)) : null},
+              ${p.reflection || p.reflection_json ? (typeof (p.reflection || p.reflection_json) === 'string' ? JSON.parse(p.reflection || p.reflection_json) : (p.reflection || p.reflection_json)) : null},
               ${p.stop_reason || null}, ${p.refusal || false},
               ${p.cache_read_tokens || 0}, ${p.cache_write_tokens || 0},
               ${p.gateway_log_id || null}
@@ -6521,7 +6525,7 @@ export default {
               ${p.session_id}, ${p.turn || 0}, ${p.event_type || ""},
               ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
               ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
-              ${p.status || ""}, ${p.latency_ms || 0}, ${JSON.stringify(p.details || {})},
+              ${p.status || ""}, ${p.latency_ms || 0}, ${p.details || {}},
               ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
             )`;
           } else if (type === "cost_ledger") {
@@ -6579,7 +6583,8 @@ export default {
             console.log(`[telemetry] DO eviction: session=${p.session_id} org=${p.org_id}`);
           }
           msg.ack();
-        } catch (err) {
+        } catch (err: any) {
+          console.error(`[queue] message failed type=${type} session=${(p as any)?.session_id || '?'}:`, err?.message || err);
           msg.retry();
         }
       }
