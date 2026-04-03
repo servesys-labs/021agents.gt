@@ -719,6 +719,34 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       totalCacheReadTokens += llm.cache_read_tokens;
       totalCacheWriteTokens += llm.cache_write_tokens;
 
+      // ── Auto-skill activation — detect <activate-skill> in LLM response ──
+      // If the LLM's content contains an activation tag, extract the skill,
+      // inject the skill prompt, strip the tag, and let the loop continue.
+      {
+        const activateMatch = llm.content.match(/<activate-skill\s+name="([a-z][\w-]*)">([\s\S]*?)<\/activate-skill>/);
+        if (activateMatch) {
+          const [fullTag, autoSkillName, autoSkillArgs] = activateMatch;
+          const { getSkillPrompt, loadSkills: loadDbSkills } = await import("./runtime/skills");
+          let dbSkills: any[] = [];
+          try { dbSkills = await loadDbSkills(this.env.HYPERDRIVE, p.org_id, p.agent_name); } catch {}
+          const autoSkillPrompt = getSkillPrompt(autoSkillName, autoSkillArgs.trim(), dbSkills);
+          if (autoSkillPrompt) {
+            // Strip the activation tag from the assistant's content
+            (llm as any).content = llm.content.replace(fullTag, "").trim();
+            // Inject skill prompt as a system message
+            messages.push({
+              role: "system",
+              content: `## Active Skill: /${autoSkillName}\n\n${autoSkillPrompt}`,
+            });
+            logger.info("skill_auto_activated", { skill: autoSkillName, args_length: autoSkillArgs.trim().length, turn });
+            (this.env as any).TELEMETRY_QUEUE?.send?.({ type: "skill_auto_activation", payload: { session_id: sessionId, skill: autoSkillName, agent_name: p.agent_name, org_id: p.org_id, turn } }).catch(() => {});
+            await this.emit(p.progress_key, {
+              type: "skill_activated", skill: autoSkillName, auto: true, turn,
+            });
+          }
+        }
+      }
+
       // ── Phase 9.3: Handle model refusal ──
       if (llm.refusal) {
         await this.emit(p.progress_key, {
@@ -779,7 +807,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         });
       }
 
-      // Handle discover-tools calls locally (no need for external execution)
+      // Handle discover-tools calls locally — AND inject discovered tools into next turn's selection
       const discoverCalls = llm.tool_calls.filter(tc => tc.name === "discover-tools");
       if (discoverCalls.length > 0) {
         const { discoverTools, getToolDefinitions: gtd } = await memo("tools", () => import("./runtime/tools"));
@@ -787,6 +815,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         for (const dc of discoverCalls) {
           const query = JSON.parse(dc.arguments || "{}").query || "";
           const discovered = discoverTools(allTools, query);
+          // Add discovered tool names to config.tools so they're included in subsequent turns
+          for (const toolName of discovered.tools) {
+            if (!config.tools.includes(toolName)) {
+              config.tools.push(toolName);
+            }
+          }
           const resultText = discovered.tools.length > 0
             ? `Found ${discovered.tools.length} tools: ${discovered.tools.join(", ")}. These tools are now available for your next action.`
             : "No matching tools found. Try a different description.";
