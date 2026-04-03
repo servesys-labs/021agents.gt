@@ -6465,7 +6465,7 @@ export default {
               session_id, org_id, project_id, agent_name, status,
               input_text, output_text, model, trace_id, parent_session_id,
               depth, step_count, action_count, wall_clock_seconds,
-              cost_total_usd, channel,
+              cost_total_usd,
               detailed_cost_json, feature_flags_json,
               total_cache_read_tokens, total_cache_write_tokens,
               repair_count, compaction_count,
@@ -6477,7 +6477,6 @@ export default {
               ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
               ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
               ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
-              ${p.channel || ""},
               ${p.detailed_cost_json ? (typeof p.detailed_cost_json === 'string' ? JSON.parse(p.detailed_cost_json) : p.detailed_cost_json) : null},
               ${p.feature_flags_json ? (typeof p.feature_flags_json === 'string' ? JSON.parse(p.feature_flags_json) : p.feature_flags_json) : null},
               ${p.total_cache_read_tokens || 0}, ${p.total_cache_write_tokens || 0},
@@ -6496,7 +6495,7 @@ export default {
               session_id, turn_number, model_used, input_tokens, output_tokens,
               latency_ms, llm_latency_ms, llm_content, cost_total_usd,
               tool_calls_json, tool_results_json, errors_json,
-              execution_mode, plan_artifact, reflection,
+              execution_mode, plan_json, reflection_json,
               stop_reason, refusal, cache_read_tokens, cache_write_tokens,
               gateway_log_id
             ) VALUES (
