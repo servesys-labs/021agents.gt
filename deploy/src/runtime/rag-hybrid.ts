@@ -56,33 +56,38 @@ export async function bm25Search(
   // Build tsquery from the search terms
   // Use plainto_tsquery for natural language queries
   try {
-    const filters: string[] = [];
-    const params: any[] = [];
+    // Build parameterized query with all filters
+    const params: any[] = [query];
+    const conditions: string[] = ["tsv @@ plainto_tsquery('english', $1)"];
 
-    let baseQuery = `
+    if (opts.org_id) {
+      params.push(opts.org_id);
+      conditions.push(`org_id = $${params.length}`);
+    }
+    if (opts.agent_name) {
+      params.push(opts.agent_name);
+      conditions.push(`agent_name = $${params.length}`);
+    }
+    if (opts.source) {
+      params.push(opts.source);
+      conditions.push(`source = $${params.length}`);
+    }
+    if (opts.pipeline) {
+      params.push(opts.pipeline);
+      conditions.push(`pipeline = $${params.length}`);
+    }
+
+    const whereClause = conditions.join(" AND ");
+    const fullQuery = `
       SELECT id, text, context_prefix, source, pipeline, chunk_type, chunk_index,
              ts_rank(tsv, plainto_tsquery('english', $1)) as rank
       FROM rag_chunks
-      WHERE tsv @@ plainto_tsquery('english', $1)
+      WHERE ${whereClause}
+      ORDER BY rank DESC
+      LIMIT ${limit}
     `;
 
-    if (opts.org_id) {
-      baseQuery += ` AND org_id = $2`;
-    }
-    if (opts.source) {
-      baseQuery += ` AND source = ${opts.org_id ? '$3' : '$2'}`;
-    }
-
-    baseQuery += ` ORDER BY rank DESC LIMIT ${limit}`;
-
-    // Use parameterized query
-    const rows = opts.org_id
-      ? opts.source
-        ? await sql.unsafe(baseQuery, [query, opts.org_id, opts.source])
-        : await sql.unsafe(baseQuery, [query, opts.org_id])
-      : opts.source
-        ? await sql.unsafe(baseQuery, [query, opts.source])
-        : await sql.unsafe(baseQuery, [query]);
+    const rows = await sql.unsafe(fullQuery, params);
 
     return rows.map((r: any) => ({
       id: String(r.id),

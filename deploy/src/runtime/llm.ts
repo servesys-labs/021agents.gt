@@ -112,7 +112,7 @@ export async function callLLM(
 
   const providerPath = isWorkersAI
     ? "workers-ai/v1"
-    : `${opts.provider}/v1`;
+    : `${opts.provider ?? "openrouter"}/v1`;
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
 
   const headers: Record<string, string> = {
