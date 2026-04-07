@@ -116,3 +116,19 @@ Thumbs.db
 .wrangler
 .dev.vars*
 !.dev.vars.example
+
+# ------------------------------
+# Build artifacts / generated
+# ------------------------------
+artifacts/
+.claude/skills/
+.cursor/
+
+# ------------------------------
+# Mobile build artifacts
+# ------------------------------
+mobile/android/.gradle/
+mobile/android/app/build/
+mobile/android/build/
+mobile/ios/build/
+mobile/ios/Pods/
