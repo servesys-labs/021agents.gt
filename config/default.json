@@ -170,9 +170,9 @@
         ]
       },
       "local": {
-        "api_base": "http://localhost:11434/v1",
+        "api_base": "http://localhost:8083/v1",
         "models": ["*"],
-        "note": "Any OpenAI-compatible endpoint (Ollama, vLLM, llama.cpp). No data leaves your machine."
+        "note": "Any OpenAI-compatible endpoint (llama.cpp, vLLM, Ollama). No data leaves your machine."
       }
     },
     "provider_config": {

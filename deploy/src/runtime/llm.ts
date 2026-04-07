@@ -102,13 +102,12 @@ export async function callLLM(
     }
   }
 
-  // ── MVP: Only free models — Workers AI + self-hosted GPU via CF Tunnel ──
-  // No OpenRouter, no paid models. Fail loud if a paid model is requested.
-  // TODO: Re-enable OpenRouter path when we have paying users.
+  // MVP: Allow Workers AI + self-hosted GPU. Log (don't throw) for other providers
+  // so paid plan routing works when enabled.
   const isCustomProvider = opts.provider?.startsWith("custom-");
 
   if (!isWorkersAI && !isCustomProvider) {
-    throw new LLMError(model, `MVP mode: Only free models allowed (Workers AI @cf/* or custom-gemma4-*). Got provider="${opts.provider || "openrouter"}" model="${model}". Check PLAN_ROUTING in db.ts.`, { retryable: false });
+    console.warn(`[llm] Non-free model requested: provider="${opts.provider || "openrouter"}" model="${model}". Proceeding — ensure OpenRouter key is configured.`);
   }
 
   const providerPath = isWorkersAI
