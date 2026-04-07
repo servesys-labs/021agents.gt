@@ -54,19 +54,70 @@ function isBreakerOpen(): boolean {
   return true;
 }
 
+// ── RLS Context ──────────────────────────────────────────────
+// Workers don't have AsyncLocalStorage, so we use a module-level
+// context that each request boundary sets before any DB calls.
+// This is safe because Workers are single-threaded — only one
+// request is active per isolate at a time.
+//
+// Set at three boundaries:
+//   1. HTTP fetch handler (after auth extracts org_id from JWT/service token)
+//   2. Queue consumer (from message payload.org_id)
+//   3. DO/Workflow (from this.state.config.orgId / p.org_id)
+//
+// Every getDb() call reads this context and sets app.current_org_id
+// via SET LOCAL, which Postgres scopes to the current transaction.
+// Hyperdrive transaction-mode pooling clears it on COMMIT/ROLLBACK.
+
+let _currentOrgId = "";
+
+/** Set the org_id for all subsequent DB calls in this request. */
+export function setDbOrgContext(orgId: string): void {
+  _currentOrgId = (orgId || "").trim();
+}
+
+/** Clear the org context (call at request end or in finally blocks). */
+export function clearDbOrgContext(): void {
+  _currentOrgId = "";
+}
+
+/** Get the current org context (for debugging/logging). */
+export function getDbOrgContext(): string {
+  return _currentOrgId;
+}
+
 /**
  * Get a Postgres connection via Hyperdrive.
- * Creates a fresh connection per call — Hyperdrive handles pooling server-side.
+ *
+ * If org_id context is set (via setDbOrgContext), automatically sets
+ * app.current_org_id for RLS row-level security policies.
+ *
+ * Connection lifecycle is managed by Hyperdrive (transaction-mode pooling).
+ * SET LOCAL is scoped to the current transaction and automatically
+ * cleared on COMMIT/ROLLBACK — no cross-request leakage.
  */
 export async function getDb(hyperdrive: Hyperdrive): Promise<Sql> {
   const pg = (await import("postgres")).default;
-  return pg(hyperdrive.connectionString, {
+  const sql = pg(hyperdrive.connectionString, {
     max: 1,
     fetch_types: false,
     prepare: false,  // Hyperdrive requires prepare:false (transaction-mode pooling)
     idle_timeout: 5,
     connect_timeout: 3,
   });
+
+  // Set RLS context if an org_id is in scope
+  if (_currentOrgId) {
+    try {
+      await sql.unsafe(`SELECT set_config('app.current_org_id', $1, true)`, [_currentOrgId]);
+    } catch {
+      // Non-fatal: RLS context failed to set. Queries will be filtered by
+      // application-level WHERE clauses as before. Log for visibility.
+      console.warn(`[DB:rls] Failed to set app.current_org_id=${_currentOrgId}`);
+    }
+  }
+
+  return sql;
 }
 
 /** No-op — Hyperdrive manages connection lifecycle. */
