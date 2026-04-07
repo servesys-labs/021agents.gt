@@ -37,7 +37,7 @@
   async function fetchSessions() {
     loading = true;
     try {
-      sessions = await listSessions(agentName, limit, statusFilter);
+      sessions = await listSessions({ agent_name: agentName, limit, status: statusFilter === "all" ? undefined : statusFilter });
     } catch (err) {
       console.error("Failed to fetch sessions:", err);
       toast.error("Failed to load sessions");
@@ -53,8 +53,7 @@
     feedbackRating = null;
     feedbackComment = "";
     try {
-      const data = await getSessionTurns(session.session_id);
-      selectedTurns = data.turns ?? [];
+      selectedTurns = await getSessionTurns(session.session_id);
     } catch (err) {
       console.error("Failed to fetch turns:", err);
       toast.error("Failed to load session details");
@@ -68,7 +67,8 @@
     if (!selectedSession || !feedbackRating) return;
     submittingFeedback = true;
     try {
-      await submitFeedback(selectedSession.session_id, feedbackRating, feedbackComment || undefined);
+      const ratingNum = feedbackRating === "up" ? 5 : 1;
+      await submitFeedback(selectedSession.session_id, ratingNum, feedbackComment || undefined);
       toast.success("Feedback submitted");
       feedbackRating = null;
       feedbackComment = "";
@@ -158,9 +158,9 @@
                         {session.status}
                       </Badge>
                     </td>
-                    <td class="px-4 py-3 text-right font-mono text-xs">{formatCost(session.cost_usd)}</td>
-                    <td class="px-4 py-3 text-right text-xs text-muted-foreground">{formatDuration(session.duration_s)}</td>
-                    <td class="hidden px-4 py-3 text-right text-xs text-muted-foreground sm:table-cell">{session.turns}</td>
+                    <td class="px-4 py-3 text-right font-mono text-xs">{formatCost(session.cost_total_usd)}</td>
+                    <td class="px-4 py-3 text-right text-xs text-muted-foreground">{formatDuration(session.wall_clock_seconds)}</td>
+                    <td class="hidden px-4 py-3 text-right text-xs text-muted-foreground sm:table-cell">{session.step_count}</td>
                     <td class="px-4 py-3 text-right text-xs text-muted-foreground">{timeAgo(session.created_at)}</td>
                   </tr>
                 {/each}

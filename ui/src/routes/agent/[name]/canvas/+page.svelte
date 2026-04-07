@@ -3,7 +3,7 @@
   import AgentCanvas from "$lib/components/canvas/AgentCanvas.svelte";
   import AgentNav from "$lib/components/agent/AgentNav.svelte";
 
-  const agentName = $derived($page.params.name);
+  const agentName = $derived($page.params.name ?? "");
   const activePath = $derived($page.url.pathname);
 </script>
 
