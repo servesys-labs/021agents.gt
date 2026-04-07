@@ -1255,6 +1255,7 @@ export function ChatInterface({
                   className="text-xs bg-surface-alt border border-border/60 rounded-lg px-2 py-1.5 text-text-secondary hover:border-border focus:outline-none focus:ring-1 focus:ring-primary/30 cursor-pointer"
                   title="Switch LLM plan"
                 >
+                  <option value="free">Free</option>
                   <option value="basic">Basic</option>
                   <option value="standard">Standard</option>
                   <option value="premium">Premium</option>

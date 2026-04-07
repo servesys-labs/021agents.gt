@@ -1,0 +1,51 @@
+name: Infra Gate Nightly
+
+on:
+  schedule:
+    - cron: "20 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  infra-gate-nightly:
+    runs-on: ubuntu-latest
+    if: ${{ secrets.E2E_CONTROL_PLANE_URL != '' && secrets.E2E_RUNTIME_URL != '' && secrets.E2E_SERVICE_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run infra gate with stress profile
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/e2e-infra-nightly
+          bash scripts/e2e_infra_gate.sh 2>&1 | tee artifacts/e2e-infra-nightly/run.log
+        env:
+          E2E_CONTROL_PLANE_URL: ${{ secrets.E2E_CONTROL_PLANE_URL }}
+          E2E_RUNTIME_URL: ${{ secrets.E2E_RUNTIME_URL }}
+          E2E_SERVICE_TOKEN: ${{ secrets.E2E_SERVICE_TOKEN }}
+          E2E_AGENT_NAME: ${{ secrets.E2E_AGENT_NAME }}
+          E2E_ORG_ID: ${{ secrets.E2E_ORG_ID }}
+          E2E_TIMEOUT_SECONDS: 180
+          E2E_SOAK_ENABLED: 1
+          E2E_SOAK_PARALLEL: 8
+          E2E_SOAK_REQUESTS: 24
+          E2E_SOAK_MAX_FAILURE_RATE: 0.10
+          E2E_STRESS_ENABLED: 1
+          E2E_STRESS_RAMP: 32,64,128
+          E2E_STRESS_REQUESTS: 180
+          E2E_STRESS_MAX_FAILURE_RATE: 0.10
+          E2E_STRESS_MAX_P95_S: 1.5
+          E2E_LARGE_OUTPUT_MIN_BYTES: 10000
+          E2E_REPORT_DIR: artifacts/e2e-infra-nightly
+      - name: Upload nightly artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-infra-nightly
+          path: artifacts/e2e-infra-nightly/**
+          if-no-files-found: warn
+      - name: Publish summary
+        if: always()
+        run: |
+          if [ -f artifacts/e2e-infra-nightly/summary.md ]; then
+            cat artifacts/e2e-infra-nightly/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No nightly summary generated." >> "$GITHUB_STEP_SUMMARY"
+          fi

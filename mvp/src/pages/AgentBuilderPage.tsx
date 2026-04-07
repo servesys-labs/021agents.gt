@@ -93,7 +93,7 @@ export default function AgentBuilderPage() {
   // Quick mode state
   const [agentName, setAgentName] = useState("");
   const [description, setDescription] = useState("");
-  const [plan, setPlan] = useState<"basic" | "standard" | "premium">("standard");
+  const [plan, setPlan] = useState<"free" | "basic" | "standard" | "premium">("standard");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [creationPhase, setCreationPhase] = useState("");
@@ -384,11 +384,12 @@ export default function AgentBuilderPage() {
           {/* Plan selection */}
           <div className="space-y-1.5">
             <label className="block text-sm font-medium text-text">LLM Plan</label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               {([
-                { key: "basic" as const, label: "Basic", desc: "Free-tier models" },
-                { key: "standard" as const, label: "Standard", desc: "GPT + Claude + Gemini" },
-                { key: "premium" as const, label: "Premium", desc: "Top-tier models" },
+                { key: "free" as const, label: "Free", desc: "Gemma 4 31B" },
+                { key: "basic" as const, label: "Basic", desc: "DeepSeek V3.2" },
+                { key: "standard" as const, label: "Standard", desc: "Claude Sonnet" },
+                { key: "premium" as const, label: "Premium", desc: "Claude Opus" },
               ]).map((p) => (
                 <button
                   key={p.key}

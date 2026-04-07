@@ -100,3 +100,120 @@
 - Add MCP wrappers for instant tool onboarding
 - Build scheduled evolution analysis (cron trigger)
 - Add reasoning strategy to agent creation wizard in portal
+
+---
+
+## 2026-04-02 — IDE skills (Cursor + Claude Code)
+
+### What was done
+- Added five portable skills under `.cursor/skills/` with YAML frontmatter:
+  `design-foundations`, `research-methodology`, `research-report-writing`,
+  `office-pdf-patterns`, `web-artifact-quality` (adapted from external design/research/PDF guidance; vendor-specific strings removed).
+- Mirrored the same skill folders into `.claude/skills/` for Claude Code.
+- Documented the dual-tree convention in `AGENTS.md` (IDE assistant skills section).
+- Added `scripts/sync-ide-skills.sh` to copy `.cursor/skills/` → `.claude/skills/`.
+
+### What was left incomplete
+- Nothing required for this item; optional to call `sync-ide-skills.sh` from `init.sh` if desired.
+
+### What to do next
+- After skill edits, run `./scripts/sync-ide-skills.sh` so Claude Code picks up changes.
+
+---
+
+## 2026-04-02 — Ops command center (turn-level + feeds)
+
+### What was done
+- Mapped `turns` telemetry the runtime already writes (tool JSON, errors, refusal, LLM vs wall latency, cache tokens, execution_mode, stop_reason, middleware_warnings_json) and `sessions` hygiene fields (repair/compaction/cache/trace).
+- Added ops JSON APIs: `/api/turns/summary-24h`, `stop-reasons-24h`, `execution-modes-24h`, `/api/sessions/summary-24h`, `/api/tools/top-24h`, `/api/middleware/recent`, `/api/audit/recent`; expanded `/api/sessions/recent` and `/api/turns/recent`.
+- Dashboard: “Turn intelligence” KPIs, session hygiene card, stop reasons / execution modes lists, hot tools table, Runtime/Middleware/Audit tabs; richer Sessions and Turns tables; queue health shows runtime event mix (1h).
+
+### What to do next
+- Deploy `ops` worker when ready; optional: `otel_events` tab and `/api/overview` extra KPIs (agents/orgs).
+
+---
+
+## 2026-04-05 — OpenShots mobile API matrix
+
+### What was done
+- Added `docs/openshots-mobile-api-matrix.md`: screen-oriented mapping of mobile flows to control-plane paths (`/api/v1` and `/v1`), with `requireScope` notes for RBAC.
+
+### What to do next
+- Regenerate or diff the matrix when routes change; optionally add OpenAPI tags links per section.
+
+---
+
+## 2026-04-05 — JWT + SSE streaming path documented
+
+### What was done
+- Traced streaming: canonical path is `POST /api/v1/runtime-proxy/runnable/stream` (JWT or API key via global auth); `POST /api/v1/agents/:name/run/stream` returns 410.
+- Updated `docs/openshots-mobile-api-matrix.md` with a **JWT-first streaming** subsection; corrected stale 410 hint in `control-plane/src/routes/agents.ts` (was `stream-events`, now `runnable/stream`).
+
+---
+
+## 2026-04-05 — OpenShots mobile v1 shell + shared chat/token system
+
+### What was done
+- Added centralized design-token source (`design-tokens/tokens.json`) and generator (`design-tokens/build-tokens.mjs`) that outputs both web CSS vars and React Native token objects.
+- Wired `ui/src/app.css` to consume generated token CSS, keeping web and mobile on one semantic token system.
+- Built `mobile/` app shell (`App.tsx`, `src/app/AppShell.tsx`) with JWT login bootstrap, secure token storage (`react-native-keychain`), and tabbed v1 surfaces.
+- Implemented shared mobile chat core with streaming SSE parser, event reducer, hook, and tokenized components aligned to existing Svelte `ui` behavior (thinking/tool calls/streaming tokens).
+- Implemented v1 screens: Chat, Sessions, Meta-agent, Eval, Releases, Settings + diagnostics, with permission-aware tab gating based on JWT scopes.
+- Added smoke-test checklist and ran `npm run typecheck` successfully in `mobile/`.
+
+### What to do next
+- Scaffold RN native project files (`ios/`, `android/`) and run on-device/simulator.
+- Replace placeholder eval/release payload renderers with richer typed views and confirmation modals.
+- Integrate remote telemetry sink for `mobile/src/telemetry/logger.ts` (currently console-backed).
+
+---
+
+## 2026-04-05 — Mobile native scaffold + app identity rename
+
+### What was done
+- Generated RN native scaffold and merged `android/`, `ios/`, Metro/Babel/index/app config into `mobile/`.
+- Kept existing mobile TS app shell and screens intact while adding native runtime support.
+- Applied identity settings for OpenShots:
+  - app display name `OpenShots` (`mobile/app.json`, iOS Info.plist, Android strings)
+  - Android namespace/applicationId `co.oneshots.mobile`
+  - iOS bundle ids `co.oneshots.mobile` and `co.oneshots.mobile.tests`
+  - JS root component/module name aligned to `OpenShots`.
+- Verified with `npm run typecheck` in `mobile/`.
+
+### What to do next
+- Run `npm run ios` and `npm run android` to validate native boot on simulator/emulator.
+- If desired, perform a deeper Xcode target/scheme rename from `OpenShotsTemplate` to `OpenShots` (cosmetic, not required for runtime).
+
+### Follow-up completed
+- Performed additional cosmetic rename pass:
+  - moved Android Kotlin sources to `android/app/src/main/java/co/oneshots/mobile/`
+  - updated iOS product name/scheme buildable app name to `OpenShots`
+  - renamed iOS test class symbol to `OpenShotsTests`
+- Completed deep native rename:
+  - `ios/OpenShotsTemplate.xcodeproj` -> `ios/OpenShots.xcodeproj`
+  - `ios/OpenShotsTemplate/` -> `ios/OpenShots/`
+  - `ios/OpenShotsTemplateTests/` -> `ios/OpenShotsTests/`
+  - `OpenShotsTemplate.xcscheme` -> `OpenShots.xcscheme`
+  - pod targets and Xcode references updated to `OpenShots` / `OpenShotsTests`
+
+---
+
+## 2026-04-05 — Local runtime validation green (iOS + Android)
+
+### What was done
+- Installed local prerequisites via Homebrew:
+  - `cocoapods`
+  - `openjdk@17`
+  - `android-platform-tools`
+  - `android-commandlinetools`
+  - `android-studio`
+- Installed Android SDK packages and accepted licenses with `sdkmanager`.
+- Created and booted Android emulator AVD (`OpenShotsPixel`).
+- Ran `pod install` successfully in `mobile/ios` and switched to workspace build path.
+- Launched Metro and validated runtime:
+  - `npm run ios -- --no-packager` -> build + launch success on iOS simulator.
+  - `npm run android -- --no-packager` -> build + install + launch success on Android emulator.
+
+### What to do next
+- Keep `JAVA_HOME` / `ANDROID_HOME` exports in shell profile (`.zshrc`) so RN commands work without inline env prefixes.
+- Add minimal navigation polish and replace JSON debug render blocks in eval/releases/settings with production UI cards.

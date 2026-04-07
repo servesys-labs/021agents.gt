@@ -127,6 +127,10 @@ This project follows the **harness engineering** discipline described in the art
 Run `./init.sh` to bootstrap the development environment. It installs dependencies
 for all three packages and verifies the setup.
 
+## IDE assistant skills (Cursor + Claude Code)
+
+Portable skills for editors live under `.cursor/skills/<skill-name>/SKILL.md` (YAML frontmatter with `name` and `description`). The same folders are mirrored under `.claude/skills/` for Claude Code. After editing skills under `.cursor/skills/`, run `./scripts/sync-ide-skills.sh` from the repo root to refresh `.claude/skills/`, or copy manually if you prefer.
+
 ## Coding Standards (TypeScript)
 
 ### Imports
