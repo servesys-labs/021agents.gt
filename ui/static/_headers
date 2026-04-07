@@ -1,0 +1,13 @@
+# Immutable assets (hashed filenames) — cache forever
+/_app/immutable/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# HTML pages — always revalidate to get fresh JS/CSS references
+/
+  Cache-Control: no-cache
+/*.html
+  Cache-Control: no-cache
+
+# Service worker and app shell
+/index.html
+  Cache-Control: no-cache

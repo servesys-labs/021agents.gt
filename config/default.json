@@ -31,6 +31,18 @@
       }
     },
     "plans": {
+      "free": {
+        "_description": "Free — Gemma 4 26B MoE on Workers AI (edge) + self-hosted Dense 31B for complex. Zero cost.",
+        "general": {
+          "simple":    { "model": "@cf/google/gemma-4-26b-a4b-it", "provider": "workers-ai",        "max_tokens": 2048 },
+          "moderate":  { "model": "@cf/google/gemma-4-26b-a4b-it", "provider": "workers-ai",        "max_tokens": 4096 },
+          "complex":   { "model": "gemma-4-31b",                   "provider": "custom-gemma4-local","max_tokens": 8192 },
+          "tool_call": { "model": "@cf/google/gemma-4-26b-a4b-it", "provider": "workers-ai",        "max_tokens": 4096 }
+        },
+        "multimodal": {
+          "vision":    { "model": "@cf/google/gemma-4-26b-a4b-it", "provider": "workers-ai",        "max_tokens": 4096 }
+        }
+      },
       "basic": {
         "_description": "Budget — Workers AI edge-local open-source models, lowest cost",
         "general": {

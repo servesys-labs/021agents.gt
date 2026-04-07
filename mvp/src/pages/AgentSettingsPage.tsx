@@ -61,7 +61,7 @@ export default function AgentSettingsPage() {
   const [persona, setPersona] = useState("");
   const [tone, setTone] = useState("friendly");
   const [responseLength, setResponseLength] = useState("medium");
-  const [plan, setPlan] = useState<"basic" | "standard" | "premium">("standard");
+  const [plan, setPlan] = useState<"free" | "basic" | "standard" | "premium">("standard");
   const [model, setModel] = useState("");
   const [budgetLimitUsd, setBudgetLimitUsd] = useState(10);
   const [maxTurns, setMaxTurns] = useState(50);
@@ -223,11 +223,12 @@ export default function AgentSettingsPage() {
             <p className="text-xs text-text-secondary mb-2">
               Controls which AI models power your agent. Higher tiers use more capable models.
             </p>
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-4 gap-3">
               {([
-                { key: "basic" as const, label: "Basic", desc: "Free-tier models (Workers AI)", price: "Free" },
-                { key: "standard" as const, label: "Standard", desc: "GPT, Claude & Gemini mix", price: "Usage-based" },
-                { key: "premium" as const, label: "Premium", desc: "Top-tier models (Opus, GPT-5)", price: "Usage-based" },
+                { key: "free" as const, label: "Free", desc: "Gemma 4 31B (self-hosted)", price: "Free" },
+                { key: "basic" as const, label: "Basic", desc: "DeepSeek V3.2", price: "Near-free" },
+                { key: "standard" as const, label: "Standard", desc: "Claude Sonnet 4.6", price: "Usage-based" },
+                { key: "premium" as const, label: "Premium", desc: "Claude Opus 4.6", price: "Usage-based" },
               ]).map((p) => (
                 <button
                   key={p.key}

@@ -1,0 +1,18 @@
+{
+  "name": "agentos-ops",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [
+    { "pattern": "ops.oneshots.co/*", "zone_name": "oneshots.co" }
+  ],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "775f7e11ce8c479993855531f728770a"
+    }
+  ],
+  "vars": {
+    "OPS_PASSWORD": "OneShots2026!"
+  }
+}
