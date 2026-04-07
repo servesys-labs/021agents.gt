@@ -54,6 +54,7 @@
   }
 
   // Quick mode state
+  let quickName = $state("");
   let quickDescription = $state("");
   let quickPlan = $state("free");
   let quickLoading = $state(false);
@@ -125,11 +126,9 @@
     }
     quickLoading = true;
     try {
-      // Step 1: Generate a name from the description
-      const words = quickDescription.trim().toLowerCase().split(/\s+/).slice(0, 3);
-      const baseName = words.join("-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").slice(0, 30);
-      const suffix = Math.random().toString(16).slice(2, 5);
-      const name = baseName ? `${baseName}-${suffix}` : `agent-${suffix}`;
+      // Use explicit name or generate from description
+      const rawName = quickName.trim() || quickDescription.trim().split(/\s+/).slice(0, 3).join("-");
+      const name = rawName.toLowerCase().replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").slice(0, 40) || "my-agent";
 
       // Step 2: Create a minimal agent stub — just name + description + plan
       await api.post("/agents", {
@@ -180,6 +179,19 @@
   {#if mode === "describe"}
     <!-- Quick Mode -->
     <div class="space-y-6">
+      <div>
+        <label for="agent-name" class="mb-2 block text-sm font-medium text-foreground">
+          Agent Name
+        </label>
+        <input
+          id="agent-name"
+          type="text"
+          placeholder="e.g. job-hunter, support-bot, research-agent"
+          bind:value={quickName}
+          class="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+        />
+        <p class="mt-1 text-xs text-muted-foreground">Lowercase letters, numbers, and hyphens. Leave blank to auto-generate.</p>
+      </div>
       <div>
         <label for="quick-desc" class="mb-2 block text-sm font-medium text-foreground">
           Describe what your agent should do
