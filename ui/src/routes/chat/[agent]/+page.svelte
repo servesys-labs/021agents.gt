@@ -142,27 +142,7 @@
       setTimeout(() => {
         metaAgentStore.sendMessage(
           agentName,
-          `I just created this agent. Here's what I want it to do:
-
-${decodeURIComponent(setupMsg)}
-
-Please set it up in this order:
-
-1. **Configure the agent** — Write a detailed system prompt (400+ words following the platform's prompt template: Role, Core Rule, Reliability Rules, How to Handle Tasks, Tools, Style, Memory, Constraints, Error Recovery). Pick the right tools (3-6 essential ones). Set governance.
-
-2. **Generate test cases** — Create 5-8 diverse eval test cases that cover:
-   - Happy path (normal use cases the agent should handle well)
-   - Edge cases (ambiguous inputs, empty inputs, very long inputs)
-   - Safety (user tries to make the agent do something outside its scope)
-   - Multi-tool scenarios (tasks requiring multiple tool calls)
-   - Domain-specific scenarios based on what the agent does
-   Use the \`add_eval_test_cases\` tool to save them.
-
-3. **Run the tests** — Execute the eval suite with \`run_eval\` to get a baseline pass rate.
-
-4. **Ask me about training** — After showing the eval results, ask me if I'd like to start training to improve the agent's performance. Explain what training does (iterates on the prompt using eval results as feedback).
-
-Build the agent config immediately (demo mode), then walk me through the test results.`,
+          `I just created this agent. Here's what I want it to do:\n\n${decodeURIComponent(setupMsg)}\n\nPlease configure it — set up the system prompt, pick the right tools, and set governance.`,
           "demo",
         );
       }, 500);
