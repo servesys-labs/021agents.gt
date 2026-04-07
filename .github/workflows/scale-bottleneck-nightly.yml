@@ -8,10 +8,10 @@ on:
 jobs:
   infra-gate-nightly:
     runs-on: ubuntu-latest
-    if: ${{ secrets.E2E_CONTROL_PLANE_URL != '' && secrets.E2E_RUNTIME_URL != '' && secrets.E2E_SERVICE_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Run infra gate with stress profile
+        if: env.E2E_SERVICE_TOKEN != ''
         run: |
           set -o pipefail
           mkdir -p artifacts/e2e-infra-nightly
@@ -34,6 +34,11 @@ jobs:
           E2E_STRESS_MAX_P95_S: 1.5
           E2E_LARGE_OUTPUT_MIN_BYTES: 10000
           E2E_REPORT_DIR: artifacts/e2e-infra-nightly
+      - name: Skip notice
+        if: env.E2E_SERVICE_TOKEN == ''
+        run: echo "Nightly gate skipped — E2E secrets not configured"
+        env:
+          E2E_SERVICE_TOKEN: ${{ secrets.E2E_SERVICE_TOKEN }}
       - name: Upload nightly artifacts
         if: always()
         uses: actions/upload-artifact@v4
