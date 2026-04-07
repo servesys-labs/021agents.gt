@@ -1106,6 +1106,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
       aiGatewayId: c.env.AI_GATEWAY_ID,
       cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
+      aiGatewayToken: c.env.AI_GATEWAY_TOKEN,
       pipedream: c.env.PIPEDREAM_CLIENT_ID ? {
         clientId: c.env.PIPEDREAM_CLIENT_ID,
         clientSecret: c.env.PIPEDREAM_CLIENT_SECRET ?? "",
