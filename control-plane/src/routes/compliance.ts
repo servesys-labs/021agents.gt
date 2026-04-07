@@ -175,12 +175,12 @@ complianceRoutes.openapi(deleteAccountRoute, async (c): Promise<any> => {
       tablesPurged.push("file_uploads");
     }
 
-    // 9. user_feedback
+    // 9. session_feedback
     const fbResult = await sql`
-      DELETE FROM user_feedback WHERE user_id = ${targetUserId}
+      DELETE FROM session_feedback WHERE user_id = ${targetUserId}
     `;
     const fbCount = fbResult.count ?? 0;
-    if (fbCount > 0) { rowsDeleted += fbCount; tablesPurged.push("user_feedback"); }
+    if (fbCount > 0) { rowsDeleted += fbCount; tablesPurged.push("session_feedback"); }
 
     // 10. org_members
     const omResult = await sql`

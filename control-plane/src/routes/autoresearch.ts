@@ -221,7 +221,7 @@ autoresearchRoutes.openapi(createRunRoute, async (c): Promise<any> => {
   try {
     await sql`
       INSERT INTO autoresearch_runs (
-        run_id, agent_name, status, config_json, workspace,
+        run_id, agent_name, status, config, workspace,
         iteration, best_bpb, total_experiments, kept, discarded, crashed,
         org_id, created_at, updated_at
       ) VALUES (
@@ -350,7 +350,7 @@ autoresearchRoutes.openapi(createExperimentRoute, async (c): Promise<any> => {
     await sql`
       INSERT INTO autoresearch_experiments (
         experiment_id, run_id, agent_name, experiment_name, status,
-        bpb, config_json, results_json, org_id, created_at
+        bpb, config, results, org_id, created_at
       ) VALUES (
         ${experimentId}, ${runId}, ${agentName}, ${experimentName}, ${status},
         ${bpb}, ${configJson}, ${resultsJson}, ${user.org_id}, ${now}

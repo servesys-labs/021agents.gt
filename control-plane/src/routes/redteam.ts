@@ -72,7 +72,7 @@ redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
   let agentConfig = agent_config;
   if (!agentConfig) {
     const agentRows = await sql`
-      SELECT config_json FROM agents
+      SELECT config FROM agents
       WHERE name = ${agentName} AND org_id = ${user.org_id}
       LIMIT 1
     `;
@@ -80,7 +80,7 @@ redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
       return c.json({ error: `Agent '${agentName}' not found` }, 404);
     }
     agentConfig = parseAgentConfigJson(
-      (agentRows[0] as Record<string, unknown>).config_json,
+      (agentRows[0] as Record<string, unknown>).config,
     );
   }
 
@@ -142,7 +142,7 @@ redteamRoutes.openapi(startScanRoute, async (c): Promise<any> => {
       // Persist findings
       for (const finding of result.findings) {
         await sql`
-          INSERT INTO security_findings (
+          INSERT INTO security_scan_findings (
             scan_id, org_id, agent_name, probe_id, probe_name,
             category, layer, severity, title, description, evidence,
             aivss_vector, aivss_score
@@ -308,7 +308,7 @@ redteamRoutes.openapi(getScanRoute, async (c): Promise<any> => {
 
   // Get findings for this scan
   const findingRows = await sql`
-    SELECT * FROM security_findings
+    SELECT * FROM security_scan_findings
     WHERE scan_id = ${scanId} AND org_id = ${user.org_id}
     ORDER BY aivss_score DESC
   `;

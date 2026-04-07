@@ -2033,7 +2033,7 @@ async function dispatch(
       }
       try {
         await sql`
-          INSERT INTO schedules (schedule_id, agent_name, org_id, task, cron_expression, enabled, run_count, created_at)
+          INSERT INTO schedules (schedule_id, agent_name, org_id, task, cron, enabled, run_count, created_at)
           VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${new Date().toISOString()})
         `;
         return JSON.stringify({ created: true, schedule_id: scheduleId, agent_name: agentName, cron: cronExpr, task: taskDesc });
@@ -2244,7 +2244,7 @@ async function dispatch(
 
       try {
         await sql`
-          INSERT INTO user_feedback (id, session_id, turn_number, rating, comment, message_preview, org_id, agent_name, channel, created_at)
+          INSERT INTO session_feedback (id, session_id, turn_number, rating, comment, message_preview, org_id, agent_name, channel, created_at)
           VALUES (${feedbackId}, ${sessionId2}, ${turn}, ${rating}, ${comment}, ${messageContent},
                   ${args.org_id || ""}, ${args.agent_name || ""}, ${args.channel || "api"}, ${new Date().toISOString()})
         `;
@@ -2310,7 +2310,6 @@ async function dispatch(
 
         // Execute with RLS context
         const rows = await sql.begin(async (tx: any) => {
-          await tx`SELECT set_config('app.current_org_id', ${orgId}, true)`;
           await tx`SELECT set_config('app.current_user_id', ${userId || "agent"}, true)`;
           await tx`SELECT set_config('app.current_role', 'agent', true)`;
 
@@ -2344,7 +2343,7 @@ async function dispatch(
             case "feedback.stats": {
               const sd = Math.min(Number(p.since_days) || 30, 365);
               const since = new Date(Date.now() - sd * 86400 * 1000).toISOString();
-              return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
+              return await tx`SELECT rating, COUNT(*) as count FROM session_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
             }
             default:
               throw new Error(`Unknown query_id: ${queryId}. Available: sessions.stats, issues.summary, eval.latest_run, billing.usage, billing.by_agent, feedback.stats`);
@@ -2487,7 +2486,7 @@ async function dispatch(
         try {
           const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${orgId} AND is_active = true`;
           const current = countRows[0]?.cnt || 0;
-          const limitRows = await sql`SELECT (limits_json->>'max_agents')::int as max_agents FROM org_settings WHERE org_id = ${orgId} LIMIT 1`.catch(() => []);
+          const limitRows = await sql`SELECT (limits->>'max_agents')::int as max_agents FROM org_settings WHERE org_id = ${orgId} LIMIT 1`.catch(() => []);
           const maxAgents = limitRows[0]?.max_agents || 50;
           if (current >= maxAgents) {
             return JSON.stringify({ error: `Org has reached agent limit (${maxAgents}). Delete unused agents or upgrade plan.` });
@@ -2510,7 +2509,7 @@ async function dispatch(
       });
       try {
         await sql`
-          INSERT INTO agents (agent_id, name, org_id, project_id, config_json, description, is_active, created_at, updated_at)
+          INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
           VALUES (${agentId}, ${name}, ${orgId}, ${''}, ${configJson}, ${desc}, 1, ${now}, ${now})
         `;
         const warnings: string[] = [];
@@ -2657,7 +2656,7 @@ async function dispatch(
             const { getDb } = await import("./db");
             const sql = await getDb((env as any).HYPERDRIVE);
             await sql`
-              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, status, error_message, input_preview, created_at, completed_at)
+              INSERT INTO delegation_events (parent_session_id, child_session_id, parent_agent_name, child_agent_name, org_id, depth, status, error, input_preview, created_at, completed_at)
               VALUES (${lineage?.session_id || sessionId}, '', ${lineage?.agent_name || "unknown"}, ${agentName}, ${orgId}, ${parentDepth + 1}, 'failed', ${(err.message || String(err)).slice(0, 500)}, ${task.slice(0, 500)}, now(), now())
             `;
           } catch {}
@@ -2678,7 +2677,7 @@ async function dispatch(
       const trials = Number(args.trials) || 1;
       try {
         await sql`
-          INSERT INTO eval_runs (eval_run_id, agent_name, org_id, status, config_json, results_json, pass_rate, total_trials, passed_trials, created_at)
+          INSERT INTO eval_runs (eval_run_id, agent_name, org_id, status, config, results, pass_rate, total_trials, passed_trials, created_at)
           VALUES (
             ${runId}, ${agentName}, ${orgId}, ${"pending"},
             ${JSON.stringify({ source: "tool:eval-agent" })}, ${JSON.stringify({})},
@@ -2767,7 +2766,7 @@ async function dispatch(
       const timeBudget = Number(args.time_budget) || 300;
       try {
         await sql`
-          INSERT INTO eval_runs (eval_run_id, agent_name, org_id, status, config_json, results_json, pass_rate, total_trials, passed_trials, created_at)
+          INSERT INTO eval_runs (eval_run_id, agent_name, org_id, status, config, results, pass_rate, total_trials, passed_trials, created_at)
           VALUES (
             ${runId}, ${agentName}, ${orgId}, ${"pending"},
             ${JSON.stringify({ source: "tool:autoresearch" })}, ${JSON.stringify({})},
@@ -2788,13 +2787,13 @@ async function dispatch(
       const orgId = args.org_id || "";
       try {
         const rows = await sql`
-          SELECT name, description, config_json, is_active, created_at
+          SELECT name, description, config, is_active, created_at
           FROM agents WHERE org_id = ${orgId} AND is_active = true
           ORDER BY created_at DESC LIMIT 100
         `;
-        // Extract model from config_json for display
+        // Extract model from config for display
         const enriched = rows.map((r: any) => {
-          const cfg = parseJsonColumn(r.config_json);
+          const cfg = parseJsonColumn(r.config);
           return { name: r.name, description: r.description, model: cfg.model || "default", is_active: r.is_active, created_at: r.created_at };
         });
         return JSON.stringify(enriched);
@@ -2823,9 +2822,9 @@ async function dispatch(
       const agentName = String(args.agent_name || "");
       if (!agentName) return "security-scan requires agent_name";
       try {
-        const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+        const agent = await sql`SELECT name, config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const cfg = parseJsonColumn(agent[0].config_json);
+        const cfg = parseJsonColumn(agent[0].config);
         const tools = Array.isArray(cfg.tools) ? cfg.tools : [];
         // Basic OWASP LLM Top 10 probe checks
         const findings: { probe: string; risk: string; detail: string }[] = [];
@@ -2911,9 +2910,9 @@ async function dispatch(
       const agentName = String(args.agent_name || "");
       if (!agentName) return "compliance requires agent_name";
       try {
-        const agent = await sql`SELECT name, config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
+        const agent = await sql`SELECT name, config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1`;
         if (agent.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const cfg = parseJsonColumn(agent[0].config_json);
+        const cfg = parseJsonColumn(agent[0].config);
         const governance = cfg.governance || {};
         const checks = {
           has_system_prompt: Boolean(cfg.system_prompt || cfg.systemPrompt),
@@ -3157,7 +3156,7 @@ async function dispatch(
       const action = String(args.action || "list");
       try {
         if (action === "list") {
-          const rows = await sql`SELECT policy_id, name, policy_json, created_at FROM policy_templates WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT policy_id, name, policy, created_at FROM policy_templates WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -3167,7 +3166,7 @@ async function dispatch(
           const policyJson = JSON.stringify({ budget_limit_usd: budgetLimit, blocked_tools: blockedTools });
           const policyId = crypto.randomUUID().slice(0, 12);
           await sql`
-            INSERT INTO policy_templates (policy_id, org_id, name, policy_json, created_at)
+            INSERT INTO policy_templates (policy_id, org_id, name, policy, created_at)
             VALUES (${policyId}, ${orgId}, ${name}, ${policyJson}, ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, policy_id: policyId, name, budget_limit_usd: budgetLimit });
@@ -3208,7 +3207,7 @@ async function dispatch(
       const action = String(args.action || "list");
       try {
         if (action === "list") {
-          const rows = await sql`SELECT workflow_id, name, status, steps_json, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
+          const rows = await sql`SELECT workflow_id, name, status, steps, created_at FROM workflows WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT 50`;
           return JSON.stringify(rows);
         }
         if (action === "create") {
@@ -3217,7 +3216,7 @@ async function dispatch(
           const steps = Array.isArray(args.steps) ? JSON.stringify(args.steps) : "[]";
           const wfId = crypto.randomUUID().slice(0, 12);
           await sql`
-            INSERT INTO workflows (workflow_id, org_id, name, steps_json, status, created_at)
+            INSERT INTO workflows (workflow_id, org_id, name, steps, status, created_at)
             VALUES (${wfId}, ${orgId}, ${name}, ${steps}, 'draft', ${new Date().toISOString()})
           `;
           return JSON.stringify({ created: true, workflow_id: wfId, name });
@@ -3309,14 +3308,14 @@ async function dispatch(
       try {
         // Look up the agent's voice config for Vapi IDs
         const agentRows = await sql`
-          SELECT config_json FROM agents
+          SELECT config FROM agents
           WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1
         `.catch(() => []);
         if (agentRows.length === 0) return `Agent '${agentName}' not found or no voice config`;
 
-        const config = typeof agentRows[0].config_json === "string"
-          ? JSON.parse(agentRows[0].config_json)
-          : agentRows[0].config_json ?? {};
+        const config = typeof agentRows[0].config === "string"
+          ? JSON.parse(agentRows[0].config)
+          : agentRows[0].config ?? {};
         const voiceCfg = config.voice || {};
         const assistantId = String(voiceCfg.vapi_assistant_id || "");
         const phoneNumberId = String(voiceCfg.vapi_phone_number_id || "");
@@ -4151,14 +4150,14 @@ async function userProfileSave(env: RuntimeEnv, args: Record<string, any>): Prom
 
     // Upsert user profile with JSONB merge
     await sql`
-      INSERT INTO user_profiles (id, org_id, agent_name, user_identifier, profile_data, updated_at, created_at)
+      INSERT INTO user_profiles (id, org_id, agent_name, end_user_id, profile_data, updated_at, created_at)
       VALUES (
         ${`${orgId}-${agentName}-${userId}`},
         ${orgId}, ${agentName}, ${userId},
         jsonb_build_object(${key}, ${value}),
         now(), now()
       )
-      ON CONFLICT (org_id, agent_name, user_identifier) DO UPDATE
+      ON CONFLICT (org_id, agent_name, end_user_id) DO UPDATE
       SET profile_data = user_profiles.profile_data || jsonb_build_object(${key}, ${value}),
           updated_at = now()
     `;
@@ -4183,7 +4182,7 @@ async function userProfileLoad(env: RuntimeEnv, args: Record<string, any>): Prom
     const rows = await sql`
       SELECT profile_data, preferences, metadata, updated_at
       FROM user_profiles
-      WHERE org_id = ${orgId} AND agent_name = ${agentName} AND user_identifier = ${userId}
+      WHERE org_id = ${orgId} AND agent_name = ${agentName} AND end_user_id = ${userId}
       LIMIT 1
     `;
 
@@ -4739,14 +4738,14 @@ async function memorySave(env: RuntimeEnv, args: Record<string, any>): Promise<s
 
     if (memoryType === "episodic") {
       await sql`
-        INSERT INTO episodic_memories (id, agent_name, org_id, content, source, metadata_json, created_at)
+        INSERT INTO episodes (id, agent_name, org_id, content, source, metadata, created_at)
         VALUES (${id}, ${agentName}, ${orgId}, ${content}, 'agent', ${JSON.stringify(key ? { key, category } : { category })}, ${now})
       `;
       return JSON.stringify({ saved: true, type: "episodic", id });
     } else {
       const factKey = key || content.slice(0, 50);
       await sql`
-        INSERT INTO semantic_facts (id, agent_name, org_id, key, value, category, created_at)
+        INSERT INTO facts (id, agent_name, org_id, key, value, category, created_at)
         VALUES (${id}, ${agentName}, ${orgId}, ${factKey}, ${content}, ${category}, ${now})
         ON CONFLICT (agent_name, org_id, key) DO UPDATE SET value = ${content}, category = ${category}
       `;
@@ -4771,7 +4770,7 @@ async function syncWorkspaceMemory(env: RuntimeEnv, sessionId: string): Promise<
     const sql = await getDb(hyperdrive);
     const rows = await sql`
       SELECT key, value, category, created_at
-      FROM semantic_facts
+      FROM facts
       WHERE agent_name = ${agentName} AND org_id = ${orgId}
       ORDER BY category ASC, created_at DESC
       LIMIT 150
@@ -4833,15 +4832,15 @@ async function memoryRecall(env: RuntimeEnv, args: Record<string, any>): Promise
 
     if (memoryType === "all" || memoryType === "semantic") {
       const rows = query
-        ? await sql`SELECT key, value, category FROM semantic_facts WHERE agent_name = ${agentName} AND org_id = ${orgId} AND (key ILIKE ${'%' + query + '%'} OR value ILIKE ${'%' + query + '%'}) ORDER BY created_at DESC LIMIT 20`
-        : await sql`SELECT key, value, category FROM semantic_facts WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
+        ? await sql`SELECT key, value, category FROM facts WHERE agent_name = ${agentName} AND org_id = ${orgId} AND (key ILIKE ${'%' + query + '%'} OR value ILIKE ${'%' + query + '%'}) ORDER BY created_at DESC LIMIT 20`
+        : await sql`SELECT key, value, category FROM facts WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
       results.push(...rows.map((r: any) => ({ type: "semantic", key: r.key, value: r.value, category: r.category })));
     }
 
     if (memoryType === "all" || memoryType === "episodic") {
       const rows = query
-        ? await sql`SELECT content, created_at FROM episodic_memories WHERE agent_name = ${agentName} AND org_id = ${orgId} AND content ILIKE ${'%' + query + '%'} ORDER BY created_at DESC LIMIT 20`
-        : await sql`SELECT content, created_at FROM episodic_memories WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
+        ? await sql`SELECT content, created_at FROM episodes WHERE agent_name = ${agentName} AND org_id = ${orgId} AND content ILIKE ${'%' + query + '%'} ORDER BY created_at DESC LIMIT 20`
+        : await sql`SELECT content, created_at FROM episodes WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 20`;
       results.push(...rows.map((r: any) => ({ type: "episodic", content: r.content, created: r.created_at })));
     }
 
@@ -4864,9 +4863,9 @@ async function memoryDelete(env: RuntimeEnv, args: Record<string, any>): Promise
     const sql = await getDb(hyperdrive);
     if (memoryType === "semantic" && (args.fact_id || args.key)) {
       if (args.fact_id) {
-        await sql`DELETE FROM semantic_facts WHERE id = ${args.fact_id} AND agent_name = ${agentName} AND org_id = ${orgId}`;
+        await sql`DELETE FROM facts WHERE id = ${args.fact_id} AND agent_name = ${agentName} AND org_id = ${orgId}`;
       } else {
-        await sql`DELETE FROM semantic_facts WHERE key = ${args.key} AND agent_name = ${agentName} AND org_id = ${orgId}`;
+        await sql`DELETE FROM facts WHERE key = ${args.key} AND agent_name = ${agentName} AND org_id = ${orgId}`;
       }
       return JSON.stringify({ deleted: true, type: "semantic" });
     }

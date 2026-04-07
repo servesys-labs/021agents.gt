@@ -674,15 +674,15 @@ async function executeTool(
   switch (name) {
     case "read_agent_config": {
       const rows = await sql`
-        SELECT name, description, config_json, is_active, created_at, updated_at
+        SELECT name, description, config, is_active, created_at, updated_at
         FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
       `;
       if (rows.length === 0) return JSON.stringify({ error: "Agent not found" });
       const row = rows[0] as Record<string, unknown>;
       const config =
-        typeof row.config_json === "string"
-          ? JSON.parse(row.config_json)
-          : row.config_json ?? {};
+        typeof row.config === "string"
+          ? JSON.parse(row.config)
+          : row.config ?? {};
       return JSON.stringify({
         name: row.name,
         description: row.description,
@@ -723,14 +723,14 @@ async function executeTool(
 
     case "update_agent_config": {
       const rows = await sql`
-        SELECT config_json FROM agents
+        SELECT config FROM agents
         WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
       `;
       if (rows.length === 0) return JSON.stringify({ error: "Agent not found" });
       const config =
-        typeof rows[0].config_json === "string"
-          ? JSON.parse(rows[0].config_json as string)
-          : (rows[0].config_json as Record<string, unknown>) ?? {};
+        typeof rows[0].config === "string"
+          ? JSON.parse(rows[0].config as string)
+          : (rows[0].config as Record<string, unknown>) ?? {};
 
       // Apply requested changes
       // Backwards compat: accept max_tokens as alias for max_tokens_per_turn
@@ -787,7 +787,7 @@ async function executeTool(
 
       await sql`
         UPDATE agents
-        SET config_json = ${JSON.stringify(config)},
+        SET config = ${JSON.stringify(config)},
             description = ${String(config.description || "")},
             updated_at = now()
         WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
@@ -796,10 +796,10 @@ async function executeTool(
       // Snapshot version
       try {
         await sql`
-          INSERT INTO agent_versions (agent_name, version, config_json, created_by, created_at)
+          INSERT INTO agent_versions (agent_name, version, config, created_by, created_at)
           VALUES (${ctx.agentName}, ${newVersion}, ${JSON.stringify(config)}, ${"meta-agent"}, now())
           ON CONFLICT (agent_name, version) DO UPDATE
-          SET config_json = ${JSON.stringify(config)}, created_by = ${"meta-agent"}
+          SET config = ${JSON.stringify(config)}, created_by = ${"meta-agent"}
         `;
       } catch {}
 
@@ -877,7 +877,7 @@ async function executeTool(
       const limit = Number(args.limit) || 50;
       const rows = await sql`
         SELECT t.turn_number, t.model_used, t.llm_content,
-               t.tool_calls_json, t.tool_results_json, t.errors_json,
+               t.tool_calls, t.tool_results, t.errors,
                t.cost_total_usd, t.latency_ms,
                t.input_tokens, t.output_tokens, t.execution_mode,
                t.created_at
@@ -894,9 +894,9 @@ async function executeTool(
           let toolCalls: any[] = [];
           let toolResults: any[] = [];
           let errors: any[] = [];
-          toolCalls = parseJsonColumn(r.tool_calls_json, []);
-          toolResults = parseJsonColumn(r.tool_results_json, []);
-          errors = parseJsonColumn(r.errors_json, []);
+          toolCalls = parseJsonColumn(r.tool_calls, []);
+          toolResults = parseJsonColumn(r.tool_results, []);
+          errors = parseJsonColumn(r.errors, []);
 
           return {
             turn: r.turn_number,
@@ -954,7 +954,7 @@ async function executeTool(
             SUM(COALESCE(t.cache_read_tokens, 0)) as total_cache_read_tokens,
             SUM(COALESCE(t.cache_write_tokens, 0)) as total_cache_write_tokens,
             COUNT(*) FILTER (WHERE t.refusal = true) as refusal_count,
-            COUNT(*) FILTER (WHERE t.errors_json IS NOT NULL AND t.errors_json != '[]') as error_turn_count
+            COUNT(*) FILTER (WHERE t.errors IS NOT NULL AND t.errors != '[]') as error_turn_count
           FROM turns t
           JOIN sessions s ON t.session_id = s.session_id
           WHERE s.agent_name = ${ctx.agentName}
@@ -978,7 +978,7 @@ async function executeTool(
         `;
       } catch {}
 
-      // ── Per-tool health (parsed from tool_results_json) ──
+      // ── Per-tool health (parsed from tool_results) ──
       let toolHealth: any[] = [];
       try {
         toolHealth = await sql`
@@ -988,13 +988,13 @@ async function executeTool(
             ROUND(COUNT(*) FILTER (WHERE error IS NOT NULL AND error != '')::numeric
               / NULLIF(COUNT(*), 0) * 100, 1) as error_rate_pct
           FROM (
-            SELECT jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'name' as tool_name,
-              (jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
-              jsonb_array_elements(COALESCE(tool_results_json::jsonb, '[]'::jsonb))->>'error' as error
+            SELECT jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'name' as tool_name,
+              (jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'latency_ms')::numeric as latency_ms,
+              jsonb_array_elements(COALESCE(tool_results::jsonb, '[]'::jsonb))->>'error' as error
             FROM turns t JOIN sessions s ON t.session_id = s.session_id
             WHERE s.agent_name = ${ctx.agentName} AND s.org_id = ${ctx.orgId}
               AND t.created_at > now() - ${interval}::interval
-              AND t.tool_results_json IS NOT NULL AND t.tool_results_json != '[]'
+              AND t.tool_results IS NOT NULL AND t.tool_results != '[]'
           ) tool_stats WHERE tool_name IS NOT NULL
           GROUP BY tool_name ORDER BY error_rate_pct DESC, call_count DESC LIMIT 20
         `;
@@ -1148,14 +1148,14 @@ async function executeTool(
     case "analyze_and_suggest": {
       // Load config
       const configRows = await sql`
-        SELECT config_json FROM agents
+        SELECT config FROM agents
         WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
       `;
       if (configRows.length === 0) return JSON.stringify({ error: "Agent not found" });
       const config =
-        typeof configRows[0].config_json === "string"
-          ? JSON.parse(configRows[0].config_json as string)
-          : (configRows[0].config_json as Record<string, unknown>) ?? {};
+        typeof configRows[0].config === "string"
+          ? JSON.parse(configRows[0].config as string)
+          : (configRows[0].config as Record<string, unknown>) ?? {};
 
       // Load latest eval run
       const evalRows = await sql`
@@ -1235,7 +1235,7 @@ async function executeTool(
           config.version = p.join(".");
 
           await sql`
-            UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+            UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
             WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
           `;
         }
@@ -1286,17 +1286,17 @@ async function executeTool(
       let toolErrors: any[] = [];
       try {
         const errRows = await sql`
-          SELECT t.errors_json FROM turns t
+          SELECT t.errors FROM turns t
           JOIN sessions s ON t.session_id = s.session_id
           WHERE s.agent_name = ${ctx.agentName}
             AND s.org_id = ${ctx.orgId}
             AND t.created_at > now() - ${interval}::interval
-            AND t.errors_json IS NOT NULL AND t.errors_json != '[]'
+            AND t.errors IS NOT NULL AND t.errors != '[]'
           LIMIT 100
         `;
         const errorCounts: Record<string, number> = {};
         for (const row of errRows as any[]) {
-          const errors = parseJsonColumn(row.errors_json, []);
+          const errors = parseJsonColumn(row.errors, []);
           for (const err of errors) {
             const toolName = String(err).split(":")[0] || "unknown";
             errorCounts[toolName] = (errorCounts[toolName] || 0) + 1;
@@ -1382,17 +1382,17 @@ async function executeTool(
         }
 
         await sql`
-          INSERT INTO training_jobs (job_id, agent_name, org_id, algorithm, max_iterations, auto_activate,
-            status, current_iteration, best_score, eval_tasks_json, created_at)
+          INSERT INTO training_jobs (id, agent_name, org_id, algorithm, max_iterations, auto_activate,
+            status, current_iteration, best_score, eval_tasks, created_at)
           VALUES (${jobId}, ${ctx.agentName}, ${ctx.orgId}, ${algorithm}, ${maxIterations}, ${autoActivate},
             'created', 0, NULL, ${JSON.stringify(evalTasks)}, ${now})
         `;
 
         // Snapshot current system prompt as initial resource
         try {
-          const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+          const agentRows = await sql`SELECT config FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
           if (agentRows.length > 0) {
-            const config = parseJsonColumn(agentRows[0].config_json);
+            const config = parseJsonColumn(agentRows[0].config);
             const prompt = String(config.system_prompt ?? "");
             if (prompt) {
               const resId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
@@ -1411,7 +1411,7 @@ async function executeTool(
               type: "training_step",
               payload: { job_id: jobId, org_id: ctx.orgId },
             });
-            await sql`UPDATE training_jobs SET status = 'running', started_at = ${now} WHERE job_id = ${jobId}`;
+            await sql`UPDATE 0 = ${jobId}`;
           } catch (err) {
             console.error("[meta-agent] Failed to enqueue training step:", err);
           }
@@ -1437,7 +1437,7 @@ async function executeTool(
         if (args.job_id) {
           jobRows = await sql`
             SELECT * FROM training_jobs
-            WHERE job_id = ${String(args.job_id)} AND org_id = ${ctx.orgId} LIMIT 1
+            WHERE id = ${String(args.job_id)} AND org_id = ${ctx.orgId} LIMIT 1
           `;
         } else {
           jobRows = await sql`
@@ -1464,16 +1464,16 @@ async function executeTool(
 
         if (args.include_iterations) {
           const iterations = await sql`
-            SELECT iteration_number, pass_rate, reward_score, algorithm_output_json, started_at, completed_at
+            SELECT iteration_number, pass_rate, reward_score, algorithm_output, started_at, completed_at
             FROM training_iterations
-            WHERE job_id = ${job.job_id}
+            WHERE id = ${job.job_id}
             ORDER BY iteration_number
           `;
           result.iterations = iterations.map((it: any) => ({
             iteration: it.iteration_number,
             pass_rate: it.pass_rate,
             reward_score: it.reward_score,
-            algorithm_output: parseJsonColumn(it.algorithm_output_json),
+            algorithm_output: parseJsonColumn(it.algorithm_output),
             started_at: it.started_at,
             completed_at: it.completed_at,
           }));
@@ -1495,16 +1495,16 @@ async function executeTool(
         `;
         if (resRows.length === 0) return JSON.stringify({ error: "Training resource not found" });
         const resource = resRows[0] as any;
-        // content_text holds prompt content; content_json holds structured configs
-        const rawContent = resource.content_text || resource.content_json;
+        // content_text holds prompt content; content holds structured configs
+        const rawContent = resource.content_text || resource.content;
         const trainedConfig = typeof rawContent === "string" ? (() => { try { return JSON.parse(rawContent); } catch { return { system_prompt: rawContent }; } })() : (rawContent || {});
 
         // Read current config for rollback storage
         const currentRows = await sql`
-          SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
+          SELECT config FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1
         `;
         const currentConfig = currentRows.length > 0
-          ? (typeof currentRows[0].config_json === "string" ? JSON.parse(currentRows[0].config_json as string) : currentRows[0].config_json)
+          ? (typeof currentRows[0].config === "string" ? JSON.parse(currentRows[0].config as string) : currentRows[0].config)
           : {};
 
         // Apply trained config
@@ -1516,7 +1516,7 @@ async function executeTool(
         merged.version = verParts.join(".");
 
         await sql`
-          UPDATE agents SET config_json = ${JSON.stringify(merged)}, updated_at = now()
+          UPDATE agents SET config = ${JSON.stringify(merged)}, updated_at = now()
           WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
         `;
 
@@ -1557,7 +1557,7 @@ async function executeTool(
         if (activeRows.length > 0) {
           const active = activeRows[0] as any;
           rollbackRows = await sql`
-            SELECT content_text, content_json, version FROM training_resources
+            SELECT content_text, content, version FROM training_resources
             WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId}
               AND resource_type = ${active.resource_type} AND resource_key = ${active.resource_key}
               AND version < ${active.version}
@@ -1566,7 +1566,7 @@ async function executeTool(
         } else {
           // Fallback: look for rollback_snapshot resources
           rollbackRows = await sql`
-            SELECT content_text, content_json FROM training_resources
+            SELECT content_text, content FROM training_resources
             WHERE agent_name = ${ctx.agentName} AND org_id = ${ctx.orgId} AND resource_type = 'rollback_snapshot'
             ORDER BY created_at DESC LIMIT 1
           `;
@@ -1574,13 +1574,13 @@ async function executeTool(
         if (rollbackRows.length === 0) {
           return JSON.stringify({ error: "No rollback snapshot found. No training activation has been done for this agent." });
         }
-        const rawContent = rollbackRows[0].content_text || rollbackRows[0].content_json;
+        const rawContent = rollbackRows[0].content_text || rollbackRows[0].content;
         const previousConfig = typeof rawContent === "string"
           ? (() => { try { return JSON.parse(rawContent); } catch { return { system_prompt: rawContent }; } })()
           : (rawContent || {});
 
         await sql`
-          UPDATE agents SET config_json = ${JSON.stringify(previousConfig)}, updated_at = now()
+          UPDATE agents SET config = ${JSON.stringify(previousConfig)}, updated_at = now()
           WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
         `;
 
@@ -1673,8 +1673,8 @@ async function executeTool(
         // Also set pricing in agent config so x-402 works
         if (pricePerTask > 0) {
           await sql`
-            UPDATE agents SET config_json = jsonb_set(
-              COALESCE(config_json::jsonb, '{}'::jsonb),
+            UPDATE agents SET config = jsonb_set(
+              COALESCE(config::jsonb, '{}'::jsonb),
               '{pricing}',
               ${JSON.stringify({ price_per_task_usd: pricePerTask, requires_payment: true })}::jsonb
             ), updated_at = now()
@@ -1749,10 +1749,10 @@ async function executeTool(
       }
       try {
         // Read current eval config from agent
-        const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+        const agentRows = await sql`SELECT config FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
         if (!agentRows.length) return JSON.stringify({ error: `Agent '${ctx.agentName}' not found` });
         const agent = agentRows[0];
-        const config = typeof agent.config_json === "string" ? JSON.parse(agent.config_json) : agent.config_json || {};
+        const config = typeof agent.config === "string" ? JSON.parse(agent.config) : agent.config || {};
         const evalConfig = config.eval_config || { test_cases: [], rubric: { criteria: [], pass_threshold: 0.7 }, scenarios: [] };
 
         // Add new test cases
@@ -1770,7 +1770,7 @@ async function executeTool(
         evalConfig.test_cases = existing;
         config.eval_config = evalConfig;
 
-        await sql`UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now() WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+        await sql`UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now() WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
 
         return JSON.stringify({
           added: testCases.length,
@@ -1846,9 +1846,9 @@ async function executeTool(
         // Also load from config eval_config
         if (testCases.length === 0) {
           try {
-            const agentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
+            const agentRows = await sql`SELECT config FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}`;
             if (agentRows.length > 0) {
-              const config = typeof agentRows[0].config_json === "string" ? JSON.parse(agentRows[0].config_json as string) : agentRows[0].config_json || {};
+              const config = typeof agentRows[0].config === "string" ? JSON.parse(agentRows[0].config as string) : agentRows[0].config || {};
               const evalCases = config.eval_config?.test_cases || [];
               testCases = evalCases.map((tc: any) => ({
                 name: tc.name || "unnamed",
@@ -1978,9 +1978,9 @@ async function executeTool(
 
       try {
         // Read parent agent config for defaults
-        const parentRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1`;
+        const parentRows = await sql`SELECT config FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1`;
         const parentConfig = parentRows.length > 0
-          ? (typeof parentRows[0].config_json === "string" ? JSON.parse(parentRows[0].config_json as string) : parentRows[0].config_json || {})
+          ? (typeof parentRows[0].config === "string" ? JSON.parse(parentRows[0].config as string) : parentRows[0].config || {})
           : {};
 
         const subConfig = {
@@ -1998,10 +1998,10 @@ async function executeTool(
         };
 
         await sql`
-          INSERT INTO agents (name, org_id, description, config_json, is_active, created_at, updated_at)
+          INSERT INTO agents (name, org_id, description, config, is_active, created_at, updated_at)
           VALUES (${name}, ${ctx.orgId}, ${description}, ${JSON.stringify(subConfig)}, true, now(), now())
           ON CONFLICT (name, org_id) DO UPDATE SET
-            description = ${description}, config_json = ${JSON.stringify(subConfig)}, updated_at = now()
+            description = ${description}, config = ${JSON.stringify(subConfig)}, updated_at = now()
         `;
 
         // Also ensure parent agent has run-agent or route-to-agent tool
@@ -2011,7 +2011,7 @@ async function executeTool(
             parentTools.push("run-agent");
             parentConfig.tools = parentTools;
             await sql`
-              UPDATE agents SET config_json = ${JSON.stringify(parentConfig)}, updated_at = now()
+              UPDATE agents SET config = ${JSON.stringify(parentConfig)}, updated_at = now()
               WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
             `;
           }
@@ -2037,11 +2037,11 @@ async function executeTool(
       const action = String(args.action || "list");
       try {
         // Read current config
-        const configRows = await sql`SELECT config_json FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1`;
+        const configRows = await sql`SELECT config FROM agents WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId} LIMIT 1`;
         if (configRows.length === 0) return JSON.stringify({ error: "Agent not found" });
-        const config = typeof configRows[0].config_json === "string"
-          ? JSON.parse(configRows[0].config_json as string)
-          : configRows[0].config_json || {};
+        const config = typeof configRows[0].config === "string"
+          ? JSON.parse(configRows[0].config as string)
+          : configRows[0].config || {};
         const connectors: Array<{ app: string; reason?: string; tools?: string[] }> = config.mcp_connectors || [];
 
         if (action === "list") {
@@ -2076,7 +2076,7 @@ async function executeTool(
           }
 
           await sql`
-            UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+            UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
             WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
           `;
 
@@ -2094,7 +2094,7 @@ async function executeTool(
           if (!app) return JSON.stringify({ error: "app is required for remove" });
           config.mcp_connectors = connectors.filter(c => c.app !== app);
           await sql`
-            UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+            UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
             WHERE name = ${ctx.agentName} AND org_id = ${ctx.orgId}
           `;
           return JSON.stringify({ removed: true, app, remaining: config.mcp_connectors.length });
@@ -2127,7 +2127,6 @@ async function executeTool(
       const orgId = ctx.orgId;
       try {
         // Set RLS context for this query
-        await sql`SELECT set_config('app.current_org_id', ${orgId}, true)`.catch(() => {});
 
         // Validate the query references org-scoped tables only
         const SCOPED_TABLES = [
@@ -2142,7 +2141,7 @@ async function executeTool(
           "delegation_events", "tool_executions", "session_progress",
           "trace_annotations", "trace_lineage",
           // Feedback & quality
-          "session_feedback", "user_feedback", "span_feedback",
+          "session_feedback", "session_feedback", "span_feedback",
           // Security & audit
           "audit_log", "security_events", "guardrail_events", "api_access_log",
           // Alerting & SLOs
@@ -2209,9 +2208,9 @@ async function executeTool(
       const sessionId = String(args.session_id || "");
       if (!sessionId) return JSON.stringify({ error: "session_id required" });
       try {
-        // Read turns and extract diagnostic events from errors_json and tool_results_json
+        // Read turns and extract diagnostic events from errors and tool_results
         const turns = await sql`
-          SELECT t.turn_number, t.tool_calls_json, t.tool_results_json, t.errors_json, t.cost_total_usd, t.created_at
+          SELECT t.turn_number, t.tool_calls, t.tool_results, t.errors, t.cost_total_usd, t.created_at
           FROM turns t
           JOIN sessions s ON t.session_id = s.session_id
           WHERE t.session_id = ${sessionId} AND s.org_id = ${ctx.orgId}
@@ -2224,8 +2223,8 @@ async function executeTool(
           const turnNum = turn.turn_number;
           let errors: any[] = [];
           let toolResults: any[] = [];
-          errors = parseJsonColumn(turn.errors_json, []);
-          toolResults = parseJsonColumn(turn.tool_results_json, []);
+          errors = parseJsonColumn(turn.errors, []);
+          toolResults = parseJsonColumn(turn.tool_results, []);
 
           // Loop detection events
           for (const err of errors) {
@@ -2838,7 +2837,7 @@ export async function runMetaChat(
     for (const t of turnRecords) {
       await sql`
         INSERT INTO turns (session_id, turn_number, model_used, llm_content,
-          tool_calls_json, tool_results_json, errors_json,
+          tool_calls, tool_results, errors,
           input_tokens, output_tokens, cost_total_usd, latency_ms, execution_mode, started_at)
         VALUES (
           ${sessionId}, ${t.turn}, ${t.model}, ${t.content.slice(0, 10000)},

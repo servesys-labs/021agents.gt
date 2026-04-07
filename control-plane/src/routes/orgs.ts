@@ -135,7 +135,7 @@ orgRoutes.openapi(createOrgRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
   try {
     await sql`
-      INSERT INTO org_settings (org_id, plan_type, settings_json, limits_json, features_json, created_at, updated_at)
+      INSERT INTO org_settings (org_id, plan_type, settings, limits, features, created_at, updated_at)
       VALUES (
         ${orgId},
         ${"free"},
@@ -512,7 +512,7 @@ orgRoutes.openapi(getSettingsRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT settings_json, plan_type FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+    SELECT settings, plan_type FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
   `;
 
   if (rows.length === 0) {
@@ -520,7 +520,7 @@ orgRoutes.openapi(getSettingsRoute, async (c): Promise<any> => {
     return c.json({ onboarding_complete: false });
   }
 
-  const settings = parseJsonColumn(rows[0].settings_json);
+  const settings = parseJsonColumn(rows[0].settings);
   return c.json({
     onboarding_complete: settings.onboarding_complete ?? false,
     default_connectors: settings.default_connectors ?? [],
@@ -561,10 +561,10 @@ orgRoutes.openapi(updateSettingsRoute, async (c): Promise<any> => {
 
   // Merge with existing settings
   const existing = await sql`
-    SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+    SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
   `;
   const current = existing.length > 0
-    ? parseJsonColumn(existing[0].settings_json)
+    ? parseJsonColumn(existing[0].settings)
     : {};
 
   const merged = {
@@ -576,10 +576,10 @@ orgRoutes.openapi(updateSettingsRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   await sql`
-    INSERT INTO org_settings (org_id, settings_json, plan_type, created_at, updated_at)
+    INSERT INTO org_settings (org_id, settings, plan_type, created_at, updated_at)
     VALUES (${user.org_id}, ${settingsJson}, ${"free"}, ${now}, ${now})
     ON CONFLICT (org_id) DO UPDATE SET
-      settings_json = ${settingsJson},
+      settings = ${settingsJson},
       updated_at = ${now}
   `;
 

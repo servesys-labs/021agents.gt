@@ -6,7 +6,7 @@ import type { Sql } from "../db/client";
 export type VoiceTenant = { org_id: string; agent_name: string };
 
 /**
- * Match `config_json.voice.vapi_assistant_id` or `vapi_phone_number_id` (top-level voice block).
+ * Match `config.voice.vapi_assistant_id` or `vapi_phone_number_id` (top-level voice block).
  */
 export async function resolveVapiVoiceTenant(
   sql: Sql,
@@ -22,8 +22,8 @@ export async function resolveVapiVoiceTenant(
       SELECT name, org_id
       FROM agents
       WHERE
-        (${aid} != '' AND (config_json::jsonb->'voice'->>'vapi_assistant_id') = ${aid})
-        OR (${pid} != '' AND (config_json::jsonb->'voice'->>'vapi_phone_number_id') = ${pid})
+        (${aid} != '' AND (config::jsonb->'voice'->>'vapi_assistant_id') = ${aid})
+        OR (${pid} != '' AND (config::jsonb->'voice'->>'vapi_phone_number_id') = ${pid})
       ORDER BY updated_at DESC NULLS LAST
       LIMIT 1
     `) as { name?: string; org_id?: string }[];

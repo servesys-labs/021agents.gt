@@ -13,7 +13,7 @@
  *   3. Flat routing table fallback
  *   4. Default model
  *
- * Plans are loaded from agent config_json.plan or config/default.json.
+ * Plans are loaded from agent config.plan or config/default.json.
  */
 
 import type { RuntimeEnv } from "./types";

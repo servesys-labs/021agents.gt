@@ -389,7 +389,7 @@ interface AgentConfig {
   systemPrompt: string;
   agentName: string;
   agentDescription: string;
-  /** Mirrors config_json.harness.enable_checkpoints — false disables DO workspace checkpoint chain. */
+  /** Mirrors config.harness.enable_checkpoints — false disables DO workspace checkpoint chain. */
   enableWorkspaceCheckpoints?: boolean;
 }
 
@@ -1247,7 +1247,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         import("./runtime/db").then(async ({ getDb }) => {
           const sql = await getDb(this.env.HYPERDRIVE);
           await sql`
-            INSERT INTO user_feedback (id, session_id, turn_number, rating, comment, message_preview, user_id, org_id, agent_name, channel, created_at)
+            INSERT INTO session_feedback (id, session_id, turn_number, rating, comment, message_preview, user_id, org_id, agent_name, channel, created_at)
             VALUES (${feedbackId}, ${sessionId}, ${turnNum},
                     ${validatedRating}, ${comment}, ${messageContent},
                     ${userId}, ${data.org_id || ""}, ${data.agent_name || ""}, 'websocket', ${new Date().toISOString()})
@@ -2553,19 +2553,19 @@ export class AgentOSMcpServer extends Agent<Env> {
 
       const rows = effectiveOrgId
         ? await sql`
-            SELECT config_json, name, description, org_id FROM agents
+            SELECT config, name, description, org_id FROM agents
             WHERE name = ${agentName} AND org_id = ${effectiveOrgId} AND is_active = true
             LIMIT 1
           `
         : await sql`
-            SELECT config_json, name, description, org_id FROM agents
+            SELECT config, name, description, org_id FROM agents
             WHERE name = ${agentName} AND is_active = true
             LIMIT 1
           `;
       if (rows.length === 0) return;
 
       let config: Record<string, unknown> = {};
-      config = parseJsonColumn(rows[0].config_json);
+      config = parseJsonColumn(rows[0].config);
       this._agentConfig = config;
 
       // Ensure org_id from the agents table flows into the DO state and config
@@ -2626,13 +2626,13 @@ export class AgentOSMcpServer extends Agent<Env> {
       if (configuredTools.length > 0) {
         try {
           const toolRows = await sql`
-            SELECT name, description, input_schema_json FROM tool_registry
+            SELECT name, description, input_schema FROM tool_registry
             WHERE name = ANY(${configuredTools})
           `;
           const schemaMap = new Map<string, { description: string; schema: Record<string, unknown> }>();
           for (const row of toolRows) {
             let schema: Record<string, unknown> = {};
-            schema = parseJsonColumn(row.input_schema_json);
+            schema = parseJsonColumn(row.input_schema);
             schemaMap.set(String(row.name), {
               description: String(row.description || ""),
               schema,
@@ -5470,14 +5470,13 @@ export default {
           const sql = await getDb(env.HYPERDRIVE);
 
           const rows = await sql.begin(async (tx: any) => {
-            await tx`SELECT set_config('app.current_org_id', ${orgId}, true)`;
             await tx`SELECT set_config('app.current_user_id', ${userId || "system"}, true)`;
             await tx`SELECT set_config('app.current_role', ${role || "service"}, true)`;
 
             // ── Agent queries ──────────────────────────────────────
             if (queryId === "agents.list_active_by_org") {
               return await tx`
-                SELECT name, description, config_json, is_active, created_at, updated_at
+                SELECT name, description, config, is_active, created_at, updated_at
                 FROM agents
                 WHERE org_id = ${orgId} AND is_active = true
                 ORDER BY created_at DESC
@@ -5487,7 +5486,7 @@ export default {
               const agentName = String(body.params?.agent_name || "");
               if (!agentName) throw new Error("params.agent_name required");
               return await tx`
-                SELECT name, config_json, description FROM agents
+                SELECT name, config, description FROM agents
                 WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
               `;
             }
@@ -5588,12 +5587,12 @@ export default {
             // ── Feedback queries ──────────────────────────────────
             if (queryId === "feedback.recent") {
               const limit = Math.min(Number(body.params?.limit) || 50, 200);
-              return await tx`SELECT * FROM user_feedback WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`;
+              return await tx`SELECT * FROM session_feedback WHERE org_id = ${orgId} ORDER BY created_at DESC LIMIT ${limit}`;
             }
             if (queryId === "feedback.stats") {
               const sinceDays = Math.min(Number(body.params?.since_days) || 30, 365);
               const since = new Date(Date.now() - sinceDays * 86400 * 1000).toISOString();
-              return await tx`SELECT rating, COUNT(*) as count FROM user_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
+              return await tx`SELECT rating, COUNT(*) as count FROM session_feedback WHERE org_id = ${orgId} AND created_at >= ${since} GROUP BY rating`;
             }
 
             // ── Security queries ──────────────────────────────────
@@ -7250,7 +7249,7 @@ export default {
               input_text, output_text, model, trace_id, parent_session_id,
               depth, step_count, action_count, wall_clock_seconds,
               cost_total_usd,
-              detailed_cost_json, feature_flags_json,
+              detailed_cost, feature_flags,
               total_cache_read_tokens, total_cache_write_tokens,
               repair_count, compaction_count,
               created_at
@@ -7261,8 +7260,8 @@ export default {
               ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
               ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
               ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
-              ${jp(p.detailed_cost_json, null)},
-              ${jp(p.feature_flags_json, null)},
+              ${jp(p.detailed_cost, null)},
+              ${jp(p.feature_flags, null)},
               ${p.total_cache_read_tokens || 0}, ${p.total_cache_write_tokens || 0},
               ${p.repair_count || 0}, ${p.compaction_count || 0},
               ${ts(p.created_at)}
@@ -7270,19 +7269,19 @@ export default {
               status = EXCLUDED.status, output_text = EXCLUDED.output_text,
               cost_total_usd = EXCLUDED.cost_total_usd, step_count = EXCLUDED.step_count,
               action_count = EXCLUDED.action_count, wall_clock_seconds = EXCLUDED.wall_clock_seconds,
-              detailed_cost_json = COALESCE(EXCLUDED.detailed_cost_json, sessions.detailed_cost_json),
+              detailed_cost = COALESCE(EXCLUDED.detailed_cost, sessions.detailed_cost),
               total_cache_read_tokens = EXCLUDED.total_cache_read_tokens,
               total_cache_write_tokens = EXCLUDED.total_cache_write_tokens,
               repair_count = EXCLUDED.repair_count, compaction_count = EXCLUDED.compaction_count`;
 
           } else if (type === "turn") {
             if (!p.session_id) { msg.ack(); continue; }
-            // plan_json and reflection_json are NOT NULL DEFAULT '{}' — never pass null
+            // plan and reflection are NOT NULL DEFAULT '{}' — never pass null
             await sql`INSERT INTO turns (
               session_id, turn_number, model_used, input_tokens, output_tokens,
               latency_ms, llm_latency_ms, llm_content, cost_total_usd,
-              tool_calls_json, tool_results_json, errors_json,
-              execution_mode, plan_json, reflection_json,
+              tool_calls, tool_results, errors,
+              execution_mode, plan, reflection,
               stop_reason, refusal, cache_read_tokens, cache_write_tokens,
               gateway_log_id
             ) VALUES (
@@ -7290,12 +7289,12 @@ export default {
               ${p.input_tokens || 0}, ${p.output_tokens || 0},
               ${p.latency_ms || 0}, ${p.llm_latency_ms || p.latency_ms || 0},
               ${p.llm_content || ""}, ${p.cost_total_usd || 0},
-              ${jp(p.tool_calls_json, [])},
-              ${jp(p.tool_results_json, [])},
-              ${jp(p.errors_json, [])},
+              ${jp(p.tool_calls, [])},
+              ${jp(p.tool_results, [])},
+              ${jp(p.errors, [])},
               ${p.execution_mode || "sequential"},
-              ${jp(p.plan_artifact || p.plan_json, {})},
-              ${jp(p.reflection || p.reflection_json, {})},
+              ${jp(p.plan_artifact || p.plan, {})},
+              ${jp(p.reflection || p.reflection, {})},
               ${p.stop_reason || "end_turn"}, ${p.refusal || false},
               ${p.cache_read_tokens || 0}, ${p.cache_write_tokens || 0},
               ${p.gateway_log_id || null}
@@ -7303,8 +7302,8 @@ export default {
               cost_total_usd = EXCLUDED.cost_total_usd,
               input_tokens = EXCLUDED.input_tokens,
               output_tokens = EXCLUDED.output_tokens,
-              tool_calls_json = EXCLUDED.tool_calls_json,
-              tool_results_json = EXCLUDED.tool_results_json`;
+              tool_calls = EXCLUDED.tool_calls,
+              tool_results = EXCLUDED.tool_results`;
 
           } else if (type === "episode") {
             await sql`INSERT INTO episodes (session_id, input, output)
@@ -7313,7 +7312,7 @@ export default {
           } else if (type === "event") {
             await sql`INSERT INTO otel_events (
               session_id, turn, event_type, action, plan, tier,
-              provider, model, tool_name, status, latency_ms, details_json, created_at
+              provider, model, tool_name, status, latency_ms, details, created_at
             ) VALUES (
               ${p.session_id || ""}, ${p.turn || 0}, ${p.event_type || ""},
               ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
@@ -7325,7 +7324,7 @@ export default {
           } else if (type === "runtime_event") {
             await sql`INSERT INTO runtime_events (
               trace_id, session_id, org_id, event_type, node_id,
-              status, latency_ms, payload_json, created_at
+              status, latency_ms, payload, created_at
             ) VALUES (
               ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
               ${p.event_type || ""}, ${p.node_id || ""},
@@ -7334,10 +7333,10 @@ export default {
             )`;
 
           } else if (type === "middleware_event") {
-            // Table schema: session_id, middleware_name, action, details_json, turn_number, created_at
+            // Table schema: session_id, middleware_name, action, details, turn_number, created_at
             await sql`INSERT INTO middleware_events (
               session_id, middleware_name, action,
-              details_json, turn_number, created_at
+              details, turn_number, created_at
             ) VALUES (
               ${p.session_id || ""}, ${p.middleware_name || ""},
               ${p.event_type || p.action || ""},
@@ -7368,7 +7367,7 @@ export default {
             console.log(`[telemetry] DO eviction: session=${p.session_id} org=${p.org_id}`);
             await sql`INSERT INTO runtime_events (
               trace_id, session_id, org_id, event_type, node_id,
-              status, latency_ms, payload_json, created_at
+              status, latency_ms, payload, created_at
             ) VALUES (
               ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
               'do_eviction', ${p.agent_name || ""},

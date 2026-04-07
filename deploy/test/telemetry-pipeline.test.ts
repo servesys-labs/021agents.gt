@@ -174,7 +174,7 @@ describe("turn queue payload", () => {
     "session_id", "turn_number", "model_used",
     "input_tokens", "output_tokens", "latency_ms",
     "llm_content", "cost_total_usd",
-    "tool_calls_json", "tool_results_json", "errors_json",
+    "tool_calls", "tool_results", "errors",
     // Migration 026 fields
     "llm_latency_ms", "stop_reason", "refusal",
     "cache_read_tokens", "cache_write_tokens", "gateway_log_id",
@@ -198,9 +198,9 @@ describe("turn queue payload", () => {
         cache_read_tokens: 150,
         cache_write_tokens: 50,
         gateway_log_id: "gw-turn-001",
-        tool_calls_json: "[]",
-        tool_results_json: "[]",
-        errors_json: "[]",
+        tool_calls: "[]",
+        tool_results: "[]",
+        errors: "[]",
       },
     };
   }
@@ -229,7 +229,7 @@ describe("queue consumer → DB schema alignment", () => {
   const TURNS_COLUMNS = [
     "turn_id", "session_id", "turn_number", "model_used", "llm_content",
     "input_tokens", "output_tokens", "cost_total_usd", "latency_ms",
-    "tool_calls_json", "tool_results_json", "errors_json",
+    "tool_calls", "tool_results", "errors",
     "execution_mode", "plan_artifact", "reflection", "created_at",
     // Migration 026
     "llm_latency_ms", "stop_reason", "refusal",

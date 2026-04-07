@@ -13,7 +13,7 @@ export interface TrainingJob {
   org_id: string;
   agent_name: string;
   algorithm: string;
-  config_json: Record<string, unknown>;
+  config: Record<string, unknown>;
   current_iteration: number;
   max_iterations: number;
   best_score: number | null;
@@ -26,7 +26,7 @@ export interface TrainingResource {
   resource_key: string;
   version: number;
   content_text: string | null;
-  content_json: Record<string, unknown> | null;
+  content: Record<string, unknown> | null;
   is_active: boolean;
   eval_score: number | null;
 }
@@ -44,7 +44,7 @@ export interface IterationHistory {
   reward_score: number | null;
   pass_rate: number | null;
   resource_version: number | null;
-  algorithm_output_json: Record<string, unknown>;
+  algorithm_output: Record<string, unknown>;
 }
 
 export interface OptimizationContext {
@@ -378,7 +378,7 @@ export class MultiDimensionAlgorithm implements TrainingAlgorithm {
     // Analyze failure patterns — if a tool is never used successfully, try removing it
     const failingTools: string[] = [];
     for (const h of ctx.history) {
-      const output = h.algorithm_output_json;
+      const output = h.algorithm_output;
       if (output.failing_tools && Array.isArray(output.failing_tools)) {
         failingTools.push(...(output.failing_tools as string[]));
       }

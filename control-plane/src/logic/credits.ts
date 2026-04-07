@@ -111,9 +111,9 @@ export async function deductCredits(
   // Default: $50/day for free, $200/day for pro. Configurable in org_settings.
   try {
     const [settings] = await sql`
-      SELECT settings_json FROM org_settings WHERE org_id = ${orgId} LIMIT 1
+      SELECT settings FROM org_settings WHERE org_id = ${orgId} LIMIT 1
     `.catch(() => [null]);
-    const settingsJson = settings?.settings_json ? (typeof settings.settings_json === "string" ? JSON.parse(settings.settings_json) : settings.settings_json) : {};
+    const settingsJson = settings?.settings ? (typeof settings.settings === "string" ? JSON.parse(settings.settings) : settings.settings) : {};
     const dailyLimit = Number(settingsJson.daily_budget_usd) || 50; // default $50/day
 
     const [dailySpend] = await sql`

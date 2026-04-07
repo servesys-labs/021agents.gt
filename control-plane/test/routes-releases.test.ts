@@ -68,7 +68,7 @@ describe("release routes org scoping", () => {
       if (query.includes("FROM release_channels") && query.includes("channel")) return [];
       if (query.includes("FROM agents")) {
         const [, orgId] = values;
-        if (orgId !== "org-a") return [{ config_json: "{}", version: "0.1.0" }];
+        if (orgId !== "org-a") return [{ config: "{}", version: "0.1.0" }];
         return [];
       }
       return [];
@@ -135,7 +135,7 @@ describe("release routes org scoping", () => {
       const query = strings.join("?");
       queries.push(query);
       if (query.includes("FROM release_channels") && query.includes("channel")) {
-        return [{ config_json: "{}", version: "1.0.0" }];
+        return [{ config: "{}", version: "1.0.0" }];
       }
       if (query.includes("UPDATE release_channels")) {
         expect(query).toContain("org_id");
@@ -172,7 +172,7 @@ describe("release routes org scoping", () => {
     const mockSql5 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("channel")) {
-        return [{ config_json: "{}", version: "2.0.0" }];
+        return [{ config: "{}", version: "2.0.0" }];
       }
       if (query.includes("UPDATE release_channels")) return { count: 1 } as unknown as [];
       if (query.includes("INSERT INTO release_channels")) {
@@ -203,7 +203,7 @@ describe("release routes org scoping", () => {
     const mockSql6 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM release_channels") && query.includes("channel")) {
-        return [{ config_json: "{\"name\":\"agent-x\"}", version: "1.2.3" }];
+        return [{ config: "{\"name\":\"agent-x\"}", version: "1.2.3" }];
       }
       if (query.includes("UPDATE release_channels")) return { count: 0 } as unknown as [];
       if (query.includes("INSERT INTO release_channels")) return [];

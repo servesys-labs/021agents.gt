@@ -1,7 +1,7 @@
 /**
  * Phase 10.3: Agent Config Migration Framework
  *
- * Versioned migrations for agent.config_json. When the runtime adds new fields
+ * Versioned migrations for agent.config. When the runtime adds new fields
  * or renames existing ones, old configs get automatically migrated on load.
  *
  * Inspired by Claude Code's explicit migration files per config version.

@@ -47,7 +47,7 @@ export interface TransferResult {
 
 // ── Agent Pricing ────────────────────────────────────────────
 
-/** Get an agent's pricing from its config_json. Returns null if free. */
+/** Get an agent's pricing from its config. Returns null if free. */
 export function getAgentPricing(configJson: Record<string, unknown>): AgentPricing | null {
   const pricing = configJson.pricing as Record<string, unknown> | undefined;
   if (!pricing) return null;

@@ -156,12 +156,12 @@ const ingestTurnRoute = createRoute({
             latency_ms: z.coerce.number().default(0),
             llm_content: z.string().default(""),
             cost_total_usd: z.coerce.number().default(0),
-            tool_calls_json: z.string().default("[]"),
-            tool_results_json: z.string().default("[]"),
-            errors_json: z.string().default("[]"),
+            tool_calls: z.string().default("[]"),
+            tool_results: z.string().default("[]"),
+            errors: z.string().default("[]"),
             execution_mode: z.string().default("sequential"),
-            plan_json: z.string().default("{}"),
-            reflection_json: z.string().default("{}"),
+            plan: z.string().default("{}"),
+            reflection: z.string().default("{}"),
             started_at: z.coerce.number().optional(),
             ended_at: z.coerce.number().optional(),
           }),
@@ -200,19 +200,19 @@ edgeIngestRoutes.openapi(ingestTurnRoute, async (c): Promise<any> => {
   const latencyMs = Number(payload.latency_ms || 0) || 0;
   const llmContent = String(payload.llm_content || "").slice(0, 10000);
   const costTotalUsd = Number(payload.cost_total_usd || 0) || 0;
-  const toolCallsJson = String(payload.tool_calls_json || "[]");
-  const toolResultsJson = String(payload.tool_results_json || "[]");
-  const errorsJson = String(payload.errors_json || "[]");
+  const toolCallsJson = String(payload.tool_calls || "[]");
+  const toolResultsJson = String(payload.tool_results || "[]");
+  const errorsJson = String(payload.errors || "[]");
   const executionMode = String(payload.execution_mode || "sequential");
-  const planJson = String(payload.plan_json || "{}");
-  const reflectionJson = String(payload.reflection_json || "{}");
+  const planJson = String(payload.plan || "{}");
+  const reflectionJson = String(payload.reflection || "{}");
   const startedAt = payload.started_at ? new Date(Number(payload.started_at) * 1000).toISOString() : new Date().toISOString();
   const endedAt = payload.ended_at ? new Date(Number(payload.ended_at) * 1000).toISOString() : new Date().toISOString();
 
   await sql`
     INSERT INTO turns (
       session_id, turn_number, model_used, input_tokens, output_tokens, latency_ms,
-      llm_content, cost_total_usd, tool_calls_json, tool_results_json, errors_json,
+      llm_content, cost_total_usd, tool_calls, tool_results, errors,
       execution_mode, plan_artifact, reflection, created_at
     ) VALUES (
       ${sessionId}, ${turnNumber}, ${modelUsed}, ${inputTokens}, ${outputTokens}, ${latencyMs},

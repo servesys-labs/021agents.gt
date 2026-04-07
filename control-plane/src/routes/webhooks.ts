@@ -256,7 +256,7 @@ webhookRoutes.openapi(testWebhookRoute, async (c): Promise<any> => {
 
     // Log delivery
     await sql`
-      INSERT INTO webhook_deliveries (webhook_id, event_type, payload_json, response_status, response_body, duration_ms, success)
+      INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
       VALUES (${webhookId}, 'test', ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
     `;
 
@@ -347,7 +347,7 @@ webhookRoutes.openapi(replayDeliveryRoute, async (c): Promise<any> => {
   const delivery = deliveries[0] as any;
 
   let payload: any;
-  payload = parseJsonColumn(delivery.payload_json);
+  payload = parseJsonColumn(delivery.payload);
 
   try {
     const start = performance.now();
@@ -363,7 +363,7 @@ webhookRoutes.openapi(replayDeliveryRoute, async (c): Promise<any> => {
     const respText = await resp.text().catch(() => "");
 
     await sql`
-      INSERT INTO webhook_deliveries (webhook_id, event_type, payload_json, response_status, response_body, duration_ms, success)
+      INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
       VALUES (${webhookId}, ${delivery.event_type || "replay"}, ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
     `;
 
@@ -440,7 +440,7 @@ webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
 
       // Log delivery
       await sql`
-        INSERT INTO webhook_deliveries (webhook_id, event_type, payload_json, response_status, response_body, duration_ms, success)
+        INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
         VALUES (${webhookId}, 'codemode', ${JSON.stringify(payload)}, ${resp.status}, ${JSON.stringify(result).slice(0, 500)}, ${0}, ${Boolean(result.processed)})
       `.catch(() => {});
 
@@ -465,7 +465,7 @@ webhookRoutes.openapi(incomingWebhookRoute, async (c): Promise<any> => {
     const respText = await resp.text().catch(() => "");
 
     await sql`
-      INSERT INTO webhook_deliveries (webhook_id, event_type, payload_json, response_status, response_body, duration_ms, success)
+      INSERT INTO webhook_deliveries (webhook_id, event_type, payload, status_code, response_body, duration_ms, success)
       VALUES (${webhookId}, 'incoming', ${JSON.stringify(payload)}, ${resp.status}, ${respText.slice(0, 500)}, ${duration}, ${resp.status < 400})
     `.catch(() => {});
 

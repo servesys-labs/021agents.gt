@@ -178,7 +178,7 @@ dlpRoutes.openapi(getAgentPolicyRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT policy_json FROM dlp_agent_policies
+    SELECT policy FROM dlp_agent_policies
     WHERE org_id = ${user.org_id} AND agent_name = ${agentName}
     LIMIT 1
   `;
@@ -196,9 +196,9 @@ dlpRoutes.openapi(getAgentPolicyRoute, async (c): Promise<any> => {
 
   const row = rows[0] as Record<string, unknown>;
   const policy =
-    typeof row.policy_json === "string"
-      ? JSON.parse(row.policy_json as string)
-      : row.policy_json ?? {};
+    typeof row.policy === "string"
+      ? JSON.parse(row.policy as string)
+      : row.policy ?? {};
 
   return c.json({ agent_name: agentName, ...policy });
 });
@@ -232,10 +232,10 @@ dlpRoutes.openapi(updateAgentPolicyRoute, async (c): Promise<any> => {
 
   // Upsert
   await sql`
-    INSERT INTO dlp_agent_policies (id, org_id, agent_name, policy_json, created_at, updated_at)
+    INSERT INTO dlp_agent_policies (id, org_id, agent_name, policy, created_at, updated_at)
     VALUES (${genId()}, ${user.org_id}, ${agentName}, ${policyJson}, ${now}, ${now})
     ON CONFLICT (org_id, agent_name) DO UPDATE SET
-      policy_json = EXCLUDED.policy_json,
+      policy = EXCLUDED.policy,
       updated_at = EXCLUDED.updated_at
   `;
 

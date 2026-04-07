@@ -709,8 +709,8 @@ export async function streamRun(
           session_id: sessionId, turn_number: turn, model_used: llmResponse.model,
           input_tokens: llmResponse.usage.input_tokens, output_tokens: llmResponse.usage.output_tokens,
           latency_ms: llmResponse.latency_ms, llm_content: llmResponse.content,
-          cost_total_usd: llmResponse.cost_usd, tool_calls_json: "[]",
-          tool_results_json: "[]", errors_json: "[]", execution_mode: "sequential",
+          cost_total_usd: llmResponse.cost_usd, tool_calls: "[]",
+          tool_results: "[]", errors: "[]", execution_mode: "sequential",
         }).catch(() => {});
         break;
       }
@@ -847,9 +847,9 @@ export async function streamRun(
         input_tokens: llmResponse.usage.input_tokens, output_tokens: llmResponse.usage.output_tokens,
         latency_ms: llmResponse.latency_ms, llm_content: llmResponse.content,
         cost_total_usd: llmResponse.cost_usd,
-        tool_calls_json: JSON.stringify(llmResponse.tool_calls),
-        tool_results_json: JSON.stringify(toolResults),
-        errors_json: JSON.stringify(toolResults.filter((tr: ToolResult) => tr.error)),
+        tool_calls: JSON.stringify(llmResponse.tool_calls),
+        tool_results: JSON.stringify(toolResults),
+        errors: JSON.stringify(toolResults.filter((tr: ToolResult) => tr.error)),
         execution_mode: config.parallel_tool_calls && llmResponse.tool_calls.length > 1 ? "parallel" : "sequential",
       }).catch(() => {});
 

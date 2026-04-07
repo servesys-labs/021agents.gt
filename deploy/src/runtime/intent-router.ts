@@ -222,13 +222,13 @@ export async function getAgentCapabilitiesCached(
     });
 
     const rows = await sql`
-      SELECT name, description, config_json FROM agents
+      SELECT name, description, config FROM agents
       WHERE org_id = ${orgId} AND is_active = true
     `;
 
     const capabilities = rows.map((a: any) => {
       let config: Record<string, unknown> = {};
-      try { config = typeof a.config_json === "string" ? JSON.parse(a.config_json) : (a.config_json || {}); } catch {}
+      try { config = typeof a.config === "string" ? JSON.parse(a.config) : (a.config || {}); } catch {}
       return {
         agent_name: a.name,
         intents: Array.isArray(config.intents) ? config.intents : (Array.isArray(config.tags) ? config.tags : []),

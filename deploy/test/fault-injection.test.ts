@@ -45,9 +45,9 @@ const baseTurn = {
   latency_ms: 200,
   llm_content: "test",
   cost_total_usd: 0.001,
-  tool_calls_json: "[]",
-  tool_results_json: "[]",
-  errors_json: "[]",
+  tool_calls: "[]",
+  tool_results: "[]",
+  errors: "[]",
   execution_mode: "sequential",
 };
 

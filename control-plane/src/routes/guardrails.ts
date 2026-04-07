@@ -97,7 +97,7 @@ guardrailRoutes.openapi(scanRoute, async (c): Promise<any> => {
     try {
       const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
       const rows = await sql`
-        SELECT policy_json FROM guardrail_policies
+        SELECT policy FROM guardrail_policies
         WHERE org_id = ${user.org_id}
           AND (agent_name = ${agent_name} OR agent_name IS NULL)
         ORDER BY agent_name DESC NULLS LAST
@@ -107,9 +107,9 @@ guardrailRoutes.openapi(scanRoute, async (c): Promise<any> => {
         const row = rows[0] as Record<string, unknown>;
         policy = {
           ...DEFAULT_GUARDRAIL_POLICY,
-          ...(typeof row.policy_json === "string"
-            ? JSON.parse(row.policy_json)
-            : row.policy_json ?? {}),
+          ...(typeof row.policy === "string"
+            ? JSON.parse(row.policy)
+            : row.policy ?? {}),
         };
       }
     } catch {
@@ -236,7 +236,7 @@ guardrailRoutes.openapi(listPoliciesRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT id, name, agent_name, policy_json, created_at, updated_at
+    SELECT id, name, agent_name, policy, created_at, updated_at
     FROM guardrail_policies
     WHERE org_id = ${user.org_id}
     ORDER BY created_at DESC
@@ -246,9 +246,9 @@ guardrailRoutes.openapi(listPoliciesRoute, async (c): Promise<any> => {
     id: r.id,
     name: r.name,
     agent_name: r.agent_name,
-    ...(typeof r.policy_json === "string"
-      ? JSON.parse(r.policy_json as string)
-      : r.policy_json ?? {}),
+    ...(typeof r.policy === "string"
+      ? JSON.parse(r.policy as string)
+      : r.policy ?? {}),
     created_at: r.created_at,
     updated_at: r.updated_at,
   }));
@@ -283,7 +283,7 @@ guardrailRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
-    INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy_json, created_at, updated_at)
+    INSERT INTO guardrail_policies (id, org_id, name, agent_name, policy, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${agent_name ?? null}, ${policyJson}, ${now}, ${now})
   `;
 
@@ -322,7 +322,7 @@ guardrailRoutes.openapi(updatePolicyRoute, async (c): Promise<any> => {
   const result = await sql`
     UPDATE guardrail_policies
     SET name = ${name}, agent_name = ${agent_name ?? null},
-        policy_json = ${policyJson}, updated_at = ${now}
+        policy = ${policyJson}, updated_at = ${now}
     WHERE id = ${policyId} AND org_id = ${user.org_id}
   `;
 
@@ -508,7 +508,7 @@ guardrailRoutes.openapi(testRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT policy_json FROM guardrail_policies
+    SELECT policy FROM guardrail_policies
     WHERE id = ${policy_id} AND org_id = ${user.org_id}
     LIMIT 1
   `;
@@ -520,9 +520,9 @@ guardrailRoutes.openapi(testRoute, async (c): Promise<any> => {
   const row = rows[0] as Record<string, unknown>;
   const policy: GuardrailPolicy = {
     ...DEFAULT_GUARDRAIL_POLICY,
-    ...(typeof row.policy_json === "string"
-      ? JSON.parse(row.policy_json as string)
-      : row.policy_json ?? {}),
+    ...(typeof row.policy === "string"
+      ? JSON.parse(row.policy as string)
+      : row.policy ?? {}),
   };
 
   // Run both input and output evaluation and return the stricter result

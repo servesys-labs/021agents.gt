@@ -67,7 +67,7 @@ export async function runPreflightChecks(
 
   // 1. Load agent config
   const agentRows = await sql`
-    SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1
+    SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} LIMIT 1
   `;
   if (agentRows.length === 0) {
     return { passed: false, checks: [{ name: "agent_exists", passed: false, detail: "Agent not found" }], failed_tools: [], warnings: [] };
@@ -75,9 +75,9 @@ export async function runPreflightChecks(
 
   let config: Record<string, unknown>;
   try {
-    config = parseJsonColumn(agentRows[0].config_json);
+    config = parseJsonColumn(agentRows[0].config);
   } catch {
-    return { passed: false, checks: [{ name: "config_parse", passed: false, detail: "Invalid config_json" }], failed_tools: [], warnings: [] };
+    return { passed: false, checks: [{ name: "config_parse", passed: false, detail: "Invalid config" }], failed_tools: [], warnings: [] };
   }
 
   checks.push({ name: "agent_exists", passed: true });
@@ -495,13 +495,13 @@ export async function revertToPreviousResource(
   if (resourceType === "system_prompt" && prevContent) {
     try {
       const agentRows = await sql`
-        SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId}
+        SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId}
       `;
       if (agentRows.length > 0) {
-        const config = parseJsonColumn(agentRows[0].config_json);
+        const config = parseJsonColumn(agentRows[0].config);
         config.system_prompt = prevContent;
         await sql`
-          UPDATE agents SET config_json = ${JSON.stringify(config)}, updated_at = now()
+          UPDATE agents SET config = ${JSON.stringify(config)}, updated_at = now()
           WHERE name = ${agentName} AND org_id = ${orgId}
         `;
       }

@@ -92,7 +92,7 @@ policyRoutes.openapi(createPolicyRoute, async (c): Promise<any> => {
   const policyJson = JSON.stringify(policy);
 
   await sql`
-    INSERT INTO policy_templates (policy_id, org_id, name, policy_json)
+    INSERT INTO policy_templates (policy_id, org_id, name, policy)
     VALUES (${policyId}, ${user.org_id}, ${name}, ${policyJson})
   `;
 
@@ -132,8 +132,8 @@ policyRoutes.openapi(getPolicyRoute, async (c): Promise<any> => {
   const rows = await sql`SELECT * FROM policy_templates WHERE policy_id = ${policyId} AND (org_id = ${user.org_id} OR org_id = '')`;
   if (rows.length === 0) return c.json({ error: "Policy not found" }, 404);
   const d: any = { ...rows[0] };
-  d.policy = parseJsonColumn(d.policy_json);
-  delete d.policy_json;
+  d.policy = parseJsonColumn(d.policy);
+  delete d.policy;
   return c.json(d);
 });
 

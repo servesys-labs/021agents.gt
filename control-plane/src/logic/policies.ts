@@ -39,23 +39,23 @@ export async function getThresholds(
     // Try agent-specific policy first
     if (agentName) {
       const agentRows = await sql`
-        SELECT config_json FROM agent_policies
+        SELECT config FROM agent_policies
         WHERE org_id = ${orgId} AND agent_name = ${agentName} AND policy_type = 'thresholds'
         LIMIT 1
       `;
       if (agentRows.length > 0) {
-        return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(agentRows[0].config_json) };
+        return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(agentRows[0].config) };
       }
     }
 
     // Try org-wide policy
     const orgRows = await sql`
-      SELECT config_json FROM agent_policies
+      SELECT config FROM agent_policies
       WHERE org_id = ${orgId} AND agent_name IS NULL AND policy_type = 'thresholds'
       LIMIT 1
     `;
     if (orgRows.length > 0) {
-      return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(orgRows[0].config_json) };
+      return { ...PLATFORM_DEFAULTS, ...parseJsonColumn(orgRows[0].config) };
     }
   } catch {
     // DB error — use platform defaults

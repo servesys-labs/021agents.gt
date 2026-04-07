@@ -154,12 +154,12 @@ auditRoutes.openapi(deleteAuditLogRoute, async (c): Promise<any> => {
   // Check immutable_audit setting
   try {
     const settingsRows = await sql`
-      SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+      SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
     `;
     if (settingsRows.length > 0) {
-      const settings = typeof settingsRows[0].settings_json === "string"
-        ? JSON.parse(settingsRows[0].settings_json)
-        : settingsRows[0].settings_json ?? {};
+      const settings = typeof settingsRows[0].settings === "string"
+        ? JSON.parse(settingsRows[0].settings)
+        : settingsRows[0].settings ?? {};
       if (settings.immutable_audit === true) {
         return c.json({ error: "Audit log is in immutable mode" }, 403);
       }
@@ -204,12 +204,12 @@ auditRoutes.openapi(deleteAuditEntryRoute, async (c): Promise<any> => {
   // Check immutable_audit setting
   try {
     const settingsRows = await sql`
-      SELECT settings_json FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
+      SELECT settings FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1
     `;
     if (settingsRows.length > 0) {
-      const settings = typeof settingsRows[0].settings_json === "string"
-        ? JSON.parse(settingsRows[0].settings_json)
-        : settingsRows[0].settings_json ?? {};
+      const settings = typeof settingsRows[0].settings === "string"
+        ? JSON.parse(settingsRows[0].settings)
+        : settingsRows[0].settings ?? {};
       if (settings.immutable_audit === true) {
         return c.json({ error: "Audit log is in immutable mode" }, 403);
       }

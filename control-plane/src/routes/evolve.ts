@@ -87,12 +87,12 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
 
   // Verify agent exists
   const agentRows = await sql`
-    SELECT name, config_json FROM agents
+    SELECT name, config FROM agents
     WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
   `;
   if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  const agentConfig = safeJsonParse(agentRows[0].config_json) || {};
+  const agentConfig = safeJsonParse(agentRows[0].config) || {};
   const since = new Date(Date.now() - days * 86400 * 1000).toISOString();
 
   // Fetch sessions in the time window
@@ -108,7 +108,7 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
   const allSessionIds = sessions.map((s: any) => String(s.session_id));
   const allTurns = allSessionIds.length > 0
     ? await sql`
-        SELECT session_id, turn_number, model_used, tool_calls_json, tool_results_json, error
+        SELECT session_id, turn_number, model_used, tool_calls, tool_results, error
         FROM turns
         WHERE session_id = ANY(${allSessionIds})
         ORDER BY session_id, turn_number ASC
@@ -130,8 +130,8 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
     const errors: ErrorRecord[] = [];
 
     for (const turn of turns) {
-      const tcList = safeJsonParse(turn.tool_calls_json) || [];
-      const trList = safeJsonParse(turn.tool_results_json) || [];
+      const tcList = safeJsonParse(turn.tool_calls) || [];
+      const trList = safeJsonParse(turn.tool_results) || [];
 
       for (let i = 0; i < tcList.length; i++) {
         const tc = tcList[i];
@@ -201,7 +201,7 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
     await sql`
       INSERT INTO evolution_proposals (
         proposal_id, agent_name, org_id, title, rationale, category,
-        priority, config_diff_json, evidence_json, status, created_at
+        priority, config_diff, evidence, status, created_at
       ) VALUES (
         ${proposal.id}, ${agentName}, ${orgId}, ${proposal.title},
         ${proposal.rationale}, ${proposal.category}, ${proposal.priority},
@@ -211,15 +211,15 @@ evolveRoutes.openapi(analyzeRoute, async (c): Promise<any> => {
         title = EXCLUDED.title,
         rationale = EXCLUDED.rationale,
         priority = EXCLUDED.priority,
-        config_diff_json = EXCLUDED.config_diff_json,
-        evidence_json = EXCLUDED.evidence_json
+        config_diff = EXCLUDED.config_diff,
+        evidence = EXCLUDED.evidence
     `.catch(() => {});
   }
 
   // Store report for later retrieval
   await sql`
     INSERT INTO evolution_reports (
-      agent_name, org_id, report_json, session_count, created_at
+      agent_name, org_id, report, session_count, created_at
     ) VALUES (
       ${agentName}, ${orgId}, ${JSON.stringify(report)}, ${records.length}, ${now}
     )
@@ -256,7 +256,7 @@ evolveRoutes.openapi(reportRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT report_json, session_count, created_at FROM evolution_reports
+    SELECT report, session_count, created_at FROM evolution_reports
     WHERE agent_name = ${agentName} AND org_id = ${orgId}
     ORDER BY created_at DESC LIMIT 1
   `.catch(() => []);
@@ -266,7 +266,7 @@ evolveRoutes.openapi(reportRoute, async (c): Promise<any> => {
   }
 
   return c.json({
-    report: safeJsonParse(rows[0].report_json),
+    report: safeJsonParse(rows[0].report),
     sessions_analyzed: Number(rows[0].session_count || 0),
     analyzed_at: Number(rows[0].created_at || 0),
   });
@@ -317,13 +317,13 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
 
   // Fetch current agent config
   const agentRows = await sql`
-    SELECT config_json FROM agents
+    SELECT config FROM agents
     WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
   `;
   if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
 
-  const currentConfig = safeJsonParse(agentRows[0].config_json) || {};
-  const modification = safeJsonParse(proposal.config_diff_json) || {};
+  const currentConfig = safeJsonParse(agentRows[0].config) || {};
+  const modification = safeJsonParse(proposal.config_diff) || {};
 
   // ── Capture pre-apply baseline metrics (last 7 days) ──────
   const baselineMetrics = await computeAgentMetrics(sql, agentName, orgId, Date.now() / 1000 - 7 * 86400, Date.now() / 1000);
@@ -356,7 +356,7 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
   // Update agent config
   const now = new Date().toISOString();
   await sql`
-    UPDATE agents SET config_json = ${JSON.stringify(newConfig)}
+    UPDATE agents SET config = ${JSON.stringify(newConfig)}
     WHERE name = ${agentName} AND org_id = ${orgId}
   `;
 
@@ -414,7 +414,7 @@ evolveRoutes.openapi(applyRoute, async (c): Promise<any> => {
   await sql`
     INSERT INTO evolution_ledger (
       agent_name, org_id, proposal_id, action, note,
-      previous_config_json, new_config_json, metrics_before_json, created_at, apply_context_json
+      previous_config, new_config, metrics_before, created_at, apply_context
     ) VALUES (
       ${agentName}, ${orgId}, ${proposalId}, 'applied',
       ${proposal.title || ""},
@@ -488,7 +488,7 @@ evolveRoutes.openapi(measureImpactRoute, async (c): Promise<any> => {
   }
   const ledger = ledgerRows[0];
   const appliedAt = Number(ledger.created_at);
-  const metricsBefore = safeJsonParse(ledger.metrics_before_json) || {
+  const metricsBefore = safeJsonParse(ledger.metrics_before) || {
     success_rate: 0, avg_cost: 0, avg_turns: 0, avg_quality: 0, session_count: 0,
   };
 
@@ -537,14 +537,14 @@ evolveRoutes.openapi(measureImpactRoute, async (c): Promise<any> => {
 
   await sql`
     UPDATE evolution_proposals
-    SET impact_json = ${JSON.stringify(impactData)}
+    SET impact = ${JSON.stringify(impactData)}
     WHERE proposal_id = ${proposalId} AND org_id = ${orgId}
   `;
 
   // Update ledger with metrics_after
   await sql`
     UPDATE evolution_ledger
-    SET metrics_after_json = ${JSON.stringify(metricsAfter)}
+    SET metrics_after = ${JSON.stringify(metricsAfter)}
     WHERE proposal_id = ${proposalId} AND agent_name = ${agentName} AND org_id = ${orgId}
       AND action = 'applied'
   `;
@@ -607,7 +607,7 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
     return c.json({ error: "No ledger entry found — cannot determine previous config" }, 404);
   }
   const ledger = ledgerRows[0];
-  const previousConfig = safeJsonParse(ledger.previous_config_json);
+  const previousConfig = safeJsonParse(ledger.previous_config);
   if (!previousConfig) {
     return c.json({ error: "Previous config not available in ledger" }, 400);
   }
@@ -616,7 +616,7 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
 
   // Restore previous config to the agent
   await sql`
-    UPDATE agents SET config_json = ${JSON.stringify(previousConfig)}
+    UPDATE agents SET config = ${JSON.stringify(previousConfig)}
     WHERE name = ${agentName} AND org_id = ${orgId}
   `;
 
@@ -666,11 +666,11 @@ evolveRoutes.openapi(autoRollbackRoute, async (c): Promise<any> => {
   await sql`
     INSERT INTO evolution_ledger (
       agent_name, org_id, proposal_id, action, note,
-      previous_config_json, new_config_json, created_at
+      previous_config, new_config, created_at
     ) VALUES (
       ${agentName}, ${orgId}, ${proposalId}, 'rolled_back',
       ${reason},
-      ${ledger.new_config_json || "{}"}, ${JSON.stringify(previousConfig)}, ${now}
+      ${ledger.new_config || "{}"}, ${JSON.stringify(previousConfig)}, ${now}
     )
   `;
 
@@ -745,8 +745,8 @@ evolveRoutes.openapi(listProposalsRoute, async (c): Promise<any> => {
     // Enrich applied/rolled_back proposals with impact data
     const proposals = rows.map((row: any) => {
       const base: any = { ...row };
-      if ((row.status === "applied" || row.status === "rolled_back") && row.impact_json) {
-        const impact = safeJsonParse(row.impact_json);
+      if ((row.status === "applied" || row.status === "rolled_back") && row.impact) {
+        const impact = safeJsonParse(row.impact);
         if (impact) {
           base.impact = impact;
         }
@@ -1144,12 +1144,12 @@ async function buildAutopilotGateSnapshot(
   const windowStart = Date.now() / 1000 - 7 * 86400;
   let latest_report: AutopilotGateSnapshot["latest_report"] = null;
   const reportRows = await sql`
-    SELECT report_json, session_count, created_at FROM evolution_reports
+    SELECT report, session_count, created_at FROM evolution_reports
     WHERE agent_name = ${agentName} AND org_id = ${orgId}
     ORDER BY created_at DESC LIMIT 1
   `.catch(() => []);
   if (reportRows[0]) {
-    const r = safeJsonParse(reportRows[0].report_json) || {};
+    const r = safeJsonParse(reportRows[0].report) || {};
     latest_report = {
       success_rate: Number(r.success_rate ?? 0),
       session_count: Number(reportRows[0].session_count ?? 0),
@@ -1247,12 +1247,12 @@ async function mergeApplyMarkersIntoLatestReport(
 ): Promise<void> {
   try {
     const rows = await sql`
-      SELECT id, report_json FROM evolution_reports
+      SELECT id, report FROM evolution_reports
       WHERE agent_name = ${agentName} AND org_id = ${orgId}
       ORDER BY created_at DESC LIMIT 1
     `;
     if (rows.length === 0) return;
-    const report = safeJsonParse(rows[0].report_json) || {};
+    const report = safeJsonParse(rows[0].report) || {};
     report.last_apply_markers = {
       proposal_id: payload.proposal_id,
       applied_at: payload.applied_at,
@@ -1260,7 +1260,7 @@ async function mergeApplyMarkersIntoLatestReport(
       markers_before: payload.markers_before,
     };
     await sql`
-      UPDATE evolution_reports SET report_json = ${JSON.stringify(report)}
+      UPDATE evolution_reports SET report = ${JSON.stringify(report)}
       WHERE id = ${rows[0].id}
     `;
   } catch {

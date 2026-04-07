@@ -86,8 +86,8 @@ ${modeInstructions}
 ### Database Analytics (read-only)
 - \`run_query\` — Run any SELECT query against the database. Use for deep investigation: cost analysis per tool, finding expensive sessions, tracking tool usage patterns, debugging specific turns. Tables: sessions, turns, agents, training_jobs, training_iterations, training_resources, eval_test_cases, credit_transactions, billing_records, skills, audit_log, marketplace_listings.
   - **Always filter by org_id or agent_name** to scope to this agent.
-  - Example: \`SELECT tool_calls_json, tool_results_json, cost_total_usd FROM turns WHERE session_id = 'xxx' ORDER BY turn_number\`
-  - Example: \`SELECT t.turn_number, t.tool_calls_json, t.cost_total_usd FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' AND t.tool_calls_json LIKE '%bash%' ORDER BY t.cost_total_usd DESC LIMIT 10\`
+  - Example: \`SELECT tool_calls, tool_results, cost_total_usd FROM turns WHERE session_id = 'xxx' ORDER BY turn_number\`
+  - Example: \`SELECT t.turn_number, t.tool_calls, t.cost_total_usd FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' AND t.tool_calls LIKE '%bash%' ORDER BY t.cost_total_usd DESC LIMIT 10\`
 
 ## Runtime Infrastructure (summary)
 
@@ -226,8 +226,8 @@ Available strategies (set via reasoning_strategy field):
 3. If user wants to change one: \`set_feature_flag\`
 
 ### "Why is this costing so much?" / "What is bash doing?"
-1. \`run_query\` — Find the most expensive turns: \`SELECT t.turn_number, t.tool_calls_json, t.tool_results_json, t.cost_total_usd FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' ORDER BY t.cost_total_usd DESC LIMIT 10\`
-2. \`run_query\` — Analyze tool usage frequency: \`SELECT tool_calls_json, COUNT(*) as cnt, SUM(cost_total_usd) as total_cost FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' GROUP BY tool_calls_json ORDER BY total_cost DESC LIMIT 20\`
+1. \`run_query\` — Find the most expensive turns: \`SELECT t.turn_number, t.tool_calls, t.tool_results, t.cost_total_usd FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' ORDER BY t.cost_total_usd DESC LIMIT 10\`
+2. \`run_query\` — Analyze tool usage frequency: \`SELECT tool_calls, COUNT(*) as cnt, SUM(cost_total_usd) as total_cost FROM turns t JOIN sessions s ON t.session_id = s.session_id WHERE s.agent_name = '${agentName}' GROUP BY tool_calls ORDER BY total_cost DESC LIMIT 20\`
 3. Diagnose: explain what tools are being called unnecessarily, what commands are being run
 4. \`update_agent_config\` — Fix the system prompt to stop the wasteful behavior
 

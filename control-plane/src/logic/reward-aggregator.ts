@@ -1,7 +1,7 @@
 /**
  * Reward aggregator — computes composite reward signals from multiple sources.
  *
- * Reads from existing tables (eval_runs, user_feedback, sessions, guardrail events)
+ * Reads from existing tables (eval_runs, session_feedback, sessions, guardrail events)
  * and produces a normalized 0.0–1.0 reward score with per-source breakdown.
  */
 import type { Sql } from "../db/client";

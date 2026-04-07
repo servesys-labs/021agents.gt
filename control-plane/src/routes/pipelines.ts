@@ -77,7 +77,7 @@ pipelineRoutes.openapi(listStreamsRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
+    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
     FROM pipelines
     WHERE org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
     ORDER BY created_at DESC
@@ -130,7 +130,7 @@ pipelineRoutes.openapi(createStreamRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
-    INSERT INTO pipelines (id, org_id, name, description, type, config_json, status, created_at, updated_at)
+    INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'stream',
             ${JSON.stringify(config)}, 'draft', ${now}, ${now})
   `;
@@ -160,7 +160,7 @@ pipelineRoutes.openapi(getStreamRoute, async (c): Promise<any> => {
   const { stream_id: streamId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
+    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
     FROM pipelines
     WHERE id = ${streamId} AND org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
     LIMIT 1
@@ -233,7 +233,7 @@ pipelineRoutes.openapi(sendToStreamRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT cf_resource_id, config_json, status FROM pipelines
+    SELECT cf_resource_id, config, status FROM pipelines
     WHERE id = ${streamId} AND org_id = ${user.org_id} AND type = 'stream' AND status != 'deleted'
     LIMIT 1
   `;
@@ -288,7 +288,7 @@ pipelineRoutes.openapi(listSinksRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
+    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
     FROM pipelines
     WHERE org_id = ${user.org_id} AND type = 'sink' AND status != 'deleted'
     ORDER BY created_at DESC
@@ -374,7 +374,7 @@ pipelineRoutes.openapi(createSinkRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   await sql`
-    INSERT INTO pipelines (id, org_id, name, description, type, config_json, status, created_at, updated_at)
+    INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'sink',
             ${JSON.stringify(config)}, 'draft', ${now}, ${now})
   `;
@@ -404,7 +404,7 @@ pipelineRoutes.openapi(getSinkRoute, async (c): Promise<any> => {
   const { sink_id: sinkId } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
+    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
     FROM pipelines
     WHERE id = ${sinkId} AND org_id = ${user.org_id} AND type = 'sink' AND status != 'deleted'
     LIMIT 1
@@ -459,7 +459,7 @@ pipelineRoutes.openapi(listPipelinesRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
+    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
     FROM pipelines
     WHERE org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
     ORDER BY created_at DESC
@@ -531,7 +531,7 @@ pipelineRoutes.openapi(createPipelineRoute, async (c): Promise<any> => {
   if (sinkRows.length === 0) return c.json({ error: "Sink not found" }, 404);
 
   await sql`
-    INSERT INTO pipelines (id, org_id, name, description, type, config_json, status, created_at, updated_at)
+    INSERT INTO pipelines (id, org_id, name, description, type, config, status, created_at, updated_at)
     VALUES (${id}, ${user.org_id}, ${name}, ${body.description || ""}, 'pipeline',
             ${JSON.stringify(config)}, 'draft', ${now}, ${now})
   `;
@@ -575,7 +575,7 @@ pipelineRoutes.openapi(getPipelineRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT id, name, description, type, config_json, status, cf_resource_id, created_at, updated_at
+    SELECT id, name, description, type, config, status, cf_resource_id, created_at, updated_at
     FROM pipelines
     WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
     LIMIT 1
@@ -584,7 +584,7 @@ pipelineRoutes.openapi(getPipelineRoute, async (c): Promise<any> => {
 
   const pipeline = rows[0];
   let config: Record<string, unknown> = {};
-  config = parseJsonColumn(pipeline.config_json);
+  config = parseJsonColumn(pipeline.config);
 
   // Resolve stream and sink names
   let streamName = "";
@@ -639,26 +639,26 @@ pipelineRoutes.openapi(updatePipelineRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT config_json FROM pipelines
+    SELECT config FROM pipelines
     WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
     LIMIT 1
   `;
   if (rows.length === 0) return c.json({ error: "Pipeline not found" }, 404);
 
   let config: Record<string, unknown> = {};
-  config = parseJsonColumn(rows[0].config_json);
+  config = parseJsonColumn(rows[0].config);
 
   if (body.sql) config.sql = body.sql;
   const description = body.description !== undefined ? body.description : null;
 
   if (description !== null) {
     await sql`
-      UPDATE pipelines SET config_json = ${JSON.stringify(config)}, description = ${description}, updated_at = ${nowEpoch()}
+      UPDATE pipelines SET config = ${JSON.stringify(config)}, description = ${description}, updated_at = ${nowEpoch()}
       WHERE id = ${pipelineId} AND org_id = ${user.org_id}
     `;
   } else {
     await sql`
-      UPDATE pipelines SET config_json = ${JSON.stringify(config)}, updated_at = ${nowEpoch()}
+      UPDATE pipelines SET config = ${JSON.stringify(config)}, updated_at = ${nowEpoch()}
       WHERE id = ${pipelineId} AND org_id = ${user.org_id}
     `;
   }
@@ -805,7 +805,7 @@ pipelineRoutes.openapi(queryPipelineRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT name, config_json, status FROM pipelines
+    SELECT name, config, status FROM pipelines
     WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND type = 'pipeline' AND status != 'deleted'
     LIMIT 1
   `;
@@ -884,7 +884,7 @@ pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT id, name, type, config_json, status FROM pipelines
+    SELECT id, name, type, config, status FROM pipelines
     WHERE id = ${pipelineId} AND org_id = ${user.org_id} AND status != 'deleted'
     LIMIT 1
   `;
@@ -903,7 +903,7 @@ pipelineRoutes.openapi(deployPipelineRoute, async (c): Promise<any> => {
   const result = await cfApi(c.env, "/pipelines", "POST", {
     name: resource.name,
     type: resource.type,
-    config: parseJsonColumn(resource.config_json),
+    config: parseJsonColumn(resource.config),
   });
 
   if (result.ok) {

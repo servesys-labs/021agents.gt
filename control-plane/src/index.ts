@@ -588,7 +588,7 @@ export default {
 
           // Update job status in DB
           await sql`
-            UPDATE job_queue SET status = 'completed', result_json = ${JSON.stringify(result)}, completed_at = ${now}
+            UPDATE job_queue SET status = 'completed', result = ${JSON.stringify(result)}, completed_at = ${now}
             WHERE job_id = ${String(job.payload.job_id || "")}
           `.catch(() => {});
         } else if (job.type === "webhook_delivery") {
@@ -699,11 +699,11 @@ export default {
           const { agent_name, org_id } = job.payload;
           const { scanConfig: scanAgentConfig } = await import("./logic/security-scanner");
           const agentRows = await sql`
-            SELECT config_json FROM agents WHERE name = ${String(agent_name)} AND org_id = ${String(org_id)} LIMIT 1
+            SELECT config FROM agents WHERE name = ${String(agent_name)} AND org_id = ${String(org_id)} LIMIT 1
           `;
           if (agentRows.length > 0) {
             let config: Record<string, unknown> = {};
-            config = parseJsonColumn(agentRows[0].config_json);
+            config = parseJsonColumn(agentRows[0].config);
             const scanResult = scanAgentConfig(String(agent_name), config, crypto.randomUUID().slice(0, 12));
             await sql`
               INSERT INTO security_scans (scan_id, org_id, agent_name, scan_type, risk_score, risk_level, total_probes, passed, failed, created_at)
@@ -735,11 +735,11 @@ export default {
           const { analyzeSessionRecords: analyze, generateProposals: genProposals } = await import("./logic/evolution-analyzer");
 
           const agentRows = await sql`
-            SELECT config_json FROM agents WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
+            SELECT config FROM agents WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
           `;
           if (agentRows.length > 0) {
             let agentConfig: Record<string, unknown> = {};
-            agentConfig = parseJsonColumn(agentRows[0].config_json);
+            agentConfig = parseJsonColumn(agentRows[0].config);
 
             const since = Date.now() / 1000 - days * 86400;
             const sessions = await sql`
@@ -763,14 +763,14 @@ export default {
 
             for (const proposal of proposals) {
               await sql`
-                INSERT INTO evolution_proposals (proposal_id, agent_name, org_id, title, rationale, category, priority, config_diff_json, evidence_json, status, created_at)
+                INSERT INTO evolution_proposals (proposal_id, agent_name, org_id, title, rationale, category, priority, config_diff, evidence, status, created_at)
                 VALUES (${proposal.id}, ${agentName}, ${orgId}, ${proposal.title}, ${proposal.rationale}, ${proposal.category}, ${proposal.priority}, ${JSON.stringify(proposal.modification)}, ${JSON.stringify(proposal.evidence)}, 'pending', ${nowTs})
                 ON CONFLICT (proposal_id) DO UPDATE SET title = EXCLUDED.title, priority = EXCLUDED.priority
               `.catch(() => {});
             }
 
             await sql`
-              INSERT INTO evolution_reports (agent_name, org_id, report_json, session_count, created_at)
+              INSERT INTO evolution_reports (agent_name, org_id, report, session_count, created_at)
               VALUES (${agentName}, ${orgId}, ${JSON.stringify(report)}, ${records.length}, ${nowTs})
             `.catch(() => {});
 
@@ -867,7 +867,7 @@ export default {
     // 1. Check for due schedules
     try {
       const dueSchedules = await sql`
-        SELECT id, agent_name, task, org_id, cron_expression
+        SELECT id, agent_name, task, org_id, cron
         FROM schedules
         WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= ${now})
         LIMIT 10
@@ -939,13 +939,13 @@ export default {
 
           // Fetch agent config
           const agentRows = await sql`
-            SELECT config_json FROM agents
+            SELECT config FROM agents
             WHERE name = ${agentName} AND org_id = ${orgId} AND is_active = true LIMIT 1
           `;
           if (agentRows.length === 0) continue;
 
           let agentConfig: Record<string, unknown> = {};
-          agentConfig = parseJsonColumn(agentRows[0].config_json);
+          agentConfig = parseJsonColumn(agentRows[0].config);
 
           // Fetch session records
           const sessions = await sql`
@@ -970,7 +970,7 @@ export default {
           // Batch-fetch turns for ALL sessions in one query (not N+1)
           const sessionIds = sessions.map((s: any) => s.session_id);
           const allTurns = sessionIds.length > 0 ? await sql`
-            SELECT session_id, turn_number, tool_calls_json, tool_results_json, error
+            SELECT session_id, turn_number, tool_calls, tool_results, error
             FROM turns WHERE session_id = ANY(${sessionIds})
             ORDER BY session_id, turn_number ASC
           `.catch(() => []) : [];
@@ -992,8 +992,8 @@ export default {
             for (const turn of turns) {
               let tcList: any[] = [];
               let trList: any[] = [];
-              tcList = parseJsonColumn(turn.tool_calls_json, []);
-              trList = parseJsonColumn(turn.tool_results_json, []);
+              tcList = parseJsonColumn(turn.tool_calls, []);
+              trList = parseJsonColumn(turn.tool_results, []);
 
               for (let i = 0; i < tcList.length; i++) {
                 const tc = tcList[i];
@@ -1051,7 +1051,7 @@ export default {
             await sql`
               INSERT INTO evolution_proposals (
                 proposal_id, agent_name, org_id, title, rationale, category,
-                priority, config_diff_json, evidence_json, status, created_at
+                priority, config_diff, evidence, status, created_at
               ) VALUES (
                 ${proposal.id}, ${agentName}, ${orgId}, ${proposal.title},
                 ${proposal.rationale}, ${proposal.category}, ${proposal.priority},
@@ -1061,14 +1061,14 @@ export default {
                 title = EXCLUDED.title,
                 rationale = EXCLUDED.rationale,
                 priority = EXCLUDED.priority,
-                config_diff_json = EXCLUDED.config_diff_json,
-                evidence_json = EXCLUDED.evidence_json
+                config_diff = EXCLUDED.config_diff,
+                evidence = EXCLUDED.evidence
             `.catch(() => {});
           }
 
           // Store report
           await sql`
-            INSERT INTO evolution_reports (agent_name, org_id, report_json, session_count, created_at)
+            INSERT INTO evolution_reports (agent_name, org_id, report, session_count, created_at)
             VALUES (${agentName}, ${orgId}, ${JSON.stringify(report)}, ${records.length}, ${now})
           `.catch(() => {});
 
@@ -1321,7 +1321,7 @@ export default {
             const recentIssues = await sql`
               SELECT 1 FROM issues
               WHERE org_id = ${orgId} AND agent_name = ${agentName}
-                AND issue_type = 'slo_breach' AND metadata_json::text LIKE ${"%" + metric + "%"}
+                AND issue_type = 'slo_breach' AND metadata::text LIKE ${"%" + metric + "%"}
                 AND created_at > ${new Date(Date.now() - windowSeconds * 1000).toISOString()}
               LIMIT 1
             `.catch(() => []);
@@ -1331,7 +1331,7 @@ export default {
             const issueId = crypto.randomUUID().slice(0, 12);
             const direction = higherIsBetter ? "below" : "above";
             await sql`
-              INSERT INTO issues (issue_id, org_id, agent_name, issue_type, severity, title, description, metadata_json, status, created_at)
+              INSERT INTO issues (issue_id, org_id, agent_name, issue_type, severity, title, description, metadata, status, created_at)
               VALUES (
                 ${issueId}, ${orgId}, ${agentName}, 'slo_breach', 'high',
                 ${`SLO breach: ${metric} ${direction} target for ${agentName}`},
@@ -1415,7 +1415,7 @@ export default {
         } else if (errorRate < 0.03) {
           // Low error rate — auto-promote canary to production
           await sql`
-            INSERT INTO release_channels (org_id, agent_name, channel, version, config_json, promoted_by, promoted_at)
+            INSERT INTO release_channels (org_id, agent_name, channel, version, config, promoted_by, promoted_at)
             VALUES (${orgId}, ${agentName}, 'production', ${String(canary.canary_version)}, '{}', 'system', now())
             ON CONFLICT (org_id, agent_name, channel) DO UPDATE SET version = ${String(canary.canary_version)}, promoted_at = now()
           `.catch(() => {});

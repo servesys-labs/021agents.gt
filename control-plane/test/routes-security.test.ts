@@ -39,13 +39,13 @@ function buildApp(orgId = "org-a") {
 }
 
 describe("security routes contracts", () => {
-  it("POST scan selects config_json from agents", async () => {
+  it("POST scan selects config from agents", async () => {
     let agentsSql = "";
     const mockSql = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
       if (query.includes("FROM agents") && query.includes("LIMIT 1")) {
         agentsSql = query;
-        return [{ config_json: JSON.stringify({ model: "m", tools: ["web-search"] }) }];
+        return [{ config: JSON.stringify({ model: "m", tools: ["web-search"] }) }];
       }
       return [];
     }) as any;
@@ -55,7 +55,7 @@ describe("security routes contracts", () => {
     const app = buildApp("org-a");
     const res = await app.request("/scan/agent-a?scan_type=config", { method: "POST" }, mockEnv());
     expect(res.status).toBe(200);
-    expect(agentsSql).toContain("config_json");
+    expect(agentsSql).toContain("config");
     expect(agentsSql).not.toContain("SELECT config FROM");
     const payload = await res.json() as { agent_name?: string; scan_id?: string };
     expect(payload.agent_name).toBe("agent-a");
