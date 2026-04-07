@@ -365,28 +365,8 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
       `;
       console.log(`[auth/signup] Personal agent created for ${email}`);
 
-      // Auto-create meta-agent (manages all agents for this user)
-      const metaAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      const metaConfig = {
-        name: "meta-agent",
-        description: "Agent manager — creates, tests, evaluates, and evolves your agents",
-        system_prompt: "You are the agent manager for this organization. You help create, test, evaluate, and improve agents. You are called by the personal assistant when the user wants to manage their agents.",
-        model: "",  // Let plan routing handle model selection
-        plan: "free",
-        tools: [],  // meta-agent uses its own tool system, not runtime tools
-        max_turns: 20,
-        tags: ["meta", "system"],
-        version: "1.0.0",
-        governance: { budget_limit_usd: 2 },
-        is_meta: true,
-        is_personal: false,
-      };
-
-      await tx`
-        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
-        VALUES (${metaAgentId}, ${"meta-agent"}, ${orgId}, ${metaConfig.description}, ${JSON.stringify(metaConfig)}, '1.0.0', ${true}, ${userId}, now(), now())
-      `;
-      console.log(`[auth/signup] Meta-agent created for ${email}`);
+      // Meta-agent is ambient — no DB row needed. It uses its own system prompt
+      // from prompts/meta-agent-chat.ts and operates on any agent via /agents/:name/meta-chat.
 
       // Create default org_settings
       await tx`
@@ -805,29 +785,7 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
       console.log(`[auth/cf-access] Personal agent created for ${cfClaims.email}`);
     } catch (e: any) { console.warn(`[auth/cf-access] Personal agent creation failed: ${e.message}`); }
 
-    // Auto-create meta-agent
-    try {
-      const metaAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-      const metaConfig = {
-        name: "meta-agent",
-        description: "Agent manager — creates, tests, evaluates, and evolves your agents",
-        system_prompt: "You are the agent manager for this organization. You help create, test, evaluate, and improve agents. You are called by the personal assistant when the user wants to manage their agents.",
-        model: "",
-        plan: "free",
-        tools: [],
-        max_turns: 20,
-        tags: ["meta", "system"],
-        version: "1.0.0",
-        governance: { budget_limit_usd: 2 },
-        is_meta: true,
-        is_personal: false,
-      };
-      await sql`
-        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
-        VALUES (${metaAgentId}, ${"meta-agent"}, ${orgId}, ${metaConfig.description}, ${JSON.stringify(metaConfig)}, '1.0.0', ${true}, ${userId}, ${nowEpoch}, ${nowEpoch})
-      `;
-      console.log(`[auth/cf-access] Meta-agent created for ${cfClaims.email}`);
-    } catch (e: any) { console.warn(`[auth/cf-access] Meta-agent creation failed: ${e.message}`); }
+    // Meta-agent is ambient — no DB row needed.
 
     // Seed free tier credits
     const FREE_TIER_USD = 5.00;
