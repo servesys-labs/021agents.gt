@@ -2383,7 +2383,7 @@ async function executeTool(
       try {
         if (action === "list") {
           const rows = await sql`
-            SELECT name, description, category, enabled, created_at
+            SELECT name, description, category, is_active, created_at
             FROM skills
             WHERE org_id = ${ctx.orgId} AND (agent_name IS NULL OR agent_name = ${ctx.agentName})
             ORDER BY name
@@ -2420,7 +2420,7 @@ async function executeTool(
           const category = String(args.category || "workflow");
 
           await sql`
-            INSERT INTO skills (name, description, category, prompt, org_id, agent_name, enabled, created_at)
+            INSERT INTO skills (name, description, category, prompt, org_id, agent_name, is_active, created_at)
             VALUES (${name}, ${description}, ${category}, ${promptTemplate}, ${ctx.orgId}, ${ctx.agentName}, true, now())
             ON CONFLICT (org_id, name) DO UPDATE SET
               description = ${description}, prompt = ${promptTemplate}, category = ${category}, agent_name = ${ctx.agentName}

@@ -55,7 +55,7 @@ const approveRejectBody = z.object({
 const scheduleBody = z.object({
   interval_days: z.number().int().min(1).max(365).optional(),
   min_sessions: z.number().int().min(1).max(1000).optional(),
-  enabled: z.boolean().optional(),
+  is_active: z.boolean().optional(),
 }).optional();
 
 // ── POST /:agent_name/analyze ───────────────────────────────────
@@ -960,7 +960,7 @@ const createScheduleRoute = createRoute({
     body: { content: { "application/json": { schema: z.object({
       interval_days: z.number().int().min(1).max(365).optional(),
       min_sessions: z.number().int().min(1).max(1000).optional(),
-      enabled: z.boolean().optional(),
+      is_active: z.boolean().optional(),
     }) } }, required: false as const },
   },
   responses: {
@@ -977,7 +977,7 @@ evolveRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
 
   const intervalDays = Math.min(365, Math.max(1, Number(body.interval_days) || 7));
   const minSessions = Math.min(1000, Math.max(1, Number(body.min_sessions) || 10));
-  const enabled = body.enabled !== false;
+  const isActive = body.is_active !== false;
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
@@ -991,8 +991,8 @@ evolveRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
 
   // Upsert: create or update existing schedule for this agent+org
   await sql`
-    INSERT INTO evolution_schedules (id, agent_name, org_id, enabled, interval_days, min_sessions, next_run_at, created_at)
-    VALUES (${id}, ${agentName}, ${orgId}, ${enabled}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
+    INSERT INTO evolution_schedules (id, agent_name, org_id, is_active, interval_days, min_sessions, next_run_at, created_at)
+    VALUES (${id}, ${agentName}, ${orgId}, ${isActive}, ${intervalDays}, ${minSessions}, ${nextRunAt}, ${now})
     ON CONFLICT (id) DO NOTHING
   `;
 
@@ -1006,7 +1006,7 @@ evolveRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
   if (existing.length > 0) {
     await sql`
       UPDATE evolution_schedules
-      SET enabled = ${enabled},
+      SET is_active = ${isActive},
           interval_days = ${intervalDays},
           min_sessions = ${minSessions},
           next_run_at = CASE WHEN next_run_at IS NULL THEN ${nextRunAt} ELSE next_run_at END
@@ -1054,7 +1054,7 @@ evolveRoutes.openapi(deleteScheduleRoute, async (c): Promise<any> => {
   // Soft-disable rather than delete, so history is preserved
   await sql`
     UPDATE evolution_schedules
-    SET enabled = false
+    SET is_active = false
     WHERE agent_name = ${agentName} AND org_id = ${orgId}
   `.catch(() => {});
 

@@ -2626,13 +2626,13 @@ export class AgentOSMcpServer extends Agent<Env> {
       if (configuredTools.length > 0) {
         try {
           const toolRows = await sql`
-            SELECT name, description, input_schema FROM tool_registry
+            SELECT name, description, schema FROM tool_registry
             WHERE name = ANY(${configuredTools})
           `;
           const schemaMap = new Map<string, { description: string; schema: Record<string, unknown> }>();
           for (const row of toolRows) {
             let schema: Record<string, unknown> = {};
-            schema = parseJsonColumn(row.input_schema);
+            schema = parseJsonColumn(row.schema);
             schemaMap.set(String(row.name), {
               description: String(row.description || ""),
               schema,
@@ -4770,8 +4770,8 @@ export default {
           // Get access token
           let waToken = "";
           try {
-            const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'WHATSAPP_ACCESS_TOKEN' AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`;
-            if (rows.length > 0) waToken = String(rows[0].value_encrypted);
+            const rows = await sql`SELECT encrypted_value FROM secrets WHERE name = 'WHATSAPP_ACCESS_TOKEN' AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`;
+            if (rows.length > 0) waToken = String(rows[0].encrypted_value);
           } catch {}
           if (!waToken) continue;
 
@@ -4945,8 +4945,8 @@ export default {
 
       let slackBotToken = "";
       try {
-        const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'SLACK_BOT_TOKEN' AND org_id = ${slackOrgId} ORDER BY created_at DESC LIMIT 1`;
-        if (rows.length > 0) slackBotToken = String(rows[0].value_encrypted);
+        const rows = await sql`SELECT encrypted_value FROM secrets WHERE name = 'SLACK_BOT_TOKEN' AND org_id = ${slackOrgId} ORDER BY created_at DESC LIMIT 1`;
+        if (rows.length > 0) slackBotToken = String(rows[0].encrypted_value);
       } catch {}
       if (!slackBotToken) return Response.json({ ok: true });
 
@@ -5062,8 +5062,8 @@ export default {
 
           let igPageToken = "";
           try {
-            const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'INSTAGRAM_PAGE_TOKEN' AND org_id = ${igOrgId} ORDER BY created_at DESC LIMIT 1`;
-            if (rows.length > 0) igPageToken = String(rows[0].value_encrypted);
+            const rows = await sql`SELECT encrypted_value FROM secrets WHERE name = 'INSTAGRAM_PAGE_TOKEN' AND org_id = ${igOrgId} ORDER BY created_at DESC LIMIT 1`;
+            if (rows.length > 0) igPageToken = String(rows[0].encrypted_value);
           } catch {}
           if (!igPageToken) continue;
 
@@ -5266,8 +5266,8 @@ export default {
 
           let fbPageToken = "";
           try {
-            const rows = await sql`SELECT value_encrypted FROM secrets WHERE name = 'FACEBOOK_PAGE_TOKEN' AND org_id = ${fbOrgId} ORDER BY created_at DESC LIMIT 1`;
-            if (rows.length > 0) fbPageToken = String(rows[0].value_encrypted);
+            const rows = await sql`SELECT encrypted_value FROM secrets WHERE name = 'FACEBOOK_PAGE_TOKEN' AND org_id = ${fbOrgId} ORDER BY created_at DESC LIMIT 1`;
+            if (rows.length > 0) fbPageToken = String(rows[0].encrypted_value);
           } catch {}
           if (!fbPageToken) continue;
 

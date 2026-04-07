@@ -479,9 +479,9 @@ async function pushToChannel(env: any, sql: any, session: any, output: string): 
 async function getSecretValue(sql: any, name: string, orgId: string): Promise<string> {
   try {
     const rows = await sql`
-      SELECT value_encrypted FROM secrets WHERE name = ${name} AND org_id = ${orgId}
+      SELECT encrypted_value FROM secrets WHERE name = ${name} AND org_id = ${orgId}
       ORDER BY created_at DESC LIMIT 1
     `;
-    return rows.length > 0 ? String(rows[0].value_encrypted) : "";
+    return rows.length > 0 ? String(rows[0].encrypted_value) : "";
   } catch { return ""; }
 }
