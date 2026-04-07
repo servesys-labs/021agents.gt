@@ -99,11 +99,11 @@
     "binding": "AI"
   },
 
-  // Vectorize for semantic memory / RAG
+  // Vectorize for semantic memory / RAG (1024-dim Qwen3-Embedding)
   "vectorize": [
     {
       "binding": "VECTORIZE",
-      "index_name": "agentos-knowledge"
+      "index_name": "agentos-knowledge-v2"
     }
   ],
 
@@ -139,6 +139,10 @@
     "DEFAULT_MODEL": "gemma-4-26b-moe",
     "CONTROL_PLANE_URL": "https://api.oneshots.co/api/v1",
     "LOCAL_SEARCH_URL": "https://search.oneshots.co",
+    "OCR_ENDPOINT_URL": "https://ocr.oneshots.co",
+    "PDF_RENDER_URL": "https://pdf.oneshots.co",
+    "EMBEDDING_URL": "https://embed.oneshots.co",
+    "RERANKER_URL": "https://rerank.oneshots.co",
     "CF_EXEC_POOL_SIZE": "24",
     "CF_EXEC_LEASE_MS": "20000",
     "CF_EXEC_WAIT_MS": "5000"

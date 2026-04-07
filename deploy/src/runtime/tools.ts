@@ -593,6 +593,7 @@ const TOOL_COSTS: Record<string, ToolCostModel> = {
   // Knowledge (embedding + vector ops)
   "knowledge-search":  { flat_usd: 0.0002,   per_ms_usd: 0 },          // Embedding + query
   "store-knowledge":   { flat_usd: 0.0002,   per_ms_usd: 0 },          // Embedding + upsert
+  "ingest-document":   { flat_usd: 0,        per_ms_usd: 0 },          // Self-hosted OCR + embedding (GPU cost only)
 
   // R2 persistence
   "save-project":      { flat_usd: 0.001,    per_ms_usd: 0 },          // R2 PUTs
@@ -765,7 +766,7 @@ export function calculateInfraCost(session: {
 const CONCURRENT_SAFE_TOOLS = new Set([
   "read-file", "grep", "glob",                       // Read-only filesystem
   "web-search", "web-crawl", "browser-render",        // External APIs (isolated)
-  "knowledge-search", "store-knowledge",              // Vector ops (isolated)
+  "knowledge-search", "store-knowledge", "ingest-document", // Vector ops (isolated)
   "http-request",                                     // External HTTP (isolated)
   "image-generate", "text-to-speech", "speech-to-text", // AI services (isolated)
   "self-check", "adapt-strategy",                     // DB reads (no mutations)
@@ -1428,6 +1429,9 @@ async function dispatch(
 
     case "store-knowledge":
       return storeKnowledge(env, args);
+
+    case "ingest-document":
+      return ingestDocument(env, args);
 
     case "image-generate":
       return imageGenerate(env, args);
@@ -4307,16 +4311,36 @@ async function sandboxExec(
 // ── Knowledge Search (Vectorize) ──────────────────────────────
 
 async function knowledgeSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
-  const query = args.query || "";
-  const retrieveK = 20; // Retrieve more candidates for reranking
+  const { rewriteQuery, dedupResults } = await import("./rag-transforms");
+  const { embedForQuery } = await import("./embeddings");
+  const rawQuery = args.query || "";
   const finalK = args.top_k || 5;
+  const maxRetries = 2; // Up to 2 retrieval attempts (original + 1 refinement)
 
-  // Step 1: Embed query
-  const embedResult = (await env.AI.run("@cf/baai/bge-base-en-v1.5" as keyof AiModels, {
-    text: [query],
-  })) as any;
-  const queryVec = embedResult.data?.[0];
-  if (!queryVec) return "Embedding failed";
+  let bestResults: any[] = [];
+  let queriesAttempted: string[] = [];
+
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    // On first attempt: use rewritten query. On retry: use LLM-refined query.
+    let query: string;
+    if (attempt === 0) {
+      query = rewriteQuery(rawQuery, { agentName: (env as any).__agentConfig?.name });
+    } else {
+      // Refine query based on what we found (or didn't find)
+      query = await refineQuery(env, rawQuery, bestResults);
+      if (!query || queriesAttempted.includes(query)) break; // No useful refinement
+    }
+    queriesAttempted.push(query);
+
+    const retrieveK = 20;
+    let queryVec: number[];
+    try {
+      const embResult = await embedForQuery(query, env);
+      queryVec = embResult.vector;
+    } catch {
+      if (attempt === 0) return "Embedding failed — both GPU box and Workers AI unavailable";
+      break;
+    }
 
   // Step 2: Retrieve top-20 candidates from Vectorize
   const configOrgId = (env as any).__agentConfig?.org_id || "";
@@ -4346,47 +4370,59 @@ async function knowledgeSearch(env: RuntimeEnv, args: Record<string, any>): Prom
     return `No relevant knowledge found for: ${query}`;
   }
 
-  // Step 3: Rerank with cross-encoder (Workers AI bge-reranker-base)
-  // Fix #1: Use correct API shape — query + texts[] for reranker models
+  // Step 3: Rerank with GPU box reranker (Jina v3 primary, BGE fallback)
+  const { rerank } = await import("./rag-rerank");
   let reranked = candidates;
   try {
-    const rerankerResult = (await env.AI.run(
-      "@cf/baai/bge-reranker-base" as keyof AiModels,
-      {
-        query,
-        texts: candidates.map((c: any) => c.text.slice(0, 512)),
-      } as any,
-    )) as any;
-
-    // Workers AI reranker returns: { data: [{ index, score }] } or [{ score }]
-    let scores: number[] = [];
-    if (Array.isArray(rerankerResult?.data)) {
-      // Sorted by score — map back to original order via index
-      const scoreMap = new Map<number, number>();
-      for (const item of rerankerResult.data) {
-        scoreMap.set(Number(item.index ?? 0), Number(item.score ?? 0));
-      }
-      scores = candidates.map((_: any, i: number) => scoreMap.get(i) ?? 0);
-    } else if (Array.isArray(rerankerResult)) {
-      scores = rerankerResult.map((d: any) => Number(d.score ?? d ?? 0));
-    }
-
-    if (scores.length === candidates.length) {
-      reranked = candidates.map((c: any, i: number) => ({
-        ...c,
-        rerank_score: scores[i],
-        // Combine vector similarity + reranker relevance
-        final_score: 0.3 * c.vector_score + 0.7 * scores[i],
-      }));
+    const rerankResults = await rerank(query, candidates.map((c: any) => c.text), env);
+    if (rerankResults.length > 0) {
+      reranked = rerankResults.map((rr) => {
+        const c = candidates[rr.index];
+        return {
+          ...c,
+          rerank_score: rr.score,
+          final_score: 0.3 * c.vector_score + 0.7 * rr.score,
+        };
+      });
       reranked.sort((a: any, b: any) => b.final_score - a.final_score);
     }
   } catch {
-    // Reranker unavailable — fall back to vector score ordering
     reranked.sort((a: any, b: any) => b.vector_score - a.vector_score);
   }
 
-  // Step 4: Return top-K after reranking with metadata
-  const topResults = reranked.slice(0, finalK);
+    // Step 4: Dedup and collect results
+    const deduped = dedupResults(
+      reranked.map((r: any) => ({ ...r, id: r.source + "-" + r.chunk_index, score: r.final_score ?? r.vector_score })),
+      { maxPerSource: 3 },
+    );
+
+    // Merge with previous attempts (keep higher-scored version of each chunk)
+    for (const _r of deduped) {
+      const r = _r as any;
+      const existing = bestResults.find((br: any) => br.id === r.id);
+      if (!existing) {
+        bestResults.push(r);
+      } else if ((r.final_score ?? r.vector_score) > (existing.final_score ?? existing.vector_score)) {
+        Object.assign(existing, r);
+      }
+    }
+
+    // Evaluate: if top result has a good score, no need to retry
+    const topScore = bestResults[0]?.final_score ?? bestResults[0]?.vector_score ?? 0;
+    if (topScore > 0.5 || bestResults.length >= finalK * 2) {
+      break; // Good enough — stop searching
+    }
+    // Otherwise: loop will refine the query and try again
+  }
+
+  if (bestResults.length === 0) {
+    return `No relevant knowledge found for: ${rawQuery}` +
+      (queriesAttempted.length > 1 ? ` (tried ${queriesAttempted.length} query variants)` : "");
+  }
+
+  // Sort and return top-K
+  bestResults.sort((a: any, b: any) => (b.final_score ?? b.vector_score) - (a.final_score ?? a.vector_score));
+  const topResults = bestResults.slice(0, finalK);
   return topResults
     .map((r: any, i: number) => {
       const score = r.final_score !== undefined
@@ -4404,7 +4440,48 @@ async function knowledgeSearch(env: RuntimeEnv, args: Record<string, any>): Prom
       const metaStr = meta.length > 0 ? ` (${meta.join(", ")})` : "";
       return `${i + 1}. [${score}]${metaStr} ${r.text.slice(0, 300)}`;
     })
-    .join("\n\n");
+    .join("\n\n") +
+    (queriesAttempted.length > 1 ? `\n\n[Searched with ${queriesAttempted.length} query variants]` : "");
+}
+
+/**
+ * Refine a query when the first retrieval pass returned low-relevance results.
+ * Uses the MoE to analyze what was found and suggest a better search.
+ */
+async function refineQuery(
+  env: RuntimeEnv,
+  originalQuery: string,
+  currentResults: any[],
+): Promise<string> {
+  const llmUrl = "https://fast.oneshots.co";
+  const serviceToken = (env as any).SERVICE_TOKEN || "";
+  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+
+  const resultSummary = currentResults.slice(0, 3)
+    .map((r: any) => `[${r.source}] ${(r.text || "").slice(0, 100)}`)
+    .join("\n");
+
+  try {
+    const resp = await fetch(`${llmUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: JSON.stringify({
+        messages: [{
+          role: "user",
+          content: `Original search query: "${originalQuery}"\n\nTop results found (may not be relevant):\n${resultSummary || "(no results)"}\n\nThe results don't seem to answer the query well. Generate ONE improved search query that would find more relevant documents. Return ONLY the query string, nothing else.`,
+        }],
+        max_tokens: 50,
+        temperature: 0.3,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+    });
+    if (!resp.ok) return "";
+    const result = await resp.json() as any;
+    const refined = (result?.choices?.[0]?.message?.content || "").trim().replace(/^["']|["']$/g, "");
+    return refined;
+  } catch {
+    return "";
+  }
 }
 
 // ── Store Knowledge (Vectorize + R2) ──────────────────────────
@@ -4412,10 +4489,12 @@ async function knowledgeSearch(env: RuntimeEnv, args: Record<string, any>): Prom
 async function storeKnowledge(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
   const text = args.content || args.text || "";
   const key = args.key || "knowledge";
-  const embedResult = (await env.AI.run("@cf/baai/bge-base-en-v1.5" as keyof AiModels, {
-    text: [text],
-  })) as any;
-  const vec = embedResult.data?.[0];
+  const { embedSingle } = await import("./embeddings");
+  let vec: number[] | null = null;
+  try {
+    const embResult = await embedSingle(text, env);
+    vec = embResult.vector;
+  } catch { /* embedding failed */ }
   if (vec) {
     await env.VECTORIZE.upsert([
       {
@@ -4431,6 +4510,125 @@ async function storeKnowledge(env: RuntimeEnv, args: Record<string, any>): Promi
     ]);
   }
   return `Stored knowledge: '${key}' (${text.length} chars)`;
+}
+
+// ── Ingest Document (OCR → RAG pipeline) ──────────────────────
+
+async function ingestDocument(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
+  const imageUrl = args.image_url || args.url || "";
+  const source = args.source || "document";
+  if (!imageUrl) return "ERROR: image_url is required";
+
+  const ocrUrl = ((env as any).OCR_ENDPOINT_URL || "").trim();
+  if (!ocrUrl) return "ERROR: OCR_ENDPOINT_URL not configured";
+
+  const agentName = (env as any).__agentConfig?.name || "";
+  const orgId = (env as any).__agentConfig?.org_id || "";
+
+  // Fetch the image/document
+  const imgResp = await fetch(imageUrl);
+  if (!imgResp.ok) return `ERROR: Failed to fetch document from ${imageUrl}: ${imgResp.status}`;
+  const imgBytes = await imgResp.arrayBuffer();
+  const mimeType = imgResp.headers.get("Content-Type") || "image/png";
+
+  // Store raw in R2
+  const r2RawKey = `rag/${orgId || "global"}/${source}-${Date.now()}.raw`;
+  await env.STORAGE.put(r2RawKey, imgBytes, {
+    customMetadata: { source, org_id: orgId, agent_name: agentName, mime_type: mimeType },
+  });
+
+  // Convert to base64 data URL for vision model
+  // Safe base64 for large buffers (avoids stack overflow from spread)
+  const imgU8 = new Uint8Array(imgBytes);
+  let binary = "";
+  for (let i = 0; i < imgU8.length; i += 8192) {
+    const chunk = imgU8.subarray(i, Math.min(i + 8192, imgU8.length));
+    for (let j = 0; j < chunk.length; j++) binary += String.fromCharCode(chunk[j]);
+  }
+  const base64 = btoa(binary);
+  const dataUrl = `data:${mimeType};base64,${base64}`;
+  const ocrPrompt = "Extract all text from this document. Return the full text content preserving structure, headings, lists, and tables as markdown.";
+  const serviceToken = (env as any).SERVICE_TOKEN || "";
+  const authHeaders: Record<string, string> = serviceToken ? { Authorization: `Bearer ${serviceToken}` } : {};
+
+  // Try GLM-OCR first (fast, specialized), fallback to Gemma 4 31B vision
+  let extractedText = "";
+  const ocrBody = JSON.stringify({
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: ocrPrompt },
+        { type: "image_url", image_url: { url: dataUrl } },
+      ],
+    }],
+    max_tokens: 4096,
+    temperature: 0.1,
+  });
+
+  try {
+    const ocrResp = await fetch(`${ocrUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders },
+      body: ocrBody,
+    });
+    if (ocrResp.ok) {
+      const result = await ocrResp.json() as any;
+      extractedText = result?.choices?.[0]?.message?.content || "";
+    }
+  } catch { /* fall through to fallback */ }
+
+  // Fallback: Gemma 4 31B vision
+  if (!extractedText.trim()) {
+    try {
+      const gemmaResp = await fetch("https://gemma4.oneshots.co/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: ocrBody,
+      });
+      if (gemmaResp.ok) {
+        const result = await gemmaResp.json() as any;
+        extractedText = result?.choices?.[0]?.message?.content || "";
+      }
+    } catch { /* both endpoints failed */ }
+  }
+  if (!extractedText.trim()) return "ERROR: OCR returned empty text — document may be blank or unsupported format";
+
+  // Chunk and embed
+  const words = extractedText.split(/\s+/);
+  const chunks: string[] = [];
+  for (let i = 0; i < words.length; i += 400) {
+    chunks.push(words.slice(i, i + 512).join(" "));
+  }
+
+  const embedResult = (await env.AI.run("@cf/baai/bge-base-en-v1.5" as keyof AiModels, { text: chunks })) as any;
+  const vectors = embedResult.data || [];
+
+  const vecInserts = vectors.map((vec: number[], idx: number) => ({
+    id: `ocr-${source}-${Date.now()}-${idx}`,
+    values: vec,
+    metadata: {
+      text: chunks[idx],
+      source,
+      pipeline: "ocr",
+      org_id: orgId,
+      agent_name: agentName,
+      chunk_index: idx,
+      ingested_at: new Date().toISOString(),
+    },
+  }));
+
+  if (vecInserts.length > 0) {
+    await env.VECTORIZE.upsert(vecInserts);
+  }
+
+  return JSON.stringify({
+    source,
+    extracted_text_length: extractedText.length,
+    chunks: chunks.length,
+    vectors: vecInserts.length,
+    r2_key: r2RawKey,
+    preview: extractedText.slice(0, 300),
+  });
 }
 
 // ── Image Generate (Workers AI FLUX) ──────────────────────────
@@ -5104,7 +5302,7 @@ const TOOL_KEYWORDS: Record<string, string[]> = {
     "team-fact-write",
     "team-observation",
   ],
-  "knowledge|rag|embed|retrieval": ["knowledge-search", "store-knowledge", "manage-rag"],
+  "knowledge|rag|embed|retrieval|ocr|pdf|document|scan": ["knowledge-search", "store-knowledge", "ingest-document", "manage-rag"],
   "profile|preference|about me|my name": ["user-profile-save", "user-profile-load"],
   // Media
   "image|picture|photo|draw|generate image|illustration|diagram": ["image-generate", "vision-analyze"],
@@ -5423,6 +5621,21 @@ const TOOL_CATALOG: ToolDefinition[] = [
           key: { type: "string", description: "Label/key for the knowledge" },
         },
         required: ["content"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "ingest-document",
+      description: "Extract text from a PDF or image using OCR and add it to the knowledge base for RAG retrieval. Supports PDFs, scanned documents, receipts, screenshots, and any image with text.",
+      parameters: {
+        type: "object",
+        properties: {
+          image_url: { type: "string", description: "URL of the document/image to extract text from" },
+          source: { type: "string", description: "Label for this document (e.g. 'invoice-2026-01', 'meeting-notes')" },
+        },
+        required: ["image_url"],
       },
     },
   },

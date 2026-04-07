@@ -1,7 +1,7 @@
 /**
  * Gemma 4 Free Plan Benchmark Suite
  *
- * Tests the self-hosted Gemma 4 31B model (via CF Tunnel) against
+ * Tests the self-hosted Gemma 4 model (via CF Tunnel) against
  * the same task categories that paid plans handle. Measures:
  *
  *   1. Response quality (graded pass/fail per task)
@@ -21,7 +21,7 @@ const LIVE = process.env.BENCHMARK_LIVE === "1";
 const API_URL = process.env.ONESHOTS_API_URL || "http://localhost:8787";
 const API_KEY = process.env.ONESHOTS_API_KEY || "";
 const AGENT_NAME = process.env.BENCHMARK_AGENT || "personal-assistant";
-const PLAN = "free"; // Gemma 4 31B via CF Tunnel
+const PLAN = "free"; // Self-hosted Gemma 4 via CF Tunnel
 
 // ── Helpers ─────────────────────────────────────────────────────
 
@@ -81,6 +81,7 @@ interface BenchmarkResult {
   tool_calls: number;
   output_length: number;
   cost_usd: number;
+  model?: string;
   error?: string;
 }
 
@@ -95,6 +96,7 @@ function record(category: string, task: string, r: RunResult, passed: boolean, e
     tool_calls: r.tool_calls,
     output_length: r.output.length,
     cost_usd: r.cost_usd,
+    model: r.model,
     error,
   });
 }
@@ -327,9 +329,10 @@ describe.skipIf(!LIVE)("Benchmark Report", () => {
     const avgToolCalls = (results.reduce((s, r) => s + r.tool_calls, 0) / totalTests).toFixed(1);
 
     console.log("\n" + "═".repeat(70));
-    console.log("  GEMMA 4 31B FREE PLAN BENCHMARK RESULTS");
+    const observedModel = results.find((r) => r.model)?.model || "unknown";
+    console.log("  FREE PLAN BENCHMARK RESULTS");
     console.log("═".repeat(70));
-    console.log(`  Model: gemma-4-31b (Q8, 256K ctx, self-hosted GPU)`);
+    console.log(`  Model: ${observedModel} (self-hosted GPU)`);
     console.log(`  Agent: ${AGENT_NAME}`);
     console.log(`  Plan:  ${PLAN}`);
     console.log("─".repeat(70));

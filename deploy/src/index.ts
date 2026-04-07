@@ -5735,59 +5735,186 @@ export default {
         }
       }
 
-      // /cf/rag/query — semantic search via Vectorize
+      // /cf/rag/query — semantic search via Vectorize with query rewriting + dedup
       if (url.pathname === "/cf/rag/query" && request.method === "POST") {
-        const body = await request.json() as { query: string; topK?: number; org_id?: string; agent_name?: string };
+        const body = await request.json() as { query: string; topK?: number; org_id?: string; agent_name?: string; pipeline?: string; source?: string; dedup?: boolean };
         try {
-          const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: [body.query] }) as any;
-          const queryVec = embedResult.data?.[0];
-          if (!queryVec) return Response.json({ results: [] });
+          const { rewriteQuery, dedupResults } = await import("./runtime/rag-transforms");
+          const { bm25Search, reciprocalRankFusion } = await import("./runtime/rag-hybrid");
+
+          // Step 1: Rewrite query + generate multi-query variants
+          const expandedQuery = rewriteQuery(body.query, { agentName: body.agent_name });
+          const { generateMultiQuery } = await import("./runtime/rag-hybrid");
+          const llmUrl = "https://fast.oneshots.co";
+          const authHdrs = env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {};
+          let queryVariants = [expandedQuery];
+          try {
+            queryVariants = await generateMultiQuery(llmUrl, expandedQuery, authHdrs as Record<string, string>);
+          } catch { /* single query fallback */ }
 
           const filter: Record<string, string> = {};
           if (body.org_id) filter.org_id = body.org_id;
           if (body.agent_name) filter.agent_name = body.agent_name;
+          if (body.pipeline) filter.pipeline = body.pipeline;
+          if (body.source) filter.source = body.source;
 
-          const matches = await env.VECTORIZE.query(queryVec, {
-            topK: body.topK || 10,
-            filter: Object.keys(filter).length > 0 ? filter : undefined,
-            returnMetadata: "all",
+          const retrieveK = Math.min((body.topK || 10) * 2, 30);
+
+          // Step 2: Embed all query variants + run vector search for each + BM25 for primary
+          const { embedForQuery } = await import("./runtime/embeddings");
+          const allVectorResults: Array<{ id: string; score: number; text: string; source: string; pipeline: string; chunk_type: string; chunk_index: number }> = [];
+
+          // Embed and search all query variants in parallel
+          const variantSearches = queryVariants.map(async (q) => {
+            try {
+              const embResult = await embedForQuery(q, env);
+              const matches = await env.VECTORIZE.query(embResult.vector, {
+                topK: retrieveK,
+                filter: Object.keys(filter).length > 0 ? filter : undefined,
+                returnMetadata: "all",
+              });
+              return (matches.matches || []).map((m: any) => ({
+                id: m.id, score: m.score,
+                text: m.metadata?.text || "", source: m.metadata?.source || "",
+                pipeline: m.metadata?.pipeline || "", chunk_type: m.metadata?.chunk_type || "",
+                chunk_index: m.metadata?.chunk_index || 0,
+              }));
+            } catch { return []; }
           });
 
-          const results = (matches.matches || []).map((m: any) => ({
-            id: m.id,
-            score: m.score,
-            text: m.metadata?.text || "",
-            source: m.metadata?.source || "",
-            chunk_index: m.metadata?.chunk_index || 0,
-          }));
-          return Response.json({ results });
+          const bm25Promise = env.HYPERDRIVE
+            ? bm25Search(env.HYPERDRIVE, expandedQuery, { org_id: body.org_id, source: body.source, limit: retrieveK })
+            : Promise.resolve([]);
+
+          const [variantResults, bm25Matches] = await Promise.all([
+            Promise.all(variantSearches),
+            bm25Promise,
+          ]);
+
+          // Merge all variant results — deduplicate by ID, keep highest score
+          const seenIds = new Map<string, typeof allVectorResults[0]>();
+          for (const results of variantResults) {
+            for (const r of results) {
+              const existing = seenIds.get(r.id);
+              if (!existing || r.score > existing.score) {
+                seenIds.set(r.id, r);
+              }
+            }
+          }
+          const vectorResults = Array.from(seenIds.values())
+            .sort((a, b) => b.score - a.score);
+
+          // Step 3: Fuse results with Reciprocal Rank Fusion
+          let results: any[];
+          if (bm25Matches.length > 0) {
+            const fused = reciprocalRankFusion(vectorResults, bm25Matches);
+            results = fused.map(r => ({
+              id: r.id,
+              score: r.rrf_score,
+              text: r.context_prefix ? `${r.context_prefix}\n\n${r.text}` : r.text,
+              source: r.source,
+              pipeline: r.pipeline,
+              chunk_type: r.chunk_type,
+              chunk_index: r.chunk_index,
+              search_method: r.vector_score && r.bm25_rank ? "hybrid" : r.bm25_rank ? "bm25" : "vector",
+            }));
+          } else {
+            // No BM25 results — fall back to vector-only
+            results = vectorResults.map((r: any) => ({
+              ...r,
+              search_method: "vector",
+            }));
+          }
+
+          // Step 4: Deduplicate
+          if (body.dedup !== false) {
+            results = dedupResults(results as any, { maxPerSource: 3 }) as typeof results;
+          }
+
+          // Step 5: Return top-K
+          results = results.slice(0, body.topK || 10);
+          return Response.json({
+            results,
+            query_expanded: expandedQuery !== body.query ? expandedQuery : undefined,
+            search_methods: bm25Matches.length > 0 ? ["vector", "bm25", "rrf"] : ["vector"],
+            query_variants: queryVariants.length > 1 ? queryVariants : undefined,
+          });
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
         }
       }
 
-      // /cf/rag/ingest — chunk, embed, store in Vectorize + R2
+      // /cf/rag/evaluate — RAGAS-style evaluation of RAG quality
+      if (url.pathname === "/cf/rag/evaluate" && request.method === "POST") {
+        const body = await request.json() as {
+          query: string;
+          answer: string;
+          contexts: string[];
+          ground_truth?: string;
+        };
+        if (!body.query || !body.answer || !body.contexts?.length) {
+          return Response.json({ error: "query, answer, and contexts are required" }, { status: 400 });
+        }
+        try {
+          const { evaluateRAG } = await import("./runtime/rag-eval");
+          const llmUrl = "https://fast.oneshots.co";
+          const authHdrs = env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {};
+          const result = await evaluateRAG(body, llmUrl, authHdrs as Record<string, string>);
+
+          // Store eval result in telemetry queue for tracking over time
+          if (env.TELEMETRY_QUEUE) {
+            try {
+              await env.TELEMETRY_QUEUE.send({
+                type: "event",
+                payload: {
+                  event_type: "rag_eval",
+                  query: body.query.slice(0, 200),
+                  overall_score: result.overall,
+                  context_precision: result.context_precision,
+                  faithfulness: result.faithfulness,
+                  created_at: new Date().toISOString(),
+                },
+              });
+            } catch { /* telemetry is best-effort */ }
+          }
+
+          return Response.json(result);
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // /cf/rag/ingest — smart chunk, validate, embed, store in Vectorize + R2
       if (url.pathname === "/cf/rag/ingest" && request.method === "POST") {
         const body = await request.json() as { text: string; source?: string; org_id?: string; agent_name?: string };
         try {
-          const words = body.text.split(/\s+/);
-          const chunks: string[] = [];
-          for (let i = 0; i < words.length; i += 400) {
-            chunks.push(words.slice(i, i + 512).join(" "));
+          const { smartChunk, validateChunk } = await import("./runtime/rag-transforms");
+          const rawChunks = smartChunk(body.text);
+          const seenHashes = new Set<string>();
+          const validChunks = rawChunks.filter(c => validateChunk(c.text, seenHashes).valid);
+          const chunkTexts = validChunks.map(c => c.text);
+          const rejected = rawChunks.length - validChunks.length;
+
+          if (chunkTexts.length === 0) {
+            return Response.json({ error: "All chunks failed validation (binary content or duplicates)", rejected }, { status: 422 });
           }
 
-          const embedResult = await env.AI.run("@cf/baai/bge-base-en-v1.5", { text: chunks }) as any;
-          const vectors = embedResult.data || [];
+          const { embed: embedChunks } = await import("./runtime/embeddings");
+          const embedResult = await embedChunks(chunkTexts, env);
+          const vectors = embedResult.vectors;
 
           const vecInserts = vectors.map((vec: number[], idx: number) => ({
             id: `${body.source || "text"}-${Date.now()}-${idx}`,
             values: vec,
             metadata: {
-              text: chunks[idx],
+              text: chunkTexts[idx],
               source: body.source || "api",
+              pipeline: "text",
               org_id: body.org_id || "",
               agent_name: body.agent_name || "",
               chunk_index: idx,
+              chunk_type: validChunks[idx]?.type || "prose",
+              ingested_at: new Date().toISOString(),
             },
           }));
 
@@ -5795,13 +5922,345 @@ export default {
             await env.VECTORIZE.upsert(vecInserts);
           }
 
-          // Store original text in R2
+          // Store chunks in Postgres for BM25 hybrid search
+          let bm25Stored = 0;
+          if (env.HYPERDRIVE) {
+            try {
+              const { storeChunksForBM25 } = await import("./runtime/rag-hybrid");
+              bm25Stored = await storeChunksForBM25(env.HYPERDRIVE, vecInserts.map((v: any) => ({
+                id: v.id,
+                source: body.source || "api",
+                pipeline: "text",
+                org_id: body.org_id || "",
+                agent_name: body.agent_name || "",
+                chunk_index: v.metadata.chunk_index,
+                chunk_type: v.metadata.chunk_type || "prose",
+                text: v.metadata.text,
+                context_prefix: "",
+              })));
+            } catch { /* BM25 is best-effort */ }
+          }
+
           const r2Key = `rag/${body.org_id || "global"}/${body.source || "text"}-${Date.now()}.txt`;
           await env.STORAGE.put(r2Key, body.text, {
             customMetadata: { source: body.source || "api", org_id: body.org_id || "", agent_name: body.agent_name || "" },
           });
 
-          return Response.json({ chunks: chunks.length, vectors: vecInserts.length, r2_key: r2Key });
+          return Response.json({ chunks: chunkTexts.length, vectors: vecInserts.length, bm25: bm25Stored, rejected, r2_key: r2Key });
+        } catch (err: any) {
+          return Response.json({ error: err.message }, { status: 500 });
+        }
+      }
+
+      // /cf/rag/ingest-document — OCR-powered document ingestion pipeline
+      // Accepts: multipart/form-data with file (PDF/image) OR JSON with { image_url, image_base64 }
+      // Flow: upload → R2 → (PDF? render pages) → OCR (GPU, with fallback) → chunk → embed → Vectorize
+      if (url.pathname === "/cf/rag/ingest-document" && request.method === "POST") {
+        const ocrUrl = ((env as any).OCR_ENDPOINT_URL || "").trim();
+
+        try {
+          let fileBytes: ArrayBuffer | null = null;
+          let fileName = "document";
+          let mimeType = "application/octet-stream";
+          let orgId = "";
+          let agentName = "";
+          let source = "";
+
+          const ct = request.headers.get("Content-Type") || "";
+          if (ct.includes("multipart/form-data")) {
+            const form = await request.formData();
+            const file = form.get("file") as File | null;
+            if (!file) return Response.json({ error: "file field required" }, { status: 400 });
+            fileBytes = await file.arrayBuffer();
+            fileName = file.name || "document";
+            mimeType = file.type || "application/octet-stream";
+            orgId = String(form.get("org_id") || "");
+            agentName = String(form.get("agent_name") || "");
+            source = String(form.get("source") || fileName);
+          } else {
+            const body = await request.json() as {
+              image_url?: string; image_base64?: string; mime_type?: string;
+              org_id?: string; agent_name?: string; source?: string; file_name?: string;
+            };
+            if (body.image_base64) {
+              const raw = body.image_base64.replace(/^data:[^;]+;base64,/, "");
+              fileBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0)).buffer;
+              mimeType = body.mime_type || "image/png";
+            } else if (body.image_url) {
+              const resp = await fetch(body.image_url);
+              if (!resp.ok) return Response.json({ error: `Failed to fetch image: ${resp.status}` }, { status: 502 });
+              fileBytes = await resp.arrayBuffer();
+              mimeType = resp.headers.get("Content-Type") || "image/png";
+            } else {
+              return Response.json({ error: "file, image_url, or image_base64 required" }, { status: 400 });
+            }
+            orgId = body.org_id || "";
+            agentName = body.agent_name || "";
+            source = body.source || body.file_name || "document";
+            fileName = body.file_name || "document";
+          }
+
+          // Step 1: Store raw file in R2
+          const r2RawKey = `rag/${orgId || "global"}/${source}-${Date.now()}.raw`;
+          await env.STORAGE.put(r2RawKey, fileBytes, {
+            customMetadata: { source, org_id: orgId, agent_name: agentName, mime_type: mimeType, file_name: fileName },
+          });
+
+          // Step 2: Convert pages to images (PDF → render via sandbox, images → pass through)
+          const isPdf = mimeType === "application/pdf" || fileName.toLowerCase().endsWith(".pdf");
+          const pageImages: Array<{ base64: string; mimeType: string; page: number }> = [];
+
+          // Safe base64 encoder for large buffers (avoids stack overflow from spread operator)
+          function arrayBufferToBase64(buf: ArrayBuffer): string {
+            const bytes = new Uint8Array(buf);
+            let binary = "";
+            const chunkSize = 8192;
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+              const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+              for (let j = 0; j < chunk.length; j++) binary += String.fromCharCode(chunk[j]);
+            }
+            return btoa(binary);
+          }
+
+          if (isPdf) {
+            const pdfB64 = arrayBufferToBase64(fileBytes);
+            let rendered = false;
+
+            // Primary: GPU box pdf.oneshots.co (fast, no cold start, no payload limits)
+            const pdfRenderUrl = ((env as any).PDF_RENDER_URL || "https://pdf.oneshots.co").trim();
+            try {
+              const renderResp = await fetch(`${pdfRenderUrl}/render`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {}),
+                },
+                body: JSON.stringify({ pdf_base64: pdfB64, dpi: 150 }),
+              });
+              if (renderResp.ok) {
+                const renderData = await renderResp.json() as { pages?: string[]; page_count?: number };
+                if (renderData.pages?.length) {
+                  for (let i = 0; i < renderData.pages.length; i++) {
+                    pageImages.push({ base64: renderData.pages[i], mimeType: "image/png", page: i + 1 });
+                  }
+                  rendered = true;
+                }
+              }
+            } catch { /* GPU box unreachable — fall through to sandbox */ }
+
+            // Fallback: CF container sandbox with pypdfium2
+            if (!rendered) {
+              try {
+                const sandboxId = `pdf-render-${Date.now()}`;
+                const sandbox = getTimedSandbox(env.SANDBOX, sandboxId);
+                await sandbox.writeFile("/tmp/_pdf.b64", pdfB64);
+                const renderResult = await sandbox.exec([
+                  `python3 -c "`,
+                  `import pypdfium2, base64, json, io;`,
+                  `pdf_bytes = base64.b64decode(open('/tmp/_pdf.b64').read().strip());`,
+                  `pdf = pypdfium2.PdfDocument(pdf_bytes);`,
+                  `pages = [];`,
+                  `[pages.append(base64.b64encode((lambda buf: (pdf[i].render(scale=150/72).to_pil().save(buf, format='PNG'), buf)[1].getvalue())(io.BytesIO())).decode()) for i in range(min(len(pdf), 20))];`,
+                  `print(json.dumps(pages))`,
+                  `"`,
+                ].join(""), { timeout: 60 });
+
+                if (renderResult.exitCode === 0 && renderResult.stdout) {
+                  const pngList = JSON.parse(String(renderResult.stdout).trim()) as string[];
+                  for (let i = 0; i < pngList.length; i++) {
+                    pageImages.push({ base64: pngList[i], mimeType: "image/png", page: i + 1 });
+                  }
+                  rendered = true;
+                }
+              } catch { /* sandbox also failed */ }
+            }
+
+            if (!rendered) {
+              return Response.json({
+                error: "PDF rendering failed — both GPU box (pdf.oneshots.co) and container sandbox unavailable.",
+              }, { status: 422 });
+            }
+          } else {
+            // Single image — pass through directly
+            const imgB64 = arrayBufferToBase64(fileBytes);
+            pageImages.push({ base64: imgB64, mimeType, page: 1 });
+          }
+
+          // Step 3: OCR each page with fallback chain: GLM-OCR → Gemma 4 31B → error
+          const ocrServiceToken = env.SERVICE_TOKEN || "";
+          const allExtractedText: string[] = [];
+
+          for (const page of pageImages) {
+            let extractedText = "";
+            const dataUrl = `data:${page.mimeType};base64,${page.base64}`;
+            const ocrPrompt = "Extract all text from this document. Return the full text content preserving structure, headings, lists, and tables as markdown.";
+
+            // Try GLM-OCR first (fast, specialized)
+            if (ocrUrl) {
+              try {
+                const ocrResp = await fetch(`${ocrUrl}/v1/chat/completions`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    ...(ocrServiceToken ? { "Authorization": `Bearer ${ocrServiceToken}` } : {}),
+                  },
+                  body: JSON.stringify({
+                    messages: [{
+                      role: "user",
+                      content: [
+                        { type: "text", text: ocrPrompt },
+                        { type: "image_url", image_url: { url: dataUrl } },
+                      ],
+                    }],
+                    max_tokens: 4096,
+                    temperature: 0.1,
+                  }),
+                });
+                if (ocrResp.ok) {
+                  const result = await ocrResp.json() as any;
+                  extractedText = result?.choices?.[0]?.message?.content || "";
+                }
+              } catch { /* fall through to fallback */ }
+            }
+
+            // Fallback: Gemma 4 31B vision (slower but available)
+            if (!extractedText.trim()) {
+              const gemmaUrl = "https://gemma4.oneshots.co";
+              try {
+                const gemmaResp = await fetch(`${gemmaUrl}/v1/chat/completions`, {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    ...(ocrServiceToken ? { "Authorization": `Bearer ${ocrServiceToken}` } : {}),
+                  },
+                  body: JSON.stringify({
+                    messages: [{
+                      role: "user",
+                      content: [
+                        { type: "text", text: ocrPrompt },
+                        { type: "image_url", image_url: { url: dataUrl } },
+                      ],
+                    }],
+                    max_tokens: 4096,
+                    temperature: 0.1,
+                  }),
+                });
+                if (gemmaResp.ok) {
+                  const result = await gemmaResp.json() as any;
+                  extractedText = result?.choices?.[0]?.message?.content || "";
+                }
+              } catch { /* both OCR endpoints failed */ }
+            }
+
+            if (extractedText.trim()) {
+              allExtractedText.push(page.page > 1 ? `\n---\n## Page ${page.page}\n\n${extractedText}` : extractedText);
+            }
+          }
+
+          const fullText = allExtractedText.join("\n");
+          if (!fullText.trim()) {
+            return Response.json({ error: "OCR returned empty text from all pages — document may be blank or all OCR endpoints are down" }, { status: 422 });
+          }
+
+          // Step 4: Smart chunking with validation (rejects binary garbage, keeps structure)
+          const { smartChunk, validateChunk } = await import("./runtime/rag-transforms");
+          const rawChunks = smartChunk(fullText);
+          const seenHashes = new Set<string>();
+          const validChunks = rawChunks.filter(c => validateChunk(c.text, seenHashes).valid);
+          const chunks = validChunks.map(c => c.text);
+
+          if (chunks.length === 0) {
+            return Response.json({ error: "All chunks failed validation", pages: pageImages.length }, { status: 422 });
+          }
+
+          // Step 5: Embed all chunks via Qwen3-Embedding (GPU box primary, Workers AI fallback)
+          const { embed: embedOcrChunks } = await import("./runtime/embeddings");
+          const ocrEmbedResult = await embedOcrChunks(chunks, env);
+          const vectors = ocrEmbedResult.vectors;
+
+          // Step 6: Upsert to Vectorize
+          const vecInserts = vectors.map((vec: number[], idx: number) => ({
+            id: `ocr-${source}-${Date.now()}-${idx}`,
+            values: vec,
+            metadata: {
+              text: chunks[idx],
+              source,
+              pipeline: "ocr",
+              org_id: orgId,
+              chunk_type: validChunks[idx]?.type || "prose",
+              agent_name: agentName,
+              chunk_index: idx,
+              ingested_at: new Date().toISOString(),
+            },
+          }));
+
+          if (vecInserts.length > 0) {
+            await env.VECTORIZE.upsert(vecInserts);
+          }
+
+          // Step 6b: Store chunks in Postgres for BM25 + generate contextual prefixes
+          let bm25Stored = 0;
+          if (env.HYPERDRIVE) {
+            try {
+              const { storeChunksForBM25, generateDocSummary, generateContextPrefix } = await import("./runtime/rag-hybrid");
+              const llmUrl = "https://fast.oneshots.co";
+              const authHdrs = env.SERVICE_TOKEN ? { Authorization: `Bearer ${env.SERVICE_TOKEN}` } : {};
+
+              // Generate doc summary for contextual enrichment (one LLM call for the whole doc)
+              const docSummary = await generateDocSummary(
+                llmUrl,
+                fullText,
+                fileName,
+                authHdrs as Record<string, string>,
+              );
+
+              // Generate context prefix per chunk (parallel, capped at 3 concurrent to avoid GPU slowdown)
+              const chunkRecords: Array<{ id: string; source: string; pipeline: string; org_id: string; agent_name: string; chunk_index: number; chunk_type: string; text: string; context_prefix: string }> = [];
+              const batchSize = 3;
+              for (let b = 0; b < vecInserts.length; b += batchSize) {
+                const batch = vecInserts.slice(b, b + batchSize);
+                const prefixes = await Promise.all(
+                  batch.map((v: any, bi: number) =>
+                    generateContextPrefix(llmUrl, docSummary, v.metadata.text, b + bi + 1, authHdrs as Record<string, string>)
+                      .catch(() => "")
+                  )
+                );
+                for (let i = 0; i < batch.length; i++) {
+                  chunkRecords.push({
+                    id: batch[i].id,
+                    source,
+                    pipeline: "ocr",
+                    org_id: orgId,
+                    agent_name: agentName,
+                    chunk_index: batch[i].metadata.chunk_index,
+                    chunk_type: batch[i].metadata.chunk_type || "prose",
+                    text: batch[i].metadata.text,
+                    context_prefix: prefixes[i] || "",
+                  });
+                }
+              }
+              bm25Stored = await storeChunksForBM25(env.HYPERDRIVE, chunkRecords);
+            } catch (err) {
+              console.error(`[rag-hybrid] BM25+contextual store failed: ${err instanceof Error ? err.message : err}`);
+            }
+          }
+
+          // Step 7: Store extracted text in R2
+          const r2TextKey = `rag/${orgId || "global"}/${source}-${Date.now()}.md`;
+          await env.STORAGE.put(r2TextKey, fullText, {
+            customMetadata: { source, org_id: orgId, agent_name: agentName, pipeline: "ocr", file_name: fileName },
+          });
+
+          return Response.json({
+            source,
+            file_name: fileName,
+            pages: pageImages.length,
+            extracted_text_length: fullText.length,
+            chunks: chunks.length,
+            vectors: vecInserts.length,
+            r2_raw_key: r2RawKey,
+            r2_text_key: r2TextKey,
+          });
         } catch (err: any) {
           return Response.json({ error: err.message }, { status: 500 });
         }
