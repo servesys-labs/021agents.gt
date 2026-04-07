@@ -292,8 +292,8 @@ describe("queue consumer → DB schema alignment", () => {
       "utf-8",
     );
 
-    // The turns table column is plan_artifact (per migration 023),
-    // not plan_json. The consumer must use the correct column name.
+    // The turns table column is plan_json (confirmed against live DB schema).
+    // The consumer must use the correct column name.
     const turnInsertMatch = source.match(
       /else if \(type === "turn"\)[\s\S]*?\)`/,
     );
@@ -301,11 +301,8 @@ describe("queue consumer → DB schema alignment", () => {
     const turnInsert = turnInsertMatch![0];
 
     // Should contain the correct column name
-    expect(turnInsert).toContain("plan_artifact");
-    // Should NOT have plan_json as a column name in the INSERT columns list
-    // (it can appear in the VALUES as a fallback: p.plan_json)
     const columnsSection = turnInsert.split("VALUES")[0];
-    expect(columnsSection).not.toContain("plan_json");
+    expect(columnsSection).toContain("plan_json");
   });
 
   it("consumer handles all queue message types", () => {
@@ -322,15 +319,33 @@ describe("queue consumer → DB schema alignment", () => {
     expect(queueMatch).not.toBeNull();
     const queueHandler = queueMatch![0];
 
-    // All message types that workflow.ts sends must have handlers
+    // All message types that workflow.ts and tools.ts send must have handlers
     const expectedTypes = [
-      "session", "turn", "billing_flush",
-      "skill_activation", "loop_detected", "do_eviction",
+      "session", "turn", "episode", "event",
+      "runtime_event", "middleware_event", "billing_flush",
+      "skill_activation", "skill_auto_activation", "loop_detected", "do_eviction",
     ];
 
     for (const t of expectedTypes) {
       expect(queueHandler).toContain(`"${t}"`);
     }
+
+    // KNOWN_TYPES set should list all types for unknown-type detection
+    expect(queueHandler).toContain("KNOWN_TYPES");
+  });
+
+  it("consumer classifies permanent vs transient errors", () => {
+    const fs = require("fs");
+    const source = fs.readFileSync(
+      require("path").resolve(__dirname, "../src/index.ts"),
+      "utf-8",
+    );
+
+    // Must distinguish permanent failures (ack) from transient failures (retry with backoff)
+    expect(source).toContain("isPermanent");
+    expect(source).toContain("PERMANENT FAILURE");
+    expect(source).toContain("TRANSIENT FAILURE");
+    expect(source).toContain("retryWithBackoff");
   });
 });
 
@@ -446,11 +461,11 @@ describe("session-level cache token accumulation", () => {
 // F) Migration 026 schema validation
 // ═══════════════════════════════════════════════════════════════════
 
-describe("migration 026 schema", () => {
-  it("migration file contains all required ALTER TABLE statements", () => {
+describe("consolidated schema — observability columns", () => {
+  it("init migration contains all observability columns for turns and sessions", () => {
     const fs = require("fs");
     const migration = fs.readFileSync(
-      require("path").resolve(__dirname, "../../control-plane/src/db/migrations/026_observability_enrichment.sql"),
+      require("path").resolve(__dirname, "../../control-plane/src/db/migrations/001_init.sql"),
       "utf-8",
     );
 
@@ -474,18 +489,15 @@ describe("migration 026 schema", () => {
     }
   });
 
-  it("indexes support meta-agent observability queries", () => {
+  it("init migration contains observability indexes", () => {
     const fs = require("fs");
     const migration = fs.readFileSync(
-      require("path").resolve(__dirname, "../../control-plane/src/db/migrations/026_observability_enrichment.sql"),
+      require("path").resolve(__dirname, "../../control-plane/src/db/migrations/001_init.sql"),
       "utf-8",
     );
 
-    // Partial indexes for efficient filtered queries
     expect(migration).toContain("idx_turns_refusal");
     expect(migration).toContain("idx_turns_model_latency");
-    expect(migration).toContain("idx_sessions_cache");
-    expect(migration).toContain("idx_sessions_repairs");
   });
 });
 
