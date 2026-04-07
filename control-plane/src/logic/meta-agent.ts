@@ -359,6 +359,7 @@ export async function buildFromDescription(
     cloudflareAccountId?: string;
     aiGatewayId?: string;
     cloudflareApiToken?: string;
+    aiGatewayToken?: string;
     pipedream?: { clientId: string; clientSecret: string; projectId: string };
     orgProfile?: {
       org_name?: string;
@@ -661,6 +662,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
       cloudflareAccountId: (opts as any).cloudflareAccountId,
       aiGatewayId: (opts as any).aiGatewayId,
       cloudflareApiToken: (opts as any).cloudflareApiToken,
+      aiGatewayToken: (opts as any).aiGatewayToken,
       openrouterApiKey: opts.openrouterApiKey,
     },
     {
@@ -825,6 +827,7 @@ export async function expandEvalConfig(
         cloudflareAccountId: (opts as any).cloudflareAccountId,
         aiGatewayId: (opts as any).aiGatewayId,
         cloudflareApiToken: (opts as any).cloudflareApiToken,
+        aiGatewayToken: (opts as any).aiGatewayToken,
         openrouterApiKey: opts.openrouterApiKey,
       },
       {
@@ -953,6 +956,7 @@ export async function generateEvolutionSuggestions(
         cloudflareAccountId: (opts as any).cloudflareAccountId,
         aiGatewayId: (opts as any).aiGatewayId,
         cloudflareApiToken: (opts as any).cloudflareApiToken,
+        aiGatewayToken: (opts as any).aiGatewayToken,
         openrouterApiKey: opts.openrouterApiKey,
       },
       {
