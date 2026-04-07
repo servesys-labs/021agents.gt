@@ -13,18 +13,18 @@
     "types": "wrangler types"
   },
   "dependencies": {
-    "zod": "^3.24.0",
     "@cloudflare/ai-chat": "^0.1.0",
     "@cloudflare/codemode": "^0.2.1",
     "@cloudflare/puppeteer": "^1.0.6",
     "@cloudflare/sandbox": "^0.7.0",
     "agents": "^0.7.9",
-    "postgres": "^3.4.5"
+    "postgres": "^3.4.5",
+    "zod": "^3.24.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20260301.0",
     "typescript": "^5.7",
     "vitest": "^3.0.0",
-    "wrangler": "^4.77.0"
+    "wrangler": "^4.80.0"
   }
 }

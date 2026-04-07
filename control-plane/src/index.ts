@@ -91,6 +91,7 @@ import { sessionMgmtRoutes } from "./routes/session-mgmt";
 import { securityEventRoutes } from "./routes/security-events";
 import { secretsRotationRoutes } from "./routes/secrets-rotation";
 import { autopilotRoutes, tickAutopilotSessions } from "./routes/autopilot";
+import { conversationRoutes } from "./routes/conversations";
 import { mfaEnforcementMiddleware } from "./middleware/mfa-enforcement";
 
 const app = createApp();
@@ -107,6 +108,9 @@ app.use("*", cors({
     if (origin && /^https:\/\/[a-z0-9-]+\.agentos\.dev$/.test(origin)) return origin;
     // Allow any *.servesys.workers.dev subdomain (internal services)
     if (origin && /^https:\/\/[a-z0-9-]+\.servesys\.workers\.dev$/.test(origin)) return origin;
+    // Allow CF Pages preview/production domains
+    if (origin && /^https:\/\/[a-z0-9-]+\.oneshots-portal\.pages\.dev$/.test(origin)) return origin;
+    if (origin === "https://oneshots-portal.pages.dev") return origin;
     return null;
   },
   allowMethods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -356,6 +360,9 @@ app.route("/api/v1/secrets-rotation", secretsRotationRoutes);
 
 // Autopilot — always-on autonomous agent sessions
 app.route("/api/v1/autopilot", autopilotRoutes);
+
+// Conversations — persistent chat threads (ChatGPT/Claude-style)
+app.route("/api/v1/conversations", conversationRoutes);
 
 // Feature flags
 app.route("/api/v1/features", featuresRoutes);

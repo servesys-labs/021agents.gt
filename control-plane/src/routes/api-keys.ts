@@ -25,6 +25,32 @@ function ensureUser(user: CurrentUser): boolean {
   return !!user.user_id && !!user.org_id;
 }
 
+function normalizeTimestamp(value: unknown): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const ms = value < 1e12 ? value * 1000 : value;
+    return new Date(ms).toISOString();
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    if (/^\d+$/.test(trimmed)) {
+      const n = Number(trimmed);
+      if (Number.isFinite(n)) {
+        const ms = n < 1e12 ? n * 1000 : n;
+        return new Date(ms).toISOString();
+      }
+    }
+    const parsed = Date.parse(trimmed);
+    if (!Number.isNaN(parsed)) return new Date(parsed).toISOString();
+    return null;
+  }
+  return null;
+}
+
 // ── GET / — List all API keys for the current user's org ─────────────────
 
 const listApiKeysRoute = createRoute({
@@ -74,9 +100,9 @@ apiKeyRoutes.openapi(listApiKeysRoute, async (c): Promise<any> => {
       scopes,
       project_id: r.project_id || "",
       env: r.env || "",
-      expires_at: r.expires_at || null,
-      created_at: Number(r.created_at),
-      last_used_at: r.last_used_at ? Number(r.last_used_at) : null,
+      expires_at: normalizeTimestamp(r.expires_at),
+      created_at: normalizeTimestamp(r.created_at) ?? new Date().toISOString(),
+      last_used_at: normalizeTimestamp(r.last_used_at),
       is_active: Boolean(r.is_active),
       ip_allowlist: Array.isArray(r.ip_allowlist) ? r.ip_allowlist : [],
       allowed_agents: Array.isArray(r.allowed_agents) ? r.allowed_agents : [],
@@ -339,6 +365,9 @@ apiKeyRoutes.openapi(rotateApiKeyRoute, async (c): Promise<any> => {
     severity: "medium",
     details: { old_key_id: keyId, new_key_id: newKeyId },
   });
+
+  // Invalidate cached auth so old key is rejected immediately after rotation.
+  await invalidateAuthCache(c.env);
 
   return c.json({
     key_id: newKeyId,

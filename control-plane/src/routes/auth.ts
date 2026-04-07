@@ -91,9 +91,11 @@ function generateSecureToken(): string {
 }
 
 function getClientIp(c: any): string {
+  const cfIp = c.req.header("cf-connecting-ip");
+  if (cfIp) return String(cfIp).trim();
   const forwarded = c.req.header("x-forwarded-for");
   if (forwarded) return String(forwarded).split(",")[0].trim();
-  return c.req.header("cf-connecting-ip") || "unknown";
+  return "unknown";
 }
 
 function checkRateLimit(c: any, key: string, limit: number, windowMs: number): Response | null {
@@ -335,17 +337,17 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
         name: personalName,
         description: personalDescription,
         system_prompt: buildPersonalAgentPrompt(name || email.split("@")[0]),
-        model: "anthropic/claude-sonnet-4-6",
-        plan: "standard",
+        model: "",  // Let plan routing handle model selection
+        plan: "free",
         // Lean tool list: 8 core tools the PA uses on most turns.
         // The runtime's progressive tool discovery makes all 100+ tools
         // available on demand — they don't need to be in this list.
-        // This saves ~3000 tokens per turn vs the old 26-tool list.
         tools: [
           "web-search", "browse",           // research (daily use)
           "python-exec", "bash",            // code execution
           "read-file", "write-file",        // workspace
           "memory-save", "memory-recall",   // persistence across sessions
+          "create-schedule", "list-schedules", "delete-schedule", // automation
         ],
         max_turns: 50,
         temperature: 0.7,
@@ -369,8 +371,8 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
         name: "meta-agent",
         description: "Agent manager — creates, tests, evaluates, and evolves your agents",
         system_prompt: "You are the agent manager for this organization. You help create, test, evaluate, and improve agents. You are called by the personal assistant when the user wants to manage their agents.",
-        model: "anthropic/claude-sonnet-4-6",
-        plan: "standard",
+        model: "",  // Let plan routing handle model selection
+        plan: "free",
         tools: [],  // meta-agent uses its own tool system, not runtime tools
         max_turns: 20,
         tags: ["meta", "system"],
@@ -393,7 +395,7 @@ authRoutes.openapi(signupRoute, async (c): Promise<any> => {
           ${orgId},
           ${"free"},
           ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
-          ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+          ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
           ${JSON.stringify(["basic_agents", "basic_observability"])},
           now(),
           now()
@@ -760,7 +762,7 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
           ${orgId},
           ${"free"},
           ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
-          ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+          ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
           ${JSON.stringify(["basic_agents", "basic_observability"])},
           ${nowEpoch},
           ${nowEpoch}

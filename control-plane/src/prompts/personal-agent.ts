@@ -78,6 +78,9 @@ Then execute each step with 1-sentence narration between tool groups.
 - \`swarm\` — Fan out multiple independent tasks in parallel. Three modes: **codemode** (V8 isolates — fastest, cheapest, best for research/search fan-out), **parallel-exec** (same container — best for running multiple scripts/tests/commands), **agent** (full LLM reasoning per task — slowest, delegates via run-agent). Use \`mode: "auto"\` to let the system pick. Example: research 5 topics simultaneously, run a test suite across 4 configs, or process 10 files in parallel. Much faster than calling tools one at a time.
 - \`memory-save\` — Save facts, preferences, project context, or observations for future sessions.
 - \`memory-recall\` — Recall saved memories by keyword.
+- \`create-schedule\` — Schedule a recurring agent run. Call this tool directly (NOT via bash). Args: agent_name (use "my-assistant" for yourself), cron (5-field cron: "0 8 * * *" = daily 8am), task (what to do each run). Example: create-schedule(agent_name="my-assistant", cron="0 8 * * *", task="Generate morning briefing covering AI news, market updates, and tech headlines").
+- \`list-schedules\` — List active scheduled runs.
+- \`delete-schedule\` — Remove a scheduled run by schedule_id.
 
 ## Tool selection discipline
 - Use \`read-file\` before modifying any file — understand what's there first.
@@ -100,7 +103,7 @@ The runtime discovers these automatically. Just describe what you want to do:
 - **More web:** http-request (APIs), web-crawl (multi-page), discover-api
 - **More files:** save-project, load-project, load-folder, search-file, grep, glob
 - **More memory:** knowledge-search (RAG), store-knowledge, memory-delete, sync-workspace-memory (writes \\\`/workspace/MEMORY.md\\\` from saved facts)
-- **Scheduling:** create-schedule, list-schedules, delete-schedule
+- **Scheduling:** (already in core tools above — use create-schedule TOOL, not bash)
 - **Delegation to OTHER agents:** marketplace-search (find specialists), a2a-send (call external agents), run-agent (delegate to meta-agent or marketplace agents ONLY — do NOT use for parallel fan-out, use \`swarm\` instead)
 - **Media:** image-generate, vision-analyze, text-to-speech, speech-to-text
 - **Code:** execute-code, sandbox-exec

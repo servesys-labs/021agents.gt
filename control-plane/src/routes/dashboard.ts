@@ -55,12 +55,12 @@ dashboardRoutes.openapi(statsRoute, async (c): Promise<any> => {
         COUNT(*) as total,
         COALESCE(SUM(CASE WHEN is_active = true THEN 1 ELSE 0 END), 0) as live
       FROM agents
-      WHERE org_id = ${user.org_id}
+      WHERE org_id = ${user.org_id} AND is_active = true
     `;
     total_agents = Number(agentStats.total);
     live_agents = Number(agentStats.live);
 
-    const nameRows = await sql`SELECT name FROM agents WHERE org_id = ${user.org_id}`;
+    const nameRows = await sql`SELECT name FROM agents WHERE org_id = ${user.org_id} AND is_active = true`;
     agentNames = nameRows.map((a: any) => String(a.name));
   } catch (err) {
     console.error("[dashboard] Agent stats failed:", err);

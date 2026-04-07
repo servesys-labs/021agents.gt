@@ -72,7 +72,7 @@ export const AgentCreateBody = z.object({
   system_prompt: z.string().max(50000).default("You are a helpful AI assistant."),
   personality: z.string().max(2000).default(""),
   model: z.string().max(128).default("").openapi({ example: "claude-sonnet-4-20250514" }),
-  plan: z.enum(["basic", "standard", "premium"]).default("standard"),
+  plan: z.enum(["free", "basic", "standard", "premium"]).default("free"),
   max_tokens: z.number().int().min(1).max(200000).optional(),
   temperature: z.number().min(0).max(2).optional(),
   tools: z.array(z.string()).default([]),

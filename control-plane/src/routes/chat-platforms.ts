@@ -1,5 +1,5 @@
 /**
- * Chat platforms router — Telegram, WhatsApp, Slack, Instagram, Facebook Messenger.
+ * Chat platforms router — Telegram, WhatsApp, Slack, Instagram, Facebook Messenger, SMS (Twilio), TikTok DM.
  * Each platform follows the same pattern:
  *   1. connect endpoint (stores token/credentials)
  *   2. webhook endpoint (receives messages, invokes agent via RUNTIME)
@@ -95,6 +95,34 @@ async function verifyMetaSignature(appSecret: string, rawBody: ArrayBuffer, sign
     const sig = await crypto.subtle.sign("HMAC", key, rawBody);
     const hex = [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
     return hex === expected;
+  } catch {
+    return false;
+  }
+}
+
+/** Twilio request signature verification (HMAC-SHA1). */
+async function verifyTwilioSignature(
+  authToken: string,
+  url: string,
+  params: Record<string, string>,
+  signature: string,
+): Promise<boolean> {
+  if (!authToken || !signature) return !authToken; // skip if no token configured
+  try {
+    // Sort param keys and concatenate key+value
+    const sortedKeys = Object.keys(params).sort();
+    const data = url + sortedKeys.map((k) => k + params[k]).join("");
+    const key = await crypto.subtle.importKey(
+      "raw",
+      new TextEncoder().encode(authToken),
+      { name: "HMAC", hash: "SHA-1" },
+      false,
+      ["sign"],
+    );
+    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(data));
+    // Twilio signature is base64-encoded
+    const expected = btoa(String.fromCharCode(...new Uint8Array(sig)));
+    return expected === signature;
   } catch {
     return false;
   }
@@ -1834,6 +1862,692 @@ chatPlatformRoutes.openapi(deleteChannelRoute, async (c): Promise<any> => {
   await sql`
     UPDATE channel_configs SET is_active = false, updated_at = ${new Date().toISOString()}
     WHERE org_id = ${user.org_id} AND channel = ${channel}
+  `;
+
+  return c.json({ ok: true });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Email Channel — auto-setup and remove custom domain email routing
+// ═══════════════════════════════════════════════════════════════════════
+
+const emailSetupRoute = createRoute({
+  method: "post",
+  path: "/email/setup",
+  tags: ["Chat Platforms"],
+  summary: "Set up email channel — auto-configures CF Email Routing for custom domains",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1),
+            custom_email: z.string().email().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Email setup result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 404, 500),
+  },
+});
+
+chatPlatformRoutes.openapi(emailSetupRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name, custom_email } = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  const agentRows = await sql`SELECT name FROM agents WHERE name = ${agent_name} AND org_id = ${user.org_id} LIMIT 1`;
+  if (agentRows.length === 0) return c.json({ error: "Agent not found" }, 404);
+
+  const orgShort = user.org_id.slice(-8);
+  const defaultEmail = `${agent_name}.${orgShort}@oneshots.co`;
+  const now = new Date().toISOString();
+
+  // Save config
+  await sql`
+    INSERT INTO channel_configs (org_id, channel, agent_name, is_active, config_json, created_at, updated_at)
+    VALUES (${user.org_id}, 'email', ${agent_name}, true,
+      ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb, ${now}, ${now})
+    ON CONFLICT (org_id, channel) DO UPDATE SET
+      agent_name = ${agent_name}, is_active = true,
+      config_json = ${JSON.stringify({ default_email: defaultEmail, custom_email: custom_email || null })}::jsonb,
+      updated_at = ${now}
+  `.catch(() => {});
+
+  let customDomainStatus = null;
+  if (custom_email) {
+    customDomainStatus = await setupEmailRouting(c.env, custom_email, agent_name);
+  }
+
+  return c.json({ ok: true, agent_name, default_email: defaultEmail, custom_email, custom_domain_status: customDomainStatus });
+});
+
+const emailRemoveRoute = createRoute({
+  method: "post",
+  path: "/email/remove",
+  tags: ["Chat Platforms"],
+  summary: "Remove custom email routing rule for an agent",
+  middleware: [requireScope("agents:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().min(1),
+            custom_email: z.string().email(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Removal result", content: { "application/json": { schema: z.record(z.unknown()) } } },
+    ...errorResponses(400, 500),
+  },
+});
+
+chatPlatformRoutes.openapi(emailRemoveRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const { agent_name, custom_email } = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Remove the custom email from config
+  const orgShort = user.org_id.slice(-8);
+  const defaultEmail = `${agent_name}.${orgShort}@oneshots.co`;
+  const now = new Date().toISOString();
+  await sql`
+    UPDATE channel_configs SET config_json = ${JSON.stringify({ default_email: defaultEmail, custom_email: null })}::jsonb, updated_at = ${now}
+    WHERE org_id = ${user.org_id} AND channel = 'email'
+  `.catch(() => {});
+
+  // Try to remove the CF Email Routing rule
+  const removeResult = await removeEmailRouting(c.env, custom_email);
+
+  return c.json({ ok: true, removed: custom_email, result: removeResult });
+});
+
+// ── Helpers for CF Email Routing API ──
+
+async function setupEmailRouting(env: any, email: string, agentName: string): Promise<Record<string, unknown>> {
+  const domain = email.split("@")[1];
+  const cfApiToken = env.CLOUDFLARE_API_TOKEN || "";
+  const cfAccountId = env.CLOUDFLARE_ACCOUNT_ID || "";
+
+  if (!cfApiToken || !cfAccountId) {
+    return { status: "error", message: "Cloudflare API not configured" };
+  }
+
+  try {
+    // Look up zone
+    const zoneResp = await fetch(
+      `https://api.cloudflare.com/client/v4/zones?name=${domain}&account.id=${cfAccountId}`,
+      { headers: { Authorization: `Bearer ${cfApiToken}` } },
+    );
+    const zoneData = (await zoneResp.json()) as any;
+    const zone = zoneData.result?.[0];
+
+    if (zone) {
+      // Domain on this account — create email routing rule
+      const ruleResp = await fetch(
+        `https://api.cloudflare.com/client/v4/zones/${zone.id}/email/routing/rules`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${cfApiToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: `OneShots: ${agentName} (${email})`,
+            enabled: true,
+            matchers: [{ type: "literal", field: "to", value: email }],
+            actions: [{ type: "worker", value: ["agentos"] }],
+          }),
+        },
+      );
+      const ruleData = (await ruleResp.json()) as any;
+
+      if (ruleData.success) {
+        return { status: "active", message: `Routing active. Emails to ${email} → agent "${agentName}"`, rule_id: ruleData.result?.id };
+      }
+      return { status: "error", message: ruleData.errors?.[0]?.message || "Failed to create rule" };
+    }
+
+    // Domain not on this account — manual DNS setup needed
+    return {
+      status: "dns_required",
+      message: `Add these DNS records to ${domain}, then enable Email Routing in Cloudflare:`,
+      dns: [
+        { type: "MX", name: domain, content: "route1.mx.cloudflare.net", priority: 69 },
+        { type: "MX", name: domain, content: "route2.mx.cloudflare.net", priority: 27 },
+        { type: "MX", name: domain, content: "route3.mx.cloudflare.net", priority: 93 },
+        { type: "TXT", name: domain, content: "v=spf1 include:_spf.mx.cloudflare.net ~all" },
+      ],
+    };
+  } catch (err: any) {
+    return { status: "error", message: err.message };
+  }
+}
+
+async function removeEmailRouting(env: any, email: string): Promise<Record<string, unknown>> {
+  const domain = email.split("@")[1];
+  const cfApiToken = env.CLOUDFLARE_API_TOKEN || "";
+  const cfAccountId = env.CLOUDFLARE_ACCOUNT_ID || "";
+
+  if (!cfApiToken || !cfAccountId) {
+    return { status: "error", message: "Cloudflare API not configured" };
+  }
+
+  try {
+    // Find the zone
+    const zoneResp = await fetch(
+      `https://api.cloudflare.com/client/v4/zones?name=${domain}&account.id=${cfAccountId}`,
+      { headers: { Authorization: `Bearer ${cfApiToken}` } },
+    );
+    const zoneData = (await zoneResp.json()) as any;
+    const zone = zoneData.result?.[0];
+    if (!zone) return { status: "not_found", message: "Domain not on this account" };
+
+    // List rules and find the one matching this email
+    const rulesResp = await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${zone.id}/email/routing/rules`,
+      { headers: { Authorization: `Bearer ${cfApiToken}` } },
+    );
+    const rulesData = (await rulesResp.json()) as any;
+    const rule = (rulesData.result || []).find((r: any) =>
+      r.matchers?.some((m: any) => m.value === email),
+    );
+
+    if (!rule) return { status: "not_found", message: "No routing rule found for this email" };
+
+    // Delete the rule
+    const delResp = await fetch(
+      `https://api.cloudflare.com/client/v4/zones/${zone.id}/email/routing/rules/${rule.id}`,
+      { method: "DELETE", headers: { Authorization: `Bearer ${cfApiToken}` } },
+    );
+    const delData = (await delResp.json()) as any;
+
+    if (delData.success) return { status: "removed", message: `Routing rule for ${email} removed` };
+    return { status: "error", message: delData.errors?.[0]?.message || "Failed to remove rule" };
+  } catch (err: any) {
+    return { status: "error", message: err.message };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// ██ SMS via Twilio
+// ══════════════════════════════════════════════════════════════════════════
+
+// POST /chat/sms/connect — Store Twilio credentials, configure webhook
+const smsConnectRoute = createRoute({
+  method: "post",
+  path: "/sms/connect",
+  tags: ["Chat Platforms"],
+  summary: "Connect SMS via Twilio",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().default(""),
+            account_sid: z.string().min(1),
+            auth_token: z.string().min(1),
+            phone_number: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Connected",
+      content: {
+        "application/json": {
+          schema: z.object({
+            ok: z.boolean(),
+            webhook_url: z.string(),
+            phone_number: z.string(),
+            webhook_configured: z.boolean(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400),
+  },
+});
+chatPlatformRoutes.openapi(smsConnectRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const body = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const now = new Date().toISOString();
+
+  // Store Twilio credentials as secrets
+  await storeSecret(sql, "TWILIO_ACCOUNT_SID", body.account_sid, user.org_id);
+  await storeSecret(sql, "TWILIO_AUTH_TOKEN", body.auth_token, user.org_id);
+  await storeSecret(sql, "TWILIO_PHONE_NUMBER", body.phone_number, user.org_id);
+
+  // Save channel config
+  const config = JSON.stringify({
+    phone_number: body.phone_number,
+    account_sid: body.account_sid,
+  });
+  await sql`
+    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+    VALUES (${user.org_id}, 'sms', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+    ON CONFLICT (org_id, channel) DO UPDATE
+    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+        is_active = true, updated_at = ${now}
+  `;
+
+  // Configure Twilio phone number webhook
+  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/sms/webhook`;
+  let webhookConfigured = false;
+  try {
+    // First, find the phone number SID
+    const authHeader = "Basic " + btoa(`${body.account_sid}:${body.auth_token}`);
+    const listResp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${body.account_sid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(body.phone_number)}`,
+      { headers: { Authorization: authHeader } },
+    );
+    const listData = (await listResp.json()) as any;
+    const phoneNumbers = listData.incoming_phone_numbers || [];
+    if (phoneNumbers.length > 0) {
+      const phoneSid = phoneNumbers[0].sid;
+      // Update the phone number's SMS webhook URL
+      const updateResp = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${body.account_sid}/IncomingPhoneNumbers/${phoneSid}.json`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/x-www-form-urlencoded",
+          },
+          body: `SmsUrl=${encodeURIComponent(webhookUrl)}&SmsMethod=POST`,
+        },
+      );
+      webhookConfigured = updateResp.ok;
+    }
+  } catch {}
+
+  return c.json({ ok: true, webhook_url: webhookUrl, phone_number: body.phone_number, webhook_configured: webhookConfigured });
+});
+
+// POST /chat/sms/webhook — Receive inbound SMS from Twilio
+const smsWebhookRoute = createRoute({
+  method: "post",
+  path: "/sms/webhook",
+  tags: ["Chat Platforms"],
+  summary: "Receive inbound SMS via Twilio webhook",
+  request: {
+    body: {
+      content: {
+        "application/x-www-form-urlencoded": {
+          schema: z.record(z.string()),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "TwiML response",
+      content: { "text/xml": { schema: z.string() } },
+    },
+    401: { description: "Invalid signature", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+chatPlatformRoutes.openapi(smsWebhookRoute, async (c): Promise<any> => {
+  // Parse form-urlencoded body
+  const rawBody = await c.req.text();
+  const params: Record<string, string> = {};
+  for (const pair of rawBody.split("&")) {
+    const [key, val] = pair.split("=").map(decodeURIComponent);
+    if (key) params[key] = val || "";
+  }
+
+  const from = params.From || "";
+  const to = params.To || "";
+  const msgBody = params.Body || "";
+  if (!from || !msgBody) {
+    return new Response("<Response></Response>", { status: 200, headers: { "Content-Type": "text/xml" } });
+  }
+
+  const sql = await getDb(c.env.HYPERDRIVE);
+
+  // Look up org from channel_configs by phone number
+  let orgId = "";
+  try {
+    const rows = await sql`
+      SELECT org_id FROM channel_configs
+      WHERE channel = 'sms' AND config->>'phone_number' = ${to} AND is_active = true
+      LIMIT 1
+    `;
+    if (rows.length > 0) orgId = String(rows[0].org_id);
+  } catch {}
+
+  if (!orgId) {
+    return new Response(
+      "<Response><Message>This number is not configured.</Message></Response>",
+      { status: 200, headers: { "Content-Type": "text/xml" } },
+    );
+  }
+
+  // Validate Twilio request signature
+  const authToken = await getSecret(sql, "TWILIO_AUTH_TOKEN", orgId);
+  const twilioSig = c.req.header("X-Twilio-Signature") ?? "";
+  const requestUrl = `${c.env.RUNTIME_WORKER_URL}/chat/sms/webhook`;
+  if (authToken && twilioSig) {
+    const valid = await verifyTwilioSignature(authToken, requestUrl, params, twilioSig);
+    if (!valid) {
+      return c.json({ error: "Invalid Twilio signature" }, 401);
+    }
+  }
+
+  // Resolve agent and invoke
+  const agentName = await resolveChannelAgent(sql, orgId, "sms");
+  const output = await invokeAgent(c.env, agentName, msgBody, "sms", from, orgId);
+
+  // Respond with TwiML — Twilio sends the <Message> content back as SMS
+  const safeOutput = (output || "Sorry, I could not process your message.").slice(0, 1600);
+  const twiml = `<Response><Message>${safeOutput.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</Message></Response>`;
+  return new Response(twiml, { status: 200, headers: { "Content-Type": "text/xml" } });
+});
+
+// DELETE /chat/sms/disconnect — Remove Twilio webhook and deactivate channel
+const smsDisconnectRoute = createRoute({
+  method: "post",
+  path: "/sms/disconnect",
+  tags: ["Chat Platforms"],
+  summary: "Disconnect SMS (Twilio) channel",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().default(""),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Disconnected", content: { "application/json": { schema: z.object({ ok: z.boolean() }) } } },
+    ...errorResponses(400),
+  },
+});
+chatPlatformRoutes.openapi(smsDisconnectRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Get stored credentials to remove webhook
+  const accountSid = await getSecret(sql, "TWILIO_ACCOUNT_SID", user.org_id);
+  const authToken = await getSecret(sql, "TWILIO_AUTH_TOKEN", user.org_id);
+  const phoneNumber = await getSecret(sql, "TWILIO_PHONE_NUMBER", user.org_id);
+
+  if (accountSid && authToken && phoneNumber) {
+    try {
+      const authHeader = "Basic " + btoa(`${accountSid}:${authToken}`);
+      const listResp = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers.json?PhoneNumber=${encodeURIComponent(phoneNumber)}`,
+        { headers: { Authorization: authHeader } },
+      );
+      const listData = (await listResp.json()) as any;
+      const phoneNumbers = listData.incoming_phone_numbers || [];
+      if (phoneNumbers.length > 0) {
+        const phoneSid = phoneNumbers[0].sid;
+        // Clear the SMS webhook URL
+        await fetch(
+          `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/IncomingPhoneNumbers/${phoneSid}.json`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: authHeader,
+              "Content-Type": "application/x-www-form-urlencoded",
+            },
+            body: "SmsUrl=&SmsMethod=POST",
+          },
+        );
+      }
+    } catch {}
+  }
+
+  // Deactivate the channel config
+  const now = new Date().toISOString();
+  await sql`
+    UPDATE channel_configs SET is_active = false, updated_at = ${now}
+    WHERE org_id = ${user.org_id} AND channel = 'sms'
+  `;
+
+  return c.json({ ok: true });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// ██ TikTok DMs
+// ══════════════════════════════════════════════════════════════════════════
+
+const TIKTOK_API = "https://open.tiktokapis.com/v2";
+
+// GET /chat/tiktok/webhook — TikTok webhook verification
+const tiktokVerifyRoute = createRoute({
+  method: "get",
+  path: "/tiktok/webhook",
+  tags: ["Chat Platforms"],
+  summary: "TikTok webhook verification challenge",
+  request: {
+    query: z.object({
+      challenge: z.string().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Challenge response", content: { "application/json": { schema: z.object({ challenge: z.string() }) } } },
+  },
+});
+chatPlatformRoutes.openapi(tiktokVerifyRoute, async (c): Promise<any> => {
+  const query = c.req.valid("query");
+  const challenge = query.challenge || "";
+  return c.json({ challenge });
+});
+
+// POST /chat/tiktok/webhook — Receive TikTok DM events
+const tiktokWebhookRoute = createRoute({
+  method: "post",
+  path: "/tiktok/webhook",
+  tags: ["Chat Platforms"],
+  summary: "Receive TikTok DM webhook events",
+  request: { body: { content: { "application/json": { schema: z.record(z.unknown()) } } } },
+  responses: {
+    200: { description: "OK", content: { "application/json": { schema: z.object({ ok: z.boolean() }) } } },
+  },
+});
+chatPlatformRoutes.openapi(tiktokWebhookRoute, async (c): Promise<any> => {
+  let payload: any;
+  try {
+    payload = await c.req.json();
+  } catch {
+    return c.json({ ok: true });
+  }
+
+  // TikTok sends events with event type
+  const event = payload.event || "";
+  if (event !== "receive_message") return c.json({ ok: true });
+
+  const content = payload.content || {};
+  const msgText = content.text || "";
+  const senderId = content.sender_id || payload.user?.open_id || "";
+  const conversationId = content.conversation_id || "";
+  if (!msgText || !senderId) return c.json({ ok: true });
+
+  const sql = await getDb(c.env.HYPERDRIVE);
+
+  // Resolve org from channel_configs
+  let orgId = "";
+  try {
+    const rows = await sql`
+      SELECT org_id FROM channel_configs
+      WHERE channel = 'tiktok' AND is_active = true
+      ORDER BY created_at ASC LIMIT 1
+    `;
+    if (rows.length > 0) orgId = String(rows[0].org_id);
+  } catch {}
+
+  if (!orgId) return c.json({ ok: true });
+
+  // Invoke agent
+  const agentName = await resolveChannelAgent(sql, orgId, "tiktok");
+  const output = await invokeAgent(c.env, agentName, msgText, "tiktok", senderId, orgId);
+
+  // Reply via TikTok Send Message API
+  if (output) {
+    const accessToken = await getSecret(sql, "TIKTOK_ACCESS_TOKEN", orgId);
+    if (accessToken) {
+      try {
+        await fetch(`${TIKTOK_API}/direct_message/send/`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            conversation_id: conversationId,
+            text: output.slice(0, 1000),
+          }),
+        });
+      } catch {}
+    }
+  }
+
+  return c.json({ ok: true });
+});
+
+// POST /chat/tiktok/connect — Store TikTok credentials
+const tiktokConnectRoute = createRoute({
+  method: "post",
+  path: "/tiktok/connect",
+  tags: ["Chat Platforms"],
+  summary: "Connect TikTok DM channel",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().default(""),
+            client_key: z.string().min(1),
+            client_secret: z.string().min(1),
+            access_token: z.string().min(1),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Connected",
+      content: {
+        "application/json": {
+          schema: z.object({
+            ok: z.boolean(),
+            webhook_url: z.string(),
+            webhook_subscribed: z.boolean(),
+          }),
+        },
+      },
+    },
+    ...errorResponses(400),
+  },
+});
+chatPlatformRoutes.openapi(tiktokConnectRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const body = c.req.valid("json");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+  const now = new Date().toISOString();
+
+  // Store TikTok credentials as secrets
+  await storeSecret(sql, "TIKTOK_CLIENT_KEY", body.client_key, user.org_id);
+  await storeSecret(sql, "TIKTOK_CLIENT_SECRET", body.client_secret, user.org_id);
+  await storeSecret(sql, "TIKTOK_ACCESS_TOKEN", body.access_token, user.org_id);
+
+  // Save channel config
+  const config = JSON.stringify({
+    client_key: body.client_key,
+  });
+  await sql`
+    INSERT INTO channel_configs (org_id, channel, agent_name, config, is_active, created_at, updated_at)
+    VALUES (${user.org_id}, 'tiktok', ${body.agent_name || ""}, ${config}::jsonb, true, ${now}, ${now})
+    ON CONFLICT (org_id, channel) DO UPDATE
+    SET config = ${config}::jsonb, agent_name = COALESCE(NULLIF(${body.agent_name}, ''), channel_configs.agent_name),
+        is_active = true, updated_at = ${now}
+  `;
+
+  // Register webhook with TikTok
+  const webhookUrl = `${c.env.RUNTIME_WORKER_URL}/chat/tiktok/webhook`;
+  let webhookSubscribed = false;
+  try {
+    const resp = await fetch(`${TIKTOK_API}/webhook/subscribe/`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${body.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        event_type: "direct_message",
+        callback_url: webhookUrl,
+      }),
+    });
+    webhookSubscribed = resp.ok;
+  } catch {}
+
+  return c.json({ ok: true, webhook_url: webhookUrl, webhook_subscribed: webhookSubscribed });
+});
+
+// POST /chat/tiktok/disconnect — Unsubscribe webhook and deactivate channel
+const tiktokDisconnectRoute = createRoute({
+  method: "post",
+  path: "/tiktok/disconnect",
+  tags: ["Chat Platforms"],
+  summary: "Disconnect TikTok DM channel",
+  middleware: [requireScope("integrations:write")],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            agent_name: z.string().default(""),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Disconnected", content: { "application/json": { schema: z.object({ ok: z.boolean() }) } } },
+    ...errorResponses(400),
+  },
+});
+chatPlatformRoutes.openapi(tiktokDisconnectRoute, async (c): Promise<any> => {
+  const user = c.get("user");
+  const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
+
+  // Attempt to unsubscribe webhook
+  const accessToken = await getSecret(sql, "TIKTOK_ACCESS_TOKEN", user.org_id);
+  if (accessToken) {
+    try {
+      await fetch(`${TIKTOK_API}/webhook/unsubscribe/`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ event_type: "direct_message" }),
+      });
+    } catch {}
+  }
+
+  // Deactivate the channel config
+  const now = new Date().toISOString();
+  await sql`
+    UPDATE channel_configs SET is_active = false, updated_at = ${now}
+    WHERE org_id = ${user.org_id} AND channel = 'tiktok'
   `;
 
   return c.json({ ok: true });

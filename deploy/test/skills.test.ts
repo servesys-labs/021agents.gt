@@ -61,9 +61,9 @@ describe("getSkillPrompt", () => {
 
   it("returns prompt for verify skill", () => {
     const prompt = getSkillPrompt("verify", "login flow works", []);
-    expect(prompt).toContain("Positive test");
-    expect(prompt).toContain("Regression test");
-    expect(prompt).toContain("FAITHFULLY");
+    expect(prompt).toContain("Positive Tests");
+    expect(prompt).toContain("Regression Tests");
+    expect(prompt).toContain("NEVER claim");
   });
 
   it("returns prompt for remember skill", () => {

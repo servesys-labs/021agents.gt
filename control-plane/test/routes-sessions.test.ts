@@ -123,19 +123,19 @@ describe("sessions route authz and input contracts", () => {
   it("returns runtime profile contract for owned session", async () => {
     const mockSql5 = (async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
-      if (query.includes("SELECT session_id FROM sessions")) return [{ session_id: "sess-1" }];
       if (query.includes("SELECT turn_number, execution_mode")) {
         return [
           {
             turn_number: 1,
             execution_mode: "sequential",
-            plan_json: "{\"nodes\":1}",
-            reflection_json: "{\"ok\":true}",
+            plan_artifact: "{\"nodes\":1}",
+            reflection: "{\"ok\":true}",
             latency_ms: 120,
             cost_total_usd: 0.01,
           },
         ];
       }
+      if (query.includes("SELECT session_id FROM sessions")) return [{ session_id: "sess-1" }];
       return [];
     }) as any;
     vi.mocked(getDb).mockResolvedValue(mockSql5);
