@@ -1985,7 +1985,7 @@ async function executeTool(
 
         const subConfig = {
           system_prompt: systemPrompt,
-          model: String(args.model || parentConfig.model || "gemma-4-31b"),
+          model: String(args.model || parentConfig.model || "anthropic/claude-sonnet-4-6"),
           plan: parentConfig.plan || "standard",
           provider: parentConfig.provider || "openrouter",
           tools,
@@ -2694,7 +2694,7 @@ export async function runMetaChat(
         openrouterApiKey: ctx.openrouterApiKey,
       },
       {
-        model: "gemma-4-31b",
+        model: "anthropic/claude-sonnet-4-6",
         messages: llmMessages as any,
         tools: relevantTools,
         tool_choice: "auto",
@@ -2728,7 +2728,7 @@ export async function runMetaChat(
       llmMessages.push({ role: "assistant", content: msg.content || "" });
       turnRecords.push({
         turn: round,
-        model: "gemma-4-31b",
+        model: "anthropic/claude-sonnet-4-6",
         content: msg.content || "",
         input_tokens: turnInputTokens,
         output_tokens: turnOutputTokens,
@@ -2799,7 +2799,7 @@ export async function runMetaChat(
     // Record this turn
     turnRecords.push({
       turn: round,
-      model: "gemma-4-31b",
+      model: "anthropic/claude-sonnet-4-6",
       content: msg.content || "",
       input_tokens: turnInputTokens,
       output_tokens: turnOutputTokens,
@@ -2826,7 +2826,7 @@ export async function runMetaChat(
       INSERT INTO sessions (session_id, org_id, agent_name, model, status, input_text, output_text,
         step_count, action_count, cost_total_usd, wall_clock_seconds, created_at, ended_at)
       VALUES (
-        ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'gemma-4-31b',
+        ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'anthropic/claude-sonnet-4-6',
         'success', ${userInput.slice(0, 2000)}, ${(lastAssistant?.content || "").slice(0, 5000)},
         ${round}, ${totalToolCalls}, ${totalCost}, ${0}, ${now}, ${now}
       )
