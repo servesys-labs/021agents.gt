@@ -102,41 +102,35 @@ export async function callLLM(
     }
   }
 
-  // Workers AI: /workers-ai/v1/chat/completions (CF account token auth)
-  // Others:     /openrouter/chat/completions (OpenRouter API key auth)
-  const providerPath = isWorkersAI ? "workers-ai/v1" : "openrouter";
+  // ── MVP: Only free models — Workers AI + self-hosted GPU via CF Tunnel ──
+  // No OpenRouter, no paid models. Fail loud if a paid model is requested.
+  // TODO: Re-enable OpenRouter path when we have paying users.
+  const isCustomProvider = opts.provider?.startsWith("custom-");
+
+  if (!isWorkersAI && !isCustomProvider) {
+    throw new LLMError(model, `MVP mode: Only free models allowed (Workers AI @cf/* or custom-gemma4-*). Got provider="${opts.provider || "openrouter"}" model="${model}". Check PLAN_ROUTING in db.ts.`, { retryable: false });
+  }
+
+  const providerPath = isWorkersAI
+    ? "workers-ai/v1"
+    : `${opts.provider}/v1`;
   const endpoint = `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/${providerPath}/chat/completions`;
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    // AI Gateway-level caching: identical requests within TTL are served from cache.
-    // 300s (5 min) is aggressive but safe — same user asking the same question within
-    // 5 minutes gets a cached response (instant, zero cost). Different questions miss cache.
-    // This primarily helps: repeated tool calls, retry logic, and identical system prompts.
     "cf-aig-cache-ttl": "300",
   };
 
   if (opts.metadata) {
     headers["cf-aig-metadata"] = JSON.stringify(opts.metadata);
-    // Phase 5.1: Propagate trace_id for distributed tracing
     if (opts.metadata.trace_id) {
       headers["X-Trace-Id"] = opts.metadata.trace_id;
     }
   }
 
-  // Auth: Workers AI uses CF account token, OpenRouter uses OR API key
-  if (isWorkersAI) {
-    const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
-    if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
-  } else {
-    const orKey = (env as any).OPENROUTER_API_KEY;
-    if (orKey) {
-      headers["cf-aig-authorization"] = `Bearer ${orKey}`;
-    } else {
-      const cfToken = env.AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN;
-      if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
-    }
-  }
+  // Auth: Workers AI and custom providers both use CF token
+  const cfToken = env.AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN;
+  if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
 
   // ── Phase 1.3: Retry logic with backoff ──
   // Retries on transient errors (429, 529, 502, 503, network errors).

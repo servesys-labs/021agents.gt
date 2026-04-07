@@ -124,10 +124,8 @@
     }
   ],
 
-  // Email Routing — inbound emails routed to agent DOs
-  // Configure in CF Dashboard: Email Routing → catch-all → Worker "agentos"
+  // Email Routing — configured in CF Dashboard (Email Routing → catch-all → Worker "agentos")
   // Emails to agent-name@yourdomain.com → agent DO "agent-name"
-  "email_routing": true,
 
   // Custom domain — runtime.oneshots.co
   "routes": [
@@ -136,9 +134,13 @@
 
   // Environment variables (secrets set via `wrangler secret put`)
   "vars": {
-    "DEFAULT_PLAN": "standard",
-    "DEFAULT_PROVIDER": "openrouter",
-    "DEFAULT_MODEL": "openai/gpt-5.4-mini",
-    "CONTROL_PLANE_URL": "https://api.oneshots.co/api/v1"
+    "DEFAULT_PLAN": "free",
+    "DEFAULT_PROVIDER": "custom-gemma4-fast",
+    "DEFAULT_MODEL": "gemma-4-26b-moe",
+    "CONTROL_PLANE_URL": "https://api.oneshots.co/api/v1",
+    "LOCAL_SEARCH_URL": "https://search.oneshots.co",
+    "CF_EXEC_POOL_SIZE": "24",
+    "CF_EXEC_LEASE_MS": "20000",
+    "CF_EXEC_WAIT_MS": "5000"
   }
 }

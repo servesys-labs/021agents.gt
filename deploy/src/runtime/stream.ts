@@ -174,20 +174,10 @@ async function streamLLM(
     // Note: streaming responses may not be cacheable on all providers.
     "cf-aig-cache-ttl": "300",
   };
-  // Auth: Workers AI uses CF account token, OpenRouter uses OR API key
-  if (isWorkersAI) {
-    const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
-    if (cfToken) {
-      headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
-    }
-  } else {
-    const orKey = (env as any).OPENROUTER_API_KEY;
-    if (orKey) {
-      headers["cf-aig-authorization"] = `Bearer ${orKey}`;
-    } else {
-      const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
-      if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
-    }
+  // Auth: CF account token or AI Gateway token
+  const cfToken = env.CLOUDFLARE_API_TOKEN || env.AI_GATEWAY_TOKEN;
+  if (cfToken) {
+    headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
   }
 
   const resp = await fetch(endpoint, {

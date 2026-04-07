@@ -40,29 +40,42 @@ export async function callLLMGateway(
   config: GatewayConfig,
   options: LLMCallOptions,
 ): Promise<LLMCallResult> {
-  const model = options.model || "anthropic/claude-sonnet-4-6";
-  const { cloudflareAccountId, aiGatewayId, cloudflareApiToken, aiGatewayToken, openrouterApiKey } = config;
+  // ── MVP: Only free models — self-hosted Gemma 4 via AI Gateway ──
+  // Meta-agent defaults to Dense 31B for complex reasoning.
+  // No OpenRouter, no paid models. Fail loud.
+  const model = options.model || "gemma-4-31b";
+  const { cloudflareAccountId, aiGatewayId, cloudflareApiToken, aiGatewayToken } = config;
 
-  // Determine endpoint and auth
-  const useGateway = !!(cloudflareAccountId && aiGatewayId);
-  const endpoint = useGateway
-    ? `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/openrouter/chat/completions`
-    : "https://openrouter.ai/api/v1/chat/completions";
+  if (!cloudflareAccountId || !aiGatewayId) {
+    throw new Error("MVP mode: CLOUDFLARE_ACCOUNT_ID and AI_GATEWAY_ID required. No OpenRouter fallback.");
+  }
+
+  const isCustomModel = model.startsWith("gemma-4") || model.includes("gemma4");
+  const isWorkersAI = model.startsWith("@cf/");
+
+  if (!isCustomModel && !isWorkersAI) {
+    throw new Error(`MVP mode: Only free models allowed (gemma-4-* or @cf/*). Got "${model}". No paid model fallbacks.`);
+  }
+
+  let endpoint: string;
+  if (isCustomModel) {
+    // Route to self-hosted Gemma via AI Gateway custom provider
+    // Dense 31B = custom-gemma4-local, MoE 26B = custom-gemma4-fast
+    const providerPath = model.includes("26b") || model.includes("moe") || model.includes("fast")
+      ? "custom-gemma4-fast"
+      : "custom-gemma4-local";
+    endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/${providerPath}/v1/chat/completions`;
+  } else {
+    endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/workers-ai/v1/chat/completions`;
+  }
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-
-  if (useGateway) {
-    const cfToken = aiGatewayToken || cloudflareApiToken || "";
-    if (cfToken) {
-      headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
-    }
-    if (options.metadata) {
-      headers["cf-aig-metadata"] = JSON.stringify(options.metadata);
-    }
-  } else if (openrouterApiKey) {
-    headers["Authorization"] = `Bearer ${openrouterApiKey}`;
-  } else {
-    throw new Error("No LLM credentials configured. Set CLOUDFLARE_ACCOUNT_ID + AI_GATEWAY_ID, or OPENROUTER_API_KEY.");
+  const cfToken = aiGatewayToken || cloudflareApiToken || "";
+  if (cfToken) {
+    headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+  }
+  if (options.metadata) {
+    headers["cf-aig-metadata"] = JSON.stringify(options.metadata);
   }
 
   const body: Record<string, any> = {
