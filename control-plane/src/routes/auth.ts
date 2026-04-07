@@ -769,6 +769,87 @@ authRoutes.openapi(cfAccessExchangeRoute, async (c): Promise<any> => {
         )
       `;
     } catch {}
+
+    // Auto-create personal agent (same as email signup)
+    try {
+      const personalAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      const personalName = "my-assistant";
+      const displayName = userName || cfClaims.email.split("@")[0];
+      const personalDescription = `${displayName}'s personal AI assistant`;
+      const personalConfig = {
+        name: personalName,
+        description: personalDescription,
+        system_prompt: buildPersonalAgentPrompt(displayName),
+        model: "",
+        plan: "free",
+        tools: [
+          "web-search", "browse",
+          "python-exec", "bash",
+          "read-file", "write-file",
+          "memory-save", "memory-recall",
+          "create-schedule", "list-schedules", "delete-schedule",
+        ],
+        max_turns: 50,
+        temperature: 0.7,
+        tags: ["personal", "assistant"],
+        version: "1.0.0",
+        governance: { budget_limit_usd: 10 },
+        reasoning_strategy: "",
+        parallel_tool_calls: true,
+        is_personal: true,
+      };
+      await sql`
+        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
+        VALUES (${personalAgentId}, ${personalName}, ${orgId}, ${personalDescription}, ${JSON.stringify(personalConfig)}, '1.0.0', ${true}, ${userId}, ${nowEpoch}, ${nowEpoch})
+      `;
+      console.log(`[auth/cf-access] Personal agent created for ${cfClaims.email}`);
+    } catch (e: any) { console.warn(`[auth/cf-access] Personal agent creation failed: ${e.message}`); }
+
+    // Auto-create meta-agent
+    try {
+      const metaAgentId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+      const metaConfig = {
+        name: "meta-agent",
+        description: "Agent manager — creates, tests, evaluates, and evolves your agents",
+        system_prompt: "You are the agent manager for this organization. You help create, test, evaluate, and improve agents. You are called by the personal assistant when the user wants to manage their agents.",
+        model: "",
+        plan: "free",
+        tools: [],
+        max_turns: 20,
+        tags: ["meta", "system"],
+        version: "1.0.0",
+        governance: { budget_limit_usd: 2 },
+        is_meta: true,
+        is_personal: false,
+      };
+      await sql`
+        INSERT INTO agents (agent_id, name, org_id, description, config, version, is_active, created_by, created_at, updated_at)
+        VALUES (${metaAgentId}, ${"meta-agent"}, ${orgId}, ${metaConfig.description}, ${JSON.stringify(metaConfig)}, '1.0.0', ${true}, ${userId}, ${nowEpoch}, ${nowEpoch})
+      `;
+      console.log(`[auth/cf-access] Meta-agent created for ${cfClaims.email}`);
+    } catch (e: any) { console.warn(`[auth/cf-access] Meta-agent creation failed: ${e.message}`); }
+
+    // Seed free tier credits
+    const FREE_TIER_USD = 5.00;
+    try {
+      await sql`
+        INSERT INTO org_credit_balance (org_id, balance_usd, lifetime_purchased_usd, updated_at)
+        VALUES (${orgId}, ${FREE_TIER_USD}, ${FREE_TIER_USD}, ${nowEpoch})
+        ON CONFLICT (org_id) DO NOTHING
+      `;
+      await sql`
+        INSERT INTO credit_transactions (org_id, type, amount_usd, balance_after_usd, description, reference_id, reference_type, created_at)
+        VALUES (${orgId}, 'bonus', ${FREE_TIER_USD}, ${FREE_TIER_USD}, 'Welcome bonus — free tier credits', 'signup', 'signup_bonus', ${nowEpoch})
+      `;
+      console.log(`[auth/cf-access] Seeded $${FREE_TIER_USD} free credits for ${cfClaims.email}`);
+    } catch (e: any) { console.warn(`[auth/cf-access] Credit seeding failed: ${e.message}`); }
+
+    // Auto-create default referral code (5 invites)
+    try {
+      const { createReferralCode } = await import("../logic/referrals");
+      await createReferralCode(sql, orgId, { label: "Your invite link", maxUses: 5 });
+    } catch {}
+
     role = "owner";
   }
 

@@ -132,3 +132,5 @@ mobile/android/app/build/
 mobile/android/build/
 mobile/ios/build/
 mobile/ios/Pods/
+portal/
+mvp/

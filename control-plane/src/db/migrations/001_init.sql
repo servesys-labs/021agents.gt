@@ -52,12 +52,15 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS projects (
-  project_id  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  name        TEXT NOT NULL DEFAULT '',
-  description TEXT NOT NULL DEFAULT '',
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  project_id   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id       TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  name         TEXT NOT NULL DEFAULT '',
+  slug         TEXT NOT NULL DEFAULT '',
+  description  TEXT NOT NULL DEFAULT '',
+  default_env  TEXT NOT NULL DEFAULT 'development',
+  default_plan TEXT NOT NULL DEFAULT 'standard',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -71,6 +74,7 @@ CREATE TABLE IF NOT EXISTS agents (
   is_active   BOOLEAN NOT NULL DEFAULT true,
   agent_role  TEXT NOT NULL DEFAULT 'custom'
               CHECK (agent_role IN ('personal_assistant', 'meta_agent', 'skill', 'custom')),
+  created_by  TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -1535,7 +1539,9 @@ CREATE TABLE IF NOT EXISTS end_user_usage (
 
 CREATE TABLE IF NOT EXISTS environments (
   id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  env_id      TEXT,
   org_id      TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  project_id  TEXT,
   name        TEXT NOT NULL DEFAULT '',
   config      JSONB NOT NULL DEFAULT '{}',
   is_active   BOOLEAN NOT NULL DEFAULT true,
@@ -1610,7 +1616,9 @@ CREATE TABLE IF NOT EXISTS network_stats (
 
 CREATE TABLE IF NOT EXISTS event_types (
   id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  event_type  TEXT NOT NULL DEFAULT '' UNIQUE,
   name        TEXT NOT NULL DEFAULT '',
+  category    TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
   schema      JSONB NOT NULL DEFAULT '{}',
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()

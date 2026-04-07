@@ -62,6 +62,41 @@ export function getBillingUsage(): Promise<BillingUsage> {
   return api.get<BillingUsage>("/billing/usage");
 }
 
+// ── Account ────────────────────────────────────────────────────────
+
+export function changePassword(currentPassword: string, newPassword: string): Promise<{ updated: boolean }> {
+  return api.post<{ updated: boolean }>("/auth/password", { current_password: currentPassword, new_password: newPassword });
+}
+
+export interface UserProfile {
+  user_id: string;
+  email: string;
+  name: string;
+  org_id: string;
+  provider: string;
+}
+
+export function getMe(): Promise<UserProfile> {
+  return api.get<UserProfile>("/auth/me");
+}
+
+// ── Referrals ──────────────────────────────────────────────────────
+
+export interface ReferralStats {
+  total_referrals: number;
+  referrals: Array<{ org_id: string; org_name: string; since: string }>;
+  earnings: { total_earned_usd: number; l1_earned_usd: number; l2_earned_usd: number; total_transactions: number };
+  codes: Array<{ code: string; label: string; uses: number; max_uses: number | null; active: boolean }>;
+}
+
+export function getReferralStats(): Promise<ReferralStats> {
+  return api.get<ReferralStats>("/referrals/stats");
+}
+
+export function createReferralCode(label?: string, maxUses?: number): Promise<{ code: string; share_url: string }> {
+  return api.post<{ code: string; share_url: string }>("/referrals/codes", { label, max_uses: maxUses });
+}
+
 // ── Knowledge Base (RAG Documents) ──────────────────────────────────
 
 export interface RagDocument {
