@@ -82,7 +82,7 @@ export async function searchMarketplace(
       (
         CASE WHEN to_tsvector('english', short_description) @@ plainto_tsquery('english', ${query}) THEN 0.4 ELSE 0 END +
         CASE WHEN to_tsvector('english', display_name) @@ plainto_tsquery('english', ${query}) THEN 0.3 ELSE 0 END +
-        CASE WHEN ${query} = ANY(tags) THEN 0.2 ELSE 0 END +
+        CASE WHEN tags @> ${JSON.stringify([query])}::jsonb THEN 0.2 ELSE 0 END +
         quality_score * 0.3 +
         CASE WHEN is_featured AND featured_until > now() THEN 0.15 ELSE 0 END +
         CASE WHEN is_verified THEN 0.1 ELSE 0 END

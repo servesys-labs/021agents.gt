@@ -987,7 +987,7 @@ async function persistAgentPackage(
       await sql`
         INSERT INTO agents (agent_id, name, org_id, project_id, config, description, is_active, created_at, updated_at)
         VALUES (${subId}, ${subName}, ${orgId}, ${projectId}, ${JSON.stringify(subConfig)},
-                ${String((sa as Record<string, unknown>).description || "")}, 1, now(), now())
+                ${String((sa as Record<string, unknown>).description || "")}, ${true}, now(), now())
         ON CONFLICT (name, org_id) DO UPDATE SET config = ${JSON.stringify(subConfig)}, updated_at = now()
       `;
     } catch (e) {
