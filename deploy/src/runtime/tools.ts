@@ -3086,9 +3086,9 @@ async function dispatch(
           const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
           if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set. Cannot store secrets securely.";
           await sql`
-            INSERT INTO secrets (name, org_id, value_encrypted, created_at)
+            INSERT INTO secrets (name, org_id, encrypted_value, created_at)
             VALUES (${name}, ${orgId}, pgp_sym_encrypt(${value}, ${encKey}), ${new Date().toISOString()})
-            ON CONFLICT (name, org_id) DO UPDATE SET value_encrypted = pgp_sym_encrypt(EXCLUDED.value_encrypted::text, ${encKey})
+            ON CONFLICT (name, org_id) DO UPDATE SET encrypted_value = pgp_sym_encrypt(EXCLUDED.encrypted_value::text, ${encKey})
           `;
           return JSON.stringify({ stored: true, name });
         }
@@ -3098,7 +3098,7 @@ async function dispatch(
           if (!name || !value) return "rotate requires name and new value";
           const encKey = (env as any).SECRETS_ENCRYPTION_KEY || "";
           if (!encKey) return "Server misconfiguration: SECRETS_ENCRYPTION_KEY not set.";
-          await sql`UPDATE secrets SET value_encrypted = pgp_sym_encrypt(${value}, ${encKey}) WHERE name = ${name} AND org_id = ${orgId}`;
+          await sql`UPDATE secrets SET encrypted_value = pgp_sym_encrypt(${value}, ${encKey}) WHERE name = ${name} AND org_id = ${orgId}`;
           return JSON.stringify({ rotated: true, name });
         }
         if (action === "delete") {

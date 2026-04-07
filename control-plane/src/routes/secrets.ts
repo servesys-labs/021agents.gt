@@ -127,7 +127,7 @@ secretRoutes.openapi(createSecretRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   await sql`
-    INSERT INTO secrets (org_id, project_id, env, name, value_encrypted, created_by, created_at, updated_at)
+    INSERT INTO secrets (org_id, project_id, env, name, encrypted_value, created_by, created_at, updated_at)
     VALUES (${user.org_id}, ${projectId}, ${envFilter}, ${name}, ${encrypted}, ${user.user_id}, ${now}, ${now})
   `;
 
@@ -210,7 +210,7 @@ secretRoutes.openapi(rotateSecretRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
-    UPDATE secrets SET value_encrypted = ${encrypted}, updated_at = ${now}
+    UPDATE secrets SET encrypted_value = ${encrypted}, updated_at = ${now}
     WHERE org_id = ${user.org_id} AND name = ${name} AND project_id = ${projectId} AND env = ${envFilter}
   `;
   if (result.count === 0) return c.json({ error: `Secret '${name}' not found` }, 404);

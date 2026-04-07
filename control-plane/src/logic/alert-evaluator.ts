@@ -40,7 +40,7 @@ export async function evaluateAlerts(sql: Sql, orgId: string): Promise<FiredAler
   // 1. Fetch all enabled alert configs for the org
   const configs = await sql`
     SELECT * FROM alert_configs
-    WHERE org_id = ${orgId} AND enabled = true
+    WHERE org_id = ${orgId} AND is_active = true
   `;
 
   const fired: FiredAlert[] = [];

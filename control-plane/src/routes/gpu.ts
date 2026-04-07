@@ -104,10 +104,12 @@ gpuRoutes.openapi(createEndpointRoute, async (c): Promise<any> => {
   const hourlyRate = HOURLY_RATES[gpuType] ?? 3.98;
   const now = new Date().toISOString();
 
+  const apiBase = `https://dedicated-${endpointId}.gmi-serving.com/v1`;
+  const configJson = JSON.stringify({ gpu_type: gpuType, gpu_count: gpuCount, hourly_rate_usd: hourlyRate });
   await sql`
-    INSERT INTO gpu_endpoints (endpoint_id, org_id, model_id, api_base, gpu_type, gpu_count, hourly_rate_usd, status, created_at)
-    VALUES (${endpointId}, ${user.org_id}, ${modelId}, ${`https://dedicated-${endpointId}.gmi-serving.com/v1`},
-            ${gpuType}, ${gpuCount}, ${hourlyRate}, 'provisioning', ${now})
+    INSERT INTO gpu_endpoints (id, org_id, name, model, url, provider, status, config, created_at)
+    VALUES (${endpointId}, ${user.org_id}, ${`gpu-${endpointId}`}, ${modelId}, ${apiBase},
+            ${"dedicated"}, 'provisioning', ${configJson}, ${now})
   `;
 
   return c.json({
@@ -146,27 +148,27 @@ gpuRoutes.openapi(deleteEndpointRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT * FROM gpu_endpoints WHERE endpoint_id = ${endpointId} AND org_id = ${user.org_id}
+    SELECT * FROM gpu_endpoints WHERE id = ${endpointId} AND org_id = ${user.org_id}
   `;
   if (rows.length === 0) return c.json({ error: "GPU endpoint not found" }, 404);
 
   const endpoint = rows[0] as any;
+  const endpointConfig = typeof endpoint.config === "object" && endpoint.config ? endpoint.config : {};
   const nowMs = Date.now();
   const now = new Date(nowMs).toISOString();
   const createdAtMs = endpoint.created_at ? new Date(endpoint.created_at).getTime() : nowMs;
   const hours = Math.max(0, (nowMs - createdAtMs) / 3600000);
-  const costUsd = Math.round(hours * Number(endpoint.hourly_rate_usd || 3.98) * 100) / 100;
+  const costUsd = Math.round(hours * Number(endpointConfig.hourly_rate_usd || 3.98) * 100) / 100;
 
   await sql`
-    UPDATE gpu_endpoints SET status = 'terminated', terminated_at = ${now} WHERE endpoint_id = ${endpointId}
+    UPDATE gpu_endpoints SET status = 'terminated', updated_at = ${now} WHERE id = ${endpointId}
   `;
 
   // Record billing
   try {
     await sql`
-      INSERT INTO billing_records (org_id, cost_type, total_cost_usd, gpu_type, gpu_hours, gpu_cost_usd, description, created_at)
-      VALUES (${user.org_id}, 'gpu_compute', ${costUsd}, ${endpoint.gpu_type || "h200"}, ${hours}, ${costUsd},
-              ${`Dedicated GPU endpoint ${endpointId}`}, ${now})
+      INSERT INTO billing_records (org_id, cost_type, total_cost_usd, model, provider, created_at)
+      VALUES (${user.org_id}, 'gpu_compute', ${costUsd}, ${String(endpoint.model || "")}, ${"dedicated"}, ${now})
     `;
 
     // Fire-and-forget credit deduction for GPU compute cost

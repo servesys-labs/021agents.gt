@@ -869,7 +869,7 @@ export default {
       const dueSchedules = await sql`
         SELECT id, agent_name, task, org_id, cron
         FROM schedules
-        WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= ${now})
+        WHERE is_active = true AND (next_run_at IS NULL OR next_run_at <= ${now})
         LIMIT 10
       `;
 
@@ -911,7 +911,7 @@ export default {
       const dueEvolutionSchedules = await sql`
         SELECT id, agent_name, org_id, interval_days, min_sessions, last_run_at
         FROM evolution_schedules
-        WHERE enabled = true AND (next_run_at IS NULL OR next_run_at <= ${now})
+        WHERE is_active = true AND (next_run_at IS NULL OR next_run_at <= ${now})
         LIMIT 10
       `;
 
@@ -1224,7 +1224,7 @@ export default {
     try {
       const { evaluateAlerts } = await import("./logic/alert-evaluator");
       const orgsWithAlerts = await sql`
-        SELECT DISTINCT org_id FROM alert_configs WHERE enabled = true LIMIT 50
+        SELECT DISTINCT org_id FROM alert_configs WHERE is_active = true LIMIT 50
       `;
       for (const row of orgsWithAlerts) {
         try {
@@ -1356,7 +1356,7 @@ export default {
       const policies = await sql`
         SELECT id, resource_type, retention_days, org_id, redact_pii, archive_before_delete
         FROM retention_policies
-        WHERE enabled = true
+        WHERE is_active = true
         LIMIT 20
       `;
 

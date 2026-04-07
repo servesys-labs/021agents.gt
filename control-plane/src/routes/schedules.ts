@@ -41,11 +41,11 @@ scheduleRoutes.openapi(listSchedulesRoute, async (c): Promise<any> => {
   `;
   return c.json(
     rows.map((r: any) => ({
-      schedule_id: r.schedule_id,
+      schedule_id: r.id,
       agent_name: r.agent_name,
       cron: r.cron,
       task: r.task,
-      is_enabled: Boolean(r.is_enabled),
+      is_enabled: Boolean(r.is_active),
       run_count: Number(r.run_count || 0),
       last_run_at: r.last_run_at || null,
     })),
@@ -96,7 +96,7 @@ scheduleRoutes.openapi(createScheduleRoute, async (c): Promise<any> => {
   const now = new Date().toISOString();
 
   await sql`
-    INSERT INTO schedules (schedule_id, org_id, agent_name, task, cron, is_enabled, created_at)
+    INSERT INTO schedules (id, org_id, agent_name, task, cron, is_active, created_at)
     VALUES (${scheduleId}, ${user.org_id}, ${agentName}, ${task}, ${cron}, true, ${now})
   `;
 
@@ -149,26 +149,26 @@ scheduleRoutes.openapi(updateScheduleRoute, async (c): Promise<any> => {
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`
-    SELECT * FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
+    SELECT * FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
   `;
   if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
   if (cron && task) {
-    await sql`UPDATE schedules SET cron = ${cron}, task = ${task} WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
+    await sql`UPDATE schedules SET cron = ${cron}, task = ${task} WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
   } else if (cron) {
-    await sql`UPDATE schedules SET cron = ${cron} WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
+    await sql`UPDATE schedules SET cron = ${cron} WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
   } else if (task) {
-    await sql`UPDATE schedules SET task = ${task} WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
+    await sql`UPDATE schedules SET task = ${task} WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
   }
 
-  const updated = await sql`SELECT * FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}`;
+  const updated = await sql`SELECT * FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}`;
   const s = updated[0] as any;
   return c.json({
-    schedule_id: s.schedule_id,
+    schedule_id: s.id,
     agent_name: s.agent_name,
     cron: s.cron,
     task: s.task,
-    is_enabled: Boolean(s.is_enabled),
+    is_enabled: Boolean(s.is_active),
     run_count: Number(s.run_count || 0),
     last_run_at: s.last_run_at || null,
   });
@@ -199,13 +199,13 @@ scheduleRoutes.openapi(scheduleHistoryRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT * FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
+    SELECT * FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
   `;
   if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
   const s = rows[0] as any;
   return c.json({
-    schedule_id: s.schedule_id,
+    schedule_id: s.id,
     run_count: Number(s.run_count || 0),
     last_run: s.last_run_at || null,
     last_status: s.last_status || null,
@@ -238,7 +238,7 @@ scheduleRoutes.openapi(deleteScheduleRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const result = await sql`
-    DELETE FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
+    DELETE FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
   `;
   if (result.count === 0) return c.json({ error: "Schedule not found" }, 404);
   return c.json({ deleted: scheduleId });
@@ -269,11 +269,11 @@ scheduleRoutes.openapi(enableScheduleRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT schedule_id FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
+    SELECT id FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
   `;
   if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
-  await sql`UPDATE schedules SET is_enabled = true WHERE schedule_id = ${scheduleId}`;
+  await sql`UPDATE schedules SET is_active = true WHERE id = ${scheduleId}`;
   return c.json({ enabled: true });
 });
 
@@ -302,10 +302,10 @@ scheduleRoutes.openapi(disableScheduleRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    SELECT schedule_id FROM schedules WHERE schedule_id = ${scheduleId} AND org_id = ${user.org_id}
+    SELECT id FROM schedules WHERE id = ${scheduleId} AND org_id = ${user.org_id}
   `;
   if (rows.length === 0) return c.json({ error: "Schedule not found" }, 404);
 
-  await sql`UPDATE schedules SET is_enabled = false WHERE schedule_id = ${scheduleId}`;
+  await sql`UPDATE schedules SET is_active = false WHERE id = ${scheduleId}`;
   return c.json({ enabled: false });
 });
