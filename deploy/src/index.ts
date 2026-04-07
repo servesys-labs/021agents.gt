@@ -6019,6 +6019,12 @@ export default {
               fileBytes = Uint8Array.from(atob(raw), c => c.charCodeAt(0)).buffer;
               mimeType = body.mime_type || "image/png";
             } else if (body.image_url) {
+              // SSRF protection: validate URL before fetching
+              const { validateUrl } = await import("./runtime/ssrf");
+              const ssrfCheck = validateUrl(body.image_url);
+              if (!ssrfCheck.valid) {
+                return Response.json({ error: `Blocked URL (SSRF): ${ssrfCheck.reason}` }, { status: 403 });
+              }
               const resp = await fetch(body.image_url);
               if (!resp.ok) return Response.json({ error: `Failed to fetch image: ${resp.status}` }, { status: 502 });
               fileBytes = await resp.arrayBuffer();
