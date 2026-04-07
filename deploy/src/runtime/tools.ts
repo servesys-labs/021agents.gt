@@ -4525,6 +4525,11 @@ async function ingestDocument(env: RuntimeEnv, args: Record<string, any>): Promi
   const agentName = (env as any).__agentConfig?.name || "";
   const orgId = (env as any).__agentConfig?.org_id || "";
 
+  // SSRF protection: validate URL before fetching
+  const { validateUrl } = await import("./ssrf");
+  const ssrfCheck = validateUrl(imageUrl);
+  if (!ssrfCheck.valid) return `ERROR: Blocked URL (SSRF): ${ssrfCheck.reason}`;
+
   // Fetch the image/document
   const imgResp = await fetch(imageUrl);
   if (!imgResp.ok) return `ERROR: Failed to fetch document from ${imageUrl}: ${imgResp.status}`;
