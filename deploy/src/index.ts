@@ -821,6 +821,13 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     },
   ): Promise<TurnResult[]> {
     const config = this.state.config;
+
+    // Set RLS org context for all DB calls during this agent run
+    if (config.orgId) {
+      const { setDbOrgContext } = await import("./runtime/db");
+      setDbOrgContext(config.orgId);
+    }
+
     await this._syncCheckpointFlagFromDb(config.agentName || "agentos");
     const started = Date.now();
 
@@ -3370,6 +3377,12 @@ export default {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
+      // Set RLS org context from JWT claims
+      {
+        const { setDbOrgContext } = await import("./runtime/db");
+        setDbOrgContext(jwtOrgId);
+      }
+
       try {
         const { queryUsage } = await import("./runtime/db");
         const result = await queryUsage(env.HYPERDRIVE, {
@@ -5441,6 +5454,13 @@ export default {
         return Response.json({ error: "unauthorized" }, { status: 401 });
       }
 
+      // Set RLS org context from X-Org-Id header (service-to-service calls)
+      const cfOrgId = request.headers.get("X-Org-Id") || url.searchParams.get("org_id") || "";
+      if (cfOrgId) {
+        const { setDbOrgContext } = await import("./runtime/db");
+        setDbOrgContext(cfOrgId);
+      }
+
       // /cf/db/query — service-to-service DB query endpoint with query allowlist.
       // Intended for control-plane data-proxy usage (RLS-friendly session context).
       if (url.pathname === "/cf/db/query" && request.method === "POST") {
@@ -7235,6 +7255,12 @@ export default {
         }
 
         try {
+          // Set RLS org context per message (scoped to this transaction via SET LOCAL)
+          const msgOrgId = String(p.org_id || "").trim();
+          if (msgOrgId) {
+            await sql.unsafe(`SELECT set_config('app.current_org_id', $1, true)`, [msgOrgId]);
+          }
+
           if (type === "session") {
             // sessions.org_id has FK → orgs(org_id). Empty string violates it.
             // If org_id is missing/empty, skip the insert — the direct write path (DO) handles it.

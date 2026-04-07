@@ -172,6 +172,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
     const sessionId = event.instanceId.slice(0, 16);
     const traceId = crypto.randomUUID().slice(0, 16);
 
+    // Set RLS org context for all DB calls during this workflow run
+    if (p.org_id) {
+      const { setDbOrgContext } = await import("./runtime/db");
+      setDbOrgContext(p.org_id);
+    }
+
     // ── Latency fix 3: Parallelize pre-bootstrap KV ops (saves 30-100ms) ──
     // Session limit check and snapshot hydration are independent — run in parallel.
     // Registration depends on limit check, so it runs after.
