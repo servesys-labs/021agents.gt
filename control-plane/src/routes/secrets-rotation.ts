@@ -97,7 +97,7 @@ secretsRotationRoutes.openapi(rotateKeysRoute, async (c): Promise<any> => {
 
   // 2. Fetch all secrets for this org
   const secrets = await sql`
-    SELECT name, project_id, env, value_encrypted FROM secrets
+    SELECT name, project_id, env, encrypted_value FROM secrets
     WHERE org_id = ${user.org_id}
   `;
 
@@ -109,14 +109,14 @@ secretsRotationRoutes.openapi(rotateKeysRoute, async (c): Promise<any> => {
   for (const secret of secrets) {
     try {
       const plaintext = await fernetDecrypt(
-        String(secret.value_encrypted),
+        String(secret.encrypted_value),
         oldKey,
       );
       const newEncrypted = await fernetEncrypt(plaintext, newKey);
 
       await sql`
         UPDATE secrets
-        SET value_encrypted = ${newEncrypted}, updated_at = now()
+        SET encrypted_value = ${newEncrypted}, updated_at = now()
         WHERE org_id = ${user.org_id}
           AND name = ${secret.name}
           AND project_id = ${secret.project_id}

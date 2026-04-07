@@ -47,8 +47,7 @@ billingRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
       COALESCE(SUM(CASE WHEN cost_type = 'telephony' THEN total_cost_usd ELSE 0 END), 0) as telephony_cost_usd,
       COALESCE(SUM(input_tokens), 0) as total_input_tokens,
       COALESCE(SUM(output_tokens), 0) as total_output_tokens,
-      COUNT(*) as total_billing_records,
-      COALESCE(SUM(gpu_hours), 0) as total_gpu_hours
+      COUNT(*) as total_billing_records
     FROM billing_records
     WHERE org_id = ${user.org_id} AND created_at >= ${since}
   `;
@@ -120,7 +119,6 @@ billingRoutes.openapi(getUsageRoute, async (c): Promise<any> => {
     total_input_tokens: Number(summary.total_input_tokens),
     total_output_tokens: Number(summary.total_output_tokens),
     total_billing_records: Number(summary.total_billing_records),
-    total_gpu_hours: Number(summary.total_gpu_hours),
     by_cost_type: byCostType,
     by_model: byModel,
     by_agent: byAgent,

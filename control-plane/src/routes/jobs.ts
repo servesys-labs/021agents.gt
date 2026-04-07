@@ -226,7 +226,7 @@ jobRoutes.openapi(retryJobRoute, async (c): Promise<any> => {
   if (rows.length === 0) return c.json({ error: "Job not found" }, 404);
 
   await sql`
-    UPDATE job_queue SET status = 'pending', retries = 0 WHERE job_id = ${jobId} AND org_id = ${user.org_id}
+    UPDATE job_queue SET status = 'pending', attempts = 0 WHERE job_id = ${jobId} AND org_id = ${user.org_id}
   `;
   return c.json({ retried: jobId });
 });

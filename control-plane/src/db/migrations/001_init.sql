@@ -390,6 +390,7 @@ CREATE TABLE IF NOT EXISTS billing_records (
   pricing_source   TEXT,
   pricing_key      TEXT,
   pricing_version  TEXT,
+  trace_id         TEXT,
   billing_user_id  TEXT,
   api_key_id       TEXT,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -764,6 +765,7 @@ CREATE TABLE IF NOT EXISTS schedules (
 
 CREATE TABLE IF NOT EXISTS job_queue (
   id              BIGSERIAL PRIMARY KEY,
+  job_id          TEXT,
   org_id          TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   agent_name      TEXT NOT NULL DEFAULT '',
   job_type        TEXT NOT NULL DEFAULT '',
@@ -936,6 +938,7 @@ CREATE TABLE IF NOT EXISTS secrets (
   env             TEXT NOT NULL DEFAULT 'production',
   name            TEXT NOT NULL DEFAULT '',
   encrypted_value TEXT NOT NULL DEFAULT '',
+  created_by      TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (org_id, project_id, env, name)
@@ -1092,6 +1095,7 @@ CREATE TABLE IF NOT EXISTS skills (
   agent_name      TEXT NOT NULL DEFAULT '',
   name            TEXT NOT NULL DEFAULT '',
   description     TEXT NOT NULL DEFAULT '',
+  category        TEXT NOT NULL DEFAULT '',
   when_to_use     TEXT NOT NULL DEFAULT '',
   prompt          TEXT NOT NULL DEFAULT '',
   prompt_template TEXT NOT NULL DEFAULT '',
@@ -1136,6 +1140,7 @@ CREATE TABLE IF NOT EXISTS connector_tools (
   app         TEXT NOT NULL DEFAULT '',
   name        TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
+  provider    TEXT NOT NULL DEFAULT '',
   schema      JSONB NOT NULL DEFAULT '{}',
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (app, name)
@@ -2215,7 +2220,41 @@ VALUES (0, 0, 0)
 ON CONFLICT DO NOTHING;
 
 -- ============================================================================
--- SECTION 23: Revoke anon access
+-- SECTION 23: AutoResearch
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS autoresearch_runs (
+  run_id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id            TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name        TEXT NOT NULL DEFAULT '',
+  status            TEXT NOT NULL DEFAULT 'running',
+  config            JSONB NOT NULL DEFAULT '{}',
+  workspace         TEXT NOT NULL DEFAULT '.',
+  iteration         INT NOT NULL DEFAULT 0,
+  best_bpb          NUMERIC(18,8),
+  total_experiments INT NOT NULL DEFAULT 0,
+  kept              INT NOT NULL DEFAULT 0,
+  discarded         INT NOT NULL DEFAULT 0,
+  crashed           INT NOT NULL DEFAULT 0,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS autoresearch_experiments (
+  experiment_id    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  run_id           TEXT NOT NULL REFERENCES autoresearch_runs(run_id) ON DELETE CASCADE,
+  org_id           TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name       TEXT NOT NULL DEFAULT '',
+  experiment_name  TEXT NOT NULL DEFAULT '',
+  status           TEXT NOT NULL DEFAULT 'completed',
+  bpb              NUMERIC(18,8),
+  config           JSONB NOT NULL DEFAULT '{}',
+  results          JSONB NOT NULL DEFAULT '{}',
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================================
+-- SECTION 24: Revoke anon access
 -- ============================================================================
 
 REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;
