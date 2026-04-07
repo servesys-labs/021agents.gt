@@ -570,7 +570,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       // failures: restart → flaky tool retried → fails 5x → reopens circuit.
       try {
         preloadCircuitStates(sqlExec);
-      } catch {}
+      } catch (err) {
+        console.warn(`[DO:onStart] preloadCircuitStates failed: ${err instanceof Error ? err.message : err}`);
+      }
     }
 
     // Hydrate from Supabase if DO SQLite is empty (cold start / post-deploy)
@@ -633,7 +635,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         }
         console.log(`[workspace] Restored checkpoint: ${checkpoint.turn_count} turns, $${checkpoint.cumulative_cost_usd.toFixed(6)} cost`);
       }
-    } catch {}
+    } catch (err) {
+      console.warn(`[DO:onStart] workspace recovery failed: ${err instanceof Error ? err.message : err}`);
+    }
 
     // ── Initiate checkpoint schedule ────────────────────────────────
     // Kick off the self-rescheduling checkpoint chain. Without this,
@@ -749,7 +753,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           checkpoint,
         ).catch(() => {});
       }
-    } catch {}
+    } catch (err) {
+      console.warn(`[DO:alarm] checkpoint failed: ${err instanceof Error ? err.message : err}`);
+    }
 
     // Re-schedule for next checkpoint (30 seconds)
     // (enableWorkspaceCheckpoints === false already returned above)
@@ -1070,7 +1076,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
   }
 
   async onMessage(connection: Connection, message: string | ArrayBuffer) {
-    const data = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
+    let data: any;
+    try {
+      data = JSON.parse(typeof message === "string" ? message : new TextDecoder().decode(message));
+    } catch {
+      connection.send(JSON.stringify({ type: "error", error: "invalid_json", message: "Message must be valid JSON" }));
+      return;
+    }
+    if (!data || typeof data !== "object") {
+      connection.send(JSON.stringify({ type: "error", error: "invalid_message", message: "Message must be a JSON object" }));
+      return;
+    }
 
     // ── WebSocket reconnect: replay missed events from KV ──────────
     if (data.type === "reconnect" && typeof data.from_seq === "number") {
@@ -1439,7 +1455,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     agent_name: wsAgentName, model: "workflow",
                     input_tokens: events[i].input_tokens || 0,
                     output_tokens: events[i].output_tokens || 0,
-                    cost_usd: events[i].cost_usd || 0, plan: "standard",
+                    cost_usd: events[i].cost_usd || 0, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
                     trace_id: events[i].trace_id || "",
                   }, this.env.AGENT_PROGRESS_KV).catch(() => {});
                 }
@@ -1627,7 +1643,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   agent_name: this.state.config.agentName || "agentos", model: "workflow",
                   input_tokens: out.input_tokens || 0,
                   output_tokens: out.output_tokens || 0,
-                  cost_usd: out.cost_usd, plan: "standard",
+                  cost_usd: out.cost_usd, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
                   trace_id: out.trace_id || "",
                 }, this.env.AGENT_PROGRESS_KV).catch(() => {});
               } catch {}
@@ -1906,7 +1922,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 agent_name: agentName, model: "workflow",
                 input_tokens: result.input_tokens || 0,
                 output_tokens: result.output_tokens || 0,
-                cost_usd: result.cost_usd || 0, plan: "standard",
+                cost_usd: result.cost_usd || 0, plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free",
                 trace_id: result.trace_id || "",
                 billing_user_id: data.channel_user_id,
                 api_key_id: data.api_key_id,
@@ -2063,7 +2079,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                             agent_name: agentName, model: "workflow",
                             input_tokens: evt.input_tokens || 0,
                             output_tokens: evt.output_tokens || 0,
-                            cost_usd: costUsd, plan: "standard",
+                            cost_usd: costUsd, plan: (self as any).state?.config?.plan || self.env.DEFAULT_PLAN || "free",
                             trace_id: evt.trace_id || "",
                           }, self.env.AGENT_PROGRESS_KV)
                         ).catch((err: any) => console.error("[sse-billing] writeBillingRecord failed:", err.message));
@@ -2251,7 +2267,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                     input_tokens: voiceResult.input_tokens || 0,
                     output_tokens: voiceResult.output_tokens || 0,
                     cost_usd: voiceCost,
-                    plan: "standard", trace_id: voiceResult.trace_id || "",
+                    plan: this.state?.config?.plan || this.env.DEFAULT_PLAN || "free", trace_id: voiceResult.trace_id || "",
                   }, this.env.AGENT_PROGRESS_KV);
                   // Direct WS path must deduct (no control-plane in the loop)
                   const sql = await getDb(this.env.HYPERDRIVE);
