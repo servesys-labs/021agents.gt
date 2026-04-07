@@ -318,7 +318,7 @@ async function resolveDefaultModel(
   hyperdrive: Hyperdrive,
   orgId: string,
 ): Promise<string> {
-  const PLATFORM_DEFAULT = "gemma-4-31b";
+  const PLATFORM_DEFAULT = "anthropic/claude-sonnet-4-6";
   if (!orgId) return PLATFORM_DEFAULT;
 
   try {
@@ -379,7 +379,7 @@ export async function buildFromDescription(
   const agentModel = opts.model
     || (opts.hyperdrive && opts.orgId
       ? await resolveDefaultModel(opts.hyperdrive, opts.orgId)
-      : "gemma-4-31b");
+      : "anthropic/claude-sonnet-4-6");
 
   // Build the tool inventory string for the prompt
   const toolInventory = Object.entries(PLATFORM_TOOLS)
@@ -664,7 +664,7 @@ Return ONLY valid JSON. No markdown fences, no explanation.`;
       openrouterApiKey: opts.openrouterApiKey,
     },
     {
-      model: "gemma-4-31b",
+      model: "anthropic/claude-sonnet-4-6",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -828,7 +828,7 @@ export async function expandEvalConfig(
         openrouterApiKey: opts.openrouterApiKey,
       },
       {
-        model: "gemma-4-31b",
+        model: "anthropic/claude-sonnet-4-6",
         messages: [
           {
             role: "system",
@@ -956,7 +956,7 @@ export async function generateEvolutionSuggestions(
         openrouterApiKey: opts.openrouterApiKey,
       },
       {
-        model: "gemma-4-31b",
+        model: "anthropic/claude-sonnet-4-6",
         messages: [
           {
             role: "system",

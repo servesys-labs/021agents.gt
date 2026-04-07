@@ -130,18 +130,21 @@
       const rawName = quickName.trim() || quickDescription.trim().split(/\s+/).slice(0, 3).join("-");
       const name = rawName.toLowerCase().replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").slice(0, 40) || "my-agent";
 
-      // Step 2: Create a minimal agent stub — just name + description + plan
-      await api.post("/agents", {
-        name,
+      // Create agent via LLM-powered create-from-description endpoint
+      // This does query enrichment: expands vague descriptions into detailed configs,
+      // generates a proper system prompt, selects appropriate tools, fixes spelling, etc.
+      const res = await api.post<{ name: string }>("/agents/create-from-description", {
         description: quickDescription.trim(),
+        name,
         plan: quickPlan,
+        tools: "auto",
       });
+      const agentName = res.name || name;
       await agentStore.fetchAgents();
 
-      // Step 3: Redirect to chat with ?setup= flag — the chat page will auto-open
-      // the Improve panel and send the description to the meta-agent in demo mode
+      // Redirect to chat with setup flag — meta-agent will refine further
       const setupMsg = encodeURIComponent(quickDescription.trim());
-      goto(`/chat/${name}?setup=${setupMsg}`);
+      goto(`/chat/${agentName}?setup=${setupMsg}`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to create agent");
     } finally {
