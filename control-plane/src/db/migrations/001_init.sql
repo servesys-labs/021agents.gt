@@ -448,17 +448,33 @@ CREATE TABLE IF NOT EXISTS billing_events (
 -- SECTION 7: Training & Eval
 -- ============================================================================
 
+CREATE TABLE IF NOT EXISTS eval_test_cases (
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id          TEXT NOT NULL,
+  agent_name      TEXT NOT NULL DEFAULT '',
+  name            TEXT NOT NULL DEFAULT '',
+  input           TEXT NOT NULL DEFAULT '',
+  expected_output TEXT NOT NULL DEFAULT '',
+  grader          TEXT NOT NULL DEFAULT 'llm_rubric',
+  rubric          TEXT,
+  tags            JSONB NOT NULL DEFAULT '[]',
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS eval_runs (
-  eval_run_id   TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id        TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
-  agent_name    TEXT NOT NULL DEFAULT '',
-  status        TEXT NOT NULL DEFAULT 'pending',
-  config        JSONB NOT NULL DEFAULT '{}',
-  results       JSONB NOT NULL DEFAULT '{}',
-  pass_rate     NUMERIC(5,4) NOT NULL DEFAULT 0,
-  total_trials  INT NOT NULL DEFAULT 0,
-  passed_trials INT NOT NULL DEFAULT 0,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  eval_run_id    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id         TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  agent_name     TEXT NOT NULL DEFAULT '',
+  status         TEXT NOT NULL DEFAULT 'pending',
+  config         JSONB NOT NULL DEFAULT '{}',
+  results        JSONB NOT NULL DEFAULT '{}',
+  pass_rate      NUMERIC(5,4) NOT NULL DEFAULT 0,
+  total_trials   INT NOT NULL DEFAULT 0,
+  passed_trials  INT NOT NULL DEFAULT 0,
+  total_tasks    INT NOT NULL DEFAULT 0,
+  total_cost_usd NUMERIC(18,8) NOT NULL DEFAULT 0,
+  avg_latency_ms INT NOT NULL DEFAULT 0,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS eval_trials (
@@ -515,6 +531,7 @@ CREATE TABLE IF NOT EXISTS training_resources (
   version       INT NOT NULL DEFAULT 1,
   content_text  TEXT NOT NULL DEFAULT '',
   content       JSONB NOT NULL DEFAULT '{}',
+  source        TEXT,
   is_active     BOOLEAN NOT NULL DEFAULT true,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (org_id, agent_name, resource_type, resource_key, version)
