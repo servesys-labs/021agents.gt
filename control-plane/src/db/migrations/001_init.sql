@@ -80,6 +80,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_agents_name_org_active
 
 CREATE TABLE IF NOT EXISTS agent_versions (
   id          BIGSERIAL PRIMARY KEY,
+  org_id      TEXT,
   agent_name  TEXT NOT NULL,
   version     TEXT NOT NULL,
   config_json JSONB NOT NULL DEFAULT '{}',
@@ -95,13 +96,19 @@ CREATE TABLE IF NOT EXISTS agent_versions (
 CREATE TABLE IF NOT EXISTS api_keys (
   key_id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id         TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
+  user_id        TEXT,
   name           TEXT NOT NULL DEFAULT '',
   key_hash       TEXT NOT NULL UNIQUE,
+  key_prefix     TEXT,
+  project_id     TEXT,
+  env            TEXT,
   scopes         JSONB NOT NULL DEFAULT '[]',
+  allowed_agents JSONB NOT NULL DEFAULT '[]',
   rate_limit_rpm INT,
   rate_limit_rpd INT,
   ip_allowlist   JSONB NOT NULL DEFAULT '[]',
   is_active      BOOLEAN NOT NULL DEFAULT true,
+  revoked        BOOLEAN NOT NULL DEFAULT false,
   expires_at     TIMESTAMPTZ,
   last_used_at   TIMESTAMPTZ,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -129,7 +136,10 @@ CREATE TABLE IF NOT EXISTS org_members (
 
 CREATE TABLE IF NOT EXISTS org_settings (
   org_id              TEXT PRIMARY KEY REFERENCES orgs(org_id) ON DELETE CASCADE,
+  plan_type           TEXT NOT NULL DEFAULT 'free',
   settings_json       JSONB NOT NULL DEFAULT '{}',
+  limits_json         JSONB NOT NULL DEFAULT '{}',
+  features_json       JSONB NOT NULL DEFAULT '{}',
   monthly_budget_usd  NUMERIC(12,8) NOT NULL DEFAULT 0,
   daily_budget_usd    NUMERIC(12,8) NOT NULL DEFAULT 0,
   budget_alert_pct    NUMERIC(5,2) NOT NULL DEFAULT 80,
@@ -158,13 +168,18 @@ CREATE TABLE IF NOT EXISTS email_verification_tokens (
 );
 
 CREATE TABLE IF NOT EXISTS user_sessions (
-  id            BIGSERIAL PRIMARY KEY,
-  user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-  session_token TEXT NOT NULL,
-  ip_address    TEXT,
-  user_agent    TEXT,
-  expires_at    TIMESTAMPTZ NOT NULL,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id               BIGSERIAL PRIMARY KEY,
+  session_id       TEXT,
+  user_id          TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  session_token    TEXT NOT NULL,
+  ip_address       TEXT,
+  user_agent       TEXT,
+  is_active        BOOLEAN NOT NULL DEFAULT true,
+  revoked          BOOLEAN NOT NULL DEFAULT false,
+  revoked_at       TIMESTAMPTZ,
+  last_activity_at TIMESTAMPTZ,
+  expires_at       TIMESTAMPTZ NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================================
@@ -182,6 +197,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   llm_output_cost      NUMERIC(12,8) NOT NULL DEFAULT 0,
   tool_cost            NUMERIC(12,8) NOT NULL DEFAULT 0,
   total_cost           NUMERIC(12,8) NOT NULL DEFAULT 0,
+  cost_total_usd       NUMERIC(12,8) NOT NULL DEFAULT 0,
+  wall_clock_seconds   NUMERIC(12,4) NOT NULL DEFAULT 0,
+  step_count           INT NOT NULL DEFAULT 0,
+  action_count         INT NOT NULL DEFAULT 0,
   composition_json     JSONB NOT NULL DEFAULT '{}',
   trace_id             TEXT,
   parent_session_id    TEXT,
@@ -214,8 +233,12 @@ CREATE TABLE IF NOT EXISTS turns (
   tool_calls_json  JSONB NOT NULL DEFAULT '[]',
   tool_results_json JSONB NOT NULL DEFAULT '[]',
   errors_json      JSONB NOT NULL DEFAULT '[]',
+  error            TEXT,
   plan_json        JSONB NOT NULL DEFAULT '{}',
+  plan_artifact    JSONB NOT NULL DEFAULT '{}',
   reflection_json  JSONB NOT NULL DEFAULT '{}',
+  reflection       TEXT,
+  execution_mode   TEXT,
   routing_model    TEXT,
   routing_reason   TEXT,
   llm_latency_ms   INT,
@@ -225,6 +248,7 @@ CREATE TABLE IF NOT EXISTS turns (
   cache_write_tokens INT NOT NULL DEFAULT 0,
   gateway_log_id   TEXT,
   cost_usd         NUMERIC(12,8) NOT NULL DEFAULT 0,
+  cost_total_usd   NUMERIC(12,8) NOT NULL DEFAULT 0,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (session_id, turn_number)
 );
@@ -332,9 +356,13 @@ CREATE TABLE IF NOT EXISTS credit_transactions (
                           CHECK (type IN ('purchase', 'burn', 'refund', 'adjustment', 'bonus', 'transfer_in', 'transfer_out')),
   amount_usd              NUMERIC(12,8) NOT NULL DEFAULT 0,
   balance_after_usd       NUMERIC(12,8) NOT NULL DEFAULT 0,
+  amount_cents            INT NOT NULL DEFAULT 0,
+  balance_after_cents     INT NOT NULL DEFAULT 0,
   description             TEXT NOT NULL DEFAULT '',
   agent_name              TEXT,
   session_id              TEXT,
+  reference_id            TEXT,
+  reference_type          TEXT,
   stripe_payment_intent_id TEXT,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -501,8 +529,11 @@ CREATE TABLE IF NOT EXISTS marketplace_listings (
   id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id                TEXT NOT NULL REFERENCES orgs(org_id) ON DELETE CASCADE,
   agent_name            TEXT NOT NULL DEFAULT '',
+  display_name          TEXT NOT NULL DEFAULT '',
   title                 TEXT NOT NULL DEFAULT '',
+  short_description     TEXT NOT NULL DEFAULT '',
   description           TEXT NOT NULL DEFAULT '',
+  category              TEXT NOT NULL DEFAULT 'other',
   pricing_model         TEXT NOT NULL DEFAULT 'cost_plus'
                         CHECK (pricing_model IN ('fixed', 'cost_plus', 'per_token')),
   price_per_task_usd    NUMERIC(12,8) NOT NULL DEFAULT 0,
@@ -511,11 +542,23 @@ CREATE TABLE IF NOT EXISTS marketplace_listings (
                         CHECK (agent_type IN ('agent', 'skill')),
   tags                  JSONB NOT NULL DEFAULT '[]',
   a2a_endpoint          TEXT,
+  a2a_endpoint_url      TEXT,
+  agent_card_url        TEXT,
   sla_max_latency_ms    INT,
+  sla_response_time_ms  INT,
+  avg_response_time_ms  INT,
   quality_score         NUMERIC(5,4) NOT NULL DEFAULT 0,
+  avg_rating            NUMERIC(5,4) NOT NULL DEFAULT 0,
+  total_ratings         INT NOT NULL DEFAULT 0,
   total_tasks           INT NOT NULL DEFAULT 0,
+  total_tasks_completed INT NOT NULL DEFAULT 0,
+  total_tasks_failed    INT NOT NULL DEFAULT 0,
   total_revenue_usd     NUMERIC(12,8) NOT NULL DEFAULT 0,
   is_active             BOOLEAN NOT NULL DEFAULT true,
+  is_published          BOOLEAN NOT NULL DEFAULT false,
+  is_featured           BOOLEAN NOT NULL DEFAULT false,
+  is_verified           BOOLEAN NOT NULL DEFAULT false,
+  featured_until        TIMESTAMPTZ,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (agent_name, org_id)
@@ -525,8 +568,11 @@ CREATE TABLE IF NOT EXISTS marketplace_ratings (
   id                BIGSERIAL PRIMARY KEY,
   listing_id        TEXT NOT NULL REFERENCES marketplace_listings(id) ON DELETE CASCADE,
   rater_org_id      TEXT NOT NULL,
+  rater_agent_name  TEXT NOT NULL DEFAULT '',
+  task_id           TEXT NOT NULL DEFAULT '',
   rating            INT NOT NULL CHECK (rating >= 1 AND rating <= 5),
   review_text       TEXT NOT NULL DEFAULT '',
+  response_time_ms  INT NOT NULL DEFAULT 0,
   raw_rating        NUMERIC(5,4),
   credibility_weight NUMERIC(5,4),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -535,18 +581,26 @@ CREATE TABLE IF NOT EXISTS marketplace_ratings (
 CREATE TABLE IF NOT EXISTS marketplace_featured (
   id          BIGSERIAL PRIMARY KEY,
   listing_id  TEXT NOT NULL REFERENCES marketplace_listings(id) ON DELETE CASCADE,
+  org_id      TEXT,
+  cost_usd    NUMERIC(12,8) NOT NULL DEFAULT 0,
   featured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  starts_at   TIMESTAMPTZ,
+  ends_at     TIMESTAMPTZ,
   expires_at  TIMESTAMPTZ,
+  status      TEXT NOT NULL DEFAULT 'active',
   category    TEXT NOT NULL DEFAULT '',
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS marketplace_queries (
-  id            BIGSERIAL PRIMARY KEY,
-  query_text    TEXT NOT NULL DEFAULT '',
-  org_id        TEXT,
-  results_count INT NOT NULL DEFAULT 0,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                 BIGSERIAL PRIMARY KEY,
+  querier_org_id     TEXT,
+  querier_agent_name TEXT NOT NULL DEFAULT '',
+  query_text         TEXT NOT NULL DEFAULT '',
+  category_filter    TEXT NOT NULL DEFAULT '',
+  org_id             TEXT,
+  results_count      INT NOT NULL DEFAULT 0,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS a2a_agents (
@@ -688,11 +742,20 @@ CREATE TABLE IF NOT EXISTS tool_executions (
 
 CREATE TABLE IF NOT EXISTS schedules (
   id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  schedule_id     TEXT,
   org_id          TEXT NOT NULL,
   agent_name      TEXT NOT NULL DEFAULT '',
+  cron            TEXT NOT NULL DEFAULT '',
   cron_expression TEXT NOT NULL DEFAULT '',
+  task            TEXT NOT NULL DEFAULT '',
   task_input      JSONB NOT NULL DEFAULT '{}',
   is_active       BOOLEAN NOT NULL DEFAULT true,
+  is_enabled      BOOLEAN NOT NULL DEFAULT true,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  run_count       INT NOT NULL DEFAULT 0,
+  last_status     TEXT,
+  last_output     TEXT,
+  last_error      TEXT,
   last_run_at     TIMESTAMPTZ,
   next_run_at     TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -700,16 +763,26 @@ CREATE TABLE IF NOT EXISTS schedules (
 );
 
 CREATE TABLE IF NOT EXISTS job_queue (
-  id            BIGSERIAL PRIMARY KEY,
-  org_id        TEXT NOT NULL,
-  job_type      TEXT NOT NULL DEFAULT '',
-  payload_json  JSONB NOT NULL DEFAULT '{}',
-  status        TEXT NOT NULL DEFAULT 'pending',
-  attempts      INT NOT NULL DEFAULT 0,
-  max_attempts  INT NOT NULL DEFAULT 3,
-  error_message TEXT,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id              BIGSERIAL PRIMARY KEY,
+  job_id          TEXT,
+  org_id          TEXT NOT NULL,
+  agent_name      TEXT NOT NULL DEFAULT '',
+  job_type        TEXT NOT NULL DEFAULT '',
+  task            TEXT NOT NULL DEFAULT '',
+  payload_json    JSONB NOT NULL DEFAULT '{}',
+  result_json     JSONB,
+  status          TEXT NOT NULL DEFAULT 'pending',
+  attempts        INT NOT NULL DEFAULT 0,
+  max_attempts    INT NOT NULL DEFAULT 3,
+  max_retries     INT NOT NULL DEFAULT 3,
+  priority        INT NOT NULL DEFAULT 0,
+  idempotency_key TEXT,
+  error_message   TEXT,
+  error           TEXT,
+  scheduled_at    TIMESTAMPTZ,
+  completed_at    TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS batch_jobs (
@@ -721,20 +794,37 @@ CREATE TABLE IF NOT EXISTS batch_jobs (
   total_tasks     INT NOT NULL DEFAULT 0,
   completed_tasks INT NOT NULL DEFAULT 0,
   failed_tasks    INT NOT NULL DEFAULT 0,
+  callback_url    TEXT,
+  callback_secret TEXT,
+  metadata_json   JSONB NOT NULL DEFAULT '{}',
+  completed_at    TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS batch_tasks (
-  id            BIGSERIAL PRIMARY KEY,
-  batch_id      TEXT NOT NULL REFERENCES batch_jobs(batch_id) ON DELETE CASCADE,
-  input_text    TEXT NOT NULL DEFAULT '',
-  output_text   TEXT NOT NULL DEFAULT '',
-  status        TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
-  error_message TEXT,
-  cost_usd      NUMERIC(12,8) NOT NULL DEFAULT 0,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id              BIGSERIAL PRIMARY KEY,
+  task_id         TEXT,
+  batch_id        TEXT NOT NULL REFERENCES batch_jobs(batch_id) ON DELETE CASCADE,
+  org_id          TEXT,
+  task_index      INT NOT NULL DEFAULT 0,
+  input           TEXT NOT NULL DEFAULT '',
+  input_text      TEXT NOT NULL DEFAULT '',
+  output          TEXT,
+  output_text     TEXT NOT NULL DEFAULT '',
+  system_prompt   TEXT,
+  response_format TEXT,
+  response_schema JSONB,
+  file_ids_json   JSONB NOT NULL DEFAULT '[]',
+  session_id      TEXT,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
+  error_message   TEXT,
+  error           TEXT,
+  cost_usd        NUMERIC(12,8) NOT NULL DEFAULT 0,
+  latency_ms      INT NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS workflows (
@@ -814,9 +904,16 @@ CREATE TABLE IF NOT EXISTS security_events (
 
 CREATE TABLE IF NOT EXISTS security_scans (
   id            BIGSERIAL PRIMARY KEY,
+  scan_id       TEXT,
   org_id        TEXT NOT NULL,
+  agent_name    TEXT NOT NULL DEFAULT '',
   scan_type     TEXT NOT NULL DEFAULT '',
   status        TEXT NOT NULL DEFAULT 'pending',
+  risk_score    NUMERIC(5,4) NOT NULL DEFAULT 0,
+  risk_level    TEXT NOT NULL DEFAULT 'low',
+  total_probes  INT NOT NULL DEFAULT 0,
+  passed        INT NOT NULL DEFAULT 0,
+  failed        INT NOT NULL DEFAULT 0,
   findings_json JSONB NOT NULL DEFAULT '[]',
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -1201,8 +1298,10 @@ CREATE TABLE IF NOT EXISTS voice_numbers (
 
 CREATE TABLE IF NOT EXISTS evolution_proposals (
   id                 TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  proposal_id        TEXT,
   org_id             TEXT NOT NULL,
   agent_name         TEXT NOT NULL DEFAULT '',
+  title              TEXT NOT NULL DEFAULT '',
   category           TEXT NOT NULL DEFAULT '',
   rationale          TEXT NOT NULL DEFAULT '',
   config_diff_json   JSONB NOT NULL DEFAULT '{}',
@@ -1230,11 +1329,12 @@ CREATE TABLE IF NOT EXISTS evolution_ledger (
 );
 
 CREATE TABLE IF NOT EXISTS evolution_reports (
-  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id      TEXT NOT NULL,
-  agent_name  TEXT NOT NULL DEFAULT '',
-  report_json JSONB NOT NULL DEFAULT '{}',
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id        TEXT NOT NULL,
+  agent_name    TEXT NOT NULL DEFAULT '',
+  session_count INT NOT NULL DEFAULT 0,
+  report_json   JSONB NOT NULL DEFAULT '{}',
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS evolution_schedules (
@@ -1243,7 +1343,12 @@ CREATE TABLE IF NOT EXISTS evolution_schedules (
   agent_name      TEXT NOT NULL DEFAULT '',
   schedule_type   TEXT NOT NULL DEFAULT '',
   cron_expression TEXT NOT NULL DEFAULT '',
+  interval_days   INT NOT NULL DEFAULT 7,
+  min_sessions    INT NOT NULL DEFAULT 10,
   is_active       BOOLEAN NOT NULL DEFAULT true,
+  enabled         BOOLEAN NOT NULL DEFAULT true,
+  last_run_at     TIMESTAMPTZ,
+  next_run_at     TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1280,13 +1385,16 @@ CREATE TABLE IF NOT EXISTS policy_templates (
 );
 
 CREATE TABLE IF NOT EXISTS risk_profiles (
-  id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id       TEXT NOT NULL,
-  agent_name   TEXT NOT NULL DEFAULT '',
-  risk_score   NUMERIC(5,4) NOT NULL DEFAULT 0,
-  factors_json JSONB NOT NULL DEFAULT '{}',
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id               TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id           TEXT NOT NULL,
+  agent_name       TEXT NOT NULL DEFAULT '',
+  risk_score       NUMERIC(5,4) NOT NULL DEFAULT 0,
+  risk_level       TEXT NOT NULL DEFAULT 'low',
+  last_scan_id     TEXT,
+  factors_json     JSONB NOT NULL DEFAULT '{}',
+  findings_summary JSONB NOT NULL DEFAULT '{}',
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================================
@@ -1317,21 +1425,37 @@ CREATE TABLE IF NOT EXISTS dlp_agent_policies (
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS slo_definitions (
-  id            TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id        TEXT NOT NULL,
-  name          TEXT NOT NULL DEFAULT '',
-  target_value  NUMERIC(8,4) NOT NULL DEFAULT 0,
-  metric_type   TEXT NOT NULL DEFAULT '',
-  window_days   INT NOT NULL DEFAULT 30,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  slo_id         TEXT,
+  org_id         TEXT NOT NULL,
+  agent_name     TEXT NOT NULL DEFAULT '',
+  env            TEXT NOT NULL DEFAULT 'production',
+  name           TEXT NOT NULL DEFAULT '',
+  metric         TEXT NOT NULL DEFAULT '',
+  metric_type    TEXT NOT NULL DEFAULT '',
+  target_value   NUMERIC(8,4) NOT NULL DEFAULT 0,
+  target         NUMERIC(12,4) NOT NULL DEFAULT 0,
+  threshold      NUMERIC(12,4) NOT NULL DEFAULT 0,
+  operator       TEXT NOT NULL DEFAULT 'gte',
+  window_days    INT NOT NULL DEFAULT 30,
+  window_hours   INT NOT NULL DEFAULT 720,
+  window_seconds INT NOT NULL DEFAULT 2592000,
+  alert_on_breach BOOLEAN NOT NULL DEFAULT true,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS slo_evaluations (
   id           BIGSERIAL PRIMARY KEY,
+  eval_id      TEXT,
   org_id       TEXT NOT NULL,
   slo_id       TEXT NOT NULL REFERENCES slo_definitions(id) ON DELETE CASCADE,
+  agent_name   TEXT NOT NULL DEFAULT '',
+  metric       TEXT NOT NULL DEFAULT '',
   actual_value NUMERIC(8,4) NOT NULL DEFAULT 0,
+  threshold    NUMERIC(12,4) NOT NULL DEFAULT 0,
   target_met   BOOLEAN NOT NULL DEFAULT false,
+  breached     BOOLEAN NOT NULL DEFAULT false,
+  window_hours INT NOT NULL DEFAULT 720,
   evaluated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1342,6 +1466,8 @@ CREATE TABLE IF NOT EXISTS slo_error_budgets (
   month                TEXT NOT NULL DEFAULT '',
   budget_remaining_pct NUMERIC(8,4) NOT NULL DEFAULT 100,
   burn_rate            NUMERIC(8,4) NOT NULL DEFAULT 0,
+  total_evaluations    INT NOT NULL DEFAULT 0,
+  breaches             INT NOT NULL DEFAULT 0,
   created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (org_id, slo_id, month)
 );
@@ -1350,15 +1476,21 @@ CREATE TABLE IF NOT EXISTS alert_configs (
   id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id                TEXT NOT NULL,
   agent_name            TEXT,
-  alert_type            TEXT NOT NULL
-                        CHECK (alert_type IN ('error_rate', 'latency_p95', 'cost_daily',
-                                              'agent_down', 'webhook_failures', 'batch_failures')),
+  name                  TEXT NOT NULL DEFAULT '',
+  type                  TEXT NOT NULL DEFAULT '',
+  alert_type            TEXT NOT NULL DEFAULT 'error_rate',
   threshold             NUMERIC(12,4) NOT NULL DEFAULT 0,
   comparison            TEXT NOT NULL DEFAULT 'gte'
                         CHECK (comparison IN ('gte', 'lte', 'gt', 'lt')),
+  window_minutes        INT NOT NULL DEFAULT 60,
+  cooldown_minutes      INT NOT NULL DEFAULT 60,
   notification_channel  TEXT,
+  webhook_url           TEXT,
+  webhook_secret        TEXT,
   is_active             BOOLEAN NOT NULL DEFAULT true,
-  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  enabled               BOOLEAN NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS alert_history (
@@ -1392,25 +1524,30 @@ CREATE TABLE IF NOT EXISTS custom_domains (
 );
 
 CREATE TABLE IF NOT EXISTS webhooks (
-  id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id     TEXT NOT NULL,
-  url        TEXT NOT NULL DEFAULT '',
-  events     JSONB NOT NULL DEFAULT '[]',
-  secret     TEXT,
-  is_active  BOOLEAN NOT NULL DEFAULT true,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  webhook_id          TEXT,
+  org_id              TEXT NOT NULL,
+  url                 TEXT NOT NULL DEFAULT '',
+  events              JSONB NOT NULL DEFAULT '[]',
+  secret              TEXT,
+  codemode_handler_id TEXT,
+  is_active           BOOLEAN NOT NULL DEFAULT true,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
-  id            BIGSERIAL PRIMARY KEY,
-  webhook_id    TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
-  event_type    TEXT NOT NULL DEFAULT '',
-  payload_json  JSONB NOT NULL DEFAULT '{}',
-  status_code   INT,
-  response_body TEXT,
-  attempts      INT NOT NULL DEFAULT 0,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id              BIGSERIAL PRIMARY KEY,
+  webhook_id      TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
+  event_type      TEXT NOT NULL DEFAULT '',
+  payload_json    JSONB NOT NULL DEFAULT '{}',
+  status_code     INT,
+  response_status INT,
+  response_body   TEXT,
+  duration_ms     INT NOT NULL DEFAULT 0,
+  success         BOOLEAN,
+  attempts        INT NOT NULL DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS github_webhook_subscriptions (
@@ -1425,21 +1562,32 @@ CREATE TABLE IF NOT EXISTS github_webhook_subscriptions (
 
 CREATE TABLE IF NOT EXISTS file_uploads (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  file_id      TEXT,
   org_id       TEXT NOT NULL,
+  uploaded_by  TEXT,
   filename     TEXT NOT NULL DEFAULT '',
   content_type TEXT NOT NULL DEFAULT '',
   size_bytes   BIGINT NOT NULL DEFAULT 0,
   storage_key  TEXT NOT NULL DEFAULT '',
+  r2_key       TEXT,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS end_user_tokens (
   id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  token_id        TEXT,
   org_id          TEXT NOT NULL,
   token_hash      TEXT NOT NULL UNIQUE,
   user_identifier TEXT NOT NULL DEFAULT '',
+  end_user_id     TEXT NOT NULL DEFAULT '',
+  api_key_id      TEXT,
   scopes          JSONB NOT NULL DEFAULT '[]',
+  allowed_agents  JSONB NOT NULL DEFAULT '[]',
+  rate_limit_rpm  INT,
+  rate_limit_rpd  INT,
   is_active       BOOLEAN NOT NULL DEFAULT true,
+  revoked         BOOLEAN NOT NULL DEFAULT false,
+  is_revoked      BOOLEAN NOT NULL DEFAULT false,
   expires_at      TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -1448,10 +1596,13 @@ CREATE TABLE IF NOT EXISTS end_user_usage (
   id              BIGSERIAL PRIMARY KEY,
   org_id          TEXT NOT NULL,
   user_identifier TEXT NOT NULL DEFAULT '',
+  end_user_id     TEXT NOT NULL DEFAULT '',
   agent_name      TEXT NOT NULL DEFAULT '',
   session_id      TEXT,
   tokens_used     INT NOT NULL DEFAULT 0,
+  input_tokens    INT NOT NULL DEFAULT 0,
   cost_usd        NUMERIC(12,8) NOT NULL DEFAULT 0,
+  latency_ms      INT NOT NULL DEFAULT 0,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -1484,35 +1635,62 @@ CREATE TABLE IF NOT EXISTS user_feedback (
 );
 
 CREATE TABLE IF NOT EXISTS issues (
-  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id      TEXT NOT NULL,
-  agent_name  TEXT NOT NULL DEFAULT '',
-  title       TEXT NOT NULL DEFAULT '',
-  description TEXT NOT NULL DEFAULT '',
-  severity    TEXT NOT NULL DEFAULT 'medium',
-  status      TEXT NOT NULL DEFAULT 'open',
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  issue_id          TEXT,
+  org_id            TEXT NOT NULL,
+  agent_name        TEXT NOT NULL DEFAULT '',
+  title             TEXT NOT NULL DEFAULT '',
+  description       TEXT NOT NULL DEFAULT '',
+  issue_type        TEXT,
+  category          TEXT,
+  source            TEXT,
+  source_session_id TEXT,
+  suggested_fix     TEXT,
+  metadata_json     JSONB NOT NULL DEFAULT '{}',
+  severity          TEXT NOT NULL DEFAULT 'medium',
+  status            TEXT NOT NULL DEFAULT 'open',
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS feed_posts (
-  id         TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id     TEXT NOT NULL,
-  agent_name TEXT NOT NULL DEFAULT '',
-  post_type  TEXT NOT NULL DEFAULT '',
-  title      TEXT NOT NULL DEFAULT '',
-  content    TEXT NOT NULL DEFAULT '',
-  tags       JSONB NOT NULL DEFAULT '[]',
-  is_active  BOOLEAN NOT NULL DEFAULT true,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                 TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id             TEXT NOT NULL,
+  agent_name         TEXT NOT NULL DEFAULT '',
+  post_type          TEXT NOT NULL DEFAULT '',
+  title              TEXT NOT NULL DEFAULT '',
+  content            TEXT NOT NULL DEFAULT '',
+  body               TEXT NOT NULL DEFAULT '',
+  tags               JSONB NOT NULL DEFAULT '[]',
+  image_url          TEXT,
+  cta_text           TEXT,
+  cta_url            TEXT,
+  offer_discount_pct INT,
+  offer_price_usd    NUMERIC(12,8),
+  offer_expires_at   TIMESTAMPTZ,
+  views              INT NOT NULL DEFAULT 0,
+  clicks             INT NOT NULL DEFAULT 0,
+  is_active          BOOLEAN NOT NULL DEFAULT true,
+  is_promoted        BOOLEAN NOT NULL DEFAULT false,
+  promoted_until     TIMESTAMPTZ,
+  promotion_cost_usd NUMERIC(12,8),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS network_stats (
-  id                         BIGSERIAL PRIMARY KEY,
-  total_agents               INT NOT NULL DEFAULT 0,
-  total_sessions             INT NOT NULL DEFAULT 0,
-  total_marketplace_listings INT NOT NULL DEFAULT 0,
-  updated_at                 TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                           BIGSERIAL PRIMARY KEY,
+  total_agents                 INT NOT NULL DEFAULT 0,
+  total_sessions               INT NOT NULL DEFAULT 0,
+  total_marketplace_listings   INT NOT NULL DEFAULT 0,
+  total_orgs                   INT NOT NULL DEFAULT 0,
+  total_transactions_24h       INT NOT NULL DEFAULT 0,
+  total_volume_24h_usd         NUMERIC(12,8) NOT NULL DEFAULT 0,
+  total_transactions_all_time  INT NOT NULL DEFAULT 0,
+  total_volume_all_time_usd    NUMERIC(12,8) NOT NULL DEFAULT 0,
+  total_feed_posts             INT NOT NULL DEFAULT 0,
+  trending_categories          JSONB NOT NULL DEFAULT '[]',
+  updated_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS event_types (
@@ -1524,30 +1702,45 @@ CREATE TABLE IF NOT EXISTS event_types (
 );
 
 CREATE TABLE IF NOT EXISTS referrals (
-  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  referrer_org_id TEXT NOT NULL,
-  referred_org_id TEXT,
-  referral_code   TEXT NOT NULL DEFAULT '',
-  status          TEXT NOT NULL DEFAULT 'pending',
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                  TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  referrer_org_id     TEXT NOT NULL,
+  referred_org_id     TEXT,
+  referrer_user_id    TEXT NOT NULL DEFAULT '',
+  referral_code       TEXT NOT NULL DEFAULT '',
+  status              TEXT NOT NULL DEFAULT 'pending',
+  referral_activated  BOOLEAN NOT NULL DEFAULT false,
+  referred_task_count INT NOT NULL DEFAULT 0,
+  referred_volume_usd NUMERIC(12,8) NOT NULL DEFAULT 0,
+  activated_at        TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS referral_codes (
   id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id         TEXT NOT NULL,
+  user_id        TEXT NOT NULL DEFAULT '',
   code           TEXT NOT NULL UNIQUE,
+  label          TEXT NOT NULL DEFAULT '',
   commission_pct NUMERIC(5,2) NOT NULL DEFAULT 0,
+  uses           INT NOT NULL DEFAULT 0,
+  max_uses       INT,
   is_active      BOOLEAN NOT NULL DEFAULT true,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS referral_earnings (
-  id            BIGSERIAL PRIMARY KEY,
-  earner_org_id TEXT NOT NULL,
-  referral_id   TEXT NOT NULL,
-  amount_usd    NUMERIC(12,8) NOT NULL DEFAULT 0,
-  period        TEXT NOT NULL DEFAULT '',
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id               BIGSERIAL PRIMARY KEY,
+  earner_org_id    TEXT NOT NULL,
+  source_org_id    TEXT NOT NULL DEFAULT '',
+  referral_id      TEXT NOT NULL DEFAULT '',
+  transfer_id      TEXT NOT NULL DEFAULT '',
+  level            INT NOT NULL DEFAULT 1,
+  amount_usd       NUMERIC(12,8) NOT NULL DEFAULT 0,
+  platform_fee_usd NUMERIC(12,8) NOT NULL DEFAULT 0,
+  earning_usd      NUMERIC(12,8) NOT NULL DEFAULT 0,
+  earning_rate     NUMERIC(8,6) NOT NULL DEFAULT 0,
+  period           TEXT NOT NULL DEFAULT '',
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS meta_proposals (
@@ -1561,31 +1754,43 @@ CREATE TABLE IF NOT EXISTS meta_proposals (
 );
 
 CREATE TABLE IF NOT EXISTS canary_splits (
-  id          TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id      TEXT NOT NULL,
-  agent_name  TEXT NOT NULL DEFAULT '',
-  config_json JSONB NOT NULL DEFAULT '{}',
-  is_active   BOOLEAN NOT NULL DEFAULT true,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id              TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  org_id          TEXT NOT NULL,
+  agent_name      TEXT NOT NULL DEFAULT '',
+  primary_version TEXT,
+  canary_version  TEXT,
+  canary_weight   NUMERIC(5,4) NOT NULL DEFAULT 0,
+  config_json     JSONB NOT NULL DEFAULT '{}',
+  is_active       BOOLEAN NOT NULL DEFAULT true,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS release_channels (
   id           TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
   org_id       TEXT NOT NULL,
   agent_name   TEXT NOT NULL DEFAULT '',
+  channel      TEXT NOT NULL DEFAULT '',
   channel_name TEXT NOT NULL DEFAULT '',
+  version      TEXT,
+  promoted_by  TEXT,
+  promoted_at  TIMESTAMPTZ,
   config_json  JSONB NOT NULL DEFAULT '{}',
   is_active    BOOLEAN NOT NULL DEFAULT true,
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS retention_policies (
-  id             TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
-  org_id         TEXT NOT NULL,
-  resource_type  TEXT NOT NULL DEFAULT '',
-  retention_days INT NOT NULL DEFAULT 90,
-  is_active      BOOLEAN NOT NULL DEFAULT true,
-  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  policy_id             TEXT,
+  org_id                TEXT NOT NULL,
+  resource_type         TEXT NOT NULL DEFAULT '',
+  retention_days        INT NOT NULL DEFAULT 90,
+  redact_pii            BOOLEAN NOT NULL DEFAULT false,
+  redact_fields         JSONB NOT NULL DEFAULT '[]',
+  archive_before_delete BOOLEAN NOT NULL DEFAULT false,
+  is_active             BOOLEAN NOT NULL DEFAULT true,
+  enabled               BOOLEAN NOT NULL DEFAULT true,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS gold_images (
@@ -1714,6 +1919,70 @@ CREATE TABLE IF NOT EXISTS codemode_executions (
   status        TEXT NOT NULL DEFAULT 'pending',
   error_message TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================================
+-- SECTION 19a: RAG, missing tables, referral anti-gaming
+-- ============================================================================
+
+-- BM25 full-text search for RAG chunks (used by deploy/src/runtime/rag-hybrid.ts)
+CREATE TABLE IF NOT EXISTS rag_chunks (
+  id             TEXT PRIMARY KEY,
+  source         TEXT NOT NULL DEFAULT '',
+  pipeline       TEXT NOT NULL DEFAULT '',
+  org_id         TEXT NOT NULL DEFAULT '',
+  agent_name     TEXT NOT NULL DEFAULT '',
+  chunk_index    INT NOT NULL DEFAULT 0,
+  chunk_type     TEXT NOT NULL DEFAULT '',
+  text           TEXT NOT NULL DEFAULT '',
+  context_prefix TEXT NOT NULL DEFAULT '',
+  tsv            TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', coalesce(context_prefix, '') || ' ' || coalesce(text, ''))) STORED
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_tsv ON rag_chunks USING GIN (tsv);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_org_id ON rag_chunks(org_id);
+CREATE INDEX IF NOT EXISTS idx_rag_chunks_source ON rag_chunks(source);
+
+CREATE TABLE IF NOT EXISTS security_scan_findings (
+  id          BIGSERIAL PRIMARY KEY,
+  scan_id     TEXT NOT NULL,
+  org_id      TEXT NOT NULL,
+  agent_name  TEXT NOT NULL DEFAULT '',
+  probe_id    TEXT NOT NULL DEFAULT '',
+  probe_name  TEXT NOT NULL DEFAULT '',
+  category    TEXT NOT NULL DEFAULT '',
+  severity    TEXT NOT NULL DEFAULT 'info',
+  description TEXT NOT NULL DEFAULT '',
+  passed      BOOLEAN NOT NULL DEFAULT true,
+  response    TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS audit_log_archive (
+  id          BIGSERIAL PRIMARY KEY,
+  archive_key TEXT NOT NULL DEFAULT '',
+  org_id      TEXT NOT NULL,
+  row_count   INT NOT NULL DEFAULT 0,
+  data_json   JSONB NOT NULL DEFAULT '[]',
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS transfer_pairs (
+  id          BIGSERIAL PRIMARY KEY,
+  from_org_id TEXT NOT NULL,
+  to_org_id   TEXT NOT NULL,
+  amount_usd  NUMERIC(12,8) NOT NULL DEFAULT 0,
+  transfer_id TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS transfer_rate_limits (
+  org_id           TEXT PRIMARY KEY,
+  transfers_this_hour INT NOT NULL DEFAULT 0,
+  hour_window      TIMESTAMPTZ NOT NULL DEFAULT date_trunc('hour', NOW()),
+  volume_today_usd NUMERIC(12,8) NOT NULL DEFAULT 0,
+  day_window       DATE NOT NULL DEFAULT CURRENT_DATE,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================================
@@ -1933,6 +2202,18 @@ CREATE INDEX IF NOT EXISTS idx_langchain_tools_org_id ON langchain_tools(org_id)
 CREATE INDEX IF NOT EXISTS idx_schema_validation_errors_org_id ON schema_validation_errors(org_id);
 CREATE INDEX IF NOT EXISTS idx_codemode_executions_snippet_id ON codemode_executions(snippet_id);
 CREATE INDEX IF NOT EXISTS idx_codemode_executions_org_id ON codemode_executions(org_id);
+
+-- Missing tables indexes
+CREATE INDEX IF NOT EXISTS idx_security_scan_findings_scan_id ON security_scan_findings(scan_id);
+CREATE INDEX IF NOT EXISTS idx_security_scan_findings_org_id ON security_scan_findings(org_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_archive_org_id ON audit_log_archive(org_id);
+CREATE INDEX IF NOT EXISTS idx_transfer_pairs_orgs ON transfer_pairs(from_org_id, to_org_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_credit_transactions_reference_id ON credit_transactions(reference_id) WHERE reference_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_referral_earnings_transfer_id ON referral_earnings(transfer_id);
+CREATE INDEX IF NOT EXISTS idx_end_user_tokens_end_user_id ON end_user_tokens(org_id, end_user_id);
+CREATE INDEX IF NOT EXISTS idx_marketplace_listings_published ON marketplace_listings(is_published) WHERE is_published = true;
+CREATE INDEX IF NOT EXISTS idx_marketplace_listings_featured ON marketplace_listings(is_featured) WHERE is_featured = true;
+CREATE INDEX IF NOT EXISTS idx_feed_posts_promoted ON feed_posts(is_promoted) WHERE is_promoted = true;
 
 -- GIN indexes for JSONB query patterns
 CREATE INDEX IF NOT EXISTS idx_channel_configs_config_gin ON channel_configs USING GIN (config);
