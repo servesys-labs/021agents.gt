@@ -264,11 +264,11 @@ describe("observability ownership and maintenance contracts", () => {
       if (query.includes("FROM sessions") && query.includes("trace_id")) {
         return [{ session_id: "sess-1", status: "success", created_at: recentTs }];
       }
-      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ cnt: 1 }];
-      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ cnt: 2 }];
-      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ cnt: 0 }];
+      if (query.includes("COUNT(*) as cnt FROM turns")) return [{ session_id: "sess-1", cnt: 1 }];
+      if (query.includes("COUNT(*) as cnt FROM runtime_events")) return [{ session_id: "sess-1", cnt: 2 }];
+      if (query.includes("COUNT(*) as cnt FROM billing_records")) return [{ session_id: "sess-1", cnt: 0 }];
       if (query.includes("SUM(CASE WHEN event_type = 'turn_start'")) {
-        return [{ turn_start: 1, turn_end: 1, session_end: 1 }];
+        return [{ session_id: "sess-1", turn_start: 1, turn_end: 1, session_end: 1 }];
       }
       return [];
     }) as any;

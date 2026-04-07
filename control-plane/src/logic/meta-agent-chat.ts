@@ -149,7 +149,7 @@ const META_TOOLS: ToolDef[] = [
           description: { type: "string", description: "Agent description" },
           personality: { type: "string", description: "Personality/tone" },
           model: { type: "string", description: "Model identifier" },
-          plan: { type: "string", enum: ["basic", "standard", "premium"], description: "LLM plan tier — controls which models are used for different task types" },
+          plan: { type: "string", enum: ["free", "basic", "standard", "premium"], description: "LLM plan tier — controls which models are used for different task types" },
           routing: { type: "object", description: "Custom model routing overrides by category and role" },
           provider: { type: "string", description: "LLM provider (e.g. 'openrouter', 'openai', 'google-ai-studio'). Usually auto-detected from model name." },
           temperature: { type: "number", description: "Sampling temperature" },
@@ -1985,7 +1985,7 @@ async function executeTool(
 
         const subConfig = {
           system_prompt: systemPrompt,
-          model: String(args.model || parentConfig.model || "anthropic/claude-sonnet-4-6"),
+          model: String(args.model || parentConfig.model || "gemma-4-31b"),
           plan: parentConfig.plan || "standard",
           provider: parentConfig.provider || "openrouter",
           tools,
@@ -2695,7 +2695,7 @@ export async function runMetaChat(
         openrouterApiKey: ctx.openrouterApiKey,
       },
       {
-        model: "anthropic/claude-sonnet-4-6",
+        model: "gemma-4-31b",
         messages: llmMessages as any,
         tools: relevantTools,
         tool_choice: "auto",
@@ -2729,7 +2729,7 @@ export async function runMetaChat(
       llmMessages.push({ role: "assistant", content: msg.content || "" });
       turnRecords.push({
         turn: round,
-        model: "anthropic/claude-sonnet-4-6",
+        model: "gemma-4-31b",
         content: msg.content || "",
         input_tokens: turnInputTokens,
         output_tokens: turnOutputTokens,
@@ -2800,7 +2800,7 @@ export async function runMetaChat(
     // Record this turn
     turnRecords.push({
       turn: round,
-      model: "anthropic/claude-sonnet-4-6",
+      model: "gemma-4-31b",
       content: msg.content || "",
       input_tokens: turnInputTokens,
       output_tokens: turnOutputTokens,
@@ -2827,7 +2827,7 @@ export async function runMetaChat(
       INSERT INTO sessions (session_id, org_id, agent_name, model, status, input_text, output_text,
         step_count, action_count, cost_total_usd, wall_clock_seconds, created_at, ended_at)
       VALUES (
-        ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'anthropic/claude-sonnet-4-6',
+        ${sessionId}, ${ctx.orgId}, ${'meta:' + ctx.agentName}, 'gemma-4-31b',
         'success', ${userInput.slice(0, 2000)}, ${(lastAssistant?.content || "").slice(0, 5000)},
         ${round}, ${totalToolCalls}, ${totalCost}, ${0}, ${now}, ${now}
       )

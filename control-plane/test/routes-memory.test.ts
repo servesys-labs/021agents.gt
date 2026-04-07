@@ -159,12 +159,12 @@ describe("memory routes: working snapshot", () => {
     expect(payload.procedures?.[0]?.success_rate).toBe(0.75);
   });
 
-  it("facts list returns parsed JSON values", async () => {
+  it("facts list returns values from semantic_facts", async () => {
     const mockSql3 = (async (strings: TemplateStringsArray) => {
       const query = String(strings[0] || "");
       if (query.includes("FROM agents WHERE name")) return [{ "?column?": 1 }];
-      if (query.includes("SELECT key, value_json FROM facts")) {
-        return [{ key: "k1", value_json: "{\"v\":1}" }];
+      if (query.includes("SELECT key, value") || query.includes("FROM semantic_facts")) {
+        return [{ key: "k1", value: "{\"v\":1}", category: "reference" }];
       }
       return [];
     }) as any;
@@ -176,6 +176,6 @@ describe("memory routes: working snapshot", () => {
     const payload = await res.json() as { facts?: Array<{ key?: string; value?: unknown }>; total?: number };
     expect(payload.total).toBe(1);
     expect(payload.facts?.[0]?.key).toBe("k1");
-    expect(payload.facts?.[0]?.value).toEqual({ v: 1 });
+    expect(payload.facts?.[0]?.value).toBe("{\"v\":1}");
   });
 });

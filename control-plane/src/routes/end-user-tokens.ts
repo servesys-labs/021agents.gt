@@ -97,6 +97,7 @@ endUserTokenRoutes.openapi(mintTokenRoute, async (c): Promise<any> => {
   const expirySeconds = Math.min(req.expires_in_seconds ?? DEFAULT_EXPIRY_SECONDS, MAX_EXPIRY_SECONDS);
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = new Date((now + expirySeconds) * 1000).toISOString();
+  const parentApiKeyId = user.apiKeyId || user.user_id;
 
   // Create the JWT with end-user claims
   const token = await createToken(c.env.AUTH_JWT_SECRET, req.end_user_id, {
@@ -104,7 +105,8 @@ endUserTokenRoutes.openapi(mintTokenRoute, async (c): Promise<any> => {
     expiry_seconds: expirySeconds,
     extra: {
       type: "end_user",
-      api_key_id: user.user_id,
+      // Prefer key_id for API-key auth; fallback keeps legacy JWT flows working.
+      api_key_id: parentApiKeyId,
       allowed_agents: req.allowed_agents ?? [],
     },
   });
@@ -118,7 +120,7 @@ endUserTokenRoutes.openapi(mintTokenRoute, async (c): Promise<any> => {
       token_id, org_id, end_user_id, api_key_id, allowed_agents,
       rate_limit_rpm, rate_limit_rpd, expires_at, revoked, created_at
     ) VALUES (
-      ${tokenId}, ${user.org_id}, ${req.end_user_id}, ${user.user_id},
+      ${tokenId}, ${user.org_id}, ${req.end_user_id}, ${parentApiKeyId},
       ${req.allowed_agents ?? []},
       ${req.rate_limit_rpm ?? 60}, ${req.rate_limit_rpd ?? 10000},
       ${expiresAt}, ${false}, ${new Date().toISOString()}

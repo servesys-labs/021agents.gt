@@ -232,6 +232,7 @@ function makeSql() {
 
     return [];
   };
+  sql.begin = async (fn: any) => fn(sql);
   return sql;
 }
 

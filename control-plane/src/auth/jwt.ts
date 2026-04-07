@@ -101,6 +101,7 @@ export async function verifyToken(secret: string, token: string): Promise<TokenC
     if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
 
     return {
+      ...payload,
       sub: payload.sub ?? "",
       email: payload.email ?? "",
       name: payload.name ?? "",

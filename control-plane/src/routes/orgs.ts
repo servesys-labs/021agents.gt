@@ -140,7 +140,7 @@ orgRoutes.openapi(createOrgRoute, async (c): Promise<any> => {
         ${orgId},
         ${"free"},
         ${JSON.stringify({ onboarding_complete: false, default_connectors: [] })},
-        ${JSON.stringify({ max_agents: 3, max_runs_per_month: 1000, max_seats: 1 })},
+        ${JSON.stringify({ max_agents: 50, max_runs_per_month: 1000, max_seats: 1 })},
         ${JSON.stringify(["basic_agents", "basic_observability"])},
         ${now},
         ${now}

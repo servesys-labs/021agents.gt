@@ -499,7 +499,7 @@ async function resolveEndUserToken(claims: TokenClaims, env: Env): Promise<Curre
   // Look up the token in the DB to verify it's not revoked
   const sql = await getDb(env.HYPERDRIVE);
   const rows = await sql`
-    SELECT token_id, allowed_agents, rate_limit_rpm, rate_limit_rpd, revoked, expires_at
+    SELECT token_id, api_key_id, allowed_agents, rate_limit_rpm, rate_limit_rpd, revoked, expires_at
     FROM end_user_tokens
     WHERE org_id = ${orgId} AND end_user_id = ${endUserId} AND api_key_id = ${apiKeyId}
       AND revoked = false AND expires_at > now()
@@ -525,6 +525,29 @@ async function resolveEndUserToken(claims: TokenClaims, env: Env): Promise<Curre
     }
   } catch {}
 
+  // Inherit parent API key IP allowlist for end-user tokens.
+  let ipAllowlist: string[] = [];
+  try {
+    if (row.api_key_id) {
+      const keyRows = await sql`
+        SELECT ip_allowlist FROM api_keys
+        WHERE org_id = ${orgId} AND key_id = ${String(row.api_key_id)} AND is_active = true
+        LIMIT 1
+      `;
+      const allow = keyRows[0]?.ip_allowlist;
+      if (Array.isArray(allow)) {
+        ipAllowlist = allow.filter((v: unknown) => typeof v === "string" && v.length > 0);
+      } else if (typeof allow === "string" && allow.trim()) {
+        try {
+          const parsed = JSON.parse(allow);
+          if (Array.isArray(parsed)) {
+            ipAllowlist = parsed.filter((v: unknown) => typeof v === "string" && v.length > 0);
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
   return {
     user_id: endUserId,
     email: "",
@@ -538,6 +561,7 @@ async function resolveEndUserToken(claims: TokenClaims, env: Env): Promise<Curre
     rateLimitRpm: Number(row.rate_limit_rpm) || 60,
     rateLimitRpd: Number(row.rate_limit_rpd) || 10000,
     allowedAgents: allowedAgents.length > 0 ? allowedAgents : undefined,
+    ipAllowlist: ipAllowlist.length > 0 ? ipAllowlist : undefined,
     endUserApiKeyId: apiKeyId,
   };
 }

@@ -201,6 +201,7 @@ const agentRunRoute = createRoute({
             input: z.string().min(1).openapi({ example: "Hello" }),
             message: z.string().optional(),
             task: z.string().optional(),
+            plan: z.enum(["free", "basic", "standard", "premium"]).optional(),
             history: z.array(z.record(z.unknown())).optional(),
           }),
         },
@@ -226,21 +227,24 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
     return c.json({ error: "agent_name and input are required" }, 400);
   }
 
-  // Credit gate: verify org has credits before running
+  // Credit gate: verify org has credits before running (skip for free plan — zero cost)
   const orgId = user.org_id;
-  try {
-    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
-    const hasEnough = await hasCredits(creditSql, orgId, 1);
-    if (!hasEnough) {
-      return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
-        code: "insufficient_credits",
-        balance_cents: 0,
-      }, 402);
+  const requestedPlan = String(body.plan || "").toLowerCase();
+  if (requestedPlan !== "free") {
+    try {
+      const creditSql = await getDbForOrg(c.env.HYPERDRIVE, orgId);
+      const hasEnough = await hasCredits(creditSql, orgId, 1);
+      if (!hasEnough) {
+        return c.json({
+          error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+          code: "insufficient_credits",
+          balance_cents: 0,
+        }, 402);
+      }
+    } catch (err) {
+      console.error("Credit check failed, denying run as precaution:", err);
+      return c.json({ error: "Credit check unavailable. Please try again.", code: "credit_check_error" }, 503);
     }
-  } catch (err) {
-    console.error("Credit check failed, denying run as precaution:", err);
-    return c.json({ error: "Credit check unavailable. Please try again.", code: "credit_check_error" }, 503);
   }
 
   try {
@@ -260,6 +264,7 @@ runtimeProxyRoutes.openapi(agentRunRoute, async (c): Promise<any> => {
           channel_user_id: user.user_id,
           api_key_id: user.apiKeyId ?? "",
           history: body.history,
+          ...(requestedPlan ? { plan: requestedPlan } : {}),
         }),
       }),
     ));
@@ -522,8 +527,9 @@ const streamRoute = createRoute({
             agent_name: z.string().min(1).openapi({ example: "my-agent" }),
             input: z.string().optional(),
             task: z.string().optional(),
-            plan: z.enum(["basic", "standard", "premium"]).optional(),
+            plan: z.enum(["free", "basic", "standard", "premium"]).optional(),
             session_id: z.string().optional(),
+            conversation_id: z.string().optional(),
             history: z.array(z.object({
               role: z.enum(["user", "assistant", "system"]),
               content: z.string(),
@@ -551,21 +557,24 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
     return c.json({ error: "agent_name is required" }, 400);
   }
 
-  // Credit gate: verify org has credits before streaming
+  // Credit gate: verify org has credits before streaming (skip for free plan)
   const streamOrgId = user.org_id;
-  try {
-    const creditSql = await getDbForOrg(c.env.HYPERDRIVE, streamOrgId);
-    const hasEnough = await hasCredits(creditSql, streamOrgId, 1);
-    if (!hasEnough) {
-      return c.json({
-        error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
-        code: "insufficient_credits",
-        balance_cents: 0,
-      }, 402);
+  const streamPlan = String(body.plan || "").toLowerCase();
+  if (streamPlan !== "free") {
+    try {
+      const creditSql = await getDbForOrg(c.env.HYPERDRIVE, streamOrgId);
+      const hasEnough = await hasCredits(creditSql, streamOrgId, 1);
+      if (!hasEnough) {
+        return c.json({
+          error: "Insufficient credits. Purchase credits at https://app.oneshots.co/settings?tab=billing",
+          code: "insufficient_credits",
+          balance_cents: 0,
+        }, 402);
+      }
+    } catch (err) {
+      console.error("Credit check failed, denying stream as precaution:", err);
+      return c.json({ error: "Credit check unavailable. Please try again.", code: "credit_check_error" }, 503);
     }
-  } catch (err) {
-    console.error("Credit check failed, denying stream as precaution:", err);
-    return c.json({ error: "Credit check unavailable. Please try again.", code: "credit_check_error" }, 503);
   }
 
   // Check runtime health first
@@ -603,6 +612,7 @@ runtimeProxyRoutes.openapi(streamRoute, async (c): Promise<any> => {
     project_id: user.project_id,
     channel_user_id: user.user_id,
     channel: "portal",
+    ...(streamPlan ? { plan: streamPlan } : {}),
   };
 
   try {

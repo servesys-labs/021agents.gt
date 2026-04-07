@@ -58,8 +58,12 @@ export const apiKeyRateLimitMiddleware = createMiddleware<{
   // Portal JWT users are rate-limited by the global middleware, not here
   if (user.auth_method !== "api_key" && user.auth_method !== "end_user_token") return next();
 
-  // Use user_id + org_id + auth_method as rate limit key
-  const rateKey = `${user.org_id}:${user.user_id}:${user.auth_method}`;
+  // Use key-anchored subjects so distinct API keys do not share limits.
+  // End-user tokens are bucketed by parent key + end-user id.
+  const rateSubject = user.auth_method === "api_key"
+    ? (user.apiKeyId || user.user_id)
+    : `${user.endUserApiKeyId || "unknown-key"}:${user.user_id}`;
+  const rateKey = `${user.org_id}:${rateSubject}:${user.auth_method}`;
 
   const minBucket = getMinuteBucket();
   const dayBucket = getDayBucket();
