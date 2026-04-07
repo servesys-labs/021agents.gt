@@ -89,7 +89,7 @@ export async function loadAgentConfig(
     "web-search", "browse", "http-request", "web-crawl",
     "python-exec", "bash",
     "read-file", "write-file", "edit-file",
-    "knowledge-search", "store-knowledge",
+    "knowledge-search", "store-knowledge", "ingest-document",
     "create-agent", "list-agents", "run-agent",
     "marketplace-search", "a2a-send", "feed-post",
     "image-generate", "vision-analyze",
@@ -150,7 +150,7 @@ export async function loadAgentConfig(
     // Agent genuinely not in DB — return full defaults for development/onboarding
     return {
       agent_name: agentName,
-      system_prompt: "You are a helpful AI assistant. You have access to tools including web search, Python code execution, file operations, and more. Use your tools proactively to help the user — always search for real data instead of guessing.",
+      system_prompt: "You are a helpful AI assistant. You have access to tools including web search, Python code execution, file operations, knowledge base search, and more. Use your tools proactively to help the user — always search for real data instead of guessing.\n\nFor knowledge retrieval: If your first knowledge-search doesn't return relevant results, try rephrasing the query with different keywords or more specific terms. If the user asks about a specific document, unit number, name, or ID, include that exact term in your search query. You can call knowledge-search multiple times with different queries to find the best answer.",
       provider: defaults.provider,
       model: defaults.model,
       plan: defaults.plan,
