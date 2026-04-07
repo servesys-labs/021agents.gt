@@ -203,7 +203,7 @@ export async function loadAgentConfig(
   if (resolvedModel && !resolvedModel.includes("/") && !resolvedModel.startsWith("@cf/")) {
     console.warn(`[config:${agentName}] Model '${resolvedModel}' missing provider prefix (e.g. 'openai/gpt-5.4-mini') — may fail at LLM call`);
   }
-  const VALID_PLANS = new Set(["basic", "standard", "premium"]);
+  const VALID_PLANS = new Set(["free", "basic", "standard", "premium"]);
   const resolvedPlan = String(cfg.plan || defaults.plan);
   if (resolvedPlan && !VALID_PLANS.has(resolvedPlan)) {
     console.warn(`[config:${agentName}] Unknown plan '${resolvedPlan}' — falling back to 'standard' routing`);
@@ -261,46 +261,63 @@ export async function loadAgentConfig(
 // Single agentic loop: LLM → tools → LLM → tools → answer.
 // No per-task classification needed — the model handles everything.
 // Agent can override with config_json.model.
+// ── MVP Mode: All plans route to self-hosted Gemma 4 models ──────────
+// Zero LLM cost. Optimized for cheaper models so when better models come,
+// they'll only perform better. Three endpoints:
+//   MoE 26B @ 166 t/s (fast.oneshots.co) — simple, moderate, tool_call
+//   Dense 31B @ 42 t/s (gemma4.oneshots.co) — complex reasoning, 256K ctx
+//   Workers AI MoE (edge) — fallback if tunnels are down
+//
+// When ready to monetize, uncomment the paid plan routes below.
+const GEMMA_FAST = { model: "gemma-4-26b-moe", provider: "custom-gemma4-fast" };
+const GEMMA_DEEP = { model: "gemma-4-31b", provider: "custom-gemma4-local" };
+const GEMMA_EDGE = { model: "@cf/google/gemma-4-26b-a4b-it", provider: "workers-ai" };
+
 const PLAN_ROUTING: Record<string, Record<string, Record<string, { model: string; provider: string }>>> = {
-  // ── Basic: DeepSeek V3.2 via OpenRouter ($0.26/$0.38 per M tokens) ──
-  // ~90% of GPT-5.4 quality at 1/50th the cost of Sonnet.
-  // Uses agentic task synthesis pipeline for strong tool calling.
-  // Handles our full 17K system prompt (128K context).
-  // Cost per interaction: ~$0.005 (vs $0.15 for Sonnet standard plan).
+  free: {
+    general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    multimodal: { vision: GEMMA_DEEP },
+  },
   basic: {
-    general: {
-      simple: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
-      moderate: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
-      complex: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
-      tool_call: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
-    },
-    multimodal: { vision: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" } },
+    general: { simple: GEMMA_FAST, moderate: GEMMA_FAST, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    multimodal: { vision: GEMMA_DEEP },
   },
-  // ── Standard: Haiku for simple/tool_call (fast, cheap), Sonnet for reasoning ──
-  // Haiku 4.5: $0.80/$4.00 per M — 75% cheaper than Sonnet for tool routing.
-  // Tool calls are routing decisions that don't need Sonnet-level reasoning.
-  // Simple questions also get Haiku (fast) — user upgrades to Premium for all-Sonnet.
   standard: {
-    general: {
-      simple: { model: "anthropic/claude-haiku-4-5-20251001", provider: "openrouter" },
-      moderate: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
-      complex: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
-      tool_call: { model: "anthropic/claude-haiku-4-5-20251001", provider: "openrouter" },
-    },
-    multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
+    general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    multimodal: { vision: GEMMA_DEEP },
   },
-  // ── Premium: Haiku for tool routing, Sonnet for moderate, Opus for complex ──
-  // Tool calls still use Haiku — speed matters more than reasoning for routing.
-  // Users pay for Opus reasoning on complex tasks, not on tool dispatch.
   premium: {
-    general: {
-      simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
-      moderate: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
-      complex: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
-      tool_call: { model: "anthropic/claude-haiku-4-5-20251001", provider: "openrouter" },
-    },
-    multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
+    general: { simple: GEMMA_FAST, moderate: GEMMA_DEEP, complex: GEMMA_DEEP, tool_call: GEMMA_FAST },
+    multimodal: { vision: GEMMA_DEEP },
   },
+  // ── Paid plans (uncomment when ready to monetize) ──────────────────
+  // basic_paid: {
+  //   general: {
+  //     simple: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
+  //     moderate: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
+  //     complex: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
+  //     tool_call: { model: "deepseek/deepseek-v3.2", provider: "openrouter" },
+  //   },
+  //   multimodal: { vision: { model: "google/gemini-3.1-flash-lite-preview", provider: "openrouter" } },
+  // },
+  // standard_paid: {
+  //   general: {
+  //     simple: { model: "anthropic/claude-haiku-4.5", provider: "openrouter" },
+  //     moderate: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+  //     complex: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+  //     tool_call: { model: "anthropic/claude-haiku-4.5", provider: "openrouter" },
+  //   },
+  //   multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
+  // },
+  // premium_paid: {
+  //   general: {
+  //     simple: { model: "anthropic/claude-sonnet-4-6", provider: "openrouter" },
+  //     moderate: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
+  //     complex: { model: "anthropic/claude-opus-4-6", provider: "openrouter" },
+  //     tool_call: { model: "anthropic/claude-haiku-4.5", provider: "openrouter" },
+  //   },
+  //   multimodal: { vision: { model: "google/gemini-3.1-pro-preview", provider: "openrouter" } },
+  // },
 };
 
 /**
@@ -356,7 +373,7 @@ export async function writeSession(
         depth, step_count, action_count, wall_clock_seconds,
         cost_total_usd, created_at
       ) VALUES (
-        ${session.session_id}, ${session.org_id}, ${session.project_id},
+        ${session.session_id}, ${session.org_id || ""}, ${session.project_id},
         ${session.agent_name}, ${session.status},
         ${session.input_text}, ${session.output_text},
         ${session.model}, ${session.trace_id}, ${session.parent_session_id || ""},
@@ -562,21 +579,7 @@ export async function writeBillingRecord(
     }
   }
 
-  // Legacy metering table (optional schema) — non-fatal
-  try {
-    await sql`
-      INSERT INTO billing_events (
-        session_id, org_id, agent_name, model,
-        input_tokens, output_tokens, cost_usd, plan, created_at
-      ) VALUES (
-        ${sessionId}, ${orgId}, ${record.agent_name},
-        ${record.model}, ${record.input_tokens}, ${record.output_tokens},
-        ${record.cost_usd}, ${record.plan}, ${new Date().toISOString()}
-      )
-    `;
-  } catch {
-    /* billing_events may be missing or different shape */
-  }
+  // billing_events removed — billing_records is the single source of truth
 }
 
 /**
@@ -620,6 +623,7 @@ export async function writeEvalRun(
   hyperdrive: Hyperdrive,
   run: {
     agent_name: string;
+    org_id?: string;
     eval_name: string;
     total_tasks: number;
     total_trials: number;
@@ -632,68 +636,102 @@ export async function writeEvalRun(
     total_cost_usd: number;
     eval_conditions_json: string;
   },
-): Promise<number> {
+): Promise<string> {
   if (isBreakerOpen()) {
     console.warn(`[DB:breaker] Skipping writeEvalRun for ${run.agent_name}`);
-    return 0;
+    return "";
   }
   try {
     const sql = await getDb(hyperdrive);
-    // Try richer schema first, then degrade to the smaller shape.
-    try {
-      const rows = await sql<{ id: number }[]>`
-        INSERT INTO eval_runs (
-          agent_name, benchmark_name, protocol,
-          total_tasks, total_trials, pass_count, fail_count, error_count,
-          pass_rate, avg_score, avg_latency_ms, total_cost_usd,
-          eval_conditions_json, created_at
-        ) VALUES (
-          ${run.agent_name}, ${run.eval_name}, ${"edge_runtime"},
-          ${run.total_tasks}, ${run.total_trials}, ${run.pass_count}, ${run.fail_count}, ${run.error_count},
-          ${run.pass_rate}, ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd},
-          ${run.eval_conditions_json}, ${new Date().toISOString()}
-        )
-        RETURNING id
-      `;
-      recordDbSuccess();
-      return Number(rows?.[0]?.id || 0);
-    } catch {
+    // Resolve org_id: must exist in orgs table (FK constraint).
+    // If not provided, look up the first org as a fallback.
+    let orgId = (run.org_id || "").trim();
+    if (!orgId) {
       try {
-        const rows = await sql<{ id: number }[]>`
-          INSERT INTO eval_runs (
-            agent_name, total_tasks, total_trials, pass_rate,
-            avg_score, avg_latency_ms, total_cost_usd, created_at
-          ) VALUES (
-            ${run.agent_name}, ${run.total_tasks}, ${run.total_trials}, ${run.pass_rate},
-            ${run.avg_score}, ${run.avg_latency_ms}, ${run.total_cost_usd}, ${new Date().toISOString()}
-          )
-          RETURNING id
-        `;
-        recordDbSuccess();
-        return Number(rows?.[0]?.id || 0);
-      } catch {
-        return 0;
-      }
+        const fallback = await sql<{ org_id: string }[]>`SELECT org_id FROM orgs LIMIT 1`;
+        orgId = fallback?.[0]?.org_id || "";
+      } catch { /* ignore */ }
     }
+    if (orgId) {
+      const slug = `seed-${orgId.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase().slice(0, 24) || "org"}`;
+      await sql`
+        INSERT INTO orgs (org_id, name, slug, plan, created_at, updated_at)
+        VALUES (${orgId}, ${`Seed ${orgId.slice(0, 8)}`}, ${slug}, ${"free"}, NOW(), NOW())
+        ON CONFLICT (org_id) DO NOTHING
+      `;
+    } else {
+      orgId = `e2e-${crypto.randomUUID().slice(0, 12)}`;
+      const slug = `seed-${orgId.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase().slice(0, 24)}`;
+      await sql`
+        INSERT INTO orgs (org_id, name, slug, plan, created_at, updated_at)
+        VALUES (${orgId}, ${`Seed ${orgId.slice(0, 8)}`}, ${slug}, ${"free"}, NOW(), NOW())
+        ON CONFLICT (org_id) DO NOTHING
+      `;
+    }
+    if (!orgId) {
+      console.error(`[DB:breaker] writeEvalRun skipped: no valid org_id and no fallback org`);
+      return "";
+    }
+
+    let configJson: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(run.eval_conditions_json || "{}");
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        configJson = { ...parsed };
+      }
+    } catch {
+      configJson = {};
+    }
+
+    const evalRunId = crypto.randomUUID();
+    const resultsJson = {
+      total_tasks: run.total_tasks,
+      total_trials: run.total_trials,
+      pass_count: run.pass_count,
+      fail_count: run.fail_count,
+      error_count: run.error_count,
+      avg_score: run.avg_score,
+      avg_latency_ms: run.avg_latency_ms,
+      total_cost_usd: run.total_cost_usd,
+      pass_rate: run.pass_rate,
+    };
+
+    await sql`
+      INSERT INTO eval_runs (
+        eval_run_id, org_id, agent_name, status, config_json, results_json,
+        pass_rate, total_trials, passed_trials, created_at
+      ) VALUES (
+        ${evalRunId}, ${orgId}, ${run.agent_name}, ${"completed"},
+        ${JSON.stringify({ eval_name: run.eval_name, ...configJson })},
+        ${JSON.stringify(resultsJson)},
+        ${run.pass_rate}, ${run.total_trials}, ${run.pass_count}, ${new Date().toISOString()}
+      )
+    `;
+    recordDbSuccess();
+    return evalRunId;
   } catch (err) {
     recordDbFailure();
     console.error(`[DB:breaker] writeEvalRun failed: ${err instanceof Error ? err.message : err}`);
-    return 0;
+    return "";
   }
 }
 
 export async function writeEvalTrial(
   hyperdrive: Hyperdrive,
   trial: {
-    eval_run_id?: number;
-    eval_name: string;
+    eval_run_id?: string;
     agent_name: string;
-    trial_index: number;
+    org_id?: string;
+    task_name: string;
+    input: string;
+    expected: string;
+    actual: string;
     passed: boolean;
     score: number;
-    details_json: string;
-    trace_id: string;
-    session_id: string;
+    reasoning: string;
+    latency_ms: number;
+    cost_usd: number;
+    grader: string;
   },
 ): Promise<void> {
   if (isBreakerOpen()) {
@@ -702,38 +740,20 @@ export async function writeEvalTrial(
   }
   try {
     const sql = await getDb(hyperdrive);
-    // Best-effort — eval_trials schema may differ across environments.
-    try {
-      await sql`
-        INSERT INTO eval_trials (
-          eval_run_id, eval_name, agent_name, trial_index, passed, score, details_json,
-          trace_id, session_id, created_at
-        ) VALUES (
-          ${Number(trial.eval_run_id) || 0}, ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
-          ${trial.passed}, ${trial.score}, ${trial.details_json},
-          ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
-        )
-      `;
-      recordDbSuccess();
-      return;
-    } catch {
-      // Fall through to schemas without eval_run_id.
-    }
-    try {
-      await sql`
-        INSERT INTO eval_trials (
-          eval_name, agent_name, trial_index, passed, score, details_json,
-          trace_id, session_id, created_at
-        ) VALUES (
-          ${trial.eval_name}, ${trial.agent_name}, ${trial.trial_index},
-          ${trial.passed}, ${trial.score}, ${trial.details_json},
-          ${trial.trace_id}, ${trial.session_id}, ${new Date().toISOString()}
-        )
-      `;
-      recordDbSuccess();
-    } catch {
-      // Non-fatal for runtime execution.
-    }
+    const evalRunId = String(trial.eval_run_id || "").trim();
+    if (!evalRunId) return;
+    await sql`
+      INSERT INTO eval_trials (
+        eval_run_id, test_input, expected_output, actual_output,
+        passed, score, latency_ms, error_message, created_at
+      ) VALUES (
+        ${evalRunId}, ${trial.input}, ${trial.expected}, ${trial.actual},
+        ${trial.passed}, ${trial.score}, ${trial.latency_ms},
+        ${trial.reasoning || null},
+        ${new Date().toISOString()}
+      )
+    `;
+    recordDbSuccess();
   } catch (err) {
     recordDbFailure();
     console.error(`[DB:breaker] writeEvalTrial failed: ${err instanceof Error ? err.message : err}`);
@@ -750,28 +770,40 @@ export async function listEvalRuns(
   try {
     const rows = agentName
       ? await sql`
-        SELECT id, agent_name, pass_rate, avg_score, avg_latency_ms, total_cost_usd, total_tasks, total_trials
+        SELECT eval_run_id, agent_name, pass_rate, total_trials, passed_trials, status, config_json, results_json, created_at
         FROM eval_runs
         WHERE agent_name = ${agentName}
         ORDER BY created_at DESC
         LIMIT ${limit}
       `
       : await sql`
-        SELECT id, agent_name, pass_rate, avg_score, avg_latency_ms, total_cost_usd, total_tasks, total_trials
+        SELECT eval_run_id, agent_name, pass_rate, total_trials, passed_trials, status, config_json, results_json, created_at
         FROM eval_runs
         ORDER BY created_at DESC
         LIMIT ${limit}
       `;
-    return rows.map((r: any) => ({
-      run_id: Number(r.id || 0),
-      agent_name: String(r.agent_name || ""),
-      pass_rate: Number(r.pass_rate || 0),
-      avg_score: Number(r.avg_score || 0),
-      avg_latency_ms: Number(r.avg_latency_ms || 0),
-      total_cost_usd: Number(r.total_cost_usd || 0),
-      total_tasks: Number(r.total_tasks || 0),
-      total_trials: Number(r.total_trials || 0),
-    }));
+    return rows.map((r: any) => {
+      const cfg = typeof r.config_json === "string"
+        ? (parseJson(r.config_json) || {})
+        : (r.config_json || {});
+      const results = typeof r.results_json === "string"
+        ? (parseJson(r.results_json) || {})
+        : (r.results_json || {});
+      return {
+        run_id: String(r.eval_run_id || ""),
+        agent_name: String(r.agent_name || ""),
+        eval_name: String((cfg as Record<string, unknown>).eval_name || ""),
+        status: String(r.status || ""),
+        pass_rate: Number(r.pass_rate || 0),
+        avg_score: Number((results as Record<string, unknown>).avg_score || 0),
+        avg_latency_ms: Number((results as Record<string, unknown>).avg_latency_ms || 0),
+        total_cost_usd: Number((results as Record<string, unknown>).total_cost_usd || 0),
+        total_tasks: Number((results as Record<string, unknown>).total_tasks || 0),
+        total_trials: Number(r.total_trials || 0),
+        passed_trials: Number(r.passed_trials || 0),
+        created_at: String(r.created_at || ""),
+      };
+    });
   } catch {
     return [];
   }
@@ -779,26 +811,26 @@ export async function listEvalRuns(
 
 export async function getEvalRun(
   hyperdrive: Hyperdrive,
-  runId: number,
+  runId: string,
 ): Promise<Record<string, unknown> | null> {
   const sql = await getDb(hyperdrive);
-  const rid = Math.max(0, Math.floor(Number(runId) || 0));
-  if (rid <= 0) return null;
+  const rid = String(runId || "").trim();
+  if (!rid) return null;
   try {
     const rows = await sql`
       SELECT *
       FROM eval_runs
-      WHERE id = ${rid}
+      WHERE eval_run_id = ${rid}
       LIMIT 1
     `;
     if (!rows.length) return null;
     const row: Record<string, unknown> = { ...rows[0] };
     const out: Record<string, unknown> = {
-      run_id: Number((row.id as number) || 0),
+      run_id: String((row.eval_run_id as string) || ""),
       ...row,
     };
     try {
-      const raw = out.eval_conditions_json;
+      const raw = out.config_json;
       out.eval_conditions = typeof raw === "string" ? JSON.parse(raw) : (raw || {});
     } catch {
       out.eval_conditions = {};
@@ -811,28 +843,19 @@ export async function getEvalRun(
 
 export async function listEvalTrialsByRun(
   hyperdrive: Hyperdrive,
-  runId: number,
+  runId: string,
 ): Promise<Array<Record<string, unknown>>> {
   const sql = await getDb(hyperdrive);
-  const rid = Math.max(0, Math.floor(Number(runId) || 0));
-  if (rid <= 0) return [];
+  const rid = String(runId || "").trim();
+  if (!rid) return [];
   try {
     const rows = await sql`
       SELECT *
       FROM eval_trials
       WHERE eval_run_id = ${rid}
-      ORDER BY trial_index ASC, id ASC
+      ORDER BY created_at ASC, id ASC
     `;
-    return rows.map((row: any) => {
-      const out: Record<string, unknown> = { ...row };
-      try {
-        const raw = out.details_json;
-        out.details = typeof raw === "string" ? JSON.parse(raw) : (raw || {});
-      } catch {
-        out.details = {};
-      }
-      return out;
-    });
+    return rows.map((row: any) => ({ ...row }));
   } catch {
     return [];
   }
@@ -1958,59 +1981,32 @@ export async function queryUsage(
     total_turns: Number(s.total_turns) || 0,
     total_tool_calls: Number(s.total_tool_calls) || 0,
     total_cost_usd: Number(s.total_cost_usd) || 0,
-    total_input_tokens: 0, // Filled from billing_events below
+    total_input_tokens: 0,
     total_output_tokens: 0,
     total_wall_clock_seconds: Number(s.total_wall_clock_seconds) || 0,
     period_start: fromTs,
     period_end: toTs,
   };
 
-  // Token totals from billing_events (if available), else billing_records inference rows
+  // Token totals from billing_records (single source of truth)
   try {
-    let tokenRows: any[];
-    if (agentName) {
-      tokenRows = await sql`
-        SELECT COALESCE(SUM(input_tokens), 0) as total_in, COALESCE(SUM(output_tokens), 0) as total_out
-        FROM billing_events
-        WHERE org_id = ${orgId} AND agent_name = ${agentName}
-          AND created_at >= ${fromTs} AND created_at <= ${toTs}
-      `;
-    } else {
-      tokenRows = await sql`
-        SELECT COALESCE(SUM(input_tokens), 0) as total_in, COALESCE(SUM(output_tokens), 0) as total_out
-        FROM billing_events
-        WHERE org_id = ${orgId}
-          AND created_at >= ${fromTs} AND created_at <= ${toTs}
-      `;
-    }
-    summary.total_input_tokens = Number(tokenRows[0]?.total_in) || 0;
-    summary.total_output_tokens = Number(tokenRows[0]?.total_out) || 0;
-  } catch {
-    // billing_events table may not exist
-  }
-  if (summary.total_input_tokens === 0 && summary.total_output_tokens === 0) {
-    try {
-      let br: any[];
-      if (agentName) {
-        br = await sql`
+    const br = agentName
+      ? await sql`
           SELECT COALESCE(SUM(input_tokens), 0) as total_in, COALESCE(SUM(output_tokens), 0) as total_out
           FROM billing_records
           WHERE org_id = ${orgId} AND agent_name = ${agentName} AND cost_type = 'inference'
             AND created_at >= ${fromTs} AND created_at <= ${toTs}
-        `;
-      } else {
-        br = await sql`
+        `
+      : await sql`
           SELECT COALESCE(SUM(input_tokens), 0) as total_in, COALESCE(SUM(output_tokens), 0) as total_out
           FROM billing_records
           WHERE org_id = ${orgId} AND cost_type = 'inference'
             AND created_at >= ${fromTs} AND created_at <= ${toTs}
         `;
-      }
-      summary.total_input_tokens = Number(br[0]?.total_in) || 0;
-      summary.total_output_tokens = Number(br[0]?.total_out) || 0;
-    } catch {
-      /* billing_records may be missing */
-    }
+    summary.total_input_tokens = Number(br[0]?.total_in) || 0;
+    summary.total_output_tokens = Number(br[0]?.total_out) || 0;
+  } catch {
+    /* billing_records query failed — totals stay 0 */
   }
 
   // Paginated session list

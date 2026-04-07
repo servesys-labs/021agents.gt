@@ -203,10 +203,8 @@ export interface RuntimeEnv {
   CLOUDFLARE_API_TOKEN?: string;
   AI_GATEWAY_ID?: string;        // CF AI Gateway slug (e.g. "one-shots")
   AI_GATEWAY_TOKEN?: string;     // Gateway auth token (all providers, no BYOK needed)
-  BRAVE_SEARCH_KEY?: string;     // Brave Search API key (X-Subscription-Token)
   DEFAULT_PROVIDER: string;
   DEFAULT_MODEL: string;
-  OPENROUTER_API_KEY?: string;
   /** DO SQLite tagged template — passed from DO context for hibernation-safe file persistence. */
   DO_SQL?: any;
   /** DO instance name (session affinity key) — used as session_id for workspace persistence. */

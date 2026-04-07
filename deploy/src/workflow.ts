@@ -115,6 +115,8 @@ export interface AgentRunParams {
   plan_override?: string;
   /** Override the agent's tool list for this run — scopes a sub-agent to only these tools */
   tools_override?: string[];
+  /** Conversation ID for persistent chat history */
+  conversation_id?: string;
   /** DO session ID — used as stable sandbox identifier so hydrate-workspace and tools share the same container */
   do_session_id?: string;
   /** Pre-loaded config from DO — skips the Supabase query in bootstrap (saves 200-800ms) */
@@ -241,12 +243,12 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
         config = await loadAgentConfig(this.env.HYPERDRIVE, p.agent_name, {
           provider: this.env.DEFAULT_PROVIDER || "openrouter",
           model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
-          plan: "standard",
+          plan: this.env.DEFAULT_PLAN || "free",
         }, p.org_id || undefined);
       }
 
       // Apply plan override if provided (mid-session model switching)
-      if (p.plan_override && ["basic", "standard", "premium"].includes(p.plan_override)) {
+      if (p.plan_override && ["free", "basic", "standard", "premium"].includes(p.plan_override)) {
         config.plan = p.plan_override;
       }
 
@@ -482,6 +484,85 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
 - Tools available: ${bootstrap.tool_count}
 - Budget remaining: $${(config.budget_limit_usd - recoveredCost).toFixed(2)}
 - Date: ${new Date().toISOString().slice(0, 10)}` });
+
+    // Channel-aware response guidelines — adapt tone, format, and length per communication mode
+    const channelGuidelines: Record<string, string> = {
+      email: `## Channel: Email
+You are responding to an email. Adapt your response style:
+- Use a professional email format: greeting, body paragraphs, sign-off
+- Be thorough — email readers expect complete answers, not back-and-forth
+- Include relevant links, references, and attachments when helpful
+- Use proper formatting: paragraphs, bullet points, numbered lists
+- Keep a professional but warm tone
+- Sign off with the agent name, not "Best regards" or similar
+- Do NOT use markdown headers (##) — use plain text formatting that renders well in email clients
+- If you need more information, ask all your questions in one email rather than multiple follow-ups
+- Quote or reference the original email when relevant`,
+
+      telegram: `## Channel: Telegram
+You are responding in a Telegram chat. Adapt your response style:
+- Keep messages short and conversational — Telegram is a chat app
+- Use Telegram-compatible formatting: *bold*, _italic_, \`code\`, \`\`\`code blocks\`\`\`
+- Break long responses into multiple short paragraphs (not one wall of text)
+- Use emoji sparingly for clarity (✅ ❌ 📎 🔗) when they add meaning
+- Respond quickly and directly — chat users expect fast answers
+- If a task will take time, acknowledge first ("Looking into this...") then follow up`,
+
+      whatsapp: `## Channel: WhatsApp
+You are responding in WhatsApp. Adapt your response style:
+- Keep messages brief — WhatsApp users read on mobile phones
+- Maximum 1-2 short paragraphs per message
+- Use *bold* for emphasis (WhatsApp supports this)
+- Avoid long code blocks or technical formatting
+- Be conversational and friendly
+- If sharing links, put them on their own line
+- Use numbered lists for step-by-step instructions`,
+
+      slack: `## Channel: Slack
+You are responding in a Slack workspace. Adapt your response style:
+- Use Slack mrkdwn formatting: *bold*, _italic_, \`code\`, \`\`\`code blocks\`\`\`, >blockquotes
+- Keep responses focused and scannable — Slack users skim
+- Use threaded responses for complex topics (mention you'll follow up in thread)
+- For code: use code blocks with language hints
+- For data: use simple tables or bullet points
+- Reference channels with #channel-name and users with @username when relevant
+- Be professional but casual — match the workspace tone`,
+
+      instagram: `## Channel: Instagram DM
+You are responding to an Instagram direct message. Adapt your response style:
+- Keep it very short and casual — Instagram DMs are informal
+- 1-3 sentences per message maximum
+- Use emoji naturally (this is Instagram)
+- Don't use markdown or code formatting — it won't render
+- Be friendly, approachable, and conversational
+- If they need detailed help, suggest they email or visit the website`,
+
+      tiktok: `## Channel: TikTok DM
+You are responding to a TikTok direct message. Adapt your response style:
+- Ultra-brief — TikTok users expect quick, casual responses
+- 1-2 sentences max
+- Use emoji and casual language
+- No formatting, no code blocks, no bullet points
+- Be fun and energetic — match TikTok's vibe
+- For complex requests, provide a brief answer and suggest a better channel`,
+
+      voice: `## Channel: Voice Call
+You are responding on a phone call (text-to-speech). Adapt your response style:
+- Write responses meant to be SPOKEN ALOUD, not read
+- Use short, clear sentences — no run-on sentences
+- Avoid bullet points, numbered lists, or visual formatting
+- Don't say URLs or email addresses unless asked — they're hard to hear
+- Use conversational filler naturally: "Let me check that for you..."
+- Spell out abbreviations: "API" → "A-P-I"
+- Keep responses under 30 seconds of speech (~75 words)
+- Pause naturally between topics (use periods, not commas)`,
+    };
+
+    const channel = (p.channel || "web").toLowerCase();
+    const channelGuide = channelGuidelines[channel];
+    if (channelGuide) {
+      messages.push({ role: "system", content: channelGuide });
+    }
 
     if (bootstrap.reasoning_prompt) {
       messages.push({ role: "system", content: bootstrap.reasoning_prompt });
@@ -887,7 +968,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
                 AI: this.env.AI, HYPERDRIVE: this.env.HYPERDRIVE,
                 VECTORIZE: this.env.VECTORIZE, STORAGE: this.env.STORAGE,
                 SANDBOX: this.env.SANDBOX, LOADER: this.env.LOADER,
-                BROWSER: this.env.BROWSER, BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
+                BROWSER: this.env.BROWSER,
                 CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
                 CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
                 AI_GATEWAY_ID: this.env.AI_GATEWAY_ID,
@@ -896,7 +977,8 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
                 AGENT_PROGRESS_KV: this.env.AGENT_PROGRESS_KV,
                 SERVICE_TOKEN: (this.env as any).SERVICE_TOKEN,
                 CONTROL_PLANE_URL: (this.env as any).CONTROL_PLANE_URL,
-                OPENROUTER_API_KEY: (this.env as any).OPENROUTER_API_KEY,
+                LOCAL_SEARCH_URL: (this.env as any).LOCAL_SEARCH_URL,
+                // MVP: No paid model API keys — Gemma only
                 DO_SESSION_ID: p.do_session_id,
                 __agentConfig: config,
                 __channelUserId: p.channel_user_id || "",
@@ -1239,9 +1321,13 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
       trace_id: traceId,
     };
 
-    // Emit final done event
+    // Emit final done event (include conversation_id if present)
     await step.do("finalize", async () => {
-      await this.emit(p.progress_key, { type: "done", ...result });
+      await this.emit(p.progress_key, {
+        type: "done",
+        ...result,
+        ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
+      });
     });
 
     // Cloud C3.3: Compact KV progress events — remove intermediate events
@@ -1296,6 +1382,7 @@ export class AgentRunWorkflow extends WorkflowEntrypoint<Env, AgentRunParams> {
           compaction_count: compactionCount,
           trace_id: traceId,
           channel: p.channel || "workflow",
+          ...(p.conversation_id ? { conversation_id: p.conversation_id } : {}),
         },
       });
 

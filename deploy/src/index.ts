@@ -39,6 +39,91 @@ const MAX_INPUT_BYTES = 50_000;
 // container capacity is exhausted. Wraps every operation with a 30s deadline.
 const SANDBOX_ACQUIRE_TIMEOUT_MS = 30_000;
 
+// ── /cf/sandbox/exec warm pool leasing ──
+// Avoid random sandbox IDs per request, which causes frequent cold starts.
+// We keep a small deterministic lane pool and lease lanes briefly to spread load.
+const _cfExecLaneLeases = new Map<string, number>(); // lane -> lease expiry (ms)
+
+function _hashString(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0);
+}
+
+function _intFromEnv(raw: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const v = Math.floor(n);
+  if (v < min) return min;
+  if (v > max) return max;
+  return v;
+}
+
+function _cfExecPoolSize(env: Env): number {
+  return _intFromEnv((env as any).CF_EXEC_POOL_SIZE, 16, 2, 128);
+}
+
+function _cfExecLeaseMs(env: Env): number {
+  return _intFromEnv((env as any).CF_EXEC_LEASE_MS, 20_000, 2_000, 120_000);
+}
+
+function _cfExecWaitMs(env: Env): number {
+  return _intFromEnv((env as any).CF_EXEC_WAIT_MS, 5_000, 500, 30_000);
+}
+
+async function _acquireCfExecLane(
+  env: Env,
+  affinityKey: string,
+): Promise<{ lane: string; sandboxId: string }> {
+  const poolSize = _cfExecPoolSize(env);
+  const leaseMs = _cfExecLeaseMs(env);
+  const waitMs = _cfExecWaitMs(env);
+  const seed = _hashString(affinityKey) % poolSize;
+  const start = Date.now();
+
+  while (true) {
+    const now = Date.now();
+
+    // Deterministic probe order keeps request affinity while still allowing spillover.
+    for (let offset = 0; offset < poolSize; offset++) {
+      const idx = (seed + offset) % poolSize;
+      const lane = `lane-${idx}`;
+      const until = _cfExecLaneLeases.get(lane) || 0;
+      if (until <= now) {
+        _cfExecLaneLeases.set(lane, now + leaseMs);
+        return { lane, sandboxId: `cf-exec-${lane}` };
+      }
+    }
+
+    if (now - start > waitMs) {
+      // If all lanes are busy beyond wait budget, force-take earliest expiring lane.
+      let bestLane = "lane-0";
+      let bestUntil = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < poolSize; i++) {
+        const lane = `lane-${i}`;
+        const until = _cfExecLaneLeases.get(lane) || 0;
+        if (until < bestUntil) {
+          bestUntil = until;
+          bestLane = lane;
+        }
+      }
+      _cfExecLaneLeases.set(bestLane, now + leaseMs);
+      return { lane: bestLane, sandboxId: `cf-exec-${bestLane}` };
+    }
+
+    await new Promise((r) => setTimeout(r, 50 + Math.random() * 50));
+  }
+}
+
+function _releaseCfExecLane(lane: string): void {
+  const now = Date.now();
+  const until = _cfExecLaneLeases.get(lane) || 0;
+  if (until > now) _cfExecLaneLeases.set(lane, now);
+}
+
 function getTimedSandbox(namespace: any, sandboxId: string, opts?: any) {
   const raw = getSandbox(namespace, sandboxId, opts);
   const wrap = <T>(p: Promise<T>): Promise<T> =>
@@ -257,14 +342,12 @@ import type { RunOutput } from "./workflow";
 // ---------------------------------------------------------------------------
 
 export interface Env extends Cloudflare.Env {
-  OPENROUTER_API_KEY?: string;   // OpenRouter key (used via AI Gateway)
   AUTH_JWT_SECRET?: string;      // End-user JWT auth (portal, API clients)
   SERVICE_TOKEN?: string;        // Service-to-service auth (dispatch workers → main worker)
   CLOUDFLARE_ACCOUNT_ID?: string;
   CLOUDFLARE_API_TOKEN?: string;
   AI_GATEWAY_ID?: string;        // CF AI Gateway slug (e.g. "one-shots")
   AI_GATEWAY_TOKEN?: string;     // Dedicated gateway token (least-privilege)
-  BRAVE_SEARCH_KEY?: string;     // Brave Search API key
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_AGENT_NAME?: string;
   WHATSAPP_APP_SECRET?: string;   // Meta HMAC verification for WhatsApp webhooks
@@ -311,12 +394,12 @@ interface AgentConfig {
 }
 
 
-function normalizePlan(value?: string): string {
+function normalizePlan(value?: string, fallback: string = "free"): string {
   const raw = (value || "").trim().toLowerCase();
-  if (!raw) return "standard";
+  if (!raw) return fallback;
   if (raw === "balanced") return "standard";
   if (raw === "manual") return "manual";
-  return ["basic", "standard", "premium", "code", "dedicated", "private"].includes(raw) ? raw : "standard";
+  return ["free", "basic", "standard", "premium", "code", "dedicated", "private"].includes(raw) ? raw : fallback;
 }
 
 // ---------------------------------------------------------------------------
@@ -374,9 +457,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
 
   initialState: AgentState = {
     config: {
-      plan: "standard",
-      provider: "openrouter",
-      model: "deepseek/deepseek-chat-v3-0324",
+      plan: "free",
+      provider: "custom-gemma4-fast",
+      model: "gemma-4-26b-moe",
       orgId: "",
       projectId: "",
       maxTurns: 50,
@@ -669,11 +752,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
     } catch {}
 
     // Re-schedule for next checkpoint (30 seconds)
-    if (this.state.config.enableWorkspaceCheckpoints !== false) {
-      try {
-        await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
-      } catch {}
-    }
+    // (enableWorkspaceCheckpoints === false already returned above)
+    try {
+      await this.schedule(Date.now() + 30_000, "checkpointWorkspace");
+    } catch {}
   }
 
   /** Load harness.enable_checkpoints from Supabase and update DO state. Cached 5 minutes. */
@@ -686,7 +768,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const cfg = await loadAgentConfig(this.env.HYPERDRIVE, agentDbName.trim(), {
         provider: this.env.DEFAULT_PROVIDER || "openrouter",
         model: this.env.DEFAULT_MODEL || "openai/gpt-5.4-mini",
-        plan: "standard",
+        plan: this.env.DEFAULT_PLAN || "free",
       }, orgId || this.state.config.orgId || undefined);
       const on = cfg.enable_workspace_checkpoints !== false;
       this.setState({
@@ -1072,12 +1154,10 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
           STORAGE: this.env.STORAGE, SANDBOX: this.env.SANDBOX, LOADER: this.env.LOADER,
           TELEMETRY_QUEUE: this.env.TELEMETRY_QUEUE, BROWSER: this.env.BROWSER,
           AI_GATEWAY_ID: this.env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: this.env.AI_GATEWAY_TOKEN,
-          BRAVE_SEARCH_KEY: this.env.BRAVE_SEARCH_KEY,
           CLOUDFLARE_ACCOUNT_ID: this.env.CLOUDFLARE_ACCOUNT_ID,
           CLOUDFLARE_API_TOKEN: this.env.CLOUDFLARE_API_TOKEN,
-          OPENROUTER_API_KEY: this.env.OPENROUTER_API_KEY,
-          DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "openrouter",
-          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "openai/gpt-5.4-mini",
+          DEFAULT_PROVIDER: this.env.DEFAULT_PROVIDER || config.provider || "custom-gemma4-fast",
+          DEFAULT_MODEL: this.env.DEFAULT_MODEL || config.model || "gemma-4-26b-moe",
           DO_SQL: this.sql.bind(this), DO_SESSION_ID: this.name,
         };
 
@@ -1319,7 +1399,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   if (st.status === "complete") {
                     // Workflow finished but KV didn't get the done event — synthesize one
                     // Guard: only send if we haven't sent a done already in this run
-                    const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                    const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
                     const doneEvt = {
                       type: "done", output: out?.output || "", session_id: out?.session_id || "",
                       trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
@@ -1357,7 +1437,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   writeBillingRecord(this.env.HYPERDRIVE, {
                     session_id: events[i].session_id || "", org_id: data.org_id || "",
                     agent_name: wsAgentName, model: "workflow",
-                    input_tokens: 0, output_tokens: 0,
+                    input_tokens: events[i].input_tokens || 0,
+                    output_tokens: events[i].output_tokens || 0,
                     cost_usd: events[i].cost_usd || 0, plan: "standard",
                     trace_id: events[i].trace_id || "",
                   }, this.env.AGENT_PROGRESS_KV).catch(() => {});
@@ -1373,7 +1454,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               try {
                 const st = await instance.status();
                 if (st.status === "complete" && !doneSent) {
-                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
                   const doneEvt = {
                     type: "done", output: out?.output || "", session_id: out?.session_id || "",
                     trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
@@ -1415,7 +1496,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 const kvEvents = JSON.parse(await this.env.AGENT_PROGRESS_KV.get(progressKey) || "[]");
                 const kvHasDone = kvEvents.some((ev: any) => ev.type === "done");
                 if (!kvHasDone && !doneSent) {
-                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                  const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
                   const doneEvt = {
                     type: "done", output: out?.output || "", session_id: out?.session_id || "",
                     trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
@@ -1433,6 +1514,20 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
               }
             } catch {}
           }
+        }
+
+        // Emit KV poll loop telemetry (P0-5)
+        if (this.env.TELEMETRY_QUEUE) {
+          this.env.TELEMETRY_QUEUE.send({
+            type: "runtime_event",
+            event_type: "kv_poll_loop",
+            session_id: data.session_id || "",
+            org_id: data.org_id || "",
+            node_id: progressKey,
+            status: done ? "complete" : (connection.readyState !== 1 ? "client_disconnect" : "timeout"),
+            duration_ms: Date.now() - pollStart,
+            details: { poll_count: pollCount, kv_failures: kvConsecutiveFailures, degraded_notified: kvDegradedNotified },
+          }).catch(() => {});
         }
 
         // Best-effort cancellation on client disconnect.
@@ -1518,7 +1613,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
         try {
           const st = await instance.status();
           if (st.status === "complete") {
-            const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+            const out = (st as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
             // Save assistant response to conversation history
             if (out?.output) {
               this._appendConversationMessage("assistant", out.output, channel);
@@ -1530,7 +1625,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 await writeBillingRecord(this.env.HYPERDRIVE, {
                   session_id: out.session_id || "", org_id: this.state.config.orgId || "",
                   agent_name: this.state.config.agentName || "agentos", model: "workflow",
-                  input_tokens: 0, output_tokens: 0,
+                  input_tokens: out.input_tokens || 0,
+                  output_tokens: out.output_tokens || 0,
                   cost_usd: out.cost_usd, plan: "standard",
                   trace_id: out.trace_id || "",
                 }, this.env.AGENT_PROGRESS_KV).catch(() => {});
@@ -1691,6 +1787,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       const data = await request.json() as any;
       const inputText = String(data.input || "");
 
+      // Extract org_id from JWT if not supplied in body (mirrors WS auth at line 1026)
+      if (!data.org_id) {
+        try {
+          const authToken = (request.headers.get("Authorization") || "").slice(7).trim();
+          if (authToken && authToken.includes(".")) {
+            const payload = JSON.parse(atob(authToken.split(".")[1]));
+            if (payload.org_id) data.org_id = payload.org_id;
+          }
+        } catch {}
+      }
+
       // Input size guard
       if (new TextEncoder().encode(inputText).byteLength > MAX_INPUT_BYTES) {
         return Response.json({ error: "Message too large. Please keep your message under 50 KB.", code: "INPUT_TOO_LARGE" }, { status: 413 });
@@ -1795,16 +1902,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
             if (this.env.HYPERDRIVE) {
               const { writeBillingRecord, writeSession } = await import("./runtime/db");
               writeBillingRecord(this.env.HYPERDRIVE, {
-                session_id: result.session_id || "", org_id: data.org_id || "",
+                session_id: result.session_id || "", org_id: runOrgId,
                 agent_name: agentName, model: "workflow",
-                input_tokens: 0, output_tokens: 0,
+                input_tokens: result.input_tokens || 0,
+                output_tokens: result.output_tokens || 0,
                 cost_usd: result.cost_usd || 0, plan: "standard",
                 trace_id: result.trace_id || "",
                 billing_user_id: data.channel_user_id,
                 api_key_id: data.api_key_id,
               }, this.env.AGENT_PROGRESS_KV).catch(() => {});
               writeSession(this.env.HYPERDRIVE, {
-                session_id: result.session_id || "", org_id: data.org_id || "",
+                session_id: result.session_id || "", org_id: runOrgId,
                 project_id: data.project_id || "", agent_name: agentName,
                 status: "success", input_text: inputText,
                 output_text: result.output || "", model: "workflow",
@@ -1847,6 +1955,17 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
       }
       const data = await request.json() as any;
       const inputText = String(data.input || "");
+
+      // Extract org_id from JWT if not supplied in body
+      if (!data.org_id) {
+        try {
+          const authToken = (request.headers.get("Authorization") || "").slice(7).trim();
+          if (authToken && authToken.includes(".")) {
+            const payload = JSON.parse(atob(authToken.split(".")[1]));
+            if (payload.org_id) data.org_id = payload.org_id;
+          }
+        } catch {}
+      }
 
       // Input size guard
       if (new TextEncoder().encode(inputText).byteLength > MAX_INPUT_BYTES) {
@@ -1942,7 +2061,8 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                           writeBillingRecord(self.env.HYPERDRIVE, {
                             session_id: evt.session_id || "", org_id: orgId,
                             agent_name: agentName, model: "workflow",
-                            input_tokens: 0, output_tokens: 0,
+                            input_tokens: evt.input_tokens || 0,
+                            output_tokens: evt.output_tokens || 0,
                             cost_usd: costUsd, plan: "standard",
                             trace_id: evt.trace_id || "",
                           }, self.env.AGENT_PROGRESS_KV)
@@ -1985,7 +2105,7 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                 try {
                   const status = await instance.status();
                   if (status.status === "complete" && !done) {
-                    const out = (status as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number } | undefined;
+                    const out = (status as any).output as { output?: string; session_id?: string; trace_id?: string; cost_usd?: number; tool_calls?: number; input_tokens?: number; output_tokens?: number } | undefined;
                     const doneEvt = {
                       type: "done", output: out?.output || "", session_id: out?.session_id || "",
                       trace_id: out?.trace_id || "", cost_usd: out?.cost_usd || 0,
@@ -2128,7 +2248,9 @@ export class AgentOSAgent extends Agent<Env, AgentState> {
                   await writeBillingRecord(this.env.HYPERDRIVE, {
                     session_id: voiceSessionId, org_id: orgId,
                     agent_name: agentName, model: "workflow",
-                    input_tokens: 0, output_tokens: 0, cost_usd: voiceCost,
+                    input_tokens: voiceResult.input_tokens || 0,
+                    output_tokens: voiceResult.output_tokens || 0,
+                    cost_usd: voiceCost,
                     plan: "standard", trace_id: voiceResult.trace_id || "",
                   }, this.env.AGENT_PROGRESS_KV);
                   // Direct WS path must deduct (no control-plane in the loop)
@@ -2415,12 +2537,12 @@ export class AgentOSMcpServer extends Agent<Env> {
 
       const rows = effectiveOrgId
         ? await sql`
-            SELECT config_json, name, description FROM agents
+            SELECT config_json, name, description, org_id FROM agents
             WHERE name = ${agentName} AND org_id = ${effectiveOrgId} AND is_active = true
             LIMIT 1
           `
         : await sql`
-            SELECT config_json, name, description FROM agents
+            SELECT config_json, name, description, org_id FROM agents
             WHERE name = ${agentName} AND is_active = true
             LIMIT 1
           `;
@@ -2429,6 +2551,17 @@ export class AgentOSMcpServer extends Agent<Env> {
       let config: Record<string, unknown> = {};
       config = parseJsonColumn(rows[0].config_json);
       this._agentConfig = config;
+
+      // Ensure org_id from the agents table flows into the DO state and config
+      const dbOrgId = rows[0].org_id || "";
+      if (dbOrgId) {
+        this._orgId = dbOrgId;
+        // Merge into state.config so all code paths (REST, WS, billing) can find it
+        const st = this.state as AgentState;
+        if (!st.config.orgId) {
+          this.setState({ ...st, config: { ...st.config, orgId: dbOrgId } });
+        }
+      }
 
       // Build MCP tool definitions from agent's configured tools
       const configuredTools = Array.isArray(config.tools) ? (config.tools as string[]) : [];
@@ -2740,10 +2873,13 @@ async function runViaAgent(
   const userId = opts?.channel_user_id || "";
   const orgId = opts?.org_id || "";
   const sessionId = (opts as any)?.session_id || "";
-  const orgPrefix = orgId ? `${orgId}-` : "";
-  const doName = userId
-    ? `${orgPrefix}${agentName}-u-${userId}${sessionId ? `-s-${sessionId}` : ""}`
-    : `${orgPrefix}${agentName}${sessionId ? `-s-${sessionId}` : ""}`;
+  const shortOrg = orgId.length > 12 ? orgId.slice(-8) : orgId;
+  const shortUser = userId.length > 12 ? userId.slice(-8) : userId;
+  const orgPrefix = shortOrg ? `${shortOrg}-` : "";
+  let doName = shortUser
+    ? `${orgPrefix}${agentName}-u-${shortUser}`
+    : `${orgPrefix}${agentName}`;
+  if (doName.length > 63) doName = doName.slice(0, 63);
   const agentId = env.AGENTOS_AGENT.idFromName(doName);
   const agent = env.AGENTOS_AGENT.get(agentId);
   const headers: Record<string, string> = {
@@ -3085,6 +3221,16 @@ export default {
           delegation?: Record<string, unknown>;
           system_prompt_override?: string;
         };
+        // Extract org_id from JWT when not provided in body
+        if (!body.org_id) {
+          try {
+            const authToken = (request.headers.get("Authorization") || "").slice(7).trim();
+            if (authToken && authToken.includes(".")) {
+              const payload = JSON.parse(atob(authToken.split(".")[1]));
+              if (payload.org_id) body.org_id = payload.org_id;
+            }
+          } catch {}
+        }
         const result = await runViaAgent(env, body.agent_name || "agentos", body.input || "", {
           org_id: body.org_id,
           project_id: body.project_id,
@@ -3320,6 +3466,7 @@ export default {
               trialRows.push({
                 task_name: taskName, trial_number: trial,
                 score: grade.score, passed: grade.passed,
+                input,
                 latency_ms: Number(runResult.latency_ms || 0),
                 cost_usd: Number(runResult.cost_usd || 0),
                 tool_calls: Number(runResult.tool_calls || 0),
@@ -3336,8 +3483,9 @@ export default {
           const passRate = totalTrials > 0 ? passCount / totalTrials : 0;
           const avgScore = totalTrials > 0 ? totalScore / totalTrials : 0;
           const avgLatency = totalTrials > 0 ? totalLatency / totalTrials : 0;
+          const orgId = body.org_id || "";
           const dbEvalRunId = await writeEvalRun(env.HYPERDRIVE, {
-            agent_name: agentName, eval_name: evalName,
+            agent_name: agentName, org_id: orgId, eval_name: evalName,
             total_tasks: tasks.length, total_trials: totalTrials,
             pass_count: passCount, fail_count: Math.max(0, totalTrials - passCount),
             error_count: errorCount, pass_rate: passRate,
@@ -3346,10 +3494,13 @@ export default {
           });
           for (const row of trialRows) {
             await writeEvalTrial(env.HYPERDRIVE, {
-              eval_run_id: dbEvalRunId, eval_name: evalName, agent_name: agentName,
-              trial_index: row.trial_number, passed: row.passed, score: row.score,
-              details_json: JSON.stringify(row),
-              trace_id: row.trace_id, session_id: row.session_id,
+              eval_run_id: dbEvalRunId, agent_name: agentName, org_id: orgId,
+              task_name: row.task_name, input: String(row.input || ""),
+              expected: row.expected, actual: String(row.output || ""),
+              passed: row.passed, score: row.score,
+              reasoning: row.error ? `Error: ${row.error}` : (row.passed ? "passed" : "failed"),
+              latency_ms: Number(row.latency_ms || 0), cost_usd: Number(row.cost_usd || 0),
+              grader: row.grader || "contains",
             });
           }
         } catch (err) {
@@ -3385,7 +3536,7 @@ export default {
         return Response.json({ error: err.message || String(err) }, { status: 500 });
       }
     }
-    const evalRunMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/(\d+)$/);
+    const evalRunMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/([^/]+)$/);
     if (evalRunMatch && request.method === "GET") {
       const serviceToken = env.SERVICE_TOKEN || "";
       if (serviceToken) {
@@ -3396,7 +3547,7 @@ export default {
         }
       }
       try {
-        const runId = Number(evalRunMatch[1] || 0);
+        const runId = decodeURIComponent(String(evalRunMatch[1] || ""));
         const run = await getEvalRun(env.HYPERDRIVE, runId);
         if (!run) return Response.json({ error: "Eval run not found" }, { status: 404 });
         const trials = await listEvalTrialsByRun(env.HYPERDRIVE, runId);
@@ -3405,7 +3556,7 @@ export default {
         return Response.json({ error: err.message || String(err) }, { status: 500 });
       }
     }
-    const evalTrialsMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/(\d+)\/trials$/);
+    const evalTrialsMatch = url.pathname.match(/^\/api\/v1\/eval\/runs\/([^/]+)\/trials$/);
     if (evalTrialsMatch && request.method === "GET") {
       const serviceToken = env.SERVICE_TOKEN || "";
       if (serviceToken) {
@@ -3416,7 +3567,7 @@ export default {
         }
       }
       try {
-        const runId = Number(evalTrialsMatch[1] || 0);
+        const runId = decodeURIComponent(String(evalTrialsMatch[1] || ""));
         const run = await getEvalRun(env.HYPERDRIVE, runId);
         if (!run) return Response.json({ error: "Eval run not found" }, { status: 404 });
         const trials = await listEvalTrialsByRun(env.HYPERDRIVE, runId);
@@ -3469,8 +3620,12 @@ export default {
       );
 
       // DO name for WebSocket connection — must include org_id for tenant isolation
-      const orgPrefix = body.org_id ? `${body.org_id}-` : "";
-      const doName = userId ? `${orgPrefix}${agentName}-u-${userId}` : `${orgPrefix}${agentName}`;
+      // Truncate UUIDs to stay within 63-char Sandbox limit
+      const shortOrg2 = body.org_id && body.org_id.length > 12 ? body.org_id.slice(-8) : (body.org_id || "");
+      const shortUser2 = userId.length > 12 ? userId.slice(-8) : userId;
+      const orgPrefix = shortOrg2 ? `${shortOrg2}-` : "";
+      let doName = shortUser2 ? `${orgPrefix}${agentName}-u-${shortUser2}` : `${orgPrefix}${agentName}`;
+      if (doName.length > 63) doName = doName.slice(0, 63);
 
       return Response.json({
         status: "running",
@@ -3602,18 +3757,25 @@ export default {
           agent_name?: string; task?: string; input?: unknown;
           org_id?: string; project_id?: string; channel?: string; channel_user_id?: string;
           api_key_id?: string; session_id?: string; plan?: string;
+          conversation_id?: string;
         };
 
         const agentName = body.agent_name || "agentos";
         const task = runnableInputToTask(body.input, body.task);
         const userId = body.channel_user_id || "";
         const orgId = body.org_id || "";
+        let conversationId = body.conversation_id || "";
         const sessionId = body.session_id || "";
-        const orgPrefix = orgId ? `${orgId}-` : "";
-        // Include session_id in DO name so each session gets its own DO instance
-        const doName = userId
-          ? `${orgPrefix}${agentName}-u-${userId}${sessionId ? `-s-${sessionId}` : ""}`
-          : `${orgPrefix}${agentName}${sessionId ? `-s-${sessionId}` : ""}`;
+        // Build DO name within 63-char Sandbox limit.
+        // Hash long org/user IDs to keep the name short while maintaining uniqueness.
+        const shortOrg = orgId.length > 12 ? orgId.slice(-8) : orgId;
+        const shortUser = userId.length > 12 ? userId.slice(-8) : userId;
+        const orgPrefix = shortOrg ? `${shortOrg}-` : "";
+        let doName = shortUser
+          ? `${orgPrefix}${agentName}-u-${shortUser}`
+          : `${orgPrefix}${agentName}`;
+        // Ensure ≤63 chars (Cloudflare Sandbox/Container name limit)
+        if (doName.length > 63) doName = doName.slice(0, 63);
         const agentId = env.AGENTOS_AGENT.idFromName(doName);
         const agent = env.AGENTOS_AGENT.get(agentId);
 
@@ -3636,6 +3798,9 @@ export default {
             channel: body.channel || "sse",
             channel_user_id: userId,
             api_key_id: body.api_key_id || "",
+            session_id: sessionId || undefined,
+            conversation_id: conversationId || undefined,
+            history: (body as any).history || undefined,
             ...(body.plan ? { plan: body.plan } : {}),
           }),
         }));
@@ -3645,8 +3810,130 @@ export default {
           return Response.json({ error: errText }, { status: doResp.status });
         }
 
-        // Pass through the SSE stream from the DO
-        return new Response(doResp.body, {
+        // ── Conversation persistence: wrap SSE stream ──────────
+        // Intercept the SSE stream to:
+        //   1. Create conversation if none provided (on first message)
+        //   2. Write user + assistant messages to conversation_messages after done
+        //   3. Include conversation_id in the done event
+        const { readable, writable } = new TransformStream();
+        const writer = writable.getWriter();
+        const sseDecoder = new TextDecoder();
+        const sseEncoder = new TextEncoder();
+
+        // Helper: generate title from first user message
+        function generateTitle(input: string): string {
+          if (!input) return "New conversation";
+          // Trim at word boundary within 50 chars
+          const trimmed = input.slice(0, 60);
+          if (trimmed.length <= 50) return trimmed;
+          const lastSpace = trimmed.lastIndexOf(" ", 50);
+          return lastSpace > 20 ? trimmed.slice(0, lastSpace) : trimmed.slice(0, 50);
+        }
+
+        ctx.waitUntil((async () => {
+          const reader = doResp.body!.getReader();
+          let fullAssistantContent = "";
+          let doneEventData: Record<string, unknown> | null = null;
+          let sseBuffer = "";
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const chunk = sseDecoder.decode(value, { stream: true });
+              sseBuffer += chunk;
+
+              // Scan for done event to capture data
+              const doneMatch = sseBuffer.match(/data:\s*(\{[^}]*"type"\s*:\s*"done"[^}]*\})/);
+              if (doneMatch && !doneEventData) {
+                try { doneEventData = JSON.parse(doneMatch[1]); } catch {}
+              }
+
+              // Capture token content for assistant message persistence
+              const tokenMatches = chunk.matchAll(/data:\s*(\{[^}]*"type"\s*:\s*"token"[^}]*\})/g);
+              for (const m of tokenMatches) {
+                try {
+                  const parsed = JSON.parse(m[1]);
+                  fullAssistantContent += parsed.content || parsed.text || "";
+                } catch {}
+              }
+
+              // If done event found, inject conversation_id before forwarding
+              if (doneEventData && conversationId) {
+                const augmented = chunk.replace(
+                  /data:\s*(\{[^}]*"type"\s*:\s*"done"[^}]*\})/,
+                  (match) => {
+                    try {
+                      const obj = JSON.parse(match.slice(5).trim());
+                      obj.conversation_id = conversationId;
+                      return `data: ${JSON.stringify(obj)}`;
+                    } catch { return match; }
+                  }
+                );
+                await writer.write(sseEncoder.encode(augmented));
+              } else {
+                await writer.write(sseEncoder.encode(chunk));
+              }
+            }
+
+            // ── After stream completes: persist conversation ──
+            if (orgId && task) {
+              try {
+                const pg = (await import("postgres")).default;
+                const sql = pg((env as any).HYPERDRIVE.connectionString, {
+                  max: 1, fetch_types: false, prepare: false, connect_timeout: 5,
+                });
+
+                // Create conversation if not provided
+                if (!conversationId) {
+                  const title = generateTitle(task);
+                  const [conv] = await sql`
+                    INSERT INTO conversations (org_id, user_id, agent_name, channel, title)
+                    VALUES (${orgId}, ${userId}, ${agentName}, ${"sse"}, ${title})
+                    RETURNING id
+                  `;
+                  conversationId = String(conv.id);
+                }
+
+                const doneSessionId = doneEventData ? String(doneEventData.session_id || "") : "";
+                const doneCostUsd = doneEventData ? Number(doneEventData.cost_usd || 0) : 0;
+
+                // Write user message + assistant response
+                await sql`
+                  INSERT INTO conversation_messages (conversation_id, role, content, session_id)
+                  VALUES (${conversationId}, 'user', ${task}, ${doneSessionId || null})
+                `;
+                await sql`
+                  INSERT INTO conversation_messages (conversation_id, role, content, model, cost_usd, session_id)
+                  VALUES (
+                    ${conversationId}, 'assistant',
+                    ${fullAssistantContent || (doneEventData?.output as string) || ""},
+                    ${doneEventData ? String(doneEventData.model || "") : null},
+                    ${doneCostUsd},
+                    ${doneSessionId || null}
+                  )
+                `;
+
+                // Update conversation stats
+                await sql`
+                  UPDATE conversations SET
+                    message_count = (SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ${conversationId}),
+                    total_cost_usd = (SELECT COALESCE(SUM(cost_usd), 0) FROM conversation_messages WHERE conversation_id = ${conversationId}),
+                    updated_at = NOW()
+                  WHERE id = ${conversationId}
+                `;
+
+                await sql.end();
+              } catch (convErr: any) {
+                console.error(`[conversation-persist] Error: ${convErr.message}`);
+              }
+            }
+          } catch {} finally {
+            try { await writer.close(); } catch {}
+          }
+        })());
+
+        return new Response(readable, {
           headers: {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
@@ -3803,9 +4090,7 @@ export default {
         AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
         STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
         TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
-        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
         AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
         CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
@@ -3866,9 +4151,7 @@ export default {
         AI: env.AI, HYPERDRIVE: env.HYPERDRIVE, VECTORIZE: env.VECTORIZE,
         STORAGE: env.STORAGE, SANDBOX: env.SANDBOX, LOADER: env.LOADER,
         TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
-        OPENROUTER_API_KEY: env.OPENROUTER_API_KEY,
         AI_GATEWAY_ID: env.AI_GATEWAY_ID, AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
         CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
@@ -3944,7 +4227,6 @@ export default {
         TELEMETRY_QUEUE: env.TELEMETRY_QUEUE, BROWSER: env.BROWSER,
         AI_GATEWAY_ID: env.AI_GATEWAY_ID,
         AI_GATEWAY_TOKEN: env.AI_GATEWAY_TOKEN,
-        BRAVE_SEARCH_KEY: env.BRAVE_SEARCH_KEY,
         CLOUDFLARE_ACCOUNT_ID: env.CLOUDFLARE_ACCOUNT_ID,
         CLOUDFLARE_API_TOKEN: env.CLOUDFLARE_API_TOKEN,
         DEFAULT_PROVIDER: env.DEFAULT_PROVIDER, DEFAULT_MODEL: env.DEFAULT_MODEL,
@@ -5249,9 +5531,9 @@ export default {
               return await tx`SELECT * FROM eval_runs WHERE agent_name = ${agentName} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`;
             }
             if (queryId === "eval.trials") {
-              const runId = Number(body.params?.run_id);
+              const runId = String(body.params?.run_id || "");
               if (!runId) throw new Error("params.run_id required");
-              return await tx`SELECT * FROM eval_trials WHERE eval_run_id = ${runId} ORDER BY trial_index`;
+              return await tx`SELECT * FROM eval_trials WHERE eval_run_id = ${runId} ORDER BY created_at`;
             }
 
             // ── Billing queries ───────────────────────────────────
@@ -5319,7 +5601,13 @@ export default {
 
       // /cf/sandbox/exec — run code in Dynamic Worker or Container
       if (url.pathname === "/cf/sandbox/exec" && request.method === "POST") {
-        const body = await request.json() as { code: string; language?: string; timeoutMs?: number };
+        const body = await request.json() as {
+          code: string;
+          language?: string;
+          timeoutMs?: number;
+          org_id?: string;
+          session_id?: string;
+        };
         const code = body.code || "";
         const language = (body.language || detectLang(code)) as "javascript" | "python" | "bash";
         const timeout = body.timeoutMs || 30000;
@@ -5347,12 +5635,38 @@ export default {
         }
 
         if (language === "bash" && env.SANDBOX) {
+          const orgId = String(body.org_id || request.headers.get("X-Org-Id") || "");
+          const sessionId = String(body.session_id || "");
+          const affinityKey = `${orgId || "global"}:${sessionId || _hashString(code).toString(16)}`;
+          const runWithLease = async (lease: { lane: string; sandboxId: string }) => {
+            if (orgId) {
+              // Best effort: keep outbound access scoped when org context is known.
+              AgentSandbox.registerOrg(env.SANDBOX, lease.sandboxId, orgId).catch(() => {});
+            }
+            const sandbox = getTimedSandbox(env.SANDBOX, lease.sandboxId, { sleepAfter: "20m" } as any);
+            return sandbox.exec(code, { timeout: Math.ceil(timeout / 1000) });
+          };
+
+          const lease = await _acquireCfExecLane(env, affinityKey);
           try {
-            const sandbox = getTimedSandbox(env.SANDBOX, `cf-exec-${crypto.randomUUID().slice(0, 8)}`);
-            const result = await sandbox.exec(code, { timeout: Math.ceil(timeout / 1000) });
+            let result: any;
+            try {
+              result = await runWithLease(lease);
+            } catch (firstErr: any) {
+              // Lane can become unhealthy/stuck; retry once on a different affinity key.
+              const retryLease = await _acquireCfExecLane(env, `${affinityKey}:retry:${crypto.randomUUID().slice(0, 8)}`);
+              try {
+                result = await runWithLease(retryLease);
+              } finally {
+                _releaseCfExecLane(retryLease.lane);
+              }
+              if (!result) throw firstErr;
+            }
             return Response.json({ stdout: result.stdout || "", stderr: result.stderr || "", exit_code: result.exitCode ?? 0 });
           } catch (err: any) {
             return Response.json({ stdout: "", stderr: err.message, exit_code: 1 });
+          } finally {
+            _releaseCfExecLane(lease.lane);
           }
         }
 
@@ -5407,72 +5721,13 @@ export default {
             outputTokens = aiResult.usage?.output_tokens || 0;
 
           } else {
-            // ── OpenRouter (400+ models, BYOK) ──
-            const orKey = env.OPENROUTER_API_KEY || "";
-            if (!orKey) {
-              return Response.json({ error: "OPENROUTER_API_KEY not configured on worker" }, { status: 503 });
-            }
-
-            // Build payload — handle GPT-5.x max_completion_tokens
-            const payload: Record<string, any> = {
-              model,
-              messages: body.messages.map(m => ({
-                ...m,
-                role: m.role === "system" && model.includes("gpt-5") ? "developer" : m.role,
-              })),
-              temperature: body.temperature || 0,
-            };
-            if (model.includes("gpt-5")) {
-              payload.max_completion_tokens = body.max_tokens || 1024;
-            } else {
-              payload.max_tokens = body.max_tokens || 1024;
-            }
-            if (body.tools) {
-              // Fix array schemas for GPT-5.x strict validation
-              payload.tools = body.tools.map((t: any) => {
-                const params = t.function?.parameters || t.parameters || {};
-                const fixed = JSON.parse(JSON.stringify(params));
-                const fixArrays = (obj: any) => {
-                  if (!obj || typeof obj !== "object") return;
-                  for (const [k, v] of Object.entries(obj)) {
-                    if (v && typeof v === "object") {
-                      const val = v as Record<string, any>;
-                      if (val.type === "array" && !val.items) val.items = { type: "string" };
-                      fixArrays(val);
-                    }
-                  }
-                };
-                fixArrays(fixed);
-                return { type: "function", function: { name: t.function?.name || t.name, description: t.function?.description || t.description, parameters: fixed } };
-              });
-            }
-
-            const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-              method: "POST",
-              headers: { "Authorization": `Bearer ${orKey}`, "Content-Type": "application/json" },
-              body: JSON.stringify(payload),
-            });
-
-            if (!resp.ok) {
-              const errBody = await resp.text();
-              return Response.json({ error: `OpenRouter ${resp.status}: ${errBody.slice(0, 200)}`, model }, { status: resp.status });
-            }
-
-            const data = await resp.json() as any;
-            const choice = (data.choices || [{}])[0];
-            const msg = choice.message || {};
-            content = msg.content || "";
-            toolCalls = (msg.tool_calls || []).map((tc: any) => ({
-              id: tc.id, name: tc.function?.name, arguments: tc.function?.arguments,
-            }));
-            inputTokens = data.usage?.prompt_tokens || 0;
-            outputTokens = data.usage?.completion_tokens || 0;
-            resolvedModel = data.model || model;
+            // MVP: Only Workers AI / Gemma models — no paid providers
+            return Response.json({ error: `MVP mode: model "${model}" is not a Workers AI model. Only @cf/* and Gemma models are supported.` }, { status: 400 });
           }
 
           const latencyMs = Date.now() - started;
           return Response.json({
-            content, model: resolvedModel, provider: isWorkersAI ? "workers-ai" : "openrouter",
+            content, model: resolvedModel, provider: "workers-ai",
             tool_calls: toolCalls, input_tokens: inputTokens, output_tokens: outputTokens, latency_ms: latencyMs,
           });
         } catch (err: any) {
@@ -6307,27 +6562,7 @@ export default {
                   image_key: key, format: "png", size_bytes: buf.byteLength, model: "@cf/bfl/flux-2-klein-4b",
                 });
               } catch (err: any) {
-                // Fallback: OpenRouter Gemini image
-                try {
-                  const orKey = env.OPENROUTER_API_KEY || "";
-                  if (orKey) {
-                    const resp = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-                      method: "POST",
-                      headers: { Authorization: `Bearer ${orKey}`, "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        model: "google/gemini-2.5-flash-image",
-                        messages: [{ role: "user", content: `Generate an image: ${prompt}` }],
-                      }),
-                    });
-                    const data = await resp.json() as any;
-                    const content = data.choices?.[0]?.message?.content || "";
-                    result = JSON.stringify({ description: content, model: "google/gemini-2.5-flash-image" });
-                  } else {
-                    result = `Image gen failed: ${err.message}`;
-                  }
-                } catch (e2: any) {
-                  result = `Image gen failed: ${err.message}, fallback: ${e2.message}`;
-                }
+                result = `Image gen failed: ${err.message}`;
               }
               break;
             }
@@ -6438,12 +6673,47 @@ export default {
 
   // ── Queue Consumer — writes telemetry to Supabase via Hyperdrive ──
   // Messages flow: Agent DO → TELEMETRY_QUEUE → this consumer → Supabase
-  // Guaranteed delivery, batched writes, automatic retries.
+  // At-least-once delivery. Per-message ack/retry. Permanent failures acked to avoid poison loops.
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     if (!env.HYPERDRIVE) {
       batch.retryAll();
       return;
     }
+
+    // ── Helpers ──
+    /** Safe JSON parse — never throws, returns fallback on malformed input */
+    function jp(input: unknown, fallback: any = {}): any {
+      if (input == null) return fallback;
+      if (typeof input !== "string") return input; // already parsed
+      try { return JSON.parse(input); } catch { return fallback; }
+    }
+    /** Resolve created_at from various formats */
+    function ts(v: unknown): string {
+      if (!v) return new Date().toISOString();
+      if (typeof v === "string" && v.includes("T")) return v;
+      const n = Number(v);
+      return n > 1e12 ? new Date(n).toISOString() // ms epoch
+        : n > 1e9 ? new Date(n * 1000).toISOString() // s epoch
+        : new Date().toISOString();
+    }
+    /** Classify DB errors: permanent (schema/constraint) vs transient (connection/timeout) */
+    function isPermanent(err: any): boolean {
+      const m = err?.message || "";
+      // FK violation, NOT NULL, check constraint, unique violation, column doesn't exist,
+      // data type mismatch, syntax error — retrying will never fix these
+      return /violates (foreign key|not-null|check|unique)|does not exist|invalid input syntax|column.*of relation/i.test(m);
+    }
+    /** Retry with exponential backoff capped at 5 min */
+    function retryWithBackoff(msg: any) {
+      const delay = Math.min(30 * Math.pow(2, (msg.attempts || 1) - 1), 300);
+      msg.retry({ delaySeconds: delay });
+    }
+
+    const KNOWN_TYPES = new Set([
+      "session", "turn", "episode", "event",
+      "runtime_event", "middleware_event", "billing_flush",
+      "skill_activation", "skill_auto_activation", "loop_detected", "do_eviction",
+    ]);
 
     // Connect via Postgres.js + Hyperdrive (Worker-compatible driver)
     const postgres = (await import("postgres")).default;
@@ -6451,6 +6721,8 @@ export default {
       max: 5,
       fetch_types: false,
       prepare: false,  // Hyperdrive requires prepare:false (transaction-mode pooling)
+      idle_timeout: 20,
+      connect_timeout: 10,
     });
 
     try {
@@ -6458,9 +6730,24 @@ export default {
         const body = (msg.body || {}) as { type?: string; payload?: Record<string, unknown> };
         const type = String(body.type || "");
         const p = (body.payload || {}) as Record<string, any>;
+
+        // Unknown message types — ack to prevent infinite retry, log for investigation
+        if (!type || !KNOWN_TYPES.has(type)) {
+          console.warn(`[queue] unknown message type="${type}" — acking to prevent poison loop`);
+          msg.ack();
+          continue;
+        }
+
         try {
           if (type === "session") {
-            const createdAt = p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString();
+            // sessions.org_id has FK → orgs(org_id). Empty string violates it.
+            // If org_id is missing/empty, skip the insert — the direct write path (DO) handles it.
+            if (!p.session_id) { msg.ack(); continue; }
+            if (!p.org_id) {
+              console.warn(`[queue] session ${p.session_id} has no org_id — skipping (FK would fail)`);
+              msg.ack();
+              continue;
+            }
             await sql`INSERT INTO sessions (
               session_id, org_id, project_id, agent_name, status,
               input_text, output_text, model, trace_id, parent_session_id,
@@ -6471,26 +6758,29 @@ export default {
               repair_count, compaction_count,
               created_at
             ) VALUES (
-              ${p.session_id}, ${p.org_id || ""}, ${p.project_id || ""},
+              ${p.session_id}, ${p.org_id}, ${p.project_id || ""},
               ${p.agent_name || "agentos"}, ${p.status || "success"},
               ${p.input_text || ""}, ${p.output_text || ""},
               ${p.model || ""}, ${p.trace_id || ""}, ${p.parent_session_id || ""},
               ${p.depth || 0}, ${p.step_count || 0}, ${p.action_count || 0},
               ${p.wall_clock_seconds || 0}, ${p.cost_total_usd || 0},
-              ${p.detailed_cost_json ? (typeof p.detailed_cost_json === 'string' ? JSON.parse(p.detailed_cost_json) : p.detailed_cost_json) : null},
-              ${p.feature_flags_json ? (typeof p.feature_flags_json === 'string' ? JSON.parse(p.feature_flags_json) : p.feature_flags_json) : null},
+              ${jp(p.detailed_cost_json, null)},
+              ${jp(p.feature_flags_json, null)},
               ${p.total_cache_read_tokens || 0}, ${p.total_cache_write_tokens || 0},
               ${p.repair_count || 0}, ${p.compaction_count || 0},
-              ${createdAt}
+              ${ts(p.created_at)}
             ) ON CONFLICT (session_id) DO UPDATE SET
               status = EXCLUDED.status, output_text = EXCLUDED.output_text,
               cost_total_usd = EXCLUDED.cost_total_usd, step_count = EXCLUDED.step_count,
               action_count = EXCLUDED.action_count, wall_clock_seconds = EXCLUDED.wall_clock_seconds,
-              detailed_cost_json = EXCLUDED.detailed_cost_json,
+              detailed_cost_json = COALESCE(EXCLUDED.detailed_cost_json, sessions.detailed_cost_json),
               total_cache_read_tokens = EXCLUDED.total_cache_read_tokens,
               total_cache_write_tokens = EXCLUDED.total_cache_write_tokens,
               repair_count = EXCLUDED.repair_count, compaction_count = EXCLUDED.compaction_count`;
+
           } else if (type === "turn") {
+            if (!p.session_id) { msg.ack(); continue; }
+            // plan_json and reflection_json are NOT NULL DEFAULT '{}' — never pass null
             await sql`INSERT INTO turns (
               session_id, turn_number, model_used, input_tokens, output_tokens,
               latency_ms, llm_latency_ms, llm_content, cost_total_usd,
@@ -6503,109 +6793,144 @@ export default {
               ${p.input_tokens || 0}, ${p.output_tokens || 0},
               ${p.latency_ms || 0}, ${p.llm_latency_ms || p.latency_ms || 0},
               ${p.llm_content || ""}, ${p.cost_total_usd || 0},
-              ${typeof p.tool_calls_json === 'string' ? JSON.parse(p.tool_calls_json || '[]') : (p.tool_calls_json || [])},
-              ${typeof p.tool_results_json === 'string' ? JSON.parse(p.tool_results_json || '[]') : (p.tool_results_json || [])},
-              ${typeof p.errors_json === 'string' ? JSON.parse(p.errors_json || '[]') : (p.errors_json || [])},
+              ${jp(p.tool_calls_json, [])},
+              ${jp(p.tool_results_json, [])},
+              ${jp(p.errors_json, [])},
               ${p.execution_mode || "sequential"},
-              ${p.plan_artifact || p.plan_json ? (typeof (p.plan_artifact || p.plan_json) === 'string' ? JSON.parse(p.plan_artifact || p.plan_json) : (p.plan_artifact || p.plan_json)) : null},
-              ${p.reflection || p.reflection_json ? (typeof (p.reflection || p.reflection_json) === 'string' ? JSON.parse(p.reflection || p.reflection_json) : (p.reflection || p.reflection_json)) : null},
-              ${p.stop_reason || null}, ${p.refusal || false},
+              ${jp(p.plan_artifact || p.plan_json, {})},
+              ${jp(p.reflection || p.reflection_json, {})},
+              ${p.stop_reason || "end_turn"}, ${p.refusal || false},
               ${p.cache_read_tokens || 0}, ${p.cache_write_tokens || 0},
               ${p.gateway_log_id || null}
-            )`;
+            ) ON CONFLICT (session_id, turn_number) DO UPDATE SET
+              cost_total_usd = EXCLUDED.cost_total_usd,
+              input_tokens = EXCLUDED.input_tokens,
+              output_tokens = EXCLUDED.output_tokens,
+              tool_calls_json = EXCLUDED.tool_calls_json,
+              tool_results_json = EXCLUDED.tool_results_json`;
+
           } else if (type === "episode") {
             await sql`INSERT INTO episodes (session_id, input, output)
-              VALUES (${p.session_id}, ${p.input}, ${p.output})`;
+              VALUES (${p.session_id || ""}, ${p.input || ""}, ${p.output || ""})`;
+
           } else if (type === "event") {
             await sql`INSERT INTO otel_events (
               session_id, turn, event_type, action, plan, tier,
               provider, model, tool_name, status, latency_ms, details_json, created_at
             ) VALUES (
-              ${p.session_id}, ${p.turn || 0}, ${p.event_type || ""},
+              ${p.session_id || ""}, ${p.turn || 0}, ${p.event_type || ""},
               ${p.action || ""}, ${p.plan || ""}, ${p.tier || ""},
               ${p.provider || ""}, ${p.model || ""}, ${p.tool_name || ""},
-              ${p.status || ""}, ${p.latency_ms || 0}, ${p.details || {}},
-              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
+              ${p.status || ""}, ${p.latency_ms || 0}, ${jp(p.details, {})},
+              ${ts(p.created_at)}
             )`;
-          } else if (type === "cost_ledger") {
-            // Per-session cost breakdown written at session end
-            await sql`INSERT INTO cost_ledger (
-              session_id, org_id, agent_name, model,
-              input_tokens, output_tokens, cost_usd, plan, created_at
-            ) VALUES (
-              ${p.session_id}, ${p.org_id || ""}, ${p.agent_name || ""},
-              ${p.model || ""}, ${p.input_tokens || 0}, ${p.output_tokens || 0},
-              ${p.cost_usd || 0}, ${p.plan || ""}, ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
-            )`;
+
           } else if (type === "runtime_event") {
-            // Runtime-level events (node executions, graph transitions, errors)
             await sql`INSERT INTO runtime_events (
               trace_id, session_id, org_id, event_type, node_id,
-              status, duration_ms, details_json, created_at
+              status, latency_ms, payload_json, created_at
             ) VALUES (
               ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
               ${p.event_type || ""}, ${p.node_id || ""},
-              ${p.status || ""}, ${p.duration_ms || 0}, ${JSON.stringify(p.details || {})},
-              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
+              ${p.status || ""}, ${p.duration_ms || 0}, ${jp(p.details, {})},
+              ${ts(p.created_at)}
             )`;
+
           } else if (type === "middleware_event") {
-            // Middleware execution events (loop detection, summarization, etc.)
+            // Table schema: session_id, middleware_name, action, details_json, turn_number, created_at
             await sql`INSERT INTO middleware_events (
-              org_id, session_id, middleware_name, event_type,
-              details_json, created_at
+              session_id, middleware_name, action,
+              details_json, turn_number, created_at
             ) VALUES (
-              ${p.org_id || ""}, ${p.session_id || ""}, ${p.middleware_name || ""},
-              ${p.event_type || ""}, ${JSON.stringify(p.details || {})},
-              ${p.created_at ? (typeof p.created_at === "string" && p.created_at.includes("T") ? p.created_at : new Date(Number(p.created_at) * 1000).toISOString()) : new Date().toISOString()}
+              ${p.session_id || ""}, ${p.middleware_name || ""},
+              ${p.event_type || p.action || ""},
+              ${jp(p.details, {})}, ${p.turn_number || p.turn || 0},
+              ${ts(p.created_at)}
             )`;
+
           } else if (type === "billing_flush") {
-            // DO eviction billing flush — update session cost to prevent undercount
             if (p.session_id && p.cost_usd) {
               await sql`UPDATE sessions SET cost_total_usd = GREATEST(cost_total_usd, ${p.cost_usd}),
                 step_count = GREATEST(step_count, ${p.turns || 0})
                 WHERE session_id = ${p.session_id}`;
             }
-          } else if (type === "skill_activation") {
-            // Record skill usage for analytics
+
+          } else if (type === "skill_activation" || type === "skill_auto_activation") {
             await sql`INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-              VALUES (${p.org_id || ""}, 'system', 'skill_activation', 'skill', ${p.skill || ""},
-                ${JSON.stringify({ session_id: p.session_id, agent_name: p.agent_name })}::jsonb, now())
-            `.catch(() => {}); // non-critical
+              VALUES (${p.org_id || ""}, 'system', ${type}, 'skill', ${p.skill || ""},
+                ${JSON.stringify({ session_id: p.session_id, agent_name: p.agent_name, trigger: p.trigger || (type === "skill_auto_activation" ? "auto" : "user") })}::jsonb, now())
+            `;
+
           } else if (type === "loop_detected") {
-            // Record loop detection events for diagnostics
             await sql`INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
               VALUES (${p.org_id || ""}, 'system', 'loop_detected', 'session', ${p.session_id || ""},
                 ${JSON.stringify({ tool: p.tool, repeat_count: p.repeat_count, turn: p.turn, agent_name: p.agent_name })}::jsonb, now())
-            `.catch(() => {}); // non-critical
+            `;
+
           } else if (type === "do_eviction") {
-            // DO eviction telemetry — log for capacity planning
             console.log(`[telemetry] DO eviction: session=${p.session_id} org=${p.org_id}`);
+            await sql`INSERT INTO runtime_events (
+              trace_id, session_id, org_id, event_type, node_id,
+              status, latency_ms, payload_json, created_at
+            ) VALUES (
+              ${p.trace_id || ""}, ${p.session_id || ""}, ${p.org_id || ""},
+              'do_eviction', ${p.agent_name || ""},
+              'evicted', ${p.uptime_ms || 0}, ${JSON.stringify({
+                turns: p.turns || 0, cost_usd: p.cost_usd || 0,
+                reason: p.reason || "unknown",
+              })},
+              ${new Date().toISOString()}
+            )`;
           }
           msg.ack();
         } catch (err: any) {
-          console.error(`[queue] message failed type=${type} session=${(p as any)?.session_id || '?'}:`, err?.message || err);
-          msg.retry();
+          const errMsg = err?.message || String(err);
+          if (isPermanent(err)) {
+            // Schema/constraint errors will never self-heal — ack to prevent poison loop
+            console.error(`[queue] PERMANENT FAILURE type=${type} session=${p?.session_id || '?'}: ${errMsg.slice(0, 300)}`);
+            msg.ack();
+          } else {
+            // Transient errors (connection, timeout) — retry with backoff
+            console.error(`[queue] TRANSIENT FAILURE type=${type} session=${p?.session_id || '?'} attempt=${msg.attempts}: ${errMsg.slice(0, 200)}`);
+            retryWithBackoff(msg);
+          }
         }
       }
     } finally {
-      await sql.end();
+      try { await sql.end(); } catch (e) {
+        console.error("[queue] sql.end() failed:", e instanceof Error ? e.message : e);
+      }
     }
   },
 
   // ── Email handler — route inbound emails to the target agent DO ──
   async email(message: ForwardableEmailMessage, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Determine which agent should handle this email.
-    // Convention: emails to agent-name@yourdomain.com route to that agent.
-    // e.g., support@agents.oneshots.co → agent "support"
+    // Email addresses are: {agent_name}.{org_short}@oneshots.co
+    // e.g., support-bot.d8ec4cf7@oneshots.co
+    // Fallback: {agent_name}@oneshots.co (looks up first matching agent)
     const toAddress = message.to;
-    const agentName = toAddress.split("@")[0].toLowerCase().replace(/[^a-z0-9-]/g, "") || "default";
+    const localPart = toAddress.split("@")[0].toLowerCase().replace(/[^a-z0-9.-]/g, "");
 
-    // Look up org_id from the agents table to ensure cross-org isolation
+    // Parse org hint from email: "name.orgshort" format
+    const dotIdx = localPart.lastIndexOf(".");
+    const hasOrgHint = dotIdx > 0 && localPart.length - dotIdx <= 9; // org suffix is 8 chars max
+    const agentName = hasOrgHint ? localPart.slice(0, dotIdx) : localPart;
+    const orgHint = hasOrgHint ? localPart.slice(dotIdx + 1) : "";
+
+    // Look up agent — use org hint for disambiguation if available
     let orgId = "";
     try {
       const { getDb } = await import("./runtime/db");
       const sql = await getDb(env.HYPERDRIVE);
-      const rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} LIMIT 1`;
+      let rows: any[] = [];
+      if (orgHint) {
+        // Match agent by name AND org_id ending with the hint
+        rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND org_id LIKE ${"%" + orgHint} AND is_active = true LIMIT 1`;
+      }
+      if (!rows.length) {
+        // Fallback: match by name only (backward compat for simple addresses)
+        rows = await sql`SELECT org_id FROM agents WHERE name = ${agentName} AND is_active = true LIMIT 1`;
+      }
       orgId = rows[0]?.org_id || "";
     } catch {}
 
@@ -6637,7 +6962,7 @@ export default {
   },
 
   // ── Cron: prune idle pooled Browser Rendering sessions ───────────
-  async scheduled(_event: ScheduledEvent, _env: Env, _ctx: ExecutionContext): Promise<void> {
+  async scheduled(_event: ScheduledController, _env: Env, _ctx: ExecutionContext): Promise<void> {
     const { pruneStaleBrowserSessions } = await import("./runtime/tools");
     pruneStaleBrowserSessions();
 

@@ -248,6 +248,9 @@ function withSandboxTimeout<T>(promise: Promise<T>, sandboxId: string): Promise<
  * container takes more than 30s to start, the call rejects instead of blocking
  * the entire DO request.
  */
+// Track which sandbox IDs have been initialized (warm) in this isolate lifetime
+const _warmSandboxes = new Set<string>();
+
 function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
   // getSandbox returns immediately — container only starts on first operation.
   // Same sandboxId = same container = warm after first call.
@@ -260,12 +263,25 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
     // and ephemeral disk (no persistent secrets to exfiltrate).
   } as any);
 
+  const isCold = !_warmSandboxes.has(sandboxId);
+
   return {
     exec: async (cmd: string, opts?: any): Promise<{ stdout?: string; stderr?: string; exitCode?: number }> => {
+      const execStart = Date.now();
       try {
-        return await withSandboxTimeout<any>(raw.exec(cmd, opts), sandboxId);
+        const result = await withSandboxTimeout<any>(raw.exec(cmd, opts), sandboxId);
+        // Emit cold/warm start telemetry on first exec (P0-4)
+        if (isCold && !_warmSandboxes.has(sandboxId)) {
+          _warmSandboxes.add(sandboxId);
+          emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - execStart, (env as any).ORG_ID);
+        }
+        return result;
       } catch (err: any) {
         console.error(`[sandbox] exec failed (${sandboxId}): ${err.message?.slice(0, 200)}`);
+        if (isCold && !_warmSandboxes.has(sandboxId)) {
+          _warmSandboxes.add(sandboxId);
+          emitSandboxStartEvent((env as any).TELEMETRY_QUEUE, sandboxId, true, Date.now() - execStart, (env as any).ORG_ID, "error");
+        }
         throw err;
       }
     },
@@ -283,6 +299,21 @@ function getSafeSandbox(env: RuntimeEnv, sandboxId: string) {
         sandboxId,
       ),
   };
+}
+
+/** Emit sandbox cold/warm start telemetry */
+function emitSandboxStartEvent(queue: any, sandboxId: string, cold: boolean, latencyMs: number, orgId?: string, status = "success") {
+  if (!queue?.send) return;
+  queue.send({
+    type: "runtime_event",
+    event_type: "sandbox_start",
+    session_id: "",
+    org_id: orgId || "",
+    node_id: sandboxId,
+    status,
+    duration_ms: latencyMs,
+    details: { cold, sandbox_id: sandboxId },
+  }).catch(() => {});
 }
 
 /**
@@ -547,10 +578,12 @@ interface ToolCostModel {
 }
 
 const TOOL_COSTS: Record<string, ToolCostModel> = {
-  // Search & web (external API flat fees)
-  "web-search":        { flat_usd: 0.005,    per_ms_usd: 0 },          // Brave: $5/1K
-  "web-crawl":         { flat_usd: 0.005,    per_ms_usd: 0 },          // Browser Rendering
-  "browser-render":    { flat_usd: 0.005,    per_ms_usd: 0 },          // Browser Rendering
+  // Search & web — $0 when LOCAL_SEARCH_URL is set (self-hosted SearXNG + Gemma 4),
+  // otherwise Brave/Perplexity rates apply. Cost is set to 0 here since the local
+  // pipeline is the primary path; paid fallbacks are charged at the provider level.
+  "web-search":        { flat_usd: 0,        per_ms_usd: 0 },          // Local SearXNG (free) or Brave fallback
+  "web-crawl":         { flat_usd: 0,        per_ms_usd: 0 },          // Local Playwright or CF Browser Rendering
+  "browser-render":    { flat_usd: 0,        per_ms_usd: 0 },          // Local Playwright or CF Browser Rendering
 
   // Multimodal (Workers AI per-request)
   "image-generate":    { flat_usd: 0.001,    per_ms_usd: 0 },
@@ -945,10 +978,13 @@ async function executeSingleTool(
   try {
     const result = await dispatch(env, tc.name, args, sessionId, enabledTools);
     const latencyMs = Date.now() - started;
-    
+
     // Record success for circuit breaker (with telemetry)
     recordSuccess(tc.name, (env as any).TELEMETRY_QUEUE);
-    
+
+    // Emit per-tool latency telemetry (P0-3)
+    emitToolExecEvent((env as any).TELEMETRY_QUEUE, tc.name, latencyMs, "success", sessionId, (env as any).ORG_ID);
+
     return {
       tool: tc.name,
       tool_call_id: tc.id,
@@ -964,6 +1000,9 @@ async function executeSingleTool(
       recordFailure(tc.name, (env as any).TELEMETRY_QUEUE);
     }
 
+    // Emit per-tool latency telemetry (P0-3)
+    emitToolExecEvent((env as any).TELEMETRY_QUEUE, tc.name, latencyMs, "error", sessionId, (env as any).ORG_ID);
+
     // Wrap raw errors in structured ToolError for telemetry-safe reporting
     const toolErr = err instanceof ToolError ? err : new ToolError(tc.name, err.message || String(err), {
       retryable: isExternalServiceError(err),
@@ -978,6 +1017,21 @@ async function executeSingleTool(
       cost_usd: calculateToolCost(tc.name, latencyMs),
     };
   }
+}
+
+/** Emit per-tool execution telemetry to the queue for persistence in runtime_events */
+function emitToolExecEvent(queue: any, toolName: string, latencyMs: number, status: string, sessionId: string, orgId?: string) {
+  if (!queue?.send) return;
+  queue.send({
+    type: "runtime_event",
+    event_type: "tool_exec",
+    session_id: sessionId,
+    org_id: orgId || "",
+    node_id: toolName,
+    status,
+    duration_ms: latencyMs,
+    details: { tool: toolName },
+  }).catch(() => {});
 }
 
 function isExternalServiceError(err: any): boolean {
@@ -1975,8 +2029,8 @@ async function dispatch(
       }
       try {
         await sql`
-          INSERT INTO schedules (schedule_id, agent_name, org_id, task, cron, is_enabled, run_count, created_at)
-          VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, 1, 0, ${new Date().toISOString()})
+          INSERT INTO schedules (schedule_id, agent_name, org_id, task, cron_expression, enabled, run_count, created_at)
+          VALUES (${scheduleId}, ${agentName}, ${orgId}, ${taskDesc}, ${cronExpr}, true, 0, ${new Date().toISOString()})
         `;
         return JSON.stringify({ created: true, schedule_id: scheduleId, agent_name: agentName, cron: cronExpr, task: taskDesc });
       } catch (err: any) {
@@ -2620,8 +2674,12 @@ async function dispatch(
       const trials = Number(args.trials) || 1;
       try {
         await sql`
-          INSERT INTO eval_runs (id, agent_name, org_id, total_trials, created_at)
-          VALUES (${runId}, ${agentName}, ${orgId}, ${trials}, ${new Date().toISOString()})
+          INSERT INTO eval_runs (eval_run_id, agent_name, org_id, status, config_json, results_json, pass_rate, total_trials, passed_trials, created_at)
+          VALUES (
+            ${runId}, ${agentName}, ${orgId}, ${"pending"},
+            ${JSON.stringify({ source: "tool:eval-agent" })}, ${JSON.stringify({})},
+            ${0}, ${trials}, ${0}, ${new Date().toISOString()}
+          )
         `;
         return JSON.stringify({ eval_run_id: runId, agent_name: agentName, status: "pending", trials });
       } catch (err: any) {
@@ -2705,8 +2763,12 @@ async function dispatch(
       const timeBudget = Number(args.time_budget) || 300;
       try {
         await sql`
-          INSERT INTO eval_runs (id, agent_name, org_id, total_trials, created_at)
-          VALUES (${runId}, ${agentName}, ${orgId}, ${maxIter}, ${new Date().toISOString()})
+          INSERT INTO eval_runs (eval_run_id, agent_name, org_id, status, config_json, results_json, pass_rate, total_trials, passed_trials, created_at)
+          VALUES (
+            ${runId}, ${agentName}, ${orgId}, ${"pending"},
+            ${JSON.stringify({ source: "tool:autoresearch" })}, ${JSON.stringify({})},
+            ${0}, ${maxIter}, ${0}, ${new Date().toISOString()}
+          )
         `;
         return JSON.stringify({ run_id: runId, agent_name: agentName, max_iterations: maxIter, time_budget_seconds: timeBudget, status: "pending" });
       } catch (err: any) {
@@ -3597,103 +3659,6 @@ async function dispatch(
       });
     }
 
-    // ── Git tools (routed through bash sandbox) ────────────────────
-    case "git-init":
-    case "git-status":
-    case "git-diff":
-    case "git-commit":
-    case "git-log":
-    case "git-branch":
-    case "git-stash": {
-      const gitSubCmd = tool.replace("git-", "");
-      const gitArgs = args.args || args.command || "";
-      const message = args.message || "";
-      let command: string;
-      if (tool === "git-commit" && message) {
-        command = `cd /workspace && git add -A && git commit -m ${JSON.stringify(message)}`;
-      } else if (tool === "git-init") {
-        command = `cd /workspace && git init`;
-      } else {
-        command = `cd /workspace && git ${gitSubCmd} ${gitArgs}`.trim();
-      }
-      return sandboxExecWithLimits(env, sessionId, command, 30).then((res) => {
-        const out = (res.stdout || "") + (res.stderr ? `\nSTDERR: ${res.stderr}` : "");
-        return out || "(no output)";
-      });
-    }
-
-    // ── Management stubs (return actionable messages) ──────────────
-    case "security-scan":
-      return JSON.stringify({ status: "queued", message: "Security scan has been queued. Results will be available in the security dashboard." });
-
-    case "manage-issues": {
-      const action = args.action || "list";
-      const title = args.title || "";
-      const description = args.description || "";
-      if (action === "create" && title) {
-        return JSON.stringify({ created: true, title, description, status: "open" });
-      }
-      return JSON.stringify({ issues: [], message: "No issues found. Use action='create' with title to create one." });
-    }
-
-    case "view-costs":
-      return JSON.stringify({ message: "Cost data available in the billing dashboard at /billing. Use the API at /api/v1/billing/usage for programmatic access." });
-
-    case "view-traces":
-      return JSON.stringify({ message: "Trace data available in the sessions dashboard at /sessions. Use /api/v1/observability/spans for programmatic access." });
-
-    case "conversation-intel":
-      return JSON.stringify({ message: "Conversation intelligence available via /api/v1/intelligence endpoint." });
-
-    case "compliance":
-      return JSON.stringify({ status: "compliant", message: "Agent configuration matches gold image. Use /api/v1/gold-images for drift detection." });
-
-    case "create-schedule": {
-      const cron = args.cron || args.schedule || "0 * * * *";
-      const task = args.task || args.description || "";
-      return JSON.stringify({ created: true, cron, task, status: "active", message: "Schedule created. Manage via /api/v1/schedules." });
-    }
-
-    case "list-schedules":
-      return JSON.stringify({ schedules: [], message: "No active schedules. Use create-schedule to add one." });
-
-    case "manage-workflows":
-      return JSON.stringify({ workflows: [], message: "Use the workflows API at /api/v1/workflows to manage multi-step workflows." });
-
-    case "manage-mcp":
-      return JSON.stringify({ servers: [], message: "MCP server management available via /api/v1/mcp/servers." });
-
-    case "manage-rag":
-      return JSON.stringify({ documents: [], message: "RAG management available via /api/v1/rag. Use store-knowledge/knowledge-search for inline operations." });
-
-    case "manage-secrets":
-      return JSON.stringify({ message: "Secret management available via /api/v1/secrets. Never expose secret values in responses." });
-
-    case "speech-to-text": {
-      const audioUrl = args.audio_url || args.url || "";
-      if (!audioUrl) throw new Error("audio_url is required");
-      const check = validateUrl(audioUrl);
-      if (!check.valid) throw new Error(check.reason);
-      const audioResp = await fetch(audioUrl);
-      const audioBuffer = await audioResp.arrayBuffer();
-      const result = await (env.AI as any).run("@cf/openai/whisper", { audio: [...new Uint8Array(audioBuffer)] });
-      return JSON.stringify(result);
-    }
-
-    case "discover-api": {
-      const targetUrl = args.url || args.endpoint || "";
-      if (!targetUrl) throw new Error("url is required");
-      const check = validateUrl(targetUrl);
-      if (!check.valid) throw new Error(check.reason);
-      const resp = await fetch(targetUrl, { headers: { Accept: "application/json" } });
-      const body = await resp.text();
-      return body.slice(0, 10000);
-    }
-
-    case "execute-code":
-      // Alias for dynamic-exec
-      return dispatch(env, "dynamic-exec", args, sessionId, enabledTools);
-
     // ── Swarm / Batch Orchestration ─────────────────────────────
     case "swarm": {
       const swarmMode = String(args.mode || "auto");
@@ -3978,118 +3943,42 @@ async function perplexitySearch(env: RuntimeEnv, args: Record<string, any>): Pro
   const query = args.query || "";
   if (!query) return "web-search requires a query";
 
-  const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
-  const gatewayId = env.AI_GATEWAY_ID || "";
-  const cfToken = (env as any).AI_GATEWAY_TOKEN || env.CLOUDFLARE_API_TOKEN || "";
-
-  if (!accountId || !gatewayId) {
-    // Fallback to Brave if no gateway
-    return braveSearch(env, args);
+  // ── MVP: Local search ONLY — no paid fallbacks ──
+  // Fails loud so we can fix issues. No Perplexity, no Brave, no DuckDuckGo.
+  // TODO: Re-enable paid fallbacks when we have paying users.
+  const localSearchUrl = (env as any).LOCAL_SEARCH_URL;
+  if (!localSearchUrl) {
+    return "ERROR: LOCAL_SEARCH_URL not configured. Set it in wrangler.jsonc vars to point to search.oneshots.co";
   }
 
   try {
-    const resp = await fetchWithTimeout(
-      `https://gateway.ai.cloudflare.com/v1/${accountId}/${gatewayId}/openrouter/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(cfToken ? { "cf-aig-authorization": `Bearer ${cfToken}` } : {}),
-        },
-        body: JSON.stringify({
-          model: "perplexity/sonar",
-          messages: [{ role: "user", content: query }],
-        }),
-      },
-    );
+    const resp = await fetchWithTimeout(`${localSearchUrl}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "search-gemma4",
+        messages: [{ role: "user", content: query }],
+      }),
+    }, 90_000);
 
     if (!resp.ok) {
-      console.error(`[web-search] Perplexity Sonar failed ${resp.status}`);
-      return braveSearch(env, args);
+      const errText = await resp.text().catch(() => "");
+      return `ERROR: Local search failed (HTTP ${resp.status}). URL: ${localSearchUrl}. Response: ${errText.slice(0, 200)}`;
     }
 
     const data = (await resp.json()) as any;
     const content = data.choices?.[0]?.message?.content || "";
-    if (!content) return braveSearch(env, args);
+    if (!content) {
+      return `ERROR: Local search returned empty content. Raw response: ${JSON.stringify(data).slice(0, 300)}`;
+    }
 
     return content;
   } catch (err: any) {
-    console.error(`[web-search] Perplexity error: ${err.message}`);
-    return braveSearch(env, args);
+    return `ERROR: Local search failed — ${err.message}. Is search.oneshots.co running? Check SearXNG + llama.cpp on your home server.`;
   }
 }
 
-// ── Brave Search (fallback) ──
-
-async function braveSearch(env: RuntimeEnv, args: Record<string, any>): Promise<string> {
-  const query = args.query || "";
-  const maxResults = args.max_results || 5;
-  const braveKey = (env as any).BRAVE_SEARCH_KEY || "";
-  const accountId = env.CLOUDFLARE_ACCOUNT_ID || "";
-  const gatewayId = env.AI_GATEWAY_ID || "";
-
-  if (!braveKey) {
-    // Fallback to DuckDuckGo if no Brave key
-    return duckDuckGoSearch(query, maxResults);
-  }
-
-  // Hit Brave Search API directly (AI Gateway custom endpoints unreliable)
-  const baseUrl = "https://api.search.brave.com";
-
-  const headers: Record<string, string> = {
-    "X-Subscription-Token": braveKey,
-    "Accept": "application/json",
-  };
-
-  try {
-    const resp = await fetchWithTimeout(
-      `${baseUrl}/res/v1/web/search?q=${encodeURIComponent(query)}&count=${maxResults}`,
-      { headers },
-    );
-
-    if (!resp.ok) {
-      const errText = await resp.text();
-      console.error(`[web-search] Brave failed ${resp.status}: ${errText.slice(0, 100)}`);
-      return duckDuckGoSearch(query, maxResults);
-    }
-
-    const data = await resp.json() as any;
-    const results = data.web?.results || [];
-
-    if (results.length === 0) return `No results found for: ${query}`;
-
-    return results.slice(0, maxResults).map((r: any, i: number) =>
-      `${i + 1}. ${r.title || "Untitled"}\n   ${r.url || ""}\n   ${(r.description || "").replace(/<[^>]+>/g, "").slice(0, 200)}`,
-    ).join("\n\n");
-  } catch (err: any) {
-    console.error(`[web-search] Brave error: ${err.message}`);
-    return duckDuckGoSearch(query, maxResults);
-  }
-}
-
-// DuckDuckGo fallback (no API key needed)
-async function duckDuckGoSearch(query: string, maxResults: number): Promise<string> {
-  const resp = await fetchWithTimeout("https://html.duckduckgo.com/html/", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "AgentOS/0.2.0" },
-    body: `q=${encodeURIComponent(query)}`,
-  });
-  const html = await resp.text();
-  const linkRe = /<a rel="nofollow" class="result__a" href="([^"]+)"[^>]*>(.*?)<\/a>/g;
-  const snippetRe = /<a class="result__snippet"[^>]*>(.*?)<\/a>/gs;
-  const links: [string, string][] = [];
-  let m;
-  while ((m = linkRe.exec(html)) && links.length < maxResults) {
-    links.push([m[1], m[2].replace(/<[^>]+>/g, "").trim()]);
-  }
-  const snippets: string[] = [];
-  while ((m = snippetRe.exec(html)) && snippets.length < maxResults) {
-    snippets.push(m[1].replace(/<[^>]+>/g, "").trim());
-  }
-  return links.map(([url, title], i) =>
-    `${i + 1}. ${title}\n   ${url}\n   ${snippets[i] || ""}`,
-  ).join("\n\n") || `No results found for: ${query}`;
-}
+// ── Brave / DuckDuckGo removed — MVP uses LOCAL_SEARCH_URL only ──
 
 // ── Mixture of Agents — multi-model parallel reasoning + aggregation ──
 
@@ -4099,11 +3988,11 @@ async function mixtureOfAgents(env: RuntimeEnv, args: Record<string, any>): Prom
 
   const { callLLM } = await import("./llm");
 
-  // Reference models — diverse providers for perspective variety
+  // Reference models — MVP: multiple Gemma runs with different temperatures for diversity
   const referenceModels = [
-    { model: "anthropic/claude-sonnet-4-20250514", label: "Claude Sonnet" },
-    { model: "google/gemini-2.5-flash", label: "Gemini Flash" },
-    { model: "deepseek/deepseek-chat", label: "DeepSeek V3" },
+    { model: "gemma-4-31b", label: "Gemma Dense (precise)" },
+    { model: "gemma-4-26b-moe", label: "Gemma MoE (creative)" },
+    { model: "gemma-4-31b", label: "Gemma Dense (exploratory)" },
   ];
 
   const userMsg = [
@@ -4149,7 +4038,7 @@ async function mixtureOfAgents(env: RuntimeEnv, args: Record<string, any>): Prom
 
   try {
     const aggregated = await callLLM(env, aggregatorPrompt, [], {
-      model: "anthropic/claude-sonnet-4-20250514",
+      model: "gemma-4-31b",
       max_tokens: 3000,
       temperature: 0.3,
     });
@@ -4179,7 +4068,7 @@ async function parallelWebSearch(env: RuntimeEnv, args: Record<string, any>): Pr
   const capped = queries.slice(0, 5); // Max 5 parallel queries
 
   const results = await Promise.allSettled(
-    capped.map((q: string) => braveSearch(env, { query: String(q), max_results: maxPerQuery })),
+    capped.map((q: string) => perplexitySearch(env, { query: String(q), max_results: maxPerQuery })),
   );
 
   const output = capped.map((q: string, i: number) => {
@@ -4338,7 +4227,24 @@ async function browse(args: Record<string, any>, env?: RuntimeEnv, sessionId?: s
     }
   }
 
-  // Fallback: simple fetch + tag stripping (no JS execution)
+  // Fallback 1: Self-hosted Playwright browse via search server
+  const localSearchUrl = (env as any)?.LOCAL_SEARCH_URL;
+  if (localSearchUrl) {
+    try {
+      const browseResp = await fetchWithTimeout(`${localSearchUrl}/v1/browse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: args.url, extract_text: true }),
+      });
+      if (browseResp.ok) {
+        const data = (await browseResp.json()) as any;
+        const text = data.text || data.content || "";
+        if (text.length > 50) return text.slice(0, 10000);
+      }
+    } catch {}
+  }
+
+  // Fallback 2: simple fetch + tag stripping (no JS execution)
   const resp = await fetchWithTimeout(args.url || "", {
     headers: { "User-Agent": "AgentOS/0.2.0" },
     redirect: "follow",
@@ -4790,32 +4696,6 @@ async function textToSpeech(env: RuntimeEnv, args: Record<string, any>): Promise
     } catch {
       return "Edge TTS failed — falling back unavailable in serverless environment";
     }
-  } else if (provider === "openai" && (env as any).OPENROUTER_API_KEY) {
-    // OpenAI TTS via OpenRouter
-    try {
-      const resp = await fetch("https://openrouter.ai/api/v1/audio/speech", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${(env as any).OPENROUTER_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "openai/tts-1",
-          input: text,
-          voice: args.voice || "alloy",
-        }),
-      });
-      if (!resp.ok) throw new Error(`OpenAI TTS failed: ${resp.status}`);
-      audioBuffer = await resp.arrayBuffer();
-      modelUsed = "openai/tts-1";
-    } catch (err: any) {
-      // Fallback to Deepgram
-      const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
-      audioBuffer = audioRaw instanceof ArrayBuffer ? audioRaw
-        : audioRaw instanceof Uint8Array ? (audioRaw.buffer as ArrayBuffer).slice(audioRaw.byteOffset, audioRaw.byteOffset + audioRaw.byteLength)
-        : await new Response(audioRaw as BodyInit).arrayBuffer();
-      modelUsed = "@cf/deepgram/aura-2-en (openai fallback)";
-    }
   } else {
     // Default: Deepgram Aura via Workers AI (free)
     const audioRaw = await env.AI.run("@cf/deepgram/aura-2-en" as keyof AiModels, { text }) as any;
@@ -5195,8 +5075,9 @@ const CORE_TOOLS = new Set([
   "web-search", "python-exec", "bash", "read-file", "write-file", "edit-file",
   "memory-save", "memory-recall", "browse",
   "execute-code", "swarm",
-  // Meta-tools for discovery + delegation (marketplace-search removed from core
-  // to prevent the LLM from defaulting to marketplace delegation instead of using its own tools)
+  // Scheduling — always loaded so the model sees the tool definition and doesn't try bash
+  "create-schedule", "list-schedules", "delete-schedule",
+  // Meta-tools for discovery + delegation
   "discover-api",
 ]);
 
@@ -5361,8 +5242,12 @@ export function discoverTools(
     }
   }
 
-  const definitions = allTools.filter(t => needed.has(t.function.name));
-  return { tools: [...needed], definitions };
+  // Only return tools that exist in the agent's available tool set (allTools).
+  // TOOL_KEYWORDS may reference tools the agent doesn't have — filter them out.
+  const availableNames = new Set(allTools.map(t => t.function.name));
+  const validNeeded = new Set([...needed].filter(n => availableNames.has(n)));
+  const definitions = allTools.filter(t => validNeeded.has(t.function.name));
+  return { tools: [...validNeeded], definitions };
 }
 
 /** Meta-tool that lets the agent request additional tools mid-conversation. */

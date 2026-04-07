@@ -57,10 +57,17 @@ const MODEL_PRICING: Record<string, { input: number; output: number }> = {
   "meta-llama/llama-4-scout":    { input: 0.15, output: 0.45 },
 
   // ── Workers AI (Cloudflare on-edge, near-zero cost) ───────────
+  "@cf/google/gemma-4-26b-a4b-it":              { input: 0.00, output: 0.00 },   // Workers AI free tier
   "@cf/moonshotai/kimi-k2.5":                  { input: 0.10, output: 0.40 },
   "@cf/zai-org/glm-4.7-flash":                 { input: 0.05, output: 0.20 },
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast":  { input: 0.10, output: 0.20 },
   "@cf/mistral/mistral-7b-instruct-v0.2-lora": { input: 0.01, output: 0.03 },
+
+  // ── Self-hosted (free — runs on local GPU via CF Tunnel) ─────
+  "gemma-4-31b":                               { input: 0.00, output: 0.00 },
+  "gemma-4-31B-it-Q8_0.gguf":                  { input: 0.00, output: 0.00 },
+  "gemma-4-26b-moe":                           { input: 0.00, output: 0.00 },
+  "gemma-4-26B-A4B-it-Q4_K_M.gguf":            { input: 0.00, output: 0.00 },
 };
 
 /**
@@ -114,9 +121,13 @@ export function estimateTokenCost(model: string, inputTokens: number, outputToke
     const key = Object.keys(MODEL_PRICING).find((k) => model.startsWith(k) || k.startsWith(model));
     if (key) pricing = MODEL_PRICING[key];
     if (!pricing) {
-      console.warn(`[pricing] Unknown model '${model}' — REJECTING. All models must route through AI Gateway for accurate cost tracking.`);
-      // Charge at a high rate to flag the issue ($5/$15 per 1M = expensive enough to notice)
-      pricing = { input: 5.00, output: 15.00 };
+      // Workers AI and self-hosted models are free
+      if (model.startsWith("@cf/") || model.startsWith("gemma-4")) {
+        pricing = { input: 0.00, output: 0.00 };
+      } else {
+        console.warn(`[pricing] Unknown model '${model}' — charging penalty rate. Add to MODEL_PRICING.`);
+        pricing = { input: 5.00, output: 15.00 };
+      }
     }
   }
   const baseCost = (inputTokens / 1_000_000) * pricing.input + (outputTokens / 1_000_000) * pricing.output;

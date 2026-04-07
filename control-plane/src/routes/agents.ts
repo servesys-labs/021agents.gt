@@ -125,7 +125,7 @@ const CreateFromDescriptionSchema = z.object({
   description: z.string().min(1).max(5000),
   name: z.string().max(128).default(""),
   tools: z.string().default("auto"),
-  plan: z.enum(["basic", "standard", "premium"]).default("standard"),
+  plan: z.enum(["free", "basic", "standard", "premium"]).default("standard"),
   draft_only: z.boolean().default(false),
   include_gate_pack: z.boolean().default(true),
   min_eval_pass_rate: z.number().min(0).max(1).default(0.85),
@@ -179,11 +179,21 @@ function agentResponse(row: Record<string, unknown>): Record<string, unknown> {
     agent_id: row.agent_id ?? "",
     name: row.name ?? config.name ?? "",
     description: row.description ?? config.description ?? "",
+    system_prompt: config.system_prompt ?? config.systemPrompt ?? "",
     model: config.model ?? "",
     plan: config.plan ?? "standard",
     tools: Array.isArray(config.tools) ? config.tools : [],
     tags: Array.isArray(config.tags) ? config.tags : [],
     version: config.version ?? "0.1.0",
+    is_active: row.is_active ?? true,
+    temperature: config.temperature,
+    max_tokens: config.max_tokens,
+    max_turns: config.max_turns,
+    timeout_seconds: config.timeout_seconds,
+    reasoning_strategy: config.reasoning_strategy,
+    budget_limit_usd: (config.governance as Record<string, unknown>)?.budget_limit_usd ?? config.budget_limit_usd,
+    model_override: config.model_override,
+    handoff_config: config.handoff_config,
   };
 }
 
@@ -316,27 +326,30 @@ agentRoutes.openapi(createAgentRoute, async (c): Promise<any> => {
 
     // Check for existing agent with same name in org (case-insensitive)
     const existing = await sql`
-      SELECT name FROM agents WHERE LOWER(name) = LOWER(${req.name}) AND org_id = ${user.org_id} LIMIT 1
+      SELECT name, is_active FROM agents WHERE LOWER(name) = LOWER(${req.name}) AND org_id = ${user.org_id} LIMIT 1
     `;
     if (existing.length > 0) {
-      return c.json({ error: `Agent '${existing[0].name}' already exists (names are case-insensitive)` }, 409);
+      if (existing[0].is_active) {
+        return c.json({ error: `Agent '${existing[0].name}' already exists (names are case-insensitive)` }, 409);
+      }
+      // Reactivate soft-deleted agent with new config
+      const configJson: Record<string, unknown> = {
+        name: req.name, description: req.description, system_prompt: req.system_prompt,
+        model: req.model || "", plan: req.plan || "free",
+        tools: req.tools, max_turns: req.max_turns, temperature: req.temperature,
+        tags: req.tags, version: "0.1.0",
+        governance: req.governance ?? { budget_limit_usd: req.budget_limit_usd },
+      };
+      await sql`
+        UPDATE agents SET is_active = true, config_json = ${JSON.stringify(configJson)}::jsonb,
+          description = ${req.description}, updated_at = now()
+        WHERE LOWER(name) = LOWER(${req.name}) AND org_id = ${user.org_id}
+      `;
+      return c.json(agentResponse({ ...existing[0], is_active: true, config_json: configJson } as any), 201);
     }
 
-    // Enforce org agent limit
-    try {
-      const countRows = await sql`SELECT COUNT(*)::int as cnt FROM agents WHERE org_id = ${user.org_id} AND is_active = true`;
-      const current = countRows[0]?.cnt || 0;
-      const limitRows = await sql`SELECT (limits_json->>'max_agents')::int as max_agents FROM org_settings WHERE org_id = ${user.org_id} LIMIT 1`;
-      const maxAgents = limitRows[0]?.max_agents || 3;
-      if (current >= maxAgents) {
-        return c.json({
-          error: `Organization has reached agent limit (${maxAgents}). Delete unused agents or upgrade your plan.`,
-        }, 403);
-      }
-    } catch (err) {
-      console.warn(`[agents] Failed to check org limit: ${err}`);
-      // Non-blocking — allow creation if limit check fails
-    }
+    // Agent creation is unlimited — agents are just config rows with zero cost.
+    // Billing is purely usage-based (LLM tokens + tool execution).
 
     // Build config JSON
     const configJson: Record<string, unknown> = {
@@ -473,6 +486,7 @@ agentRoutes.openapi(updateAgentRoute, async (c): Promise<any> => {
     if (req.system_prompt) existingConfig.system_prompt = req.system_prompt;
     if (req.personality) existingConfig.personality = req.personality;
     if (req.model) existingConfig.model = req.model;
+    if (req.plan) existingConfig.plan = req.plan;
     if (req.max_tokens != null) existingConfig.max_tokens = req.max_tokens;
     if (req.temperature != null) existingConfig.temperature = req.temperature;
     if (req.tools.length > 0) existingConfig.tools = req.tools;
@@ -582,6 +596,15 @@ agentRoutes.openapi(deleteAgentRoute, async (c): Promise<any> => {
     if (!name) {
       return c.json({ error: `Agent '${identifier}' not found` }, 404);
     }
+
+    // Block deletion of personal agents (my-assistant) — they're permanent per account
+    try {
+      const configRows = await sql`SELECT config_json FROM agents WHERE name = ${name} AND org_id = ${user.org_id} LIMIT 1`;
+      const cfg = parseConfig(configRows[0]?.config_json);
+      if (cfg.is_personal) {
+        return c.json({ error: "Cannot delete the personal assistant. This agent is permanent for your account." }, 403);
+      }
+    } catch {}
 
     const counts: Record<string, number> = {};
 
@@ -1079,7 +1102,7 @@ agentRoutes.openapi(createFromDescriptionRoute, async (c): Promise<any> => {
       name: req.name || undefined,
       hyperdrive: c.env.HYPERDRIVE,
       orgId: user.org_id,
-      openrouterApiKey: c.env.OPENROUTER_API_KEY,
+      openrouterApiKey: c.env.OPENROUTER_API_KEY || "",
       cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
       aiGatewayId: c.env.AI_GATEWAY_ID,
       cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
@@ -1537,17 +1560,13 @@ agentRoutes.openapi(metaChatRoute, async (c): Promise<any> => {
     return c.json({ error: `Agent '${identifier}' not found` }, 404);
   }
 
-  if (!c.env.OPENROUTER_API_KEY) {
-    return c.json({ error: "OPENROUTER_API_KEY not configured" }, 500);
-  }
-
   try {
     const result = await runMetaChat(messages as MetaChatMessage[], {
       agentName,
       orgId: user.org_id,
       userId: user.user_id,
       hyperdrive: c.env.HYPERDRIVE,
-      openrouterApiKey: c.env.OPENROUTER_API_KEY,
+      openrouterApiKey: c.env.OPENROUTER_API_KEY || "",
       cloudflareAccountId: c.env.CLOUDFLARE_ACCOUNT_ID,
       aiGatewayId: c.env.AI_GATEWAY_ID,
       cloudflareApiToken: c.env.CLOUDFLARE_API_TOKEN,
@@ -1583,7 +1602,7 @@ agentRoutes.post("/:name/run", (c) => {
 
 agentRoutes.post("/:name/run/stream", (c) => {
   return runtimeMovedToEdge(
-    "Use `/api/v1/runtime-proxy/runnable/stream-events` on worker.",
+    "Use `POST /api/v1/runtime-proxy/runnable/stream` (SSE) with the same auth.",
   );
 });
 
