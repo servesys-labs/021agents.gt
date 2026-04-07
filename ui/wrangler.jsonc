@@ -1,0 +1,11 @@
+{
+  "name": "oneshots-ui",
+  "compatibility_date": "2026-03-01",
+  "assets": {
+    "directory": "./build",
+    "not_found_handling": "single-page-application"
+  },
+  "routes": [
+    { "pattern": "app.oneshots.co/*", "zone_name": "oneshots.co" }
+  ]
+}

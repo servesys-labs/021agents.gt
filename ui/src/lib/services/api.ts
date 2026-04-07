@@ -53,7 +53,7 @@ export class ApiClient {
     const data = await this.request<Record<string, unknown>>(
       "POST",
       "/auth/signup",
-      { name, email, password, ...(invite_code ? { invite_code } : {}) }
+      { name, email, password, ...(invite_code ? { referral_code: invite_code } : {}) }
     );
     this.token = data.token as string;
     return {
