@@ -19,9 +19,9 @@ export const chatPlatformRoutes = createOpenAPIRouter();
 async function getSecret(sql: any, name: string, orgId?: string): Promise<string> {
   try {
     const rows = orgId
-      ? await sql`SELECT value_encrypted FROM secrets WHERE name = ${name} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`
-      : await sql`SELECT value_encrypted FROM secrets WHERE name = ${name} ORDER BY created_at DESC LIMIT 1`;
-    if (rows.length > 0 && rows[0].value_encrypted) return String(rows[0].value_encrypted);
+      ? await sql`SELECT encrypted_value FROM secrets WHERE name = ${name} AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`
+      : await sql`SELECT encrypted_value FROM secrets WHERE name = ${name} ORDER BY created_at DESC LIMIT 1`;
+    if (rows.length > 0 && rows[0].encrypted_value) return String(rows[0].encrypted_value);
   } catch {}
   return "";
 }
@@ -30,9 +30,9 @@ async function getSecret(sql: any, name: string, orgId?: string): Promise<string
 async function storeSecret(sql: any, name: string, value: string, orgId: string): Promise<void> {
   const now = new Date().toISOString();
   await sql`
-    INSERT INTO secrets (name, value_encrypted, org_id, created_at, updated_at)
+    INSERT INTO secrets (name, encrypted_value, org_id, created_at, updated_at)
     VALUES (${name}, ${value}, ${orgId}, ${now}, ${now})
-    ON CONFLICT (org_id, name, project_id, env) DO UPDATE SET value_encrypted = EXCLUDED.value_encrypted, updated_at = EXCLUDED.updated_at
+    ON CONFLICT (org_id, name, project_id, env) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, updated_at = EXCLUDED.updated_at
   `;
 }
 
@@ -145,9 +145,9 @@ async function verifySlackSignature(signingSecret: string, timestamp: string, bo
 async function getTelegramToken(sql: any, orgId?: string): Promise<string> {
   try {
     const rows = orgId
-      ? await sql`SELECT value_encrypted FROM secrets WHERE name = 'TELEGRAM_BOT_TOKEN' AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`
-      : await sql`SELECT value_encrypted FROM secrets WHERE name = 'TELEGRAM_BOT_TOKEN' ORDER BY created_at DESC LIMIT 1`;
-    if (rows.length > 0 && rows[0].value_encrypted) return String(rows[0].value_encrypted);
+      ? await sql`SELECT encrypted_value FROM secrets WHERE name = 'TELEGRAM_BOT_TOKEN' AND org_id = ${orgId} ORDER BY created_at DESC LIMIT 1`
+      : await sql`SELECT encrypted_value FROM secrets WHERE name = 'TELEGRAM_BOT_TOKEN' ORDER BY created_at DESC LIMIT 1`;
+    if (rows.length > 0 && rows[0].encrypted_value) return String(rows[0].encrypted_value);
   } catch {}
   return "";
 }
@@ -721,9 +721,9 @@ chatPlatformRoutes.openapi(telegramConnectRoute, async (c): Promise<any> => {
   // Store in secrets
   try {
     await sql`
-      INSERT INTO secrets (name, value_encrypted, org_id, created_at, updated_at)
+      INSERT INTO secrets (name, encrypted_value, org_id, created_at, updated_at)
       VALUES ('TELEGRAM_BOT_TOKEN', ${botToken}, ${user.org_id}, ${now}, ${now})
-      ON CONFLICT (org_id, name, project_id, env) DO UPDATE SET value_encrypted = EXCLUDED.value_encrypted, updated_at = EXCLUDED.updated_at
+      ON CONFLICT (org_id, name, project_id, env) DO UPDATE SET encrypted_value = EXCLUDED.encrypted_value, updated_at = EXCLUDED.updated_at
     `;
   } catch {}
 

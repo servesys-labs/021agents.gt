@@ -1001,7 +1001,7 @@ async function persistAgentPackage(
     try {
       const s = sk as Record<string, unknown>;
       await sql`
-        INSERT INTO skills (name, description, category, prompt, prompt_template, agent_name, org_id, enabled, created_at)
+        INSERT INTO skills (name, description, category, prompt, prompt_template, agent_name, org_id, is_active, created_at)
         VALUES (${String(s.name)}, ${String(s.description || "")}, ${String(s.category || "general")},
                 ${String(s.content || "")}, ${String(s.content || "")}, ${agentName}, ${orgId}, true, now())
         ON CONFLICT (org_id, name) DO NOTHING

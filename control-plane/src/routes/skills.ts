@@ -81,7 +81,7 @@ const updateSkillRoute = createRoute({
       content: {
         "application/json": {
           schema: z.object({
-            enabled: z.boolean(),
+            is_active: z.boolean(),
           }),
         },
       },
@@ -99,13 +99,13 @@ skillRoutes.openapi(updateSkillRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const { name } = c.req.valid("param");
   const body = c.req.valid("json");
-  const enabled = Boolean(body.enabled);
+  const isActive = Boolean(body.is_active);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const rows = await sql`SELECT name FROM skills WHERE org_id = ${user.org_id} AND name = ${name}`;
   if (rows.length === 0) return c.json({ error: `Skill '${name}' not found` }, 404);
 
-  await sql`UPDATE skills SET enabled = ${enabled} WHERE org_id = ${user.org_id} AND name = ${name}`;
+  await sql`UPDATE skills SET is_active = ${isActive} WHERE org_id = ${user.org_id} AND name = ${name}`;
 
   const updated = await sql`SELECT * FROM skills WHERE org_id = ${user.org_id} AND name = ${name}`;
   return c.json(updated[0]);
@@ -142,7 +142,7 @@ skillRoutes.openapi(reloadSkillsRoute, async (c): Promise<any> => {
     const rows = await sql`SELECT * FROM skills WHERE org_id = ${user.org_id} ORDER BY name`;
     return c.json({
       total: rows.length,
-      enabled: rows.filter((r: any) => r.enabled).length,
+      enabled: rows.filter((r: any) => r.is_active).length,
       skills: rows.map((r: any) => r.name),
     });
   } catch {

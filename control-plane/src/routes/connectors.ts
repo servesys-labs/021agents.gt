@@ -230,13 +230,12 @@ const storeTokenRoute = createRoute({
       content: {
         "application/json": {
           schema: z.object({
-            connector_name: z.string().min(1),
-            access_token: z.string().min(1),
-            refresh_token: z.string().default(""),
-            token_type: z.string().default("Bearer"),
+            provider: z.string().min(1),
+            app: z.string().default(""),
+            access_token_enc: z.string().min(1),
+            refresh_token_enc: z.string().default(""),
             expires_at: z.string().optional(),
             scopes: z.string().default(""),
-            metadata: z.record(z.unknown()).default({}),
           }),
         },
       },
@@ -245,7 +244,7 @@ const storeTokenRoute = createRoute({
   responses: {
     200: {
       description: "Token stored",
-      content: { "application/json": { schema: z.object({ connector_name: z.string(), stored: z.boolean() }) } },
+      content: { "application/json": { schema: z.object({ provider: z.string(), stored: z.boolean() }) } },
     },
     ...errorResponses(400, 500),
   },
@@ -253,16 +252,15 @@ const storeTokenRoute = createRoute({
 connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
   const user = c.get("user");
   const body = c.req.valid("json");
-  const connectorName = body.connector_name.trim();
-  const accessToken = body.access_token.trim();
-  const refreshToken = body.refresh_token;
-  const tokenType = body.token_type;
+  const provider = body.provider.trim();
+  const app = body.app.trim();
+  const accessTokenEnc = body.access_token_enc.trim();
+  const refreshTokenEnc = body.refresh_token_enc;
   const expiresAt = body.expires_at ? new Date(body.expires_at).toISOString() : null;
   const scopes = body.scopes;
-  const metadataJson = JSON.stringify(body.metadata);
 
-  if (!connectorName) return c.json({ error: "connector_name is required" }, 400);
-  if (!accessToken) return c.json({ error: "access_token is required" }, 400);
+  if (!provider) return c.json({ error: "provider is required" }, 400);
+  if (!accessTokenEnc) return c.json({ error: "access_token_enc is required" }, 400);
 
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
   const now = new Date().toISOString();
@@ -270,19 +268,17 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
   try {
     await sql`
       INSERT INTO connector_tokens (
-        org_id, connector_name, access_token, refresh_token,
-        token_type, expires_at, scopes, metadata, created_at, updated_at
+        org_id, provider, app, access_token_enc, refresh_token_enc,
+        expires_at, scopes, created_at, updated_at
       ) VALUES (
-        ${user.org_id}, ${connectorName}, ${accessToken}, ${refreshToken},
-        ${tokenType}, ${expiresAt}, ${scopes}, ${metadataJson}, ${now}, ${now}
+        ${user.org_id}, ${provider}, ${app}, ${accessTokenEnc}, ${refreshTokenEnc},
+        ${expiresAt}, ${scopes}, ${now}, ${now}
       )
-      ON CONFLICT (org_id, connector_name) DO UPDATE SET
-        access_token = EXCLUDED.access_token,
-        refresh_token = EXCLUDED.refresh_token,
-        token_type = EXCLUDED.token_type,
+      ON CONFLICT (org_id, provider, app) DO UPDATE SET
+        access_token_enc = EXCLUDED.access_token_enc,
+        refresh_token_enc = EXCLUDED.refresh_token_enc,
         expires_at = EXCLUDED.expires_at,
         scopes = EXCLUDED.scopes,
-        metadata = EXCLUDED.metadata,
         updated_at = EXCLUDED.updated_at
     `;
   } catch (err: any) {
@@ -294,12 +290,12 @@ connectorRoutes.openapi(storeTokenRoute, async (c): Promise<any> => {
     const nowEpoch = new Date().toISOString();
     await sql`
       INSERT INTO audit_log (org_id, actor_id, action, resource_type, resource_name, details, created_at)
-      VALUES (${user.org_id}, ${user.user_id}, 'connector.token_stored', 'connector', ${connectorName},
-              ${JSON.stringify({ scopes, token_type: tokenType })}, ${nowEpoch})
+      VALUES (${user.org_id}, ${user.user_id}, 'connector.token_stored', 'connector', ${provider},
+              ${JSON.stringify({ scopes })}, ${nowEpoch})
     `;
   } catch {}
 
-  return c.json({ connector_name: connectorName, stored: true });
+  return c.json({ provider, stored: true });
 });
 
 // ── DELETE /connectors/tokens/{connector} ──────────────────────────────
@@ -316,21 +312,21 @@ const revokeTokenRoute = createRoute({
   responses: {
     200: {
       description: "Token revoked",
-      content: { "application/json": { schema: z.object({ connector_name: z.string(), revoked: z.boolean() }) } },
+      content: { "application/json": { schema: z.object({ provider: z.string(), revoked: z.boolean() }) } },
     },
   },
 });
 connectorRoutes.openapi(revokeTokenRoute, async (c): Promise<any> => {
   const user = c.get("user");
-  const { connector: connectorName } = c.req.valid("param");
+  const { connector: connectorProvider } = c.req.valid("param");
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   await sql`
     DELETE FROM connector_tokens
-    WHERE org_id = ${user.org_id} AND connector_name = ${connectorName}
+    WHERE org_id = ${user.org_id} AND provider = ${connectorProvider}
   `;
 
-  return c.json({ connector_name: connectorName, revoked: true });
+  return c.json({ provider: connectorProvider, revoked: true });
 });
 
 // ── POST /connectors/tools (register) ──────────────────────────────────

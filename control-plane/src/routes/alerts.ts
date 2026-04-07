@@ -103,7 +103,7 @@ alertRoutes.openapi(createAlertRoute, async (c): Promise<any> => {
   const sql = await getDbForOrg(c.env.HYPERDRIVE, user.org_id);
 
   const rows = await sql`
-    INSERT INTO alert_configs (org_id, name, type, agent_name, threshold, comparison, window_minutes, webhook_url, webhook_secret, cooldown_minutes)
+    INSERT INTO alert_configs (org_id, name, alert_type, agent_name, threshold, comparison, window_minutes, webhook_url, webhook_secret, cooldown_minutes)
     VALUES (${user.org_id}, ${name}, ${type}, ${agentName}, ${threshold}, ${comparison}, ${windowMinutes}, ${webhookUrl}, ${webhookSecret}, ${cooldownMinutes})
     RETURNING *
   `;
@@ -133,7 +133,7 @@ const updateAlertRoute = createRoute({
             webhook_secret: z.string().optional(),
             agent_name: z.string().optional(),
             cooldown_minutes: z.number().optional(),
-            enabled: z.boolean().optional(),
+            is_active: z.boolean().optional(),
           }),
         },
       },
@@ -184,12 +184,12 @@ alertRoutes.openapi(updateAlertRoute, async (c): Promise<any> => {
   if (body.webhook_secret !== undefined) uWebhookSecret = String(body.webhook_secret);
   if (body.agent_name !== undefined) uAgentName = String(body.agent_name);
   if (body.cooldown_minutes !== undefined) uCooldownMinutes = Number(body.cooldown_minutes);
-  if (body.enabled !== undefined) uEnabled = Boolean(body.enabled);
+  if (body.is_active !== undefined) uEnabled = Boolean(body.is_active);
 
   const rows = await sql`
     UPDATE alert_configs SET
       name = COALESCE(${uName}, name),
-      type = COALESCE(${uType}, type),
+      alert_type = COALESCE(${uType}, alert_type),
       threshold = COALESCE(${uThreshold}, threshold),
       comparison = COALESCE(${uComparison}, comparison),
       window_minutes = COALESCE(${uWindowMinutes}, window_minutes),
@@ -197,7 +197,7 @@ alertRoutes.openapi(updateAlertRoute, async (c): Promise<any> => {
       webhook_secret = COALESCE(${uWebhookSecret}, webhook_secret),
       agent_name = COALESCE(${uAgentName}, agent_name),
       cooldown_minutes = COALESCE(${uCooldownMinutes}, cooldown_minutes),
-      enabled = COALESCE(${uEnabled}, enabled),
+      is_active = COALESCE(${uEnabled}, is_active),
       updated_at = now()
     WHERE id = ${id} AND org_id = ${user.org_id}
     RETURNING *
