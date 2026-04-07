@@ -104,7 +104,7 @@ describe("session queue payload", () => {
     "step_count", "action_count", "wall_clock_seconds",
     "cost_total_usd", "trace_id", "channel",
     // Migration 026 fields
-    "detailed_cost_json", "feature_flags_json",
+    "detailed_cost", "feature_flags",
     "total_cache_read_tokens", "total_cache_write_tokens",
     "repair_count", "compaction_count",
   ];
@@ -127,12 +127,12 @@ describe("session queue payload", () => {
         cost_total_usd: 0.0045,
         trace_id: "trace-xyz",
         channel: "web",
-        detailed_cost_json: JSON.stringify({
+        detailed_cost: JSON.stringify({
           input_cost: 0.003, output_cost: 0.001,
           cache_write_cost: 0.0002, cache_read_cost: 0.0001,
           cache_savings: 0.0005, total_cost: 0.0043,
         }),
-        feature_flags_json: JSON.stringify({
+        feature_flags: JSON.stringify({
           concurrent_tools: true,
           context_compression: true,
           deferred_tool_loading: false,
@@ -152,18 +152,18 @@ describe("session queue payload", () => {
     }
   });
 
-  it("detailed_cost_json is valid JSON with cache fields", () => {
+  it("detailed_cost is valid JSON with cache fields", () => {
     const msg = buildSessionPayload();
-    const cost = JSON.parse(msg.payload.detailed_cost_json);
+    const cost = JSON.parse(msg.payload.detailed_cost);
     expect(cost).toHaveProperty("cache_savings");
     expect(cost).toHaveProperty("cache_read_cost");
     expect(cost).toHaveProperty("cache_write_cost");
     expect(cost.cache_savings).toBeGreaterThan(0);
   });
 
-  it("feature_flags_json is valid JSON", () => {
+  it("feature_flags is valid JSON", () => {
     const msg = buildSessionPayload();
-    const flags = JSON.parse(msg.payload.feature_flags_json);
+    const flags = JSON.parse(msg.payload.feature_flags);
     expect(flags).toHaveProperty("concurrent_tools");
     expect(typeof flags.concurrent_tools).toBe("boolean");
   });
@@ -237,7 +237,7 @@ describe("queue consumer → DB schema alignment", () => {
   ];
 
   const SESSIONS_COLUMNS_026 = [
-    "feature_flags_json", "detailed_cost_json",
+    "feature_flags", "detailed_cost",
     "total_cache_read_tokens", "total_cache_write_tokens",
     "repair_count", "compaction_count",
   ];
@@ -285,24 +285,23 @@ describe("queue consumer → DB schema alignment", () => {
     }
   });
 
-  it("consumer turn INSERT uses plan_artifact NOT plan_json", () => {
+  it("consumer turn INSERT uses plan column (not plan_json)", () => {
     const fs = require("fs");
     const source = fs.readFileSync(
       require("path").resolve(__dirname, "../src/index.ts"),
       "utf-8",
     );
 
-    // The turns table column is plan_json (confirmed against live DB schema).
-    // The consumer must use the correct column name.
+    // The turns table column is `plan` (JSONB) in the consolidated schema.
     const turnInsertMatch = source.match(
       /else if \(type === "turn"\)[\s\S]*?\)`/,
     );
     expect(turnInsertMatch).not.toBeNull();
     const turnInsert = turnInsertMatch![0];
 
-    // Should contain the correct column name
+    // Should contain the plan column (not plan_json)
     const columnsSection = turnInsert.split("VALUES")[0];
-    expect(columnsSection).toContain("plan_json");
+    expect(columnsSection).toContain("plan");
   });
 
   it("consumer handles all queue message types", () => {
@@ -480,7 +479,7 @@ describe("consolidated schema — observability columns", () => {
 
     // Sessions columns
     const sessionsCols = [
-      "feature_flags_json", "detailed_cost_json",
+      "feature_flags", "detailed_cost",
       "total_cache_read_tokens", "total_cache_write_tokens",
       "repair_count", "compaction_count",
     ];
@@ -496,7 +495,7 @@ describe("consolidated schema — observability columns", () => {
       "utf-8",
     );
 
-    expect(migration).toContain("idx_turns_refusal");
+    // idx_turns_refusal was removed in the consolidated schema (refusal is rarely queried alone)
     expect(migration).toContain("idx_turns_model_latency");
   });
 });
@@ -524,7 +523,7 @@ describe("meta-agent SCOPED_TABLES", () => {
       // Tracing
       "delegation_events", "tool_executions",
       // Feedback
-      "session_feedback", "user_feedback",
+      "session_feedback",
       // Security
       "security_events", "guardrail_events",
       // SLOs

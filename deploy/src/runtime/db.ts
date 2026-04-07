@@ -420,7 +420,7 @@ export async function writeTurn(
     await sql`
       INSERT INTO turns (
         session_id, turn_number, model_used, input_tokens, output_tokens,
-        latency_ms, llm_content, cost_total_usd,
+        latency_ms, output_text, cost_usd,
         tool_calls, tool_results, errors,
         execution_mode, plan, reflection
       ) VALUES (
@@ -634,7 +634,8 @@ export async function writeEvalRun(
     avg_score: number;
     avg_latency_ms: number;
     total_cost_usd: number;
-    eval_conditions_json: string;
+    eval_conditions_json?: string;
+    config?: Record<string, unknown>;
   },
 ): Promise<string> {
   if (isBreakerOpen()) {
