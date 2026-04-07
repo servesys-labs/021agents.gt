@@ -291,21 +291,13 @@ describe("SSRF bypass patterns", () => {
 // ── Migration File Existence ──────────────────────────────────────
 
 describe("database migrations", () => {
-  it("team memory migration exists", async () => {
+  it("consolidated init migration exists with all tables", async () => {
     const fs = await import("fs");
-    const path = "/Users/ishprasad/agent-mute/one-shot/control-plane/src/db/migrations/024_team_memory_and_consolidation.sql";
+    const path = "/Users/ishprasad/agent-mute/one-shot/control-plane/src/db/migrations/001_init.sql";
     expect(fs.existsSync(path)).toBe(true);
-  });
-
-  it("github webhooks migration exists", async () => {
-    const fs = await import("fs");
-    const path = "/Users/ishprasad/agent-mute/one-shot/control-plane/src/db/migrations/025_github_webhooks.sql";
-    expect(fs.existsSync(path)).toBe(true);
-  });
-
-  it("autopilot migration exists", async () => {
-    const fs = await import("fs");
-    const path = "/Users/ishprasad/agent-mute/one-shot/control-plane/src/db/migrations/023_autopilot_sessions.sql";
-    expect(fs.existsSync(path)).toBe(true);
+    const content = fs.readFileSync(path, "utf8");
+    expect(content).toContain("team_facts");
+    expect(content).toContain("github_webhook_subscriptions");
+    expect(content).toContain("autopilot_sessions");
   });
 });

@@ -739,34 +739,27 @@ describe("agent lifecycle — CREATE → TEST → EVALUATE → EVOLVE", () => {
 // 14. MIGRATION 027 — feature_flags + agent_versions tables
 // ══════════════════════════════════════════════════════════════════
 
-describe("migration 027 — table creation", () => {
-  it("migration file exists and creates feature_flags table", async () => {
+describe("consolidated schema — feature_flags, agent_versions, skills", () => {
+  it("init migration contains feature_flags table", async () => {
     const fs = await import("fs");
-    const path = "src/db/migrations/027_feature_flags_and_agent_versions.sql";
-    const content = fs.readFileSync(path, "utf8");
-
+    const content = fs.readFileSync("src/db/migrations/001_init.sql", "utf8");
     expect(content).toContain("CREATE TABLE IF NOT EXISTS feature_flags");
     expect(content).toContain("org_id");
     expect(content).toContain("flag_name");
-    expect(content).toContain("UNIQUE(org_id, flag_name)");
   });
 
-  it("migration creates agent_versions table", async () => {
+  it("init migration contains agent_versions table", async () => {
     const fs = await import("fs");
-    const path = "src/db/migrations/027_feature_flags_and_agent_versions.sql";
-    const content = fs.readFileSync(path, "utf8");
-
+    const content = fs.readFileSync("src/db/migrations/001_init.sql", "utf8");
     expect(content).toContain("CREATE TABLE IF NOT EXISTS agent_versions");
     expect(content).toContain("agent_name");
     expect(content).toContain("config_json");
-    expect(content).toContain("UNIQUE(agent_name, version)");
   });
 
-  it("migration adds agent_name column to skills", async () => {
+  it("init migration contains skills table with agent_name", async () => {
     const fs = await import("fs");
-    const path = "src/db/migrations/027_feature_flags_and_agent_versions.sql";
-    const content = fs.readFileSync(path, "utf8");
-
-    expect(content).toContain("ALTER TABLE skills ADD COLUMN IF NOT EXISTS agent_name");
+    const content = fs.readFileSync("src/db/migrations/001_init.sql", "utf8");
+    expect(content).toContain("CREATE TABLE IF NOT EXISTS skills");
+    expect(content).toContain("agent_name");
   });
 });

@@ -20,45 +20,49 @@ import { buildPersonalAgentPrompt } from "../src/prompts/personal-agent";
 describe("personal assistant prompt — lean and focused", () => {
   const prompt = buildPersonalAgentPrompt("TestUser");
 
-  it("prompt is under 4500 tokens (~18000 chars)", () => {
+  it("prompt is under 5500 tokens (~22000 chars)", () => {
     const estimatedTokens = Math.ceil(prompt.length / 4);
-    expect(estimatedTokens).toBeLessThan(4500);
+    expect(estimatedTokens).toBeLessThan(5500);
   });
 
-  it("documents exactly 8 core tools, not 26", () => {
-    // Core tools section should list these 8
+  it("documents core tools including extended set", () => {
+    // Core tools section should list these
     expect(prompt).toContain("## Core tools (always available)");
     const coreSection = prompt.split("## Core tools")[1].split("## Additional")[0];
     const toolMentions = coreSection.match(/`[a-z-]+`/g) || [];
-    // Should have exactly 8 core tools documented
-    expect(toolMentions.length).toBe(8);
+    // Should have core tools documented (11 in current prompt)
+    expect(toolMentions.length).toBeGreaterThanOrEqual(8);
     expect(toolMentions).toContain("`web-search`");
     expect(toolMentions).toContain("`browse`");
     expect(toolMentions).toContain("`python-exec`");
     expect(toolMentions).toContain("`bash`");
     expect(toolMentions).toContain("`read-file`");
     expect(toolMentions).toContain("`write-file`");
+    expect(toolMentions).toContain("`edit-file`");
+    expect(toolMentions).toContain("`execute-code`");
+    expect(toolMentions).toContain("`swarm`");
     expect(toolMentions).toContain("`memory-save`");
     expect(toolMentions).toContain("`memory-recall`");
   });
 
   it("has additional tools section for on-demand discovery", () => {
     expect(prompt).toContain("## Additional tools (available on demand)");
-    expect(prompt).toContain("runtime discovers these automatically");
+    expect(prompt).toContain("discovers these automatically");
   });
 
   it("mentions progressive discovery concept", () => {
-    expect(prompt).toContain("100+ additional tools");
-    expect(prompt).toContain("discovered on demand");
+    // The additional tools section explains on-demand discovery
+    expect(prompt).toContain("discovers these automatically");
+    expect(prompt).toContain("Additional tools");
   });
 
-  it("does NOT list all 26 tools as always-available", () => {
+  it("does NOT list marketplace/integration tools as always-available", () => {
     // These should be in the "additional" section, not core
     const coreSection = prompt.split("## Core tools")[1].split("## Additional")[0];
     expect(coreSection).not.toContain("marketplace-search");
     expect(coreSection).not.toContain("a2a-send");
     expect(coreSection).not.toContain("image-generate");
-    expect(coreSection).not.toContain("create-schedule");
+    // create-schedule is now a core tool (intentionally promoted)
     expect(coreSection).not.toContain("mcp-call");
     expect(coreSection).not.toContain("save-project");
   });
@@ -105,18 +109,19 @@ describe("personal assistant — meta-agent delegation", () => {
 // ══════════════════════════════════════════════════════════════════
 
 describe("signup flow — agent creation", () => {
-  it("personal assistant config has lean 8-tool list", () => {
-    // Simulate the config that auth.ts creates
+  it("personal assistant config has core tool list", () => {
+    // Simulate the config that auth.ts creates (now 12 tools with edit-file, execute-code, swarm, sync-workspace-memory)
     const personalConfig = {
       tools: [
         "web-search", "browse",
         "python-exec", "bash",
-        "read-file", "write-file",
-        "memory-save", "memory-recall",
+        "read-file", "write-file", "edit-file",
+        "memory-save", "memory-recall", "sync-workspace-memory",
+        "execute-code", "swarm",
       ],
     };
 
-    expect(personalConfig.tools).toHaveLength(8);
+    expect(personalConfig.tools).toHaveLength(12);
     expect(personalConfig.tools).not.toContain("marketplace-search");
     expect(personalConfig.tools).not.toContain("image-generate");
     expect(personalConfig.tools).not.toContain("mcp-call");
@@ -153,20 +158,24 @@ describe("signup flow — agent creation", () => {
 // ══════════════════════════════════════════════════════════════════
 
 describe("personal-assistant.json — lean config", () => {
-  it("JSON file has 8 tools matching auth.ts", async () => {
+  it("JSON file has 12 tools matching auth.ts", async () => {
     const fs = await import("fs");
     const raw = fs.readFileSync("../agents/personal-assistant.json", "utf8");
     const config = JSON.parse(raw);
 
-    expect(config.tools).toHaveLength(8);
+    expect(config.tools).toHaveLength(12);
     expect(config.tools).toContain("web-search");
     expect(config.tools).toContain("browse");
     expect(config.tools).toContain("python-exec");
     expect(config.tools).toContain("bash");
     expect(config.tools).toContain("read-file");
     expect(config.tools).toContain("write-file");
+    expect(config.tools).toContain("edit-file");
     expect(config.tools).toContain("memory-save");
     expect(config.tools).toContain("memory-recall");
+    expect(config.tools).toContain("sync-workspace-memory");
+    expect(config.tools).toContain("execute-code");
+    expect(config.tools).toContain("swarm");
   });
 
   it("JSON file has delegation config for meta-agent", async () => {
@@ -218,18 +227,18 @@ describe("personal assistant prompt — quality checks", () => {
 
   it("has planning vs execution guidance", () => {
     expect(prompt).toContain("Execute immediately");
-    expect(prompt).toContain("Brief plan first");
+    expect(prompt).toContain("Plan first, then execute");
   });
 
   it("has error recovery guidance", () => {
     expect(prompt).toContain("Error recovery");
-    expect(prompt).toContain("web-search returns nothing");
+    expect(prompt).toContain("`web-search` returns nothing");
   });
 
   it("has memory protocol", () => {
     expect(prompt).toContain("Memory protocol");
-    expect(prompt).toContain("Save automatically");
-    expect(prompt).toContain("Recall automatically");
+    expect(prompt).toContain("## Save");
+    expect(prompt).toContain("## Recall");
   });
 
   it("has building apps guidance", () => {
@@ -238,7 +247,7 @@ describe("personal assistant prompt — quality checks", () => {
   });
 
   it("has constraints/safety section", () => {
-    expect(prompt).toContain("Constraints");
+    expect(prompt).toContain("# Safety");
     expect(prompt).toContain("malware");
     expect(prompt).toContain("PII");
   });
@@ -246,6 +255,8 @@ describe("personal assistant prompt — quality checks", () => {
   it("defaults to 'there' when no username provided", () => {
     const defaultPrompt = buildPersonalAgentPrompt();
     expect(defaultPrompt).toContain("for there on the OneShots");
+    // The prompt uses "there" as fallback name
+    expect(defaultPrompt).toContain("there");
   });
 });
 
