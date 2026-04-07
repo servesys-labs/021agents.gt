@@ -13,6 +13,7 @@ export interface GatewayConfig {
   cloudflareApiToken?: string;
   aiGatewayToken?: string;
   openrouterApiKey?: string;
+  anthropicApiKey?: string;
 }
 
 export interface LLMCallOptions {
@@ -40,44 +41,39 @@ export async function callLLMGateway(
   config: GatewayConfig,
   options: LLMCallOptions,
 ): Promise<LLMCallResult> {
-  // ── MVP: Only free models — self-hosted Gemma 4 via AI Gateway ──
-  // Meta-agent defaults to Dense 31B for complex reasoning.
-  // No OpenRouter, no paid models. Fail loud.
-  const model = options.model || "gemma-4-31b";
+  const model = options.model || "anthropic/claude-sonnet-4-6";
   const { cloudflareAccountId, aiGatewayId, cloudflareApiToken, aiGatewayToken } = config;
 
   if (!cloudflareAccountId || !aiGatewayId) {
-    throw new Error("MVP mode: CLOUDFLARE_ACCOUNT_ID and AI_GATEWAY_ID required. No OpenRouter fallback.");
+    throw new Error("CLOUDFLARE_ACCOUNT_ID and AI_GATEWAY_ID required.");
   }
 
   const isCustomModel = model.startsWith("gemma-4") || model.includes("gemma4");
   const isWorkersAI = model.startsWith("@cf/");
 
-  if (!isCustomModel && !isWorkersAI) {
-    throw new Error(`MVP mode: Only free models allowed (gemma-4-* or @cf/*). Got "${model}". No paid model fallbacks.`);
-  }
-
   let endpoint: string;
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const cfToken = aiGatewayToken || cloudflareApiToken || "";
+  if (cfToken) headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+
   if (isCustomModel) {
     // Route to self-hosted Gemma via AI Gateway custom provider
-    // Dense 31B = custom-gemma4-local, MoE 26B = custom-gemma4-fast
     const providerPath = model.includes("26b") || model.includes("moe") || model.includes("fast")
       ? "custom-gemma4-fast"
       : "custom-gemma4-local";
     endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/${providerPath}/v1/chat/completions`;
-  } else {
+  } else if (isWorkersAI) {
     endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/workers-ai/v1/chat/completions`;
-  }
-
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const cfToken = aiGatewayToken || cloudflareApiToken || "";
-  if (cfToken) {
-    headers["cf-aig-authorization"] = `Bearer ${cfToken}`;
+  } else {
+    // All other models (anthropic/*, openai/*, etc.) — route through AI Gateway compat endpoint
+    // This handles OpenAI-compatible format for any provider
+    endpoint = `https://gateway.ai.cloudflare.com/v1/${cloudflareAccountId}/${aiGatewayId}/compat/chat/completions`;
   }
   if (options.metadata) {
     headers["cf-aig-metadata"] = JSON.stringify(options.metadata);
   }
 
+  // All models use OpenAI-compatible format (compat endpoint handles conversion)
   const body: Record<string, any> = {
     model,
     messages: options.messages,
