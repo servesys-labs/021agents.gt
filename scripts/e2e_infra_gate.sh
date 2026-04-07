@@ -1266,6 +1266,7 @@ fi
 # ═══════════════════════════════════════════════════════════════════
 
 CP_AUTH=("Authorization: Bearer ${SERVICE_TOKEN}")
+CP_ORG=("X-Org-Id: ${ORG_ID}")
 
 info "Stage 24: control-plane health detailed"
 RAW="$(http_get "${CP_URL}/api/v1/health/detailed")"
@@ -1278,7 +1279,7 @@ ok "control-plane detailed health (DB + billing + runtime)"
 info "Stage 25: control-plane agents CRUD"
 # List agents for the org
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/agents?org_id=${ORG_ID}" \
-  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+  -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
 if [[ "$CODE" == "200" ]]; then
   AGENT_COUNT="$(python3 -c '
@@ -1297,7 +1298,7 @@ fi
 
 info "Stage 26: control-plane sessions list"
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/sessions?org_id=${ORG_ID}&limit=5" \
-  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+  -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
 if [[ "$CODE" == "200" ]]; then
   SESS_COUNT="$(python3 -c '
@@ -1316,7 +1317,7 @@ fi
 
 info "Stage 27: control-plane billing/usage"
 RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/billing/usage?org_id=${ORG_ID}" \
-  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+  -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
 if [[ "$CODE" == "200" ]]; then
   ok "billing/usage endpoint responsive"
@@ -1335,7 +1336,7 @@ print(json.dumps({
 }))
 ' "$AGENT_NAME" "$ORG_ID" "$RUN_TAG")"
 RAW="$(curl -sS -w "\n%{http_code}" -X POST "${CP_URL}/api/v1/conversations" \
-  -H "Content-Type: application/json" -H "${CP_AUTH[0]}" \
+  -H "Content-Type: application/json" -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" \
   --data-binary "$CONV_PAYLOAD" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
 if [[ "$CODE" == "200" ]] || [[ "$CODE" == "201" ]]; then
@@ -1347,8 +1348,8 @@ else
 fi
 
 # List conversations
-RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/conversations?org_id=${ORG_ID}&limit=3" \
-  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/conversations?agent_name=${AGENT_NAME}&limit=3" \
+  -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
 if [[ "$CODE" == "200" ]]; then
   ok "conversations list responsive"
@@ -1359,8 +1360,8 @@ else
 fi
 
 info "Stage 29: control-plane dashboard/analytics"
-RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/dashboard?org_id=${ORG_ID}" \
-  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/dashboard/stats?org_id=${ORG_ID}" \
+  -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
 if [[ "$CODE" == "200" ]]; then
   ok "dashboard endpoint responsive"
@@ -1372,8 +1373,8 @@ fi
 
 info "Stage 30: control-plane orgs + plans"
 # Get org details
-RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/orgs/${ORG_ID}" \
-  -H "${CP_AUTH[0]}" --max-time 15 2>&1)"
+RAW="$(curl -sS -w "\n%{http_code}" "${CP_URL}/api/v1/orgs?org_id=${ORG_ID}" \
+  -H "${CP_AUTH[0]}" -H "${CP_ORG[0]}" --max-time 15 2>&1)"
 parse_curl_body_code <<<"$RAW"
 if [[ "$CODE" == "200" ]]; then
   ORG_PLAN="$(printf '%s' "$BODY" | json_eval 'd.get("plan", d.get("org", {}).get("plan", "?"))')"
