@@ -66,7 +66,7 @@
         value={errorRate}
         label="Error Rate"
         subtitle="Last 30 days"
-        accentColor="destructive"
+        accentColor="chart-1"
       />
       <StatCard
         value={summary ? `${summary.avg_latency_seconds.toFixed(1)}s` : "0s"}

@@ -40,7 +40,7 @@
     const renderAll = async () => {
       const map = new Map<number, string>();
       for (const turn of turns) {
-        if (turn.content && turn.role === "assistant") {
+        if (turn.content && turn.execution_mode === "llm") {
           map.set(turn.turn_number, await renderMarkdown(turn.content));
         }
       }
@@ -59,8 +59,8 @@
     </div>
     <span class="text-border">|</span>
     <div class="flex items-center gap-1.5">
-      <span class="text-muted-foreground">Model:</span>
-      <span class="text-foreground">{session.model}</span>
+      <span class="text-muted-foreground">Steps:</span>
+      <span class="text-foreground">{session.step_count}</span>
     </div>
     <span class="text-border">|</span>
     <div class="flex items-center gap-1.5">
@@ -129,11 +129,11 @@
         <!-- Turn header -->
         <div class="flex items-center gap-2 border-b border-border px-4 py-2.5 text-xs">
           <span class="font-semibold text-foreground">Turn {turn.turn_number}</span>
-          <Badge variant={turn.role === "assistant" ? "secondary" : "outline"}>
-            {turn.role}
+          <Badge variant={turn.execution_mode === "llm" ? "secondary" : "outline"}>
+            {turn.execution_mode}
           </Badge>
-          {#if turn.model}
-            <span class="text-muted-foreground">{turn.model}</span>
+          {#if turn.model_used}
+            <span class="text-muted-foreground">{turn.model_used}</span>
           {/if}
           {#if turn.latency_ms}
             <span class="ml-auto text-muted-foreground">{turn.latency_ms}ms</span>
@@ -143,7 +143,7 @@
         <div class="space-y-3 p-4">
           <!-- LLM content -->
           {#if turn.content}
-            {#if turn.role === "assistant" && renderedContent.get(turn.turn_number)}
+            {#if turn.execution_mode === "llm" && renderedContent.get(turn.turn_number)}
               <div class="prose prose-sm max-w-none text-card-foreground dark:prose-invert">
                 {@html renderedContent.get(turn.turn_number)}
               </div>
@@ -162,9 +162,9 @@
           {/if}
 
           <!-- Error -->
-          {#if turn.error}
+          {#if turn.reflection?.error}
             <div class="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              {turn.error}
+              {turn.reflection.error}
             </div>
           {/if}
         </div>

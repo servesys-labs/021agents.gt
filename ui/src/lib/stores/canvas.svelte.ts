@@ -20,6 +20,7 @@ export function createCanvasStore() {
   let timeoutSeconds = $state(300);
   let isActive = $state(true);
   let delegates = $state<string[]>([]);
+  let handoffConfig = $state<Record<string, unknown>>({ enabled: false });
 
   // Canvas UI state
   let dirty = $state(false);
@@ -69,7 +70,7 @@ export function createCanvasStore() {
       tools,
       budget_limit_usd: budgetEnabled ? budgetLimit : 0,
       timeout_seconds: timeoutSeconds,
-      handoff_config: { enabled: false },
+      handoff_config: handoffConfig,
     };
   }
 
@@ -93,6 +94,10 @@ export function createCanvasStore() {
       budgetEnabled = rawBudget != null && rawBudget > 0 && rawBudget < 999;
       budgetLimit = rawBudget ?? 5;
       timeoutSeconds = a.timeout_seconds ?? a.config_json?.timeout_seconds ?? 300;
+      const hc = a.handoff_config ?? a.config_json?.handoff_config;
+      if (hc) {
+        handoffConfig = hc;
+      }
       dirty = false;
     } catch (err) {
       throw err;

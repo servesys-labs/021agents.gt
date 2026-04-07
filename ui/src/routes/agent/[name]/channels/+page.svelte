@@ -121,6 +121,7 @@
 
   // Email
   let emailAddress = $state("");
+  let emailProvider = $state("default");
   let emailSetupStatus = $state<{ status: string; message: string; dns?: any[] } | null>(null);
 
   // SMS (Twilio)
